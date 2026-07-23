@@ -1,21 +1,20 @@
-mod assets;
-mod cli;
-mod config;
-mod error;
-mod protocol;
-mod rdp;
-mod server;
-mod ws;
-
 use anyhow::Context;
 use clap::Parser;
-use cli::{Cli, Commands};
-use config::AppConfig;
 use log::info;
+use rdpweb::cli::{Cli, Commands};
+use rdpweb::config::AppConfig;
+use rdpweb::server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Install the ring crypto provider as the process default. ironrdp-tls builds
+    // its rustls ClientConfig with `ClientConfig::builder()`, which requires a
+    // process-wide default provider to be installed first.
+    tokio_rustls::rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let cli = Cli::parse();
 
@@ -25,12 +24,22 @@ async fn main() -> anyhow::Result<()> {
             port,
             rdp_host,
             rdp_port,
+            rdp_username,
+            rdp_password,
+            rdp_domain,
+            rdp_width,
+            rdp_height,
         } => {
             let config = AppConfig {
                 host,
                 port,
                 rdp_host,
                 rdp_port,
+                rdp_username,
+                rdp_password,
+                rdp_domain,
+                rdp_width,
+                rdp_height,
             };
             serve(config).await?;
         }
@@ -52,10 +61,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind to {addr}"))?;
     info!("listening on http://{addr}");
-    info!(
-        "RDP target (placeholder, not yet connected): {}:{}",
-        config.rdp_host, config.rdp_port
-    );
+    info!("RDP target: {}:{}", config.rdp_host, config.rdp_port);
 
     axum::serve(listener, app).await.context("server error")?;
     Ok(())

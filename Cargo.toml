@@ -16,10 +16,15 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 base64 = "0.22"
+futures-util = "0.3"
 
-# Phase 1: uncomment to bring in the server-side RDP engine (see docs/phase1-mvp.md).
-# The skeleton compiles without these; src/rdp.rs is a placeholder until then.
-# ironrdp = "0.17"
-# ironrdp-async = "0.10"
-# ironrdp-tls = "0.2"
-# tokio-rustls = "0.26"
+# Server-side RDP engine (see docs/phase1-mvp.md).
+ironrdp = { version = "0.17", features = ["connector", "session", "graphics"] }
+ironrdp-tokio = { version = "0.10", features = ["reqwest-rustls-ring"] }
+ironrdp-tls = { version = "0.2", features = ["rustls-ring"] }
+# Direct dep so we can install the ring CryptoProvider as the process default
+# before any TLS handshake (ironrdp-tls uses rustls with no bundled provider).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
