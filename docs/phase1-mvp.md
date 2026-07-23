@@ -1,5 +1,24 @@
 # Phase 1 — MVP
 
+> **Status: implemented.** The server connects to one RDP host over TLS/CredSSP
+> (IronRDP, server-side), streams the framebuffer to the browser as
+> dirty-rectangle RGBA tiles over `/ws`, and injects mouse + keyboard as RDP
+> fast-path PDUs. Credentials come from `RDPWEB_RDP_*` and stay server-side.
+> Covered by unit tests plus protocol-level end-to-end tests
+> (`tests/protocol_e2e.rs`). Notes on what was deferred are inline below.
+>
+> Implementation notes:
+> - Tiles are sent as JSON `ServerMsg::Tile` with base64 RGBA (milestone-2
+>   "decide during milestone 2" resolved in favor of the simple JSON path;
+>   binary framing / PNG remain a later optimization).
+> - The RDP session runs on a dedicated thread with a current-thread runtime:
+>   IronRDP's `read_pdu` future is not `Send`-general, so it can't live on the
+>   shared multi-threaded runtime via `tokio::spawn`.
+> - Server-pointer software rendering is enabled so the cursor is composited into
+>   the framebuffer (and therefore visible in the browser).
+> - Deactivation-Reactivation (resolution renegotiation) is logged but not
+>   handled — consistent with "no dynamic resize" being out of scope.
+
 ## Goal
 
 Connect to a single RDP host, render its screen in the browser, and drive it
