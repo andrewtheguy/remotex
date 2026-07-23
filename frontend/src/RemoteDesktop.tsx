@@ -3,30 +3,38 @@ import { useRemoteDesktop } from "./useRemoteDesktop.ts";
 
 const STATUS_LABEL: Record<string, string> = {
   connecting: "Connecting…",
-  connected: "Connected (skeleton — no RDP backend yet)",
+  connected: "Connected",
   closed: "Disconnected",
-  error: "Connection error",
+  error: "Error",
 };
 
 export default function RemoteDesktop() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
-  const { status } = useRemoteDesktop(overlayRef);
+  const { status, size } = useRemoteDesktop(canvasRef, overlayRef);
 
   return (
     <div className="remote-desktop">
       <div className="statusbar">
         <span className={`status status-${status}`}>{STATUS_LABEL[status]}</span>
+        {size && (
+          <span className="resolution">
+            {size.w}×{size.h}
+          </span>
+        )}
       </div>
       <div className="screen">
-        {/* TODO(phase1): render decoded tiles onto this canvas. */}
-        <canvas ref={canvasRef} className="framebuffer" width={1024} height={768} />
-        {/* Transparent overlay captures mouse + keyboard input. */}
-        <div ref={overlayRef} className="input-overlay" tabIndex={0}>
-          <div className="placeholder">
-            No remote screen yet — RDP engine lands in Phase 1.
-            <br />
-            Mouse and keyboard events over this area are sent to the backend.
+        <div className="surface">
+          <canvas ref={canvasRef} className="framebuffer" width={1024} height={768} />
+          {/* Transparent overlay captures mouse + keyboard input. */}
+          <div ref={overlayRef} className="input-overlay" tabIndex={0}>
+            {!size && (
+              <div className="placeholder">
+                Waiting for the remote desktop…
+                <br />
+                Mouse and keyboard over this area drive the RDP session.
+              </div>
+            )}
           </div>
         </div>
       </div>
