@@ -401,3 +401,358 @@ body {
   color: #8b949e;
   text-align: right;
 }
+
+/* Phase 10: the soft keyboard. Ported from remotex and recoloured to this
+   project's GitHub-dark palette. On narrow viewports it docks to the bottom
+   edge (compact layout, screen toggle, sticky-modifier badges); at ≥800px it
+   becomes a draggable floating PC-keyboard grid. Every key routes through the
+   same DOM-code sendKeyCombo the toolbar uses — no bespoke input path. It sits
+   above the FAB/toolbar (z-index) and, on touch, overlaps the canvas: the
+   remote can be panned out from under it with a one-finger drag. */
+.sk-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(22, 27, 34, 0.98);
+  border-top: 1px solid #30363d;
+  z-index: 2000;
+  padding: 6px 4px 8px;
+  color: #e6edf3;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+@media (min-width: 800px) {
+  .sk-panel {
+    bottom: 16px;
+    right: 16px;
+    left: auto;
+    width: 760px;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(1, 4, 9, 0.6);
+  }
+}
+
+/* Drag bar toolbar — desktop only. */
+.sk-toolbar {
+  display: none;
+}
+
+@media (min-width: 800px) {
+  .sk-toolbar {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+}
+
+.sk-toolbar-spacer {
+  width: 1.4rem;
+  flex-shrink: 0;
+}
+
+.sk-drag-handle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 1.4rem;
+  border-radius: 999px;
+  border: 1px solid #30363d;
+  background: #21262d;
+  color: #8b949e;
+  font-size: 0.68rem;
+  line-height: 1;
+  font-weight: 700;
+  padding: 0 0.35rem;
+  touch-action: none;
+  cursor: grab;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sk-drag-handle:active {
+  cursor: grabbing;
+  background: #30363d;
+}
+
+.sk-toolbar-close,
+.sk-mobile-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  background: rgba(248, 81, 73, 0.12);
+  color: #f85149;
+  font-size: 0.85rem;
+  line-height: 1;
+  font-weight: 700;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sk-toolbar-close {
+  width: 1.4rem;
+  height: 1.4rem;
+}
+
+.sk-mobile-close {
+  margin-left: auto;
+  width: 1.6rem;
+  height: 1.6rem;
+}
+
+.sk-toolbar-close:active,
+.sk-mobile-close:active {
+  background: rgba(248, 81, 73, 0.25);
+}
+
+/* Scrollable top rows (combos / function keys). */
+.sk-combo-row,
+.sk-fkey-row {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 0 4px 6px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sk-combo-row::-webkit-scrollbar,
+.sk-fkey-row::-webkit-scrollbar {
+  display: none;
+}
+
+.sk-combo-row .sk-button {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  font-size: 0.7rem;
+}
+
+.sk-fkey-row .sk-button {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  font-size: 0.68rem;
+}
+
+/* Grid and rows. */
+.sk-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 4px;
+}
+
+.sk-row {
+  display: flex;
+  gap: 3px;
+  justify-content: center;
+}
+
+/* Individual key button. */
+.sk-button {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 4px;
+  background: linear-gradient(to bottom, #21262d, #161b22);
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #e6edf3;
+  font-size: 0.78rem;
+  text-align: center;
+  cursor: pointer;
+  line-height: 1.1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sk-button:active,
+.sk-active {
+  background: linear-gradient(to bottom, #388bfd, #1f6feb);
+  border-color: #388bfd;
+  color: #fff;
+}
+
+.sk-single-char {
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+/* Shift hint in the corner (the shifted glyph, e.g. "!" over "1"). */
+.sk-shift-hint {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  font-size: 0.55rem;
+  color: #8b949e;
+  line-height: 1;
+}
+
+/* Width variants (flex-grow multiples). */
+.sk-wide-1_3 {
+  flex: 1.3;
+}
+.sk-wide-1_5 {
+  flex: 1.5;
+}
+.sk-wide-2 {
+  flex: 2;
+}
+.sk-wide-3 {
+  flex: 3;
+}
+
+/* Status row (screen toggle + modifier badges + close). */
+.sk-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px 0;
+}
+
+.sk-screen-toggle {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #e6edf3;
+  font-size: 0.72rem;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.sk-screen-toggle:active {
+  background: #1f6feb;
+  border-color: #388bfd;
+  color: #fff;
+}
+
+.sk-modifier-indicators {
+  display: flex;
+  gap: 4px;
+}
+
+.sk-modifier-badge {
+  background: #1f6feb;
+  color: #fff;
+  font-size: 0.62rem;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* ── Desktop PC keyboard layout (≥800px) ── */
+
+.sk-desktop-layout {
+  display: grid;
+  grid-template-columns: 1fr 8rem;
+  gap: 0.3rem;
+  padding: 0 4px;
+}
+
+.sk-desktop-main {
+  display: grid;
+  gap: 0;
+}
+
+.sk-desktop-row {
+  display: flex;
+  gap: 0;
+}
+
+.sk-desktop-row > .sk-button {
+  margin-right: -1px;
+  border-radius: 0;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.sk-desktop-row + .sk-desktop-row {
+  margin-top: -1px;
+}
+
+.sk-desktop-row-fn {
+  margin-bottom: 0.3rem;
+}
+
+.sk-desktop-side {
+  width: 8rem;
+  border-left: 1px solid #30363d;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding-left: 0.3rem;
+}
+
+.sk-desktop-side-panel {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  background: rgba(33, 38, 45, 0.5);
+  overflow: hidden;
+}
+
+.sk-desktop-nav {
+  gap: 0.15rem;
+  padding: 0.15rem;
+}
+
+.sk-desktop-arrows {
+  margin-top: auto;
+  gap: 0.15rem;
+  padding: 0.15rem;
+}
+
+.sk-desktop-side-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.15rem;
+}
+
+/* Desktop key width variants. */
+.sk-dk-esc {
+  flex: 1.2;
+}
+.sk-dk-tab {
+  flex: 1.45;
+}
+.sk-dk-bksp {
+  flex: 1.75;
+}
+.sk-dk-slash {
+  flex: 1.15;
+}
+.sk-dk-enter {
+  flex: 1.95;
+}
+.sk-dk-shift {
+  flex: 1.95;
+}
+.sk-dk-modifier {
+  flex: 1.1;
+}
+.sk-dk-space {
+  flex: 9;
+}
+
+.sk-dk-side {
+  min-width: 0;
+  min-height: 0;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  border-radius: 3px;
+}
+
+.sk-dk-arrow {
+  font-size: 1.1rem;
+}
+
+.sk-dk-home-spacer {
+  flex: 2.1;
+}
