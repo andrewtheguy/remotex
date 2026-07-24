@@ -97,6 +97,15 @@ Explicitly **out** (later phases):
 - Multi-target UI (config may already hold multiple targets; the UI to pick
   them comes later).
 
+And permanently out of scope — never planned, in any phase: **multi session**.
+This is a single-user program with one active session only, with session
+takeover logic like remotex (`../remotex/server/session.ts`): one global
+session slot; claiming it while a session is active fails unless forced, and a
+forced claim evicts the previous holder (its WebSocket is closed with a
+"Session taken over" code, hard-terminated shortly after). Resume, takeover,
+and multi-target all mean re-attaching to or choosing *the* one session/target
+— never concurrent sessions, session sharing, or a broker.
+
 ## Later phases (sketch)
 
 - **Phase 3+ — frontend integration:** port remotex's frontend shell
@@ -104,9 +113,11 @@ Explicitly **out** (later phases):
   protocol. With decode server-side there is **one renderer** — the RFB
   decoder, `zrleDecoder`, and the rest of the browser-side engine do not come
   along.
-- **Session management:** detach/reattach, takeover — backed by the
-  server-owned framebuffer.
-- **Multi-target support:** target picker over the `[[targets]]` config.
+- **Session management:** detach/reattach and remotex-style takeover of the
+  single session slot (force-claim evicts the previous browser) — backed by
+  the server-owned framebuffer.
+- **Multi-target support:** target picker over the `[[targets]]` config (still
+  one active session at a time).
 - **Final phase — the rename:** when the project is ready to replace the old
   one, rename the GitHub repo to **remotex-v2** and the binary to **remotex**,
   replacing the original. Not done now; documented here so it isn't forgotten.

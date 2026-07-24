@@ -44,10 +44,8 @@ async fn session(socket: WebSocket, state: AppState) {
     // RDP host disconnects.
     //
     // Scalability: this costs one OS thread + one current-thread runtime per
-    // connection. That's fine for the MVP's one-session-at-a-time use, but it
-    // caps concurrency at roughly the OS thread budget. Supporting many parallel
-    // sessions would mean a pool of runtime threads (each hosting several
-    // sessions via `LocalSet`/`spawn_local`) rather than a thread per client.
+    // connection — fine here, since multi session is permanently out of scope
+    // (single user, one active session at a time; see CLAUDE.md).
     let rdp_config = state.config.target.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {

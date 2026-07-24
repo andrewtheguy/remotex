@@ -42,7 +42,10 @@ and type — with acceptable latency on a LAN.
 - Multi-monitor, dynamic resize renegotiation.
 - H.264 / WebCodecs video streaming (start with tiles; revisit for bandwidth).
 - Touch gestures / mobile input.
-- Multiple concurrent sessions, session sharing, or a session broker.
+- Multiple concurrent sessions, session sharing, or a session broker —
+  **permanently**, not a later phase: single user, one active session only.
+  A later phase adds remotex-style session takeover (a new browser claims the
+  single session slot, evicting the previous holder) — takeover, not concurrency.
 - Web login / auth UI, RD Gateway, NLA-as-a-service.
 - Reconnect, clipboard sync, latency adaptation.
 
