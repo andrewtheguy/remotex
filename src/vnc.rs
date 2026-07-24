@@ -540,17 +540,22 @@ async fn read_cursor<R: AsyncRead + Unpin>(
         let pixels_len = usize::from(w) * usize::from(h) * BPP;
         let mask_len = usize::from(w).div_ceil(8) * usize::from(h);
         if w > MAX_CURSOR_DIM || h > MAX_CURSOR_DIM {
+            // Drop the shape but not the admission behind it: the server has
+            // handed pointer drawing over, so report a hidden pointer and let
+            // the browser draw its own arrow instead of nothing at all.
             warn!("vnc: ignoring an oversized {w}x{h} cursor");
             discard(reader, (pixels_len + mask_len) as u64).await?;
-            return Ok(());
+            (CursorState::Hidden, ServerMsg::Cursor(None))
+        } else {
+            let mut pixels = vec![0u8; pixels_len];
+            reader.read_exact(&mut pixels).await?;
+            let mut mask = vec![0u8; mask_len];
+            reader.read_exact(&mut mask).await?;
+            let shape =
+                CursorShape::from_rgba(w, h, hx, hy, &masked_bgrx_to_rgba(&pixels, &mask, w))?;
+            debug!("vnc: cursor {w}x{h} hotspot ({hx},{hy}), {} bytes", shape.png.len());
+            (CursorState::Shape(shape.clone()), ServerMsg::Cursor(Some(shape)))
         }
-        let mut pixels = vec![0u8; pixels_len];
-        reader.read_exact(&mut pixels).await?;
-        let mut mask = vec![0u8; mask_len];
-        reader.read_exact(&mut mask).await?;
-        let shape = CursorShape::from_rgba(w, h, hx, hy, &masked_bgrx_to_rgba(&pixels, &mask, w))?;
-        debug!("vnc: cursor {w}x{h} hotspot ({hx},{hy}), {} bytes", shape.png.len());
-        (CursorState::Shape(shape.clone()), ServerMsg::Cursor(Some(shape)))
     };
     *cursor.lock().unwrap() = state;
     frame_tx
@@ -1088,7 +1093,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_cursor_is_drained_and_ignored() {
+    async fn oversized_cursor_is_drained_and_hides_the_pointer() {
         let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
         let (tx, mut rx) = mpsc::channel(4);
         let (w, h) = (MAX_CURSOR_DIM + 1, 1);
@@ -1099,8 +1104,10 @@ mod tests {
 
         read_cursor(&mut reader, &cursor, (0, 0, w, h), &tx).await.unwrap();
         assert_eq!(reader, &[0xAB]);
-        assert!(rx.try_recv().is_err(), "nothing to draw, nothing sent");
-        assert!(cursor_msg(&cursor).is_none());
+        // The shape is dropped, but the server still isn't drawing the pointer,
+        // so the browser is told to fall back rather than left with nothing.
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Cursor(None))));
+        assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
     }
 
     #[test]
