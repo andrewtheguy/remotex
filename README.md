@@ -198,9 +198,23 @@ podman or docker, connects through the real server, and validates the binary
 tile transport on the wire — resize as JSON text first, then binary frames
 with PNG payloads (the VNC test requires a full-desktop paint). They require a
 container runtime; no browser is involved (automated browser tests are flaky
-and deliberately avoided). Set `REMOTEX_TEST_CONTAINER_HOST=<host>` to run them
-against a remote podman/docker over SSH, which is the only option on a Mac that
-cannot run a container engine locally.
+and deliberately avoided).
+
+To run them against a **remote** podman/docker over SSH — the only option on a
+Mac that cannot run a container engine locally (inside a VM there is no nested
+virtualization, so `podman machine` fails outright):
+
+```bash
+podman system connection add linuxbox \
+  ssh://user@host/run/user/1000/podman/podman.sock
+
+CONTAINER_CONNECTION=linuxbox REMOTEX_TEST_CONTAINER_HOST=host cargo test
+```
+
+`CONTAINER_CONNECTION` picks the connection (a local `podman machine`, even a
+dead one, otherwise takes precedence); `REMOTEX_TEST_CONTAINER_HOST` tells the
+tests where to reach the published port, since a remote engine publishes on its
+own loopback rather than yours.
 
 `tests/rxa_e2e.rs` needs no container: it drives the real server against an
 in-process fake Mac agent that speaks the real Noise handshake, and checks that

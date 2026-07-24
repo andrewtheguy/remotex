@@ -490,11 +490,13 @@ someone believing a target was authenticated by a key it never uses.
   and container-backed happy paths — `rdp_tiles_e2e.rs` against a dummy xrdp,
   `vnc_tiles_e2e.rs` against a dummy TigerVNC (full-desktop paint, dynamic
   resize, and detach/reattach repaint through a real server). Containers run
-  under podman or docker; set `REMOTEX_TEST_CONTAINER_HOST` to use a **remote**
-  engine over SSH, which is the only option on a Mac that cannot run one
-  locally (inside a VM there is no nested virtualization, so `podman machine`
-  fails outright). **Never a headless browser** — browser automation is flaky
-  by policy.
+  under podman or docker. For a **remote** engine over SSH — the only option on
+  a Mac that cannot run one locally (inside a VM there is no nested
+  virtualization, so `podman machine` fails outright) — set
+  `CONTAINER_CONNECTION` to the connection name and
+  `REMOTEX_TEST_CONTAINER_HOST` to the address the published port is reachable
+  on, since a remote engine publishes on its own loopback. **Never a headless
+  browser** — browser automation is flaky by policy.
 - **The rxa engine** is covered container-free by `rxa_e2e.rs`, which drives
   the real server against an in-process fake agent speaking the real Noise
   handshake: a JPEG tile arrives byte-for-byte as `format = 2`, the cursor
