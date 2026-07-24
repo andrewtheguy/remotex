@@ -23,7 +23,7 @@ use des::Des;
 use des::cipher::generic_array::GenericArray;
 use des::cipher::{BlockEncrypt as _, KeyInit as _};
 use log::{debug, info, warn};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
@@ -296,14 +296,20 @@ async fn active_loop(
 /// Handle a browser viewport report (phase 4 dynamic resize): send
 /// SetDesktopSize once the server has declared support via an
 /// ExtendedDesktopSize rect; until then, stash the report for replay.
-async fn request_resize(
-    writer: &SharedWriter,
+async fn request_resize<W: AsyncWrite + Unpin>(
+    writer: &Arc<Mutex<W>>,
     desktop: &SharedDesktop,
     want: (u16, u16),
 ) -> anyhow::Result<()> {
     let msg = {
         let mut d = desktop.lock().unwrap();
-        if want.0 == 0 || want.1 == 0 || want == d.size {
+        if want.0 == 0 || want.1 == 0 {
+            return Ok(());
+        }
+        if want == d.size {
+            // The browser is back at the current size; drop any stale stash
+            // so a later support declaration doesn't replay it.
+            d.pending = None;
             return Ok(());
         }
         match d.screen {
@@ -439,9 +445,9 @@ async fn read_rect(
 /// y = status when the reason is 1 (0 = ok), w/h = the framebuffer size; the
 /// payload is the screen layout. Receiving one at all is the server's
 /// declaration that SetDesktopSize is supported.
-async fn read_extended_desktop_size(
-    reader: &mut Reader,
-    writer: &SharedWriter,
+async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &Arc<Mutex<W>>,
     desktop: &SharedDesktop,
     (reason, status, w, h): (u16, u16, u16, u16),
     frame_tx: &mpsc::Sender<ServerMsg>,
@@ -702,13 +708,16 @@ async fn read_string(reader: &mut Reader) -> anyhow::Result<String> {
 }
 
 /// Drain and drop exactly `n` bytes.
-async fn discard(reader: &mut Reader, n: u64) -> anyhow::Result<()> {
+async fn discard<R: AsyncRead + Unpin>(reader: &mut R, n: u64) -> anyhow::Result<()> {
     let copied = tokio::io::copy(&mut reader.take(n), &mut tokio::io::sink()).await?;
     anyhow::ensure!(copied == n, "connection closed while skipping {n} bytes");
     Ok(())
 }
 
-async fn write_to(writer: &SharedWriter, bytes: &[u8]) -> anyhow::Result<()> {
+async fn write_to<W: AsyncWrite + Unpin>(
+    writer: &Arc<Mutex<W>>,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
     writer
         .lock()
         .await
@@ -871,6 +880,159 @@ mod tests {
             &mut pos,
         );
         assert_eq!(bytes, pointer_event(0x00, (30, 40)).to_vec());
+    }
+
+    // ── Resize state machine (no sockets: Cursor writer, slice reader) ──────
+
+    type TestWriter = Arc<Mutex<std::io::Cursor<Vec<u8>>>>;
+
+    fn test_writer() -> TestWriter {
+        Arc::new(Mutex::new(std::io::Cursor::new(Vec::new())))
+    }
+
+    async fn written(writer: &TestWriter) -> Vec<u8> {
+        writer.lock().await.get_ref().clone()
+    }
+
+    fn shared_desktop(
+        size: (u16, u16),
+        screen: Option<Screen>,
+        pending: Option<(u16, u16)>,
+    ) -> SharedDesktop {
+        Arc::new(std::sync::Mutex::new(DesktopState { size, screen, pending }))
+    }
+
+    /// Payload of an ExtendedDesktopSize rect declaring one screen.
+    fn eds_payload(screen: Screen) -> Vec<u8> {
+        let mut p = vec![1, 0, 0, 0]; // one screen + padding
+        p.extend_from_slice(&screen.id.to_be_bytes());
+        p.extend_from_slice(&[0u8; 8]); // screen x, y, w, h (layout unused)
+        p.extend_from_slice(&screen.flags.to_be_bytes());
+        p
+    }
+
+    #[tokio::test]
+    async fn request_resize_stashes_until_support_and_skips_noops() {
+        let writer = test_writer();
+        let desktop = shared_desktop((1024, 768), None, None);
+
+        // Matching the current size or a zero dimension: no-ops.
+        request_resize(&writer, &desktop, (1024, 768)).await.unwrap();
+        request_resize(&writer, &desktop, (0, 600)).await.unwrap();
+        assert!(desktop.lock().unwrap().pending.is_none());
+        assert!(written(&writer).await.is_empty());
+
+        // Support not declared yet: stashed, nothing on the wire.
+        request_resize(&writer, &desktop, (800, 600)).await.unwrap();
+        assert_eq!(desktop.lock().unwrap().pending, Some((800, 600)));
+        assert!(written(&writer).await.is_empty());
+
+        // Browser back at the current size: the stale stash is dropped.
+        request_resize(&writer, &desktop, (1024, 768)).await.unwrap();
+        assert!(desktop.lock().unwrap().pending.is_none());
+
+        // Support declared: SetDesktopSize goes out immediately.
+        let screen = Screen { id: 7, flags: 0 };
+        desktop.lock().unwrap().screen = Some(screen);
+        request_resize(&writer, &desktop, (800, 600)).await.unwrap();
+        assert_eq!(written(&writer).await, set_desktop_size((800, 600), screen));
+    }
+
+    #[tokio::test]
+    async fn extended_desktop_size_declares_support_and_replays_pending() {
+        let writer = test_writer();
+        let (tx, mut rx) = mpsc::channel(8);
+        let desktop = shared_desktop((1024, 768), None, Some((800, 600)));
+        let screen = Screen { id: 3, flags: 0 };
+
+        // First rect from the server (reason 0), size unchanged.
+        let payload = eds_payload(screen);
+        let resized = read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &writer,
+            &desktop,
+            (0, 0, 1024, 768),
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resized, "size did not change");
+        let (screen_id, pending) = {
+            let d = desktop.lock().unwrap();
+            (d.screen.map(|s| s.id), d.pending)
+        };
+        assert_eq!(screen_id, Some(3), "support recorded");
+        assert_eq!(pending, None, "stash consumed");
+        // No browser resize (same size), but the stashed report replays.
+        assert!(rx.try_recv().is_err());
+        assert_eq!(written(&writer).await, set_desktop_size((800, 600), screen));
+    }
+
+    #[tokio::test]
+    async fn extended_desktop_size_applies_a_change_and_tells_the_browser() {
+        let writer = test_writer();
+        let (tx, mut rx) = mpsc::channel(8);
+        let desktop = shared_desktop((1024, 768), None, None);
+
+        // Our SetDesktopSize succeeded (reason 1, status 0) at 800x600.
+        let payload = eds_payload(Screen { id: 1, flags: 0 });
+        let resized = read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &writer,
+            &desktop,
+            (1, 0, 800, 600),
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(resized);
+        assert_eq!(desktop.lock().unwrap().size, (800, 600));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 800, h: 600 })));
+        assert!(written(&writer).await.is_empty(), "nothing left to request");
+    }
+
+    #[tokio::test]
+    async fn rejected_set_desktop_size_leaves_the_size_alone() {
+        let writer = test_writer();
+        let (tx, mut rx) = mpsc::channel(8);
+        let desktop = shared_desktop((1024, 768), Some(Screen { id: 1, flags: 0 }), None);
+
+        // reason 1, status 1 = our request was prohibited.
+        let payload = eds_payload(Screen { id: 1, flags: 0 });
+        let resized = read_extended_desktop_size(
+            &mut payload.as_slice(),
+            &writer,
+            &desktop,
+            (1, 1, 640, 480),
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resized);
+        assert_eq!(desktop.lock().unwrap().size, (1024, 768));
+        assert!(rx.try_recv().is_err(), "no resize reported to the browser");
+        assert!(written(&writer).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_resize_dedupes_and_rejects_zero_sizes() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let desktop = shared_desktop((1024, 768), None, None);
+
+        // Same size: no change, nothing sent to the browser.
+        assert!(!apply_resize(&desktop, (1024, 768), &tx).await.unwrap());
+        assert!(rx.try_recv().is_err());
+
+        // A real change updates the state and reaches the browser.
+        assert!(apply_resize(&desktop, (640, 480), &tx).await.unwrap());
+        assert_eq!(desktop.lock().unwrap().size, (640, 480));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 640, h: 480 })));
+
+        // A zero dimension is a protocol violation, not a resize.
+        assert!(apply_resize(&desktop, (0, 480), &tx).await.is_err());
     }
 
     #[test]
