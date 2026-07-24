@@ -42,6 +42,12 @@ async fn session(socket: WebSocket, state: AppState) {
     // runtime via `tokio::spawn`; a current-thread runtime imposes no `Send`
     // bound. It ends when the browser goes away (input channel closed) or the
     // RDP host disconnects.
+    //
+    // Scalability: this costs one OS thread + one current-thread runtime per
+    // connection. That's fine for the MVP's one-session-at-a-time use, but it
+    // caps concurrency at roughly the OS thread budget. Supporting many parallel
+    // sessions would mean a pool of runtime threads (each hosting several
+    // sessions via `LocalSet`/`spawn_local`) rather than a thread per client.
     let rdp_config = state.config.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {

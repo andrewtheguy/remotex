@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   type ClientMsg,
+  type MouseButton,
   mouseButtonFromEvent,
   type ServerMsg,
 } from "./protocol.ts";
@@ -105,56 +106,90 @@ export function useRemoteDesktop(
     const el = overlayRef.current;
     if (!el) return;
 
+    const send = sendRef.current;
+    // Track what's held so we can release it if focus/pointer leaves the surface,
+    // avoiding keys/buttons that stick down on the remote host.
+    const pressedButtons = new Set<MouseButton>();
+    const pressedKeys = new Set<string>();
+
     const toRemote = (e: MouseEvent) => {
       const rect = el.getBoundingClientRect();
       const remote = sizeRef.current;
       const scaleX = remote && rect.width > 0 ? remote.w / rect.width : 1;
       const scaleY = remote && rect.height > 0 ? remote.h / rect.height : 1;
-      return {
-        x: Math.round((e.clientX - rect.left) * scaleX),
-        y: Math.round((e.clientY - rect.top) * scaleY),
-      };
+      let x = Math.round((e.clientX - rect.left) * scaleX);
+      let y = Math.round((e.clientY - rect.top) * scaleY);
+      // Clamp to the framebuffer bounds so a drag past the edge stays in range.
+      if (remote) {
+        x = Math.min(Math.max(x, 0), remote.w - 1);
+        y = Math.min(Math.max(y, 0), remote.h - 1);
+      }
+      return { x, y };
     };
 
-    const send = sendRef.current;
     const onMouseMove = (e: MouseEvent) => {
       const { x, y } = toRemote(e);
       send({ type: "mouseMove", x, y });
     };
-    const onMouseButton = (pressed: boolean) => (e: MouseEvent) => {
+    const onMouseDown = (e: MouseEvent) => {
+      el.focus(); // take keyboard focus on pointer interaction
       const button = mouseButtonFromEvent(e.button);
-      if (button) send({ type: "mouseButton", button, pressed });
+      if (!button) return;
+      pressedButtons.add(button);
+      send({ type: "mouseButton", button, pressed: true });
     };
-    const onMouseDown = onMouseButton(true);
-    const onMouseUp = onMouseButton(false);
+    // Release on window so a press that ends outside the overlay still reports
+    // the button up. Only buttons we saw pressed on the surface are released.
+    const onMouseUp = (e: MouseEvent) => {
+      const button = mouseButtonFromEvent(e.button);
+      if (!button || !pressedButtons.delete(button)) return;
+      send({ type: "mouseButton", button, pressed: false });
+    };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       send({ type: "wheel", dx: e.deltaX, dy: e.deltaY });
     };
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
-    const onKey = (pressed: boolean) => (e: KeyboardEvent) => {
+    const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
-      send({ type: "key", code: e.code, pressed });
+      pressedKeys.add(e.code);
+      send({ type: "key", code: e.code, pressed: true });
     };
-    const onKeyDown = onKey(true);
-    const onKeyUp = onKey(false);
+    const onKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      pressedKeys.delete(e.code);
+      send({ type: "key", code: e.code, pressed: false });
+    };
+    // On blur, release everything still held so nothing sticks on the remote.
+    const onBlur = () => {
+      for (const code of pressedKeys) send({ type: "key", code, pressed: false });
+      pressedKeys.clear();
+      for (const button of pressedButtons) {
+        send({ type: "mouseButton", button, pressed: false });
+      }
+      pressedButtons.clear();
+    };
 
     el.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
-    el.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("mouseup", onMouseUp);
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("contextmenu", onContextMenu);
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
+    // Keyboard is scoped to the focused overlay (not window) so the remote
+    // surface only grabs keys when the user is interacting with it.
+    el.addEventListener("keydown", onKeyDown);
+    el.addEventListener("keyup", onKeyUp);
+    el.addEventListener("blur", onBlur);
 
     return () => {
       el.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
-      el.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("mouseup", onMouseUp);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onContextMenu);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
+      el.removeEventListener("keydown", onKeyDown);
+      el.removeEventListener("keyup", onKeyUp);
+      el.removeEventListener("blur", onBlur);
     };
   }, [overlayRef]);
 

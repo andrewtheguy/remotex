@@ -45,10 +45,9 @@ Run the backend and frontend in two terminals. In dev, Vite (`:5173`) proxies
 `/api` and `/ws` to the Rust server (`:52380`).
 
 ```bash
-# Terminal 1 — backend (RDP target + credentials via env or flags)
-RDPWEB_RDP_HOST=192.0.2.10 \
-RDPWEB_RDP_USERNAME=alice \
-RDPWEB_RDP_PASSWORD=secret \
+# Terminal 1 — backend. Put the RDP target + credentials in a .env file
+# (gitignored, read automatically at startup) rather than on the command line.
+cp .env.example .env               # then edit .env with your host + credentials
 cargo run -- serve                 # http://localhost:52380
 
 # Terminal 2 — frontend (with hot reload)
@@ -81,6 +80,12 @@ Self-signed server certificates are accepted.
 
 Credentials are used only server-side for the RDP handshake; `GET /api/config`
 returns only the non-secret target host/port.
+
+> **Password handling.** Prefer the `.env` file (gitignored) or your secret
+> manager for `RDPWEB_RDP_PASSWORD`. Avoid the `--rdp-password` flag and inline
+> `RDPWEB_RDP_PASSWORD=… cargo run` on real hosts: command-line arguments are
+> visible to other users via the process list (`ps`, `/proc`) and both are
+> captured in your shell history. The flag exists mainly for scripted/CI use.
 
 ## Tests
 

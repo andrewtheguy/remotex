@@ -83,9 +83,10 @@ switch tiles to PNG if bandwidth matters. H.264 + WebCodecs is a **later phase**
 much lower bandwidth but far more complex (encoder, keyframe/damage tracking,
 decoder plumbing) — not worth it for the MVP.
 
-> Transport note: tiles may be sent as JSON text (base64) to match the current
-> `ServerMsg` shape, or as a compact binary framing over the same socket for
-> throughput. Decide during milestone 2; the socket is already `arraybuffer`.
+> Transport note: the current contract is **JSON text with base64-encoded
+> tiles**, matching the `ServerMsg` shape and the integration test. A compact
+> binary framing over the same socket is deferred as a throughput optimization
+> (the socket is already `arraybuffer`).
 
 ## Input
 
@@ -110,6 +111,11 @@ sent to the browser (mirrors the remotex model). `GET /api/config` returns only
 non-secret target info (host/port).
 
 ## Milestones
+
+> These are the **original plan** milestones, all delivered in the current MVP
+> (see the status note at the top); kept for historical context. The one item
+> flagged as open below — NLA/CredSSP — is implemented: `--rdp-security` selects
+> `auto` (TLS+NLA), `nla`, or `tls`.
 
 1. **Connect** — uncomment the `ironrdp*` + TLS deps in `Cargo.toml`; implement
    `rdp::Session::connect` (TCP → TLS → RDP negotiation/activation). Log a
