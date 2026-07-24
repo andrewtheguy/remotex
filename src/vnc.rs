@@ -202,8 +202,12 @@ async fn active_loop(
                     break Ok(());
                 };
                 let bytes = translate_input(input, &mut button_mask, &mut last_pos);
-                if !bytes.is_empty() {
-                    write_to(&writer, &bytes).await?;
+                // Break instead of `?`: the error must pass the trailing
+                // read_task.abort() on its way out.
+                if !bytes.is_empty()
+                    && let Err(e) = write_to(&writer, &bytes).await
+                {
+                    break Err(e);
                 }
             }
         }
