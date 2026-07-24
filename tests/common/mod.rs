@@ -161,9 +161,26 @@ impl Drop for Container {
     }
 }
 
+/// The address these tests reach a published container port on.
+///
+/// `127.0.0.1` for a local engine. Set `REMOTEX_TEST_CONTAINER_HOST` to the
+/// engine host's address when the engine is **remote** — a `podman system
+/// connection` or `docker context` pointing at another machine over SSH. A
+/// remote engine publishes ports on *its own* loopback, so a test connecting to
+/// its own `127.0.0.1` finds nothing there; this is the one thing that has to
+/// change for a remote engine to work.
+///
+/// Needed because macOS cannot always run a container engine locally: inside a
+/// VM, `podman machine` fails with "Virtualization is not available on this
+/// hardware" (no nested virt), and there is nothing to fix on this side.
+#[allow(dead_code)]
+pub fn container_host() -> String {
+    std::env::var("REMOTEX_TEST_CONTAINER_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned())
+}
+
 /// Build the image from `tests/<context>` (cached after the first run) and
-/// start it with the container's `internal_port` published on an ephemeral
-/// localhost port. Returns the container guard and the published port.
+/// start it with the container's `internal_port` published on an ephemeral port
+/// of [`container_host`]. Returns the container guard and the published port.
 #[allow(dead_code)]
 pub fn start_dummy_server(
     runtime: &'static str,
@@ -172,6 +189,8 @@ pub fn start_dummy_server(
     internal_port: u16,
 ) -> (Container, u16) {
     let context_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(context);
+    // With a remote engine the build context is sent over the connection, so a
+    // local path still works.
     let build = Command::new(runtime)
         .args(["build", "-t", image])
         .arg(&context_dir)
@@ -184,24 +203,30 @@ pub fn start_dummy_server(
     );
 
     // Grab a free port; the tiny window before the container binds it is fine.
+    // Against a remote engine this only proves the port is free *locally*, which
+    // is a reasonable proxy — a collision shows up as a container that fails to
+    // start rather than as a silent wrong answer.
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
         .port();
 
+    let host = container_host();
+    // A remote engine has to publish on all interfaces for this machine to reach
+    // it; a local one stays on loopback so a test never exposes a service to the
+    // network.
+    let publish = if host == "127.0.0.1" || host == "localhost" {
+        format!("127.0.0.1:{port}:{internal_port}")
+    } else {
+        format!("0.0.0.0:{port}:{internal_port}")
+    };
+
     let name = format!("{image}-{port}");
     let container = Container { runtime, name: name.clone() };
     let run = Command::new(runtime)
         .args([
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &name,
-            "-p",
-            &format!("127.0.0.1:{port}:{internal_port}"),
-            image,
+            "run", "-d", "--rm", "--name", &name, "-p", &publish, image,
         ])
         .output()
         .expect("run container");
