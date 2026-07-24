@@ -7,6 +7,10 @@ use rdpweb::server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load a local `.env` if present, so RDPWEB_* (incl. credentials) can live in
+    // a file instead of the shell. Real environment variables take precedence.
+    let _ = dotenvy::dotenv();
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Install the ring crypto provider as the process default. ironrdp-tls builds

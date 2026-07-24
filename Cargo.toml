@@ -17,6 +17,7 @@ log = "0.4"
 env_logger = "0.11"
 base64 = "0.22"
 futures-util = "0.3"
+dotenvy = "0.15"
 
 # Server-side RDP engine (see docs/phase1-mvp.md).
 ironrdp = { version = "0.17", features = ["connector", "session", "graphics"] }
