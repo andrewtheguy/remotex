@@ -195,11 +195,24 @@ const ROW_NAV_ARROWS: SoftKeyDefinition[] = [
   s("→", "ArrowRight", 1.5),
 ];
 
+// The Sym/Nav screen gets its own bottom row leading with a Shift toggle, so
+// the shifted glyphs on the symbol keys (~ _ + { } | : " < > ?) are reachable
+// without switching to the ABC screen. Space/Enter shrink slightly to make
+// room. (The ABC screen's Shift lives in ROW_ZXCV.)
+const ROW_BOTTOM_SECONDARY: SoftKeyDefinition[] = [
+  s("Shift", "ShiftLeft", 1.5),
+  s("Tab", "Tab", 1.3),
+  s("Ctrl", "ControlLeft", 1.3),
+  s("Alt", "AltLeft", 1.3),
+  s("Space", "Space", 3),
+  s("Enter", "Enter", 2),
+];
+
 export const SECONDARY_SCREEN_ROWS: SoftKeyDefinition[][] = [
   ROW_SYMBOLS_1,
   ROW_SYMBOLS_2,
   ROW_NAV_ARROWS,
-  ROW_BOTTOM,
+  ROW_BOTTOM_SECONDARY,
 ];
 
 // ── Function key row (scrollable quick-access, secondary screen) ──
