@@ -91,6 +91,42 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     }
     info!("web login: user {:?}", config.site_passwd.username());
 
-    axum::serve(listener, app).await.context("server error")?;
+    // Race the server against an explicit shutdown signal. Relying on the OS
+    // default SIGINT disposition to terminate proved flaky on macOS — Ctrl+C
+    // was intermittently ignored while a detached engine thread was still
+    // running, forcing a SIGKILL. An installed handler makes it deterministic.
+    tokio::select! {
+        result = axum::serve(listener, app) => result.context("server error")?,
+        _ = shutdown_signal() => info!("shutdown signal received; stopping"),
+    }
     Ok(())
+}
+
+/// Resolve when the process is asked to stop: Ctrl+C (SIGINT) on any platform,
+/// or SIGTERM under a service manager on Unix. The engine threads are detached
+/// and hold no state worth draining (a dropped remote session just reconnects),
+/// so returning from `main` — which exits the process and reaps them — is the
+/// whole shutdown: no graceful HTTP drain that a lingering WebSocket could hang.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install the Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install the SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
