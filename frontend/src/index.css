@@ -73,14 +73,6 @@ body {
   touch-action: none;
 }
 
-/* The viewport-covering overlay would swallow the disconnect button's taps;
-   lift the bar above it (it sits in the dead space below the desktop, so it
-   covers nothing that matters at rest). */
-.screen-touch .disconnect-bar {
-  position: relative;
-  z-index: 1;
-}
-
 /* Centered connection-state readout, shown until the desktop is streaming.
    The translucent backdrop dims stale canvas content while reconnecting or
    after an eviction, so the readout stays legible over it. */
@@ -228,34 +220,184 @@ body {
   font-size: 0.8rem;
 }
 
-/* Phase 7: the minimal disconnect CTA under the canvas. The desktop keeps its
-   fixed configured size, so mobile portrait always has dead space below it —
-   the button lives there and scrolls with the surface. Touch-only: a desktop
-   browser has the Ctrl+Alt+Shift+L chord and no dead space to spare. */
-.disconnect-bar {
-  display: none;
+/* Phase 9: the floating chrome. A draggable FAB pinned in viewport space
+   (position: fixed, moved via left/top) that toggles the toolbar drawer.
+   touch-action: none so a drag never scrolls the page under it. */
+.fab {
+  position: fixed;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid #30363d;
+  border-radius: 50%;
+  background: rgba(33, 38, 45, 0.92);
+  color: #e6edf3;
+  font-size: 1.1rem;
+  line-height: 1;
+  text-align: center;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow: 0 2px 8px rgba(1, 4, 9, 0.5);
+  z-index: 1000;
+}
+
+.fab:hover {
+  border-color: #8b949e;
+}
+
+.fab-open {
+  background: rgba(48, 54, 61, 0.95);
+}
+
+.fab-dragging {
+  cursor: grabbing;
+}
+
+/* The drawer. Positioned in viewport space near the FAB via an inline style
+   (left/top/maxHeight computed from the FAB position); this rule owns the look
+   and the scroll behavior when the content outgrows the available height. */
+.toolbar {
+  position: fixed;
+  width: 240px;
   padding: 12px;
-  line-height: normal;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  background: rgba(22, 27, 34, 0.97);
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(1, 4, 9, 0.6);
+  z-index: 1000;
 }
 
-@media (hover: none), (pointer: coarse) {
-  .disconnect-bar {
-    display: block;
-  }
+.toolbar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.disconnect-button {
-  padding: 0.3rem 0.9rem;
-  font: inherit;
-  font-size: 0.8rem;
+.toolbar-label {
   color: #8b949e;
-  background: transparent;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.toolbar-btn {
+  padding: 0.45rem 0.8rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #e6edf3;
+  background: #21262d;
   border: 1px solid #30363d;
   border-radius: 6px;
   cursor: pointer;
 }
 
-.disconnect-button:hover {
-  color: #e6edf3;
+.toolbar-btn:hover:not(:disabled) {
+  background: #30363d;
   border-color: #8b949e;
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.toolbar-btn-danger {
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.4);
+}
+
+.toolbar-btn-danger:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.12);
+  border-color: #f85149;
+}
+
+/* Two-column wrap for the special-keys and modifier-tap rows. */
+.toolbar-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.toolbar-btn-key {
+  flex: 1 1 calc(50% - 3px);
+  min-width: 0;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+/* The action row: Gestures + Soft keyboard share a line, Disconnect spans it. */
+.toolbar-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.toolbar-actions .toolbar-btn {
+  flex: 1 1 calc(50% - 4px);
+  min-width: 0;
+  text-align: center;
+}
+
+.toolbar-actions .toolbar-btn-danger {
+  flex-basis: 100%;
+}
+
+/* Gesture cheat-sheet, opened from the toolbar's Gestures button. */
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(1, 4, 9, 0.8);
+  z-index: 3000;
+}
+
+.help-card {
+  width: min(340px, 90vw);
+  padding: 20px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(1, 4, 9, 0.7);
+}
+
+.help-card h2 {
+  margin: 0 0 14px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.help-list {
+  margin: 0 0 16px;
+  padding: 0;
+}
+
+.help-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid #21262d;
+}
+
+.help-item:last-child {
+  border-bottom: none;
+}
+
+.help-item dt {
+  font-size: 0.85rem;
+}
+
+.help-item dd {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #8b949e;
+  text-align: right;
 }

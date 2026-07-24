@@ -136,11 +136,12 @@ other browser's WebSocket but never logs it out. In the frontend, `App.tsx`
 mounts the desktop only once authenticated (mounting claims the slot), shows
 the login screen otherwise — with the app version at the bottom, injected
 from Cargo.toml via a Vite define — and returns to it when a claim answers
-401. Until the floating chrome exists, logout is the reserved
-**Ctrl+Alt+Shift+L** chord (swallowed before key pass-through, held input
-released first) or, on touch devices only, the minimal **Disconnect** button
-in the dead space below the fixed-size canvas; both end the browser's login,
-not the engine.
+401. Logout is the **Disconnect** button in the floating menu
+(`FloatingMenu.tsx`) — a draggable ☰ FAB that toggles a toolbar drawer; it
+ends the browser's login, not the engine. The drawer also sends
+browser-swallowed **special keys** (F5, Ctrl+W, Alt+F4…) and **modifier taps**
+via `sendKeyCombo`, and shows the touch-gesture cheat-sheet. (Its **Soft
+keyboard** button and **Clipboard** section are placeholders for later phases.)
 
 ## The wire protocol (browser ↔ backend)
 
@@ -215,11 +216,13 @@ matter:
 - `App.tsx` — the auth gate: login screen vs the desktop.
 - `Login.tsx` — the login form, with the app version pinned at the bottom.
 - `useRemoteDesktop.ts` — the one hook: session claim + WebSocket lifecycle,
-  tile rendering, input capture, viewport reporting, the logout chord, the
-  touch view transform (fit-to-width × pinch zoom + pan).
+  tile rendering, input capture, viewport reporting, the touch view transform
+  (fit-to-width × pinch zoom + pan).
 - `touchGestures.ts` — remotex's touch gesture engine, ported.
 - `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
-  connection-status overlay + the disconnect CTA below the canvas.
+  connection-status overlay + the floating menu.
+- `FloatingMenu.tsx` — the draggable ☰ FAB and toolbar drawer (Disconnect,
+  plus placeholders for soft keyboard and clipboard).
 
 **Connection flow.** The hook claims the session slot, opens the
 WebSocket with the token, and reconnects automatically with capped backoff
