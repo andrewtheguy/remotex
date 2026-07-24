@@ -112,9 +112,11 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
     wait_for_rdp_port(rdp_port).await;
 
     let addr = spawn_app(rdp_port).await;
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    let token = common::claim_session(addr).await;
+    let (mut ws, _resp) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session={token}"))
+            .await
+            .unwrap();
 
     let mut got_resize = false;
     let mut tiles = 0u32;

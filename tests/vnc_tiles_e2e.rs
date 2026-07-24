@@ -113,9 +113,11 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     wait_for_vnc_port(vnc_port).await;
 
     let addr = spawn_app(vnc_port).await;
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    let token = common::claim_session(addr).await;
+    let (mut ws, _resp) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session={token}"))
+            .await
+            .unwrap();
 
     let mut got_resize = false;
     let mut covered: u64 = 0;
@@ -207,4 +209,61 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     })
     .await
     .expect("timed out waiting for the resize + repaint");
+
+    // Phase 6 (detach/reattach): drop the browser, reclaim the slot with the
+    // same token, and reattach. The still-running engine must re-announce the
+    // (resized) geometry and repaint the full desktop through a real server.
+    ws.close(None).await.unwrap();
+    drop(ws);
+
+    let (status, body) =
+        common::post_session(addr, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
+    assert_eq!(status, 200, "reclaim after detach failed: {body}");
+    let token: String = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
+        .as_str()
+        .expect("claim response carries a sessionId")
+        .to_owned();
+    let (mut ws, _resp) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session={token}"))
+            .await
+            .unwrap();
+
+    let mut reannounced = false;
+    let mut covered: u64 = 0;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(
+                        !text.contains(r#""type":"error""#),
+                        "session failed: {text}"
+                    );
+                    if text.contains(r#""type":"resize""#) {
+                        assert_eq!(
+                            text,
+                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H}}}"#),
+                            "reattach must announce the session's current size"
+                        );
+                        reannounced = true;
+                    }
+                }
+                Message::Binary(frame) => {
+                    // An update already in flight when the slot was reattached
+                    // may land before the Refresh-triggered resize; only count
+                    // repaint tiles from the announcement on.
+                    if !reannounced {
+                        continue;
+                    }
+                    covered += check_tile_frame(&frame, VIEWPORT_W, VIEWPORT_H);
+                    if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H) {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("websocket closed after {covered} px of reattach tiles");
+    })
+    .await
+    .expect("timed out waiting for the reattach repaint");
 }

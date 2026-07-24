@@ -2530,6 +2530,7 @@ dependencies = [
  "toml",
  "tower",
  "tower-http",
+ "uuid",
 ]
 
 [[package]]

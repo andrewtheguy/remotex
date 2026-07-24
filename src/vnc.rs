@@ -249,7 +249,7 @@ async fn active_loop(
         reader,
         Arc::clone(&writer),
         Arc::clone(&desktop),
-        frame_tx,
+        frame_tx.clone(),
     ));
 
     // RFB pointer events always carry position + full button mask, so both are
@@ -264,7 +264,7 @@ async fn active_loop(
             }
             input = input_rx.recv() => {
                 let Some(input) = input else {
-                    info!("vnc: input channel closed by browser");
+                    info!("vnc: input channel closed; session shut down");
                     break Ok(());
                 };
                 // Viewport reports drive dynamic resize, not an input event;
@@ -275,6 +275,21 @@ async fn active_loop(
                     } else {
                         Ok(())
                     }
+                } else if matches!(input, ClientMsg::Refresh) {
+                    // A (re)attached browser needs the desktop size and a full
+                    // repaint (phase 6). Unlike RDP, this engine keeps no
+                    // framebuffer copy — the VNC server is one LAN hop away,
+                    // so a non-incremental update request repaints just as
+                    // well without duplicating the framebuffer here.
+                    let size = desktop.lock().unwrap().size;
+                    if frame_tx
+                        .send(ServerMsg::Resize { w: size.0, h: size.1 })
+                        .await
+                        .is_err()
+                    {
+                        break Err(anyhow::anyhow!("frame channel closed"));
+                    }
+                    write_to(&writer, &update_request(false, size)).await
                 } else {
                     match translate_input(input, &mut button_mask, &mut last_pos) {
                         bytes if bytes.is_empty() => Ok(()),
@@ -573,6 +588,8 @@ fn translate_input(
         },
         // Intercepted by the input loop (request_resize) before translation.
         ClientMsg::Viewport { .. } => Vec::new(),
+        // Intercepted by the input loop (full repaint) before translation.
+        ClientMsg::Refresh => Vec::new(),
     }
 }
 

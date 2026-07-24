@@ -1,13 +1,56 @@
-//! Shared helpers for the container-backed e2e tests: locate a container
-//! runtime, build a dummy-server image, and run it with cleanup-on-drop.
-//! (Never a headless browser — see CLAUDE.md.)
+//! Shared helpers for the e2e tests: claim the session slot over the HTTP
+//! API, locate a container runtime, build a dummy-server image, and run it
+//! with cleanup-on-drop. (Never a headless browser — see CLAUDE.md.)
+//!
+//! Each test binary uses a subset of these, so the helpers are individually
+//! `#[allow(dead_code)]`.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
+
+/// POST a JSON body to `/api/session` over raw HTTP/1.1 (the tests don't pull
+/// in an HTTP client just for this). Returns the status code and body.
+#[allow(dead_code)]
+pub async fn post_session(addr: SocketAddr, body: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "POST /api/session HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let text = String::from_utf8_lossy(&raw);
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("response has a status code");
+    let (_, body) = text.split_once("\r\n\r\n").expect("response has a body");
+    (status, body.to_owned())
+}
+
+/// Claim the single session slot, panicking on refusal. Returns the token to
+/// present as `/ws?session=<token>`.
+#[allow(dead_code)]
+pub async fn claim_session(addr: SocketAddr) -> String {
+    let (status, body) = post_session(addr, "{}").await;
+    assert_eq!(status, 200, "session claim failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    json["sessionId"]
+        .as_str()
+        .expect("claim response carries a sessionId")
+        .to_owned()
+}
 
 /// Locate a container runtime. The dummy remote-desktop server is part of the
 /// e2e contract, so a machine without one fails loudly instead of silently
 /// skipping the coverage.
+#[allow(dead_code)]
 pub fn container_runtime() -> &'static str {
     for runtime in ["podman", "docker"] {
         if Command::new(runtime)
@@ -23,6 +66,7 @@ pub fn container_runtime() -> &'static str {
 
 /// Kills the container on drop so a failed test doesn't leak it
 /// (`--rm` then removes it).
+#[allow(dead_code)]
 pub struct Container {
     runtime: &'static str,
     name: String,
@@ -39,6 +83,7 @@ impl Drop for Container {
 /// Build the image from `tests/<context>` (cached after the first run) and
 /// start it with the container's `internal_port` published on an ephemeral
 /// localhost port. Returns the container guard and the published port.
+#[allow(dead_code)]
 pub fn start_dummy_server(
     runtime: &'static str,
     image: &str,
