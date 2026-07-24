@@ -122,8 +122,9 @@ and multi-target all mean re-attaching to or choosing *the* one session/target
 **Done:** phase 1 (the MVP, docs/phase1-mvp.md), phase 2 (this document —
 transport, the VNC engine baseline, TOML config), phase 3 (full-screen
 canvas), and phase 4 (VNC dynamic resize — docs/architecture.md describes
-the system as built). Everything below phase 4 is **not started**, in
-planned order:
+the system as built). The list below keeps every later phase for the
+record, in planned order: completed ones are marked **(done)** with
+as-built notes; phases 5–9 are **not started**:
 
 - **Phase 3 — full-screen canvas, like remotex — (done).** Common to **all
   protocols** — a frontend behavior, not a VNC feature: the canvas fills the
