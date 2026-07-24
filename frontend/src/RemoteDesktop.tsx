@@ -16,7 +16,9 @@ export default function RemoteDesktop() {
   return (
     <div className="remote-desktop">
       <div className="statusbar">
-        <span className={`status status-${status}`}>{STATUS_LABEL[status]}</span>
+        <span className={`status status-${status}`}>
+          {STATUS_LABEL[status]}
+        </span>
         {size && (
           <span className="resolution">
             {size.w}×{size.h}
@@ -25,9 +27,14 @@ export default function RemoteDesktop() {
       </div>
       <div className="screen">
         <div className="surface">
-          <canvas ref={canvasRef} className="framebuffer" width={1024} height={768} />
+          <canvas
+            ref={canvasRef}
+            className="framebuffer"
+            width={1024}
+            height={768}
+          />
           {/* Transparent overlay captures mouse + keyboard input. */}
-          <div ref={overlayRef} className="input-overlay" tabIndex={0}>
+          <div ref={overlayRef} className="input-overlay">
             {!size && (
               <div className="placeholder">
                 Waiting for the remote desktop…
