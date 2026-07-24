@@ -120,10 +120,9 @@ password = "change-me"
 
 `security` is `auto` (advertise TLS + NLA/CredSSP, server picks), `nla`
 (require NLA), or `tls` (plain TLS, no NLA — the remote shows a graphical login).
-Self-signed server certificates are accepted. For VNC targets only `host`,
-`port`, and `password` matter: the RFB handshake uses classic VncAuth when a
-password is set (or security type None when the server allows it), and
-`username`/`domain`/`width`/`height`/`security` are ignored.
+Self-signed server certificates are accepted. For VNC targets, `name` and `protocol = "vnc"` are still required. The
+connection-specific fields are `host`, optional `port` (default 5900), and
+optional `password`; `username`/`domain`/`width`/`height`/`security` are ignored.
 
 Credentials are used only server-side for the RDP/VNC handshake;
 `GET /api/config` returns only the non-secret target name/protocol/host/port.
