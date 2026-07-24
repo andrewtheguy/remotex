@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::Deserialize;
 
+use crate::auth::SitePasswd;
+
 /// RDP security negotiation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -130,6 +132,11 @@ pub struct ServerSection {
     pub port: Option<u16>,
     /// Directory holding the built frontend; overrides [`default_static_dir`].
     pub static_dir: Option<PathBuf>,
+    /// Web-login credential (phase 7): `username:bcrypt_hash`, generated with
+    /// `rdpweb gen-passwd <username>`. Required — without a login everything
+    /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
+    /// value would lock the server to nobody.
+    pub site_passwd: Option<String>,
 }
 
 /// The parsed TOML file, before a target is selected.
@@ -154,6 +161,8 @@ pub struct AppConfig {
     pub static_dir: PathBuf,
     /// The target profile this process serves.
     pub target: TargetConfig,
+    /// Web-login credential guarding `/api/*` and `/ws` (phase 7).
+    pub site_passwd: SitePasswd,
 }
 
 impl ConfigFile {
@@ -193,6 +202,18 @@ impl ConfigFile {
 
     /// Pick the target profile to serve: by name, or the first one.
     pub fn resolve(self, target_name: Option<&str>) -> anyhow::Result<AppConfig> {
+        let site_passwd = self
+            .server
+            .site_passwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .context(
+                "[server].site_passwd is required — generate one with \
+                 `rdpweb gen-passwd <username>`",
+            )?;
+        let site_passwd =
+            SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
         let target = match target_name {
             Some(name) => self
                 .targets
@@ -217,6 +238,7 @@ impl ConfigFile {
             port: self.server.port.unwrap_or(52380),
             static_dir: self.server.static_dir.unwrap_or_else(default_static_dir),
             target,
+            site_passwd,
         })
     }
 }
@@ -288,18 +310,34 @@ pub fn default_static_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    const MINIMAL: &str = r#"
-        [[targets]]
-        name = "one"
-        protocol = "rdp"
-        host = "192.0.2.10"
-    "#;
+    /// A valid `site_passwd = "…"` line (admin/hunter2 at bcrypt's minimum
+    /// cost) for configs that get resolved — resolve requires the credential.
+    fn site_passwd_line() -> String {
+        let encoded = crate::auth::generate("admin", "hunter2", 4).unwrap();
+        format!("site_passwd = \"{encoded}\"")
+    }
+
+    fn minimal() -> String {
+        format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "one"
+            protocol = "rdp"
+            host = "192.0.2.10"
+            "#,
+            site_passwd_line()
+        )
+    }
 
     #[test]
     fn minimal_config_gets_defaults() {
-        let config = ConfigFile::parse(MINIMAL).unwrap().resolve(None).unwrap();
+        let config = ConfigFile::parse(&minimal()).unwrap().resolve(None).unwrap();
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 52380);
+        assert_eq!(config.site_passwd.username(), "admin");
         let t = &config.target;
         assert_eq!(t.name, "one");
         assert_eq!(t.protocol, Protocol::Rdp);
@@ -312,12 +350,13 @@ mod tests {
 
     #[test]
     fn full_config_parses() {
-        let config = ConfigFile::parse(
+        let config = ConfigFile::parse(&format!(
             r#"
             [server]
             host = "0.0.0.0"
             port = 8080
             static_dir = "/srv/web"
+            {}
 
             [[targets]]
             name = "win"
@@ -336,7 +375,8 @@ mod tests {
             protocol = "vnc"
             host = "10.0.0.3"
             "#,
-        )
+            site_passwd_line()
+        ))
         .unwrap();
         let config = config.resolve(Some("win")).unwrap();
         assert_eq!(config.host, "0.0.0.0");
@@ -350,12 +390,47 @@ mod tests {
 
     #[test]
     fn unknown_target_name_lists_available() {
-        let err = ConfigFile::parse(MINIMAL)
+        let err = ConfigFile::parse(&minimal())
             .unwrap()
             .resolve(Some("nope"))
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("nope") && msg.contains("one"), "{msg}");
+    }
+
+    #[test]
+    fn missing_site_passwd_is_rejected() {
+        // Parse succeeds (the file is well-formed); resolve refuses to run
+        // without the web-login credential and says how to make one.
+        let toml = r#"
+            [[targets]]
+            name = "one"
+            protocol = "rdp"
+            host = "192.0.2.10"
+        "#;
+        let err = ConfigFile::parse(toml).unwrap().resolve(None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("site_passwd") && msg.contains("gen-passwd"), "{msg}");
+
+        // Whitespace-only is as good as absent.
+        let toml = format!("[server]\nsite_passwd = \"  \"\n{toml}");
+        let err = ConfigFile::parse(&toml).unwrap().resolve(None).unwrap_err();
+        assert!(format!("{err:#}").contains("site_passwd"), "{err:#}");
+    }
+
+    #[test]
+    fn malformed_site_passwd_is_rejected() {
+        let toml = r#"
+            [server]
+            site_passwd = "no-colon-in-here"
+
+            [[targets]]
+            name = "one"
+            protocol = "rdp"
+            host = "192.0.2.10"
+        "#;
+        let err = ConfigFile::parse(toml).unwrap().resolve(None).unwrap_err();
+        assert!(format!("{err:#}").contains("username:bcrypt_hash"), "{err:#}");
     }
 
     #[test]
@@ -435,8 +510,11 @@ mod tests {
 
     #[test]
     fn vnc_target_gets_the_vnc_default_port() {
-        let config = ConfigFile::parse(
+        let config = ConfigFile::parse(&format!(
             r#"
+            [server]
+            {}
+
             [[targets]]
             name = "mac"
             protocol = "vnc"
@@ -444,7 +522,8 @@ mod tests {
             password = "hunter2"
             resize = true
             "#,
-        )
+            site_passwd_line()
+        ))
         .unwrap()
         .resolve(None)
         .unwrap();
@@ -453,15 +532,19 @@ mod tests {
         assert!(config.target.resize);
 
         // An explicit port wins over the protocol default.
-        let config = ConfigFile::parse(
+        let config = ConfigFile::parse(&format!(
             r#"
+            [server]
+            {}
+
             [[targets]]
             name = "mac"
             protocol = "vnc"
             host = "10.0.0.4"
             port = 5901
             "#,
-        )
+            site_passwd_line()
+        ))
         .unwrap()
         .resolve(None)
         .unwrap();

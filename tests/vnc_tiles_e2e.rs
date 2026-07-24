@@ -58,6 +58,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         host: "127.0.0.1".to_owned(),
         port: 0,
         static_dir: "frontend/dist".into(),
+        site_passwd: common::test_site_passwd(),
         target: TargetConfig {
             name: "tigervnc-dummy".to_owned(),
             protocol: Protocol::Vnc,
@@ -113,8 +114,9 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     wait_for_vnc_port(vnc_port).await;
 
     let addr = spawn_app(vnc_port).await;
-    let token = common::claim_session(addr).await;
-    let mut ws = common::connect_ws(addr, &token).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_ws(addr, &token, &cookie).await;
 
     let mut got_resize = false;
     let mut covered: u64 = 0;
@@ -214,13 +216,13 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     drop(ws);
 
     let (status, body) =
-        common::post_session(addr, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
+        common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
     assert_eq!(status, 200, "reclaim after detach failed: {body}");
     let token: String = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
         .as_str()
         .expect("claim response carries a sessionId")
         .to_owned();
-    let mut ws = common::connect_ws(addr, &token).await;
+    let mut ws = common::connect_ws(addr, &token, &cookie).await;
 
     let mut reannounced = false;
     let mut covered: u64 = 0;

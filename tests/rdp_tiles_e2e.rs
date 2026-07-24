@@ -66,6 +66,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
         host: "127.0.0.1".to_owned(),
         port: 0,
         static_dir: "frontend/dist".into(),
+        site_passwd: common::test_site_passwd(),
         target: TargetConfig {
             name: "xrdp-dummy".to_owned(),
             protocol: Protocol::Rdp,
@@ -112,8 +113,9 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
     wait_for_rdp_port(rdp_port).await;
 
     let addr = spawn_app(rdp_port).await;
-    let token = common::claim_session(addr).await;
-    let mut ws = common::connect_ws(addr, &token).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_ws(addr, &token, &cookie).await;
 
     let mut got_resize = false;
     let mut tiles = 0u32;

@@ -157,6 +157,7 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         port: 0,
         static_dir: "frontend/dist".into(),
         target,
+        site_passwd: common::test_site_passwd(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -189,17 +190,15 @@ async fn spawn_app_dead_rdp() -> SocketAddr {
     spawn_app(target(Protocol::Rdp, dead_rdp_port)).await
 }
 
-/// Minimal HTTP/1.1 GET returning the response body as a string (connection is
-/// closed by the server after the response, so we read to EOF).
-async fn http_get(addr: SocketAddr, path: &str) -> String {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).await.unwrap();
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await.unwrap();
-    let text = String::from_utf8_lossy(&raw);
-    let (_, body) = text.split_once("\r\n\r\n").expect("response has a body");
-    body.to_owned()
+/// Minimal HTTP/1.1 GET (optionally with the login cookie) returning the
+/// response body as a string.
+async fn http_get(addr: SocketAddr, path: &str, cookie: Option<&str>) -> String {
+    let cookie_line = cookie.map(|c| format!("Cookie: {c}\r\n")).unwrap_or_default();
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\n{cookie_line}Connection: close\r\n\r\n"
+    );
+    let (_status, _head, body) = common::http_request(addr, &req).await;
+    body
 }
 
 /// Read from the socket until a `resize` control message arrives; fails on an
@@ -266,14 +265,16 @@ async fn expect_close(ws: &mut Ws) -> Option<u16> {
 #[tokio::test]
 async fn health_endpoint_returns_ok() {
     let addr = spawn_app_dead_rdp().await;
-    let body = http_get(addr, "/api/health").await;
+    // Health stays public (it's a liveness probe) — no login cookie.
+    let body = http_get(addr, "/api/health", None).await;
     assert_eq!(body, "ok");
 }
 
 #[tokio::test]
 async fn config_endpoint_exposes_target_but_never_credentials() {
     let addr = spawn_app_dead_rdp().await;
-    let body = http_get(addr, "/api/config").await;
+    let cookie = common::login(addr).await;
+    let body = http_get(addr, "/api/config", Some(&cookie)).await;
     assert!(body.contains("127.0.0.1"), "config should report the host: {body}");
     // Credentials must never be serialized to the browser.
     assert!(
@@ -287,8 +288,9 @@ async fn config_endpoint_exposes_target_but_never_credentials() {
 #[tokio::test]
 async fn websocket_reports_rdp_connect_failure_as_error_message() {
     let addr = spawn_app_dead_rdp().await;
-    let token = common::claim_session(addr).await;
-    let mut ws = connect_ws(addr, &token).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
 
     // Send a realistic input event (also proves inbound JSON parses without error).
     ws.send(Message::text(r#"{"type":"mouseMove","x":10,"y":20}"#))
@@ -315,15 +317,14 @@ async fn websocket_reports_rdp_connect_failure_as_error_message() {
 #[tokio::test]
 async fn websocket_without_a_valid_token_is_closed_with_4000() {
     let addr = spawn_app_dead_rdp().await;
+    let cookie = common::login(addr).await;
 
-    // No token at all.
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    // No token at all (authenticated, so the upgrade itself succeeds).
+    let mut ws = connect_ws(addr, "", &cookie).await;
     assert_eq!(expect_close(&mut ws).await, Some(4000));
 
     // A made-up token.
-    let mut ws = connect_ws(addr, "not-a-real-token").await;
+    let mut ws = connect_ws(addr, "not-a-real-token", &cookie).await;
     assert_eq!(expect_close(&mut ws).await, Some(4000));
 }
 
@@ -331,30 +332,31 @@ async fn websocket_without_a_valid_token_is_closed_with_4000() {
 async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
     let vnc_port = spawn_fake_vnc().await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
 
     // Browser A claims and attaches; the engine connects to the fake VNC
     // server and paints the desktop.
-    let token_a = common::claim_session(addr).await;
-    let mut ws_a = connect_ws(addr, &token_a).await;
+    let token_a = common::claim_session(addr, &cookie).await;
+    let mut ws_a = connect_ws(addr, &token_a, &cookie).await;
     expect_resize(&mut ws_a, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws_a).await;
 
     // Browser B: a plain claim is refused while A is attached…
-    let (status, _) = common::post_session(addr, "{}").await;
+    let (status, _) = common::post_session(addr, &cookie, "{}").await;
     assert_eq!(status, 409, "a live attachment must block a plain claim");
     // …and A's own token reclaims without force (the reconnect path).
     let (status, _) =
-        common::post_session(addr, &format!(r#"{{"sessionId":"{token_a}"}}"#)).await;
+        common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token_a}"}}"#)).await;
     assert_eq!(status, 200, "the holder reclaims with its token");
     // That reclaim evicted A's socket; reattach A to a fresh one.
     assert_eq!(expect_close(&mut ws_a).await, Some(4001));
-    let token_a = common::claim_session(addr).await; // nothing attached now
-    let mut ws_a = connect_ws(addr, &token_a).await;
+    let token_a = common::claim_session(addr, &cookie).await; // nothing attached now
+    let mut ws_a = connect_ws(addr, &token_a, &cookie).await;
     expect_resize(&mut ws_a, FAKE_DESKTOP, FAKE_DESKTOP).await;
 
     // B takes over with force: A is evicted with 4001, A's token dies, and B
     // gets the desktop repainted from the same still-running engine session.
-    let (status, body) = common::post_session(addr, r#"{"force":true}"#).await;
+    let (status, body) = common::post_session(addr, &cookie, r#"{"force":true}"#).await;
     assert_eq!(status, 200, "force takeover must succeed: {body}");
     let token_b = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
         .as_str()
@@ -362,10 +364,10 @@ async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
         .to_owned();
 
     assert_eq!(expect_close(&mut ws_a).await, Some(4001));
-    let mut ws_stale = connect_ws(addr, &token_a).await;
+    let mut ws_stale = connect_ws(addr, &token_a, &cookie).await;
     assert_eq!(expect_close(&mut ws_stale).await, Some(4000));
 
-    let mut ws_b = connect_ws(addr, &token_b).await;
+    let mut ws_b = connect_ws(addr, &token_b, &cookie).await;
     expect_resize(&mut ws_b, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws_b).await;
 }
@@ -374,9 +376,10 @@ async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
 async fn detach_keeps_the_engine_and_reattach_repaints() {
     let vnc_port = spawn_fake_vnc().await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
 
-    let token = common::claim_session(addr).await;
-    let mut ws = connect_ws(addr, &token).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws).await;
 
@@ -387,13 +390,13 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
     // Reattach (same token, reclaim): the engine must re-announce the size
     // and repaint the whole desktop from the running session.
     let (status, body) =
-        common::post_session(addr, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
+        common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
     assert_eq!(status, 200, "reclaim after detach failed: {body}");
     let token = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
         .as_str()
         .unwrap()
         .to_owned();
-    let mut ws = connect_ws(addr, &token).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws).await;
 }

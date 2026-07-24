@@ -18,6 +18,12 @@ pub enum AppError {
     #[error("not found")]
     NotFound,
 
+    /// No valid auth session (phase 7): a bad login, a missing/expired
+    /// `rdpweb_session` cookie on a guarded route — rendered as
+    /// `401 Unauthorized`. The browser reacts by showing the login screen.
+    #[error("unauthorized")]
+    Unauthorized,
+
     /// Another browser's WebSocket holds the single session slot — rendered
     /// as `409 Conflict`. The client may retry with `force` (takeover).
     #[error("session busy")]
@@ -36,6 +42,9 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
+            AppError::Unauthorized => {
+                (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+            }
             AppError::SessionBusy(_) => {
                 (StatusCode::CONFLICT, "another browser holds the session").into_response()
             }

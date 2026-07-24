@@ -15,6 +15,9 @@
 # Directory of the built frontend. Defaults to share/rdpweb/web in the active
 # version (or frontend/dist in a checkout). Only set to override.
 #static_dir = ""
+# Web login (required): username:bcrypt_hash guarding the whole surface.
+# Generate with:  rdpweb gen-passwd <username>
+site_passwd = ""
 
 # Target profiles (at least one required). Each needs a unique name; serve a
 # specific one with `rdpweb serve --target <name>` (default: the first).
