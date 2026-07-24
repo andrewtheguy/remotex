@@ -18,9 +18,9 @@ pub const TEST_PASSWORD: &str = "hunter2";
 /// The parsed `site_passwd` for [`TEST_USER`]/[`TEST_PASSWORD`], for building
 /// an `AppConfig` directly. bcrypt's minimum cost keeps logins fast in tests.
 #[allow(dead_code)]
-pub fn test_site_passwd() -> rdpweb::auth::SitePasswd {
-    let encoded = rdpweb::auth::generate(TEST_USER, TEST_PASSWORD, 4).unwrap();
-    rdpweb::auth::SitePasswd::parse(&encoded).unwrap()
+pub fn test_site_passwd() -> remotex::auth::SitePasswd {
+    let encoded = remotex::auth::generate(TEST_USER, TEST_PASSWORD, 4).unwrap();
+    remotex::auth::SitePasswd::parse(&encoded).unwrap()
 }
 
 /// Send a raw HTTP/1.1 request (the tests don't pull in an HTTP client) and
@@ -62,7 +62,7 @@ pub async fn login(addr: SocketAddr) -> String {
             name.eq_ignore_ascii_case("set-cookie").then(|| value.trim())
         })
         .expect("login sets the session cookie");
-    // "rdpweb_session=<token>; HttpOnly; …" → the name=token pair.
+    // "remotex_session=<token>; HttpOnly; …" → the name=token pair.
     cookie.split(';').next().unwrap().to_owned()
 }
 

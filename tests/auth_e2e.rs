@@ -8,8 +8,8 @@ mod common;
 
 use std::net::SocketAddr;
 
-use rdpweb::config::{AppConfig, Protocol, Security, TargetConfig};
-use rdpweb::server;
+use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::server;
 use tokio::net::TcpListener;
 
 /// Start the server with the shared test credential. The target is never
@@ -72,7 +72,7 @@ async fn guarded_routes_refuse_unauthenticated_requests() {
     assert_eq!(status, 401, "/api/session must require a login");
 
     // A made-up cookie is as good as none.
-    let (status, _) = get(addr, "/api/config", Some("rdpweb_session=forged")).await;
+    let (status, _) = get(addr, "/api/config", Some("remotex_session=forged")).await;
     assert_eq!(status, 401, "a forged cookie must be refused");
 
     // The public surface still answers.
@@ -114,7 +114,7 @@ async fn login_sets_the_session_cookie_and_grants_access() {
         .lines()
         .find(|l| l.to_lowercase().starts_with("set-cookie:"))
         .expect("login must set the session cookie");
-    assert!(set_cookie.contains("rdpweb_session="), "{set_cookie}");
+    assert!(set_cookie.contains("remotex_session="), "{set_cookie}");
     assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
     assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
     assert!(set_cookie.contains("Path=/"), "{set_cookie}");

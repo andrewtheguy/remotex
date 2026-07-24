@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Build a distro-agnostic release tarball for the current OS/arch.
 #
-# Produces dist/rdpweb-<version>-<os>-<arch>.tar.gz containing a relocatable
+# Produces dist/remotex-<version>-<os>-<arch>.tar.gz containing a relocatable
 # tree that install.sh lays down under <prefix>/versions/<version>:
 #
-#   rdpweb-<version>/
+#   remotex-<version>/
 #   ├── VERSION
-#   ├── bin/rdpweb                # release binary
-#   ├── share/doc/rdpweb/rdpweb.toml.example # config template
-#   ├── share/rdpweb/web/                  # built frontend (index.html + assets)
+#   ├── bin/remotex                # release binary
+#   ├── share/doc/remotex/remotex.toml.example # config template
+#   ├── share/remotex/web/                  # built frontend (index.html + assets)
 #   ├── install.sh
 #   └── uninstall.sh
 #
@@ -41,7 +41,7 @@ case "$(uname -m)" in
   *) arch="$(uname -m)" ;;
 esac
 
-pkg="rdpweb-${version}"
+pkg="remotex-${version}"
 stage="$(mktemp -d)"
 root="${stage}/${pkg}"
 trap 'rm -rf "$stage"' EXIT
@@ -61,12 +61,12 @@ echo ">> building release binary"
 cargo build --release
 
 echo ">> assembling ${pkg}"
-mkdir -p "$root/bin" "$root/share/doc/rdpweb" "$root/share/rdpweb"
-cp target/release/rdpweb "$root/bin/rdpweb"
-cp packaging/etc/rdpweb.toml.example "$root/share/doc/rdpweb/rdpweb.toml.example"
-cp -R frontend/dist "$root/share/rdpweb/web"
+mkdir -p "$root/bin" "$root/share/doc/remotex" "$root/share/remotex"
+cp target/release/remotex "$root/bin/remotex"
+cp packaging/etc/remotex.toml.example "$root/share/doc/remotex/remotex.toml.example"
+cp -R frontend/dist "$root/share/remotex/web"
 cp packaging/install.sh packaging/uninstall.sh "$root/"
-chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/rdpweb"
+chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/remotex"
 printf '%s\n' "$version" > "$root/VERSION"
 
 mkdir -p dist

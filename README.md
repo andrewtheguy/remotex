@@ -1,4 +1,4 @@
-# rdpweb
+# remotex
 
 A browser-based remote-desktop client: connect to an RDP or VNC host and drive
 it with mouse and keyboard from a web browser.
@@ -9,7 +9,7 @@ it with mouse and keyboard from a web browser.
   client — and the browser talks to both over the same WebSocket protocol.
 - **Frontend** — [Vite](https://vite.dev/) + React 19 + TypeScript, managed with
   [Bun](https://bun.sh/). The built assets ship alongside the binary and are
-  served from disk (`share/rdpweb/web`), resolved relative to the executable.
+  served from disk (`share/remotex/web`), resolved relative to the executable.
 
 > **Status: phases 1–4 done** (MVP; transport + VNC engine + TOML config;
 > full-screen canvas; VNC dynamic resize). Connects to one RDP or VNC host,
@@ -25,16 +25,16 @@ it with mouse and keyboard from a web browser.
 ## Install (Linux & macOS)
 
 ```bash
-curl -fsSL https://andrewtheguy.github.io/rdpweb/install.sh | bash
+curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
 ```
 
 Downloads the release tarball for your platform, verifies its SHA-256 against
-the GitHub-published digest, and installs under `/usr/local/opt/rdpweb` with a
-`rdpweb` launcher on your `PATH` (may prompt for `sudo`). Then:
+the GitHub-published digest, and installs under `/usr/local/opt/remotex` with a
+`remotex` launcher on your `PATH` (may prompt for `sudo`). Then:
 
 ```bash
-$EDITOR /usr/local/opt/rdpweb/etc/rdpweb.toml   # set RDP target + creds
-rdpweb serve
+$EDITOR /usr/local/opt/remotex/etc/remotex.toml   # set RDP target + creds
+remotex serve
 ```
 
 See [`docs/install.md`](docs/install.md) for options, custom locations, and the
@@ -75,10 +75,10 @@ Run the backend and frontend in two terminals. In dev, Vite (`:5173`) proxies
 `/api` and `/ws` to the Rust server (`:52380`).
 
 ```bash
-# Terminal 1 — backend. Put the RDP target + credentials in a rdpweb.toml
+# Terminal 1 — backend. Put the RDP target + credentials in a remotex.toml
 # file (gitignored) and pass it explicitly — only an installed deployment has
 # a default config location.
-cargo run -- serve -c rdpweb.toml  # http://localhost:52380
+cargo run -- serve -c remotex.toml  # http://localhost:52380
 
 # Terminal 2 — frontend (with hot reload)
 cd frontend
@@ -97,7 +97,7 @@ the real environment caused subtle bugs). `RUST_LOG` only controls logging.
 The `serve` subcommand takes only two selectors:
 
 - `--config <path>` — the config file. Defaults to the installed
-  `<prefix>/etc/rdpweb.toml`; config is global-only (no per-user or
+  `<prefix>/etc/remotex.toml`; config is global-only (no per-user or
   working-directory files), so in a dev checkout this flag is required.
 - `--target <name>` — which `[[targets]]` profile to serve (default: the first).
 
@@ -106,7 +106,7 @@ The `serve` subcommand takes only two selectors:
 #host = "127.0.0.1"        # web UI bind address
 #port = 52380              # web UI port
 #static_dir = ""           # built frontend; defaults to the installed
-                           # share/rdpweb/web, else frontend/dist
+                           # share/remotex/web, else frontend/dist
 
 [[targets]]
 name = "example"           # unique profile name (picked with --target)
@@ -131,7 +131,7 @@ Credentials are used only server-side for the RDP/VNC handshake;
 `GET /api/config` returns only the non-secret target name/protocol/host/port.
 
 > **Password handling.** The config file holds credentials — keep it out of
-> version control (`rdpweb.toml` is gitignored here) and `chmod 600` it on real
+> version control (`remotex.toml` is gitignored here) and `chmod 600` it on real
 > hosts.
 
 ## Tests
@@ -164,14 +164,14 @@ checkout the server defaults to `frontend/dist`; set `static_dir` under
 cd frontend && bun install && bun run build   # -> frontend/dist/
 cd ..
 cargo build --release
-./target/release/rdpweb serve -c rdpweb.toml  # static_dir defaults to frontend/dist
+./target/release/remotex serve -c remotex.toml  # static_dir defaults to frontend/dist
 ```
 
 To produce a distributable, relocatable tarball (`bin` + `share`) that
-installs under `/usr/local/opt/rdpweb`, use the packaging scripts:
+installs under `/usr/local/opt/remotex`, use the packaging scripts:
 
 ```bash
-bash packaging/build-tarball.sh               # -> dist/rdpweb-<version>-<os>-<arch>.tar.gz
+bash packaging/build-tarball.sh               # -> dist/remotex-<version>-<os>-<arch>.tar.gz
 ```
 
 See [`packaging/README.md`](packaging/README.md) for the full layout, the

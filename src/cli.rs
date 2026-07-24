@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "rdpweb", version, about = "Browser-based RDP client")]
+#[command(name = "remotex", version, about = "Browser-based RDP client")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -13,7 +13,7 @@ pub struct Cli {
 pub enum Commands {
     /// Start the web server
     Serve {
-        /// TOML config file (default: the installed <prefix>/etc/rdpweb.toml;
+        /// TOML config file (default: the installed <prefix>/etc/remotex.toml;
         /// required when running from a checkout)
         #[arg(short, long)]
         config: Option<PathBuf>,
@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn serve_parses_config_and_target() {
         let cli =
-            Cli::try_parse_from(["rdpweb", "serve", "-c", "/etc/x.toml", "--target", "win"])
+            Cli::try_parse_from(["remotex", "serve", "-c", "/etc/x.toml", "--target", "win"])
                 .unwrap();
         let Commands::Serve { config, target } = cli.command else {
             panic!("expected the serve subcommand");
@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn serve_selectors_are_optional() {
-        let cli = Cli::try_parse_from(["rdpweb", "serve"]).unwrap();
+        let cli = Cli::try_parse_from(["remotex", "serve"]).unwrap();
         let Commands::Serve { config, target } = cli.command else {
             panic!("expected the serve subcommand");
         };
@@ -60,13 +60,13 @@ mod tests {
 
     #[test]
     fn gen_passwd_takes_a_username() {
-        let cli = Cli::try_parse_from(["rdpweb", "gen-passwd", "andrew"]).unwrap();
+        let cli = Cli::try_parse_from(["remotex", "gen-passwd", "andrew"]).unwrap();
         let Commands::GenPasswd { username } = cli.command else {
             panic!("expected the gen-passwd subcommand");
         };
         assert_eq!(username, "andrew");
 
         // The username is required.
-        assert!(Cli::try_parse_from(["rdpweb", "gen-passwd"]).is_err());
+        assert!(Cli::try_parse_from(["remotex", "gen-passwd"]).is_err());
     }
 }

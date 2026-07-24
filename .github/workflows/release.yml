@@ -113,7 +113,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rdpweb-${{ matrix.target-note }}
+          name: remotex-${{ matrix.target-note }}
           path: dist/*.tar.gz
           if-no-files-found: error
 

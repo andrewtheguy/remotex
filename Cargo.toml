@@ -1,5 +1,5 @@
 [package]
-name = "rdpweb"
+name = "remotex"
 version = "0.0.13"
 edition = "2024"
 
@@ -9,7 +9,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Serves the built frontend from disk (see src/server.rs). Assets are no longer
-# embedded in the binary — they ship alongside it under share/rdpweb/web.
+# embedded in the binary — they ship alongside it under share/remotex/web.
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 clap = { version = "4", features = ["derive"] }

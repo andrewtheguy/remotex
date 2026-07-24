@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Remove rdpweb installed by install.sh.
+# Remove remotex installed by install.sh.
 #
-#   PREFIX   install root   (default: /usr/local/opt/rdpweb)
+#   PREFIX   install root   (default: /usr/local/opt/remotex)
 #   BINDIR   launcher dir   (default: /usr/local/bin)
 #
 # By default removes the whole install tree (all versions + config). Pass a
@@ -9,13 +9,13 @@
 # there. Use sudo if the directories are not writable by your user.
 set -euo pipefail
 
-prefix="${PREFIX:-/usr/local/opt/rdpweb}"
+prefix="${PREFIX:-/usr/local/opt/remotex}"
 bindir="${BINDIR:-/usr/local/bin}"
 version="${1:-}"
 
 # Only remove the launcher symlink if it points into our prefix.
-launcher="$bindir/rdpweb"
-if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$prefix/current/bin/rdpweb" ]; then
+launcher="$bindir/remotex"
+if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$prefix/current/bin/remotex" ]; then
   rm -f "$launcher"
   echo ">> removed $launcher"
 fi

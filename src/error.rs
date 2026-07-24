@@ -19,7 +19,7 @@ pub enum AppError {
     NotFound,
 
     /// No valid auth session: a bad login, a missing/expired
-    /// `rdpweb_session` cookie on a guarded route — rendered as
+    /// `remotex_session` cookie on a guarded route — rendered as
     /// `401 Unauthorized`. The browser reacts by showing the login screen.
     #[error("unauthorized")]
     Unauthorized,

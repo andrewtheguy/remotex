@@ -1,9 +1,9 @@
 //! Web login: the `site_passwd` credential and the in-memory auth
-//! sessions behind the `rdpweb_session` cookie.
+//! sessions behind the `remotex_session` cookie.
 //!
 //! TOML strings carry a bcrypt hash verbatim — its `$./` alphabet needs no
 //! escaping: `[server].site_passwd` is plain `username:bcrypt_hash` (generated
-//! by `rdpweb gen-passwd <username>`), `/api/auth/login` verifies a
+//! by `remotex gen-passwd <username>`), `/api/auth/login` verifies a
 //! username/password pair against it and mints a session token, and everything
 //! guarded (the rest of `/api/*`, `/ws`) requires that token in the cookie.
 //! Sessions live in memory only — a server restart logs every browser out,
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 
 /// Name of the auth session cookie.
-pub const COOKIE_NAME: &str = "rdpweb_session";
+pub const COOKIE_NAME: &str = "remotex_session";
 
 /// Default bcrypt cost for `gen-passwd` (the crate default).
 pub const DEFAULT_COST: u32 = bcrypt::DEFAULT_COST;

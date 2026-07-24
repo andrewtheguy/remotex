@@ -2530,35 +2530,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rdpweb"
-version = "0.0.13"
-dependencies = [
- "anyhow",
- "axum",
- "bcrypt",
- "clap",
- "des 0.8.1",
- "env_logger",
- "futures-util",
- "ironrdp",
- "ironrdp-tls",
- "ironrdp-tokio",
- "log",
- "png",
- "rpassword",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "toml",
- "tower",
- "tower-http",
- "uuid",
-]
-
-[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2586,6 +2557,35 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "remotex"
+version = "0.0.13"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bcrypt",
+ "clap",
+ "des 0.8.1",
+ "env_logger",
+ "futures-util",
+ "ironrdp",
+ "ironrdp-tls",
+ "ironrdp-tokio",
+ "log",
+ "png",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "toml",
+ "tower",
+ "tower-http",
+ "uuid",
+]
 
 [[package]]
 name = "reqwest"

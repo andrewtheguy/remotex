@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Install rdpweb from an extracted release tarball.
+# Install remotex from an extracted release tarball.
 #
 # Layout (distro-agnostic, works on Linux and macOS):
 #
-#   <prefix>/etc/rdpweb.toml                        # stable user configuration
+#   <prefix>/etc/remotex.toml                        # stable user configuration
 #   <prefix>/versions/<version>/{bin,share}         # this version's files
 #   <prefix>/current -> versions/<version>          # active version (atomic swap)
-#   <bindir>/rdpweb -> <prefix>/current/bin/rdpweb  # launcher on PATH (stable)
+#   <bindir>/remotex -> <prefix>/current/bin/remotex  # launcher on PATH (stable)
 #
 # Upgrade model:
 #   1. The new version is staged fully into versions/<version> before anything
@@ -17,22 +17,22 @@
 #   3. Older versions are pruned, keeping only the new one and the immediately
 #      previous one (for rollback: point `current` back at it).
 #
-# Config is seeded once at <prefix>/etc/rdpweb.toml and is never rolled with
+# Config is seeded once at <prefix>/etc/remotex.toml and is never rolled with
 # versions. A lock prevents two installs from racing on the same prefix.
 #
 # Env overrides:
-#   PREFIX   install root   (default: /usr/local/opt/rdpweb)
+#   PREFIX   install root   (default: /usr/local/opt/remotex)
 #   BINDIR   launcher dir   (default: /usr/local/bin)
 #
-# Run from inside the extracted rdpweb-<version>/ directory. Use sudo if the
+# Run from inside the extracted remotex-<version>/ directory. Use sudo if the
 # target directories are not writable by your user.
 set -euo pipefail
 
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-prefix="${PREFIX:-/usr/local/opt/rdpweb}"
+prefix="${PREFIX:-/usr/local/opt/remotex}"
 bindir="${BINDIR:-/usr/local/bin}"
 
-[ -f "$src/VERSION" ] || { echo "error: run this from an extracted rdpweb release" >&2; exit 1; }
+[ -f "$src/VERSION" ] || { echo "error: run this from an extracted remotex release" >&2; exit 1; }
 version="$(cat "$src/VERSION")"
 
 # Serialize installs against this prefix. `mkdir` is atomic on POSIX, so it
@@ -70,14 +70,14 @@ staging="$prefix/versions/.incoming.$version.$$"
 final="$prefix/versions/$version"
 mkdir -p "$prefix/versions"
 
-echo ">> staging rdpweb $version"
+echo ">> staging remotex $version"
 rm -rf "$staging"
 mkdir -p "$staging"
 cp -R "$src/bin" "$src/share" "$staging/"
 cp "$src/VERSION" "$staging/VERSION"
 
 config_dir="$prefix/etc"
-config="$config_dir/rdpweb.toml"
+config="$config_dir/remotex.toml"
 mkdir -p "$config_dir"
 if [ -e "$config" ] && [ ! -f "$config" ]; then
   echo "error: config path is not a regular file: $config" >&2
@@ -85,7 +85,7 @@ if [ -e "$config" ] && [ ! -f "$config" ]; then
 fi
 if [ ! -f "$config" ]; then
   echo ">> seeding config from sample — edit $config"
-  cp "$src/share/doc/rdpweb/rdpweb.toml.example" "$config"
+  cp "$src/share/doc/remotex/remotex.toml.example" "$config"
 else
   echo ">> preserving config at $config"
 fi
@@ -108,7 +108,7 @@ mv "$staging" "$final"
 echo ">> activating $version"
 swap_symlink "versions/$version" "$prefix/current"
 mkdir -p "$bindir"
-ln -sfn "$prefix/current/bin/rdpweb" "$bindir/rdpweb"
+ln -sfn "$prefix/current/bin/remotex" "$bindir/remotex"
 
 # Keep only the active version and the immediately previous one; remove the rest.
 for dir in "$prefix"/versions/*/; do
@@ -120,10 +120,10 @@ for dir in "$prefix"/versions/*/; do
   esac
 done
 
-echo ">> installed. 'rdpweb' -> $bindir/rdpweb -> $prefix/current/bin/rdpweb"
+echo ">> installed. 'remotex' -> $bindir/remotex -> $prefix/current/bin/remotex"
 if [ -n "$prev_version" ] && [ "$prev_version" != "$version" ]; then
   echo ">> previous version $prev_version kept for rollback:"
   echo "     $(basename "$0" .sh) rollback  ->  ln -sfn versions/$prev_version $prefix/current"
 fi
 echo ">> config: $config"
-echo ">> run:    rdpweb serve"
+echo ">> run:    remotex serve"
