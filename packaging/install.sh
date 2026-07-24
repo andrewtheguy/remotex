@@ -21,7 +21,7 @@
 # versions. A lock prevents two installs from racing on the same prefix.
 #
 # Env overrides:
-#   PREFIX   install root   (default: /usr/local/opt/remotex)
+#   PREFIX   install root   (default: /opt/remotex)
 #   BINDIR   launcher dir   (default: /usr/local/bin)
 #
 # Run from inside the extracted remotex-<version>/ directory. Use sudo if the
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-prefix="${PREFIX:-/usr/local/opt/remotex}"
+prefix="${PREFIX:-/opt/remotex}"
 bindir="${BINDIR:-/usr/local/bin}"
 
 [ -f "$src/VERSION" ] || { echo "error: run this from an extracted remotex release" >&2; exit 1; }

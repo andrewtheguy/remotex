@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remove remotex installed by install.sh.
 #
-#   PREFIX   install root   (default: /usr/local/opt/remotex)
+#   PREFIX   install root   (default: /opt/remotex)
 #   BINDIR   launcher dir   (default: /usr/local/bin)
 #
 # By default removes the whole install tree (all versions + config). Pass a
@@ -9,7 +9,7 @@
 # there. Use sudo if the directories are not writable by your user.
 set -euo pipefail
 
-prefix="${PREFIX:-/usr/local/opt/remotex}"
+prefix="${PREFIX:-/opt/remotex}"
 bindir="${BINDIR:-/usr/local/bin}"
 version="${1:-}"
 

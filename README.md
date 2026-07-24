@@ -29,11 +29,12 @@ curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
 ```
 
 Downloads the release tarball for your platform, verifies its SHA-256 against
-the GitHub-published digest, and installs under `/usr/local/opt/remotex` with a
-`remotex` launcher on your `PATH` (may prompt for `sudo`). Then:
+the GitHub-published digest, and installs under `/opt/remotex` with a
+`remotex` launcher at `/usr/local/bin/remotex` on your `PATH` (may prompt for
+`sudo`). Then:
 
 ```bash
-$EDITOR /usr/local/opt/remotex/etc/remotex.toml   # set RDP target + creds
+$EDITOR /opt/remotex/etc/remotex.toml   # set RDP target + creds
 remotex serve
 ```
 
@@ -168,7 +169,7 @@ cargo build --release
 ```
 
 To produce a distributable, relocatable tarball (`bin` + `share`) that
-installs under `/usr/local/opt/remotex`, use the packaging scripts:
+installs under `/opt/remotex`, use the packaging scripts:
 
 ```bash
 bash packaging/build-tarball.sh               # -> dist/remotex-<version>-<os>-<arch>.tar.gz
