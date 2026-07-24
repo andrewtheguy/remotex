@@ -1,9 +1,9 @@
 use anyhow::Context;
 use clap::Parser;
 use log::{info, warn};
-use rdpweb::cli::{Cli, Commands};
-use rdpweb::config::AppConfig;
-use rdpweb::server;
+use remotex::cli::{Cli, Commands};
+use remotex::config::AppConfig;
+use remotex::server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve { config, target } => {
             // All configuration comes from the TOML file — no env vars, no .env
             // (see src/config.rs for why).
-            let (file, path) = rdpweb::config::load(config.as_deref())?;
+            let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
             let config = file.resolve(target.as_deref())?;
             serve(config).await?;
@@ -49,7 +49,7 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
         std::io::stdin().read_line(&mut line)?;
         line.trim_end_matches(['\r', '\n']).to_owned()
     };
-    let encoded = rdpweb::auth::generate(username, &password, rdpweb::auth::DEFAULT_COST)?;
+    let encoded = remotex::auth::generate(username, &password, remotex::auth::DEFAULT_COST)?;
     println!("{encoded}");
     Ok(())
 }

@@ -114,10 +114,10 @@ the session layer (src/auth.rs):
 
 - **Credential** — `[server].site_passwd` holds `username:bcrypt_hash`
   verbatim (TOML needs no escaping for bcrypt's alphabet; no base64 wrapping).
-  Required; generated with `rdpweb gen-passwd <username>`
+  Required; generated with `remotex gen-passwd <username>`
   (hidden prompt on a TTY, reads a line when piped).
 - **Login** — `POST /api/auth/login` (`{username, password}`) verifies via
-  bcrypt (off the async workers) and sets the `rdpweb_session` cookie:
+  bcrypt (off the async workers) and sets the `remotex_session` cookie:
   `HttpOnly; SameSite=Strict; Path=/`, plus `Secure` only when
   `x-forwarded-proto: https` says a TLS proxy is in front (Safari drops
   Secure cookies set over plain HTTP). Tokens live in an in-memory map with
@@ -295,13 +295,13 @@ so nothing sticks on the remote.
 
 ## Configuration
 
-One global TOML file (`--config <path>`, or `<prefix>/etc/rdpweb.toml` in the
+One global TOML file (`--config <path>`, or `<prefix>/etc/remotex.toml` in the
 installed layout — see [`install.md`](install.md) and `packaging/`). A
 `[server]` block (bind host/port, static dir, the required `site_passwd`
 web-login credential) plus `[[targets]]` profiles:
 protocol, host/port, credentials, RDP-only `width`/`height`/`security`, and
 the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
-(default: the first). See `packaging/etc/rdpweb.toml.example`.
+(default: the first). See `packaging/etc/remotex.toml.example`.
 
 ## Testing
 

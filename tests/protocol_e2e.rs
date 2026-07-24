@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use common::{Ws, connect_ws};
 use futures_util::{SinkExt as _, StreamExt as _};
-use rdpweb::config::{AppConfig, Protocol, Security, TargetConfig};
-use rdpweb::server;
+use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::server;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;

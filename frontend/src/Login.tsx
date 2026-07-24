@@ -48,7 +48,7 @@ export default function Login({
         <span className="login-hint">Checking authentication…</span>
       ) : (
         <form className="login-form" onSubmit={(e) => void submit(e)}>
-          <h1>rdpweb</h1>
+          <h1>remotex</h1>
           {error && <p className="login-error">{error}</p>}
           <label htmlFor="login-username">Username</label>
           <input

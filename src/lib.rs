@@ -1,4 +1,4 @@
-//! rdpweb — a browser-based RDP client.
+//! remotex — a browser-based RDP client.
 //!
 //! The library exposes the pieces the binary wires together and that the
 //! integration tests exercise at the protocol level. See docs/architecture.md.

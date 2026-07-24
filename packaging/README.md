@@ -1,31 +1,31 @@
 # Packaging
 
-Distro-agnostic tarball packaging for Linux and macOS. rdpweb ships as a single
+Distro-agnostic tarball packaging for Linux and macOS. remotex ships as a single
 binary plus its built frontend (served from disk, not embedded), laid out under
 a relocatable prefix.
 
 ## Layout after install
 
 ```
-/usr/local/opt/rdpweb/
+/usr/local/opt/remotex/
 ├── etc/
-│   └── rdpweb.toml               # the global config (stable across versions)
+│   └── remotex.toml               # the global config (stable across versions)
 ├── versions/
 │   └── <version>/
-│       ├── bin/rdpweb            # the binary
-│       ├── share/doc/rdpweb/
-│       │   └── rdpweb.toml.example # versioned config example
-│       ├── share/rdpweb/web/     # built frontend (index.html + assets)
+│       ├── bin/remotex            # the binary
+│       ├── share/doc/remotex/
+│       │   └── remotex.toml.example # versioned config example
+│       ├── share/remotex/web/     # built frontend (index.html + assets)
 │       └── VERSION
 ├── current -> versions/<version> # active version (atomic rename swap)
 └── .install.lock                 # present only while an install runs
 
-/usr/local/bin/rdpweb -> /usr/local/opt/rdpweb/current/bin/rdpweb
+/usr/local/bin/remotex -> /usr/local/opt/remotex/current/bin/remotex
 ```
 
 The binary resolves its versioned `share/` from its own real path
 (`current_exe()` canonicalized through the symlinks), then loads the global
-config from the enclosing prefix's `etc/rdpweb.toml`. Config is global-only —
+config from the enclosing prefix's `etc/remotex.toml`. Config is global-only —
 no per-user or working-directory files; `--config <path>` is the sole
 override. The tree can live anywhere via `PREFIX` / `BINDIR`.
 
@@ -33,10 +33,10 @@ override. The tree can live anywhere via `PREFIX` / `BINDIR`.
 
 | File | Purpose |
 |------|---------|
-| `build-tarball.sh` | Build the frontend + release binary and assemble `dist/rdpweb-<version>-<os>-<arch>.tar.gz`. Run once per target platform (no cross-compile). |
+| `build-tarball.sh` | Build the frontend + release binary and assemble `dist/remotex-<version>-<os>-<arch>.tar.gz`. Run once per target platform (no cross-compile). |
 | `install.sh` | Lay an extracted tarball down under `PREFIX`: stage → atomic `current` swap → prune to (new + previous). Locked against concurrent runs. |
 | `uninstall.sh` | Remove the whole prefix, or a single version (`uninstall.sh <version>`). |
-| `etc/rdpweb.toml.example` | Config template installed under the active version's `share/doc/rdpweb/` and seeded to the stable `etc/rdpweb.toml` on a fresh install. |
+| `etc/remotex.toml.example` | Config template installed under the active version's `share/doc/remotex/` and seeded to the stable `etc/remotex.toml` on a fresh install. |
 
 The repo-root `install.sh` is the network installer (`curl … | bash`): it
 downloads the right tarball, verifies its SHA-256 against GitHub's published
@@ -47,7 +47,7 @@ digest, extracts, and invokes this `packaging/install.sh`.
 ```sh
 cd frontend && bun install --frozen-lockfile && cd ..
 bash packaging/build-tarball.sh
-# -> dist/rdpweb-<version>-<os>-<arch>.tar.gz
+# -> dist/remotex-<version>-<os>-<arch>.tar.gz
 ```
 
 ## Upgrades & rollback
@@ -55,7 +55,7 @@ bash packaging/build-tarball.sh
 Each install keeps the previous version. Roll back by repointing `current`:
 
 ```sh
-ln -sfn versions/<previous> /usr/local/opt/rdpweb/current
+ln -sfn versions/<previous> /usr/local/opt/remotex/current
 ```
 
 ## Releasing

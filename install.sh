@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# rdpweb network installer for Linux and macOS.
+# remotex network installer for Linux and macOS.
 #
-#   curl -fsSL https://andrewtheguy.github.io/rdpweb/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/andrewtheguy/rdpweb/main/install.sh | bash
+#   curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/andrewtheguy/remotex/main/install.sh | bash
 #
 # Downloads the release tarball for your platform, verifies its SHA-256 against
 # the GitHub-published digest, and lays it out under <prefix> with a launcher on
 # PATH (see packaging/install.sh for the on-disk layout).
 #
 # Usage: install.sh [RELEASE_TAG]
-# Env:   PREFIX (default /usr/local/opt/rdpweb), BINDIR (default /usr/local/bin)
+# Env:   PREFIX (default /usr/local/opt/remotex), BINDIR (default /usr/local/bin)
 set -euo pipefail
 
 REPO_OWNER="andrewtheguy"
-REPO_NAME="rdpweb"
-PREFIX="${PREFIX:-/usr/local/opt/rdpweb}"
+REPO_NAME="remotex"
+PREFIX="${PREFIX:-/usr/local/opt/remotex}"
 BINDIR="${BINDIR:-/usr/local/bin}"
 tmp_dir=""
 
@@ -128,8 +128,8 @@ main() {
   $sudo env PREFIX="$PREFIX" BINDIR="$BINDIR" "$extracted/install.sh"
 
   echo
-  info "done — run: rdpweb serve"
-  info "edit config: ${PREFIX}/etc/rdpweb.toml"
+  info "done — run: remotex serve"
+  info "edit config: ${PREFIX}/etc/remotex.toml"
 }
 
 main "$@"

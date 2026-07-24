@@ -1,13 +1,5 @@
 # Roadmap
 
-Phases 1–10 are done and their planning docs were removed;
-[`architecture.md`](architecture.md) describes the system as built. What
-remains, in planned order:
-
-- **Phase 11 — the rename:** when the project is ready,
-  rename the GitHub repo to **remotex** and the binary to
-  **remotex**. Not done now; documented here so it
-  isn't forgotten.
 - **Phase 12 — multi-target support:** target picker over the `[[targets]]`
   config (still one active session at a time).
 - **Phase 13 — clipboard bridge:** replace the **Clipboard** placeholder with

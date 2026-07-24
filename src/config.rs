@@ -6,7 +6,7 @@
 //! `.env` loading — env files shadowing the real environment caused subtle
 //! setup bugs, and credentials belong in one 600-mode file.
 //!
-//! The config is **global-only**: the installed `<prefix>/etc/rdpweb.toml`, or
+//! The config is **global-only**: the installed `<prefix>/etc/remotex.toml`, or
 //! an explicit `--config <path>`. No per-user or working-directory files are
 //! searched — one deployment, one config, no shadowing.
 
@@ -133,7 +133,7 @@ pub struct ServerSection {
     /// Directory holding the built frontend; overrides [`default_static_dir`].
     pub static_dir: Option<PathBuf>,
     /// Web-login credential: `username:bcrypt_hash`, generated with
-    /// `rdpweb gen-passwd <username>`. Required — without a login everything
+    /// `remotex gen-passwd <username>`. Required — without a login everything
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
@@ -210,7 +210,7 @@ impl ConfigFile {
             .filter(|s| !s.is_empty())
             .context(
                 "[server].site_passwd is required — generate one with \
-                 `rdpweb gen-passwd <username>`",
+                 `remotex gen-passwd <username>`",
             )?;
         let site_passwd =
             SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
@@ -244,14 +244,14 @@ impl ConfigFile {
 }
 
 /// Load the config file: the explicit `--config` path, or the global
-/// `<prefix>/etc/rdpweb.toml` of the installed layout. Returns the parsed file
+/// `<prefix>/etc/remotex.toml` of the installed layout. Returns the parsed file
 /// and the path it came from.
 pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
     let path = match explicit {
         Some(path) => path.to_path_buf(),
         None => installed_config_path().context(
             "no --config given and not running from an installed prefix \
-             (<prefix>/versions/<version>/bin/rdpweb) — pass --config <path>",
+             (<prefix>/versions/<version>/bin/remotex) — pass --config <path>",
         )?,
     };
     let text = std::fs::read_to_string(&path)
@@ -261,27 +261,27 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
     Ok((config, path))
 }
 
-/// The one global config location, `<prefix>/etc/rdpweb.toml`, when the
+/// The one global config location, `<prefix>/etc/remotex.toml`, when the
 /// executable runs from the versioned install layout (see packaging/README.md).
 pub fn installed_config_path() -> Option<PathBuf> {
-    Some(installed_etc_dir()?.join("rdpweb.toml"))
+    Some(installed_etc_dir()?.join("remotex.toml"))
 }
 
 /// The active version root, derived from the running binary's own location.
 ///
-/// The binary is shipped at `<prefix>/versions/<version>/bin/rdpweb`. We
+/// The binary is shipped at `<prefix>/versions/<version>/bin/remotex`. We
 /// canonicalize `current_exe` so a launcher symlink resolves to the real
 /// versioned directory. Returns `None` in odd environments where the executable
 /// path can't be determined.
 pub fn version_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.canonicalize().unwrap_or(exe);
-    // <root>/bin/rdpweb → <root>
+    // <root>/bin/remotex → <root>
     Some(exe.parent()?.parent()?.to_path_buf())
 }
 
 /// `<prefix>/etc` when the executable lives in the versioned install layout
-/// (`<prefix>/versions/<version>/bin/rdpweb`), else `None`.
+/// (`<prefix>/versions/<version>/bin/remotex`), else `None`.
 fn installed_etc_dir() -> Option<PathBuf> {
     let root = version_root()?;
     let versions_dir = root.parent()?;
@@ -293,12 +293,12 @@ fn installed_etc_dir() -> Option<PathBuf> {
 
 /// Default location of the built frontend.
 ///
-/// Prefers the installed layout (`<root>/share/rdpweb/web`); falls back to
+/// Prefers the installed layout (`<root>/share/remotex/web`); falls back to
 /// `frontend/dist` relative to the working directory for `cargo run` in a
 /// checkout. Override with `static_dir` in the `[server]` block.
 pub fn default_static_dir() -> PathBuf {
     if let Some(root) = version_root() {
-        let installed = root.join("share/rdpweb/web");
+        let installed = root.join("share/remotex/web");
         if installed.is_dir() {
             return installed;
         }

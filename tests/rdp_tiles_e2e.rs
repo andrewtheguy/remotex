@@ -14,8 +14,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use rdpweb::config::{AppConfig, Protocol, Security, TargetConfig};
-use rdpweb::server;
+use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -109,7 +109,7 @@ fn check_tile_frame(frame: &[u8]) {
 async fn tiles_arrive_as_binary_frames_after_resize_text() {
     let runtime = common::container_runtime();
     let (_container, rdp_port) =
-        common::start_dummy_server(runtime, "rdpweb-e2e-xrdp", "xrdp-dummy", 3389);
+        common::start_dummy_server(runtime, "remotex-e2e-xrdp", "xrdp-dummy", 3389);
     wait_for_rdp_port(rdp_port).await;
 
     let addr = spawn_app(rdp_port).await;

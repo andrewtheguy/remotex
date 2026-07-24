@@ -15,7 +15,7 @@
 //   three-finger swipe    scroll, axis-locked (vertical or horizontal wheel)
 //
 // The state machine keeps its thresholds local to this file. The output layer
-// sends rdpweb ClientMsg JSON (a scroll tick is one wheel message; the server
+// sends remotex ClientMsg JSON (a scroll tick is one wheel message; the server
 // turns any nonzero delta into one notch), and the view transform is owned by
 // useRemoteDesktop's applyCanvasCss, reached through GestureDeps.
 

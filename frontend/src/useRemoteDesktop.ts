@@ -41,7 +41,7 @@ export interface RemoteSize {
 // without the takeover prompt (sessionStorage is per-tab, so two tabs of the
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
-export const SESSION_KEY = "rdpweb.sessionId";
+export const SESSION_KEY = "remotex.sessionId";
 // Mobile sizing: pinch-zoom-capable touch devices size the session in CSS
 // pixels (no dpr multiplication — a phone's 3x dpr would mint an enormous
 // desktop), floored per axis at a fixed 1024x768 — so a portrait phone raises

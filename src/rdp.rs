@@ -423,7 +423,7 @@ fn build_connector_config(config: &TargetConfig) -> Config {
         },
         bitmap: None,
         client_build: 0,
-        client_name: "rdpweb".to_owned(),
+        client_name: "remotex".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
 
         #[cfg(windows)]

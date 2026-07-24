@@ -14,8 +14,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use rdpweb::config::{AppConfig, Protocol, Security, TargetConfig};
-use rdpweb::server;
+use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -110,7 +110,7 @@ fn check_tile_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> u64 {
 async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
-        common::start_dummy_server(runtime, "rdpweb-e2e-tigervnc", "vnc-dummy", 5900);
+        common::start_dummy_server(runtime, "remotex-e2e-tigervnc", "vnc-dummy", 5900);
     wait_for_vnc_port(vnc_port).await;
 
     let addr = spawn_app(vnc_port).await;
