@@ -1,17 +1,22 @@
 import { useRef } from "react";
-import { useRemoteDesktop } from "./useRemoteDesktop.ts";
+import { type ConnectionStatus, useRemoteDesktop } from "./useRemoteDesktop.ts";
 
-const STATUS_LABEL: Record<string, string> = {
+const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connecting: "Connecting…",
   connected: "Connected",
-  closed: "Disconnected",
-  error: "Error",
+  reconnecting: "Reconnecting…",
+  busy: "Session in use",
+  takenOver: "Session taken over",
+  error: "Session error",
 };
 
 export default function RemoteDesktop() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
-  const { status, size } = useRemoteDesktop(canvasRef, overlayRef);
+  const { status, size, errorMessage, takeOver, retry } = useRemoteDesktop(
+    canvasRef,
+    overlayRef,
+  );
 
   return (
     <div className="screen">
@@ -38,6 +43,44 @@ export default function RemoteDesktop() {
           </span>
           {status === "connected" && !size && (
             <span className="status-hint">Waiting for the remote desktop…</span>
+          )}
+          {status === "busy" && (
+            <>
+              <span className="status-hint">
+                This desktop is open in another browser.
+              </span>
+              <button
+                type="button"
+                className="status-action"
+                onClick={takeOver}
+              >
+                Take over
+              </button>
+            </>
+          )}
+          {status === "takenOver" && (
+            <>
+              <span className="status-hint">
+                Another browser took over this session.
+              </span>
+              <button
+                type="button"
+                className="status-action"
+                onClick={takeOver}
+              >
+                Take it back
+              </button>
+            </>
+          )}
+          {status === "error" && (
+            <>
+              {errorMessage && (
+                <span className="status-hint">{errorMessage}</span>
+              )}
+              <button type="button" className="status-action" onClick={retry}>
+                Retry
+              </button>
+            </>
           )}
         </div>
       )}

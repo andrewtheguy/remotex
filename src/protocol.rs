@@ -44,6 +44,11 @@ pub enum ClientMsg {
     /// size act on it (VNC `SetDesktopSize`); the rest ignore it and the
     /// frontend keeps its phase-3 scrollbars.
     Viewport { w: u16, h: u16 },
+    /// Re-announce the desktop size and repaint the whole framebuffer
+    /// (phase 6). Injected by the session layer when a browser (re)attaches to
+    /// a running engine; a browser may also send it to recover from a
+    /// corrupted canvas.
+    Refresh,
 }
 
 /// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
@@ -199,6 +204,10 @@ mod tests {
         // Viewport dimensions beyond the protocol's u16 range are rejected at
         // the deserialization boundary, not clamped.
         assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"viewport","w":70000,"h":1}"#).is_err());
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
+            ClientMsg::Refresh
+        ));
     }
 
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.

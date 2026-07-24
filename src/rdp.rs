@@ -171,9 +171,27 @@ async fn active_loop(
             }
             input = input_rx.recv() => {
                 let Some(input) = input else {
-                    info!("rdp: input channel closed by browser");
+                    info!("rdp: input channel closed; session shut down");
                     break;
                 };
+                // A (re)attached browser needs the desktop size and a full
+                // repaint from the server-owned framebuffer (phase 6).
+                if matches!(input, ClientMsg::Refresh) {
+                    frame_tx
+                        .send(ServerMsg::Resize { w: desktop.width, h: desktop.height })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                    send_tiles(
+                        &image,
+                        0,
+                        0,
+                        desktop.width.saturating_sub(1),
+                        desktop.height.saturating_sub(1),
+                        &frame_tx,
+                    )
+                    .await?;
+                    continue;
+                }
                 let events = translate_input(input, &mut last_pos);
                 if events.is_empty() {
                     continue;
@@ -290,6 +308,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // RDP can't resize mid-session without Deactivation-Reactivation,
         // which is not implemented; the frontend keeps its scrollbars.
         ClientMsg::Viewport { .. } => Vec::new(),
+        // Handled by the active loop (full repaint) before translation.
+        ClientMsg::Refresh => Vec::new(),
     }
 }
 

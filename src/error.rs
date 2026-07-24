@@ -18,6 +18,11 @@ pub enum AppError {
     #[error("not found")]
     NotFound,
 
+    /// Another browser's WebSocket holds the single session slot — rendered
+    /// as `409 Conflict`. The client may retry with `force` (takeover).
+    #[error("session busy")]
+    SessionBusy(#[from] crate::session::SessionBusy),
+
     /// An unexpected application error, bubbled up from `anyhow`. Rendered as
     /// `500 Internal Server Error`; the detail is logged, never sent to clients.
     #[error(transparent)]
@@ -31,6 +36,9 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
+            AppError::SessionBusy(_) => {
+                (StatusCode::CONFLICT, "another browser holds the session").into_response()
+            }
             AppError::Internal(e) => {
                 // Log the full `source()` chain; return an opaque message.
                 log::error!("internal error: {e:#}");

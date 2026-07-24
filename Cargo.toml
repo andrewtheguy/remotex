@@ -1,6 +1,6 @@
 [package]
 name = "rdpweb"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 
 [dependencies]
@@ -21,6 +21,8 @@ futures-util = "0.3"
 toml = "1"
 # Tile payload compression for the browser transport (see src/protocol.rs).
 png = "0.18"
+# Session-slot claim tokens (see src/session.rs).
+uuid = { version = "1", features = ["v4"] }
 # Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
 des = "0.8"
 

@@ -1,28 +1,31 @@
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
     extract::State,
     http::{StatusCode, header},
     response::IntoResponse,
-    routing::{any, get},
+    routing::{any, get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tower::service_fn;
 use tower_http::services::ServeDir;
 
-use crate::{config::AppConfig, error::AppError, ws};
+use crate::{config::AppConfig, error::{ApiResult, AppError}, session::SessionManager, ws};
 
 /// Shared application state handed to route handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub config: AppConfig,
+    /// The single session slot (phase 6): claim here, attach over `/ws`.
+    pub sessions: Arc<SessionManager>,
 }
 
 /// Build the axum router.
 ///
-/// - `/api/*` — JSON API (health, config); unknown `/api/*` paths return 404
-///   rather than the SPA, so API clients get an honest error.
+/// - `/api/*` — JSON API (health, config, session claim); unknown `/api/*`
+///   paths return 404 rather than the SPA, so API clients get an honest error.
 /// - `/ws`    — binary WebSocket carrying the remote-desktop session
 /// - fallback — the built SPA, served from `config.static_dir` on disk. Real
 ///   files are served by [`ServeDir`]; any unknown path returns `index.html`
@@ -45,13 +48,15 @@ pub fn router(config: AppConfig) -> Router {
     });
     let spa = ServeDir::new(&config.static_dir).fallback(spa_index);
 
-    let state = AppState { config };
+    let sessions = Arc::new(SessionManager::new(config.target.clone()));
+    let state = AppState { config, sessions };
 
     // Nested so unmatched `/api/*` paths hit this router's 404 fallback instead
     // of falling through to the SPA index.
     let api = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/config", get(config_handler))
+        .route("/session", post(claim_handler))
         .fallback(|| async { AppError::NotFound });
 
     Router::new()
@@ -77,4 +82,31 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
         host: state.config.target.host.clone(),
         port: state.config.target.port,
     })
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct ClaimRequest {
+    /// Take the slot even if another browser's WebSocket holds it (takeover).
+    force: bool,
+    /// The caller's previous token; matching the current claim lets the same
+    /// browser reclaim (reconnect) without the takeover prompt.
+    session_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaimResponse {
+    session_id: String,
+}
+
+/// Claim the single session slot (phase 6). Returns the token the WebSocket
+/// must present as `/ws?session=<token>`; 409 while another browser is
+/// attached (retry with `force` to take over).
+async fn claim_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ClaimRequest>,
+) -> ApiResult<Json<ClaimResponse>> {
+    let session_id = state.sessions.claim(req.force, req.session_id.as_deref())?;
+    Ok(Json(ClaimResponse { session_id }))
 }
