@@ -1,5 +1,5 @@
-// Mobile gestures: remotex's touch controls, ported onto the input
-// overlay. The gesture model is a trackpad, not a touchscreen: the cursor is
+// Mobile gestures for the input overlay. The gesture model is a trackpad, not
+// a touchscreen: the cursor is
 // a persistent position that fingers nudge around, and taps click wherever
 // the cursor currently is (the server renders the cursor into the
 // framebuffer, so it is always visible).
@@ -14,12 +14,10 @@
 //   two-finger drag       pan the zoomed view (when not in drag mode)
 //   three-finger swipe    scroll, axis-locked (vertical or horizontal wheel)
 //
-// The state machine and every threshold are ported faithfully from
-// ../remotex/src/useRemoteDesktop.ts — they are battle-tested there. Only the
-// output layer differs: rdpweb ClientMsg JSON instead of RFB pointer masks
-// (a scroll tick is one wheel message; the server turns any nonzero delta
-// into one notch), and the view transform is owned by useRemoteDesktop's
-// applyCanvasCss, reached through GestureDeps.
+// The state machine keeps its thresholds local to this file. The output layer
+// sends rdpweb ClientMsg JSON (a scroll tick is one wheel message; the server
+// turns any nonzero delta into one notch), and the view transform is owned by
+// useRemoteDesktop's applyCanvasCss, reached through GestureDeps.
 
 import type { ClientMsg } from "./protocol.ts";
 
@@ -271,7 +269,7 @@ export function attachTouchGestures(
   }
 
   // Move the remote pointer, transitioning the left button when the held
-  // state changes (the remotex equivalent sent position + mask atomically).
+  // state changes.
   function movePointer(x: number, y: number, left: boolean): void {
     const clamped = clampCursorToRemote(x, y);
     trackCursor(clamped.x, clamped.y);

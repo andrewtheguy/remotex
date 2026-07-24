@@ -42,15 +42,15 @@ export interface RemoteSize {
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
 export const SESSION_KEY = "rdpweb.sessionId";
-// Mobile sizing, with remotex's bounds: pinch-zoom-capable touch devices size
-// the session in CSS pixels (no dpr multiplication — a phone's 3x dpr would
-// mint an enormous desktop), floored per axis at a fixed 1024x768 — so a
-// portrait phone raises only the height to its own viewport, never a
-// width-derived height that makes the desktop absurdly tall. The floor is a
-// constant, NOT remotex's geometry-found-on-connect: the engine (and a VNC
-// server) outlives the browser here, so a connect-time floor would inherit
-// whatever damage a previous session left (e.g. a too-tall desktop) and
-// never shrink it — with a constant floor the phone repairs it on connect.
+// Mobile sizing: pinch-zoom-capable touch devices size the session in CSS
+// pixels (no dpr multiplication — a phone's 3x dpr would mint an enormous
+// desktop), floored per axis at a fixed 1024x768 — so a portrait phone raises
+// only the height to its own viewport, never a width-derived height that makes
+// the desktop absurdly tall. The floor is a constant rather than geometry
+// found on connect: the engine (and a VNC server) outlives the browser here,
+// so a connect-time floor would inherit whatever damage a previous session
+// left (e.g. a too-tall desktop) and never shrink it — with a constant floor
+// the phone repairs it on connect.
 // Exported so RemoteDesktop.tsx can switch the screen into touch layout
 // (overflow hidden + viewport-fixed overlay — see index.css).
 export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
@@ -67,7 +67,7 @@ interface TouchViewState {
 }
 
 // Touch base scale: scale the desktop down (never up) to fit the viewport
-// width (remotex's fit bound).
+// width.
 function touchFitScale(size: RemoteSize): number {
   return Math.min(document.documentElement.clientWidth / size.w, 1);
 }

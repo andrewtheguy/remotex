@@ -83,8 +83,8 @@ when the browser does.
 ## The session slot
 
 `SessionManager` (src/session.rs) decouples the engine session (backend ↔
-remote host) from the browser attachment (backend ↔ WebSocket), remotex's
-claim rules on top of a persistent engine:
+remote host) from the browser attachment (backend ↔ WebSocket), with
+takeover/reclaim claim rules on top of a persistent engine:
 
 - **Claim** — `POST /api/session` (`{force?, sessionId?}`) mints the slot
   token. While another browser's WebSocket is attached the claim answers
@@ -109,12 +109,12 @@ one — concurrent sessions, sharing, and brokers stay out of scope.
 
 ## Web login
 
-Everything session-related refuses unauthenticated requests, remotex-style
-(src/auth.rs):
+Everything session-related refuses unauthenticated requests before they reach
+the session layer (src/auth.rs):
 
 - **Credential** — `[server].site_passwd` holds `username:bcrypt_hash`
-  verbatim (TOML needs no escaping for bcrypt's alphabet; no base64 wrapping
-  like remotex). Required; generated with `rdpweb gen-passwd <username>`
+  verbatim (TOML needs no escaping for bcrypt's alphabet; no base64 wrapping).
+  Required; generated with `rdpweb gen-passwd <username>`
   (hidden prompt on a TTY, reads a line when piped).
 - **Login** — `POST /api/auth/login` (`{username, password}`) verifies via
   bcrypt (off the async workers) and sets the `rdpweb_session` cookie:
@@ -232,7 +232,7 @@ matter:
 - `useRemoteDesktop.ts` — the one hook: session claim + WebSocket lifecycle,
   tile rendering, input capture, viewport reporting, the touch view transform
   (fit-to-width × pinch zoom + pan).
-- `touchGestures.ts` — remotex's touch gesture engine, ported.
+- `touchGestures.ts` — the mobile touch gesture engine.
 - `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
   connection-status overlay + the floating menu.
 - `FloatingMenu.tsx` — the draggable ☰ FAB and toolbar drawer (Disconnect,
@@ -270,10 +270,10 @@ scrollbars disappear.
 
 **Mobile.** Pinch-zoom-capable touch devices
 (`navigator.maxTouchPoints >= 2`) diverge from the desktop model in two ways,
-both with remotex's battle-tested bounds. *Sizing:* the viewport report uses
+both with conservative touch bounds. *Sizing:* the viewport report uses
 CSS pixels (no dpr — a phone's 3× dpr would mint an enormous desktop),
-floored per axis at a constant 1024×768; the constant floor (not remotex's
-geometry-found-on-connect) means a phone connecting to a desktop a previous
+floored per axis at a constant 1024×768; the constant floor (rather than
+geometry found on connect) means a phone connecting to a desktop a previous
 session left too tall repairs it on connect, since the engine outlives the
 browser here. *Display and input:* native scrolling is off; `applyCanvasCss`
 positions the canvas by fit-to-width scale × pinch zoom (1–4×) plus a clamped

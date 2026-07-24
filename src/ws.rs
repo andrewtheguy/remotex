@@ -34,7 +34,7 @@ use crate::{
 
 /// Close code: the session token is missing, invalid, or superseded.
 const CLOSE_INVALID_TOKEN: u16 = 4000;
-/// Close code: another browser took over the session slot (matches remotex).
+/// Close code: another browser took over the session slot.
 const CLOSE_EVICTED: u16 = 4001;
 
 #[derive(Deserialize)]

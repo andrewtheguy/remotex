@@ -134,7 +134,7 @@ body {
 }
 
 /* Phase 7: the login gate. A plain centered form; the version sits pinned at
-   the bottom of the screen (remotex-style). */
+  the bottom of the screen. */
 .login-screen {
   position: fixed;
   inset: 0;
@@ -402,8 +402,8 @@ body {
   text-align: right;
 }
 
-/* Phase 10: the soft keyboard. Ported from remotex and recoloured to this
-   project's GitHub-dark palette. On narrow viewports it docks to the bottom
+/* Phase 10: the soft keyboard. It uses this project's GitHub-dark palette. On
+  narrow viewports it docks to the bottom
    edge (compact layout, screen toggle, sticky-modifier badges); at ≥800px it
    becomes a draggable floating PC-keyboard grid. Every key routes through the
    same DOM-code sendKeyCombo the toolbar uses — no bespoke input path. It sits

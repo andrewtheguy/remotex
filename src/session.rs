@@ -18,7 +18,7 @@
 //!
 //! - **Claim** (`POST /api/session`): a browser obtains the slot token. If
 //!   another browser's WebSocket is live, the claim needs `force` (takeover)
-//!   or the current token (reclaim after a network drop) — remotex's rules.
+//!   or the current token (reclaim after a network drop).
 //!   Claiming evicts the previous WebSocket but *keeps the engine running*.
 //! - **Attach** (`/ws?session=<token>`): the WebSocket joins the slot. The
 //!   engine is spawned on first attach and survives detach — closing the
@@ -131,9 +131,9 @@ impl SessionManager {
         }
     }
 
-    /// Claim the session slot, returning the new token (remotex's rules): a
-    /// live attachment blocks the claim unless `force` (takeover) or `token`
-    /// is the current claim (the same browser reclaiming after a drop). Both
+    /// Claim the session slot, returning the new token: a live attachment
+    /// blocks the claim unless `force` (takeover) or `token` is the current
+    /// claim (the same browser reclaiming after a drop). Both
     /// evict the previous WebSocket; the engine keeps running either way.
     pub fn claim(&self, force: bool, token: Option<&str>) -> Result<String, SessionBusy> {
         let (id, evicted) = {
