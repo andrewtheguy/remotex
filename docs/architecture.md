@@ -241,6 +241,6 @@ the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
 
 Done: phase 1 (MVP), phase 2 (transport + VNC engine + TOML config), phase 3
 (full-screen canvas), phase 4 (VNC dynamic resize), phase 5 (connection-flow
-UX), phase 6 (session management). Planned: soft keyboard + floating UI (7),
-multi-target picker (8), the remotex-v2 rename (9) — the list lives in
-[`roadmap.md`](roadmap.md).
+UX), phase 6 (session management). Planned: auth (7), mobile gestures (8),
+the remotex-v2 rename (9), soft keyboard + floating UI (10), multi-target
+picker (11) — the list lives in [`roadmap.md`](roadmap.md).
