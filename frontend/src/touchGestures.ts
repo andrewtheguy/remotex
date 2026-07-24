@@ -380,10 +380,13 @@ export function attachTouchGestures(
       gesture.maxForce = Math.max(gesture.maxForce, touch.force ?? 0);
     }
     const duration = Date.now() - gesture.startTime;
+    // Devices that report pressure must clear FORCE_TAP_THRESHOLD (a resting
+    // finger isn't a tap); devices that don't report it leave maxForce at 0,
+    // so fall back to the move/duration bounds alone.
     const isForceTap =
       !gesture.moved &&
       duration <= TAP_MAX_DURATION_MS &&
-      gesture.maxForce >= FORCE_TAP_THRESHOLD;
+      (gesture.maxForce === 0 || gesture.maxForce >= FORCE_TAP_THRESHOLD);
 
     if (gesture.mode === "drag") {
       const c = currentCursor();
