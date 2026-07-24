@@ -60,6 +60,12 @@ export interface GestureDeps {
   // pan under them, and content can pan up above them. 0 when nothing covers
   // the canvas. Optional: absent means no inset.
   bottomInset?(): number;
+  // Reports where the virtual cursor now sits, in remote coordinates, so the
+  // caller can draw a pointer there when the remote isn't drawing one itself.
+  // `real` marks a position that came from a hardware mouse (notePointer) —
+  // the browser's own CSS cursor already tracks that one, with no lag.
+  // Optional: absent means nothing is drawn.
+  onCursor?(x: number, y: number, real: boolean): void;
 }
 
 export interface TouchGestures {
@@ -253,9 +259,10 @@ export function attachTouchGestures(
     return { left, right, top, bottom };
   }
 
-  function trackCursor(x: number, y: number): void {
+  function trackCursor(x: number, y: number, real = false): void {
     cursor = { x, y };
     hasCursor = true;
+    deps.onCursor?.(x, y, real);
   }
 
   function currentCursor(): Point {
@@ -1001,7 +1008,7 @@ export function attachTouchGestures(
       el.removeEventListener("touchcancel", handleTouchEnd);
     },
     notePointer(x: number, y: number) {
-      trackCursor(x, y);
+      trackCursor(x, y, true);
     },
     release,
   };

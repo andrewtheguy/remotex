@@ -30,6 +30,19 @@ export type ClientMsg =
 // server sends so the browser knows which post-login state it is in.
 export type ControlMsg =
   | { type: "resize"; w: number; h: number }
+  // The remote pointer shape, sent only by engines whose server hands the
+  // cursor over instead of drawing it into the framebuffer (the VNC Cursor
+  // pseudo-encoding). Receiving one at all means the browser owns pointer
+  // rendering from then on; `image` is a base64 PNG, null when the remote hid
+  // the pointer. `hx`/`hy` are the hotspot within the image.
+  | {
+      type: "cursor";
+      image: string | null;
+      w: number;
+      h: number;
+      hx: number;
+      hy: number;
+    }
   | { type: "error"; message: string }
   | { type: "picker" }
   // `protocol` ("rdp"/"vnc") and `resize` tell the browser how to handle

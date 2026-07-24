@@ -27,6 +27,7 @@ export default function RemoteDesktop({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const pointerRef = useRef<HTMLImageElement>(null);
   const {
     status,
     mode,
@@ -40,7 +41,7 @@ export default function RemoteDesktop({
     resizeToWindow,
     sendKeyCombo,
     setBottomInset,
-  } = useRemoteDesktop(canvasRef, overlayRef, onUnauthorized);
+  } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
@@ -68,6 +69,11 @@ export default function RemoteDesktop({
           // biome-ignore lint/a11y/noNoninteractiveTabindex: the remote-desktop surface (role=application) must take focus to receive keyboard input
           tabIndex={0}
         />
+        {/* The pointer for the touch gesture layer's virtual cursor, drawn
+            only when the engine sends cursor shapes instead of compositing
+            them (VNC). Sized and positioned imperatively by the hook; hidden
+            by default, and decorative, so it carries no alt text. */}
+        <img ref={pointerRef} className="remote-pointer" alt="" />
       </div>
 
       {/* The floating menu is desktop-only; its Switch target button returns to

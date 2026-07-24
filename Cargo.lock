@@ -2577,6 +2577,7 @@ version = "0.0.17"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "bcrypt",
  "clap",
  "des 0.8.1",

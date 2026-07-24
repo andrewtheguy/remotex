@@ -8,9 +8,12 @@
 //!   followed by a PNG-compressed payload. This replaced base64 RGBA inside
 //!   JSON text, which inflated the bottleneck backend->browser link by ~4.3x
 //!   (4 bytes/px, +33% base64).
-//! - **Control messages** (`resize`, `error`) are rare and tiny; they stay
-//!   JSON text frames with a `type` tag.
+//! - **Control messages** (`resize`, `error`, `cursor`, …) are rare and small;
+//!   they stay JSON text frames with a `type` tag. `cursor` carries a base64
+//!   PNG — a pointer shape is a couple of hundred bytes and changes a handful
+//!   of times a session, so it is not worth a second binary frame kind.
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 /// Transport policy shared by all engines: a dirty rectangle taller than this
@@ -107,7 +110,7 @@ impl Tile {
             "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
             rgb.len()
         );
-        let data = encode_png(w, h, rgb)?;
+        let data = encode_png(w, h, png::ColorType::Rgb, rgb)?;
         Ok(Self { x, y, w, h, data })
     }
 
@@ -125,16 +128,46 @@ impl Tile {
     }
 }
 
-/// PNG-encode packed RGB888 pixels. Fast compression: the win over raw is
+/// The remote pointer shape, for engines whose server does **not** composite
+/// the cursor into the framebuffer and hands the shape over instead (the VNC
+/// Cursor pseudo-encoding — see [`crate::vnc`]). The browser draws it locally,
+/// anchoring the image so that `(hx, hy)` — the hotspot — lands on the pointer
+/// position. RDP never sends one: it renders the pointer into the framebuffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorShape {
+    pub w: u16,
+    pub h: u16,
+    /// Hotspot within the image, in cursor pixels.
+    pub hx: u16,
+    pub hy: u16,
+    /// PNG-encoded RGBA image (the alpha channel carries the cursor mask).
+    pub png: Vec<u8>,
+}
+
+impl CursorShape {
+    /// Build from packed RGBA8888 pixels.
+    pub fn from_rgba(w: u16, h: u16, hx: u16, hy: u16, rgba: &[u8]) -> anyhow::Result<Self> {
+        let expected = usize::from(w) * usize::from(h) * 4;
+        anyhow::ensure!(
+            rgba.len() == expected,
+            "cursor payload is {} bytes, expected {expected} for {w}x{h} RGBA",
+            rgba.len()
+        );
+        let png = encode_png(w, h, png::ColorType::Rgba, rgba)?;
+        Ok(Self { w, h, hx, hy, png })
+    }
+}
+
+/// PNG-encode packed 8-bit pixels. Fast compression: the win over raw is
 /// already large for screen content, and this runs on the session's hot path.
-fn encode_png(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
-    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_color(color);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Fast);
     let mut writer = encoder.write_header()?;
-    writer.write_image_data(rgb)?;
+    writer.write_image_data(pixels)?;
     writer.finish()?;
     Ok(out)
 }
@@ -150,6 +183,12 @@ pub enum ServerMsg {
     Tile(Tile),
     /// The remote desktop resolution changed.
     Resize { w: u16, h: u16 },
+    /// The remote pointer shape changed, and with it the fact that **the
+    /// browser** owns pointer rendering for this session — a server that
+    /// composites the cursor into the framebuffer (RDP, and VNC servers that
+    /// ignore the Cursor pseudo-encoding) never sends this, and the browser
+    /// keeps its own pointer hidden. `None` means the remote hid the pointer.
+    Cursor(Option<CursorShape>),
     /// A fatal session error the client should surface. The session then
     /// returns to the picker, so the browser shows this against the picker.
     Error { message: String },
@@ -182,6 +221,15 @@ pub enum WireFrame {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ControlMsg<'a> {
     Resize { w: u16, h: u16 },
+    /// `image` is a base64 PNG (the browser wraps it in a `data:` URL), null
+    /// when the remote hid the pointer.
+    Cursor {
+        image: Option<String>,
+        w: u16,
+        h: u16,
+        hx: u16,
+        hy: u16,
+    },
     Error { message: &'a str },
     Picker,
     Connected {
@@ -197,6 +245,22 @@ impl ServerMsg {
         match self {
             ServerMsg::Tile(tile) => WireFrame::Binary(tile.to_frame()),
             ServerMsg::Resize { w, h } => WireFrame::Text(control(&ControlMsg::Resize { w: *w, h: *h })),
+            ServerMsg::Cursor(shape) => WireFrame::Text(control(&match shape {
+                Some(c) => ControlMsg::Cursor {
+                    image: Some(base64::engine::general_purpose::STANDARD.encode(&c.png)),
+                    w: c.w,
+                    h: c.h,
+                    hx: c.hx,
+                    hy: c.hy,
+                },
+                None => ControlMsg::Cursor {
+                    image: None,
+                    w: 0,
+                    h: 0,
+                    hx: 0,
+                    hy: 0,
+                },
+            })),
             ServerMsg::Error { message } => WireFrame::Text(control(&ControlMsg::Error { message })),
             ServerMsg::Picker => WireFrame::Text(control(&ControlMsg::Picker)),
             ServerMsg::Connected {
@@ -282,6 +346,33 @@ mod tests {
             WireFrame::Text(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
             other => panic!("error should be a text frame: {other:?}"),
         }
+    }
+
+    // The cursor control message: base64 PNG plus geometry, and an explicit
+    // null image for "the remote hid the pointer".
+    #[test]
+    fn cursor_control_message_carries_a_base64_png_or_null() {
+        let shape = CursorShape::from_rgba(1, 1, 3, 4, &[255, 0, 0, 255]).unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode(&shape.png);
+        match (ServerMsg::Cursor(Some(shape))).encode() {
+            WireFrame::Text(json) => assert_eq!(
+                json,
+                format!(r#"{{"type":"cursor","image":"{expected}","w":1,"h":1,"hx":3,"hy":4}}"#)
+            ),
+            other => panic!("cursor should be a text frame: {other:?}"),
+        }
+        match (ServerMsg::Cursor(None)).encode() {
+            WireFrame::Text(json) => assert_eq!(
+                json,
+                r#"{"type":"cursor","image":null,"w":0,"h":0,"hx":0,"hy":0}"#
+            ),
+            other => panic!("cursor should be a text frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_with_wrong_payload_length_is_rejected() {
+        assert!(CursorShape::from_rgba(2, 2, 0, 0, &[0u8; 12]).is_err());
     }
 
     // The binary layout `protocol.ts` (decodeTileFrame) parses.

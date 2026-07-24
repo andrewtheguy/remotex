@@ -21,6 +21,9 @@ futures-util = "0.3"
 toml = "1"
 # Tile payload compression for the browser transport (see src/protocol.rs).
 png = "0.18"
+# Cursor shapes ride the JSON control channel as base64 PNG (see
+# src/protocol.rs) — small and rare enough not to warrant a binary frame kind.
+base64 = "0.22"
 # Session-slot claim tokens (see src/session.rs) and auth session tokens
 # (see src/auth.rs).
 uuid = { version = "1", features = ["v4"] }
