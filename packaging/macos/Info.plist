@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for remotex-agent.app.
+
+  The agent ships as an .app bundle rather than a bare executable for one
+  reason: TCC grants (Screen Recording, Accessibility) are keyed to the
+  requesting code's *identity*. A signed bundle with a stable
+  CFBundleIdentifier keeps that identity constant across rebuilds and upgrades,
+  so the two permissions are granted once. A bare unsigned binary's grant can be
+  invalidated whenever the binary is replaced, which means re-approving in
+  System Settings on every single build — see docs/mac-agent-plan.md §3.5.
+
+  CFBundleVersion is rewritten by build-agent-app.sh; everything else here is
+  intentionally static, because changing CFBundleIdentifier resets the grants.
+
+  The bundle also carries its own LaunchAgent plist at
+  Contents/Library/LaunchAgents/dev.remotex.agent.plist, which SMAppService hands
+  to launchd when the agent registers itself — so there is no install script and
+  nothing in ~/Library/LaunchAgents.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.remotex.agent</string>
+	<key>CFBundleName</key>
+	<string>remotex-agent</string>
+	<key>CFBundleDisplayName</key>
+	<string>remotex agent</string>
+	<key>CFBundleExecutable</key>
+	<string>remotex-agent</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>0.0.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<!-- The agent registers itself as a login item via SMAppService, which is
+	     macOS 13+; 14.0 is the floor the project targets (see
+	     .cargo/config.toml, where the same version is load-bearing for how the
+	     Swift bridge links). Nothing here needs a macOS 15 API. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- No dock icon, no menu bar, no windows: this is a background agent that
+	     happens to need a GUI session (see main.rs). LSUIElement rather than
+	     LSBackgroundOnly, because LSBackgroundOnly processes are denied some
+	     window-server access that ScreenCaptureKit wants. -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- Shown in the permission prompts, so it should say why. -->
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>remotex agent shares this Mac's screen with your remotex gateway.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>remotex agent delivers your keyboard and mouse input to this Mac.</string>
+</dict>
+</plist>

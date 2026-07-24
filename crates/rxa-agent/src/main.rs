@@ -7,18 +7,34 @@
 //! two-message Noise handshake, and no human in a reconnect ever. See
 //! `docs/mac-agent-plan.md`.
 //!
-//! ## Two permissions, and why it is a LaunchAgent
+//! ## Installing is dragging it in and opening it
+//!
+//! There is no install script. On first launch the agent
+//!
+//! 1. writes `~/Library/Application Support/remotex-agent/config.toml` with a
+//!    freshly generated pre-shared key, if it is not already there, and
+//! 2. registers itself with `SMAppService` (see [`loginitem`]), which puts it in
+//!    **System Settings → General → Login Items** and starts it at every login.
+//!
+//! Uninstalling is moving the bundle to the Trash — or `--unregister` first, to
+//! take it out of Login Items cleanly.
+//!
+//! ## Two permissions
 //!
 //! - **Screen Recording**, for `SCStream` (see [`capture`]).
 //! - **Accessibility**, for `CGEventPost` (see [`input`]).
 //!
-//! Both are one-time grants in System Settings → Privacy & Security, and both
-//! require the process to live in the user's **GUI (Aqua) session**. That makes
-//! this a *LaunchAgent*, not a LaunchDaemon: a daemon has no window server
-//! connection and both capture and injection fail outright.
+//! Both are one-time grants in System Settings → Privacy & Security, both are
+//! attached to this bundle's signed identity, and macOS provides no way to grant
+//! them programmatically. Accessibility is the one that bites: without it the
+//! screen paints, the session looks perfectly healthy, and every click and
+//! keystroke is silently discarded — so [`report_permissions`] says so at
+//! startup.
 //!
-//! The honest consequence: the agent is **not running at the login window** and
-//! cannot be. If nobody is logged in on the Mac, there is nothing to connect to.
+//! Both also require the process to live in the user's GUI (Aqua) session, which
+//! is why the embedded plist is a LaunchAgent and not a LaunchDaemon. The honest
+//! consequence: the agent is **not running at the login window** and cannot be.
+//! If nobody is logged in on the Mac, there is nothing to connect to.
 //!
 //! ## Threading
 //!
@@ -50,9 +66,11 @@ mod config;
 mod cursor;
 mod encode;
 mod input;
+mod loginitem;
 mod session;
 
-use std::path::PathBuf;
+use std::io::IsTerminal as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,21 +80,60 @@ use log::{info, warn};
 const CURSOR_POLL: Duration = Duration::from_millis(100);
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     let args = Args::parse(std::env::args().skip(1))?;
+    init_logging();
+
+    // Subcommands that do one thing and exit, before any config is needed.
     if args.gen_psk {
         println!("{}", rxa_proto::psk::generate());
         return Ok(());
     }
+    if args.unregister {
+        loginitem::unregister()?;
+        println!("remotex-agent removed from Login Items.");
+        println!("Move remotex-agent.app to the Trash to finish uninstalling.");
+        return Ok(());
+    }
 
-    let (config, path) = config::load(args.config.as_deref())?;
+    let (config, path, created) = config::load_or_create(args.config.as_deref())?;
+    if args.show_psk {
+        println!("{}", config.psk);
+        return Ok(());
+    }
+    if args.status {
+        print_status(&config, &path);
+        return Ok(());
+    }
+
     info!(
         "remotex-agent {} — rxa/{}, config {}",
         env!("CARGO_PKG_VERSION"),
         rxa_proto::VERSION,
         path.display()
     );
+    if created {
+        info!("config: created {} with a fresh pre-shared key", path.display());
+    }
+
+    // Registering is idempotent, so doing it on every launch keeps a bundle that
+    // was copied to a new machine (or a new user account) working without a
+    // separate setup step. `--no-register` is for running it by hand in a
+    // terminal while developing, where a login item would be in the way.
+    if !args.no_register {
+        match loginitem::register() {
+            Ok(()) => info!("login item: registered ({})", loginitem::status()),
+            // Not fatal: an agent started by hand should still serve. Most
+            // likely causes are an unsigned bundle or no bundle at all.
+            Err(e) => warn!("login item: could not register: {e:#}"),
+        }
+    }
+
+    // When the user has just double-clicked the bundle, the terminal-less
+    // launch has nowhere to show the key — so put it in the log, which
+    // `--show-psk` also prints. The config file is already 0600.
+    if created && std::io::stdout().is_terminal() {
+        print_first_run(&config, &path);
+    }
 
     report_permissions();
 
@@ -100,9 +157,12 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            if let Err(e) = runtime.block_on(serve(listen, psk, display, serve_tracker)) {
-                eprintln!("remotex-agent: {e:#}");
-                std::process::exit(1);
+            match runtime.block_on(serve(listen, psk, display, serve_tracker)) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("remotex-agent: {e:#}");
+                    std::process::exit(1);
+                }
             }
         })?;
 
@@ -113,6 +173,35 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Log to stderr on a terminal, and to `~/Library/Logs/remotex-agent.log`
+/// otherwise.
+///
+/// launchd does not expand `~`, so the embedded plist cannot name a per-user log
+/// path and sets no `StandardErrorPath` at all — output would go nowhere. The
+/// agent redirects its own logging instead, which also keeps a hand-run agent
+/// printing to the terminal where you expect it.
+fn init_logging() {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if !std::io::stderr().is_terminal()
+        && let Some(file) = log_file()
+    {
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    builder.init();
+}
+
+fn log_file() -> Option<std::fs::File> {
+    let home = std::env::var_os("HOME")?;
+    let dir = Path::new(&home).join("Library/Logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("remotex-agent.log"))
+        .ok()
+}
+
 /// Accept gateway connections, one at a time.
 async fn serve(
     listen: String,
@@ -120,9 +209,17 @@ async fn serve(
     display: usize,
     tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(&listen)
-        .await
-        .map_err(|e| anyhow::anyhow!("cannot bind {listen}: {e}"))?;
+    let listener = match tokio::net::TcpListener::bind(&listen).await {
+        Ok(listener) => listener,
+        // Almost always "another copy is already running" — launchd started one
+        // at login and the user then opened the bundle by hand. That is not an
+        // error worth a crash loop, so say so and exit cleanly.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            info!("agent: {listen} is already in use — another remotex-agent is running; exiting");
+            return Ok(());
+        }
+        Err(e) => return Err(anyhow::anyhow!("cannot bind {listen}: {e}")),
+    };
     info!("agent: listening on {listen}");
 
     // The single active session, so a new gateway evicts the previous one.
@@ -176,20 +273,63 @@ fn report_permissions() {
     }
 }
 
+fn print_status(config: &config::Config, path: &Path) {
+    println!("remotex-agent {}", env!("CARGO_PKG_VERSION"));
+    println!("  config:        {}", path.display());
+    println!("  listen:        {}", config.listen);
+    println!("  display:       {}", config.display);
+    println!("  login item:    {}", loginitem::status());
+    println!(
+        "  Screen Recording: {}",
+        match capture::probe(config.display) {
+            Ok(geometry) => format!(
+                "granted ({}x{} at {}x)",
+                geometry.width, geometry.height, geometry.scale
+            ),
+            Err(e) => format!("NOT granted or unavailable — {e}"),
+        }
+    );
+    println!(
+        "  Accessibility:    {}",
+        if input::accessibility_granted() {
+            "granted"
+        } else {
+            "NOT granted (input will be silently ignored)"
+        }
+    );
+}
+
+fn print_first_run(config: &config::Config, path: &Path) {
+    println!();
+    println!("Set up {}.", path.display());
+    println!();
+    println!("Put this on the gateway's rxa target:");
+    println!();
+    println!("    psk = \"{}\"", config.psk);
+    println!();
+    println!("Then grant two permissions in System Settings > Privacy & Security,");
+    println!("enabling \"remotex-agent\" under BOTH of:");
+    println!();
+    println!("    Screen Recording   — without it the screen never paints");
+    println!("    Accessibility      — without it input is silently ignored");
+    println!();
+}
+
 /// The agent's argument surface, kept deliberately tiny — `clap` would be a
-/// dependency for two flags.
-#[derive(Debug)]
+/// dependency for a handful of flags.
+#[derive(Debug, Default)]
 struct Args {
     config: Option<PathBuf>,
     gen_psk: bool,
+    show_psk: bool,
+    status: bool,
+    no_register: bool,
+    unregister: bool,
 }
 
 impl Args {
     fn parse(args: impl Iterator<Item = String>) -> anyhow::Result<Self> {
-        let mut parsed = Args {
-            config: None,
-            gen_psk: false,
-        };
+        let mut parsed = Args::default();
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -200,6 +340,10 @@ impl Args {
                     parsed.config = Some(PathBuf::from(path));
                 }
                 "--gen-psk" => parsed.gen_psk = true,
+                "--show-psk" => parsed.show_psk = true,
+                "--status" => parsed.status = true,
+                "--no-register" => parsed.no_register = true,
+                "--unregister" => parsed.unregister = true,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -220,15 +364,22 @@ remotex-agent — the macOS screen agent remotex connects to
 
 Usage: remotex-agent [options]
 
+With no options: create the config if absent, register as a login item, and
+serve. Normally launched by macOS at login rather than by hand.
+
 Options:
   -c, --config <path>  Config file (default:
                        ~/Library/Application Support/remotex-agent/config.toml)
+      --show-psk       Print this agent's pre-shared key and exit
       --gen-psk        Print a fresh pre-shared key and exit
+      --status         Show config, login-item and permission state, then exit
+      --no-register    Serve without registering as a login item (for development)
+      --unregister     Remove from Login Items and exit
   -h, --help           Show this help
   -V, --version        Show the version
 
-The key printed by --gen-psk goes in two places: `psk` in this agent's config
-and `psk` on the matching [[targets]] entry in the gateway's remotex.toml.
+The key from --show-psk goes on the matching [[targets]] entry in the gateway's
+remotex.toml, as `psk`. It is the only credential either side uses.
 ";
 
 #[cfg(test)]
@@ -240,10 +391,13 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_uses_the_default_config_path() {
+    fn no_arguments_serves_with_the_default_config_path() {
         let args = parse(&[]).unwrap();
         assert!(args.config.is_none());
-        assert!(!args.gen_psk);
+        assert!(!args.gen_psk && !args.show_psk && !args.status);
+        // Registering is the default: installing is meant to be "open it once".
+        assert!(!args.no_register);
+        assert!(!args.unregister);
     }
 
     #[test]
@@ -255,8 +409,19 @@ mod tests {
     }
 
     #[test]
-    fn gen_psk_is_a_flag() {
+    fn every_flag_parses() {
         assert!(parse(&["--gen-psk"]).unwrap().gen_psk);
+        assert!(parse(&["--show-psk"]).unwrap().show_psk);
+        assert!(parse(&["--status"]).unwrap().status);
+        assert!(parse(&["--no-register"]).unwrap().no_register);
+        assert!(parse(&["--unregister"]).unwrap().unregister);
+    }
+
+    #[test]
+    fn flags_combine_with_a_config_path() {
+        let args = parse(&["--config", "/tmp/a.toml", "--status"]).unwrap();
+        assert_eq!(args.config, Some(PathBuf::from("/tmp/a.toml")));
+        assert!(args.status);
     }
 
     #[test]
@@ -271,5 +436,23 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("--recursive"), "{msg}");
         assert!(msg.contains("Usage:"), "{msg}");
+    }
+
+    // The usage text is the only documentation a user gets from the binary, so
+    // it must mention every flag `parse` accepts.
+    #[test]
+    fn the_usage_text_documents_every_flag() {
+        for flag in [
+            "--config",
+            "--show-psk",
+            "--gen-psk",
+            "--status",
+            "--no-register",
+            "--unregister",
+            "--help",
+            "--version",
+        ] {
+            assert!(USAGE.contains(flag), "usage does not mention {flag}");
+        }
     }
 }
