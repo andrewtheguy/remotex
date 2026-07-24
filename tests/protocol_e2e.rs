@@ -9,7 +9,7 @@
 //!   `ServerMsg::Error` — exercising the full bridge (claim → upgrade → input
 //!   parsing → rdp session → serialized `ServerMsg` out);
 //! - a scripted RFB 3.8 server (security None, 16x16 raw framebuffer) that
-//!   stays alive, so the phase-6 session-slot semantics — claim conflicts,
+//!   stays alive, so the session-slot semantics — claim conflicts,
 //!   forced takeover with eviction, detach/reattach with a full repaint — run
 //!   against a live engine deterministically.
 

@@ -1,4 +1,4 @@
-//! End-to-end tests of the phase-7 web login: `/api/auth/*`, the cookie, and
+//! End-to-end tests of the web login: `/api/auth/*`, the cookie, and
 //! the guard on the rest of `/api/*` and `/ws`.
 //!
 //! These only exercise the HTTP surface — no engine ever connects — so the

@@ -3,7 +3,7 @@ import Login from "./Login.tsx";
 import RemoteDesktop from "./RemoteDesktop.tsx";
 import { SESSION_KEY } from "./useRemoteDesktop.ts";
 
-// Phase 7: gate the desktop behind the web login. The desktop is only mounted
+// Gate the desktop behind the web login. The desktop is only mounted
 // once authenticated — mounting it claims the session slot, which must not
 // happen before the login succeeds.
 type AuthState = "checking" | "unauthenticated" | "authenticated";

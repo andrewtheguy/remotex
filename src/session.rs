@@ -11,7 +11,7 @@
 //! `match` beats a trait object (which IronRDP's non-`Send` futures could not
 //! implement cleanly anyway).
 //!
-//! ## The single session slot (phase 6)
+//! ## The single session slot
 //!
 //! [`SessionManager`] decouples the engine session (backend ↔ remote host)
 //! from the browser attachment (backend ↔ WebSocket):

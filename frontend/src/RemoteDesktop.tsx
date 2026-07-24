@@ -31,7 +31,7 @@ export default function RemoteDesktop({
   );
 
   return (
-    /* screen-touch swaps native scrolling for the phase-8 gesture transform
+    /* screen-touch swaps native scrolling for the gesture transform
        (pinch zoom + pan) and stretches the input overlay over the whole
        viewport so gestures land everywhere — see index.css. */
     <div className={`screen${CAN_PINCH_ZOOM ? " screen-touch" : ""}`}>

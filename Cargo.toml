@@ -24,7 +24,7 @@ png = "0.18"
 # Session-slot claim tokens (see src/session.rs) and auth session tokens
 # (see src/auth.rs).
 uuid = { version = "1", features = ["v4"] }
-# Web login (phase 7): the site_passwd credential is username:bcrypt_hash,
+# Web login: the site_passwd credential is username:bcrypt_hash,
 # verified on /api/auth/login (see src/auth.rs).
 bcrypt = "0.19"
 # Hidden password prompt for the `gen-passwd` helper subcommand.

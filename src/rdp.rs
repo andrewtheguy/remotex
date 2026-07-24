@@ -175,7 +175,7 @@ async fn active_loop(
                     break;
                 };
                 // A (re)attached browser needs the desktop size and a full
-                // repaint from the server-owned framebuffer (phase 6).
+                // repaint from the server-owned framebuffer.
                 if matches!(input, ClientMsg::Refresh) {
                     frame_tx
                         .send(ServerMsg::Resize { w: desktop.width, h: desktop.height })

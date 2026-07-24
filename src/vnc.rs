@@ -6,7 +6,7 @@
 //! the backend↔VNC hop is LAN, so clever wire encodings buy nothing there;
 //! the browser link is optimized by the shared tile transport instead.
 //!
-//! On top of the baseline, **dynamic resize** (phase 4) is available per
+//! On top of the baseline, **dynamic resize** is available per
 //! target opt-in (`resize = true`): the DesktopSize/ExtendedDesktopSize
 //! pseudo-encodings are advertised, and browser viewport reports
 //! ([`ClientMsg::Viewport`]) become `SetDesktopSize` requests once the server
@@ -277,7 +277,7 @@ async fn active_loop(
                     }
                 } else if matches!(input, ClientMsg::Refresh) {
                     // A (re)attached browser needs the desktop size and a full
-                    // repaint (phase 6). Unlike RDP, this engine keeps no
+                    // repaint. Unlike RDP, this engine keeps no
                     // framebuffer copy — the VNC server is one LAN hop away,
                     // so a non-incremental update request repaints just as
                     // well without duplicating the framebuffer here.
@@ -308,7 +308,7 @@ async fn active_loop(
     result
 }
 
-/// Handle a browser viewport report (phase 4 dynamic resize): send
+/// Handle a browser viewport report (dynamic resize): send
 /// SetDesktopSize once the server has declared support via an
 /// ExtendedDesktopSize rect; until then, stash the report for replay.
 async fn request_resize<W: AsyncWrite + Unpin>(

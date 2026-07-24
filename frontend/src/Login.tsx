@@ -1,6 +1,6 @@
 import { type FormEvent, useState } from "react";
 
-// The web-login gate (phase 7): one user, POST /api/auth/login sets the
+// The web-login gate: one user, POST /api/auth/login sets the
 // session cookie. Shown while the mount-time auth check runs and whenever the
 // server answers 401. The version pinned at the bottom mirrors remotex.
 export default function Login({
