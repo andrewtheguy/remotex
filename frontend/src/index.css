@@ -74,8 +74,8 @@ body {
 }
 
 /* Centered connection-state readout, shown until the desktop is streaming.
-   The translucent backdrop dims stale canvas content while reconnecting or
-   after an eviction, so the readout stays legible over it. */
+   A solid background fully hides any stale canvas content behind the readout
+   (reconnecting, eviction, waiting) — a plain interstitial, no see-through. */
 .status-overlay {
   position: fixed;
   inset: 0;
@@ -87,7 +87,7 @@ body {
   text-align: center;
   pointer-events: none;
   font-size: 0.95rem;
-  background: rgba(13, 17, 23, 0.72);
+  background: #0d1117;
 }
 
 .status-hint {
