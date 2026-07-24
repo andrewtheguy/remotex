@@ -83,13 +83,13 @@ path. Explicitly **in**:
    full-screen paint went from ~31.4 MB (base64-JSON equivalent) to ~3.1 MB on
    the wire — **10x**. Per-session byte totals are logged on disconnect
    (`ws: outbound totals: …`) for measuring in the field.
-2. **Server-side VNC session — (done, phase 1 of docs/vnc.md).** A simple
+2. **Server-side VNC session — (done, see docs/vnc.md).** A simple
    Rust RFB client alongside the RDP engine (`src/vnc.rs`) — Guacamole-style:
    protocol 3.8, security None/VncAuth, the raw baseline encoding only, no
    per-implementation workarounds. Both engines feed the same server→browser
-   protocol behind the common `Session` seam (`src/session.rs`). The VNC
-   follow-ups (full-screen canvas like remotex, TigerVNC-style dynamic
-   resize) are phase 2 of docs/vnc.md — planned, not implemented.
+   protocol behind the common `Session` seam (`src/session.rs`). The
+   follow-ups are planned, not implemented: the full-screen canvas (phase 3,
+   common to all protocols) and TigerVNC-style dynamic resize (phase 4).
 3. **TOML config, like remotex — (done).** CLI/env-centric config replaced
    with a TOML file in remotex's shape (`[server]` block, `[[targets]]`
    profiles with per-target protocol/host/port/credentials — see
@@ -117,21 +117,32 @@ and multi-target all mean re-attaching to or choosing *the* one session/target
 
 ## Later phases (sketch)
 
-- **VNC phase 2 (docs/vnc.md):** full-screen canvas like remotex — common to
-  all protocols: viewport × `devicePixelRatio` sizing at 1:1 pixels, with
-  scrollbars when the remote can't match the viewport — plus TigerVNC-style
-  dynamic resize (`SetDesktopSize`) where supported. Planned, not implemented.
-- **Phase 3+ — frontend integration:** port remotex's frontend shell
+**Done:** phase 1 (the MVP, docs/phase1-mvp.md) and phase 2 (this document —
+transport, the VNC engine baseline, TOML config). Everything below is **not
+started**, in planned order:
+
+- **Phase 3 — full-screen canvas, like remotex.** Common to **all
+  protocols** — a frontend behavior, not a VNC feature: the canvas fills the
+  browser viewport and renders the remote desktop at 1:1 pixels (viewport ×
+  `devicePixelRatio`, no scaling blur). When the remote desktop doesn't match
+  the viewport — because the protocol or server can't resize — the canvas
+  simply overflows and shows scrollbars, exactly like remotex. No
+  letterboxing, no scaling.
+- **Phase 4 — TigerVNC-style dynamic resize (docs/vnc.md):** where the server
+  supports it, drive the size it renders from the browser (`SetDesktopSize`)
+  so the phase-3 scrollbars disappear; servers without it keep the fixed
+  connect-time size and the scrollbars.
+- **Phase 5 — frontend integration:** port remotex's frontend shell
   (connection flow, overlay, soft keyboard, clipboard) onto the uniform
   protocol. With decode server-side there is **one renderer** — the RFB
   decoder, `zrleDecoder`, and the rest of the browser-side engine do not come
   along.
-- **Session management:** detach/reattach and remotex-style takeover of the
-  single session slot (force-claim evicts the previous browser) — backed by
-  the server-owned framebuffer.
-- **Multi-target support:** target picker over the `[[targets]]` config (still
-  one active session at a time).
-- **Final phase — the rename:** when the project is ready to replace the old
+- **Phase 6 — session management:** detach/reattach and remotex-style takeover
+  of the single session slot (force-claim evicts the previous browser) —
+  backed by the server-owned framebuffer.
+- **Phase 7 — multi-target support:** target picker over the `[[targets]]`
+  config (still one active session at a time).
+- **Phase 8 — the rename:** when the project is ready to replace the old
   one, rename the GitHub repo to **remotex-v2** and the binary to **remotex**,
   replacing the original. Not done now; documented here so it isn't forgotten.
 
@@ -182,5 +193,6 @@ profile selected at connect time.
    through the real server.
 5. Verify against real targets — including macOS Screen Sharing, the case that
    motivated dropping the clever-encoding path.
-6. Later phases: frontend integration, session management, multi-target UI,
-   and finally the remotex-v2 rename.
+6. Later phases (3–8 above): full-screen canvas, dynamic resize, frontend
+   integration, session management, multi-target UI, and finally the
+   remotex-v2 rename.

@@ -63,7 +63,7 @@ tests/               end-to-end tests: protocol-level (protocol_e2e.rs) and
                      container-backed happy paths (rdp_tiles_e2e.rs against a
                      dummy xrdp, vnc_tiles_e2e.rs against a dummy TigerVNC)
 docs/phase1-mvp.md   Phase 1 MVP plan
-docs/vnc.md          VNC engine: phase 1 (done) + phase 2 (planned)
+docs/vnc.md          VNC engine: implemented baseline + the phase-4 resize plan
 ```
 
 ## Development

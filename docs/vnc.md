@@ -1,10 +1,14 @@
 # VNC engine
 
 The server-side VNC session promised by phase 2 (see
-[`phase2-consolidation.md`](phase2-consolidation.md), scope item 2), split into
-its own two phases.
+[`phase2-consolidation.md`](phase2-consolidation.md), scope item 2). The
+baseline client below is **implemented** (part of phase 2); the dynamic-resize
+follow-up is **phase 4**, not started. Phase numbers are the project-wide
+sequence listed under "Later phases" in `phase2-consolidation.md` — the
+full-screen canvas that resize builds on is **phase 3** there, a frontend
+behavior common to all protocols, not a VNC feature.
 
-## Phase 1 — baseline RFB client (implemented)
+## Implemented (phase 2) — baseline RFB client
 
 `src/vnc.rs` is a minimal RFB client (RFC 6143) that sits behind the same
 `Session` seam as the RDP engine (`src/session.rs`) and feeds the identical
@@ -34,34 +38,25 @@ Covered by unit tests (handshake pieces, auth vectors cross-checked against
 remotex's implementation, input encoding) and an end-to-end test against a
 real TigerVNC server in a container (`tests/vnc_tiles_e2e.rs`).
 
-Deliberately out of phase 1: clipboard (`ServerCutText` is drained and
+Deliberately out of the baseline: clipboard (`ServerCutText` is drained and
 dropped), Bell, and any resize handling — the desktop size is fixed at
 connect time.
 
-## Phase 2 — full-screen canvas + dynamic resize (planned, not implemented)
+## Phase 4 — TigerVNC-style dynamic resize (planned, not implemented)
 
-Two related follow-ups, in the spirit of remotex's frontend:
+Builds on the phase-3 full-screen canvas (protocol-common, see
+`phase2-consolidation.md`): once the canvas tracks the viewport and falls
+back to scrollbars when the remote can't match it, this phase makes the
+scrollbars disappear where the server supports resizing.
 
-1. **Full-screen canvas, like remotex — common to all protocols.** This is a
-   frontend behavior, not a VNC feature: the canvas fills the browser
-   viewport and renders the remote desktop at 1:1 pixels (no scaling blur).
-   The desired remote size is viewport dimensions × `devicePixelRatio`
-   (`../remotex/src/resizeSizing.ts`). When the remote desktop doesn't match
-   the viewport — because the protocol or server can't resize — the canvas
-   simply overflows and shows scrollbars, exactly like remotex. No
-   letterboxing, no scaling.
+Where the server supports it, drive the size it renders from the browser:
+advertise the `ExtendedDesktopSize` pseudo-encoding and send `SetDesktopSize`
+when the viewport changes, so TigerVNC-family servers (Xtigervnc,
+x0vncserver, …) re-render at the new geometry — the desired size is viewport
+dimensions × `devicePixelRatio` (`../remotex/src/resizeSizing.ts`). Servers
+that don't support it keep the fixed connect-time size and fall back to the
+phase-3 scrollbars — acceptable per the no-workarounds rule.
 
-2. **TigerVNC-style dynamic resize.** Where the server supports it, drive the
-   size it renders from the browser so the scrollbars disappear: advertise
-   the `ExtendedDesktopSize` pseudo-encoding and send `SetDesktopSize` when
-   the viewport changes, so TigerVNC-family servers (Xtigervnc, x0vncserver,
-   …) re-render at the new geometry. Servers that don't support it keep the
-   fixed connect-time size and fall back to the scrollbars above — acceptable
-   per the no-workarounds rule. The RDP engine has the same gap
-   (deactivation/reactivation is logged, not handled); the browser-side
-   plumbing — a `ClientMsg` for viewport changes and re-`Resize` handling —
-   should be designed once for both engines.
-
-Neither is started; both depend on frontend work scheduled with the phase-3
-remotex frontend integration (see the later-phases sketch in
-`phase2-consolidation.md`).
+The RDP engine has the same gap (deactivation/reactivation is logged, not
+handled); the browser-side plumbing — a `ClientMsg` for viewport changes and
+re-`Resize` handling — should be designed once for both engines.
