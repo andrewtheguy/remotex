@@ -13,6 +13,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Transport policy shared by all engines: a dirty rectangle taller than this
+/// is split into strips before being sent, so a full-screen repaint doesn't
+/// produce one huge WebSocket message.
+pub const STRIP_ROWS: u16 = 64;
+
 /// A mouse button, matching the DOM `MouseEvent.button` numbering.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
