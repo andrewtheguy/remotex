@@ -19,12 +19,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { config, target } => {
+        Commands::Serve { config } => {
             // All configuration comes from the TOML file — no env vars, no .env
-            // (see src/config.rs for why).
+            // (see src/config.rs for why). Every target is served; the browser
+            // picks one after login.
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
-            let config = file.resolve(target.as_deref())?;
+            let config = file.resolve()?;
             serve(config).await?;
         }
         Commands::GenPasswd { username } => gen_passwd(&username)?,
@@ -81,10 +82,13 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind to {addr}"))?;
     info!("listening on http://{addr}");
-    info!(
-        "target {:?}: {}:{} ({:?})",
-        config.target.name, config.target.host, config.target.port, config.target.protocol
-    );
+    info!("{} target(s) available in the post-login picker:", config.targets.len());
+    for target in &config.targets {
+        info!(
+            "  target {:?}: {}:{} ({:?})",
+            target.name, target.host, target.port, target.protocol
+        );
+    }
     info!("web login: user {:?}", config.site_passwd.username());
 
     axum::serve(listener, app).await.context("server error")?;

@@ -3,17 +3,21 @@
 //!
 //! Each connection presents its claim token (`/ws?session=<token>`, obtained
 //! from `POST /api/session`) and attaches to the single session slot
-//! ([`crate::session::SessionManager`]): inbound `ClientMsg` (input, JSON
-//! text) go to the engine, and outbound `ServerMsg` go to the browser —
-//! screen tiles as binary frames, control messages (resize/error) as JSON
-//! text (see [`crate::protocol`]).
+//! ([`crate::session::SessionManager`]). Inbound `ClientMsg` split two ways:
+//! session-control messages (`connect` to pick a target from the post-login
+//! picker, `disconnect` to switch back to it) act on the slot; everything else
+//! is engine input, routed to the current engine (or dropped in the picker
+//! state). Outbound `ServerMsg` go to the browser — screen tiles as binary
+//! frames, control messages (resize/error, plus the picker/connected status)
+//! as JSON text (see [`crate::protocol`]).
 //!
 //! Close codes tell the browser why the socket ended:
 //! - `4000` — the token is missing or superseded; claim again.
 //! - `4001` — evicted: another browser force-claimed the slot (takeover).
 //!
-//! Any other close leaves the engine running detached; reattaching repaints
-//! from the server-owned framebuffer.
+//! Any other close leaves the session (picker or a running engine) in place;
+//! reattaching restores it — the picker, or a full repaint from the
+//! server-owned framebuffer.
 
 use axum::{
     extract::{
@@ -63,17 +67,10 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
         return;
     };
 
-    let target = &state.config.target;
-    info!(
-        "ws: client attached to the {} session slot for {}:{}",
-        target.protocol.name(),
-        target.host,
-        target.port
-    );
+    info!("ws: client attached to the session slot");
 
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let (attach_id, mut events, input_tx) =
-        (attachment.id, attachment.events, attachment.input_tx);
+    let (attach_id, mut events) = (attachment.id, attachment.events);
 
     // Outbound: session events -> browser. Byte counters are logged at the end
     // of the attachment so the transport can be measured in the field (this
@@ -131,13 +128,20 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
         };
         match msg {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
-                Ok(input) => {
-                    // A failed send means the engine died; its final error
-                    // message may still be in flight through the pump, so keep
-                    // the attachment until the outbound side ends (the select
-                    // arm above) instead of detaching early and dropping it.
-                    let _ = input_tx.send(input);
+                // Session-control messages act on the slot, not an engine: pick a
+                // target from the picker, or tear the session down and go back to
+                // it ("switch target").
+                Ok(ClientMsg::Connect { target }) => {
+                    if let Err(e) = state.sessions.connect(attach_id, &target) {
+                        warn!("ws: connect to {target:?} refused: {e}");
+                    }
                 }
+                Ok(ClientMsg::Disconnect) => state.sessions.disconnect(attach_id),
+                // Everything else is engine input, routed to the current engine
+                // (dropped in the picker state). Routing through the manager —
+                // rather than a captured engine sender — means it always reaches
+                // the engine that is live *now*, across connect/disconnect.
+                Ok(input) => state.sessions.forward_input(attach_id, input),
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
             },
             Some(Ok(Message::Close(_))) | None => break,

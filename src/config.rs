@@ -1,10 +1,13 @@
 //! TOML configuration: a `[server]` block plus `[[targets]]` profiles (see
 //! docs/architecture.md).
 //!
-//! Config comes **only** from the TOML file (plus the `--config`/`--target`
-//! CLI selectors). There are deliberately no environment variables and no
-//! `.env` loading — env files shadowing the real environment caused subtle
-//! setup bugs, and credentials belong in one 600-mode file.
+//! Config comes **only** from the TOML file (plus the `--config` selector).
+//! There are deliberately no environment variables and no `.env` loading — env
+//! files shadowing the real environment caused subtle setup bugs, and
+//! credentials belong in one 600-mode file. The target is not selected on the
+//! command line either: the server serves *every* `[[targets]]` profile and the
+//! browser picks one after login (the post-login target picker), so there is a
+//! single pathway to choosing a target.
 //!
 //! The config is **global-only**: the installed `<prefix>/etc/remotex.toml`, or
 //! an explicit `--config <path>`. No per-user or working-directory files are
@@ -76,7 +79,8 @@ impl Protocol {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetConfig {
-    /// Unique profile name; selected with `--target` (default: first profile).
+    /// Unique profile name; shown in the post-login target picker and selected
+    /// there by the browser.
     pub name: String,
     /// Remote-desktop protocol: `"rdp"` or `"vnc"`. Required — each target
     /// must say what it speaks.
@@ -149,7 +153,8 @@ pub struct ConfigFile {
     pub targets: Vec<TargetConfig>,
 }
 
-/// Resolved runtime configuration: the web server plus the one selected target.
+/// Resolved runtime configuration: the web server plus every target profile it
+/// serves (the browser picks one after login).
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     /// Host/interface the web server binds to.
@@ -159,8 +164,9 @@ pub struct AppConfig {
     /// Directory holding the built frontend (index.html + assets), served from
     /// disk. Defaults to [`default_static_dir`].
     pub static_dir: PathBuf,
-    /// The target profile this process serves.
-    pub target: TargetConfig,
+    /// Every target profile this process serves; the post-login picker selects
+    /// one. Guaranteed non-empty by [`ConfigFile::parse`].
+    pub targets: Vec<TargetConfig>,
     /// Web-login credential guarding `/api/*` and `/ws`.
     pub site_passwd: SitePasswd,
 }
@@ -200,8 +206,9 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// Pick the target profile to serve: by name, or the first one.
-    pub fn resolve(self, target_name: Option<&str>) -> anyhow::Result<AppConfig> {
+    /// Resolve the runtime configuration: validate the web-login credential and
+    /// carry over every target profile (the browser picks one after login).
+    pub fn resolve(self) -> anyhow::Result<AppConfig> {
         let site_passwd = self
             .server
             .site_passwd
@@ -214,30 +221,12 @@ impl ConfigFile {
             )?;
         let site_passwd =
             SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
-        let target = match target_name {
-            Some(name) => self
-                .targets
-                .iter()
-                .find(|t| t.name == name)
-                .cloned()
-                .with_context(|| {
-                    format!(
-                        "no target named {name:?} (available: {})",
-                        self.targets
-                            .iter()
-                            .map(|t| t.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })?,
-            // Non-empty is guaranteed by `parse`.
-            None => self.targets.into_iter().next().context("no targets")?,
-        };
         Ok(AppConfig {
             host: self.server.host.unwrap_or_else(|| "127.0.0.1".to_owned()),
             port: self.server.port.unwrap_or(52380),
             static_dir: self.server.static_dir.unwrap_or_else(default_static_dir),
-            target,
+            // Non-empty is guaranteed by `parse`.
+            targets: self.targets,
             site_passwd,
         })
     }
@@ -334,11 +323,12 @@ mod tests {
 
     #[test]
     fn minimal_config_gets_defaults() {
-        let config = ConfigFile::parse(&minimal()).unwrap().resolve(None).unwrap();
+        let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 52380);
         assert_eq!(config.site_passwd.username(), "admin");
-        let t = &config.target;
+        assert_eq!(config.targets.len(), 1);
+        let t = &config.targets[0];
         assert_eq!(t.name, "one");
         assert_eq!(t.protocol, Protocol::Rdp);
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
@@ -378,24 +368,20 @@ mod tests {
             site_passwd_line()
         ))
         .unwrap();
-        let config = config.resolve(Some("win")).unwrap();
+        let config = config.resolve().unwrap();
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 8080);
         assert_eq!(config.static_dir, PathBuf::from("/srv/web"));
-        let t = &config.target;
-        assert_eq!(t.security, Security::Nla);
-        assert_eq!(t.domain.as_deref(), Some("CORP"));
-        assert_eq!((t.width, t.height), (1920, 1080));
-    }
-
-    #[test]
-    fn unknown_target_name_lists_available() {
-        let err = ConfigFile::parse(&minimal())
-            .unwrap()
-            .resolve(Some("nope"))
-            .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("nope") && msg.contains("one"), "{msg}");
+        // Every profile is carried over, in file order, for the picker.
+        assert_eq!(config.targets.len(), 2);
+        let win = &config.targets[0];
+        assert_eq!(win.name, "win");
+        assert_eq!(win.security, Security::Nla);
+        assert_eq!(win.domain.as_deref(), Some("CORP"));
+        assert_eq!((win.width, win.height), (1920, 1080));
+        let other = &config.targets[1];
+        assert_eq!(other.name, "other");
+        assert_eq!(other.protocol, Protocol::Vnc);
     }
 
     #[test]
@@ -408,13 +394,13 @@ mod tests {
             protocol = "rdp"
             host = "192.0.2.10"
         "#;
-        let err = ConfigFile::parse(toml).unwrap().resolve(None).unwrap_err();
+        let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("site_passwd") && msg.contains("gen-passwd"), "{msg}");
 
         // Whitespace-only is as good as absent.
         let toml = format!("[server]\nsite_passwd = \"  \"\n{toml}");
-        let err = ConfigFile::parse(&toml).unwrap().resolve(None).unwrap_err();
+        let err = ConfigFile::parse(&toml).unwrap().resolve().unwrap_err();
         assert!(format!("{err:#}").contains("site_passwd"), "{err:#}");
     }
 
@@ -429,7 +415,7 @@ mod tests {
             protocol = "rdp"
             host = "192.0.2.10"
         "#;
-        let err = ConfigFile::parse(toml).unwrap().resolve(None).unwrap_err();
+        let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
         assert!(format!("{err:#}").contains("username:bcrypt_hash"), "{err:#}");
     }
 
@@ -525,11 +511,11 @@ mod tests {
             site_passwd_line()
         ))
         .unwrap()
-        .resolve(None)
+        .resolve()
         .unwrap();
-        assert_eq!(config.target.protocol, Protocol::Vnc);
-        assert_eq!(config.target.port, 5900);
-        assert!(config.target.resize);
+        assert_eq!(config.targets[0].protocol, Protocol::Vnc);
+        assert_eq!(config.targets[0].port, 5900);
+        assert!(config.targets[0].resize);
 
         // An explicit port wins over the protocol default.
         let config = ConfigFile::parse(&format!(
@@ -546,8 +532,8 @@ mod tests {
             site_passwd_line()
         ))
         .unwrap()
-        .resolve(None)
+        .resolve()
         .unwrap();
-        assert_eq!(config.target.port, 5901);
+        assert_eq!(config.targets[0].port, 5901);
     }
 }

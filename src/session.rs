@@ -14,17 +14,28 @@
 //! ## The single session slot
 //!
 //! [`SessionManager`] decouples the engine session (backend ↔ remote host)
-//! from the browser attachment (backend ↔ WebSocket):
+//! from the browser attachment (backend ↔ WebSocket). The slot also holds the
+//! **selected target**: `None` is the post-login *picker* state (authenticated,
+//! no connection started), `Some` is a live desktop. Which target is selected
+//! is slot state, so a takeover inherits it — the new browser lands on the
+//! picker or the desktop exactly where the previous holder was.
 //!
 //! - **Claim** (`POST /api/session`): a browser obtains the slot token. If
 //!   another browser's WebSocket is live, the claim needs `force` (takeover)
 //!   or the current token (reclaim after a network drop).
 //!   Claiming evicts the previous WebSocket but *keeps the engine running*.
-//! - **Attach** (`/ws?session=<token>`): the WebSocket joins the slot. The
-//!   engine is spawned on first attach and survives detach — closing the
-//!   browser leaves the remote session alive. A reattach sends the engine
-//!   [`ClientMsg::Refresh`], which re-announces the desktop size and repaints
-//!   the whole framebuffer from the server-owned copy.
+//! - **Attach** (`/ws?session=<token>`): the WebSocket joins the slot. Attach
+//!   does *not* start an engine — it reports the current state to the browser
+//!   ([`ServerMsg::Picker`] or [`ServerMsg::Connected`]). A reattach to a
+//!   running engine sends it [`ClientMsg::Refresh`] (re-announce the size and
+//!   repaint from the server-owned copy).
+//! - **Connect** ([`ClientMsg::Connect`]): the browser picks a target; the
+//!   engine is spawned for it and survives detach — closing the browser leaves
+//!   the remote session alive.
+//! - **Disconnect** ([`ClientMsg::Disconnect`], "switch target"): the engine is
+//!   torn down and the slot returns to the picker, without dropping the
+//!   WebSocket. An engine that ends on its own (remote hung up, connect
+//!   failure) returns the slot to the picker the same way.
 //! - **Detach**: the WebSocket went away. Frames keep flowing from the engine
 //!   and are dropped here; the engine's framebuffer stays current, so the
 //!   next attach starts from a full repaint, not a replay.
@@ -65,15 +76,34 @@ pub struct SessionBusy;
 #[error("invalid or superseded session token")]
 pub struct InvalidToken;
 
+/// A [`SessionManager::connect`] was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectError {
+    /// The attachment is no longer the slot's current client (superseded or
+    /// evicted since it attached).
+    #[error("attachment is not the current session client")]
+    NotCurrent,
+    /// No `[[targets]]` profile has this name.
+    #[error("no target named {0:?}")]
+    UnknownTarget(String),
+    /// A target session is already running; disconnect before connecting again.
+    #[error("a session is already connected")]
+    AlreadyConnected,
+}
+
 /// One WebSocket's live handle on the session slot, returned by
-/// [`SessionManager::attach`].
+/// [`SessionManager::attach`]. Browser input is routed back through
+/// [`SessionManager::forward_input`] (keyed by [`Attachment::id`]) rather than a
+/// direct engine sender, so it always reaches the *current* engine — or is
+/// dropped in the picker state — with no stale handle to manage across
+/// connect/disconnect.
 pub struct Attachment {
-    /// Identifies this attachment for [`SessionManager::detach`].
+    /// Identifies this attachment for [`SessionManager::detach`],
+    /// [`SessionManager::forward_input`], and the connect/disconnect calls.
     pub id: u64,
-    /// Engine output (and the eviction signal). Ends when the engine dies.
+    /// Session output: engine frames, the picker/connected status messages, and
+    /// the eviction signal. Ends when the slot drops this client.
     pub events: mpsc::Receiver<AttachEvent>,
-    /// Browser input into the engine.
-    pub input_tx: mpsc::UnboundedSender<ClientMsg>,
 }
 
 /// Spawns a protocol engine. Injectable so the manager's unit tests can run
@@ -100,7 +130,11 @@ struct State {
     /// The current claim token. Persists across WebSocket closes so the same
     /// browser can reattach without a takeover prompt.
     claim: Option<String>,
-    /// The running engine, if any. Survives detach; cleared when it dies.
+    /// The selected target: `None` is the picker state, `Some` is a live (or
+    /// just-ended) desktop. Slot state, so a takeover inherits it.
+    selected: Option<TargetConfig>,
+    /// The running engine, if any. Survives detach; cleared on disconnect or
+    /// when it dies.
     engine: Option<EngineSlot>,
     /// The attached WebSocket, if any.
     client: Option<ClientSlot>,
@@ -111,21 +145,22 @@ struct State {
 /// The single session slot: owns the engine lifecycle and routes its frames
 /// to whichever browser currently holds the attachment.
 pub struct SessionManager {
-    target: TargetConfig,
+    /// Every target profile the browser may pick from the picker.
+    targets: Vec<TargetConfig>,
     spawn_engine: EngineSpawner,
     // std Mutex: every critical section is short and never held across an await.
     state: Mutex<State>,
 }
 
 impl SessionManager {
-    pub fn new(target: TargetConfig) -> Self {
-        Self::with_spawner(target, Box::new(spawn_engine))
+    pub fn new(targets: Vec<TargetConfig>) -> Self {
+        Self::with_spawner(targets, Box::new(spawn_engine))
     }
 
     /// Test seam: run the manager against a scripted engine.
-    fn with_spawner(target: TargetConfig, spawn_engine: EngineSpawner) -> Self {
+    fn with_spawner(targets: Vec<TargetConfig>, spawn_engine: EngineSpawner) -> Self {
         Self {
-            target,
+            targets,
             spawn_engine,
             state: Mutex::new(State::default()),
         }
@@ -158,9 +193,12 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Attach a WebSocket holding `token` to the slot. Spawns the engine on
-    /// first attach; a running engine is asked to [`ClientMsg::Refresh`] so
-    /// the new browser gets the desktop size and a full repaint.
+    /// Attach a WebSocket holding `token` to the slot. Does **not** start an
+    /// engine — it reports the current slot state to the browser:
+    /// [`ServerMsg::Connected`] when a target session is running (and asks it to
+    /// [`ClientMsg::Refresh`] for a full repaint), else [`ServerMsg::Picker`].
+    /// The browser drives what happens next with [`Self::connect`] /
+    /// [`Self::disconnect`].
     pub fn attach(self: &Arc<Self>, token: &str) -> Result<Attachment, InvalidToken> {
         let mut st = self.state.lock().unwrap();
         if st.claim.as_deref() != Some(token) {
@@ -176,27 +214,98 @@ impl SessionManager {
         let (event_tx, events) = mpsc::channel(FRAME_BUFFER);
         st.next_attach_id += 1;
         let id = st.next_attach_id;
-        st.client = Some(ClientSlot { attach_id: id, event_tx });
 
-        let input_tx = match &st.engine {
-            Some(engine) => {
+        // Tell the freshly attached browser which post-login state it is in. The
+        // channel is empty, so try_send always lands.
+        let status = match (&st.selected, &st.engine) {
+            (Some(target), Some(engine)) => {
                 info!("session: reattached to the running engine, requesting a repaint");
                 let _ = engine.input_tx.send(ClientMsg::Refresh);
-                engine.input_tx.clone()
+                ServerMsg::Connected { name: target.name.clone() }
             }
-            None => {
-                let (input_tx, input_rx) = mpsc::unbounded_channel();
-                let (frame_tx, frame_rx) = mpsc::channel(FRAME_BUFFER);
-                st.next_generation += 1;
-                let generation = st.next_generation;
-                st.engine = Some(EngineSlot { input_tx: input_tx.clone(), generation });
-                (self.spawn_engine)(self.target.clone(), input_rx, frame_tx);
-                tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
-                input_tx
-            }
+            // No engine (idle, or an engine that ended): the picker.
+            _ => ServerMsg::Picker,
         };
+        let _ = event_tx.try_send(AttachEvent::Msg(status));
 
-        Ok(Attachment { id, events, input_tx })
+        st.client = Some(ClientSlot { attach_id: id, event_tx });
+        Ok(Attachment { id, events })
+    }
+
+    /// Pick a target and start its engine (the picker's "connect"). The browser
+    /// is told [`ServerMsg::Connected`]; the engine then paints. Refused if this
+    /// attachment is no longer the current client, the name is unknown, or a
+    /// session is already connected.
+    pub fn connect(
+        self: &Arc<Self>,
+        attach_id: u64,
+        target_name: &str,
+    ) -> Result<(), ConnectError> {
+        let mut st = self.state.lock().unwrap();
+        if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
+            return Err(ConnectError::NotCurrent);
+        }
+        if st.engine.is_some() {
+            return Err(ConnectError::AlreadyConnected);
+        }
+        let target = self
+            .targets
+            .iter()
+            .find(|t| t.name == target_name)
+            .cloned()
+            .ok_or_else(|| ConnectError::UnknownTarget(target_name.to_owned()))?;
+
+        info!("session: connecting to target {:?}", target.name);
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (frame_tx, frame_rx) = mpsc::channel(FRAME_BUFFER);
+        st.next_generation += 1;
+        let generation = st.next_generation;
+        st.engine = Some(EngineSlot { input_tx, generation });
+        (self.spawn_engine)(target.clone(), input_rx, frame_tx);
+        tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
+
+        let name = target.name.clone();
+        st.selected = Some(target);
+        if let Some(client) = &st.client {
+            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected { name }));
+        }
+        Ok(())
+    }
+
+    /// Tear the current engine down and return the slot to the picker ("switch
+    /// target"). The WebSocket stays attached and is told [`ServerMsg::Picker`].
+    /// A no-op if this attachment is not the current client.
+    pub fn disconnect(&self, attach_id: u64) {
+        let mut st = self.state.lock().unwrap();
+        if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
+            return;
+        }
+        // Dropping the EngineSlot closes the engine's input channel, which ends
+        // the engine (both engines exit their loop when input_rx closes); its
+        // pump then finds a newer/absent generation and does nothing.
+        let had_engine = st.engine.take().is_some();
+        st.selected = None;
+        if had_engine {
+            info!("session: disconnected; returning to the picker");
+        }
+        if let Some(client) = &st.client {
+            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Picker));
+        }
+    }
+
+    /// Route one browser input message to the current engine, dropping it in the
+    /// picker state or if `attach_id` is no longer the current client (so an
+    /// evicted-but-lingering socket can't inject input). Session-control
+    /// messages ([`ClientMsg::Connect`] / [`ClientMsg::Disconnect`]) are handled
+    /// by the ws bridge and never reach here.
+    pub fn forward_input(&self, attach_id: u64, msg: ClientMsg) {
+        let st = self.state.lock().unwrap();
+        if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
+            return;
+        }
+        if let Some(engine) = &st.engine {
+            let _ = engine.input_tx.send(msg);
+        }
     }
 
     /// The WebSocket for attachment `id` went away. The engine keeps running
@@ -212,28 +321,46 @@ impl SessionManager {
     }
 
     /// Forward one engine's frames to whichever browser is attached, dropping
-    /// them while detached. Ends when the engine dies, clearing the slot so
-    /// the next attach spawns a fresh engine.
+    /// them while detached. Ends when the engine dies, returning the slot to the
+    /// picker (keeping the WebSocket) so the browser can pick again.
     async fn pump(mgr: Arc<Self>, mut frame_rx: mpsc::Receiver<ServerMsg>, generation: u64) {
         while let Some(msg) = frame_rx.recv().await {
             let event_tx = {
                 let st = mgr.state.lock().unwrap();
-                st.client.as_ref().map(|c| c.event_tx.clone())
+                match &st.engine {
+                    // Current engine: forward to the attached browser (if any).
+                    Some(e) if e.generation == generation => {
+                        st.client.as_ref().map(|c| c.event_tx.clone())
+                    }
+                    // Detached (engine current, no client) or superseded (a
+                    // disconnect/takeover replaced this engine): drop the frame.
+                    _ => None,
+                }
             };
             let Some(event_tx) = event_tx else {
-                continue; // detached: drop the frame, the engine owns the framebuffer
+                continue; // detached/superseded: drop the frame, the engine owns the framebuffer
             };
             // A send error means that client is gone mid-frame; it will detach
             // itself, so just drop the frame like the detached case.
             let _ = event_tx.send(AttachEvent::Msg(msg)).await;
         }
         info!("session: engine ended");
-        let mut st = mgr.state.lock().unwrap();
-        if st.engine.as_ref().is_some_and(|e| e.generation == generation) {
+        // If this is still the current engine (not a disconnect that already
+        // replaced/cleared it), return the slot to the picker: clear the engine
+        // and selection and tell the browser, but keep it attached — a fatal
+        // engine `Error` reached it just before this, and now it lands on the
+        // picker rather than a dropped socket.
+        let event_tx = {
+            let mut st = mgr.state.lock().unwrap();
+            if !st.engine.as_ref().is_some_and(|e| e.generation == generation) {
+                return;
+            }
             st.engine = None;
-            // Dropping the client's sender ends its event stream, closing the
-            // WebSocket after any buffered frames (e.g. the final error) drain.
-            st.client = None;
+            st.selected = None;
+            st.client.as_ref().map(|c| c.event_tx.clone())
+        };
+        if let Some(event_tx) = event_tx {
+            let _ = event_tx.send(AttachEvent::Msg(ServerMsg::Picker)).await;
         }
     }
 }
@@ -283,13 +410,9 @@ mod tests {
     /// plays the engine role directly (no task, no sockets).
     type EngineEnds = (mpsc::UnboundedReceiver<ClientMsg>, mpsc::Sender<ServerMsg>);
 
-    fn manager_with_fake_engine() -> (Arc<SessionManager>, std_mpsc::Receiver<EngineEnds>) {
-        let (hook_tx, hook_rx) = std_mpsc::channel();
-        let spawner: EngineSpawner = Box::new(move |_target, input_rx, frame_tx| {
-            hook_tx.send((input_rx, frame_tx)).unwrap();
-        });
-        let target = TargetConfig {
-            name: "fake".to_owned(),
+    fn fake_target(name: &str) -> TargetConfig {
+        TargetConfig {
+            name: name.to_owned(),
             protocol: Protocol::Vnc,
             host: "127.0.0.1".to_owned(),
             port: 1,
@@ -300,8 +423,18 @@ mod tests {
             height: 1,
             security: Security::Auto,
             resize: false,
-        };
-        (Arc::new(SessionManager::with_spawner(target, spawner)), hook_rx)
+        }
+    }
+
+    /// A manager over two fake targets whose engine spawns hand their channel
+    /// ends to the test (which plays the engine role directly).
+    fn manager_with_fake_engine() -> (Arc<SessionManager>, std_mpsc::Receiver<EngineEnds>) {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(move |_target, input_rx, frame_tx| {
+            hook_tx.send((input_rx, frame_tx)).unwrap();
+        });
+        let targets = vec![fake_target("fake"), fake_target("other")];
+        (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
 
     async fn recv(events: &mut mpsc::Receiver<AttachEvent>) -> AttachEvent {
@@ -309,6 +442,22 @@ mod tests {
             .await
             .expect("timed out waiting for an attach event")
             .expect("event stream ended unexpectedly")
+    }
+
+    /// Assert the next event is the picker status.
+    async fn expect_picker(events: &mut mpsc::Receiver<AttachEvent>) {
+        assert!(
+            matches!(recv(events).await, AttachEvent::Msg(ServerMsg::Picker)),
+            "expected a picker status message"
+        );
+    }
+
+    /// Assert the next event is the connected status for `name`.
+    async fn expect_connected(events: &mut mpsc::Receiver<AttachEvent>, name: &str) {
+        match recv(events).await {
+            AttachEvent::Msg(ServerMsg::Connected { name: got }) => assert_eq!(got, name),
+            other => panic!("expected connected({name}), got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -338,11 +487,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attach_announces_the_picker_and_connect_starts_the_engine() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+
+        // No engine yet: attach lands the browser on the picker.
+        expect_picker(&mut att.events).await;
+        assert!(hooks.try_recv().is_err(), "attach must not spawn an engine");
+
+        // Picking a target starts the engine and confirms with connected.
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        assert!(hooks.try_recv().is_ok(), "connect spawns the engine");
+
+        // A second connect while one is live is refused.
+        assert!(matches!(
+            mgr.connect(att.id, "other"),
+            Err(ConnectError::AlreadyConnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_unknown_targets_and_stale_attachments() {
+        let (mgr, _hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+
+        assert!(matches!(
+            mgr.connect(att.id, "nope"),
+            Err(ConnectError::UnknownTarget(name)) if name == "nope"
+        ));
+        // An attachment that is no longer the current client can't connect.
+        assert!(matches!(mgr.connect(att.id + 999, "fake"), Err(ConnectError::NotCurrent)));
+    }
+
+    #[tokio::test]
     async fn frames_reach_the_attached_client_and_are_dropped_while_detached() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
-        let (_input_rx, frame_tx) = hooks.try_recv().expect("engine spawned on first attach");
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (_input_rx, frame_tx) = hooks.try_recv().expect("engine spawned on connect");
 
         frame_tx.send(ServerMsg::Resize { w: 10, h: 20 }).await.unwrap();
         assert!(matches!(
@@ -363,9 +552,11 @@ mod tests {
         .await
         .expect("pump never drained the detached frame");
 
-        // Reattach: only frames sent after the reattach arrive.
+        // Reattach to the running engine: it announces connected, then only
+        // frames sent after the reattach arrive.
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
+        expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "no second engine while one runs");
         frame_tx.send(ServerMsg::Resize { w: 30, h: 40 }).await.unwrap();
         assert!(matches!(
@@ -378,15 +569,18 @@ mod tests {
     async fn reattach_asks_the_running_engine_for_a_refresh() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
-        let att = mgr.attach(&token).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, _frame_tx) = hooks.try_recv().unwrap();
         assert!(
             input_rx.try_recv().is_err(),
             "a fresh engine paints on connect; no refresh needed"
         );
 
-        // Input flows through the attachment to the engine.
-        att.input_tx.send(ClientMsg::MouseMove { x: 1, y: 2 }).unwrap();
+        // Input is routed to the current engine through the manager.
+        mgr.forward_input(att.id, ClientMsg::MouseMove { x: 1, y: 2 });
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::MouseMove { x: 1, y: 2 })));
 
         mgr.detach(att.id);
@@ -396,10 +590,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_returns_to_the_picker_and_reconnect_respawns() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+
+        // Switch target: the engine is torn down (its input channel closes) and
+        // the browser lands back on the picker without dropping the socket.
+        mgr.disconnect(att.id);
+        expect_picker(&mut att.events).await;
+        assert!(input_rx.is_closed(), "disconnect closes the engine input channel");
+
+        // Picking again spawns a fresh engine — a different target this time.
+        mgr.connect(att.id, "other").unwrap();
+        expect_connected(&mut att.events, "other").await;
+        assert!(hooks.try_recv().is_ok(), "reconnect spawns a fresh engine");
+    }
+
+    #[tokio::test]
     async fn takeover_evicts_the_previous_client_but_keeps_the_engine() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token_a = mgr.claim(false, None).unwrap();
         let mut att_a = mgr.attach(&token_a).unwrap();
+        expect_picker(&mut att_a.events).await;
+        mgr.connect(att_a.id, "fake").unwrap();
+        expect_connected(&mut att_a.events, "fake").await;
         let (mut input_rx, frame_tx) = hooks.try_recv().unwrap();
 
         let token_b = mgr.claim(true, None).unwrap();
@@ -407,7 +626,9 @@ mod tests {
         // The old token is superseded.
         assert!(mgr.attach(&token_a).is_err());
 
+        // B inherits the live desktop: connected (not the picker) + a repaint.
         let mut att_b = mgr.attach(&token_b).unwrap();
+        expect_connected(&mut att_b.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
         frame_tx.send(ServerMsg::Resize { w: 5, h: 6 }).await.unwrap();
@@ -418,10 +639,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_death_ends_the_event_stream_and_the_next_attach_respawns() {
+    async fn takeover_in_the_picker_lands_the_new_browser_on_the_picker() {
+        let (mgr, _hooks) = manager_with_fake_engine();
+        // A never connects — it just holds the slot on the picker.
+        let token_a = mgr.claim(false, None).unwrap();
+        let mut att_a = mgr.attach(&token_a).unwrap();
+        expect_picker(&mut att_a.events).await;
+
+        // B force-claims and attaches: it inherits the picker state.
+        let token_b = mgr.claim(true, None).unwrap();
+        assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
+        let mut att_b = mgr.attach(&token_b).unwrap();
+        expect_picker(&mut att_b.events).await;
+    }
+
+    #[tokio::test]
+    async fn engine_death_returns_to_the_picker_and_reconnect_respawns() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx) = hooks.try_recv().unwrap();
 
         // The engine reports a final error and dies.
@@ -430,21 +669,17 @@ mod tests {
             .await
             .unwrap();
         drop(frame_tx);
+        // The browser sees the error, then lands back on the picker — the socket
+        // stays open.
         assert!(matches!(
             recv(&mut att.events).await,
             AttachEvent::Msg(ServerMsg::Error { .. })
         ));
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), att.events.recv())
-                .await
-                .expect("timed out waiting for the stream to end")
-                .is_none(),
-            "engine death ends the event stream"
-        );
+        expect_picker(&mut att.events).await;
 
-        // Reattaching spawns a fresh engine.
-        let token = mgr.claim(false, None).unwrap();
-        let _att = mgr.attach(&token).unwrap();
+        // Picking again (same socket) spawns a fresh engine.
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
         tokio::task::spawn_blocking(move || {
             hooks
                 .recv_timeout(Duration::from_secs(5))

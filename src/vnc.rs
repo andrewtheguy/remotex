@@ -636,6 +636,9 @@ fn translate_input(
         ClientMsg::Viewport { .. } => Vec::new(),
         // Intercepted by the input loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
+        // Session-control messages act on the slot, not an engine — the ws
+        // bridge handles them and they never reach here.
+        ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
     }
 }
 

@@ -58,6 +58,14 @@ pub enum ClientMsg {
     /// a running engine; a browser may also send it to recover from a
     /// corrupted canvas.
     Refresh,
+    /// Pick a target from the post-login picker and start a session against it.
+    /// Handled by the session layer (spawns the engine for `target`), never
+    /// forwarded to an engine. `target` is a `[[targets]]` profile name.
+    Connect { target: String },
+    /// Tear the current session's engine down and return to the picker
+    /// ("switch target"). Handled by the session layer, never forwarded to an
+    /// engine.
+    Disconnect,
 }
 
 /// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
@@ -131,14 +139,28 @@ fn encode_png(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Server -> browser: screen updates and status.
+/// Server -> browser: screen updates and session status.
+///
+/// Most variants come from the protocol engine (tiles, resize, error); the two
+/// session-status variants ([`ServerMsg::Picker`] / [`ServerMsg::Connected`])
+/// come from the session layer (src/session.rs) to tell the browser which
+/// post-login state it is in — the target picker, or a live desktop.
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
     Tile(Tile),
     /// The remote desktop resolution changed.
     Resize { w: u16, h: u16 },
-    /// A fatal session error the client should surface.
+    /// A fatal session error the client should surface. The session then
+    /// returns to the picker, so the browser shows this against the picker.
     Error { message: String },
+    /// No target is selected: show the post-login target picker. Sent on attach
+    /// to an idle slot, on disconnect ("switch target"), and when an engine
+    /// ends (the remote hung up, or a connect failure after its `Error`).
+    Picker,
+    /// A target session is live: show the desktop. Sent on attach to a running
+    /// engine and right after a [`ClientMsg::Connect`]. `name` is the target
+    /// profile the session is bound to.
+    Connected { name: String },
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -154,6 +176,8 @@ pub enum WireFrame {
 enum ControlMsg<'a> {
     Resize { w: u16, h: u16 },
     Error { message: &'a str },
+    Picker,
+    Connected { name: &'a str },
 }
 
 impl ServerMsg {
@@ -163,6 +187,10 @@ impl ServerMsg {
             ServerMsg::Tile(tile) => WireFrame::Binary(tile.to_frame()),
             ServerMsg::Resize { w, h } => WireFrame::Text(control(&ControlMsg::Resize { w: *w, h: *h })),
             ServerMsg::Error { message } => WireFrame::Text(control(&ControlMsg::Error { message })),
+            ServerMsg::Picker => WireFrame::Text(control(&ControlMsg::Picker)),
+            ServerMsg::Connected { name } => {
+                WireFrame::Text(control(&ControlMsg::Connected { name }))
+            }
         }
     }
 }
