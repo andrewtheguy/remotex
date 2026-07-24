@@ -15,8 +15,9 @@ This:
 1. Detects your OS/arch and resolves the latest release.
 2. Downloads the matching tarball and **verifies its SHA-256** against the
    digest GitHub publishes for the asset.
-3. Installs under `/usr/local/opt/remotex` and links a `remotex` launcher onto your
-   `PATH`. You may be prompted for `sudo` to write under `/usr/local`.
+3. Installs under `/opt/remotex` and links a `remotex` launcher onto your
+   `PATH` at `/usr/local/bin/remotex`. You may be prompted for `sudo` to write
+   under `/opt` and `/usr/local/bin`.
 
 > Review the script before piping it to a shell:
 > <https://andrewtheguy.github.io/remotex/install.sh>
@@ -25,7 +26,7 @@ This:
 
 ```bash
 # set your RDP target + credentials (kept server-side, never sent to the browser)
-$EDITOR /usr/local/opt/remotex/etc/remotex.toml
+$EDITOR /opt/remotex/etc/remotex.toml
 
 remotex serve
 ```
@@ -56,11 +57,11 @@ Make sure `BINDIR` is on your `PATH`.
 ## Layout
 
 ```
-/usr/local/opt/remotex/
+/opt/remotex/
 ├── etc/remotex.toml                       # stable user configuration
 ├── versions/<version>/{bin,share}       # this version's files
 ├── current -> versions/<version>        # active version
-└── /usr/local/bin/remotex -> current/bin/remotex
+└── /usr/local/bin/remotex -> /opt/remotex/current/bin/remotex
 ```
 
 The example config is versioned at
@@ -77,8 +78,8 @@ atomically, and keeps the **immediately previous** version for rollback. Your
 Roll back by repointing `current` at the previous version:
 
 ```bash
-ln -sfn versions/<previous> /usr/local/opt/remotex/current
-# e.g. ls /usr/local/opt/remotex/versions  to see what's kept
+ln -sfn versions/<previous> /opt/remotex/current
+# e.g. ls /opt/remotex/versions  to see what's kept
 ```
 
 ## Uninstall

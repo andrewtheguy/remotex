@@ -9,12 +9,12 @@
 # PATH (see packaging/install.sh for the on-disk layout).
 #
 # Usage: install.sh [RELEASE_TAG]
-# Env:   PREFIX (default /usr/local/opt/remotex), BINDIR (default /usr/local/bin)
+# Env:   PREFIX (default /opt/remotex), BINDIR (default /usr/local/bin)
 set -euo pipefail
 
 REPO_OWNER="andrewtheguy"
 REPO_NAME="remotex"
-PREFIX="${PREFIX:-/usr/local/opt/remotex}"
+PREFIX="${PREFIX:-/opt/remotex}"
 BINDIR="${BINDIR:-/usr/local/bin}"
 tmp_dir=""
 

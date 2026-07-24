@@ -7,7 +7,7 @@ a relocatable prefix.
 ## Layout after install
 
 ```
-/usr/local/opt/remotex/
+/opt/remotex/
 ├── etc/
 │   └── remotex.toml               # the global config (stable across versions)
 ├── versions/
@@ -20,7 +20,7 @@ a relocatable prefix.
 ├── current -> versions/<version> # active version (atomic rename swap)
 └── .install.lock                 # present only while an install runs
 
-/usr/local/bin/remotex -> /usr/local/opt/remotex/current/bin/remotex
+/usr/local/bin/remotex -> /opt/remotex/current/bin/remotex
 ```
 
 The binary resolves its versioned `share/` from its own real path
@@ -55,7 +55,7 @@ bash packaging/build-tarball.sh
 Each install keeps the previous version. Roll back by repointing `current`:
 
 ```sh
-ln -sfn versions/<previous> /usr/local/opt/remotex/current
+ln -sfn versions/<previous> /opt/remotex/current
 ```
 
 ## Releasing
