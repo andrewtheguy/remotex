@@ -1,12 +1,17 @@
 # remotex
 
-A browser-based remote-desktop client: connect to an RDP or VNC host and drive
-it with mouse and keyboard from a web browser.
+A browser-based remote-desktop client: connect to an RDP, VNC or macOS host and
+drive it with mouse and keyboard from a web browser.
 
 - **Backend** — Rust, [axum](https://github.com/tokio-rs/axum) + tokio. The
   protocol engines run server-side — RDP via
   [IronRDP](https://crates.io/crates/ironrdp), VNC via a built-in minimal RFB
-  client — and the browser talks to both over the same WebSocket protocol.
+  client, and Macs via `rxa` and a purpose-built agent — and the browser talks
+  to all three over the same WebSocket protocol.
+- **macOS agent** — a small companion app (`crates/rxa-agent`) that shares a
+  Mac's screen over a pre-shared key, so a dropped connection reconnects
+  silently instead of demanding a fresh login the way Screen Sharing does. See
+  [`packaging/macos/README.md`](packaging/macos/README.md).
 - **Frontend** — [Vite](https://vite.dev/) + React 19 + TypeScript, managed with
   [Bun](https://bun.sh/). The built assets ship alongside the binary and are
   served from disk (`share/remotex/web`), resolved relative to the executable.
@@ -71,14 +76,15 @@ release — nothing is recompiled for them (see [`packaging/`](packaging/)).
 src/                 Rust backend (flat module layout)
   main.rs            entry: CLI dispatch + serve
   lib.rs             library surface (shared with the integration tests)
-  cli.rs             clap CLI (serve --config, gen-passwd)
+  cli.rs             clap CLI (serve --config, gen-passwd, gen-psk)
   config.rs          TOML config ([server] + [[targets]] profiles)
   server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
   ws.rs              WebSocket <-> protocol-engine bridge
   session.rs         the session slot + engine seam: picker state, then
-                     spawns rdp::run or vnc::run for the chosen target
+                     spawns rdp::run, vnc::run or rxa::run for the target
   rdp.rs             server-side RDP session (IronRDP): connect + active loop
   vnc.rs             server-side VNC session (built-in RFB client, raw-only)
+  rxa.rs             macOS agent session (Noise + tile pass-through)
   keymap.rs          DOM KeyboardEvent.code -> RDP scancode / X11 keysym
   protocol.rs        wire messages (ClientMsg / ServerMsg)
   error.rs           AppError
@@ -139,15 +145,18 @@ a session uses is a browser choice, not a launch flag.
 
 [[targets]]
 name = "example"           # unique profile name (shown in the login picker)
-protocol = "rdp"           # required: "rdp" or "vnc"
+protocol = "rdp"           # required: "rdp", "vnc" or "rxa"
 host = "192.0.2.10"
-#port = 3389               # default: the protocol's standard port (3389/5900)
+#port = 3389               # default: the protocol's standard port
+                           #  (3389 rdp, 5900 vnc, 52381 rxa)
 username = "Administrator"
 password = "change-me"
 #domain = ""               # optional; unset = local account   (RDP only)
 #width = 1280              # initial desktop size to request   (RDP only —
 #height = 800              #  a VNC server dictates its own size)
 #security = "auto"         # auto (TLS+NLA), nla (NLA only), tls (RDP only)
+#psk = "rxa..."            # pre-shared key                    (rxa only —
+                           #  `remotex gen-psk`, must match the Mac agent's)
 ```
 
 `security` is `auto` (advertise TLS + NLA/CredSSP, server picks), `nla`
@@ -155,6 +164,13 @@ password = "change-me"
 Self-signed server certificates are accepted. For VNC targets, `name` and `protocol = "vnc"` are still required. The
 connection-specific fields are `host`, optional `port` (default 5900), and
 optional `password`; `username`/`domain`/`width`/`height`/`security` are ignored.
+
+For **macOS** targets (`protocol = "rxa"`) the only fields are `host`, optional
+`port` (default 52381) and `psk` — the pre-shared key is the entire credential.
+Generate one with `remotex gen-psk` and put the same key in the Mac agent's
+config; `resize` is rejected, since the agent captures the Mac's own
+resolution. Install the agent from
+[`packaging/macos/README.md`](packaging/macos/README.md).
 
 Credentials are used only server-side for the RDP/VNC handshake;
 `GET /api/targets` returns only the non-secret name/protocol/host/port of each
@@ -182,7 +198,15 @@ podman or docker, connects through the real server, and validates the binary
 tile transport on the wire — resize as JSON text first, then binary frames
 with PNG payloads (the VNC test requires a full-desktop paint). They require a
 container runtime; no browser is involved (automated browser tests are flaky
-and deliberately avoided).
+and deliberately avoided). Set `REMOTEX_TEST_CONTAINER_HOST=<host>` to run them
+against a remote podman/docker over SSH, which is the only option on a Mac that
+cannot run a container engine locally.
+
+`tests/rxa_e2e.rs` needs no container: it drives the real server against an
+in-process fake Mac agent that speaks the real Noise handshake, and checks that
+a JPEG tile survives the trip byte-for-byte, that a dropped agent link
+reconnects and repaints instead of erroring, and that a wrong pre-shared key is
+reported immediately.
 
 ## Production build
 

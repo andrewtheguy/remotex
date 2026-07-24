@@ -1,8 +1,49 @@
 # Plan — `rxa`: a purpose-built macOS agent for remotex
 
-Status: **planned, not started.** This document is the implementation plan;
-`architecture.md` describes the system as built and should absorb the relevant
-parts of this once the work lands.
+Status: **implemented.** Kept as the design record — the reasoning behind the
+decisions, and the risks that were live at the time. For the system as built,
+see [`architecture.md`](architecture.md#rxa-srcrxars) and
+[`packaging/macos/README.md`](../packaging/macos/README.md).
+
+## What changed on contact with the machine
+
+The plan survived largely intact. Five things went differently, and they are
+worth recording because each was a real discovery rather than a preference:
+
+1. **Packaging (§3.7).** The plan called for an install script laying a plist
+   into `~/Library/LaunchAgents` and running `launchctl`. `SMAppService` does
+   it better: the bundle carries its own LaunchAgent plist, registers itself on
+   first launch, and appears in System Settings → General → Login Items.
+   Installing is dragging the app in and opening it once; there is no install
+   script. This raised the floor to macOS 14.
+2. **The Swift bridge bites (§3.1).** `screencapturekit` was the right pick —
+   it exposes `dirtyRects`, which the plan named as the single biggest risk —
+   but its bridge is built with `swift build --triple arm64-apple-macosx`, no
+   OS version. Swift then links the *back-deployment* concurrency runtime as
+   `@rpath/libswift_Concurrency.dylib` with no matching runpath, so the agent
+   builds clean and dies at startup. Fixed at the root by setting
+   `MACOSX_DEPLOYMENT_TARGET` (`.cargo/config.toml`), not by adding a runpath.
+3. **`SCFrameStatus::Started` carries pixels.** Accepting only `Complete`
+   meant a static screen produced *no tiles at all* — `Started` is the stream's
+   first frame and, on a screen that then sits still, the only content-bearing
+   one that ever arrives.
+4. **Cursor representations lie about scale (§3.4).** Taking the largest
+   `NSBitmapImageRep` is wrong: a system cursor can carry a vector-backed rep
+   at an arbitrary resolution. The I-beam reports a 14×20 point size with a
+   280×400 rep available, so "largest" produced a cursor 20× oversized with its
+   hotspot scaled to match. The rep closest to *point size × backing scale* is
+   the right one.
+5. **`clamp_u16` moved too (§4.5).** The plan said to extract only
+   `host_port`. The rxa engine needs coordinate clamping as well, so both live
+   in `src/engine.rs` — still not a `trait Engine`, and the duplication did not
+   grow.
+
+Two items from §3.6 were **not** implemented, deliberately: the post-disconnect
+stream linger (it only pays for outages shorter than the gateway's own 1 s
+minimum backoff, and restarting the stream costs about as much — noted in
+`session.rs`), and a multi-threaded encoder pool (a pool lets two frames' tiles
+finish out of order, and the same region is commonly dirty in consecutive
+frames, so an older tile could land on top of a newer one).
 
 ## Context
 
