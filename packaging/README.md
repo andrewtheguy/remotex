@@ -60,7 +60,10 @@ ln -sfn versions/<previous> /usr/local/opt/rdpweb/current
 
 ## Releasing
 
-`.github/workflows/release.yml` (manual `workflow_dispatch`) builds the three
-tarballs (linux x86_64, linux arm64, macOS arm64) and publishes a `v<version>`
-GitHub release. `.github/workflows/pages.yml` serves `install.sh` from GitHub
-Pages.
+`.github/workflows/release.yml` (manual `workflow_dispatch`) is draft-first:
+it validates the Cargo.toml version (real TOML parse), aborts if the `v<version>`
+tag already exists, creates a **draft** release up front (replacing any stale
+draft from a failed run), builds the three tarballs (linux x86_64, linux arm64,
+macOS arm64), uploads them to the draft, and only then publishes it — which is
+what creates the tag, so a failed build never leaves a tag or a half-populated
+release. `.github/workflows/pages.yml` serves `install.sh` from GitHub Pages.
