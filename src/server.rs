@@ -21,7 +21,8 @@ pub struct AppState {
 
 /// Build the axum router.
 ///
-/// - `/api/*` — JSON API (health, config)
+/// - `/api/*` — JSON API (health, config); unknown `/api/*` paths return 404
+///   rather than the SPA, so API clients get an honest error.
 /// - `/ws`    — binary WebSocket carrying the remote-desktop session
 /// - fallback — the built SPA, served from `config.static_dir` on disk. Real
 ///   files are served by [`ServeDir`]; any unknown path returns `index.html`
@@ -46,9 +47,15 @@ pub fn router(config: AppConfig) -> Router {
 
     let state = AppState { config };
 
+    // Nested so unmatched `/api/*` paths hit this router's 404 fallback instead
+    // of falling through to the SPA index.
+    let api = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/config", get(config_handler))
+        .fallback(|| async { StatusCode::NOT_FOUND });
+
     Router::new()
-        .route("/api/health", get(|| async { "ok" }))
-        .route("/api/config", get(config_handler))
+        .nest("/api", api)
         .route("/ws", any(ws::handler))
         .fallback_service(spa)
         .with_state(state)

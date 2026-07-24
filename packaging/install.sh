@@ -85,7 +85,11 @@ else
   echo ">> seeding config from sample — edit $final/etc/rdpweb.env"
   cp "$src/etc/rdpweb.env.sample" "$staging/etc/rdpweb.env"
 fi
-chmod 600 "$staging/etc/rdpweb.env" || true
+if ! chmod 600 "$staging/etc/rdpweb.env"; then
+  echo "error: could not set 600 permissions on $staging/etc/rdpweb.env" >&2
+  echo "       refusing to install — the credentials file would not be secured." >&2
+  exit 1
+fi
 
 # Publish the version directory (replace any same-version dir from a prior run).
 rm -rf "$final"
