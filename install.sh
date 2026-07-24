@@ -129,7 +129,7 @@ main() {
 
   echo
   info "done — run: rdpweb serve"
-  info "edit config: ${PREFIX}/current/etc/rdpweb.env"
+  info "edit config: ${PREFIX}/etc/rdpweb.env"
 }
 
 main "$@"

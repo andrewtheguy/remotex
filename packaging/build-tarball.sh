@@ -7,8 +7,8 @@
 #   rdpweb-<version>/
 #   ├── VERSION
 #   ├── bin/rdpweb                # release binary
-#   ├── etc/rdpweb.env.sample     # config template (install.sh seeds etc/rdpweb.env)
-#   ├── share/rdpweb/web/         # built frontend (index.html + assets)
+#   ├── share/doc/rdpweb/rdpweb.env.example # config template
+#   ├── share/rdpweb/web/                  # built frontend (index.html + assets)
 #   ├── install.sh
 #   └── uninstall.sh
 #
@@ -52,9 +52,9 @@ echo ">> building release binary"
 cargo build --release
 
 echo ">> assembling ${pkg}"
-mkdir -p "$root/bin" "$root/etc" "$root/share/rdpweb"
+mkdir -p "$root/bin" "$root/share/doc/rdpweb" "$root/share/rdpweb"
 cp target/release/rdpweb "$root/bin/rdpweb"
-cp packaging/etc/rdpweb.env.sample "$root/etc/rdpweb.env.sample"
+cp packaging/etc/rdpweb.env.example "$root/share/doc/rdpweb/rdpweb.env.example"
 cp -R frontend/dist "$root/share/rdpweb/web"
 cp packaging/install.sh packaging/uninstall.sh "$root/"
 chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/rdpweb"

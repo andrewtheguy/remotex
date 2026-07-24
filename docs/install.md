@@ -25,7 +25,7 @@ This:
 
 ```bash
 # set your RDP target + credentials (kept server-side, never sent to the browser)
-$EDITOR /usr/local/opt/rdpweb/current/etc/rdpweb.env
+$EDITOR /usr/local/opt/rdpweb/etc/rdpweb.env
 
 rdpweb serve
 ```
@@ -56,19 +56,22 @@ Make sure `BINDIR` is on your `PATH`.
 
 ```
 /usr/local/opt/rdpweb/
-├── versions/<version>/{bin,etc,share}   # this version's files
+├── etc/rdpweb.env                       # stable user configuration
+├── versions/<version>/{bin,share}       # this version's files
 ├── current -> versions/<version>        # active version
 └── /usr/local/bin/rdpweb -> current/bin/rdpweb
 ```
 
-The binary resolves its `share/` and `etc/` relative to its own real path, so
-the whole tree is relocatable via `PREFIX`/`BINDIR`.
+The example config is versioned at
+`current/share/doc/rdpweb/rdpweb.env.example`. The binary resolves `share/`
+relative to its own real path and the stable config relative to the enclosing
+prefix, so the whole tree is relocatable via `PREFIX`/`BINDIR`.
 
 ## Upgrades and rollback
 
 Re-running the installer stages the new version, flips the `current` symlink
 atomically, and keeps the **immediately previous** version for rollback. Your
-`etc/rdpweb.env` is migrated forward automatically.
+`etc/rdpweb.env` remains untouched across upgrades and rollbacks.
 
 Roll back by repointing `current` at the previous version:
 
