@@ -1,12 +1,15 @@
 //! Wire protocol shared (in shape) with the frontend `src/protocol.ts`.
 //!
-//! Messages are JSON with a `type` tag. `ClientMsg` flows browser -> server
-//! (input events); `ServerMsg` flows server -> browser (screen updates).
-//! Kept minimal for the MVP — see docs/phase1-mvp.md.
-
-// `TileFormat::Png` is defined for the protocol but the server only emits `Rgba`
-// tiles today; allow the unused variant.
-#![allow(dead_code)]
+//! `ClientMsg` flows browser -> server (input events) as JSON text frames.
+//! Server -> browser, the transport is split by weight (phase 2 — see
+//! docs/phase2-consolidation.md):
+//!
+//! - **Screen tiles** are binary WebSocket frames: a fixed 10-byte header
+//!   followed by the pixel payload, PNG-compressed unless raw is smaller.
+//!   This replaced base64 RGBA inside JSON text, which inflated the
+//!   bottleneck backend->browser link by ~4.3x (4 bytes/px, +33% base64).
+//! - **Control messages** (`resize`, `error`) are rare and tiny; they stay
+//!   JSON text frames with a `type` tag.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,33 +36,128 @@ pub enum ClientMsg {
     Key { code: String, pressed: bool },
 }
 
-/// Pixel format for a tile payload.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Payload encoding of a binary tile frame. The discriminant is the wire byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileFormat {
-    /// Raw RGBA8888, row-major, `w * h * 4` bytes.
-    Rgba,
-    /// PNG-encoded image.
-    Png,
+    /// Packed RGB888, row-major, `w * h * 3` bytes.
+    Rgb = 0,
+    /// PNG-encoded RGB image.
+    Png = 1,
+}
+
+/// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
+///
+/// Frame layout (little-endian):
+///
+/// ```text
+/// offset 0: u8  frame kind, always 0x01 (tile)
+/// offset 1: u8  format (see TileFormat)
+/// offset 2: u16 x
+/// offset 4: u16 y
+/// offset 6: u16 w
+/// offset 8: u16 h
+/// offset 10: payload (w*h*3 bytes raw, or a PNG stream)
+/// ```
+#[derive(Debug, Clone)]
+pub struct Tile {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub format: TileFormat,
+    pub data: Vec<u8>,
+}
+
+impl Tile {
+    pub const FRAME_KIND: u8 = 0x01;
+    pub const HEADER_LEN: usize = 10;
+
+    /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
+    /// Falls back to the raw pixels when PNG comes out larger (tiny or
+    /// incompressible tiles, where PNG's fixed overhead dominates).
+    pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
+        let expected = usize::from(w) * usize::from(h) * 3;
+        anyhow::ensure!(
+            rgb.len() == expected,
+            "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
+            rgb.len()
+        );
+        let png = encode_png(w, h, rgb)?;
+        let (format, data) = if png.len() < rgb.len() {
+            (TileFormat::Png, png)
+        } else {
+            (TileFormat::Rgb, rgb.to_vec())
+        };
+        Ok(Self { x, y, w, h, format, data })
+    }
+
+    /// Serialize into the binary WebSocket frame described above.
+    pub fn to_frame(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::HEADER_LEN + self.data.len());
+        out.push(Self::FRAME_KIND);
+        out.push(self.format as u8);
+        out.extend_from_slice(&self.x.to_le_bytes());
+        out.extend_from_slice(&self.y.to_le_bytes());
+        out.extend_from_slice(&self.w.to_le_bytes());
+        out.extend_from_slice(&self.h.to_le_bytes());
+        out.extend_from_slice(&self.data);
+        out
+    }
+}
+
+/// PNG-encode packed RGB888 pixels. Fast compression: the win over raw is
+/// already large for screen content, and this runs on the session's hot path.
+fn encode_png(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(rgb)?;
+    writer.finish()?;
+    Ok(out)
 }
 
 /// Server -> browser: screen updates and status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub enum ServerMsg {
-    /// A dirty rectangle of the framebuffer. `data` is base64-encoded.
-    Tile {
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        format: TileFormat,
-        data: String,
-    },
+    Tile(Tile),
     /// The remote desktop resolution changed.
-    Resize { w: i32, h: i32 },
+    Resize { w: u16, h: u16 },
     /// A fatal session error the client should surface.
     Error { message: String },
+}
+
+/// One encoded WebSocket frame, ready to send.
+#[derive(Debug)]
+pub enum WireFrame {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+/// JSON shape of the text-frame control messages (`ServerMsg` minus tiles).
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum ControlMsg<'a> {
+    Resize { w: u16, h: u16 },
+    Error { message: &'a str },
+}
+
+impl ServerMsg {
+    /// Encode for the WebSocket: tiles as binary frames, control as JSON text.
+    pub fn encode(&self) -> WireFrame {
+        match self {
+            ServerMsg::Tile(tile) => WireFrame::Binary(tile.to_frame()),
+            ServerMsg::Resize { w, h } => WireFrame::Text(control(&ControlMsg::Resize { w: *w, h: *h })),
+            ServerMsg::Error { message } => WireFrame::Text(control(&ControlMsg::Error { message })),
+        }
+    }
+}
+
+fn control(msg: &ControlMsg<'_>) -> String {
+    // Infallible: ControlMsg is a string/number-only struct enum.
+    serde_json::to_string(msg).expect("control message serialization cannot fail")
 }
 
 #[cfg(test)]
@@ -98,32 +196,107 @@ mod tests {
         }
     }
 
-    // Serialize into the tagged, camelCase shape `protocol.ts` expects.
+    // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.
     #[test]
-    fn server_messages_serialize_to_tagged_camelcase() {
-        let tile = ServerMsg::Tile {
-            x: 1,
-            y: 2,
-            w: 3,
-            h: 4,
-            format: TileFormat::Rgba,
-            data: "AAAA".to_owned(),
-        };
-        let json = serde_json::to_string(&tile).unwrap();
-        assert!(json.contains(r#""type":"tile""#), "{json}");
-        assert!(json.contains(r#""format":"rgba""#), "{json}");
-        assert!(json.contains(r#""data":"AAAA""#), "{json}");
+    fn control_messages_encode_to_tagged_camelcase_text() {
+        match (ServerMsg::Resize { w: 1280, h: 800 }).encode() {
+            WireFrame::Text(json) => assert_eq!(json, r#"{"type":"resize","w":1280,"h":800}"#),
+            other => panic!("resize should be a text frame: {other:?}"),
+        }
+        match (ServerMsg::Error { message: "boom".to_owned() }).encode() {
+            WireFrame::Text(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
+            other => panic!("error should be a text frame: {other:?}"),
+        }
+    }
 
-        assert_eq!(
-            serde_json::to_string(&ServerMsg::Resize { w: 1280, h: 800 }).unwrap(),
-            r#"{"type":"resize","w":1280,"h":800}"#
+    // The binary layout `protocol.ts` (decodeTileFrame) parses.
+    #[test]
+    fn tile_frame_layout_is_kind_format_le_coords_payload() {
+        let tile = Tile {
+            x: 0x0102,
+            y: 0x0304,
+            w: 2,
+            h: 1,
+            format: TileFormat::Rgb,
+            data: vec![10, 20, 30, 40, 50, 60],
+        };
+        let frame = tile.to_frame();
+        assert_eq!(frame[0], Tile::FRAME_KIND);
+        assert_eq!(frame[1], 0); // TileFormat::Rgb
+        assert_eq!(&frame[2..4], &[0x02, 0x01]); // x, little-endian
+        assert_eq!(&frame[4..6], &[0x04, 0x03]); // y
+        assert_eq!(&frame[6..8], &[2, 0]); // w
+        assert_eq!(&frame[8..10], &[1, 0]); // h
+        assert_eq!(&frame[10..], &[10, 20, 30, 40, 50, 60]);
+
+        match (ServerMsg::Tile(tile)).encode() {
+            WireFrame::Binary(bytes) => assert_eq!(bytes, frame),
+            other => panic!("tile should be a binary frame: {other:?}"),
+        }
+    }
+
+    /// A desktop-like strip: horizontal gradient, repeated rows.
+    fn gradient_rgb(w: u16, h: u16) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for _ in 0..h {
+            for x in 0..w {
+                let v = (x % 256) as u8;
+                rgb.extend_from_slice(&[v, v / 2, 255 - v]);
+            }
+        }
+        rgb
+    }
+
+    #[test]
+    fn screen_content_compresses_to_png_and_roundtrips() {
+        let (w, h) = (320, 64);
+        let rgb = gradient_rgb(w, h);
+        let tile = Tile::from_rgb(7, 9, w, h, &rgb).unwrap();
+        assert_eq!(tile.format, TileFormat::Png);
+        assert!(
+            tile.data.len() < rgb.len() / 4,
+            "PNG should compress a gradient well: {} vs raw {}",
+            tile.data.len(),
+            rgb.len()
         );
-        assert_eq!(
-            serde_json::to_string(&ServerMsg::Error {
-                message: "boom".to_owned()
-            })
-            .unwrap(),
-            r#"{"type":"error","message":"boom"}"#
+
+        // Decode the PNG back and verify the pixels survived.
+        let decoder = png::Decoder::new(std::io::Cursor::new(tile.data.as_slice()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (u32::from(w), u32::from(h)));
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        assert_eq!(&buf[..info.buffer_size()], rgb.as_slice());
+    }
+
+    // Phase 2's reason to exist: the binary frame must beat the old
+    // base64-in-JSON baseline by a wide margin for screen-like content.
+    #[test]
+    fn tile_frame_beats_old_base64_json_baseline() {
+        let (w, h) = (1280, 64);
+        let rgb = gradient_rgb(w, h);
+        let frame = Tile::from_rgb(0, 0, w, h, &rgb).unwrap().to_frame();
+        // Old wire cost: RGBA (4 bytes/px) -> base64 (4/3) + ~90 bytes of JSON.
+        let old = usize::from(w) * usize::from(h) * 4 * 4 / 3 + 90;
+        assert!(
+            frame.len() * 10 < old,
+            "expected >10x reduction: {} vs baseline {old}",
+            frame.len()
         );
+    }
+
+    #[test]
+    fn tiny_incompressible_tile_falls_back_to_raw() {
+        // 2x2 of "noise": PNG's fixed overhead exceeds 12 raw bytes.
+        let rgb = [1u8, 200, 3, 250, 5, 90, 7, 160, 9, 30, 11, 220];
+        let tile = Tile::from_rgb(0, 0, 2, 2, &rgb).unwrap();
+        assert_eq!(tile.format, TileFormat::Rgb);
+        assert_eq!(tile.data, rgb);
+    }
+
+    #[test]
+    fn tile_with_wrong_payload_length_is_rejected() {
+        assert!(Tile::from_rgb(0, 0, 2, 2, &[0u8; 5]).is_err());
     }
 }

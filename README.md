@@ -10,10 +10,12 @@ mouse and keyboard from a web browser.
   [Bun](https://bun.sh/). The built assets ship alongside the binary and are
   served from disk (`share/rdpweb/web`), resolved relative to the executable.
 
-> **Status: Phase 1 MVP.** Connects to one RDP host, renders its screen in the
-> browser (dirty-rectangle RGBA tiles over the WebSocket), and forwards mouse and
-> keyboard input. Credentials live server-side and are never sent to the browser.
-> See [`docs/phase1-mvp.md`](docs/phase1-mvp.md) for scope and design.
+> **Status: Phase 1 MVP + phase 2 transport.** Connects to one RDP host,
+> renders its screen in the browser (dirty-rectangle tiles as binary WebSocket
+> frames, PNG-compressed), and forwards mouse and keyboard input. Credentials
+> live server-side and are never sent to the browser. See
+> [`docs/phase1-mvp.md`](docs/phase1-mvp.md) and
+> [`docs/phase2-consolidation.md`](docs/phase2-consolidation.md).
 
 ## Install (Linux & macOS)
 

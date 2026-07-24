@@ -1,9 +1,9 @@
 //! WebSocket endpoint bridging a browser to a server-side RDP session.
 //!
 //! Each connection spawns a [`crate::rdp`] session and shuttles messages between
-//! it and the browser: inbound `ClientMsg` (input) go to the RDP engine, and
-//! outbound `ServerMsg` (screen tiles, resize, errors) go to the browser as JSON
-//! text frames.
+//! it and the browser: inbound `ClientMsg` (input, JSON text) go to the RDP
+//! engine, and outbound `ServerMsg` go to the browser — screen tiles as binary
+//! frames, control messages (resize/error) as JSON text (see [`crate::protocol`]).
 
 use axum::{
     extract::{
@@ -17,7 +17,7 @@ use log::{info, warn};
 use tokio::sync::mpsc;
 
 use crate::{
-    protocol::{ClientMsg, ServerMsg},
+    protocol::{ClientMsg, ServerMsg, WireFrame},
     rdp,
     server::AppState,
 };
@@ -58,18 +58,29 @@ async fn session(socket: WebSocket, state: AppState) {
         rt.block_on(rdp::run(rdp_config, input_rx, frame_tx));
     });
 
-    // Outbound: RDP screen updates -> browser.
-    let outbound = tokio::spawn(async move {
+    // Outbound: RDP screen updates -> browser. Byte counters are logged at the
+    // end of the session so the transport can be measured in the field (this
+    // link — backend to a possibly weak-signal WAN browser — is the bottleneck
+    // phase 2 optimizes).
+    let mut outbound = tokio::spawn(async move {
+        let (mut tiles, mut tile_bytes, mut text_bytes) = (0u64, 0u64, 0u64);
         while let Some(msg) = frame_rx.recv().await {
-            match serde_json::to_string(&msg) {
-                Ok(json) => {
-                    if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                        break; // browser gone
-                    }
+            let frame = match msg.encode() {
+                WireFrame::Binary(bytes) => {
+                    tiles += 1;
+                    tile_bytes += bytes.len() as u64;
+                    Message::Binary(bytes.into())
                 }
-                Err(e) => warn!("ws: serialize error: {e}"),
+                WireFrame::Text(json) => {
+                    text_bytes += json.len() as u64;
+                    Message::Text(json.into())
+                }
+            };
+            if ws_tx.send(frame).await.is_err() {
+                break; // browser gone
             }
         }
+        info!("ws: outbound totals: {tiles} tiles / {tile_bytes} bytes binary, {text_bytes} bytes text");
     });
 
     // Inbound: browser input -> RDP session.
@@ -92,7 +103,17 @@ async fn session(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Dropping `input_tx` (end of scope) tells the RDP session to stop.
-    outbound.abort();
+    // Dropping `input_tx` tells the RDP session to stop; it then drops
+    // `frame_tx`, which ends the outbound task naturally so its totals line
+    // still gets logged (an abort here would cancel it mid-recv). Bounded:
+    // if the RDP side is stuck (e.g. hung TCP connect) the task holds
+    // `frame_rx` open longer, and then it is simply aborted.
+    drop(input_tx);
+    if tokio::time::timeout(std::time::Duration::from_secs(5), &mut outbound)
+        .await
+        .is_err()
+    {
+        outbound.abort();
+    }
     info!("ws: client disconnected");
 }

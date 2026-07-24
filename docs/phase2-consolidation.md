@@ -73,11 +73,15 @@ The old table, corrected for these constraints:
 Phase 2 prepares this repo to absorb remotex, focused narrowly on the data
 path. Explicitly **in**:
 
-1. **Browser↔backend transport efficiency.** This is the bottleneck link and
-   the main deliverable. The current path (base64 RGBA tiles inside JSON text
-   frames — see `src/protocol.rs`) was fine for the MVP but is what phase 2
-   improves: binary WebSocket frames and/or compressed tile payloads, measured
-   against weak-signal WAN conditions.
+1. **Browser↔backend transport efficiency — (done).** This is the bottleneck
+   link and the main deliverable. The MVP path (base64 RGBA tiles inside JSON
+   text frames) is replaced: tiles are now **binary WebSocket frames** (10-byte
+   header + payload, see `src/protocol.rs`) carrying **PNG-compressed RGB**
+   (raw RGB when smaller, e.g. tiny tiles); control messages (`resize`/`error`)
+   stay JSON text. Measured live against the dev RDP target: the initial
+   full-screen paint went from ~31.4 MB (base64-JSON equivalent) to ~3.1 MB on
+   the wire — **10x**. Per-session byte totals are logged on disconnect
+   (`ws: outbound totals: …`) for measuring in the field.
 2. **Server-side VNC session.** A simple Rust RFB client alongside the RDP
    engine — Guacamole-style: standard/raw baseline encodings only, no
    per-implementation workarounds. Both engines feed the same server→browser
@@ -149,8 +153,11 @@ profile selected at connect time.
 1. **(done)** TOML config in remotex's shape (`[server]` + `[[targets]]`),
    replacing the CLI/env config entirely — no env vars, no `.env` (env files
    shadowing the environment caused subtle bugs under bun).
-2. Transport efficiency: move tiles to binary WS frames / compressed payloads;
-   measure against the current base64-JSON baseline over a constrained link.
+2. **(done)** Transport efficiency: tiles moved to binary WS frames with
+   PNG-compressed payloads (raw fallback for tiles where PNG would be larger);
+   ~10x smaller than the base64-JSON baseline on a real full-screen paint.
+   Session byte totals are logged so it can also be measured over a real
+   constrained link.
 3. Introduce the `Session` trait; make the current RDP path implement it.
 4. Add `vnc::Session`: a minimal Rust RFB client (handshake, VNC auth, raw +
    mandatory baseline encodings, pointer/key input), feeding the shared

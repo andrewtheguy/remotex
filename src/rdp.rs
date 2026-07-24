@@ -8,8 +8,6 @@
 //!
 //! See docs/phase1-mvp.md for the design.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use ironrdp::connector::{
     ClientConnector, ConnectionResult, Config, Credentials, DesktopSize, ServerName,
 };
@@ -31,7 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::config::TargetConfig;
 use crate::keymap;
-use crate::protocol::{ClientMsg, MouseButton, ServerMsg, TileFormat};
+use crate::protocol::{ClientMsg, MouseButton, ServerMsg, Tile};
 
 /// A dirty rectangle taller than this is split into strips before being sent,
 /// so a full-screen repaint doesn't produce one huge WebSocket message.
@@ -69,8 +67,8 @@ pub async fn run(
     info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
     if frame_tx
         .send(ServerMsg::Resize {
-            w: i32::from(desktop.width),
-            h: i32::from(desktop.height),
+            w: desktop.width,
+            h: desktop.height,
         })
         .await
         .is_err()
@@ -296,8 +294,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
     }
 }
 
-/// Repack the dirty rectangle `[left..=right] × [top..=bottom]` into packed,
-/// opaque RGBA strips and send each as a [`ServerMsg::Tile`].
+/// Repack the dirty rectangle `[left..=right] × [top..=bottom]` into packed
+/// RGB strips and send each as a [`ServerMsg::Tile`] (binary WS frame, PNG
+/// compressed unless raw is smaller — see `protocol::Tile`).
 async fn send_tiles(
     image: &DecodedImage,
     left: u16,
@@ -320,27 +319,27 @@ async fn send_tiles(
         let h = STRIP_ROWS.min(total_h - done);
         let y0 = top + done;
 
-        let mut buf = Vec::with_capacity(usize::from(width) * usize::from(h) * 4);
+        // Pack to RGB888: the framebuffer alpha is meaningless for a screen
+        // (and IronRDP may leave it 0), so it is dropped rather than shipped.
+        let mut buf = Vec::with_capacity(usize::from(width) * usize::from(h) * 3);
         for r in 0..h {
             let src_y = usize::from(y0 + r);
             let start = src_y * stride + usize::from(left) * bpp;
             let line = &data[start..start + usize::from(width) * bpp];
             for px in line.chunks_exact(bpp) {
-                // Force full alpha: the browser canvas treats a 0 alpha as
-                // transparent, which would blank out the tile.
-                buf.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                buf.extend_from_slice(&px[..3]);
             }
         }
 
+        let tile = Tile::from_rgb(left, y0, width, h, &buf)?;
+        debug!(
+            "rdp: tile {width}x{h} at ({left},{y0}): {} -> {} bytes ({:?})",
+            buf.len(),
+            tile.data.len(),
+            tile.format
+        );
         frame_tx
-            .send(ServerMsg::Tile {
-                x: i32::from(left),
-                y: i32::from(y0),
-                w: i32::from(width),
-                h: i32::from(h),
-                format: TileFormat::Rgba,
-                data: BASE64.encode(&buf),
-            })
+            .send(ServerMsg::Tile(tile))
             .await
             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
 
