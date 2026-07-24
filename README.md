@@ -42,6 +42,29 @@ See [`docs/install.md`](docs/install.md) for options, custom locations, and the
 upgrade/rollback model, and [`packaging/`](packaging/) for the on-disk layout and
 building tarballs.
 
+## Container image (Linux amd64/arm64)
+
+```bash
+docker run -d --name remotex -p 52380:52380 \
+  -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
+  ghcr.io/andrewtheguy/remotex:latest
+```
+
+The image mirrors the installed layout, so bare `serve` (the default command)
+picks up `/opt/remotex/etc/remotex.toml` — mount your config there read-only, and
+set `host = "0.0.0.0"` in `[server]` or nothing outside the container can reach
+it. A template ships at
+`/opt/remotex/current/share/doc/remotex/remotex.toml.example`, and the
+`gen-passwd` helper is the same binary:
+
+```bash
+docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
+```
+
+Tags are `v<version>` per release and `latest` for the newest stable one.
+The images carry the very binaries and frontend bundle attached to that
+release — nothing is recompiled for them (see [`packaging/`](packaging/)).
+
 ## Layout
 
 ```

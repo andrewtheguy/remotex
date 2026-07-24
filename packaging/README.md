@@ -37,6 +37,7 @@ override. The tree can live anywhere via `PREFIX` / `BINDIR`.
 | `install.sh` | Lay an extracted tarball down under `PREFIX`: stage → atomic `current` swap → prune to (new + previous). Locked against concurrent runs. |
 | `uninstall.sh` | Remove the whole prefix, or a single version (`uninstall.sh <version>`). |
 | `etc/remotex.toml.example` | Config template installed under the active version's `share/doc/remotex/` and seeded to the stable `etc/remotex.toml` on a fresh install. |
+| `Dockerfile` | Container image built from an **extracted release tarball** — it compiles nothing, it just lays the tarball out in the install layout above. |
 
 The repo-root `install.sh` is the network installer (`curl … | bash`): it
 downloads the right tarball, verifies its SHA-256 against GitHub's published
@@ -67,3 +68,23 @@ draft from a failed run), builds the three tarballs (linux x86_64, linux arm64,
 macOS arm64), uploads them to the draft, and only then publishes it — which is
 what creates the tag, so a failed build never leaves a tag or a half-populated
 release. `.github/workflows/pages.yml` serves `install.sh` from GitHub Pages.
+
+The frontend is built once in its own job and handed to every tarball job as an
+artifact: the bundle is platform-agnostic, so rebuilding it per target would
+only risk three subtly different bundles. `SKIP_FRONTEND_BUILD=1` is how
+`build-tarball.sh` consumes it.
+
+Container images (`ghcr.io/andrewtheguy/remotex`) are built *after* the release
+is published, so an image tag always maps to a real release — and they reuse the
+release artifacts rather than recompiling: each arch's published tarball is
+unpacked into the build context for `packaging/Dockerfile`, which means the image
+holds byte-identical copies of the binary users download and of the one frontend
+bundle. amd64 and arm64 build on their own native runners (no QEMU), get
+smoke-tested (`--version` must match the release; `index.html` must be where the
+server looks), and are pushed as `v<version>-amd64` / `v<version>-arm64`; a final
+job stitches those into the `v<version>` manifest, plus `latest` for non-prereleases.
+
+Linux tarball builds are pinned to `ubuntu-24.04` rather than `ubuntu-latest`:
+those binaries set the glibc floor for the tarballs *and* for the images (whose
+base is `debian:trixie-slim`, glibc 2.41 against the runner's 2.39), so the
+builder must not drift under us into something the base can no longer run.

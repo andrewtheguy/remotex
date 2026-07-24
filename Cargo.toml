@@ -1,6 +1,6 @@
 [package]
 name = "remotex"
-version = "0.0.18"
+version = "0.0.19"
 edition = "2024"
 
 [dependencies]
@@ -46,3 +46,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
