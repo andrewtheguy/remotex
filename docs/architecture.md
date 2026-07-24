@@ -77,8 +77,9 @@ src/
 
 Each engine runs on a dedicated thread with a current-thread tokio runtime
 (IronRDP's futures are not `Send`; one shared spawn path keeps the seam
-uniform). The engine lives as long as the remote session: it is spawned when
-the first browser attaches and ends when the remote host disconnects — not
+uniform). The engine lives as long as the remote session: it is spawned only
+once the browser picks a target (`ClientMsg::Connect`, after the post-login
+picker) — not merely on attach — and ends when the remote host disconnects, not
 when the browser does.
 
 ## The session slot
@@ -157,10 +158,11 @@ the login screen otherwise — with the app version at the bottom, injected
 from Cargo.toml via a Vite define — and returns to it when a claim answers
 401. Once mounted, the browser holds the slot and lands on the **target
 picker** (`TargetPicker.tsx`, fed by `GET /api/targets`); picking a profile
-starts its session and switches to the desktop. Logout is the **Disconnect**
+starts its session and switches to the desktop. Logging out is the **Log out**
 button in the floating menu (`FloatingMenu.tsx`) — a draggable ☰ FAB that
 toggles a toolbar drawer; it ends the browser's login, not the engine. Its
-**Switch target** button disconnects back to the picker without logging out.
+**Switch target** button disconnects the engine (`ClientMsg::Disconnect`) back
+to the picker without logging out.
 The drawer also sends browser-swallowed **special keys** (F5, Ctrl+W, Alt+F4…)
 and **modifier taps** via `sendKeyCombo`, and shows the touch-gesture
 cheat-sheet. Its **Soft
@@ -267,7 +269,7 @@ matter:
 - `RemoteDesktop.tsx` — the session shell: the picker or the full-screen canvas
   + input overlay + the connection-status overlay + the floating menu.
 - `FloatingMenu.tsx` — the draggable ☰ FAB and toolbar drawer (Switch target,
-  Disconnect, special-key/modifier combos, the soft-keyboard toggle, plus a
+  Log out, special-key/modifier combos, the soft-keyboard toggle, plus a
   clipboard placeholder).
 - `SoftKeyboardPanel.tsx` / `softKeyboard.ts` — the on-screen keyboard panel
   and its layout tables (compact docked screens + the ≥800px PC grid).

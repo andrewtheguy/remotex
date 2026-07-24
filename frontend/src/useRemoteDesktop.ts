@@ -180,7 +180,7 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
 // `onUnauthorized` fires when a claim answers 401 — the login is gone, so the
 // caller swaps back to the login screen. It must be referentially stable
 // (useCallback) or the connection/input effects tear down and redo. Logout is
-// the floating menu's Disconnect button (see FloatingMenu.tsx), not this hook.
+// the floating menu's Log out button (see FloatingMenu.tsx), not this hook.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
@@ -230,10 +230,28 @@ export function useRemoteDesktop(
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
 
+    // Drop any retained framebuffer. Every interstitial (connecting,
+    // reconnecting, busy, taken over) and the picker fully hide the canvas
+    // behind a solid overlay, and the desktop is always rebuilt from a full
+    // repaint (the server's Refresh) on the next connect — so there is nothing
+    // worth keeping behind the overlay, and holding stale pixels would only
+    // flash on the way back.
+    const clearDesktop = () => {
+      sizeRef.current = null;
+      setSize(null);
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      ctxRef.current = null;
+    };
+
     const scheduleRetry = () => {
       if (disposed) {
         return;
       }
+      clearDesktop();
       setStatus("reconnecting");
       const delay = Math.min(1000 * 2 ** attempts, MAX_RETRY_DELAY_MS);
       attempts += 1;
@@ -277,6 +295,7 @@ export function useRemoteDesktop(
         return;
       }
       if (claimed === "busy") {
+        clearDesktop();
         setStatus("busy");
         return;
       }
@@ -335,6 +354,7 @@ export function useRemoteDesktop(
         ws = null;
         wsRef.current = null;
         if (ev.code === CLOSE_EVICTED) {
+          clearDesktop();
           setStatus("takenOver");
           return;
         }
@@ -414,10 +434,13 @@ export function useRemoteDesktop(
           handleResize(msg);
           break;
         case "error":
-          // The engine failed; the server follows this with `picker`, so show
-          // the message against the picker rather than a dead-end error screen.
+          // The engine failed (or a connect was refused); show the message
+          // against the picker rather than a dead-end error screen, and end any
+          // pending connect so the picker re-enables. An engine failure is
+          // followed by `picker`; a refusal leaves the slot already there.
           console.error("remote session error:", msg.message);
           setConnectError(msg.message);
+          setPendingTarget(null);
           break;
         case "connected":
           // A target session started (picker connect, reattach, or takeover of
@@ -434,13 +457,12 @@ export function useRemoteDesktop(
           break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
-          // ended): show the picker. Drop any stale desktop size so a later
+          // ended): show the picker. Drop any retained framebuffer so a later
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setConnectedTarget(null);
           setMode("picker");
-          sizeRef.current = null;
-          setSize(null);
+          clearDesktop();
           break;
       }
     };
@@ -449,6 +471,7 @@ export function useRemoteDesktop(
     const start = (force: boolean) => {
       clearTimeout(retryTimer);
       attempts = 0;
+      clearDesktop();
       setStatus("connecting");
       if (ws) {
         const old = ws;

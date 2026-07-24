@@ -11,10 +11,10 @@ import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 // Phase 9: the floating chrome — a draggable ☰ button that toggles a toolbar
 // drawer. The drawer carries this project's controls (browser-swallowed keys,
 // modifier taps, the gesture cheat-sheet), a Switch target button that returns
-// to the post-login picker, and the logout affordance that used to live in the
-// Ctrl+Alt+Shift+L chord and the below-canvas bar. Phase 10 wired the drawer's
-// Soft keyboard button to the on-screen keyboard panel; Clipboard is still a
-// placeholder until its phase lands.
+// to the post-login picker, and the Log out affordance (ending the web login)
+// that used to live in the Ctrl+Alt+Shift+L chord and the below-canvas bar.
+// Phase 10 wired the drawer's Soft keyboard button to the on-screen keyboard
+// panel; Clipboard is still a placeholder until its phase lands.
 const FAB_SIZE = 40;
 const FAB_MARGIN = 12;
 // Pointer travel (px) before a press becomes a drag rather than a click.
@@ -407,7 +407,7 @@ export default function FloatingMenu({
               className="toolbar-btn toolbar-btn-danger"
               onClick={onLogout}
             >
-              Disconnect
+              Log out
             </button>
           </div>
         </div>

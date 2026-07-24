@@ -439,7 +439,7 @@ body {
   text-align: center;
 }
 
-/* The action row: Gestures + Soft keyboard share a line, Disconnect spans it. */
+/* The action row: buttons share lines; the danger (Log out) button spans it. */
 .toolbar-actions {
   flex-direction: row;
   flex-wrap: wrap;

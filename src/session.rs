@@ -232,10 +232,25 @@ impl SessionManager {
         Ok(Attachment { id, events })
     }
 
+    /// Reliably deliver a session status message to `client` — a spawned
+    /// awaiting send (like [`Self::claim`]'s eviction) rather than `try_send`,
+    /// so a status transition isn't silently discarded when the frame channel is
+    /// momentarily full (a stalled browser socket). No-op when detached.
+    fn notify(client: Option<&ClientSlot>, msg: ServerMsg) {
+        if let Some(client) = client {
+            let tx = client.event_tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(AttachEvent::Msg(msg)).await;
+            });
+        }
+    }
+
     /// Pick a target and start its engine (the picker's "connect"). The browser
     /// is told [`ServerMsg::Connected`]; the engine then paints. Refused if this
     /// attachment is no longer the current client, the name is unknown, or a
-    /// session is already connected.
+    /// session is already connected — each refusal (except a stale attachment,
+    /// which isn't the current browser) tells the browser with a
+    /// [`ServerMsg::Error`] so a rejected pick never hangs the picker.
     pub fn connect(
         self: &Arc<Self>,
         attach_id: u64,
@@ -246,14 +261,22 @@ impl SessionManager {
             return Err(ConnectError::NotCurrent);
         }
         if st.engine.is_some() {
+            Self::notify(
+                st.client.as_ref(),
+                ServerMsg::Error { message: "already connected to a target".to_owned() },
+            );
             return Err(ConnectError::AlreadyConnected);
         }
-        let target = self
-            .targets
-            .iter()
-            .find(|t| t.name == target_name)
-            .cloned()
-            .ok_or_else(|| ConnectError::UnknownTarget(target_name.to_owned()))?;
+        let target = match self.targets.iter().find(|t| t.name == target_name).cloned() {
+            Some(target) => target,
+            None => {
+                Self::notify(
+                    st.client.as_ref(),
+                    ServerMsg::Error { message: format!("no target named {target_name:?}") },
+                );
+                return Err(ConnectError::UnknownTarget(target_name.to_owned()));
+            }
+        };
 
         info!("session: connecting to target {:?}", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -266,6 +289,10 @@ impl SessionManager {
 
         let name = target.name.clone();
         st.selected = Some(target);
+        // try_send is safe and ordered here: this runs under the state lock
+        // before the just-spawned pump can acquire it, and with no engine until
+        // now nothing else feeds this channel — so the buffer holds at most the
+        // attach status, never 64 frames, and Connected lands before any tile.
         if let Some(client) = &st.client {
             let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected { name }));
         }
@@ -288,9 +315,10 @@ impl SessionManager {
         if had_engine {
             info!("session: disconnected; returning to the picker");
         }
-        if let Some(client) = &st.client {
-            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Picker));
-        }
+        // Reliable send: the engine may have left the frame channel full, so a
+        // try_send could drop the picker transition and strand the browser on a
+        // dead desktop.
+        Self::notify(st.client.as_ref(), ServerMsg::Picker);
     }
 
     /// Route one browser input message to the current engine, dropping it in the

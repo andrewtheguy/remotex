@@ -30,7 +30,7 @@ export default function App() {
     };
   }, []);
 
-  // Disconnect/logout: end this browser's login. The slot token goes too, so
+  // Log out: end this browser's login. The slot token goes too, so
   // the next login claims fresh instead of silently reattaching.
   const logout = useCallback(() => {
     sessionStorage.removeItem(SESSION_KEY);
