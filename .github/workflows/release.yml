@@ -31,8 +31,28 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
 
-  build:
+  # The frontend bundle is platform-agnostic — build it once here and reuse it
+  # for every target tarball, rather than rebuilding on each matrix runner.
+  frontend:
     needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build frontend
+        run: cd frontend && bun install --frozen-lockfile && bun run build
+
+      - name: Upload frontend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+
+  build:
+    needs: [prepare, frontend]
     strategy:
       fail-fast: false
       matrix:
@@ -47,16 +67,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Install frontend dependencies
-        run: cd frontend && bun install --frozen-lockfile
+      - name: Download prebuilt frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
       - name: Build release tarball (${{ matrix.target-note }})
-        run: bash packaging/build-tarball.sh
+        run: SKIP_FRONTEND_BUILD=1 bash packaging/build-tarball.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

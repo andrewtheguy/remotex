@@ -37,8 +37,16 @@ stage="$(mktemp -d)"
 root="${stage}/${pkg}"
 trap 'rm -rf "$stage"' EXIT
 
-echo ">> building frontend"
-( cd frontend && bun run build )
+# The frontend bundle is platform-agnostic, so CI builds it once and reuses it
+# across every target. Set SKIP_FRONTEND_BUILD=1 to use an existing frontend/dist
+# instead of rebuilding (requires `bun run build` to have run first).
+if [ "${SKIP_FRONTEND_BUILD:-0}" = 1 ]; then
+  [ -d frontend/dist ] || { echo "SKIP_FRONTEND_BUILD=1 but frontend/dist is missing" >&2; exit 1; }
+  echo ">> using prebuilt frontend/dist"
+else
+  echo ">> building frontend"
+  ( cd frontend && bun run build )
+fi
 
 echo ">> building release binary"
 cargo build --release
