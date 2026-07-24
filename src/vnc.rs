@@ -249,7 +249,7 @@ async fn read_loop(
             }
             // Bell — nothing to ring in the browser (yet).
             2 => {}
-            // ServerCutText — clipboard is a later phase; drain and drop.
+            // ServerCutText — clipboard support is not planned; drain and drop.
             3 => {
                 let mut padding = [0u8; 3];
                 reader.read_exact(&mut padding).await?;

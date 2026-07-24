@@ -96,15 +96,17 @@ path. Explicitly **in**:
    `../remotex/remotex.example.toml`). Credentials stay server-side.
    Delivered as migration step 1 below.
 
-Explicitly **out** (later phases):
+Explicitly **out**:
 
-- Clipboard support.
-- Soft keyboard mapping.
-- The fancy input overlay / frontend chrome from remotex.
+- Clipboard support — **not planned yet**, deliberately absent from the phase
+  list below: a different approach may be considered instead of porting
+  remotex's clipboard sync.
+- Soft keyboard mapping and the fancy floating UI (三) from remotex — later,
+  phase 7 below.
 - Session management (resume, takeover) — the server-side architecture
-  *enables* it, but building it is a later phase.
+  *enables* it, but building it is a later phase (6).
 - Multi-target UI (config may already hold multiple targets; the UI to pick
-  them comes later).
+  them comes later — phase 8).
 
 And permanently out of scope — never planned, in any phase: **multi session**.
 This is a single-user program with one active session only, with session
@@ -133,16 +135,20 @@ started**, in planned order:
   so the phase-3 scrollbars disappear; servers without it keep the fixed
   connect-time size and the scrollbars.
 - **Phase 5 — frontend integration:** port remotex's frontend shell
-  (connection flow, overlay, soft keyboard, clipboard) onto the uniform
-  protocol. With decode server-side there is **one renderer** — the RFB
-  decoder, `zrleDecoder`, and the rest of the browser-side engine do not come
-  along.
+  (connection flow, base input handling) onto the uniform protocol. With
+  decode server-side there is **one renderer** — the RFB decoder,
+  `zrleDecoder`, and the rest of the browser-side engine do not come along.
+  The soft keyboard and the floating UI move later (phase 7); clipboard is
+  not planned (see "Explicitly out" above).
 - **Phase 6 — session management:** detach/reattach and remotex-style takeover
   of the single session slot (force-claim evicts the previous browser) —
   backed by the server-owned framebuffer.
-- **Phase 7 — multi-target support:** target picker over the `[[targets]]`
+- **Phase 7 — soft keyboard + the floating UI:** port remotex's soft keyboard
+  mapping/panel and the fancy floating chrome (the draggable 三 button that
+  opens the toolbar).
+- **Phase 8 — multi-target support:** target picker over the `[[targets]]`
   config (still one active session at a time).
-- **Phase 8 — the rename:** when the project is ready to replace the old
+- **Phase 9 — the rename:** when the project is ready to replace the old
   one, rename the GitHub repo to **remotex-v2** and the binary to **remotex**,
   replacing the original. Not done now; documented here so it isn't forgotten.
 
@@ -193,6 +199,6 @@ profile selected at connect time.
    through the real server.
 5. Verify against real targets — including macOS Screen Sharing, the case that
    motivated dropping the clever-encoding path.
-6. Later phases (3–8 above): full-screen canvas, dynamic resize, frontend
-   integration, session management, multi-target UI, and finally the
-   remotex-v2 rename.
+6. Later phases (3–9 above): full-screen canvas, dynamic resize, frontend
+   integration, session management, soft keyboard + floating UI, multi-target
+   UI, and finally the remotex-v2 rename.
