@@ -88,6 +88,33 @@ pub struct Geometry {
     pub origin: (f64, f64),
 }
 
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    /// Whether Screen Recording is granted, checked *without* prompting.
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    /// Raise the Screen Recording prompt if it has not been answered yet.
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// Whether Screen Recording is granted, checked without prompting.
+pub fn screen_recording_granted() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// Ask for Screen Recording, raising the system prompt if it is unanswered.
+///
+/// This has to be an explicit call. `SCShareableContent::get` does **not**
+/// prompt — it just fails with "the user declined TCCs", which is
+/// indistinguishable from an actual refusal and leaves the agent absent from
+/// the Screen Recording list entirely, so there is nothing for the user to
+/// switch on. Calling this at startup is what puts it there.
+///
+/// Returns the resulting grant state. Once the user has answered, macOS
+/// remembers it and this stops prompting — so it is safe on every launch.
+pub fn request_screen_recording() -> bool {
+    unsafe { CGRequestScreenCaptureAccess() }
+}
+
 /// Measure a display without starting a stream.
 ///
 /// `Hello` has to carry the screen size before the gateway sends `Attach`, but
@@ -110,9 +137,19 @@ pub struct Capture {
     pub geometry: Geometry,
 }
 
+/// How many frames are logged at `info` after a stream starts.
+///
+/// "The stream started but nothing painted" is otherwise invisible: every
+/// reason a frame is skipped is individually unremarkable, and at `debug` the
+/// evidence never reaches a log anyone reads. A handful of lines per session
+/// answers "is ScreenCaptureKit delivering anything, and what?" immediately.
+const FRAMES_TO_LOG: u64 = 3;
+
 /// State shared with the capture callback.
 struct Shared {
     sink: Arc<dyn FrameSink>,
+    /// Frames the callback has been handed, for [`FRAMES_TO_LOG`].
+    frames_seen: std::sync::atomic::AtomicU64,
     /// Set to make the next frame report the whole surface as dirty. Used for
     /// the first frame after `Attach`, for `Refresh`, and to recover from a
     /// dropped backlog. Shared with the session — see [`Capture::start`].
@@ -177,6 +214,7 @@ impl Capture {
 
         let shared = Arc::new(Shared {
             sink,
+            frames_seen: std::sync::atomic::AtomicU64::new(0),
             full_repaint,
             last_size: Mutex::new((geometry.width, geometry.height)),
         });
@@ -258,14 +296,6 @@ fn backing_scale(display: &SCDisplay) -> f64 {
     display_scale(display.display_id())
 }
 
-/// Pixels per point for the main display.
-///
-/// Used by [`crate::cursor`], which has no `SCDisplay` to hand: the pointer is a
-/// system-wide artifact, and v1 shares a single display.
-pub fn main_display_scale() -> f64 {
-    display_scale(objc2_core_graphics::CGMainDisplayID())
-}
-
 fn display_scale(id: u32) -> f64 {
     use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGDisplayMode};
 
@@ -304,9 +334,14 @@ impl Handler {
         // accepting it is load-bearing: on a screen that then sits still, it is
         // the only content-bearing frame that ever arrives, so rejecting it
         // means the session paints nothing at all and looks hung.
-        match sample.frame_status() {
+        let nth = self.0.frames_seen.fetch_add(1, Ordering::Relaxed);
+        let status = sample.frame_status();
+        match status {
             Some(status) if status.has_content() => {}
             other => {
+                if nth < FRAMES_TO_LOG {
+                    info!("capture: frame {nth} status {other:?} — no pixels, skipping");
+                }
                 anyhow::bail!("frame status {other:?} carries no pixels");
             }
         }
@@ -347,7 +382,9 @@ impl Handler {
             let Some(rects) = sample.dirty_rects() else {
                 // No attachment at all — not something we can work around, so
                 // fall back to a full frame rather than painting nothing.
-                debug!("capture: no dirtyRects attachment; repainting in full");
+                if nth < FRAMES_TO_LOG {
+                    info!("capture: frame {nth} has no dirtyRects attachment; repainting in full");
+                }
                 self.0.full_repaint.store(true, Ordering::Relaxed);
                 return Ok(());
             };
@@ -368,6 +405,13 @@ impl Handler {
                     rgb: extract_rgb(pixels, stride, strip),
                 });
             }
+        }
+        if nth < FRAMES_TO_LOG {
+            info!(
+                "capture: frame {nth} status {status:?} — surface {surface_w}x{surface_h}, \
+                 stride {stride}, full_repaint {full}, {} tile(s)",
+                tiles.len()
+            );
         }
         if !tiles.is_empty() {
             self.0.sink.tiles(tiles);

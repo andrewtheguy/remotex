@@ -254,14 +254,34 @@ async fn serve(
     }
 }
 
-/// Log the state of both TCC grants at startup.
+/// Ask for both TCC grants at startup, and report where they stand.
 ///
-/// Screen Recording is reported by the capture probe when a session starts;
-/// Accessibility has no such natural moment — a missing grant makes
-/// `CGEventPost` silently do nothing, so the screen paints, the session looks
-/// healthy, and every click vanishes. Saying so here is the difference between a
-/// two-click fix and an afternoon.
+/// Asking matters, and not only for politeness. Neither grant can be requested
+/// implicitly by using the API:
+///
+/// - `SCShareableContent::get` does not prompt. It fails with "the user
+///   declined TCCs", which reads like a refusal but also happens when the
+///   question was never asked — and until it *is* asked, the agent does not
+///   appear in the Screen Recording list at all, so there is nothing for the
+///   user to switch on. `CGRequestScreenCaptureAccess` is what puts it there.
+/// - `CGEventPost` never fails. Without Accessibility it silently does nothing,
+///   so the screen paints, the session looks perfectly healthy, and every click
+///   and keystroke vanishes.
+///
+/// macOS remembers the answer, so a granted (or firmly refused) permission does
+/// not re-prompt on later launches.
 fn report_permissions() {
+    if capture::screen_recording_granted() {
+        info!("permissions: Screen Recording granted");
+    } else {
+        warn!(
+            "permissions: Screen Recording NOT granted — requesting it. Enable \
+             remotex-agent in System Settings > Privacy & Security > Screen \
+             Recording, then restart the agent."
+        );
+        capture::request_screen_recording();
+    }
+
     if input::accessibility_granted() {
         info!("permissions: Accessibility granted (input injection will work)");
     } else {
@@ -270,6 +290,7 @@ fn report_permissions() {
              will be silently ignored. Grant it to remotex-agent in System \
              Settings > Privacy & Security > Accessibility."
         );
+        input::request_accessibility();
     }
 }
 

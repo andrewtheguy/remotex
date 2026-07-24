@@ -26,10 +26,14 @@ use rxa_proto::msg::CursorImage;
 
 /// Read the current system cursor as a PNG plus its hotspot in image pixels.
 ///
+/// `scale` is the *capture's* pixels-per-point, not the main display's: the
+/// browser draws this image onto a canvas measured in captured pixels, so a
+/// cursor sized for the wrong display comes out too big or too small.
+///
 /// Returns `None` when the shape cannot be read — a missing shape is reported to
 /// the browser as "no cursor" rather than failing the session, since a session
 /// without a pointer is degraded but perfectly usable.
-pub fn current() -> Option<CursorImage> {
+pub fn current(scale: f64) -> Option<CursorImage> {
     // Every AppKit call here returns autoreleased objects. Without a pool this
     // runs on a timer for the life of the agent and leaks steadily.
     // `currentSystemCursor` is deprecated in favour of either capturing the
@@ -57,7 +61,7 @@ pub fn current() -> Option<CursorImage> {
         // reports a 14x20 point size with a 280x400 rep available, and taking
         // the largest produced a cursor 20x too big whose hotspot was scaled by
         // 20 to match, putting the pointer's anchor far off the image.
-        let target_w = point_size.width * crate::capture::main_display_scale();
+        let target_w = point_size.width * scale;
         let reps = image.representations();
         let mut best: Option<objc2::rc::Retained<NSBitmapImageRep>> = None;
         for i in 0..reps.count() {
@@ -95,8 +99,8 @@ pub fn current() -> Option<CursorImage> {
 
         // Points -> pixels for the hotspot. Guard the division: a zero point
         // size would otherwise produce NaN and a nonsense hotspot.
-        let scale_x = scale(pixels_wide as f64, point_size.width);
-        let scale_y = scale(pixels_high as f64, point_size.height);
+        let scale_x = pixels_per_point(pixels_wide as f64, point_size.width);
+        let scale_y = pixels_per_point(pixels_high as f64, point_size.height);
 
         Some(CursorImage {
             w: clamp_u16(pixels_wide as f64),
@@ -118,6 +122,10 @@ pub fn current() -> Option<CursorImage> {
 #[derive(Default)]
 pub struct Tracker {
     inner: std::sync::Mutex<Cached>,
+    /// Pixels per point of the running capture, as f64 bits. Written by the
+    /// session when a stream starts, read by the main thread's poll. Defaults
+    /// to 1.0 so a poll before any session still produces a sane shape.
+    scale_bits: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -134,14 +142,30 @@ pub const UNSEEN: u64 = 0;
 
 impl Tracker {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: std::sync::Mutex::default(),
+            scale_bits: std::sync::atomic::AtomicU64::new(1.0f64.to_bits()),
+        }
+    }
+
+    /// Tell the tracker what the running capture's scale is.
+    ///
+    /// Called when a stream starts. Without it the pointer would be sized for
+    /// whatever the *main* display happens to be, which is wrong whenever the
+    /// shared display is not the main one or has a different backing scale.
+    pub fn set_scale(&self, scale: f64) {
+        if scale > 0.0 {
+            self.scale_bits
+                .store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Re-read the system cursor and record it if it changed.
     ///
     /// **Main thread only.**
     pub fn poll(&self) {
-        let shape = current();
+        let scale = f64::from_bits(self.scale_bits.load(std::sync::atomic::Ordering::Relaxed));
+        let shape = current(scale);
         let mut cached = self.inner.lock().unwrap();
         if cached.shape != shape {
             cached.shape = shape;
@@ -158,7 +182,7 @@ impl Tracker {
 }
 
 /// Pixels per point for one axis, falling back to 1.0 for a degenerate size.
-fn scale(pixels: f64, points: f64) -> f64 {
+fn pixels_per_point(pixels: f64, points: f64) -> f64 {
     if points > 0.0 && pixels > 0.0 {
         pixels / points
     } else {
@@ -180,16 +204,16 @@ mod tests {
 
     #[test]
     fn scale_is_pixels_per_point() {
-        assert_eq!(scale(32.0, 16.0), 2.0);
-        assert_eq!(scale(16.0, 16.0), 1.0);
+        assert_eq!(pixels_per_point(32.0, 16.0), 2.0);
+        assert_eq!(pixels_per_point(16.0, 16.0), 1.0);
     }
 
     // A degenerate image size must not turn the hotspot into NaN.
     #[test]
     fn a_degenerate_size_falls_back_to_one_to_one() {
-        assert_eq!(scale(32.0, 0.0), 1.0);
-        assert_eq!(scale(0.0, 16.0), 1.0);
-        assert_eq!(scale(32.0, -1.0), 1.0);
+        assert_eq!(pixels_per_point(32.0, 0.0), 1.0);
+        assert_eq!(pixels_per_point(0.0, 16.0), 1.0);
+        assert_eq!(pixels_per_point(32.0, -1.0), 1.0);
     }
 
     #[test]
@@ -197,7 +221,7 @@ mod tests {
         // A 16pt cursor exported at 32px: a hotspot at (4, 3) points is at
         // (8, 6) pixels. Getting this wrong offsets the pointer by half its own
         // size, which is very visible.
-        let s = scale(32.0, 16.0);
+        let s = pixels_per_point(32.0, 16.0);
         assert_eq!(clamp_u16(4.0 * s), 8);
         assert_eq!(clamp_u16(3.0 * s), 6);
     }
@@ -248,7 +272,7 @@ mod tests {
     // nowhere near the cursor.
     #[test]
     fn the_live_system_cursor_is_a_coherent_png() {
-        let Some(shape) = current() else {
+        let Some(shape) = current(1.0) else {
             eprintln!("no system cursor available (headless session); skipping");
             return;
         };

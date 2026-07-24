@@ -40,15 +40,44 @@ use rxa_proto::keymap;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
-    /// Whether this process is a trusted accessibility client. Passing false
-    /// checks without prompting, which is what a background agent wants — the
-    /// prompt is raised once at startup instead (see main.rs).
+    /// Whether this process is a trusted accessibility client. A null options
+    /// dictionary checks without prompting.
     fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    /// `kAXTrustedCheckOptionPrompt`, the one option key that matters here:
+    /// set it to true and the check also raises the "open System Settings"
+    /// dialog and registers the app in the Accessibility list.
+    static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
 }
 
 /// Whether the Accessibility grant is in place, checked without prompting.
 pub fn accessibility_granted() -> bool {
     unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) }
+}
+
+/// Ask for Accessibility, raising the system prompt if it is unanswered.
+///
+/// Needed because nothing else will: `CGEventPost` does not fail without the
+/// grant, it silently discards every event, so the agent would otherwise never
+/// appear in the Accessibility list for the user to switch on. macOS remembers
+/// the answer, so this stops prompting once it has been given.
+pub fn request_accessibility() -> bool {
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString};
+
+    // Safety: the symbol is a CFStringRef constant owned by the framework, and
+    // it outlives the dictionary we build from it.
+    let key = unsafe { CFRetained::retain(std::ptr::NonNull::new(
+        kAXTrustedCheckOptionPrompt as *mut CFString,
+    ).expect("kAXTrustedCheckOptionPrompt is never null")) };
+    let value: &CFBoolean = CFBoolean::new(true);
+    let options: CFRetained<CFDictionary<CFString, CFBoolean>> =
+        CFDictionary::from_slices(&[&*key], &[value]);
+
+    // Safety: `options` is a valid CFDictionary for the duration of the call.
+    unsafe {
+        AXIsProcessTrustedWithOptions(
+            CFRetained::as_ptr(&options).as_ptr().cast::<std::ffi::c_void>()
+        )
+    }
 }
 
 /// How many scroll lines one unit of DOM wheel delta is worth.

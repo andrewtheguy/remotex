@@ -254,6 +254,11 @@ async fn pump(
                                         }.encode()).await?;
                                     }
                                     injector = Injector::new(live.scale, live.origin);
+                                    // The pointer is drawn onto a canvas in
+                                    // captured pixels, so it must be sized by
+                                    // the capture's scale, not the main
+                                    // display's.
+                                    cursor_tracker.set_scale(live.scale);
                                     capture = Some(started);
                                     out_rx = Some(rx);
                                     encoder_thread = Some(thread);
