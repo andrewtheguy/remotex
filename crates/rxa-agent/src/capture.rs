@@ -336,14 +336,23 @@ impl Handler {
         // means the session paints nothing at all and looks hung.
         let nth = self.0.frames_seen.fetch_add(1, Ordering::Relaxed);
         let status = sample.frame_status();
-        match status {
-            Some(status) if status.has_content() => {}
-            other => {
-                if nth < FRAMES_TO_LOG {
-                    info!("capture: frame {nth} status {other:?} — no pixels, skipping");
-                }
-                anyhow::bail!("frame status {other:?} carries no pixels");
+        // The status attachment is an *optimisation*, not a precondition: it
+        // lets us skip `Idle` frames without touching the surface. It is not
+        // always there — on macOS 26 this reads `None` for every single frame —
+        // and treating a missing status as "no pixels" means the session never
+        // paints anything at all, which is exactly the bug this comment exists
+        // to prevent a future edit from reintroducing.
+        //
+        // So: skip only on a status that positively says there is nothing to
+        // read. Absent or content-bearing, fall through and let the image
+        // buffer decide, which is the real test.
+        if let Some(status) = status
+            && !status.has_content()
+        {
+            if nth < FRAMES_TO_LOG {
+                info!("capture: frame {nth} status {status:?} — no pixels, skipping");
             }
+            anyhow::bail!("frame status {status:?} carries no pixels");
         }
 
         let buffer = sample
