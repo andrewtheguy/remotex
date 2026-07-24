@@ -12,3 +12,41 @@ path = "src/main.rs"
 
 [dependencies]
 rxa-proto = { path = "../rxa-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+# Screen capture. Chosen over objc2-screen-capture-kit because it exposes the
+# `SCStreamFrameInfo.dirtyRects` attachment directly (`CMSampleBuffer::
+# dirty_rects`), which the whole design leans on — see docs/mac-agent-plan.md.
+# It builds a small Swift bridge, hence build.rs's Swift runtime rpath.
+screencapturekit = "8"
+
+# Tile codecs. Same `png` version and Fast compression the gateway uses, so a
+# PNG tile from the agent is byte-comparable with one from the VNC engine.
+png = "0.18"
+# Pure Rust, no C dependency; `simd` matters because this runs per tile on a
+# Retina desktop.
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+
+# Input injection (CGEvent*) and the pointer shape (NSCursor).
+objc2 = "0.6"
+objc2-core-graphics = "0.3"
+objc2-core-foundation = "0.3"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSCursor",
+    "NSImage",
+    "NSBitmapImageRep",
+    "NSImageRep",
+    "NSGraphics",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSDictionary",
+    "NSGeometry",
+] }
