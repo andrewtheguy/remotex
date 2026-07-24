@@ -650,7 +650,11 @@ body {
 
 .sk-desktop-layout {
   display: grid;
-  grid-template-columns: 1fr 8rem;
+  /* Side cluster is wide enough for the 4-char nav labels (Home/PgUp/PgDn);
+     at 8rem they truncated to "Ho…"/"Pg…" and PgUp/PgDn were indistinguishable.
+     The panel width is fixed, so this only shaves a couple px off each wide
+     main key. */
+  grid-template-columns: 1fr 9.5rem;
   gap: 0.3rem;
   padding: 0 4px;
 }
@@ -681,7 +685,7 @@ body {
 }
 
 .sk-desktop-side {
-  width: 8rem;
+  width: 9.5rem;
   border-left: 1px solid #30363d;
   display: flex;
   flex-direction: column;
@@ -744,8 +748,9 @@ body {
 .sk-dk-side {
   min-width: 0;
   min-height: 0;
-  padding-top: 4px;
-  padding-bottom: 4px;
+  padding: 4px 3px;
+  /* Slightly smaller than the main keys so multi-char labels never clip. */
+  font-size: 0.72rem;
   border-radius: 3px;
 }
 
