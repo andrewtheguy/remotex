@@ -21,6 +21,8 @@ futures-util = "0.3"
 toml = "1"
 # Tile payload compression for the browser transport (see src/protocol.rs).
 png = "0.18"
+# Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
+des = "0.8"
 
 # Server-side RDP engine (see docs/phase1-mvp.md).
 ironrdp = { version = "0.17", features = ["connector", "session", "graphics"] }
