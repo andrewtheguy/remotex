@@ -48,11 +48,12 @@ building tarballs.
 src/                 Rust backend (flat module layout)
   main.rs            entry: CLI dispatch + serve
   lib.rs             library surface (shared with the integration tests)
-  cli.rs             clap CLI (serve --config/--target)
+  cli.rs             clap CLI (serve --config, gen-passwd)
   config.rs          TOML config ([server] + [[targets]] profiles)
   server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
   ws.rs              WebSocket <-> protocol-engine bridge
-  session.rs         the engine seam: spawns rdp::run or vnc::run per target
+  session.rs         the session slot + engine seam: picker state, then
+                     spawns rdp::run or vnc::run for the chosen target
   rdp.rs             server-side RDP session (IronRDP): connect + active loop
   vnc.rs             server-side VNC session (built-in RFB client, raw-only)
   keymap.rs          DOM KeyboardEvent.code -> RDP scancode / X11 keysym
@@ -61,13 +62,14 @@ src/                 Rust backend (flat module layout)
 frontend/            Vite + React + TS SPA
   src/
     protocol.ts      TS mirror of the wire protocol
-    useRemoteDesktop.ts  WebSocket + tile rendering + input capture hook
-    RemoteDesktop.tsx    canvas + input overlay
+    useRemoteDesktop.ts  WebSocket + picker/desktop mode + tile rendering + input
+    TargetPicker.tsx     post-login target picker
+    RemoteDesktop.tsx    canvas + input overlay + floating menu
 tests/               end-to-end tests: protocol-level (protocol_e2e.rs) and
                      container-backed happy paths (rdp_tiles_e2e.rs against a
                      dummy xrdp, vnc_tiles_e2e.rs against a dummy TigerVNC)
 docs/architecture.md overall architecture: data path, protocol, engines
-docs/roadmap.md      remaining phases (5-9)
+docs/roadmap.md      remaining work
 ```
 
 ## Development
@@ -95,12 +97,15 @@ keyboard over it drive the session. Use `RUST_LOG=info` (or `debug`) for logs.
 All configuration lives in one TOML file — no environment variables for server
 or target configuration, and no `.env` loading (env files silently shadowing
 the real environment caused subtle bugs). `RUST_LOG` only controls logging.
-The `serve` subcommand takes only two selectors:
+The `serve` subcommand takes a single selector:
 
 - `--config <path>` — the config file. Defaults to the installed
   `<prefix>/etc/remotex.toml`; config is global-only (no per-user or
   working-directory files), so in a dev checkout this flag is required.
-- `--target <name>` — which `[[targets]]` profile to serve (default: the first).
+
+Every `[[targets]]` profile is served; there is no `--target` selector. The
+browser picks a target from a picker after login — one pathway, so which target
+a session uses is a browser choice, not a launch flag.
 
 ```toml
 [server]
@@ -110,7 +115,7 @@ The `serve` subcommand takes only two selectors:
                            # share/remotex/web, else frontend/dist
 
 [[targets]]
-name = "example"           # unique profile name (picked with --target)
+name = "example"           # unique profile name (shown in the login picker)
 protocol = "rdp"           # required: "rdp" or "vnc"
 host = "192.0.2.10"
 #port = 3389               # default: the protocol's standard port (3389/5900)
@@ -129,7 +134,8 @@ connection-specific fields are `host`, optional `port` (default 5900), and
 optional `password`; `username`/`domain`/`width`/`height`/`security` are ignored.
 
 Credentials are used only server-side for the RDP/VNC handshake;
-`GET /api/config` returns only the non-secret target name/protocol/host/port.
+`GET /api/targets` returns only the non-secret name/protocol/host/port of each
+profile for the picker.
 
 > **Password handling.** The config file holds credentials — keep it out of
 > version control (`remotex.toml` is gitignored here) and `chmod 600` it on real

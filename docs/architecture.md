@@ -60,13 +60,14 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
 src/
   main.rs            entry: CLI dispatch + serve
   lib.rs             library surface (shared with the integration tests)
-  cli.rs             clap CLI (serve --config/--target, gen-passwd)
+  cli.rs             clap CLI (serve --config, gen-passwd)
   config.rs          TOML config ([server] + [[targets]] profiles)
   auth.rs            web login (site_passwd credential + auth sessions)
   server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
   ws.rs              WebSocket <-> session bridge
-  session.rs         the session slot (claim/attach/detach/takeover) and the
-                     engine seam: spawns rdp::run or vnc::run per session
+  session.rs         the session slot (claim/attach/connect/disconnect/
+                     takeover, with a picker state) and the engine seam:
+                     spawns rdp::run or vnc::run for the chosen target
   rdp.rs             RDP engine (IronRDP): connect + active loop
   vnc.rs             VNC engine (built-in RFB client, raw-only + resize)
   keymap.rs          DOM KeyboardEvent.code -> RDP scancode / X11 keysym
@@ -84,7 +85,12 @@ when the browser does.
 
 `SessionManager` (src/session.rs) decouples the engine session (backend ↔
 remote host) from the browser attachment (backend ↔ WebSocket), with
-takeover/reclaim claim rules on top of a persistent engine:
+takeover/reclaim claim rules on top of a persistent engine. The slot also holds
+the **selected target**: none is the post-login *picker* state (authenticated,
+holding the slot, no connection started), a target is a live desktop. The
+selection is slot state, so a takeover inherits it — the new browser lands on
+the picker or the desktop exactly where the previous holder was. There is still
+one active session at a time; the picker is just the slot's idle state.
 
 - **Claim** — `POST /api/session` (`{force?, sessionId?}`) mints the slot
   token. While another browser's WebSocket is attached the claim answers
@@ -93,16 +99,29 @@ takeover/reclaim claim rules on top of a persistent engine:
   previously attached WebSocket — its socket closes with code **4001** —
   but never the engine.
 - **Attach** — `/ws?session=<token>` joins the slot (a stale token closes
-  with code **4000**; the browser claims again). The first attach spawns the
-  engine; a reattach injects `ClientMsg::Refresh`, making the engine
-  re-announce the desktop size and repaint fully — RDP repacks its
-  server-owned `DecodedImage`, VNC issues a non-incremental update request
-  (the VNC server is one LAN hop away; duplicating the framebuffer
-  server-side would buy nothing).
+  with code **4000**; the browser claims again). Attach does *not* start an
+  engine: it reports the current state to the browser — `picker` when idle,
+  or `connected` when an engine is running (a reattach then injects
+  `ClientMsg::Refresh`, making the engine re-announce the desktop size and
+  repaint fully — RDP repacks its server-owned `DecodedImage`, VNC issues a
+  non-incremental update request; the VNC server is one LAN hop away, so
+  duplicating the framebuffer server-side would buy nothing).
+- **Connect** — `ClientMsg::Connect {target}` (the picker's pick) starts the
+  engine for that `[[targets]]` profile; the browser is told `connected` and
+  the engine paints.
+- **Disconnect** — `ClientMsg::Disconnect` ("switch target") tears the engine
+  down and returns the slot to the picker without dropping the WebSocket. An
+  engine that ends on its own (remote hung up, or a connect failure after its
+  `error`) does the same — the browser lands back on the picker rather than a
+  dropped socket, with any error shown there.
 - **Detach** — the WebSocket went away; the engine keeps running and its
   frames are dropped until the next attach. Closing the browser therefore
   *detaches* from the desktop rather than ending it; the remote session ends
   only when the remote host ends it.
+
+Browser input is routed through the manager (keyed by the attachment id), so it
+always reaches the engine that is live *now* and is simply dropped in the picker
+state — no stale engine handle to manage across connect/disconnect.
 
 One slot, permanently: takeover replaces the attached browser, never adds
 one — concurrent sessions, sharing, and brokers stay out of scope.
@@ -125,7 +144,7 @@ the session layer (src/auth.rs):
   single-user program. `POST /api/auth/logout` invalidates the caller's
   token; `GET /api/auth/status` answers `{authenticated}` for the SPA's
   mount-time check.
-- **Guards** — middleware refuses `/api/config`, `/api/session`, and the
+- **Guards** — middleware refuses `/api/targets`, `/api/session`, and the
   `/ws` upgrade (the handshake itself 401s) without a live token. Public:
   `/api/health`, `/api/auth/*`, and the SPA shell — it renders the login
   screen and holds no secrets.
@@ -133,14 +152,18 @@ the session layer (src/auth.rs):
 The auth session ("may this browser talk to the server?") is independent of
 the session slot ("which browser owns the desktop?"): takeover evicts the
 other browser's WebSocket but never logs it out. In the frontend, `App.tsx`
-mounts the desktop only once authenticated (mounting claims the slot), shows
+mounts the session only once authenticated (mounting claims the slot), shows
 the login screen otherwise — with the app version at the bottom, injected
 from Cargo.toml via a Vite define — and returns to it when a claim answers
-401. Logout is the **Disconnect** button in the floating menu
-(`FloatingMenu.tsx`) — a draggable ☰ FAB that toggles a toolbar drawer; it
-ends the browser's login, not the engine. The drawer also sends
-browser-swallowed **special keys** (F5, Ctrl+W, Alt+F4…) and **modifier taps**
-via `sendKeyCombo`, and shows the touch-gesture cheat-sheet. Its **Soft
+401. Once mounted, the browser holds the slot and lands on the **target
+picker** (`TargetPicker.tsx`, fed by `GET /api/targets`); picking a profile
+starts its session and switches to the desktop. Logout is the **Disconnect**
+button in the floating menu (`FloatingMenu.tsx`) — a draggable ☰ FAB that
+toggles a toolbar drawer; it ends the browser's login, not the engine. Its
+**Switch target** button disconnects back to the picker without logging out.
+The drawer also sends browser-swallowed **special keys** (F5, Ctrl+W, Alt+F4…)
+and **modifier taps** via `sendKeyCombo`, and shows the touch-gesture
+cheat-sheet. Its **Soft
 keyboard** button opens an on-screen keyboard panel (`SoftKeyboardPanel.tsx`) —
 a compact docked layout with a symbol/nav screen toggle and sticky-modifier
 badges on narrow viewports, a draggable floating PC-keyboard grid at ≥800px;
@@ -156,14 +179,19 @@ Defined in `src/protocol.rs`, mirrored in `frontend/src/protocol.ts`.
 WebSocket frames** — a 10-byte little-endian header (kind, format, x, y, w, h)
 followed by a PNG-compressed RGB payload; dirty rectangles taller than
 `STRIP_ROWS` (64) are split into strips. Control messages stay JSON text with
-a `type` tag: `resize` (the remote desktop size changed) and `error` (fatal
-session error). Measured ~10x smaller than the old base64-in-JSON baseline on
-a full-screen paint; per-session byte totals are logged on disconnect.
+a `type` tag: `resize` (the remote desktop size changed), `error` (the engine
+failed — the session then returns to the picker, so the browser shows it
+there), and the session-slot status `picker` / `connected {name}` telling the
+browser which post-login state it is in. Measured ~10x smaller than the old
+base64-in-JSON baseline on a full-screen paint; per-session byte totals are
+logged on disconnect.
 
-**Browser → server.** JSON text frames: `mouseMove`, `mouseButton`, `wheel`,
-`key` (DOM `KeyboardEvent.code`, plus a `caps` flag carrying the browser's
-authoritative CapsLock lock state so the backend never has to infer it),
-`viewport` — the browser's viewport in
+**Browser → server.** JSON text frames. Session control acts on the slot, not
+an engine: `connect {target}` (pick a target from the picker) and `disconnect`
+(switch back to it). The rest is engine input: `mouseMove`, `mouseButton`,
+`wheel`, `key` (DOM `KeyboardEvent.code`, plus a `caps` flag carrying the
+browser's authoritative CapsLock lock state so the backend never has to infer
+it), `viewport` — the browser's viewport in
 device pixels, i.e. the size it *wants* the remote desktop to be (engines
 that can drive the remote size act on viewport reports; the rest ignore
 them) — and `refresh`, a full-repaint request. `refresh` is normally
@@ -223,35 +251,40 @@ and dropped), Bell, and non-raw encodings.
 
 ## Frontend
 
-Vite + React 19 + TypeScript, managed with Bun (`frontend/`). Three files
+Vite + React 19 + TypeScript, managed with Bun (`frontend/`). The files that
 matter:
 
 - `protocol.ts` — TS mirror of the wire protocol (binary tile parsing).
-- `App.tsx` — the auth gate: login screen vs the desktop.
+- `App.tsx` — the auth gate: login screen vs the session.
 - `Login.tsx` — the login form, with the app version pinned at the bottom.
 - `useRemoteDesktop.ts` — the one hook: session claim + WebSocket lifecycle,
-  tile rendering, input capture, viewport reporting, the touch view transform
-  (fit-to-width × pinch zoom + pan).
+  the picker-vs-desktop `mode` (from the server's `picker`/`connected` status)
+  with `connect(name)` / `switchTarget()`, tile rendering, input capture,
+  viewport reporting, the touch view transform (fit-to-width × pinch zoom + pan).
+- `TargetPicker.tsx` — the post-login target picker: lists `GET /api/targets`
+  and starts the picked session; shows a failed connect's error.
 - `touchGestures.ts` — the mobile touch gesture engine.
-- `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
-  connection-status overlay + the floating menu.
-- `FloatingMenu.tsx` — the draggable ☰ FAB and toolbar drawer (Disconnect,
-  special-key/modifier combos, the soft-keyboard toggle, plus a clipboard
-  placeholder).
+- `RemoteDesktop.tsx` — the session shell: the picker or the full-screen canvas
+  + input overlay + the connection-status overlay + the floating menu.
+- `FloatingMenu.tsx` — the draggable ☰ FAB and toolbar drawer (Switch target,
+  Disconnect, special-key/modifier combos, the soft-keyboard toggle, plus a
+  clipboard placeholder).
 - `SoftKeyboardPanel.tsx` / `softKeyboard.ts` — the on-screen keyboard panel
   and its layout tables (compact docked screens + the ≥800px PC grid).
 
 **Connection flow.** The hook claims the session slot, opens the
 WebSocket with the token, and reconnects automatically with capped backoff
-after any drop (network, server restart, session ended) — no page reload.
-The per-tab token (sessionStorage) makes a reconnect a *reclaim*, so it
-never trips the takeover prompt. Three states wait for the user instead of
-retrying: **busy** (another browser holds the slot; "Take over"
-force-claims), **taken over** (this tab was evicted with close code 4001;
-"Take it back" force-claims), and **error** (the server reported a fatal
-session error; the message is shown with "Retry"). The reconnect backoff
-resets only once a desktop actually arrives, so a session that dies right
-after connecting can't hot-loop.
+after any drop (network, server restart) — no page reload. The per-tab token
+(sessionStorage) makes a reconnect a *reclaim*, so it never trips the takeover
+prompt. Once attached, the server's `picker`/`connected` status drives the
+`mode`: the picker (pick a target → `connect`), or the desktop (`switchTarget`
+→ `disconnect` returns to the picker). Two states wait for the user instead of
+retrying: **busy** (another browser holds the slot; "Take over" force-claims)
+and **taken over** (this tab was evicted with close code 4001; "Take it back"
+force-claims). A fatal engine error is no longer a dead-end state — the socket
+stays up, the session returns to the picker, and the error shows there. The
+reconnect backoff resets once the socket attaches (any status message), so a
+slot that closes right after connecting can't hot-loop.
 
 **Full-screen canvas.** The canvas fills the browser viewport and
 renders at **1:1 device pixels**: the backing store stays at the remote pixel
@@ -300,15 +333,17 @@ installed layout — see [`install.md`](install.md) and `packaging/`). A
 `[server]` block (bind host/port, static dir, the required `site_passwd`
 web-login credential) plus `[[targets]]` profiles:
 protocol, host/port, credentials, RDP-only `width`/`height`/`security`, and
-the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
-(default: the first). See `packaging/etc/remotex.toml.example`.
+the VNC `resize` opt-in. Every profile is served; the browser picks one from
+the post-login picker (there is no `--target` selector — one pathway to a
+target). See `packaging/etc/remotex.toml.example`.
 
 ## Testing
 
 - **Unit tests** live with the code (protocol encoding, RFB handshake pieces,
   VncAuth vectors, input translation, keymaps, config parsing).
 - **E2E tests** (`tests/`): protocol-level tests against the real axum server
-  (`protocol_e2e.rs` — claim/attach flows, takeover eviction, and
+  (`protocol_e2e.rs` — claim/attach flows, the picker state, connect,
+  switch-target, takeover eviction (including takeover of the picker), and
   detach/reattach run against a scripted in-process RFB server, so the
   session-slot semantics are covered deterministically without containers),
   and container-backed happy paths — `rdp_tiles_e2e.rs` against a dummy xrdp,

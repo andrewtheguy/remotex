@@ -20,7 +20,7 @@ async fn spawn_app() -> SocketAddr {
         port: 0,
         static_dir: "frontend/dist".into(),
         site_passwd: common::test_site_passwd(),
-        target: TargetConfig {
+        targets: vec![TargetConfig {
             name: "unreachable".to_owned(),
             protocol: Protocol::Vnc,
             host: "127.0.0.1".to_owned(),
@@ -32,7 +32,7 @@ async fn spawn_app() -> SocketAddr {
             height: 800,
             security: Security::Auto,
             resize: false,
-        },
+        }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -65,14 +65,14 @@ async fn get(addr: SocketAddr, path: &str, cookie: Option<&str>) -> (u16, String
 async fn guarded_routes_refuse_unauthenticated_requests() {
     let addr = spawn_app().await;
 
-    let (status, _) = get(addr, "/api/config", None).await;
-    assert_eq!(status, 401, "/api/config must require a login");
+    let (status, _) = get(addr, "/api/targets", None).await;
+    assert_eq!(status, 401, "/api/targets must require a login");
 
     let (status, _) = common::post_session(addr, "", "{}").await;
     assert_eq!(status, 401, "/api/session must require a login");
 
     // A made-up cookie is as good as none.
-    let (status, _) = get(addr, "/api/config", Some("remotex_session=forged")).await;
+    let (status, _) = get(addr, "/api/targets", Some("remotex_session=forged")).await;
     assert_eq!(status, 401, "a forged cookie must be refused");
 
     // The public surface still answers.
@@ -127,7 +127,7 @@ async fn login_sets_the_session_cookie_and_grants_access() {
         .next()
         .unwrap()
         .to_owned();
-    let (status, body) = get(addr, "/api/config", Some(&cookie)).await;
+    let (status, body) = get(addr, "/api/targets", Some(&cookie)).await;
     assert_eq!(status, 200, "the cookie must unlock the API: {body}");
     let (status, body) = get(addr, "/api/auth/status", Some(&cookie)).await;
     assert_eq!((status, body.as_str()), (200, r#"{"authenticated":true}"#));
@@ -153,7 +153,7 @@ async fn logout_invalidates_the_session_and_clears_the_cookie() {
     let addr = spawn_app().await;
     let cookie = common::login(addr).await;
 
-    let (status, _) = get(addr, "/api/config", Some(&cookie)).await;
+    let (status, _) = get(addr, "/api/targets", Some(&cookie)).await;
     assert_eq!(status, 200);
 
     let req = format!(
@@ -169,7 +169,7 @@ async fn logout_invalidates_the_session_and_clears_the_cookie() {
     assert!(set_cookie.contains("Max-Age=0"), "{set_cookie}");
 
     // The old token is dead server-side, not just cleared in the browser.
-    let (status, _) = get(addr, "/api/config", Some(&cookie)).await;
+    let (status, _) = get(addr, "/api/targets", Some(&cookie)).await;
     assert_eq!(status, 401, "the invalidated session must be refused");
     let (_, body) = get(addr, "/api/auth/status", Some(&cookie)).await;
     assert_eq!(body, r#"{"authenticated":false}"#);

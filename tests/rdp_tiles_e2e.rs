@@ -67,7 +67,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
         port: 0,
         static_dir: "frontend/dist".into(),
         site_passwd: common::test_site_passwd(),
-        target: TargetConfig {
+        targets: vec![TargetConfig {
             name: "xrdp-dummy".to_owned(),
             protocol: Protocol::Rdp,
             host: "127.0.0.1".to_owned(),
@@ -79,7 +79,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             height: 800,
             security: Security::Auto,
             resize: false,
-        },
+        }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -116,6 +116,8 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
+    // The fresh attach lands on the picker; pick the target to start the engine.
+    common::connect_target(&mut ws, "xrdp-dummy").await;
 
     let mut got_resize = false;
     let mut tiles = 0u32;

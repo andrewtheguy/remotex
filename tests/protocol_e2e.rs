@@ -156,7 +156,7 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         host: "127.0.0.1".to_owned(),
         port: 0,
         static_dir: "frontend/dist".into(),
-        target,
+        targets: vec![target],
         site_passwd: common::test_site_passwd(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -224,6 +224,28 @@ async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
     .expect("timed out waiting for resize");
 }
 
+/// Read from the socket until the `picker` status control message arrives;
+/// fails on an `error` message or a close.
+async fn expect_picker(ws: &mut Ws) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                    if text.contains(r#""type":"picker""#) {
+                        return;
+                    }
+                }
+                Message::Close(frame) => panic!("closed while waiting for picker: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for picker");
+    })
+    .await
+    .expect("timed out waiting for picker");
+}
+
 /// Read from the socket until a binary tile frame arrives.
 async fn expect_tile(ws: &mut Ws) {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -271,18 +293,19 @@ async fn health_endpoint_returns_ok() {
 }
 
 #[tokio::test]
-async fn config_endpoint_exposes_target_but_never_credentials() {
+async fn targets_endpoint_lists_targets_but_never_credentials() {
     let addr = spawn_app_dead_rdp().await;
     let cookie = common::login(addr).await;
-    let body = http_get(addr, "/api/config", Some(&cookie)).await;
-    assert!(body.contains("127.0.0.1"), "config should report the host: {body}");
+    let body = http_get(addr, "/api/targets", Some(&cookie)).await;
+    assert!(body.contains("test-target"), "targets should list the name: {body}");
+    assert!(body.contains("127.0.0.1"), "targets should report the host: {body}");
     // Credentials must never be serialized to the browser.
     assert!(
         !body.contains("s3cr3t-should-not-leak"),
-        "config leaked the password: {body}"
+        "targets leaked the password: {body}"
     );
-    assert!(!body.contains("tester"), "config leaked the username: {body}");
-    assert!(!body.contains("password"), "config mentions a password field: {body}");
+    assert!(!body.contains("tester"), "targets leaked the username: {body}");
+    assert!(!body.contains("password"), "targets mentions a password field: {body}");
 }
 
 #[tokio::test]
@@ -292,7 +315,9 @@ async fn websocket_reports_rdp_connect_failure_as_error_message() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
 
-    // Send a realistic input event (also proves inbound JSON parses without error).
+    // Pick the target to start the (dead) engine, then send a realistic input
+    // event too (proves both control- and input-message parsing).
+    common::connect_target(&mut ws, "test-target").await;
     ws.send(Message::text(r#"{"type":"mouseMove","x":10,"y":20}"#))
         .await
         .unwrap();
@@ -334,10 +359,11 @@ async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
 
-    // Browser A claims and attaches; the engine connects to the fake VNC
-    // server and paints the desktop.
+    // Browser A claims and attaches, lands on the picker, then picks the
+    // target; the engine connects to the fake VNC server and paints the desktop.
     let token_a = common::claim_session(addr, &cookie).await;
     let mut ws_a = connect_ws(addr, &token_a, &cookie).await;
+    common::connect_target(&mut ws_a, "test-target").await;
     expect_resize(&mut ws_a, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws_a).await;
 
@@ -380,6 +406,7 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
 
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws).await;
 
@@ -397,6 +424,55 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
         .unwrap()
         .to_owned();
     let mut ws = connect_ws(addr, &token, &cookie).await;
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+    expect_tile(&mut ws).await;
+}
+
+#[tokio::test]
+async fn attach_lands_on_the_picker_and_takeover_inherits_it() {
+    // No target is ever connected, so no engine runs (a dead RDP endpoint is
+    // fine — it's never dialed).
+    let addr = spawn_app_dead_rdp().await;
+    let cookie = common::login(addr).await;
+
+    // Browser A attaches and, having picked nothing, lands on the picker.
+    let token_a = common::claim_session(addr, &cookie).await;
+    let mut ws_a = connect_ws(addr, &token_a, &cookie).await;
+    expect_picker(&mut ws_a).await;
+
+    // Browser B force-claims: A is evicted, and B inherits the picker state
+    // (not a desktop), because that is where the slot was.
+    let (status, body) = common::post_session(addr, &cookie, r#"{"force":true}"#).await;
+    assert_eq!(status, 200, "force takeover must succeed: {body}");
+    let token_b = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(expect_close(&mut ws_a).await, Some(4001));
+
+    let mut ws_b = connect_ws(addr, &token_b, &cookie).await;
+    expect_picker(&mut ws_b).await;
+}
+
+#[tokio::test]
+async fn switch_target_returns_to_the_picker_then_reconnects() {
+    let vnc_port = spawn_fake_vnc().await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
+
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+    expect_tile(&mut ws).await;
+
+    // Switch target: disconnect returns the slot to the picker over the same
+    // socket (no reclaim, no close).
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+
+    // Picking again on the same socket starts a fresh engine and repaints.
+    common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws).await;
 }

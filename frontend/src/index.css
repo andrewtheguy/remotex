@@ -111,12 +111,8 @@ body {
   color: #d29922;
 }
 
-.status-error {
-  color: #f85149;
-}
-
 /* The overlay itself must not eat input aimed at the desktop, but its action
-   buttons (take over / take back / retry) obviously must be clickable. */
+   buttons (take over / take back) obviously must be clickable. */
 .status-action {
   pointer-events: auto;
   margin-top: 0.5rem;

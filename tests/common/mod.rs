@@ -112,6 +112,22 @@ pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
     ws
 }
 
+/// Pick a target from the picker over an attached WebSocket, starting its
+/// engine. A fresh attach lands on the picker (no engine); the browser sends
+/// this `connect` to begin a session. Reattach/takeover to a running engine
+/// need no connect — the slot announces `connected` on its own.
+#[allow(dead_code)]
+pub async fn connect_target(ws: &mut Ws, target: &str) {
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"{target}"}}"#
+    )))
+    .await
+    .unwrap();
+}
+
 /// Locate a container runtime. The dummy remote-desktop server is part of the
 /// e2e contract, so a machine without one fails loudly instead of silently
 /// skipping the coverage.

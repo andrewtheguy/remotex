@@ -19,8 +19,9 @@
 # Generate with:  remotex gen-passwd <username>
 site_passwd = ""
 
-# Target profiles (at least one required). Each needs a unique name; serve a
-# specific one with `remotex serve --target <name>` (default: the first).
+# Target profiles (at least one required). Each needs a unique name. Every
+# profile is served; the browser picks one from a picker after login (there is
+# no --target selector).
 [[targets]]
 name = "example"
 protocol = "rdp"           # required: "rdp" or "vnc"

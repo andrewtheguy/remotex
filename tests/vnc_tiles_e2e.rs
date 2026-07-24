@@ -59,7 +59,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         port: 0,
         static_dir: "frontend/dist".into(),
         site_passwd: common::test_site_passwd(),
-        target: TargetConfig {
+        targets: vec![TargetConfig {
             name: "tigervnc-dummy".to_owned(),
             protocol: Protocol::Vnc,
             host: "127.0.0.1".to_owned(),
@@ -72,7 +72,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             height: 800,
             security: Security::Auto, // RDP-only knob, ignored for VNC
             resize: true,             // exercise the dynamic resize path
-        },
+        }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -117,6 +117,8 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
+    // The fresh attach lands on the picker; pick the target to start the engine.
+    common::connect_target(&mut ws, "tigervnc-dummy").await;
 
     let mut got_resize = false;
     let mut covered: u64 = 0;
