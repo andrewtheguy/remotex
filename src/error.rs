@@ -1,25 +1,38 @@
-//! Application error type usable as an axum response.
+//! Typed error type for the HTTP API boundary.
 //!
-//! Unused by the skeleton's handlers so far; provided as the shared error seam
-//! for Phase 1 handlers that can fail (RDP connect, config load, etc.).
-
-#![allow(dead_code)]
+//! Per the project's error-handling convention (see CLAUDE.md): application and
+//! internal code uses `anyhow`; the HTTP API surfaces a typed `thiserror` error.
+//! Application errors bubbled up with `?` land in [`AppError::Internal`] (500)
+//! via the `#[from] anyhow::Error` conversion, while handlers can also return
+//! typed variants such as [`AppError::NotFound`] directly.
 
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 
+/// An error returned from an HTTP handler, rendered into an HTTP response.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    /// The requested resource does not exist — rendered as `404 Not Found`.
+    #[error("not found")]
+    NotFound,
+
+    /// An unexpected application error, bubbled up from `anyhow`. Rendered as
+    /// `500 Internal Server Error`; the detail is logged, never sent to clients.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
 
+/// Result alias for fallible handlers, e.g. `async fn h() -> ApiResult<Json<T>>`.
+pub type ApiResult<T> = Result<T, AppError>;
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
             AppError::Internal(e) => {
+                // Log the full `source()` chain; return an opaque message.
                 log::error!("internal error: {e:#}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
             }

@@ -11,7 +11,7 @@ use serde::Serialize;
 use tower::service_fn;
 use tower_http::services::ServeDir;
 
-use crate::{config::AppConfig, ws};
+use crate::{config::AppConfig, error::AppError, ws};
 
 /// Shared application state handed to route handlers.
 #[derive(Clone)]
@@ -52,7 +52,7 @@ pub fn router(config: AppConfig) -> Router {
     let api = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/config", get(config_handler))
-        .fallback(|| async { StatusCode::NOT_FOUND });
+        .fallback(|| async { AppError::NotFound });
 
     Router::new()
         .nest("/api", api)
