@@ -8,9 +8,9 @@
 //! frames, which this test validates byte-for-byte against the wire layout
 //! documented in `src/protocol.rs` / `frontend/src/protocol.ts`.
 
+mod common;
+
 use std::net::SocketAddr;
-use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
@@ -22,82 +22,6 @@ use tokio_tungstenite::tungstenite::Message;
 const TILE_FRAME_KIND: u8 = 0x01;
 const TILE_FORMAT_PNG: u8 = 1;
 const TILE_HEADER_LEN: usize = 10;
-
-/// Locate a container runtime. The dummy RDP server is part of this test's
-/// contract, so a machine without one fails loudly instead of silently
-/// skipping the coverage.
-fn container_runtime() -> &'static str {
-    for runtime in ["podman", "docker"] {
-        if Command::new(runtime)
-            .arg("--version")
-            .output()
-            .is_ok_and(|out| out.status.success())
-        {
-            return runtime;
-        }
-    }
-    panic!("this e2e test needs podman or docker to start the dummy RDP server");
-}
-
-/// Kills the container on drop so a failed test doesn't leak it
-/// (`--rm` then removes it).
-struct Container {
-    runtime: &'static str,
-    name: String,
-}
-
-impl Drop for Container {
-    fn drop(&mut self) {
-        let _ = Command::new(self.runtime)
-            .args(["rm", "-f", &self.name])
-            .output();
-    }
-}
-
-/// Build the dummy xrdp image (cached after the first run) and start it on an
-/// ephemeral host port. Returns the container guard and the RDP port.
-fn start_dummy_rdp_server(runtime: &'static str) -> (Container, u16) {
-    let context = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/xrdp-dummy");
-    let build = Command::new(runtime)
-        .args(["build", "-t", "rdpweb-e2e-xrdp"])
-        .arg(&context)
-        .output()
-        .expect("run container build");
-    assert!(
-        build.status.success(),
-        "container build failed:\n{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-
-    // Grab a free port; the tiny window before the container binds it is fine.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-
-    let name = format!("rdpweb-e2e-xrdp-{port}");
-    let container = Container { runtime, name: name.clone() };
-    let run = Command::new(runtime)
-        .args([
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &name,
-            "-p",
-            &format!("127.0.0.1:{port}:3389"),
-            "rdpweb-e2e-xrdp",
-        ])
-        .output()
-        .expect("run container");
-    assert!(
-        run.status.success(),
-        "container start failed:\n{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    (container, port)
-}
 
 /// Wait until xrdp actually answers RDP on the published port.
 ///
@@ -181,8 +105,9 @@ fn check_tile_frame(frame: &[u8]) {
 
 #[tokio::test]
 async fn tiles_arrive_as_binary_frames_after_resize_text() {
-    let runtime = container_runtime();
-    let (_container, rdp_port) = start_dummy_rdp_server(runtime);
+    let runtime = common::container_runtime();
+    let (_container, rdp_port) =
+        common::start_dummy_server(runtime, "rdpweb-e2e-xrdp", "xrdp-dummy", 3389);
     wait_for_rdp_port(rdp_port).await;
 
     let addr = spawn_app(rdp_port).await;

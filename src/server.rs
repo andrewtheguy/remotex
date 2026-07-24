@@ -64,6 +64,7 @@ pub fn router(config: AppConfig) -> Router {
 #[derive(Serialize)]
 struct ConfigResponse {
     target: String,
+    protocol: &'static str,
     host: String,
     port: u16,
 }
@@ -72,6 +73,7 @@ struct ConfigResponse {
 async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         target: state.config.target.name.clone(),
+        protocol: state.config.target.protocol.name(),
         host: state.config.target.host.clone(),
         port: state.config.target.port,
     })

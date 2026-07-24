@@ -39,13 +39,32 @@ impl Security {
     }
 }
 
-/// Remote-desktop protocol of a target. Only RDP exists today; VNC lands in
-/// phase 2 (docs/phase2-consolidation.md), and the config shape is ready for it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+/// Remote-desktop protocol of a target. Each has a server-side engine feeding
+/// the same browser protocol (docs/phase2-consolidation.md): `rdp` via IronRDP
+/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
-    #[default]
     Rdp,
+    Vnc,
+}
+
+impl Protocol {
+    /// The protocol's standard port, used when a target omits `port`.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Protocol::Rdp => 3389,
+            Protocol::Vnc => 5900,
+        }
+    }
+
+    /// The lowercase name, as written in the config file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Protocol::Rdp => "rdp",
+            Protocol::Vnc => "vnc",
+        }
+    }
 }
 
 /// One `[[targets]]` profile: a remote machine plus its credentials.
@@ -57,13 +76,14 @@ pub enum Protocol {
 pub struct TargetConfig {
     /// Unique profile name; selected with `--target` (default: first profile).
     pub name: String,
-    /// Remote-desktop protocol (only `"rdp"` today).
-    #[serde(default)]
+    /// Remote-desktop protocol: `"rdp"` or `"vnc"`. Required — each target
+    /// must say what it speaks.
     pub protocol: Protocol,
     /// Target host.
     pub host: String,
-    /// Target port.
-    #[serde(default = "default_rdp_port")]
+    /// Target port. Omitted (or 0) means the protocol's standard port
+    /// (3389 for RDP, 5900 for VNC) — normalized in [`ConfigFile::parse`].
+    #[serde(default)]
     pub port: u16,
     /// Username.
     #[serde(default)]
@@ -80,14 +100,12 @@ pub struct TargetConfig {
     /// Initial desktop height requested from the server.
     #[serde(default = "default_height")]
     pub height: u16,
-    /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`.
+    /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`. RDP only —
+    /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
 }
 
-fn default_rdp_port() -> u16 {
-    3389
-}
 fn default_width() -> u16 {
     1280
 }
@@ -133,7 +151,14 @@ pub struct AppConfig {
 
 impl ConfigFile {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
-        let config: ConfigFile = toml::from_str(text).context("invalid TOML config")?;
+        let mut config: ConfigFile = toml::from_str(text).context("invalid TOML config")?;
+        // An omitted port deserializes as 0 (never a valid target port), which
+        // resolves here to the protocol's standard port.
+        for target in &mut config.targets {
+            if target.port == 0 {
+                target.port = target.protocol.default_port();
+            }
+        }
         anyhow::ensure!(
             !config.targets.is_empty(),
             "config has no [[targets]] — at least one target profile is required"
@@ -259,6 +284,7 @@ mod tests {
     const MINIMAL: &str = r#"
         [[targets]]
         name = "one"
+        protocol = "rdp"
         host = "192.0.2.10"
     "#;
 
@@ -299,6 +325,7 @@ mod tests {
 
             [[targets]]
             name = "other"
+            protocol = "vnc"
             host = "10.0.0.3"
             "#,
         )
@@ -334,9 +361,11 @@ mod tests {
             r#"
             [[targets]]
             name = "a"
+            protocol = "rdp"
             host = "h1"
             [[targets]]
             name = "a"
+            protocol = "rdp"
             host = "h2"
             "#,
         )
@@ -351,12 +380,33 @@ mod tests {
             r#"
             [[targets]]
             name = "a"
+            protocol = "rdp"
             host = "h"
             passwd = "oops"
             "#,
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("passwd"), "{err:#}");
+
+        // Same for the [server] block and the top level.
+        let err = ConfigFile::parse("[server]\nprot = 1").unwrap_err();
+        assert!(format!("{err:#}").contains("prot"), "{err:#}");
+        let err = ConfigFile::parse("[srv]\nport = 1").unwrap_err();
+        assert!(format!("{err:#}").contains("srv"), "{err:#}");
+    }
+
+    #[test]
+    fn missing_protocol_is_rejected() {
+        // No default protocol: every target must say what it speaks.
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            host = "h"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("protocol"), "{err:#}");
     }
 
     #[test]
@@ -366,11 +416,45 @@ mod tests {
             [[targets]]
             name = "a"
             host = "h"
-            protocol = "vnc"
+            protocol = "telnet"
             "#,
         )
         .unwrap_err();
-        // VNC arrives with phase 2; until then the error should say what is supported.
-        assert!(format!("{err:#}").contains("rdp"), "{err:#}");
+        // The error should say what is supported.
+        let msg = format!("{err:#}");
+        assert!(msg.contains("rdp") && msg.contains("vnc"), "{msg}");
+    }
+
+    #[test]
+    fn vnc_target_gets_the_vnc_default_port() {
+        let config = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "mac"
+            protocol = "vnc"
+            host = "10.0.0.4"
+            password = "hunter2"
+            "#,
+        )
+        .unwrap()
+        .resolve(None)
+        .unwrap();
+        assert_eq!(config.target.protocol, Protocol::Vnc);
+        assert_eq!(config.target.port, 5900);
+
+        // An explicit port wins over the protocol default.
+        let config = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "mac"
+            protocol = "vnc"
+            host = "10.0.0.4"
+            port = 5901
+            "#,
+        )
+        .unwrap()
+        .resolve(None)
+        .unwrap();
+        assert_eq!(config.target.port, 5901);
     }
 }

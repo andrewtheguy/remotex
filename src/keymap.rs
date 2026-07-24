@@ -1,9 +1,15 @@
-//! Maps DOM `KeyboardEvent.code` values to RDP (scan code set 1) make codes.
+//! Maps DOM `KeyboardEvent.code` values to protocol key codes: RDP scan codes
+//! (set 1) via [`scancode`], and X11 keysyms for VNC via [`keysym`].
 //!
-//! Returns `(scancode, extended)` where `extended` marks keys that are sent
-//! with the `E0` prefix (the RDP `EXTENDED` fast-path flag). The scancode is
-//! the set-1 make code; the release variant is derived by the caller via the
-//! `RELEASE` flag. Assumes a US layout for the MVP — see docs/phase1-mvp.md.
+//! [`scancode`] returns `(scancode, extended)` where `extended` marks keys
+//! that are sent with the `E0` prefix (the RDP `EXTENDED` fast-path flag).
+//! The scancode is the set-1 make code; the release variant is derived by the
+//! caller via the `RELEASE` flag.
+//!
+//! Both tables assume a US layout — see docs/phase1-mvp.md. For keysyms this
+//! means the *unshifted* symbol of each key is sent; the VNC server combines
+//! it with the modifier state it tracks from Shift/etc. key events, which is
+//! how X servers (Xvnc, x11vnc) resolve keysym → keycode + modifiers.
 
 /// Look up the set-1 scancode and extended-key flag for a DOM `code`.
 pub fn scancode(code: &str) -> Option<(u8, bool)> {
@@ -134,9 +140,108 @@ pub fn scancode(code: &str) -> Option<(u8, bool)> {
     Some(entry)
 }
 
+/// Look up the X11 keysym for a DOM `code` (US layout, unshifted symbol).
+///
+/// Letters map to their lowercase keysyms; the server applies Shift itself
+/// from the modifier keysyms it has seen (see the module docs).
+pub fn keysym(code: &str) -> Option<u32> {
+    let sym = match code {
+        // ── Printable keys: keysym == the US-layout unshifted codepoint ─
+        "Space" => 0x0020,
+        "Quote" => 0x0027,      // '
+        "Comma" => 0x002C,      // ,
+        "Minus" => 0x002D,      // -
+        "Period" => 0x002E,     // .
+        "Slash" => 0x002F,      // /
+        "Semicolon" => 0x003B,  // ;
+        "Equal" => 0x003D,      // =
+        "BracketLeft" => 0x005B,  // [
+        "Backslash" => 0x005C,    // \
+        "BracketRight" => 0x005D, // ]
+        "Backquote" => 0x0060,    // `
+
+        // ── TTY / editing keys ──────────────────────────────────────────
+        "Backspace" => 0xFF08,
+        "Tab" => 0xFF09,
+        "Enter" => 0xFF0D,
+        "Pause" => 0xFF13,
+        "ScrollLock" => 0xFF14,
+        "Escape" => 0xFF1B,
+        "PrintScreen" => 0xFF61,
+        "ContextMenu" => 0xFF67, // Menu
+        "Insert" => 0xFF63,
+        "Delete" => 0xFFFF,
+
+        // ── Navigation ──────────────────────────────────────────────────
+        "Home" => 0xFF50,
+        "ArrowLeft" => 0xFF51,
+        "ArrowUp" => 0xFF52,
+        "ArrowRight" => 0xFF53,
+        "ArrowDown" => 0xFF54,
+        "PageUp" => 0xFF55,
+        "PageDown" => 0xFF56,
+        "End" => 0xFF57,
+
+        // ── Function keys ───────────────────────────────────────────────
+        "F1" => 0xFFBE,
+        "F2" => 0xFFBF,
+        "F3" => 0xFFC0,
+        "F4" => 0xFFC1,
+        "F5" => 0xFFC2,
+        "F6" => 0xFFC3,
+        "F7" => 0xFFC4,
+        "F8" => 0xFFC5,
+        "F9" => 0xFFC6,
+        "F10" => 0xFFC7,
+        "F11" => 0xFFC8,
+        "F12" => 0xFFC9,
+
+        // ── Modifiers ───────────────────────────────────────────────────
+        "ShiftLeft" => 0xFFE1,
+        "ShiftRight" => 0xFFE2,
+        "ControlLeft" => 0xFFE3,
+        "ControlRight" => 0xFFE4,
+        "CapsLock" => 0xFFE5,
+        "AltLeft" => 0xFFE9,
+        "AltRight" => 0xFFEA,
+        "MetaLeft" => 0xFFEB,  // Super_L
+        "MetaRight" => 0xFFEC, // Super_R
+
+        // ── Numpad ──────────────────────────────────────────────────────
+        "NumLock" => 0xFF7F,
+        "NumpadEnter" => 0xFF8D,
+        "NumpadMultiply" => 0xFFAA,
+        "NumpadAdd" => 0xFFAB,
+        "NumpadSubtract" => 0xFFAD,
+        "NumpadDecimal" => 0xFFAE,
+        "NumpadDivide" => 0xFFAF,
+        "Numpad0" => 0xFFB0,
+        "Numpad1" => 0xFFB1,
+        "Numpad2" => 0xFFB2,
+        "Numpad3" => 0xFFB3,
+        "Numpad4" => 0xFFB4,
+        "Numpad5" => 0xFFB5,
+        "Numpad6" => 0xFFB6,
+        "Numpad7" => 0xFFB7,
+        "Numpad8" => 0xFFB8,
+        "Numpad9" => 0xFFB9,
+
+        _ => {
+            // Letters and digits follow a regular pattern.
+            let bytes = code.as_bytes();
+            return match bytes {
+                [b'K', b'e', b'y', c @ b'A'..=b'Z'] => Some(u32::from(c.to_ascii_lowercase())),
+                [b'D', b'i', b'g', b'i', b't', c @ b'0'..=b'9'] => Some(u32::from(*c)),
+                _ => None,
+            };
+        }
+    };
+    Some(sym)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scancode;
+    use super::{keysym, scancode};
 
     #[test]
     fn maps_common_letters() {
@@ -167,5 +272,33 @@ mod tests {
         assert_eq!(scancode("MediaPlayPause"), None);
         assert_eq!(scancode("F13"), None);
         assert_eq!(scancode(""), None);
+    }
+
+    #[test]
+    fn keysym_letters_are_lowercase_and_digits_are_ascii() {
+        assert_eq!(keysym("KeyA"), Some(u32::from('a')));
+        assert_eq!(keysym("KeyZ"), Some(u32::from('z')));
+        assert_eq!(keysym("Digit0"), Some(u32::from('0')));
+        assert_eq!(keysym("Digit9"), Some(u32::from('9')));
+        assert_eq!(keysym("Semicolon"), Some(u32::from(';')));
+    }
+
+    #[test]
+    fn keysym_special_keys_use_the_xk_misc_range() {
+        assert_eq!(keysym("Enter"), Some(0xFF0D));
+        assert_eq!(keysym("Escape"), Some(0xFF1B));
+        assert_eq!(keysym("ArrowUp"), Some(0xFF52));
+        assert_eq!(keysym("ShiftLeft"), Some(0xFFE1));
+        assert_eq!(keysym("F12"), Some(0xFFC9));
+        assert_eq!(keysym("NumpadEnter"), Some(0xFF8D));
+    }
+
+    #[test]
+    fn keysym_rejects_lookalike_codes() {
+        assert_eq!(keysym("Key1"), None); // digits are Digit1, not Key1
+        assert_eq!(keysym("Keya"), None); // DOM codes use uppercase letters
+        assert_eq!(keysym("DigitA"), None);
+        assert_eq!(keysym("MediaPlayPause"), None);
+        assert_eq!(keysym(""), None);
     }
 }

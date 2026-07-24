@@ -20,25 +20,29 @@
 # specific one with `rdpweb serve --target <name>` (default: the first).
 [[targets]]
 name = "example"
-#protocol = "rdp"          # only "rdp" today; "vnc" arrives in phase 2
+protocol = "rdp"           # required: "rdp" or "vnc"
 host = "192.0.2.10"
+# Default: the protocol's standard port (3389 for rdp, 5900 for vnc).
 #port = 3389
 
 # Credentials (used server-side only; never sent to the browser).
 username = "Administrator"
 password = "change-me"
-# Optional domain (leave unset for a local account).
+# Optional domain (leave unset for a local account). RDP only.
 #domain = ""
 
-# Initial desktop size to request.
+# Initial desktop size to request. RDP only — a VNC server dictates its size.
 #width = 1280
 #height = 800
 
 # Security mode: "auto" (TLS+NLA, default), "nla" (NLA only), "tls" (no NLA).
+# RDP only — VNC negotiates VncAuth (password set) or None per the handshake.
 #security = "auto"
 
+# A VNC target only needs host and (usually) a password; username, domain,
+# width/height, and security are ignored.
 # [[targets]]
-# name = "another-machine"
+# name = "mac-screen-sharing"
+# protocol = "vnc"
 # host = "10.0.0.2"
-# username = "user"
-# password = ""
+# password = "change-me"

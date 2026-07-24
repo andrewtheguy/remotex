@@ -10,4 +10,6 @@ pub mod keymap;
 pub mod protocol;
 pub mod rdp;
 pub mod server;
+pub mod session;
+pub mod vnc;
 pub mod ws;

@@ -29,11 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::config::TargetConfig;
 use crate::keymap;
-use crate::protocol::{ClientMsg, MouseButton, ServerMsg, Tile};
-
-/// A dirty rectangle taller than this is split into strips before being sent,
-/// so a full-screen repaint doesn't produce one huge WebSocket message.
-const STRIP_ROWS: u16 = 64;
+use crate::protocol::{ClientMsg, MouseButton, STRIP_ROWS, ServerMsg, Tile};
 
 // A type-erased async stream, so the connect path (which upgrades TCP → TLS) can
 // return a single concrete framed type.
