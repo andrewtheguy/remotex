@@ -198,6 +198,14 @@ function fallbackCursor(): CursorImage {
   return arrow;
 }
 
+// A cursor image as a CSS url() token. An unquoted token ends at the first
+// `)`, so quoting (and escaping what would close the quote) keeps the image
+// string from spilling into the declaration. Our own base64 can't contain
+// either character, but the URL is server-supplied and this is one line.
+function cssUrl(url: string): string {
+  return `url("${url.replace(/["\\]/g, "\\$&")}")`;
+}
+
 // What to draw for the pointer, or null to leave it to the remote.
 function cursorImage(remote: RemoteCursor | null): CursorImage | null {
   if (!remote) {
@@ -223,7 +231,7 @@ function paintCursor(
   const image = cursorImage(remote);
   if (els.overlay) {
     els.overlay.style.cursor = image
-      ? `url(${image.url}) ${image.hx} ${image.hy}, default`
+      ? `${cssUrl(image.url)} ${image.hx} ${image.hy}, default`
       : "none";
   }
   const pointer = els.pointer;
