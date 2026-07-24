@@ -95,9 +95,44 @@ for the gateway to reach. This is a property of the design, not a bug.
 
 ```sh
 packaging/macos/build-agent-app.sh          # -> dist/remotex-agent.app
-CODESIGN_IDENTITY="Apple Development: …" packaging/macos/build-agent-app.sh
 ```
 
-Needs Xcode (the capture bindings build a small Swift bridge). Signing prefers
-`$CODESIGN_IDENTITY`, then the first `Apple Development` identity in the
-keychain, then ad-hoc.
+Needs Xcode — the capture bindings build a small Swift bridge.
+
+Signing prefers `$CODESIGN_IDENTITY`, then a `Developer ID Application`
+identity, then `Apple Development`, then ad-hoc. Prefer a real identity: the
+two TCC grants are keyed to the signed code identity, and ad-hoc changes it on
+every build, so macOS asks for both permissions again each time.
+
+### Notarizing for distribution
+
+A `.app` downloaded from a release is quarantined, and Gatekeeper will refuse
+it unless it is notarized. That needs a **Developer ID Application** certificate
+and a one-time notarytool profile:
+
+```sh
+xcrun notarytool store-credentials remotex-notary \
+  --key AuthKey_XXXX.p8 --key-id <KEY_ID> --issuer <ISSUER_UUID>
+
+packaging/macos/build-agent-app.sh --notary-profile remotex-notary
+```
+
+The ticket is stapled into the bundle, so it validates offline.
+
+### Signing from CI or over SSH
+
+`codesign` needs the signing key's *partition list* to permit it. Keychain
+Access's "Allow all applications to access this item" does **not** set that, so
+from any session that cannot show UI — CI, or SSH / VS Code Remote into a Mac —
+signing fails with `errSecInternalComponent` however the keychain is unlocked.
+Either run the script at the Mac's own console, or import a `.p12` into a
+throwaway keychain by setting:
+
+| Variable | |
+|---|---|
+| `MACOS_CERT_P12` | base64 of a `.p12` exported **with its private key** |
+| `MACOS_CERT_PASSWORD` | that `.p12`'s export password |
+| `MACOS_KEYCHAIN_PASSWORD` | any string; scopes the temporary keychain |
+
+The script creates the keychain, imports, runs `security
+set-key-partition-list`, and deletes it again on exit.
