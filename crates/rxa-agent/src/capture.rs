@@ -33,7 +33,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use log::{debug, info, warn};
-use screencapturekit::cm::SCFrameStatus;
 use screencapturekit::stream::delegate_trait::ErrorHandler;
 use screencapturekit::cv::CVPixelBufferLockFlags;
 use screencapturekit::prelude::*;
@@ -256,9 +255,21 @@ impl Drop for Capture {
 /// display mode: pixel width over point width. A `1.0` fallback is safe — it
 /// just means a non-Retina capture.
 fn backing_scale(display: &SCDisplay) -> f64 {
+    display_scale(display.display_id())
+}
+
+/// Pixels per point for the main display.
+///
+/// Used by [`crate::cursor`], which has no `SCDisplay` to hand: the pointer is a
+/// system-wide artifact, and v1 shares a single display.
+pub fn main_display_scale() -> f64 {
+    display_scale(objc2_core_graphics::CGMainDisplayID())
+}
+
+fn display_scale(id: u32) -> f64 {
     use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGDisplayMode};
 
-    let Some(mode) = CGDisplayCopyDisplayMode(display.display_id()) else {
+    let Some(mode) = CGDisplayCopyDisplayMode(id) else {
         return 1.0;
     };
     let pixel_w = CGDisplayMode::pixel_width(Some(&mode)) as f64;
@@ -285,13 +296,18 @@ impl SCStreamOutputTrait for Handler {
 
 impl Handler {
     fn handle(&self, sample: &CMSampleBuffer) -> anyhow::Result<()> {
-        // `Idle` means "nothing changed and there is no new IOSurface" — the
-        // common case on a still screen. Anything but Complete has no pixels
-        // worth reading.
+        // Only some statuses carry pixels. `Idle` means "nothing changed and
+        // there is no new IOSurface", which is the common case on a still
+        // screen; `Blank`/`Suspended`/`Stopped` have nothing to read either.
+        //
+        // `Started` — the stream's *first* frame — does carry content, and
+        // accepting it is load-bearing: on a screen that then sits still, it is
+        // the only content-bearing frame that ever arrives, so rejecting it
+        // means the session paints nothing at all and looks hung.
         match sample.frame_status() {
-            Some(SCFrameStatus::Complete) => {}
+            Some(status) if status.has_content() => {}
             other => {
-                anyhow::bail!("frame status {other:?}");
+                anyhow::bail!("frame status {other:?} carries no pixels");
             }
         }
 

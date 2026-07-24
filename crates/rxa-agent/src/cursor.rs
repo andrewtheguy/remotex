@@ -48,18 +48,29 @@ pub fn current() -> Option<CursorImage> {
         let point_size = image.size();
         let hotspot = cursor.hotSpot();
 
-        // The largest bitmap representation, which is the Retina one when there
-        // is a choice. `TIFFRepresentation` collapses to a single rep, so go
-        // through the representation list to keep the pixel dimensions.
+        // Pick the representation closest to the size the browser will draw at:
+        // the cursor's point size times the display's backing scale, because the
+        // canvas it lands on is in captured *pixels*.
+        //
+        // Not simply "the largest representation" — a system cursor can carry a
+        // vector-backed rep at an arbitrary resolution. On this Mac the I-beam
+        // reports a 14x20 point size with a 280x400 rep available, and taking
+        // the largest produced a cursor 20x too big whose hotspot was scaled by
+        // 20 to match, putting the pointer's anchor far off the image.
+        let target_w = point_size.width * crate::capture::main_display_scale();
         let reps = image.representations();
         let mut best: Option<objc2::rc::Retained<NSBitmapImageRep>> = None;
         for i in 0..reps.count() {
             let rep = reps.objectAtIndex(i);
             if let Ok(bitmap) = rep.downcast::<NSBitmapImageRep>() {
-                let better = best
-                    .as_ref()
-                    .is_none_or(|b| bitmap.pixelsWide() > b.pixelsWide());
-                if better {
+                if bitmap.pixelsWide() <= 0 || bitmap.pixelsHigh() <= 0 {
+                    continue;
+                }
+                let closer = best.as_ref().is_none_or(|b| {
+                    (bitmap.pixelsWide() as f64 - target_w).abs()
+                        < (b.pixelsWide() as f64 - target_w).abs()
+                });
+                if closer {
                     best = Some(bitmap);
                 }
             }
