@@ -89,9 +89,13 @@ function readViewport(): Viewport {
 export default function FloatingMenu({
   onLogout,
   sendKeyCombo,
+  onKeyboardInset,
 }: {
   onLogout: () => void;
   sendKeyCombo: (codes: string[]) => void;
+  // Reports the docked soft keyboard's height so the touch canvas can inset
+  // above it (0 when the panel closes or floats). See useRemoteDesktop.
+  onKeyboardInset: (px: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -428,6 +432,7 @@ export default function FloatingMenu({
         <SoftKeyboardPanel
           sendKeyCombo={sendKeyCombo}
           onClose={() => setKeyboardOpen(false)}
+          onDockedHeightChange={onKeyboardInset}
         />
       )}
     </>

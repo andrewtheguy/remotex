@@ -24,8 +24,15 @@ export default function RemoteDesktop({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
-  const { status, size, errorMessage, takeOver, retry, sendKeyCombo } =
-    useRemoteDesktop(canvasRef, overlayRef, onUnauthorized);
+  const {
+    status,
+    size,
+    errorMessage,
+    takeOver,
+    retry,
+    sendKeyCombo,
+    setBottomInset,
+  } = useRemoteDesktop(canvasRef, overlayRef, onUnauthorized);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -51,7 +58,11 @@ export default function RemoteDesktop({
       {/* Phase 9: the draggable floating menu — special keys / modifier taps /
           gesture help, and the sole logout affordance now (the below-canvas bar
           and the Ctrl+Alt+Shift+L chord are gone). */}
-      <FloatingMenu onLogout={onLogout} sendKeyCombo={sendKeyCombo} />
+      <FloatingMenu
+        onLogout={onLogout}
+        sendKeyCombo={sendKeyCombo}
+        onKeyboardInset={setBottomInset}
+      />
       {(status !== "connected" || !size) && (
         <div className="status-overlay">
           <span className={`status status-${status}`}>

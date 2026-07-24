@@ -44,6 +44,10 @@ interface SoftKeyboardPanelProps {
   // useRemoteDesktop.sendKeyCombo). The panel's only channel to the remote.
   sendKeyCombo: (codes: string[]) => void;
   onClose: () => void;
+  // Reports the panel's height (CSS px) while it's docked to the bottom edge
+  // (mobile), 0 while it floats (desktop) or when it unmounts. Lets the touch
+  // canvas pan up above the keyboard instead of hiding under it.
+  onDockedHeightChange?: (px: number) => void;
 }
 
 // ── Helpers ──
@@ -320,6 +324,7 @@ function DesktopKeyboardGrid({
 export function SoftKeyboardPanel({
   sendKeyCombo,
   onClose,
+  onDockedHeightChange,
 }: SoftKeyboardPanelProps) {
   const [modifiers, setModifiers] = useState<SoftKeyModifiers>({
     ctrl: false,
@@ -393,6 +398,34 @@ export function SoftKeyboardPanel({
       window.removeEventListener("pointercancel", stopDrag);
     };
   }, []);
+
+  // Report the docked height so the touch canvas can inset above the keyboard.
+  // Only the bottom-docked mobile panel covers the canvas — the desktop panel
+  // floats and is draggable, so it reports 0. A ResizeObserver keeps the inset
+  // in sync as the panel reflows (screen toggle, rotation), and the cleanup
+  // clears it when the panel closes or switches to floating.
+  useEffect(() => {
+    const report = onDockedHeightChange;
+    if (!report) {
+      return;
+    }
+    if (isDesktop) {
+      report(0);
+      return;
+    }
+    const panel = panelRef.current;
+    if (!panel) {
+      return;
+    }
+    const measure = () => report(panel.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    return () => {
+      observer.disconnect();
+      report(0);
+    };
+  }, [isDesktop, onDockedHeightChange]);
 
   // Fire a key with the sticky modifiers held around it, then clear them —
   // sticky modifiers are one-shot, like a physical Shift you tap-then-release.
