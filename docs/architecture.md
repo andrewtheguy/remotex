@@ -215,7 +215,9 @@ matter:
 - `App.tsx` — the auth gate: login screen vs the desktop (phase 7).
 - `Login.tsx` — the login form, with the app version pinned at the bottom.
 - `useRemoteDesktop.ts` — the one hook: session claim + WebSocket lifecycle,
-  tile rendering, input capture, viewport reporting, the logout chord.
+  tile rendering, input capture, viewport reporting, the logout chord, the
+  touch view transform (fit-to-width × pinch zoom + pan).
+- `touchGestures.ts` — remotex's touch gesture engine (phase 8), ported.
 - `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
   connection-status overlay + the disconnect CTA below the canvas.
 
@@ -245,6 +247,25 @@ can't spawn phantom scrollbars.
 `devicePixelRatio`. Where the engine can act on it (VNC with `resize = true`
 against a TigerVNC-family server) the desktop follows the window and the
 scrollbars disappear.
+
+**Mobile (phase 8).** Pinch-zoom-capable touch devices
+(`navigator.maxTouchPoints >= 2`) diverge from the desktop model in two ways,
+both with remotex's battle-tested bounds. *Sizing:* the viewport report uses
+CSS pixels (no dpr — a phone's 3× dpr would mint an enormous desktop),
+floored per axis at a constant 1024×768; the constant floor (not remotex's
+geometry-found-on-connect) means a phone connecting to a desktop a previous
+session left too tall repairs it on connect, since the engine outlives the
+browser here. *Display and input:* native scrolling is off; `applyCanvasCss`
+positions the canvas by fit-to-width scale × pinch zoom (1–4×) plus a clamped
+pan (`translate3d`), and `touchGestures.ts` drives it — a trackpad model
+where the cursor is a persistent position (the server composites it into the
+framebuffer): one-finger tap clicks at the cursor, one-finger drag moves it
+(edge-panning the view), double-tap-and-hold holds the left button with a
+second finger assisting, two-finger tap right-clicks, pinch zooms, two-finger
+drag pans, three-finger swipe scrolls axis-locked. Gesture wheel ticks are
+sign-only `wheel` messages; the input overlay covers the whole viewport (the
+disconnect bar is z-lifted above it), and hybrid mouse input maps through
+the canvas rect so it tracks the zoom/pan.
 
 PNG tiles decode asynchronously (`createImageBitmap`), so all incoming
 messages run through one promise queue: draws land in arrival order and a
@@ -280,6 +301,7 @@ the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
 
 Done: phase 1 (MVP), phase 2 (transport + VNC engine + TOML config), phase 3
 (full-screen canvas), phase 4 (VNC dynamic resize), phase 5 (connection-flow
-UX), phase 6 (session management), phase 7 (web login). Planned: mobile
-gestures (8), the remotex-v2 rename (9), soft keyboard + floating UI (10),
-multi-target picker (11) — the list lives in [`roadmap.md`](roadmap.md).
+UX), phase 6 (session management), phase 7 (web login), phase 8 (mobile
+gestures). Planned: the remotex-v2 rename (9), soft keyboard + floating UI
+(10), multi-target picker (11) — the list lives in
+[`roadmap.md`](roadmap.md).

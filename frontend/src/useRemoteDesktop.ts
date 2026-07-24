@@ -7,6 +7,12 @@ import {
   mouseButtonFromEvent,
   type TileMsg,
 } from "./protocol.ts";
+import {
+  attachTouchGestures,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  type Point,
+} from "./touchGestures.ts";
 
 // The connection-flow state machine (phase 5/6):
 //
@@ -49,9 +55,26 @@ const LOGOUT_CHORD_CODE = "KeyL";
 // server) outlives the browser here, so a connect-time floor would inherit
 // whatever damage a previous session left (e.g. a too-tall desktop) and
 // never shrink it — with a constant floor the phone repairs it on connect.
-const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
+// Exported so RemoteDesktop.tsx can switch the screen into touch layout
+// (overflow hidden + viewport-fixed overlay — see index.css).
+export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
 const TOUCH_MIN_WIDTH = 1024;
 const TOUCH_MIN_HEIGHT = 768;
+
+// The touch view transform (phase 8): the pinch zoom and pan offset the
+// gestures drive, layered on top of the fit-to-width base scale. One object
+// per hook instance, mutated in place; applyCanvasCss clamps it on every
+// repaint (a framebuffer resize or viewport rotation can strand a stale pan).
+interface TouchViewState {
+  zoom: number;
+  pan: Point;
+}
+
+// Touch base scale: scale the desktop down (never up) to fit the viewport
+// width (remotex's fit bound).
+function touchFitScale(size: RemoteSize): number {
+  return Math.min(document.documentElement.clientWidth / size.w, 1);
+}
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -63,17 +86,30 @@ const MAX_RETRY_DELAY_MS = 15_000;
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
+  view: TouchViewState,
 ): void {
   if (!canvas || !size) {
     return;
   }
   if (CAN_PINCH_ZOOM) {
-    // Touch display cap (remotex's fit bound): scale the desktop down (never
-    // up) to fit the viewport width; the height scrolls. Pinch-zoom onto the
-    // full-resolution framebuffer is phase 8.
-    const scale = Math.min(document.documentElement.clientWidth / size.w, 1);
-    canvas.style.width = `${size.w * scale}px`;
-    canvas.style.height = `${size.h * scale}px`;
+    // Touch (phase 8): fit-to-width base scale with the pinch zoom on top;
+    // the pan offset (≤ 0 per axis) slides the scaled desktop under the
+    // viewport. Zoom and pan are clamped here — the one place every repaint
+    // funnels through — and the clamped values are written back so gesture
+    // math continues from what is actually on screen.
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    view.zoom = Math.min(Math.max(view.zoom, MIN_ZOOM), MAX_ZOOM);
+    const scale = touchFitScale(size) * view.zoom;
+    const w = size.w * scale;
+    const h = size.h * scale;
+    view.pan = {
+      x: Math.min(Math.max(view.pan.x, Math.min(0, vw - w)), 0),
+      y: Math.min(Math.max(view.pan.y, Math.min(0, vh - h)), 0),
+    };
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
+    canvas.style.transform = `translate3d(${view.pan.x}px, ${view.pan.y}px, 0)`;
     return;
   }
   const dpr = window.devicePixelRatio || 1;
@@ -127,7 +163,8 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
 
 // Claims the single session slot (POST /api/session), opens the /ws WebSocket
 // with the claim token, renders incoming screen tiles onto `canvasRef`, and
-// forwards mouse + keyboard input captured over `overlayRef` as ClientMsg.
+// forwards mouse + keyboard input (plus touch gestures on pinch-zoom-capable
+// devices — see touchGestures.ts) captured over `overlayRef` as ClientMsg.
 // Reconnects automatically after drops; busy/takenOver/error surface to the
 // caller with `takeOver`/`retry` to resolve them.
 //
@@ -150,6 +187,9 @@ export function useRemoteDesktop(
   // Kept in a ref (not just state) so input handlers read the latest size
   // without re-subscribing.
   const sizeRef = useRef<RemoteSize | null>(null);
+  // The touch pinch-zoom/pan state, shared by the repaint paths (connection
+  // effect) and the gesture handlers (input effect). Inert on desktop.
+  const viewRef = useRef<TouchViewState>({ zoom: 1, pan: { x: 0, y: 0 } });
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
@@ -341,7 +381,7 @@ export function useRemoteDesktop(
       if (canvas) {
         canvas.width = msg.w;
         canvas.height = msg.h;
-        applyCanvasCss(canvas, s);
+        applyCanvasCss(canvas, s, viewRef.current);
         const ctx = canvas.getContext("2d");
         ctxRef.current = ctx;
         if (ctx) {
@@ -392,7 +432,7 @@ export function useRemoteDesktop(
     const onViewportChange = () => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        applyCanvasCss(canvasRef.current, sizeRef.current);
+        applyCanvasCss(canvasRef.current, sizeRef.current, viewRef.current);
         sendViewport();
       }, 250);
     };
@@ -406,7 +446,7 @@ export function useRemoteDesktop(
     let dprQuery: MediaQueryList | null = null;
     const onDprChange = () => {
       watchDpr();
-      applyCanvasCss(canvasRef.current, sizeRef.current);
+      applyCanvasCss(canvasRef.current, sizeRef.current, viewRef.current);
       onViewportChange();
     };
     const watchDpr = () => {
@@ -449,8 +489,33 @@ export function useRemoteDesktop(
     const pressedButtons = new Set<MouseButton>();
     const pressedKeys = new Set<string>();
 
+    // Touch gestures (phase 8), only on pinch-zoom-capable devices — they
+    // drive the same view transform applyCanvasCss renders.
+    const gestures = CAN_PINCH_ZOOM
+      ? attachTouchGestures(el, {
+          send,
+          remoteSize: () => sizeRef.current,
+          view: () => {
+            const size = sizeRef.current;
+            return {
+              fit: size ? touchFitScale(size) : 1,
+              zoom: viewRef.current.zoom,
+              pan: viewRef.current.pan,
+            };
+          },
+          applyView: (zoom, pan) => {
+            viewRef.current.zoom = zoom;
+            viewRef.current.pan = pan;
+            applyCanvasCss(canvasRef.current, sizeRef.current, viewRef.current);
+          },
+        })
+      : null;
+
     const toRemote = (e: MouseEvent) => {
-      const rect = el.getBoundingClientRect();
+      // Map through the canvas rect (not the overlay): it reflects the
+      // displayed framebuffer under the current touch zoom/pan, and on
+      // desktop it coincides with the overlay anyway.
+      const rect = (canvasRef.current ?? el).getBoundingClientRect();
       const remote = sizeRef.current;
       const scaleX = remote && rect.width > 0 ? remote.w / rect.width : 1;
       const scaleY = remote && rect.height > 0 ? remote.h / rect.height : 1;
@@ -466,6 +531,9 @@ export function useRemoteDesktop(
 
     const onMouseMove = (e: MouseEvent) => {
       const { x, y } = toRemote(e);
+      // Keep the gesture cursor in sync with real mouse input on hybrid
+      // touch+mouse devices.
+      gestures?.notePointer(x, y);
       send({ type: "mouseMove", x, y });
     };
     const onMouseDown = (e: MouseEvent) => {
@@ -502,6 +570,7 @@ export function useRemoteDesktop(
         send({ type: "mouseButton", button, pressed: false });
       }
       pressedButtons.clear();
+      gestures?.release();
     };
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
@@ -535,6 +604,7 @@ export function useRemoteDesktop(
     el.addEventListener("blur", onBlur);
 
     return () => {
+      gestures?.detach();
       el.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mouseup", onMouseUp);
@@ -544,7 +614,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, onLogout]);
+  }, [overlayRef, canvasRef, onLogout]);
 
   return { status, size, errorMessage, takeOver, retry };
 }
