@@ -24,7 +24,11 @@ pub enum Commands {
         port: u16,
 
         /// RDP target host
-        #[arg(long, env = "RDPWEB_RDP_HOST", default_value = "127.0.0.1")]
+        #[arg(
+            long,
+            env = "RDPWEB_RDP_HOST",
+            value_parser = clap::builder::NonEmptyStringValueParser::new()
+        )]
         rdp_host: String,
 
         /// RDP target port
@@ -60,4 +64,31 @@ pub enum Commands {
         #[arg(long, env = "RDPWEB_STATIC_DIR")]
         static_dir: Option<PathBuf>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::Cli;
+
+    #[test]
+    fn rdp_host_is_required() {
+        let command = Cli::command();
+        let serve = command
+            .get_subcommands()
+            .find(|command| command.get_name() == "serve")
+            .expect("serve subcommand");
+        let rdp_host = serve
+            .get_arguments()
+            .find(|argument| argument.get_id() == "rdp_host")
+            .expect("rdp_host argument");
+
+        assert!(rdp_host.is_required_set());
+    }
+
+    #[test]
+    fn rdp_host_cannot_be_empty() {
+        assert!(Cli::try_parse_from(["rdpweb", "serve", "--rdp-host", ""]).is_err());
+    }
 }

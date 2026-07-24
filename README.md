@@ -26,7 +26,7 @@ the GitHub-published digest, and installs under `/usr/local/opt/rdpweb` with a
 `rdpweb` launcher on your `PATH` (may prompt for `sudo`). Then:
 
 ```bash
-$EDITOR /usr/local/opt/rdpweb/current/etc/rdpweb.env   # set RDP target + creds
+$EDITOR /usr/local/opt/rdpweb/etc/rdpweb.env   # set RDP target + creds
 rdpweb serve
 ```
 
@@ -83,7 +83,7 @@ keyboard over it drive the session. Use `RUST_LOG=info` (or `debug`) for logs.
 | --- | --- | --- |
 | `--host` | `RDPWEB_HOST` | `127.0.0.1` |
 | `--port` | `RDPWEB_PORT` | `52380` |
-| `--rdp-host` | `RDPWEB_RDP_HOST` | `127.0.0.1` |
+| `--rdp-host` | `RDPWEB_RDP_HOST` | required |
 | `--rdp-port` | `RDPWEB_RDP_PORT` | `3389` |
 | `--rdp-username` | `RDPWEB_RDP_USERNAME` | — |
 | `--rdp-password` | `RDPWEB_RDP_PASSWORD` | — |
@@ -129,7 +129,7 @@ cargo build --release
 ./target/release/rdpweb serve --static-dir frontend/dist
 ```
 
-To produce a distributable, relocatable tarball (`bin` + `etc` + `share`) that
+To produce a distributable, relocatable tarball (`bin` + `share`) that
 installs under `/usr/local/opt/rdpweb`, use the packaging scripts:
 
 ```bash

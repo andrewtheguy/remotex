@@ -8,17 +8,13 @@ use rdpweb::server;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load a local `.env` if present (dev convenience), then the installed
-    // config at <root>/etc/rdpweb.env, so RDPWEB_* (incl. credentials) can live
-    // in a file instead of the shell. dotenvy never overrides already-set
+    // config at <prefix>/etc/rdpweb.env, so RDPWEB_* (incl. credentials) can
+    // live in a file instead of the shell. dotenvy never overrides already-set
     // variables, so real environment variables take precedence over both.
     let _ = dotenvy::dotenv();
     if let Some(env_file) = rdpweb::config::default_env_file() {
-        // Surface failures (e.g. a mistyped RDPWEB_ENV_FILE override, or an
-        // unreadable file) instead of silently ignoring them. The logger isn't
-        // initialized yet, so write to stderr directly.
-        if let Err(e) = dotenvy::from_path(&env_file) {
-            eprintln!("warning: could not load env file {}: {e}", env_file.display());
-        }
+        dotenvy::from_path(&env_file)
+            .with_context(|| format!("failed to load env file {}", env_file.display()))?;
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();

@@ -3,9 +3,10 @@
 #
 # Layout (distro-agnostic, works on Linux and macOS):
 #
-#   <prefix>/versions/<version>/{bin,etc,share}    # this version's files
-#   <prefix>/current -> versions/<version>         # active version (atomic swap)
-#   <bindir>/rdpweb -> <prefix>/current/bin/rdpweb # launcher on PATH (stable)
+#   <prefix>/etc/rdpweb.env                        # stable user configuration
+#   <prefix>/versions/<version>/{bin,share}         # this version's files
+#   <prefix>/current -> versions/<version>          # active version (atomic swap)
+#   <bindir>/rdpweb -> <prefix>/current/bin/rdpweb  # launcher on PATH (stable)
 #
 # Upgrade model:
 #   1. The new version is staged fully into versions/<version> before anything
@@ -16,9 +17,8 @@
 #   3. Older versions are pruned, keeping only the new one and the immediately
 #      previous one (for rollback: point `current` back at it).
 #
-# Config (etc/rdpweb.env) is migrated from the previously active version, or
-# seeded from the bundled sample on a fresh install. A lock prevents two
-# installs from racing on the same prefix.
+# Config is seeded once at <prefix>/etc/rdpweb.env and is never rolled with
+# versions. A lock prevents two installs from racing on the same prefix.
 #
 # Env overrides:
 #   PREFIX   install root   (default: /usr/local/opt/rdpweb)
@@ -63,7 +63,6 @@ swap_symlink() {
 # What is active right now, before we touch anything — this becomes "previous".
 prev_link="$(readlink "$prefix/current" 2>/dev/null || true)"   # e.g. versions/0.0.1
 prev_version="${prev_link#versions/}"
-prev_cfg="$prefix/current/etc/rdpweb.env"
 
 # Stage the new version into a temp dir, then publish it in one move so a partial
 # copy is never named versions/<version>.
@@ -73,20 +72,29 @@ mkdir -p "$prefix/versions"
 
 echo ">> staging rdpweb $version"
 rm -rf "$staging"
-mkdir -p "$staging/etc"
+mkdir -p "$staging"
 cp -R "$src/bin" "$src/share" "$staging/"
-cp "$src/etc/rdpweb.env.sample" "$staging/etc/rdpweb.env.sample"
 cp "$src/VERSION" "$staging/VERSION"
 
-if [ -f "$prev_cfg" ]; then
-  echo ">> migrating config from active version"
-  cp "$prev_cfg" "$staging/etc/rdpweb.env"
-else
-  echo ">> seeding config from sample — edit $final/etc/rdpweb.env"
-  cp "$src/etc/rdpweb.env.sample" "$staging/etc/rdpweb.env"
+config_dir="$prefix/etc"
+config="$config_dir/rdpweb.env"
+mkdir -p "$config_dir"
+if [ -e "$config" ] && [ ! -f "$config" ]; then
+  echo "error: config path is not a regular file: $config" >&2
+  exit 1
 fi
-if ! chmod 600 "$staging/etc/rdpweb.env"; then
-  echo "error: could not set 600 permissions on $staging/etc/rdpweb.env" >&2
+if [ ! -f "$config" ]; then
+  echo ">> seeding config from sample — edit $config"
+  cp "$src/share/doc/rdpweb/rdpweb.env.example" "$config"
+else
+  echo ">> preserving config at $config"
+fi
+if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+  chown "$SUDO_UID:$SUDO_GID" "$config_dir" "$config"
+fi
+chmod 700 "$config_dir"
+if ! chmod 600 "$config"; then
+  echo "error: could not set 600 permissions on $config" >&2
   echo "       refusing to install — the credentials file would not be secured." >&2
   exit 1
 fi
@@ -117,5 +125,5 @@ if [ -n "$prev_version" ] && [ "$prev_version" != "$version" ]; then
   echo ">> previous version $prev_version kept for rollback:"
   echo "     $(basename "$0" .sh) rollback  ->  ln -sfn versions/$prev_version $prefix/current"
 fi
-echo ">> config: $prefix/current/etc/rdpweb.env"
+echo ">> config: $config"
 echo ">> run:    rdpweb serve"

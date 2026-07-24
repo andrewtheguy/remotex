@@ -53,14 +53,13 @@ pub struct AppConfig {
     pub static_dir: PathBuf,
 }
 
-/// The install root, derived from the running binary's own location.
+/// The active version root, derived from the running binary's own location.
 ///
-/// The binary is shipped at `<root>/bin/rdpweb`, so its assets and config live
-/// at `<root>/share/…` and `<root>/etc/…`. We canonicalize `current_exe` so a
-/// launcher symlink (e.g. `/usr/local/bin/rdpweb` → `…/current/bin/rdpweb`)
-/// resolves to the real versioned directory. Returns `None` in odd environments
-/// where the executable path can't be determined.
-pub fn install_root() -> Option<PathBuf> {
+/// The binary is shipped at `<prefix>/versions/<version>/bin/rdpweb`. We
+/// canonicalize `current_exe` so a launcher symlink resolves to the real
+/// versioned directory. Returns `None` in odd environments where the executable
+/// path can't be determined.
+pub fn version_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = exe.canonicalize().unwrap_or(exe);
     // <root>/bin/rdpweb → <root>
@@ -73,7 +72,7 @@ pub fn install_root() -> Option<PathBuf> {
 /// `frontend/dist` relative to the working directory for `cargo run` in a
 /// checkout. Override with `--static-dir` / `RDPWEB_STATIC_DIR`.
 pub fn default_static_dir() -> PathBuf {
-    if let Some(root) = install_root() {
+    if let Some(root) = version_root() {
         let installed = root.join("share/rdpweb/web");
         if installed.is_dir() {
             return installed;
@@ -84,13 +83,23 @@ pub fn default_static_dir() -> PathBuf {
 
 /// Path of the installed env/config file to load at startup, if any.
 ///
-/// `RDPWEB_ENV_FILE` overrides; otherwise `<root>/etc/rdpweb.env` when present.
-/// Values here seed the `RDPWEB_*` environment; real environment variables and
-/// CLI flags still take precedence (see `main.rs`).
+/// `RDPWEB_ENV_FILE` overrides; otherwise `<prefix>/etc/rdpweb.env` when the
+/// executable is in `<prefix>/versions/<version>/bin`. Values here seed the
+/// `RDPWEB_*` environment; real environment variables and CLI flags still take
+/// precedence (see `main.rs`).
 pub fn default_env_file() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("RDPWEB_ENV_FILE") {
         return Some(PathBuf::from(path));
     }
-    let candidate = install_root()?.join("etc/rdpweb.env");
-    candidate.is_file().then_some(candidate)
+    let root = version_root()?;
+    let versions_dir = root.parent()?;
+    if versions_dir.file_name()? != "versions" {
+        return None;
+    }
+    let candidate = versions_dir.parent()?.join("etc/rdpweb.env");
+    match candidate.metadata() {
+        Ok(metadata) => metadata.is_file().then_some(candidate),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(candidate),
+    }
 }
