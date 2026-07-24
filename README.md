@@ -11,10 +11,12 @@ it with mouse and keyboard from a web browser.
   [Bun](https://bun.sh/). The built assets ship alongside the binary and are
   served from disk (`share/rdpweb/web`), resolved relative to the executable.
 
-> **Status: Phase 1 MVP + phase 2 (transport + VNC).** Connects to one RDP or
-> VNC host, renders its screen in the browser (dirty-rectangle tiles as binary
-> WebSocket frames, PNG-compressed), and forwards mouse and keyboard input.
-> Credentials live server-side and are never sent to the browser. See
+> **Status: Phase 1 MVP + phase 2 (transport + VNC) + phase 3 (full-screen
+> canvas).** Connects to one RDP or VNC host, renders its screen in the browser
+> (dirty-rectangle tiles as binary WebSocket frames, PNG-compressed), and
+> forwards mouse and keyboard input. The canvas fills the browser viewport at
+> 1:1 device pixels; a remote desktop larger than the viewport scrolls, never
+> scales. Credentials live server-side and are never sent to the browser. See
 > [`docs/phase1-mvp.md`](docs/phase1-mvp.md),
 > [`docs/phase2-consolidation.md`](docs/phase2-consolidation.md), and
 > [`docs/vnc.md`](docs/vnc.md).

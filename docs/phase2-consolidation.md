@@ -119,17 +119,22 @@ and multi-target all mean re-attaching to or choosing *the* one session/target
 
 ## Later phases (sketch)
 
-**Done:** phase 1 (the MVP, docs/phase1-mvp.md) and phase 2 (this document —
-transport, the VNC engine baseline, TOML config). Everything below is **not
-started**, in planned order:
+**Done:** phase 1 (the MVP, docs/phase1-mvp.md), phase 2 (this document —
+transport, the VNC engine baseline, TOML config), and phase 3 (full-screen
+canvas). Everything below phase 3 is **not started**, in planned order:
 
-- **Phase 3 — full-screen canvas, like remotex.** Common to **all
+- **Phase 3 — full-screen canvas, like remotex — (done).** Common to **all
   protocols** — a frontend behavior, not a VNC feature: the canvas fills the
   browser viewport and renders the remote desktop at 1:1 pixels (viewport ×
   `devicePixelRatio`, no scaling blur). When the remote desktop doesn't match
   the viewport — because the protocol or server can't resize — the canvas
   simply overflows and shows scrollbars, exactly like remotex. No
-  letterboxing, no scaling.
+  letterboxing, no scaling. As built: the canvas backing store stays at the
+  remote pixel size and its CSS size is remote ÷ `devicePixelRatio`; the
+  screen container is an `overflow: auto` scroller; a re-armed `matchMedia`
+  listener re-derives the CSS size when `devicePixelRatio` changes (monitor
+  moves, browser zoom). The header/status chrome was replaced by a centered
+  status overlay shown only until the desktop streams.
 - **Phase 4 — TigerVNC-style dynamic resize (docs/vnc.md):** where the server
   supports it, drive the size it renders from the browser (`SetDesktopSize`)
   so the phase-3 scrollbars disappear; servers without it keep the fixed
@@ -199,6 +204,8 @@ profile selected at connect time.
    through the real server.
 5. Verify against real targets — including macOS Screen Sharing, the case that
    motivated dropping the clever-encoding path.
-6. Later phases (3–9 above): full-screen canvas, dynamic resize, frontend
-   integration, session management, soft keyboard + floating UI, multi-target
-   UI, and finally the remotex-v2 rename.
+6. **(done)** Phase 3: full-screen canvas at 1:1 device pixels, overflow
+   scrolls (see the phase list above).
+7. Later phases (4–9 above): dynamic resize, frontend integration, session
+   management, soft keyboard + floating UI, multi-target UI, and finally the
+   remotex-v2 rename.

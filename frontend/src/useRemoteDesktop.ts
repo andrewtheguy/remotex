@@ -15,6 +15,22 @@ export interface RemoteSize {
   h: number;
 }
 
+// Phase 3 (full-screen canvas): display the framebuffer at 1:1 device pixels —
+// CSS size = remote pixels / devicePixelRatio. No scaling, no letterboxing;
+// when the remote desktop is larger than the viewport the canvas overflows and
+// the screen container scrolls.
+function applyCanvasCss(
+  canvas: HTMLCanvasElement | null,
+  size: RemoteSize | null,
+): void {
+  if (!canvas || !size) {
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = `${size.w / dpr}px`;
+  canvas.style.height = `${size.h / dpr}px`;
+}
+
 // Opens the /ws WebSocket, renders incoming screen tiles onto `canvasRef`, and
 // forwards mouse + keyboard input captured over `overlayRef` as ClientMsg.
 export function useRemoteDesktop(
@@ -94,9 +110,11 @@ export function useRemoteDesktop(
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
       const canvas = canvasRef.current;
+      const s = { w: msg.w, h: msg.h };
       if (canvas) {
         canvas.width = msg.w;
         canvas.height = msg.h;
+        applyCanvasCss(canvas, s);
         const ctx = canvas.getContext("2d");
         ctxRef.current = ctx;
         if (ctx) {
@@ -104,7 +122,6 @@ export function useRemoteDesktop(
           ctx.fillRect(0, 0, msg.w, msg.h);
         }
       }
-      const s = { w: msg.w, h: msg.h };
       sizeRef.current = s;
       setSize(s);
     };
@@ -122,6 +139,27 @@ export function useRemoteDesktop(
     };
 
     return () => ws.close();
+  }, [canvasRef]);
+
+  // devicePixelRatio changes (moving the window between monitors with
+  // different scale factors, browser zoom) must re-derive the canvas CSS size
+  // to keep the 1:1 device-pixel mapping. matchMedia only fires when the
+  // current dpr stops matching, so re-arm the query on each change.
+  useEffect(() => {
+    let query: MediaQueryList | null = null;
+    const onDprChange = () => {
+      watch();
+      applyCanvasCss(canvasRef.current, sizeRef.current);
+    };
+    const watch = () => {
+      query?.removeEventListener("change", onDprChange);
+      query = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio || 1}dppx)`,
+      );
+      query.addEventListener("change", onDprChange);
+    };
+    watch();
+    return () => query?.removeEventListener("change", onDprChange);
   }, [canvasRef]);
 
   // Capture input over the overlay element and forward it to the server,
