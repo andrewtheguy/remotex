@@ -17,6 +17,7 @@
 //! report the desktop size as [`ServerMsg::Resize`], then pump framebuffer
 //! updates out as tiles and browser [`ClientMsg`] input back in.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use des::Des;
@@ -256,6 +257,10 @@ async fn active_loop(
     // tracked across browser events (which report only the changed part).
     let mut button_mask = 0u8;
     let mut last_pos = (size.0 / 2, size.1 / 2);
+    // The keysym actually sent for each pressed DOM code, so a key released
+    // after Shift is let go still releases the shifted keysym it was pressed
+    // with (down/up symmetry). Doubles as the live Shift state.
+    let mut pressed_keys: HashMap<String, u32> = HashMap::new();
 
     let result = loop {
         tokio::select! {
@@ -291,7 +296,7 @@ async fn active_loop(
                     }
                     write_to(&writer, &update_request(false, size)).await
                 } else {
-                    match translate_input(input, &mut button_mask, &mut last_pos) {
+                    match translate_input(input, &mut button_mask, &mut last_pos, &mut pressed_keys) {
                         bytes if bytes.is_empty() => Ok(()),
                         bytes => write_to(&writer, &bytes).await,
                     }
@@ -546,6 +551,7 @@ fn translate_input(
     input: ClientMsg,
     button_mask: &mut u8,
     last_pos: &mut (u16, u16),
+    pressed_keys: &mut HashMap<String, u32>,
 ) -> Vec<u8> {
     match input {
         ClientMsg::MouseMove { x, y } => {
@@ -579,13 +585,37 @@ fn translate_input(
             }
             out
         }
-        ClientMsg::Key { code, pressed } => match keymap::keysym(&code) {
-            Some(sym) => key_event(pressed, sym).to_vec(),
-            None => {
-                debug!("vnc: unmapped key code {code}");
-                Vec::new()
+        ClientMsg::Key { code, pressed } => {
+            if pressed {
+                // Resolve the symbol against the live Shift state so the
+                // shifted keysym (`A`, `!`) is sent, not the base one.
+                let shift = pressed_keys.contains_key("ShiftLeft")
+                    || pressed_keys.contains_key("ShiftRight");
+                match keymap::keysym(&code, shift) {
+                    Some(sym) => {
+                        pressed_keys.insert(code, sym);
+                        key_event(true, sym).to_vec()
+                    }
+                    None => {
+                        debug!("vnc: unmapped key code {code}");
+                        Vec::new()
+                    }
+                }
+            } else {
+                // Release exactly what was pressed; fall back to the unshifted
+                // keysym for a release with no matching press.
+                match pressed_keys
+                    .remove(&code)
+                    .or_else(|| keymap::keysym(&code, false))
+                {
+                    Some(sym) => key_event(false, sym).to_vec(),
+                    None => {
+                        debug!("vnc: unmapped key code {code}");
+                        Vec::new()
+                    }
+                }
             }
-        },
+        }
         // Intercepted by the input loop (request_resize) before translation.
         ClientMsg::Viewport { .. } => Vec::new(),
         // Intercepted by the input loop (full repaint) before translation.
@@ -867,6 +897,7 @@ mod tests {
     fn buttons_accumulate_in_the_mask_and_wheel_pulses() {
         let mut mask = 0u8;
         let mut pos = (10, 20);
+        let mut keys = HashMap::new();
 
         let bytes = translate_input(
             ClientMsg::MouseButton {
@@ -875,15 +906,26 @@ mod tests {
             },
             &mut mask,
             &mut pos,
+            &mut keys,
         );
         assert_eq!(bytes, pointer_event(0x01, (10, 20)).to_vec());
 
         // A move while the button is held keeps it in the mask (drag).
-        let bytes = translate_input(ClientMsg::MouseMove { x: 30, y: 40 }, &mut mask, &mut pos);
+        let bytes = translate_input(
+            ClientMsg::MouseMove { x: 30, y: 40 },
+            &mut mask,
+            &mut pos,
+            &mut keys,
+        );
         assert_eq!(bytes, pointer_event(0x01, (30, 40)).to_vec());
 
         // Scroll down = button 5 (0x10) press + release, on top of the held mask.
-        let bytes = translate_input(ClientMsg::Wheel { dx: 0.0, dy: 3.0 }, &mut mask, &mut pos);
+        let bytes = translate_input(
+            ClientMsg::Wheel { dx: 0.0, dy: 3.0 },
+            &mut mask,
+            &mut pos,
+            &mut keys,
+        );
         let mut expected = pointer_event(0x11, (30, 40)).to_vec();
         expected.extend_from_slice(&pointer_event(0x01, (30, 40)));
         assert_eq!(bytes, expected);
@@ -895,6 +937,7 @@ mod tests {
             },
             &mut mask,
             &mut pos,
+            &mut keys,
         );
         assert_eq!(bytes, pointer_event(0x00, (30, 40)).to_vec());
     }
@@ -1052,30 +1095,49 @@ mod tests {
         assert!(apply_resize(&desktop, (0, 480), &tx).await.is_err());
     }
 
+    /// Feed one key event through `translate_input` with shared state.
+    fn key(
+        keys: &mut HashMap<String, u32>,
+        code: &str,
+        pressed: bool,
+    ) -> Vec<u8> {
+        let (mut mask, mut pos) = (0u8, (0u16, 0u16));
+        translate_input(
+            ClientMsg::Key {
+                code: code.to_owned(),
+                pressed,
+            },
+            &mut mask,
+            &mut pos,
+            keys,
+        )
+    }
+
     #[test]
     fn key_input_maps_to_keysyms_and_drops_unknown_codes() {
-        let (mut mask, mut pos) = (0u8, (0u16, 0u16));
-        assert_eq!(
-            translate_input(
-                ClientMsg::Key {
-                    code: "KeyA".to_owned(),
-                    pressed: true
-                },
-                &mut mask,
-                &mut pos
-            ),
-            key_event(true, 0x61).to_vec()
-        );
-        assert!(
-            translate_input(
-                ClientMsg::Key {
-                    code: "MediaPlayPause".to_owned(),
-                    pressed: true
-                },
-                &mut mask,
-                &mut pos
-            )
-            .is_empty()
-        );
+        let mut keys = HashMap::new();
+        assert_eq!(key(&mut keys, "KeyA", true), key_event(true, 0x61).to_vec());
+        assert!(key(&mut keys, "MediaPlayPause", true).is_empty());
+    }
+
+    #[test]
+    fn held_shift_sends_the_shifted_keysym() {
+        let mut keys = HashMap::new();
+        // Shift down, then a letter and a digit resolve to their shifted form.
+        assert_eq!(key(&mut keys, "ShiftLeft", true), key_event(true, 0xFFE1).to_vec());
+        assert_eq!(key(&mut keys, "KeyA", true), key_event(true, 0x41).to_vec()); // 'A'
+        assert_eq!(key(&mut keys, "Digit1", true), key_event(true, 0x21).to_vec()); // '!'
+    }
+
+    #[test]
+    fn release_uses_the_keysym_from_press_even_after_shift_is_let_go() {
+        let mut keys = HashMap::new();
+        key(&mut keys, "ShiftLeft", true);
+        assert_eq!(key(&mut keys, "KeyA", true), key_event(true, 0x41).to_vec()); // 'A' down
+        // Shift released before the letter — the letter must still release 'A',
+        // not 'a', or the server leaves the shifted keysym stuck down.
+        key(&mut keys, "ShiftLeft", false);
+        assert_eq!(key(&mut keys, "KeyA", false), key_event(false, 0x41).to_vec());
+        assert!(keys.is_empty());
     }
 }

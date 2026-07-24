@@ -3,10 +3,11 @@
 // backend keymap.rs). Ported from remotex's soft keyboard, which emitted raw
 // X11 keysyms (and a separate shiftKeysym per key) because its backend only
 // accepted keysyms. Here we control the backend and already map every DOM code
-// to an RDP scancode *and* an X11 keysym, with the remote applying Shift from
-// modifier state — so a soft key is just a code, and shifted symbols fall out
-// of holding the real Shift modifier. That reuses the existing pipeline for
-// both engines instead of minting a second, keysym-only input path.
+// to an RDP scancode *and* an X11 keysym, resolving the shifted symbol from the
+// live Shift state (RDP defers to the remote host; VNC picks the shifted keysym
+// in keymap.rs) — so a soft key is just a code, and shifted symbols fall out of
+// holding the real Shift modifier. That reuses the existing pipeline for both
+// engines instead of minting a second, keysym-only input path.
 
 // ── Types ──
 
