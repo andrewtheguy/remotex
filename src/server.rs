@@ -63,14 +63,16 @@ pub fn router(config: AppConfig) -> Router {
 
 #[derive(Serialize)]
 struct ConfigResponse {
-    rdp_host: String,
-    rdp_port: u16,
+    target: String,
+    host: String,
+    port: u16,
 }
 
 /// Non-secret info about the configured target. Never returns credentials.
 async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
-        rdp_host: state.config.rdp_host.clone(),
-        rdp_port: state.config.rdp_port,
+        target: state.config.target.name.clone(),
+        host: state.config.target.host.clone(),
+        port: state.config.target.port,
     })
 }

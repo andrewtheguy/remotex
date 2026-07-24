@@ -25,15 +25,16 @@ This:
 
 ```bash
 # set your RDP target + credentials (kept server-side, never sent to the browser)
-$EDITOR /usr/local/opt/rdpweb/etc/rdpweb.env
+$EDITOR /usr/local/opt/rdpweb/etc/rdpweb.toml
 
 rdpweb serve
 ```
 
-Then open the printed URL (default <http://127.0.0.1:52380>). Config keys are the
-`RDPWEB_*` variables documented in the [README](../README.md#development); each
-can also be a `--flag` or a real environment variable (which take precedence
-over the file).
+Then open the printed URL (default <http://127.0.0.1:52380>). The TOML config
+format is documented in the [README](../README.md#configuration); all
+configuration lives in that file (no environment variables). Pass
+`--config <path>` to use a different file and `--target <name>` to pick a
+`[[targets]]` profile.
 
 ## Options
 
@@ -56,14 +57,14 @@ Make sure `BINDIR` is on your `PATH`.
 
 ```
 /usr/local/opt/rdpweb/
-├── etc/rdpweb.env                       # stable user configuration
+├── etc/rdpweb.toml                       # stable user configuration
 ├── versions/<version>/{bin,share}       # this version's files
 ├── current -> versions/<version>        # active version
 └── /usr/local/bin/rdpweb -> current/bin/rdpweb
 ```
 
 The example config is versioned at
-`current/share/doc/rdpweb/rdpweb.env.example`. The binary resolves `share/`
+`current/share/doc/rdpweb/rdpweb.toml.example`. The binary resolves `share/`
 relative to its own real path and the stable config relative to the enclosing
 prefix, so the whole tree is relocatable via `PREFIX`/`BINDIR`.
 
@@ -71,7 +72,7 @@ prefix, so the whole tree is relocatable via `PREFIX`/`BINDIR`.
 
 Re-running the installer stages the new version, flips the `current` symlink
 atomically, and keeps the **immediately previous** version for rollback. Your
-`etc/rdpweb.env` remains untouched across upgrades and rollbacks.
+`etc/rdpweb.toml` remains untouched across upgrades and rollbacks.
 
 Roll back by repointing `current` at the previous version:
 

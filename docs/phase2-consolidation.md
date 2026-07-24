@@ -134,8 +134,9 @@ profile selected at connect time.
 
 ## Migration sketch (rough order)
 
-1. TOML config in remotex's shape (`[server]` + `[[targets]]`), replacing the
-   current CLI/env config as the primary source.
+1. **(done)** TOML config in remotex's shape (`[server]` + `[[targets]]`),
+   replacing the CLI/env config entirely — no env vars, no `.env` (env files
+   shadowing the environment caused subtle bugs under bun).
 2. Transport efficiency: move tiles to binary WS frames / compressed payloads;
    measure against the current base64-JSON baseline over a constrained link.
 3. Introduce the `Session` trait; make the current RDP path implement it.

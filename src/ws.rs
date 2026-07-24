@@ -29,7 +29,7 @@ pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Res
 async fn session(socket: WebSocket, state: AppState) {
     info!(
         "ws: client connected; starting RDP session to {}:{}",
-        state.config.rdp_host, state.config.rdp_port
+        state.config.target.host, state.config.target.port
     );
 
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -48,7 +48,7 @@ async fn session(socket: WebSocket, state: AppState) {
     // caps concurrency at roughly the OS thread budget. Supporting many parallel
     // sessions would mean a pool of runtime threads (each hosting several
     // sessions via `LocalSet`/`spawn_local`) rather than a thread per client.
-    let rdp_config = state.config.clone();
+    let rdp_config = state.config.target.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,

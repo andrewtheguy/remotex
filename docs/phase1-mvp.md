@@ -3,7 +3,7 @@
 > **Status: implemented.** The server connects to one RDP host over TLS/CredSSP
 > (IronRDP, server-side), streams the framebuffer to the browser as
 > dirty-rectangle RGBA tiles over `/ws`, and injects mouse + keyboard as RDP
-> fast-path PDUs. Credentials come from `RDPWEB_RDP_*` and stay server-side.
+> fast-path PDUs. Credentials come from the TOML config and stay server-side.
 > Covered by unit tests plus protocol-level end-to-end tests
 > (`tests/protocol_e2e.rs`). Notes on what was deferred are inline below.
 >
@@ -105,7 +105,7 @@ The browser input overlay (`useRemoteDesktop.ts`) already captures
 
 ## Credentials
 
-RDP credentials live **only** on the server (config file or `RDPWEB_*` env vars)
+RDP credentials live **only** on the server (the TOML config file)
 and are used to authenticate to the host during the handshake. They are never
 sent to the browser (mirrors the remotex model). `GET /api/config` returns only
 non-secret target info (host/port).

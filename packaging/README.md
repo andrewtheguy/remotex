@@ -9,12 +9,12 @@ a relocatable prefix.
 ```
 /usr/local/opt/rdpweb/
 ├── etc/
-│   └── rdpweb.env                # stable user configuration
+│   └── rdpweb.toml               # the global config (stable across versions)
 ├── versions/
 │   └── <version>/
 │       ├── bin/rdpweb            # the binary
 │       ├── share/doc/rdpweb/
-│       │   └── rdpweb.env.example # versioned config example
+│       │   └── rdpweb.toml.example # versioned config example
 │       ├── share/rdpweb/web/     # built frontend (index.html + assets)
 │       └── VERSION
 ├── current -> versions/<version> # active version (atomic rename swap)
@@ -24,10 +24,10 @@ a relocatable prefix.
 ```
 
 The binary resolves its versioned `share/` from its own real path
-(`current_exe()` canonicalized through the symlinks), then finds the stable
-`etc/rdpweb.env` from the enclosing prefix. The tree can live anywhere via
-`PREFIX` / `BINDIR`. `--static-dir` / `RDPWEB_STATIC_DIR` and
-`RDPWEB_ENV_FILE` override the defaults.
+(`current_exe()` canonicalized through the symlinks), then loads the global
+config from the enclosing prefix's `etc/rdpweb.toml`. Config is global-only —
+no per-user or working-directory files; `--config <path>` is the sole
+override. The tree can live anywhere via `PREFIX` / `BINDIR`.
 
 ## Files
 
@@ -36,7 +36,7 @@ The binary resolves its versioned `share/` from its own real path
 | `build-tarball.sh` | Build the frontend + release binary and assemble `dist/rdpweb-<version>-<os>-<arch>.tar.gz`. Run once per target platform (no cross-compile). |
 | `install.sh` | Lay an extracted tarball down under `PREFIX`: stage → atomic `current` swap → prune to (new + previous). Locked against concurrent runs. |
 | `uninstall.sh` | Remove the whole prefix, or a single version (`uninstall.sh <version>`). |
-| `etc/rdpweb.env.example` | Config template installed under the active version's `share/doc/rdpweb/` and seeded to the stable `etc/rdpweb.env` on a fresh install. |
+| `etc/rdpweb.toml.example` | Config template installed under the active version's `share/doc/rdpweb/` and seeded to the stable `etc/rdpweb.toml` on a fresh install. |
 
 The repo-root `install.sh` is the network installer (`curl … | bash`): it
 downloads the right tarball, verifies its SHA-256 against GitHub's published

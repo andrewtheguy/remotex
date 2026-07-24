@@ -3,7 +3,7 @@
 #
 # Layout (distro-agnostic, works on Linux and macOS):
 #
-#   <prefix>/etc/rdpweb.env                        # stable user configuration
+#   <prefix>/etc/rdpweb.toml                        # stable user configuration
 #   <prefix>/versions/<version>/{bin,share}         # this version's files
 #   <prefix>/current -> versions/<version>          # active version (atomic swap)
 #   <bindir>/rdpweb -> <prefix>/current/bin/rdpweb  # launcher on PATH (stable)
@@ -17,7 +17,7 @@
 #   3. Older versions are pruned, keeping only the new one and the immediately
 #      previous one (for rollback: point `current` back at it).
 #
-# Config is seeded once at <prefix>/etc/rdpweb.env and is never rolled with
+# Config is seeded once at <prefix>/etc/rdpweb.toml and is never rolled with
 # versions. A lock prevents two installs from racing on the same prefix.
 #
 # Env overrides:
@@ -77,7 +77,7 @@ cp -R "$src/bin" "$src/share" "$staging/"
 cp "$src/VERSION" "$staging/VERSION"
 
 config_dir="$prefix/etc"
-config="$config_dir/rdpweb.env"
+config="$config_dir/rdpweb.toml"
 mkdir -p "$config_dir"
 if [ -e "$config" ] && [ ! -f "$config" ]; then
   echo "error: config path is not a regular file: $config" >&2
@@ -85,7 +85,7 @@ if [ -e "$config" ] && [ ! -f "$config" ]; then
 fi
 if [ ! -f "$config" ]; then
   echo ">> seeding config from sample — edit $config"
-  cp "$src/share/doc/rdpweb/rdpweb.env.example" "$config"
+  cp "$src/share/doc/rdpweb/rdpweb.toml.example" "$config"
 else
   echo ">> preserving config at $config"
 fi
