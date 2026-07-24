@@ -107,7 +107,7 @@ The `serve` subcommand takes only two selectors:
 
 [[targets]]
 name = "example"           # unique profile name (picked with --target)
-#protocol = "rdp"          # "rdp" or "vnc"
+protocol = "rdp"           # required: "rdp" or "vnc"
 host = "192.0.2.10"
 #port = 3389               # default: the protocol's standard port (3389/5900)
 username = "Administrator"

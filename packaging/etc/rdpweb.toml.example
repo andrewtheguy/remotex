@@ -20,7 +20,7 @@
 # specific one with `rdpweb serve --target <name>` (default: the first).
 [[targets]]
 name = "example"
-#protocol = "rdp"          # "rdp" (default) or "vnc"
+protocol = "rdp"           # required: "rdp" or "vnc"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 for rdp, 5900 for vnc).
 #port = 3389

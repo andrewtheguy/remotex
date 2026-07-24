@@ -42,10 +42,9 @@ impl Security {
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/phase2-consolidation.md): `rdp` via IronRDP
 /// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
-    #[default]
     Rdp,
     Vnc,
 }
@@ -77,8 +76,8 @@ impl Protocol {
 pub struct TargetConfig {
     /// Unique profile name; selected with `--target` (default: first profile).
     pub name: String,
-    /// Remote-desktop protocol: `"rdp"` or `"vnc"`.
-    #[serde(default)]
+    /// Remote-desktop protocol: `"rdp"` or `"vnc"`. Required — each target
+    /// must say what it speaks.
     pub protocol: Protocol,
     /// Target host.
     pub host: String,
@@ -285,6 +284,7 @@ mod tests {
     const MINIMAL: &str = r#"
         [[targets]]
         name = "one"
+        protocol = "rdp"
         host = "192.0.2.10"
     "#;
 
@@ -325,6 +325,7 @@ mod tests {
 
             [[targets]]
             name = "other"
+            protocol = "vnc"
             host = "10.0.0.3"
             "#,
         )
@@ -360,9 +361,11 @@ mod tests {
             r#"
             [[targets]]
             name = "a"
+            protocol = "rdp"
             host = "h1"
             [[targets]]
             name = "a"
+            protocol = "rdp"
             host = "h2"
             "#,
         )
@@ -377,12 +380,33 @@ mod tests {
             r#"
             [[targets]]
             name = "a"
+            protocol = "rdp"
             host = "h"
             passwd = "oops"
             "#,
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("passwd"), "{err:#}");
+
+        // Same for the [server] block and the top level.
+        let err = ConfigFile::parse("[server]\nprot = 1").unwrap_err();
+        assert!(format!("{err:#}").contains("prot"), "{err:#}");
+        let err = ConfigFile::parse("[srv]\nport = 1").unwrap_err();
+        assert!(format!("{err:#}").contains("srv"), "{err:#}");
+    }
+
+    #[test]
+    fn missing_protocol_is_rejected() {
+        // No default protocol: every target must say what it speaks.
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            host = "h"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("protocol"), "{err:#}");
     }
 
     #[test]
