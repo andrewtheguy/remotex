@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
 const TILE_FRAME_KIND: u8 = 0x01;
+const TILE_FORMAT_PNG: u8 = 1;
 const TILE_HEADER_LEN: usize = 10;
 
 /// Locate a container runtime. The dummy RDP server is part of this test's
@@ -163,26 +164,19 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary tile frame against the documented layout; returns
-/// (format byte, payload size) for the caller's tallies.
-fn check_tile_frame(frame: &[u8]) -> (u8, usize) {
+/// Validate one binary tile frame against the documented layout.
+fn check_tile_frame(frame: &[u8]) {
     assert!(frame.len() >= TILE_HEADER_LEN, "frame shorter than the header");
     assert_eq!(frame[0], TILE_FRAME_KIND, "unexpected frame kind");
-    let format = frame[1];
+    assert_eq!(frame[1], TILE_FORMAT_PNG, "unexpected tile format byte");
     let w = u16::from_le_bytes([frame[6], frame[7]]);
     let h = u16::from_le_bytes([frame[8], frame[9]]);
     assert!(w > 0 && h > 0, "empty tile {w}x{h}");
-    let payload = &frame[TILE_HEADER_LEN..];
-    match format {
-        0 => assert_eq!(
-            payload.len(),
-            usize::from(w) * usize::from(h) * 3,
-            "raw RGB payload size mismatch for {w}x{h}"
-        ),
-        1 => assert_eq!(&payload[..8], b"\x89PNG\r\n\x1a\n", "payload is not a PNG stream"),
-        other => panic!("unknown tile format byte {other}"),
-    }
-    (format, payload.len())
+    assert_eq!(
+        &frame[TILE_HEADER_LEN..TILE_HEADER_LEN + 8],
+        b"\x89PNG\r\n\x1a\n",
+        "payload is not a PNG stream"
+    );
 }
 
 #[tokio::test]
@@ -198,7 +192,6 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
 
     let mut got_resize = false;
     let mut tiles = 0u32;
-    let mut png_tiles = 0u32;
 
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
@@ -217,11 +210,8 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "tile arrived before resize");
-                    let (format, _) = check_tile_frame(&frame);
+                    check_tile_frame(&frame);
                     tiles += 1;
-                    if format == 1 {
-                        png_tiles += 1;
-                    }
                     // The xrdp login screen paints in well over 20 strips;
                     // that's enough to call the transport exercised.
                     if tiles >= 20 {
@@ -237,7 +227,4 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
     .expect("timed out waiting for tile frames");
 
     assert!(got_resize, "never received the resize control message");
-    // Screen-sized strips always compress; if nothing was PNG the compression
-    // path is broken even though the frames parsed.
-    assert!(png_tiles > 0, "no PNG-compressed tiles among {tiles}");
 }

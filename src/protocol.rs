@@ -5,9 +5,9 @@
 //! docs/phase2-consolidation.md):
 //!
 //! - **Screen tiles** are binary WebSocket frames: a fixed 10-byte header
-//!   followed by the pixel payload, PNG-compressed unless raw is smaller.
-//!   This replaced base64 RGBA inside JSON text, which inflated the
-//!   bottleneck backend->browser link by ~4.3x (4 bytes/px, +33% base64).
+//!   followed by a PNG-compressed payload. This replaced base64 RGBA inside
+//!   JSON text, which inflated the bottleneck backend->browser link by ~4.3x
+//!   (4 bytes/px, +33% base64).
 //! - **Control messages** (`resize`, `error`) are rare and tiny; they stay
 //!   JSON text frames with a `type` tag.
 
@@ -36,27 +36,21 @@ pub enum ClientMsg {
     Key { code: String, pressed: bool },
 }
 
-/// Payload encoding of a binary tile frame. The discriminant is the wire byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TileFormat {
-    /// Packed RGB888, row-major, `w * h * 3` bytes.
-    Rgb = 0,
-    /// PNG-encoded RGB image.
-    Png = 1,
-}
-
 /// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
+/// The payload is always a PNG stream (every browser decodes PNG natively);
+/// PNG's worst case over raw is a fraction of a percent, so a raw format is
+/// not worth a second decode path.
 ///
 /// Frame layout (little-endian):
 ///
 /// ```text
 /// offset 0: u8  frame kind, always 0x01 (tile)
-/// offset 1: u8  format (see TileFormat)
+/// offset 1: u8  format, always 1 (PNG) — reserved for a future codec
 /// offset 2: u16 x
 /// offset 4: u16 y
 /// offset 6: u16 w
 /// offset 8: u16 h
-/// offset 10: payload (w*h*3 bytes raw, or a PNG stream)
+/// offset 10: payload (a PNG stream)
 /// ```
 #[derive(Debug, Clone)]
 pub struct Tile {
@@ -64,17 +58,16 @@ pub struct Tile {
     pub y: u16,
     pub w: u16,
     pub h: u16,
-    pub format: TileFormat,
+    /// PNG-encoded RGB image.
     pub data: Vec<u8>,
 }
 
 impl Tile {
     pub const FRAME_KIND: u8 = 0x01;
+    pub const FORMAT_PNG: u8 = 1;
     pub const HEADER_LEN: usize = 10;
 
     /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
-    /// Falls back to the raw pixels when PNG comes out larger (tiny or
-    /// incompressible tiles, where PNG's fixed overhead dominates).
     pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
         let expected = usize::from(w) * usize::from(h) * 3;
         anyhow::ensure!(
@@ -82,20 +75,15 @@ impl Tile {
             "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
             rgb.len()
         );
-        let png = encode_png(w, h, rgb)?;
-        let (format, data) = if png.len() < rgb.len() {
-            (TileFormat::Png, png)
-        } else {
-            (TileFormat::Rgb, rgb.to_vec())
-        };
-        Ok(Self { x, y, w, h, format, data })
+        let data = encode_png(w, h, rgb)?;
+        Ok(Self { x, y, w, h, data })
     }
 
     /// Serialize into the binary WebSocket frame described above.
     pub fn to_frame(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::HEADER_LEN + self.data.len());
         out.push(Self::FRAME_KIND);
-        out.push(self.format as u8);
+        out.push(Self::FORMAT_PNG);
         out.extend_from_slice(&self.x.to_le_bytes());
         out.extend_from_slice(&self.y.to_le_bytes());
         out.extend_from_slice(&self.w.to_le_bytes());
@@ -217,12 +205,11 @@ mod tests {
             y: 0x0304,
             w: 2,
             h: 1,
-            format: TileFormat::Rgb,
             data: vec![10, 20, 30, 40, 50, 60],
         };
         let frame = tile.to_frame();
         assert_eq!(frame[0], Tile::FRAME_KIND);
-        assert_eq!(frame[1], 0); // TileFormat::Rgb
+        assert_eq!(frame[1], Tile::FORMAT_PNG);
         assert_eq!(&frame[2..4], &[0x02, 0x01]); // x, little-endian
         assert_eq!(&frame[4..6], &[0x04, 0x03]); // y
         assert_eq!(&frame[6..8], &[2, 0]); // w
@@ -252,7 +239,6 @@ mod tests {
         let (w, h) = (320, 64);
         let rgb = gradient_rgb(w, h);
         let tile = Tile::from_rgb(7, 9, w, h, &rgb).unwrap();
-        assert_eq!(tile.format, TileFormat::Png);
         assert!(
             tile.data.len() < rgb.len() / 4,
             "PNG should compress a gradient well: {} vs raw {}",
@@ -287,12 +273,12 @@ mod tests {
     }
 
     #[test]
-    fn tiny_incompressible_tile_falls_back_to_raw() {
-        // 2x2 of "noise": PNG's fixed overhead exceeds 12 raw bytes.
+    fn tiny_tile_is_still_a_valid_png() {
+        // 2x2 of "noise" — PNG's fixed overhead dominates here, which is
+        // accepted: one decode path beats saving a few dozen bytes.
         let rgb = [1u8, 200, 3, 250, 5, 90, 7, 160, 9, 30, 11, 220];
         let tile = Tile::from_rgb(0, 0, 2, 2, &rgb).unwrap();
-        assert_eq!(tile.format, TileFormat::Rgb);
-        assert_eq!(tile.data, rgb);
+        assert_eq!(&tile.data[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]

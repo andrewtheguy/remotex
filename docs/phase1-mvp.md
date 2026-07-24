@@ -77,7 +77,7 @@ Message shapes are already defined and shared in shape between
 
 The server decodes the RDP framebuffer and forwards **dirty rectangles** as
 tiles. The browser decodes each tile and blits it to the canvas at `(x, y)`
-(`ctx.putImageData` for raw pixels, `drawImage` of an `ImageBitmap` for PNG).
+(`drawImage` of an `ImageBitmap`).
 In the MVP a tile was `ServerMsg::Tile { x, y, w, h, format, data }` with
 base64 `data` inside JSON text; phase 2 replaced that wire shape with binary
 frames (see the transport note below).

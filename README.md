@@ -136,9 +136,9 @@ that hangs up, so the session-failure path is reported back over `/ws` as a
 `tests/rdp_tiles_e2e.rs` covers the happy path: it starts a dummy RDP server
 (plain xrdp, built from `tests/xrdp-dummy/`) with podman or docker, connects
 through the real server, and validates the binary tile transport on the wire —
-resize as JSON text first, then binary frames with PNG (or raw-fallback)
-payloads. It requires a container runtime; no browser is involved (automated
-browser tests are flaky and deliberately avoided).
+resize as JSON text first, then binary frames with PNG payloads. It requires a
+container runtime; no browser is involved (automated browser tests are flaky
+and deliberately avoided).
 
 ## Production build
 

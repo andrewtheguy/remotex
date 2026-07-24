@@ -295,8 +295,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
 }
 
 /// Repack the dirty rectangle `[left..=right] × [top..=bottom]` into packed
-/// RGB strips and send each as a [`ServerMsg::Tile`] (binary WS frame, PNG
-/// compressed unless raw is smaller — see `protocol::Tile`).
+/// RGB strips and send each as a [`ServerMsg::Tile`] (binary WS frame with a
+/// PNG-compressed payload — see `protocol::Tile`).
 async fn send_tiles(
     image: &DecodedImage,
     left: u16,
@@ -333,10 +333,9 @@ async fn send_tiles(
 
         let tile = Tile::from_rgb(left, y0, width, h, &buf)?;
         debug!(
-            "rdp: tile {width}x{h} at ({left},{y0}): {} -> {} bytes ({:?})",
+            "rdp: tile {width}x{h} at ({left},{y0}): {} -> {} bytes",
             buf.len(),
-            tile.data.len(),
-            tile.format
+            tile.data.len()
         );
         frame_tx
             .send(ServerMsg::Tile(tile))

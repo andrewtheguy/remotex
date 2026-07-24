@@ -18,29 +18,26 @@ export type ControlMsg =
   | { type: "resize"; w: number; h: number }
   | { type: "error"; message: string };
 
-// Payload encoding of a binary tile frame.
-export type TileFormat = "rgb" | "png";
-
 export interface TileMsg {
   x: number;
   y: number;
   w: number;
   h: number;
-  format: TileFormat;
-  // Raw packed RGB888 (w*h*3 bytes) or a PNG stream, per `format`.
+  // A PNG stream (the only tile payload encoding).
   data: Uint8Array;
 }
 
 const TILE_FRAME_KIND = 0x01;
+const TILE_FORMAT_PNG = 1;
 const TILE_HEADER_LEN = 10;
 
 // Parse a binary tile frame. Layout (little-endian, matching `Tile::to_frame`
 // in the backend):
 //
 //   offset 0: u8  frame kind, always 0x01 (tile)
-//   offset 1: u8  format (0 = raw RGB888, 1 = PNG)
+//   offset 1: u8  format, always 1 (PNG) — reserved for a future codec
 //   offset 2: u16 x | 4: u16 y | 6: u16 w | 8: u16 h
-//   offset 10: payload
+//   offset 10: payload (a PNG stream)
 //
 // Returns null for anything malformed or unknown.
 export function decodeTileFrame(buf: ArrayBuffer): TileMsg | null {
@@ -48,13 +45,10 @@ export function decodeTileFrame(buf: ArrayBuffer): TileMsg | null {
     return null;
   }
   const view = new DataView(buf);
-  if (view.getUint8(0) !== TILE_FRAME_KIND) {
-    return null;
-  }
-  const formatByte = view.getUint8(1);
-  const format: TileFormat | null =
-    formatByte === 0 ? "rgb" : formatByte === 1 ? "png" : null;
-  if (format === null) {
+  if (
+    view.getUint8(0) !== TILE_FRAME_KIND ||
+    view.getUint8(1) !== TILE_FORMAT_PNG
+  ) {
     return null;
   }
   return {
@@ -62,7 +56,6 @@ export function decodeTileFrame(buf: ArrayBuffer): TileMsg | null {
     y: view.getUint16(4, true),
     w: view.getUint16(6, true),
     h: view.getUint16(8, true),
-    format,
     data: new Uint8Array(buf, TILE_HEADER_LEN),
   };
 }

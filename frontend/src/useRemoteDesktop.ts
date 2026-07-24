@@ -83,30 +83,13 @@ export function useRemoteDesktop(
       if (!ctx) {
         return;
       }
-      if (tile.format === "png") {
-        const bitmap = await createImageBitmap(
-          new Blob([tile.data as Uint8Array<ArrayBuffer>], {
-            type: "image/png",
-          }),
-        );
-        ctx.drawImage(bitmap, tile.x, tile.y);
-        bitmap.close();
-        return;
-      }
-      // Raw packed RGB888 -> expand to the RGBA the canvas wants.
-      const expected = tile.w * tile.h * 3;
-      if (tile.data.length !== expected) {
-        return; // guard against a short/garbled tile
-      }
-      const image = ctx.createImageData(tile.w, tile.h);
-      const px = image.data;
-      for (let i = 0, j = 0; i < expected; i += 3, j += 4) {
-        px[j] = tile.data[i];
-        px[j + 1] = tile.data[i + 1];
-        px[j + 2] = tile.data[i + 2];
-        px[j + 3] = 255;
-      }
-      ctx.putImageData(image, tile.x, tile.y);
+      const bitmap = await createImageBitmap(
+        new Blob([tile.data as Uint8Array<ArrayBuffer>], {
+          type: "image/png",
+        }),
+      );
+      ctx.drawImage(bitmap, tile.x, tile.y);
+      bitmap.close();
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
