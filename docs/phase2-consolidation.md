@@ -1,6 +1,7 @@
 # Phase 2 — Consolidating VNC (remotex) and RDP
 
-> **Status: decided, not yet implemented.** This supersedes the earlier
+> **Status: implemented** (all three scope items; see the migration list at
+> the bottom for what remains beyond phase 2). This supersedes the earlier
 > proposal in this file, which recommended keeping VNC decoding in the browser
 > (dumb-pipe relay). That decision is **reversed**: both protocols decode
 > **server-side** in Rust, and the browser speaks one uniform protocol.
@@ -82,10 +83,13 @@ path. Explicitly **in**:
    full-screen paint went from ~31.4 MB (base64-JSON equivalent) to ~3.1 MB on
    the wire — **10x**. Per-session byte totals are logged on disconnect
    (`ws: outbound totals: …`) for measuring in the field.
-2. **Server-side VNC session.** A simple Rust RFB client alongside the RDP
-   engine — Guacamole-style: standard/raw baseline encodings only, no
+2. **Server-side VNC session — (done, phase 1 of docs/vnc.md).** A simple
+   Rust RFB client alongside the RDP engine (`src/vnc.rs`) — Guacamole-style:
+   protocol 3.8, security None/VncAuth, the raw baseline encoding only, no
    per-implementation workarounds. Both engines feed the same server→browser
-   protocol behind a common `Session` seam.
+   protocol behind the common `Session` seam (`src/session.rs`). The VNC
+   follow-ups (full-screen canvas like remotex, TigerVNC-style dynamic
+   resize) are phase 2 of docs/vnc.md — planned, not implemented.
 3. **TOML config, like remotex — (done).** CLI/env-centric config replaced
    with a TOML file in remotex's shape (`[server]` block, `[[targets]]`
    profiles with per-target protocol/host/port/credentials — see
@@ -113,6 +117,10 @@ and multi-target all mean re-attaching to or choosing *the* one session/target
 
 ## Later phases (sketch)
 
+- **VNC phase 2 (docs/vnc.md):** full-screen canvas like remotex — common to
+  all protocols: viewport × `devicePixelRatio` sizing at 1:1 pixels, with
+  scrollbars when the remote can't match the viewport — plus TigerVNC-style
+  dynamic resize (`SetDesktopSize`) where supported. Planned, not implemented.
 - **Phase 3+ — frontend integration:** port remotex's frontend shell
   (connection flow, overlay, soft keyboard, clipboard) onto the uniform
   protocol. With decode server-side there is **one renderer** — the RFB
@@ -130,22 +138,23 @@ and multi-target all mean re-attaching to or choosing *the* one session/target
 ## Backend seam
 
 Unchanged in spirit from the earlier proposal, but now both impls decode
-server-side and emit the same messages:
+server-side and emit the same messages. As built (`src/session.rs`), the seam
+is a shared engine signature rather than the trait sketched earlier — two
+engines and no dynamic dispatch make a `match` simpler, and IronRDP's
+non-`Send` futures fit a plain function better than a trait object:
 
 ```
-trait Session {
-    async fn connect(config) -> Result<Self>;
-    // Both emit the uniform ServerMsg stream (tiles/resize/error);
-    // input flows back as ClientMsg.
-}
+// Both emit the uniform ServerMsg stream (tiles/resize/error);
+// input flows back as ClientMsg.
+rdp::run(config, input_rx, frame_tx)   // IronRDP, server-side decode
+vnc::run(config, input_rx, frame_tx)   // Rust RFB client, raw encoding only
 
-rdp::Session   // IronRDP, server-side decode            [feature = "rdp"]
-vnc::Session   // Rust RFB client, raw/standard          [feature = "vnc"]
-               // encodings, server-side decode
+session::spawn(target, …)              // dispatches on target.protocol
 ```
 
-Cargo features still gate the engines so a VNC-only build does not pull the
-heavy IronRDP tree. The session kind and target come from the TOML target
+The earlier idea of gating the engines behind cargo features (so a VNC-only
+build skips the IronRDP tree) was dropped: this is a single personal binary
+that always ships both. The session kind and target come from the TOML target
 profile selected at connect time.
 
 ## Migration sketch (rough order)
@@ -160,10 +169,17 @@ profile selected at connect time.
    constrained link. End-to-end coverage: `tests/rdp_tiles_e2e.rs` runs a
    dummy xrdp container (podman/docker) and validates the wire format against
    a real RDP session.
-3. Introduce the `Session` trait; make the current RDP path implement it.
-4. Add `vnc::Session`: a minimal Rust RFB client (handshake, VNC auth, raw +
-   mandatory baseline encodings, pointer/key input), feeding the shared
-   protocol.
+3. **(done)** The `Session` seam: both engines expose the same
+   `run(config, input_rx, frame_tx)` contract, dispatched by target protocol
+   in `session::spawn` (`src/session.rs`). A `match` over two engines
+   replaced the trait sketched below — no dynamic dispatch is needed, and
+   IronRDP's non-`Send` futures fit a plain signature better than a trait
+   object.
+4. **(done)** `vnc::run`: a minimal Rust RFB client (3.8 handshake, VncAuth,
+   raw encoding, pointer/key input), feeding the shared protocol — see
+   docs/vnc.md. End-to-end coverage: `tests/vnc_tiles_e2e.rs` runs a dummy
+   TigerVNC container (podman/docker) and validates a full-desktop paint
+   through the real server.
 5. Verify against real targets — including macOS Screen Sharing, the case that
    motivated dropping the clever-encoding path.
 6. Later phases: frontend integration, session management, multi-target UI,
