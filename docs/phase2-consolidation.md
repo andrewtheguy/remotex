@@ -82,10 +82,11 @@ path. Explicitly **in**:
    engine — Guacamole-style: standard/raw baseline encodings only, no
    per-implementation workarounds. Both engines feed the same server→browser
    protocol behind a common `Session` seam.
-3. **TOML config, like remotex.** Replace CLI/env-centric config with a TOML
-   file in remotex's shape (`[server]` block, `[[targets]]` profiles with
-   per-target protocol/host/port/credentials — see
+3. **TOML config, like remotex — (done).** CLI/env-centric config replaced
+   with a TOML file in remotex's shape (`[server]` block, `[[targets]]`
+   profiles with per-target protocol/host/port/credentials — see
    `../remotex/remotex.example.toml`). Credentials stay server-side.
+   Delivered as migration step 1 below.
 
 Explicitly **out** (later phases):
 

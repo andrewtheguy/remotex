@@ -79,9 +79,10 @@ keyboard over it drive the session. Use `RUST_LOG=info` (or `debug`) for logs.
 
 ## Configuration
 
-All configuration lives in one TOML file — there are no environment variables
-and no `.env` loading (env files silently shadowing the real environment caused
-subtle bugs). The `serve` subcommand takes only two selectors:
+All configuration lives in one TOML file — no environment variables for server
+or target configuration, and no `.env` loading (env files silently shadowing
+the real environment caused subtle bugs). `RUST_LOG` only controls logging.
+The `serve` subcommand takes only two selectors:
 
 - `--config <path>` — the config file. Defaults to the installed
   `<prefix>/etc/rdpweb.toml`; config is global-only (no per-user or
@@ -132,14 +133,15 @@ that hangs up, so the session-failure path is reported back over `/ws` as a
 
 ## Production build
 
-The frontend is served from disk (not embedded), so build it and point the
-server at `frontend/dist`:
+The frontend is served from disk (not embedded), so build it first. In a
+checkout the server defaults to `frontend/dist`; set `static_dir` under
+`[server]` in the config to serve it from elsewhere:
 
 ```bash
 cd frontend && bun install && bun run build   # -> frontend/dist/
 cd ..
 cargo build --release
-./target/release/rdpweb serve --static-dir frontend/dist
+./target/release/rdpweb serve -c rdpweb.toml  # static_dir defaults to frontend/dist
 ```
 
 To produce a distributable, relocatable tarball (`bin` + `share`) that

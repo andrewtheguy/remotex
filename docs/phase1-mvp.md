@@ -34,7 +34,7 @@ and type — with acceptable latency on a LAN.
 - Framebuffer → browser rendering via image tiles.
 - Mouse: move, left/middle/right button, wheel.
 - Keyboard: key down/up.
-- Server-side credentials (from config/env), never sent to the browser.
+- Server-side credentials (from the TOML config), never sent to the browser.
 
 ### Explicitly NOT in scope (later phases)
 
@@ -116,9 +116,10 @@ non-secret target info (host/port).
 ## Milestones
 
 > These are the **original plan** milestones, all delivered in the current MVP
-> (see the status note at the top); kept for historical context. The one item
-> flagged as open below — NLA/CredSSP — is implemented: `--rdp-security` selects
-> `auto` (TLS+NLA), `nla`, or `tls`.
+> (see the status note at the top); kept for historical context — "config/env"
+> below predates the TOML-only config. The one item flagged as open below —
+> NLA/CredSSP — is implemented: the `security` key of a TOML target profile
+> selects `auto` (TLS+NLA), `nla`, or `tls`.
 
 1. **Connect** — uncomment the `ironrdp*` + TLS deps in `Cargo.toml`; implement
    `rdp::Session::connect` (TCP → TLS → RDP negotiation/activation). Log a
@@ -137,7 +138,9 @@ VM or `xrdp`).
 
 ## Open questions
 
-- **Credential source** — flags/env now, or a small config file (like minisearch)?
+- **Credential source** — flags/env now, or a small config file (like
+  minisearch)? *(Resolved since: a TOML config file only — flags/env were
+  removed; see the README's Configuration section.)*
 - **Security** — TLS only, or also support NLA/CredSSP? RDP servers increasingly
   require NLA; check what IronRDP's client supports out of the box.
 - **Tile encoding** — raw RGBA vs PNG vs binary framing; measure on real traffic.
