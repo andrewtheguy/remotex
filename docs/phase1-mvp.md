@@ -8,9 +8,10 @@
 > (`tests/protocol_e2e.rs`). Notes on what was deferred are inline below.
 >
 > Implementation notes:
-> - Tiles are sent as JSON `ServerMsg::Tile` with base64 RGBA (milestone-2
->   "decide during milestone 2" resolved in favor of the simple JSON path;
->   binary framing / PNG remain a later optimization).
+> - Tiles were sent as JSON `ServerMsg::Tile` with base64 RGBA in the MVP
+>   (milestone-2 "decide during milestone 2" resolved in favor of the simple
+>   JSON path). **Superseded in phase 2:** tiles are now binary WebSocket
+>   frames with PNG-compressed payloads — see docs/phase2-consolidation.md.
 > - The RDP session runs on a dedicated thread with a current-thread runtime:
 >   IronRDP's `read_pdu` future is not `Send`-general, so it can't live on the
 >   shared multi-threaded runtime via `tokio::spawn`.
@@ -74,11 +75,12 @@ Message shapes are already defined and shared in shape between
 
 ## Frame transport (chosen: image tiles)
 
-The server decodes the RDP framebuffer and forwards **dirty rectangles** as tiles
-(`ServerMsg::Tile { x, y, w, h, format, data }`), where `data` is base64 and
-`format` is `Rgba` (raw RGBA8888) or `Png`. The browser decodes each tile and
-blits it to the canvas at `(x, y)` (`ctx.putImageData` for raw RGBA, or
-`drawImage` of a decoded `Image`/`ImageBitmap` for PNG).
+The server decodes the RDP framebuffer and forwards **dirty rectangles** as
+tiles. The browser decodes each tile and blits it to the canvas at `(x, y)`
+(`drawImage` of an `ImageBitmap`).
+In the MVP a tile was `ServerMsg::Tile { x, y, w, h, format, data }` with
+base64 `data` inside JSON text; phase 2 replaced that wire shape with binary
+frames (see the transport note below).
 
 Rationale: tiles are the simplest correct path to a working picture and map
 directly onto RDP's surface/bitmap updates. Start with raw RGBA for correctness,
@@ -86,10 +88,10 @@ switch tiles to PNG if bandwidth matters. H.264 + WebCodecs is a **later phase**
 much lower bandwidth but far more complex (encoder, keyframe/damage tracking,
 decoder plumbing) — not worth it for the MVP.
 
-> Transport note: the current contract is **JSON text with base64-encoded
-> tiles**, matching the `ServerMsg` shape and the integration test. A compact
-> binary framing over the same socket is deferred as a throughput optimization
-> (the socket is already `arraybuffer`).
+> Transport note: the MVP contract was **JSON text with base64-encoded
+> tiles**. That deferral ended with phase 2, which moved tiles to **binary
+> WebSocket frames with PNG-compressed payloads** (control messages stay JSON
+> text) — see docs/phase2-consolidation.md and `src/protocol.rs`.
 
 ## Input
 

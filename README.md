@@ -10,10 +10,12 @@ mouse and keyboard from a web browser.
   [Bun](https://bun.sh/). The built assets ship alongside the binary and are
   served from disk (`share/rdpweb/web`), resolved relative to the executable.
 
-> **Status: Phase 1 MVP.** Connects to one RDP host, renders its screen in the
-> browser (dirty-rectangle RGBA tiles over the WebSocket), and forwards mouse and
-> keyboard input. Credentials live server-side and are never sent to the browser.
-> See [`docs/phase1-mvp.md`](docs/phase1-mvp.md) for scope and design.
+> **Status: Phase 1 MVP + phase 2 transport.** Connects to one RDP host,
+> renders its screen in the browser (dirty-rectangle tiles as binary WebSocket
+> frames, PNG-compressed), and forwards mouse and keyboard input. Credentials
+> live server-side and are never sent to the browser. See
+> [`docs/phase1-mvp.md`](docs/phase1-mvp.md) and
+> [`docs/phase2-consolidation.md`](docs/phase2-consolidation.md).
 
 ## Install (Linux & macOS)
 
@@ -130,6 +132,13 @@ The end-to-end tests in `tests/protocol_e2e.rs` drive the real HTTP + WebSocket
 server without a browser or a real RDP server: the RDP target points at a socket
 that hangs up, so the session-failure path is reported back over `/ws` as a
 `ServerMsg::Error`.
+
+`tests/rdp_tiles_e2e.rs` covers the happy path: it starts a dummy RDP server
+(plain xrdp, built from `tests/xrdp-dummy/`) with podman or docker, connects
+through the real server, and validates the binary tile transport on the wire —
+resize as JSON text first, then binary frames with PNG payloads. It requires a
+container runtime; no browser is involved (automated browser tests are flaky
+and deliberately avoided).
 
 ## Production build
 

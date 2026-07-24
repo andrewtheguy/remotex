@@ -1,11 +1,11 @@
 [package]
 name = "rdpweb"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Serves the built frontend from disk (see src/server.rs). Assets are no longer
@@ -17,9 +17,10 @@ anyhow = "1"
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
-base64 = "0.22"
 futures-util = "0.3"
 toml = "1"
+# Tile payload compression for the browser transport (see src/protocol.rs).
+png = "0.18"
 
 # Server-side RDP engine (see docs/phase1-mvp.md).
 ironrdp = { version = "0.17", features = ["connector", "session", "graphics"] }

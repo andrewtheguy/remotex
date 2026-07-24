@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
   type ClientMsg,
+  type ControlMsg,
+  decodeTileFrame,
   type MouseButton,
   mouseButtonFromEvent,
-  type ServerMsg,
+  type TileMsg,
 } from "./protocol.ts";
 
 export type ConnectionStatus = "connecting" | "connected" | "closed" | "error";
@@ -48,20 +50,49 @@ export function useRemoteDesktop(
     ws.onopen = () => setStatus("connected");
     ws.onclose = () => setStatus("closed");
     ws.onerror = () => setStatus("error");
+    // PNG tiles decode asynchronously (createImageBitmap), so all messages are
+    // chained through one promise queue: draws land in arrival order (later
+    // tiles must overwrite earlier ones) and a resize can't jump the queue.
+    let queue: Promise<void> = Promise.resolve();
     ws.onmessage = (ev) => {
-      if (typeof ev.data !== "string") {
-        return; // frames arrive as JSON text
-      }
-      let msg: ServerMsg;
-      try {
-        msg = JSON.parse(ev.data) as ServerMsg;
-      } catch {
-        return;
-      }
-      handleServerMsg(msg);
+      // The catch keeps a garbled frame from stalling the chain.
+      queue = queue.then(() => handleMessage(ev.data)).catch(() => {});
     };
 
-    const handleResize = (msg: Extract<ServerMsg, { type: "resize" }>) => {
+    const handleMessage = async (data: unknown) => {
+      if (typeof data === "string") {
+        let msg: ControlMsg;
+        try {
+          msg = JSON.parse(data) as ControlMsg;
+        } catch {
+          return;
+        }
+        handleControlMsg(msg);
+        return;
+      }
+      if (data instanceof ArrayBuffer) {
+        const tile = decodeTileFrame(data);
+        if (tile) {
+          await drawTile(tile);
+        }
+      }
+    };
+
+    const drawTile = async (tile: TileMsg) => {
+      const ctx = ctxRef.current;
+      if (!ctx) {
+        return;
+      }
+      const bitmap = await createImageBitmap(
+        new Blob([tile.data as Uint8Array<ArrayBuffer>], {
+          type: "image/png",
+        }),
+      );
+      ctx.drawImage(bitmap, tile.x, tile.y);
+      bitmap.close();
+    };
+
+    const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
       const canvas = canvasRef.current;
       if (canvas) {
         canvas.width = msg.w;
@@ -78,28 +109,10 @@ export function useRemoteDesktop(
       setSize(s);
     };
 
-    const handleTile = (msg: Extract<ServerMsg, { type: "tile" }>) => {
-      const ctx = ctxRef.current;
-      if (!ctx || msg.format !== "rgba") {
-        return;
-      }
-      const bytes = base64ToBytes(msg.data);
-      const expected = msg.w * msg.h * 4;
-      if (bytes.length !== expected) {
-        return; // guard against a short/garbled tile
-      }
-      const image = ctx.createImageData(msg.w, msg.h);
-      image.data.set(bytes);
-      ctx.putImageData(image, msg.x, msg.y);
-    };
-
-    const handleServerMsg = (msg: ServerMsg) => {
+    const handleControlMsg = (msg: ControlMsg) => {
       switch (msg.type) {
         case "resize":
           handleResize(msg);
-          break;
-        case "tile":
-          handleTile(msg);
           break;
         case "error":
           console.error("rdp server error:", msg.message);
@@ -213,15 +226,4 @@ export function useRemoteDesktop(
   }, [overlayRef]);
 
   return { status, size };
-}
-
-// Decode a base64 string into a Uint8ClampedArray suitable for ImageData.
-function base64ToBytes(b64: string): Uint8ClampedArray {
-  const binary = atob(b64);
-  const len = binary.length;
-  const bytes = new Uint8ClampedArray(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
