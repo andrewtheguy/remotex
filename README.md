@@ -30,8 +30,9 @@ $EDITOR /usr/local/opt/rdpweb/current/etc/rdpweb.env   # set RDP target + creds
 rdpweb serve
 ```
 
-See [`packaging/`](packaging/) for the on-disk layout, upgrade/rollback model,
-and how to build the tarballs locally.
+See [`docs/install.md`](docs/install.md) for options, custom locations, and the
+upgrade/rollback model, and [`packaging/`](packaging/) for the on-disk layout and
+building tarballs.
 
 ## Layout
 
