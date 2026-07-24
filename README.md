@@ -11,15 +11,17 @@ it with mouse and keyboard from a web browser.
   [Bun](https://bun.sh/). The built assets ship alongside the binary and are
   served from disk (`share/rdpweb/web`), resolved relative to the executable.
 
-> **Status: Phase 1 MVP + phase 2 (transport + VNC) + phase 3 (full-screen
-> canvas).** Connects to one RDP or VNC host, renders its screen in the browser
-> (dirty-rectangle tiles as binary WebSocket frames, PNG-compressed), and
-> forwards mouse and keyboard input. The canvas fills the browser viewport at
-> 1:1 device pixels; a remote desktop larger than the viewport scrolls, never
-> scales. Credentials live server-side and are never sent to the browser. See
-> [`docs/phase1-mvp.md`](docs/phase1-mvp.md),
-> [`docs/phase2-consolidation.md`](docs/phase2-consolidation.md), and
-> [`docs/vnc.md`](docs/vnc.md).
+> **Status: phases 1–4 done** (MVP; transport + VNC engine + TOML config;
+> full-screen canvas; VNC dynamic resize). Connects to one RDP or VNC host,
+> renders its screen in the browser (dirty-rectangle tiles as binary WebSocket
+> frames, PNG-compressed), and forwards mouse and keyboard input. The canvas
+> fills the browser viewport at 1:1 device pixels; where the server supports
+> resizing (VNC targets with `resize = true`) the remote desktop follows the
+> window, otherwise a larger desktop scrolls, never scales. Credentials live
+> server-side and are never sent to the browser. See
+> [`docs/architecture.md`](docs/architecture.md) for the overall architecture
+> and [`docs/phase2-consolidation.md`](docs/phase2-consolidation.md) for the
+> phase plan.
 
 ## Install (Linux & macOS)
 
@@ -64,8 +66,8 @@ frontend/            Vite + React + TS SPA
 tests/               end-to-end tests: protocol-level (protocol_e2e.rs) and
                      container-backed happy paths (rdp_tiles_e2e.rs against a
                      dummy xrdp, vnc_tiles_e2e.rs against a dummy TigerVNC)
+docs/architecture.md overall architecture: data path, protocol, engines
 docs/phase1-mvp.md   Phase 1 MVP plan
-docs/vnc.md          VNC engine: implemented baseline + the phase-4 resize plan
 ```
 
 ## Development

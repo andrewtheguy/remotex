@@ -83,13 +83,13 @@ path. Explicitly **in**:
    full-screen paint went from ~31.4 MB (base64-JSON equivalent) to ~3.1 MB on
    the wire — **10x**. Per-session byte totals are logged on disconnect
    (`ws: outbound totals: …`) for measuring in the field.
-2. **Server-side VNC session — (done, see docs/vnc.md).** A simple
+2. **Server-side VNC session — (done, see docs/architecture.md).** A simple
    Rust RFB client alongside the RDP engine (`src/vnc.rs`) — Guacamole-style:
    protocol 3.8, security None/VncAuth, the raw baseline encoding only, no
    per-implementation workarounds. Both engines feed the same server→browser
    protocol behind the common `Session` seam (`src/session.rs`). The
-   follow-ups are planned, not implemented: the full-screen canvas (phase 3,
-   common to all protocols) and TigerVNC-style dynamic resize (phase 4).
+   follow-ups landed since: the full-screen canvas (phase 3, common to all
+   protocols) and TigerVNC-style dynamic resize (phase 4).
 3. **TOML config, like remotex — (done).** CLI/env-centric config replaced
    with a TOML file in remotex's shape (`[server]` block, `[[targets]]`
    profiles with per-target protocol/host/port/credentials — see
@@ -120,8 +120,10 @@ and multi-target all mean re-attaching to or choosing *the* one session/target
 ## Later phases (sketch)
 
 **Done:** phase 1 (the MVP, docs/phase1-mvp.md), phase 2 (this document —
-transport, the VNC engine baseline, TOML config), and phase 3 (full-screen
-canvas). Everything below phase 3 is **not started**, in planned order:
+transport, the VNC engine baseline, TOML config), phase 3 (full-screen
+canvas), and phase 4 (VNC dynamic resize — docs/architecture.md describes
+the system as built). Everything below phase 4 is **not started**, in
+planned order:
 
 - **Phase 3 — full-screen canvas, like remotex — (done).** Common to **all
   protocols** — a frontend behavior, not a VNC feature: the canvas fills the
@@ -135,16 +137,24 @@ canvas). Everything below phase 3 is **not started**, in planned order:
   listener re-derives the CSS size when `devicePixelRatio` changes (monitor
   moves, browser zoom). The header/status chrome was replaced by a centered
   status overlay shown only until the desktop streams.
-- **Phase 4 — TigerVNC-style dynamic resize (docs/vnc.md):** where the server
+- **Phase 4 — TigerVNC-style dynamic resize — (done).** Where the server
   supports it, drive the size it renders from the browser (`SetDesktopSize`)
   so the phase-3 scrollbars disappear; servers without it keep the fixed
-  connect-time size and the scrollbars.
-- **Phase 5 — frontend integration:** port remotex's frontend shell
-  (connection flow, base input handling) onto the uniform protocol. With
-  decode server-side there is **one renderer** — the RFB decoder,
-  `zrleDecoder`, and the rest of the browser-side engine do not come along.
-  The soft keyboard and the floating UI move later (phase 7); clipboard is
-  not planned (see "Explicitly out" above).
+  connect-time size and the scrollbars. As built (docs/architecture.md):
+  opt-in per target (`resize = true`); the browser reports its viewport in
+  device pixels on connect and on resize/dpr changes, and the VNC engine
+  turns the reports into `SetDesktopSize` once the server declares support
+  via ExtendedDesktopSize. RDP ignores the reports (reactivation not
+  implemented).
+- **Phase 5 — connection-flow UX (rescoped, much reduced):** the original
+  "port remotex's frontend shell" is mostly superseded — phases 1–4 built the
+  canvas, renderer, and input handling natively in this repo, and with decode
+  server-side there is **one renderer** (the RFB decoder, `zrleDecoder`, and
+  the rest of remotex's browser-side engine never come along). What remains
+  is the connection flow: reconnect after a dropped/ended session (today that
+  is a manual page reload) and clearer error surfacing. The soft keyboard and
+  the floating UI stay in phase 7; clipboard is not planned (see "Explicitly
+  out" above).
 - **Phase 6 — session management:** detach/reattach and remotex-style takeover
   of the single session slot (force-claim evicts the previous browser) —
   backed by the server-owned framebuffer.
@@ -199,13 +209,15 @@ profile selected at connect time.
    object.
 4. **(done)** `vnc::run`: a minimal Rust RFB client (3.8 handshake, VncAuth,
    raw encoding, pointer/key input), feeding the shared protocol — see
-   docs/vnc.md. End-to-end coverage: `tests/vnc_tiles_e2e.rs` runs a dummy
+   docs/architecture.md. End-to-end coverage: `tests/vnc_tiles_e2e.rs` runs a dummy
    TigerVNC container (podman/docker) and validates a full-desktop paint
    through the real server.
 5. Verify against real targets — including macOS Screen Sharing, the case that
    motivated dropping the clever-encoding path.
 6. **(done)** Phase 3: full-screen canvas at 1:1 device pixels, overflow
    scrolls (see the phase list above).
-7. Later phases (4–9 above): dynamic resize, frontend integration, session
-   management, soft keyboard + floating UI, multi-target UI, and finally the
-   remotex-v2 rename.
+7. **(done)** Phase 4: VNC dynamic resize via SetDesktopSize, opt-in per
+   target (see the phase list above).
+8. Later phases (5–9 above): connection-flow UX, session management, soft
+   keyboard + floating UI, multi-target UI, and finally the remotex-v2
+   rename.
