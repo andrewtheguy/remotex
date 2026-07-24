@@ -134,6 +134,132 @@ function applyCanvasCss(
   canvas.style.height = `${h}px`;
 }
 
+// ── Pointer rendering ───────────────────────────────────────────────────────
+// Engines whose server hands the cursor shape over instead of drawing it into
+// the framebuffer (VNC's Cursor pseudo-encoding — macOS Screen Sharing never
+// draws one) make the browser responsible for the pointer: the hardware
+// pointer wears the shape as a CSS cursor, and the touch gesture layer's
+// virtual pointer gets an image drawn at its remote position. Engines that
+// composite the pointer themselves (RDP, and VNC servers that ignore the
+// pseudo-encoding) send no `cursor` message at all, and the browser keeps its
+// own pointer hidden — see index.css.
+
+interface CursorImage {
+  url: string;
+  /** Hotspot within the image, in cursor pixels. */
+  hx: number;
+  hy: number;
+  w: number;
+  h: number;
+}
+
+// The engine's pointer state. `image` is null when the remote hid the pointer;
+// the state as a whole is null while the remote is drawing it itself.
+interface RemoteCursor {
+  image: CursorImage | null;
+}
+
+let arrow: CursorImage | null = null;
+
+// A neutral arrow, standing in when the browser owns the pointer but the
+// remote has hidden its shape — on a remote desktop a pointer you can't see is
+// worse than a generic one. Painted into a canvas rather than carried as an
+// embedded blob, and PNG rather than SVG because Safari rejects SVG cursors.
+function fallbackCursor(): CursorImage {
+  if (arrow) {
+    return arrow;
+  }
+  const w = 12;
+  const h = 19;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    // The usual arrow, on half-pixel coordinates so the 1px outline lands on
+    // whole pixels. The tip is the hotspot, hence (0, 0).
+    ctx.beginPath();
+    ctx.moveTo(0.5, 0.5);
+    ctx.lineTo(0.5, 16);
+    ctx.lineTo(4, 12.5);
+    ctx.lineTo(6.5, 18);
+    ctx.lineTo(9, 17);
+    ctx.lineTo(6.5, 11.5);
+    ctx.lineTo(11, 11.5);
+    ctx.closePath();
+    // White with a black outline, so it reads against any remote background.
+    ctx.fillStyle = "#fff";
+    ctx.fill();
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  arrow = { url: canvas.toDataURL("image/png"), hx: 0, hy: 0, w, h };
+  return arrow;
+}
+
+// A cursor image as a CSS url() token. An unquoted token ends at the first
+// `)`, so quoting (and escaping what would close the quote) keeps the image
+// string from spilling into the declaration. Our own base64 can't contain
+// either character, but the URL is server-supplied and this is one line.
+function cssUrl(url: string): string {
+  return `url("${url.replace(/["\\]/g, "\\$&")}")`;
+}
+
+// What to draw for the pointer, or null to leave it to the remote.
+function cursorImage(remote: RemoteCursor | null): CursorImage | null {
+  if (!remote) {
+    return null;
+  }
+  return remote.image ?? fallbackCursor();
+}
+
+// Push the pointer state to the DOM: the CSS cursor on the input overlay (it
+// tracks the hardware pointer with no lag) and the image element the touch
+// gesture layer's virtual pointer rides on. `touchAt` is that virtual position
+// in remote pixels, null while a hardware mouse is driving.
+function paintCursor(
+  els: {
+    overlay: HTMLElement | null;
+    canvas: HTMLCanvasElement | null;
+    pointer: HTMLImageElement | null;
+  },
+  size: RemoteSize | null,
+  remote: RemoteCursor | null,
+  touchAt: Point | null,
+): void {
+  const image = cursorImage(remote);
+  if (els.overlay) {
+    els.overlay.style.cursor = image
+      ? `${cssUrl(image.url)} ${image.hx} ${image.hy}, default`
+      : "none";
+  }
+  const pointer = els.pointer;
+  if (!pointer) {
+    return;
+  }
+  const rect = els.canvas?.getBoundingClientRect();
+  if (!image || !touchAt || !rect || !size || size.w <= 0) {
+    pointer.style.display = "none";
+    return;
+  }
+  // The desktop's on-screen scale places the pointer on its remote position;
+  // the pointer itself is never drawn below 1:1, because zoomed out to fit a
+  // phone screen a shrunken pointer is the last thing that can afford to
+  // shrink.
+  const view = rect.width / size.w;
+  const draw = Math.max(view, 1);
+  if (pointer.src !== image.url) {
+    pointer.src = image.url;
+  }
+  pointer.style.width = `${image.w * draw}px`;
+  pointer.style.height = `${image.h * draw}px`;
+  pointer.style.transform = `translate3d(${
+    rect.left + touchAt.x * view - image.hx * draw
+  }px, ${rect.top + touchAt.y * view - image.hy * draw}px, 0)`;
+  pointer.style.display = "block";
+}
+
 // POST /api/session (the slot claim); null on a network failure, which the
 // caller treats as retryable.
 async function postClaim(force: boolean): Promise<Response | null> {
@@ -177,6 +303,10 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
 // as ClientMsg. Reconnects automatically after drops; busy/takenOver surface to
 // the caller with `takeOver` to resolve them.
 //
+// `pointerRef` is the image element the client-side pointer is drawn on when
+// the engine sends cursor shapes rather than compositing them (see
+// paintCursor); it is positioned imperatively and stays hidden otherwise.
+//
 // `onUnauthorized` fires when a claim answers 401 — the login is gone, so the
 // caller swaps back to the login screen. It must be referentially stable
 // (useCallback) or the connection/input effects tear down and redo. Logout is
@@ -184,6 +314,7 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
+  pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -224,6 +355,28 @@ export function useRemoteDesktop(
   // current viewport even in manual-resize mode.
   const resizeToWindowRef = useRef<(() => void) | null>(null);
 
+  // The engine's latest pointer state, and where the touch gesture layer's
+  // virtual pointer sits (null while a hardware mouse is driving). Both are
+  // refs: they are pushed straight to the DOM by syncCursor, and no React
+  // output depends on them — pointer motion must not re-render.
+  const cursorRef = useRef<RemoteCursor | null>(null);
+  const touchCursorRef = useRef<Point | null>(null);
+
+  // Re-apply the pointer to the DOM. Called whenever the shape, the virtual
+  // pointer position, or the canvas geometry (resize, zoom, pan, dpr) changes.
+  const syncCursor = useCallback(() => {
+    paintCursor(
+      {
+        overlay: overlayRef.current,
+        canvas: canvasRef.current,
+        pointer: pointerRef.current,
+      },
+      sizeRef.current,
+      cursorRef.current,
+      touchCursorRef.current,
+    );
+  }, [canvasRef, overlayRef, pointerRef]);
+
   const sendRef = useRef((msg: ClientMsg) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -255,6 +408,12 @@ export function useRemoteDesktop(
         canvas.height = 0;
       }
       ctxRef.current = null;
+      // Pointer ownership is per-engine: the next target may well composite
+      // its own cursor, so drop back to hiding the browser's until it says
+      // otherwise. A reattach to the same engine gets the shape replayed.
+      cursorRef.current = null;
+      touchCursorRef.current = null;
+      syncCursor();
     };
 
     const scheduleRetry = () => {
@@ -444,6 +603,7 @@ export function useRemoteDesktop(
       }
       sizeRef.current = s;
       setSize(s);
+      syncCursor();
     };
 
     const handleControlMsg = (msg: ControlMsg) => {
@@ -454,6 +614,23 @@ export function useRemoteDesktop(
       switch (msg.type) {
         case "resize":
           handleResize(msg);
+          break;
+        case "cursor":
+          // The engine hands over the pointer shape, which means its server is
+          // not drawing one — from here the browser owns pointer rendering. A
+          // null image is the remote hiding it; fallbackCursor stands in.
+          cursorRef.current = {
+            image: msg.image
+              ? {
+                  url: `data:image/png;base64,${msg.image}`,
+                  hx: msg.hx,
+                  hy: msg.hy,
+                  w: msg.w,
+                  h: msg.h,
+                }
+              : null,
+          };
+          syncCursor();
           break;
         case "error":
           // The engine failed (or a connect was refused); show the message
@@ -528,6 +705,7 @@ export function useRemoteDesktop(
           viewRef.current,
           bottomInsetRef.current,
         );
+        syncCursor();
         sendViewport();
       }, 250);
     };
@@ -547,6 +725,7 @@ export function useRemoteDesktop(
         viewRef.current,
         bottomInsetRef.current,
       );
+      syncCursor();
       onViewportChange();
     };
     const watchDpr = () => {
@@ -568,7 +747,7 @@ export function useRemoteDesktop(
       dprQuery?.removeEventListener("change", onDprChange);
       ws?.close();
     };
-  }, [canvasRef, onUnauthorized]);
+  }, [canvasRef, onUnauthorized, syncCursor]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
   // action after being evicted (takenOver).
@@ -624,8 +803,9 @@ export function useRemoteDesktop(
         viewRef.current,
         bottomInsetRef.current,
       );
+      syncCursor();
     },
-    [canvasRef],
+    [canvasRef, syncCursor],
   );
 
   // Capture input over the overlay element and forward it to the server,
@@ -665,8 +845,16 @@ export function useRemoteDesktop(
               viewRef.current,
               bottomInsetRef.current,
             );
+            syncCursor();
           },
           bottomInset: () => bottomInsetRef.current,
+          // The virtual pointer moved: redraw it at its new spot. A hardware
+          // mouse (`real`) needs no image — the CSS cursor already sits under
+          // it — so it clears the position instead.
+          onCursor: (x, y, real) => {
+            touchCursorRef.current = real ? null : { x, y };
+            syncCursor();
+          },
         })
       : null;
 
@@ -777,7 +965,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef]);
+  }, [overlayRef, canvasRef, syncCursor]);
 
   return {
     status,

@@ -47,9 +47,27 @@ body {
   position: absolute;
   inset: 0;
   outline: none;
-  /* The remote cursor is rendered server-side into the framebuffer, so hide the
-     browser's own cursor to avoid showing two pointers. */
+  /* Default for engines that composite the cursor into the framebuffer (RDP,
+     and VNC servers that ignore the Cursor pseudo-encoding): hide the
+     browser's own cursor so only one pointer shows. When the engine sends
+     shapes instead, useRemoteDesktop overrides this inline with the remote
+     shape — see paintCursor. */
   cursor: none;
+}
+
+/* The client-side pointer for the touch gesture layer's virtual cursor, used
+   only when the engine sends cursor shapes. Fixed to the viewport (the touch
+   canvas moves under a transform) and positioned by paintCursor, which also
+   unhides it; nothing here should be sized or placed by CSS. */
+.remote-pointer {
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: none;
+  pointer-events: none;
+  image-rendering: pixelated;
+  will-change: transform;
+  z-index: 1;
 }
 
 /* Phase 8 (mobile gestures): on pinch-zoom-capable devices the gesture layer

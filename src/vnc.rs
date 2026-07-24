@@ -6,6 +6,14 @@
 //! the backend↔VNC hop is LAN, so clever wire encodings buy nothing there;
 //! the browser link is optimized by the shared tile transport instead.
 //!
+//! On top of the baseline, the **Cursor pseudo-encoding** is always
+//! advertised: a server that supports it stops compositing the pointer into
+//! the framebuffer and sends the shape instead, which the browser draws
+//! locally ([`ServerMsg::Cursor`]). This is what makes the pointer visible on
+//! servers that never composited it in the first place — macOS Screen Sharing
+//! draws no cursor into the framebuffer at all, so without this the desktop
+//! arrives with no pointer anywhere on it.
+//!
 //! On top of the baseline, **dynamic resize** is available per
 //! target opt-in (`resize = true`): the DesktopSize/ExtendedDesktopSize
 //! pseudo-encodings are advertised, and browser viewport reports
@@ -31,11 +39,15 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::config::TargetConfig;
 use crate::keymap;
-use crate::protocol::{ClientMsg, MouseButton, STRIP_ROWS, ServerMsg, Tile};
+use crate::protocol::{ClientMsg, CursorShape, MouseButton, STRIP_ROWS, ServerMsg, Tile};
 
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC_AUTH: u8 = 2;
 const ENCODING_RAW: i32 = 0;
+/// Cursor pseudo-encoding: the server hands over the pointer shape (pixels +
+/// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
+/// the framebuffer.
+const ENCODING_CURSOR: i32 = -239;
 /// DesktopSize pseudo-encoding: the server announces a new framebuffer size.
 const ENCODING_DESKTOP_SIZE: i32 = -223;
 /// ExtendedDesktopSize pseudo-encoding: size announcements with a screen
@@ -45,6 +57,9 @@ const ENCODING_EXTENDED_DESKTOP_SIZE: i32 = -308;
 const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.
 const MAX_STRING: u32 = 1024;
+/// Largest cursor edge accepted. Real pointers are 32x32 or 64x64; anything
+/// beyond this is drained and ignored rather than drawn.
+const MAX_CURSOR_DIM: u16 = 256;
 
 type Reader = BufReader<OwnedReadHalf>;
 type SharedWriter = Arc<Mutex<OwnedWriteHalf>>;
@@ -74,6 +89,23 @@ struct DesktopState {
 }
 
 type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
+
+/// What the browser should draw for the pointer, tracked so a browser that
+/// (re)attaches mid-session gets it replayed — the server only sends the shape
+/// when it changes, which may have been long before this browser showed up.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum CursorState {
+    /// No Cursor rect has arrived: the server is compositing the pointer into
+    /// the framebuffer itself, so the browser must not draw one.
+    #[default]
+    ServerDrawn,
+    /// The server owns the shape and has currently hidden the pointer.
+    Hidden,
+    /// The latest shape the server sent.
+    Shape(CursorShape),
+}
+
+type SharedCursor = Arc<std::sync::Mutex<CursorState>>;
 
 /// Connect to the VNC host, then drive the session until it ends.
 ///
@@ -212,13 +244,19 @@ async fn connect(
     anyhow::ensure!(width > 0 && height > 0, "server reported a {width}x{height} desktop");
 
     writer.write_all(&set_pixel_format()).await?;
-    // The resize pseudo-encodings are advertised only when the target opts in
+    // Cursor is unconditional (the browser can always draw a pointer). The
+    // resize pseudo-encodings are advertised only when the target opts in
     // (`resize = true`); without them the server never announces support and
     // the desktop keeps its connect-time size.
     let encodings: &[i32] = if config.resize {
-        &[ENCODING_RAW, ENCODING_EXTENDED_DESKTOP_SIZE, ENCODING_DESKTOP_SIZE]
+        &[
+            ENCODING_RAW,
+            ENCODING_CURSOR,
+            ENCODING_EXTENDED_DESKTOP_SIZE,
+            ENCODING_DESKTOP_SIZE,
+        ]
     } else {
-        &[ENCODING_RAW]
+        &[ENCODING_RAW, ENCODING_CURSOR]
     };
     writer.write_all(&set_encodings(encodings)).await?;
 
@@ -242,6 +280,7 @@ async fn active_loop(
         screen: None,
         pending: None,
     }));
+    let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
 
     // Kick off the update cycle with one full (non-incremental) request.
     write_to(&writer, &update_request(false, size)).await?;
@@ -250,6 +289,7 @@ async fn active_loop(
         reader,
         Arc::clone(&writer),
         Arc::clone(&desktop),
+        Arc::clone(&cursor),
         frame_tx.clone(),
     ));
 
@@ -293,6 +333,14 @@ async fn active_loop(
                         .send(ServerMsg::Resize { w: size.0, h: size.1 })
                         .await
                         .is_err()
+                    {
+                        break Err(anyhow::anyhow!("frame channel closed"));
+                    }
+                    // The pointer shape is not part of a repaint — the server
+                    // resends it only when it changes — so replay the cached
+                    // one, or the fresh browser would draw no pointer at all.
+                    if let Some(msg) = cursor_msg(&cursor)
+                        && frame_tx.send(msg).await.is_err()
                     {
                         break Err(anyhow::anyhow!("frame channel closed"));
                     }
@@ -351,6 +399,7 @@ async fn read_loop(
     mut reader: Reader,
     writer: SharedWriter,
     desktop: SharedDesktop,
+    cursor: SharedCursor,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
     loop {
@@ -369,7 +418,7 @@ async fn read_loop(
                 let rects = reader.read_u16().await?;
                 let mut resized = false;
                 for _ in 0..rects {
-                    resized |= read_rect(&mut reader, &writer, &desktop, &frame_tx).await?;
+                    resized |= read_rect(&mut reader, &writer, &desktop, &cursor, &frame_tx).await?;
                 }
                 // Complete the cycle. A resize invalidates the old contents,
                 // so repaint fully; otherwise ask for the next increment.
@@ -405,6 +454,7 @@ async fn read_rect(
     reader: &mut Reader,
     writer: &SharedWriter,
     desktop: &SharedDesktop,
+    cursor: &SharedCursor,
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<bool> {
     let x = reader.read_u16().await?;
@@ -414,6 +464,13 @@ async fn read_rect(
     let encoding = reader.read_i32().await?;
     match encoding {
         ENCODING_RAW => {}
+        // Cursor: the rect header carries the hotspot (x, y) and the shape
+        // size, never a framebuffer position — so it skips the bounds check
+        // and tile path below entirely.
+        ENCODING_CURSOR => {
+            read_cursor(reader, cursor, (x, y, w, h), frame_tx).await?;
+            return Ok(false);
+        }
         // DesktopSize: the rect itself is the announcement; no payload.
         ENCODING_DESKTOP_SIZE => return apply_resize(desktop, (w, h), frame_tx).await,
         ENCODING_EXTENDED_DESKTOP_SIZE => {
@@ -460,6 +517,61 @@ async fn read_rect(
         done += strip_h;
     }
     Ok(false)
+}
+
+/// Handle a Cursor rect: `w * h` pixels in the negotiated format, followed by
+/// a 1-bit-per-pixel transparency mask (rows padded to whole bytes, MSB first,
+/// 1 = opaque). The hotspot rides in the rect's x/y. A 0x0 rect means the
+/// server hid the pointer.
+///
+/// Receiving one at all is the server's admission that it is *not* drawing the
+/// pointer into the framebuffer, so the shape is cached and forwarded to the
+/// browser, which takes over rendering from here.
+async fn read_cursor<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cursor: &SharedCursor,
+    (hx, hy, w, h): (u16, u16, u16, u16),
+    frame_tx: &mpsc::Sender<ServerMsg>,
+) -> anyhow::Result<()> {
+    let (state, msg) = if w == 0 || h == 0 {
+        debug!("vnc: server hid the pointer");
+        (CursorState::Hidden, ServerMsg::Cursor(None))
+    } else {
+        let pixels_len = usize::from(w) * usize::from(h) * BPP;
+        let mask_len = usize::from(w).div_ceil(8) * usize::from(h);
+        if w > MAX_CURSOR_DIM || h > MAX_CURSOR_DIM {
+            // Drop the shape but not the admission behind it: the server has
+            // handed pointer drawing over, so report a hidden pointer and let
+            // the browser draw its own arrow instead of nothing at all.
+            warn!("vnc: ignoring an oversized {w}x{h} cursor");
+            discard(reader, (pixels_len + mask_len) as u64).await?;
+            (CursorState::Hidden, ServerMsg::Cursor(None))
+        } else {
+            let mut pixels = vec![0u8; pixels_len];
+            reader.read_exact(&mut pixels).await?;
+            let mut mask = vec![0u8; mask_len];
+            reader.read_exact(&mut mask).await?;
+            let shape =
+                CursorShape::from_rgba(w, h, hx, hy, &masked_bgrx_to_rgba(&pixels, &mask, w))?;
+            debug!("vnc: cursor {w}x{h} hotspot ({hx},{hy}), {} bytes", shape.png.len());
+            (CursorState::Shape(shape.clone()), ServerMsg::Cursor(Some(shape)))
+        }
+    };
+    *cursor.lock().unwrap() = state;
+    frame_tx
+        .send(msg)
+        .await
+        .map_err(|_| anyhow::anyhow!("frame channel closed"))
+}
+
+/// The [`ServerMsg`] that reproduces the current pointer state for a browser
+/// that just attached, or `None` while the server is still drawing it itself.
+fn cursor_msg(cursor: &SharedCursor) -> Option<ServerMsg> {
+    match &*cursor.lock().unwrap() {
+        CursorState::ServerDrawn => None,
+        CursorState::Hidden => Some(ServerMsg::Cursor(None)),
+        CursorState::Shape(shape) => Some(ServerMsg::Cursor(Some(shape.clone()))),
+    }
 }
 
 /// Handle an ExtendedDesktopSize rect. The rect header is repurposed by the
@@ -762,6 +874,29 @@ fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
     rgb
 }
 
+/// Repack a cursor's BGRX pixels into RGBA, folding the RFB 1-bit mask into
+/// the alpha channel: rows are padded to whole bytes and scanned MSB first,
+/// with a set bit meaning opaque. Pixels outside the mask are cleared to fully
+/// transparent black rather than just alpha-zeroed, so PNG's filtering has a
+/// flat area to compress and no stale colour can bleed through a viewer that
+/// ignores alpha.
+fn masked_bgrx_to_rgba(bgrx: &[u8], mask: &[u8], w: u16) -> Vec<u8> {
+    let stride = usize::from(w).div_ceil(8);
+    let mut rgba = Vec::with_capacity(bgrx.len());
+    for (i, px) in bgrx.chunks_exact(BPP).enumerate() {
+        let (row, col) = (i / usize::from(w), i % usize::from(w));
+        let opaque = mask
+            .get(row * stride + col / 8)
+            .is_some_and(|byte| byte >> (7 - col % 8) & 1 == 1);
+        if opaque {
+            rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+        } else {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        }
+    }
+    rgba
+}
+
 /// Read a u32-length-prefixed latin-1 string (reason or desktop name),
 /// truncated to [`MAX_STRING`] with the excess drained off the stream.
 async fn read_string(reader: &mut Reader) -> anyhow::Result<String> {
@@ -876,11 +1011,109 @@ mod tests {
 
     #[test]
     fn resize_encoding_set_appends_the_pseudo_encodings() {
-        let msg = set_encodings(&[ENCODING_RAW, ENCODING_EXTENDED_DESKTOP_SIZE, ENCODING_DESKTOP_SIZE]);
-        assert_eq!(&msg[..4], &[2, 0, 0, 3]);
+        let msg = set_encodings(&[
+            ENCODING_RAW,
+            ENCODING_CURSOR,
+            ENCODING_EXTENDED_DESKTOP_SIZE,
+            ENCODING_DESKTOP_SIZE,
+        ]);
+        assert_eq!(&msg[..4], &[2, 0, 0, 4]);
         assert_eq!(&msg[4..8], &0i32.to_be_bytes());
-        assert_eq!(&msg[8..12], &(-308i32).to_be_bytes());
-        assert_eq!(&msg[12..16], &(-223i32).to_be_bytes());
+        assert_eq!(&msg[8..12], &(-239i32).to_be_bytes());
+        assert_eq!(&msg[12..16], &(-308i32).to_be_bytes());
+        assert_eq!(&msg[16..20], &(-223i32).to_be_bytes());
+    }
+
+    // ── Cursor pseudo-encoding ──────────────────────────────────────────────
+
+    #[test]
+    fn cursor_mask_becomes_alpha_and_masked_out_pixels_are_cleared() {
+        // 3x2 cursor: mask rows are padded to a whole byte, MSB first.
+        // Row 0: 101xxxxx, row 1: 010xxxxx.
+        let bgrx: Vec<u8> = (0..6).flat_map(|i| [i * 3, i * 3 + 1, i * 3 + 2, 0]).collect();
+        let rgba = masked_bgrx_to_rgba(&bgrx, &[0b1010_0000, 0b0100_0000], 3);
+        assert_eq!(
+            rgba,
+            vec![
+                2, 1, 0, 255, // (0,0) opaque, BGRX -> RGBA
+                0, 0, 0, 0, // (1,0) transparent
+                8, 7, 6, 255, // (2,0) opaque
+                0, 0, 0, 0, // (0,1) transparent
+                14, 13, 12, 255, // (1,1) opaque
+                0, 0, 0, 0, // (2,1) transparent
+            ]
+        );
+    }
+
+    /// Decode a cursor's PNG back to RGBA for assertions.
+    fn decode_rgba(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        buf.truncate(info.buffer_size());
+        (info.width, info.height, buf)
+    }
+
+    #[tokio::test]
+    async fn cursor_rect_is_cached_and_forwarded_as_an_rgba_png() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (tx, mut rx) = mpsc::channel(4);
+        // 2x1: an opaque red pixel then a masked-out one.
+        let mut payload = vec![0, 0, 255, 0, 9, 9, 9, 0]; // BGRX
+        payload.push(0b1000_0000); // mask row
+        let mut reader = payload.as_slice();
+
+        read_cursor(&mut reader, &cursor, (1, 2, 2, 1), &tx).await.unwrap();
+
+        let shape = match rx.try_recv().unwrap() {
+            ServerMsg::Cursor(Some(shape)) => shape,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!((shape.w, shape.h, shape.hx, shape.hy), (2, 1, 1, 2));
+        assert_eq!(decode_rgba(&shape.png), (2, 1, vec![255, 0, 0, 255, 0, 0, 0, 0]));
+        // Cached for replay to a browser that attaches later.
+        match cursor_msg(&cursor) {
+            Some(ServerMsg::Cursor(Some(cached))) => assert_eq!(cached, shape),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_cursor_rect_hides_the_pointer() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (tx, mut rx) = mpsc::channel(4);
+        // No payload at all for a 0x0 rect.
+        read_cursor(&mut [].as_slice(), &cursor, (0, 0, 0, 0), &tx).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Cursor(None))));
+        // Hidden is still browser-drawn state, so it replays on reattach —
+        // unlike ServerDrawn, which must stay silent.
+        assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
+    }
+
+    #[tokio::test]
+    async fn oversized_cursor_is_drained_and_hides_the_pointer() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (tx, mut rx) = mpsc::channel(4);
+        let (w, h) = (MAX_CURSOR_DIM + 1, 1);
+        let mut payload = vec![0u8; usize::from(w) * BPP + usize::from(w).div_ceil(8)];
+        // A trailing byte stands in for the next rect: it must survive.
+        payload.push(0xAB);
+        let mut reader = payload.as_slice();
+
+        read_cursor(&mut reader, &cursor, (0, 0, w, h), &tx).await.unwrap();
+        assert_eq!(reader, &[0xAB]);
+        // The shape is dropped, but the server still isn't drawing the pointer,
+        // so the browser is told to fall back rather than left with nothing.
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Cursor(None))));
+        assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
+    }
+
+    #[test]
+    fn no_cursor_rect_leaves_pointer_rendering_to_the_server() {
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        assert!(cursor_msg(&cursor).is_none());
     }
 
     #[test]

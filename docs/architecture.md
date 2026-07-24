@@ -247,6 +247,23 @@ A minimal built-in RFB client (RFC 6143), Guacamole-style baseline:
   re-casing ambiguity. (RDP needs none of this: it forwards scancodes and the
   host tracks its own modifier state.)
 
+**Pointer shapes (always on).** The Cursor pseudo-encoding (`-239`) is
+advertised unconditionally: a server that supports it stops compositing the
+pointer into the framebuffer and sends the shape instead (pixels + a 1-bit
+mask, the rect's x/y being the hotspot), which the engine folds into an RGBA
+PNG and forwards as a `cursor` control message for the browser to draw. This
+is what puts a pointer on the screen for servers that never composited one —
+macOS Screen Sharing draws no cursor into the framebuffer at all, so without
+this the desktop arrives with no pointer anywhere on it. Receiving a `cursor`
+message at all is what tells the browser it owns pointer rendering; engines
+that composite (RDP, and VNC servers that ignore the pseudo-encoding) send
+none and the browser keeps its own pointer hidden. A 0×0 rect is the server
+hiding the pointer — still browser-owned, so the frontend substitutes a plain
+arrow rather than leaving nothing on screen (Xtigervnc reports exactly this
+for a root window with no cursor set). The latest shape is cached per session
+and replayed on `Refresh`, since the server only resends it when it changes
+and a browser attaching later would otherwise get no pointer.
+
 **Dynamic resize (opt-in via `resize = true` on the target).** The
 engine advertises the DesktopSize/ExtendedDesktopSize pseudo-encodings and
 turns browser `viewport` reports into `SetDesktopSize` requests, so
@@ -328,8 +345,9 @@ session left too tall repairs it on connect, since the engine outlives the
 browser here. *Display and input:* native scrolling is off; `applyCanvasCss`
 positions the canvas by fit-to-width scale × pinch zoom (1–4×) plus a clamped
 pan (`translate3d`), and `touchGestures.ts` drives it — a trackpad model
-where the cursor is a persistent position (the server composites it into the
-framebuffer): one-finger tap clicks at the cursor, one-finger drag moves it
+where the cursor is a persistent position (drawn by the remote, or by the
+browser when the engine sends shapes): one-finger tap clicks at the cursor,
+one-finger drag moves it
 (edge-panning the view), double-tap-and-hold holds the left button with a
 second finger assisting, two-finger tap right-clicks, pinch zooms, two-finger
 drag pans, three-finger swipe scrolls axis-locked. Gesture wheel ticks are
@@ -342,6 +360,17 @@ messages run through one promise queue: draws land in arrival order and a
 resize can't jump past queued tiles. Input is captured on a transparent
 overlay exactly covering the canvas; held keys/buttons are released on blur
 so nothing sticks on the remote.
+
+**Pointer.** By default the browser's own cursor is hidden — the remote
+composites one into the framebuffer. When the engine sends `cursor` messages
+instead (see the VNC section), `paintCursor` takes over: the hardware pointer
+wears the shape as a CSS `cursor` (no lag — the compositor moves it), and the
+touch gesture layer's virtual cursor gets an image element positioned at its
+remote coordinate, never drawn below 1:1 so it stays findable when the desktop
+is zoomed out to fit a phone. A null shape (remote hid the pointer) falls back
+to an arrow painted into a canvas — PNG, not SVG, since Safari rejects SVG
+cursors. Pointer state lives in refs and is pushed straight to the DOM:
+pointer motion must never re-render.
 
 ## Configuration
 

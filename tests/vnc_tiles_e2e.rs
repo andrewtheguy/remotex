@@ -107,6 +107,47 @@ fn check_tile_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> u64 {
     u64::from(w) * u64::from(h)
 }
 
+/// Validate a `cursor` control message. Either shape is legitimate: a
+/// decodable PNG with its hotspot inside it, or a null image — the server
+/// saying it has hidden the pointer, which is what Xtigervnc reports for a
+/// root window with no cursor set. Both mean the same thing to the browser:
+/// the server is not drawing the pointer, so the browser must.
+fn check_cursor_msg(text: &str) {
+    use base64::Engine as _;
+
+    let msg: serde_json::Value = serde_json::from_str(text).expect("cursor message is JSON");
+    let (w, h) = (msg["w"].as_u64().unwrap(), msg["h"].as_u64().unwrap());
+    // `get`, not indexing: a missing field must not pass as an explicit null —
+    // the browser distinguishes "no image" from a field the server forgot.
+    let image = msg.get("image").expect("cursor message carries an image field");
+    let Some(image) = image.as_str() else {
+        assert!(image.is_null(), "image must be a string or null: {text}");
+        assert_eq!((w, h), (0, 0), "a hidden pointer has no dimensions: {text}");
+        return;
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image)
+        .expect("image is base64");
+    // Decode it fully: a truncated or mislabelled stream must fail here, and
+    // the PNG's own dimensions must agree with the ones on the message.
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes))
+        .read_info()
+        .expect("image is a PNG");
+    let mut buf = vec![0; reader.output_buffer_size().expect("PNG size fits in memory")];
+    let info = reader.next_frame(&mut buf).expect("PNG decodes");
+    assert_eq!(info.color_type, png::ColorType::Rgba, "cursors carry alpha: {text}");
+    assert_eq!(
+        (u64::from(info.width), u64::from(info.height)),
+        (w, h),
+        "PNG dimensions disagree with the message: {text}"
+    );
+    assert!(w > 0 && h > 0, "empty cursor {w}x{h}");
+    assert!(
+        msg["hx"].as_u64().unwrap() < w && msg["hy"].as_u64().unwrap() < h,
+        "hotspot outside the {w}x{h} cursor: {text}"
+    );
+}
+
 #[tokio::test]
 async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let runtime = common::container_runtime();
@@ -123,6 +164,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
 
     let mut got_resize = false;
     let mut covered: u64 = 0;
+    let mut cursor: Option<String> = None;
 
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
@@ -144,14 +186,21 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         );
                         got_resize = true;
                     }
+                    if text.contains(r#""type":"cursor""#) {
+                        check_cursor_msg(&text);
+                        cursor = Some(text.to_string());
+                    }
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "tile arrived before resize");
                     covered += check_tile_frame(&frame, DESKTOP_W, DESKTOP_H);
                     // The first (non-incremental) update must repaint the whole
                     // desktop; once that much area has arrived, the raw->tile
-                    // path is proven.
-                    if covered >= u64::from(DESKTOP_W) * u64::from(DESKTOP_H) {
+                    // path is proven. The Cursor pseudo-encoding rides the same
+                    // update, so wait for the pointer shape too.
+                    if covered >= u64::from(DESKTOP_W) * u64::from(DESKTOP_H)
+                        && cursor.is_some()
+                    {
                         return;
                     }
                 }
@@ -161,7 +210,9 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
         panic!("websocket closed after {covered} px of tiles without a full paint");
     })
     .await
-    .expect("timed out waiting for the full-desktop paint");
+    .expect("timed out waiting for the full-desktop paint and pointer shape");
+    let cursor =
+        cursor.expect("Xtigervnc must report its pointer once the Cursor encoding is advertised");
 
     // Dynamic resize: report a smaller browser viewport. Xtigervnc
     // accepts SetDesktopSize, so the engine must announce the new geometry to
@@ -228,6 +279,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
 
     let mut reannounced = false;
+    let mut replayed_cursor = false;
     let mut covered: u64 = 0;
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
@@ -245,6 +297,13 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         );
                         reannounced = true;
                     }
+                    if text.contains(r#""type":"cursor""#) {
+                        // The server only sends the shape when it changes, so
+                        // the engine has to replay its cached one — otherwise
+                        // the reattached browser draws no pointer at all.
+                        assert_eq!(text, cursor, "reattach must replay the pointer shape");
+                        replayed_cursor = true;
+                    }
                 }
                 Message::Binary(frame) => {
                     // An update already in flight when the slot was reattached
@@ -254,7 +313,9 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         continue;
                     }
                     covered += check_tile_frame(&frame, VIEWPORT_W, VIEWPORT_H);
-                    if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H) {
+                    if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H)
+                        && replayed_cursor
+                    {
                         return;
                     }
                 }
@@ -264,5 +325,5 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
         panic!("websocket closed after {covered} px of reattach tiles");
     })
     .await
-    .expect("timed out waiting for the reattach repaint");
+    .expect("timed out waiting for the reattach repaint and pointer replay");
 }
