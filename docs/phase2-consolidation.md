@@ -157,7 +157,9 @@ profile selected at connect time.
    PNG-compressed payloads (raw fallback for tiles where PNG would be larger);
    ~10x smaller than the base64-JSON baseline on a real full-screen paint.
    Session byte totals are logged so it can also be measured over a real
-   constrained link.
+   constrained link. End-to-end coverage: `tests/rdp_tiles_e2e.rs` runs a
+   dummy xrdp container (podman/docker) and validates the wire format against
+   a real RDP session.
 3. Introduce the `Session` trait; make the current RDP path implement it.
 4. Add `vnc::Session`: a minimal Rust RFB client (handshake, VNC auth, raw +
    mandatory baseline encodings, pointer/key input), feeding the shared
