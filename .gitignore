@@ -3,7 +3,4 @@ frontend/node_modules
 frontend/dist
 /dist
 tmp/
-# Local secrets — the RDP credentials live here. Not committed; see
-# packaging/etc/rdpweb.toml.example.
-rdpweb.toml
 .env
