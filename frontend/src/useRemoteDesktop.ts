@@ -49,7 +49,9 @@ export function useRemoteDesktop(
     ws.onclose = () => setStatus("closed");
     ws.onerror = () => setStatus("error");
     ws.onmessage = (ev) => {
-      if (typeof ev.data !== "string") return; // frames arrive as JSON text
+      if (typeof ev.data !== "string") {
+        return; // frames arrive as JSON text
+      }
       let msg: ServerMsg;
       try {
         msg = JSON.parse(ev.data) as ServerMsg;
@@ -80,10 +82,14 @@ export function useRemoteDesktop(
         }
         case "tile": {
           const ctx = ctxRef.current;
-          if (!ctx || msg.format !== "rgba") return;
+          if (!ctx || msg.format !== "rgba") {
+            return;
+          }
           const bytes = base64ToBytes(msg.data);
           const expected = msg.w * msg.h * 4;
-          if (bytes.length !== expected) return; // guard against a short/garbled tile
+          if (bytes.length !== expected) {
+            return; // guard against a short/garbled tile
+          }
           const image = ctx.createImageData(msg.w, msg.h);
           image.data.set(bytes);
           ctx.putImageData(image, msg.x, msg.y);
@@ -104,7 +110,9 @@ export function useRemoteDesktop(
   // scaling pointer coordinates from the displayed size to the remote size.
   useEffect(() => {
     const el = overlayRef.current;
-    if (!el) return;
+    if (!el) {
+      return;
+    }
 
     const send = sendRef.current;
     // Track what's held so we can release it if focus/pointer leaves the surface,
@@ -134,7 +142,9 @@ export function useRemoteDesktop(
     const onMouseDown = (e: MouseEvent) => {
       el.focus(); // take keyboard focus on pointer interaction
       const button = mouseButtonFromEvent(e.button);
-      if (!button) return;
+      if (!button) {
+        return;
+      }
       pressedButtons.add(button);
       send({ type: "mouseButton", button, pressed: true });
     };
@@ -142,7 +152,9 @@ export function useRemoteDesktop(
     // the button up. Only buttons we saw pressed on the surface are released.
     const onMouseUp = (e: MouseEvent) => {
       const button = mouseButtonFromEvent(e.button);
-      if (!button || !pressedButtons.delete(button)) return;
+      if (!button || !pressedButtons.delete(button)) {
+        return;
+      }
       send({ type: "mouseButton", button, pressed: false });
     };
     const onWheel = (e: WheelEvent) => {
@@ -162,7 +174,9 @@ export function useRemoteDesktop(
     };
     // On blur, release everything still held so nothing sticks on the remote.
     const onBlur = () => {
-      for (const code of pressedKeys) send({ type: "key", code, pressed: false });
+      for (const code of pressedKeys) {
+        send({ type: "key", code, pressed: false });
+      }
       pressedKeys.clear();
       for (const button of pressedButtons) {
         send({ type: "mouseButton", button, pressed: false });
