@@ -7,16 +7,6 @@ use rdpweb::server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load a local `.env` if present (dev convenience), then the installed
-    // config at <prefix>/etc/rdpweb.env, so RDPWEB_* (incl. credentials) can
-    // live in a file instead of the shell. dotenvy never overrides already-set
-    // variables, so real environment variables take precedence over both.
-    let _ = dotenvy::dotenv();
-    if let Some(env_file) = rdpweb::config::default_env_file() {
-        dotenvy::from_path(&env_file)
-            .with_context(|| format!("failed to load env file {}", env_file.display()))?;
-    }
-
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Install the ring crypto provider as the process default. ironrdp-tls builds
@@ -29,32 +19,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve {
-            host,
-            port,
-            rdp_host,
-            rdp_port,
-            rdp_username,
-            rdp_password,
-            rdp_domain,
-            rdp_width,
-            rdp_height,
-            rdp_security,
-            static_dir,
-        } => {
-            let config = AppConfig {
-                host,
-                port,
-                rdp_host,
-                rdp_port,
-                rdp_username,
-                rdp_password,
-                rdp_domain,
-                rdp_width,
-                rdp_height,
-                rdp_security,
-                static_dir: static_dir.unwrap_or_else(rdpweb::config::default_static_dir),
-            };
+        Commands::Serve { config, target } => {
+            // All configuration comes from the TOML file — no env vars, no .env
+            // (see src/config.rs for why).
+            let (file, path) = rdpweb::config::load(config.as_deref())?;
+            info!("config: {}", path.display());
+            let config = file.resolve(target.as_deref())?;
             serve(config).await?;
         }
     }
@@ -67,7 +37,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     // handler still 404s per-request; this just makes the cause obvious.
     if !config.static_dir.is_dir() {
         warn!(
-            "static dir {} not found — the web UI will 404 (set --static-dir / RDPWEB_STATIC_DIR)",
+            "static dir {} not found — the web UI will 404 (set static_dir under [server])",
             config.static_dir.display()
         );
     } else if !config.static_dir.join("index.html").is_file() {
@@ -89,7 +59,10 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind to {addr}"))?;
     info!("listening on http://{addr}");
-    info!("RDP target: {}:{}", config.rdp_host, config.rdp_port);
+    info!(
+        "target {:?}: {}:{} ({:?})",
+        config.target.name, config.target.host, config.target.port, config.target.protocol
+    );
 
     axum::serve(listener, app).await.context("server error")?;
     Ok(())

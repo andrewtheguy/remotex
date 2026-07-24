@@ -29,7 +29,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::config::AppConfig;
+use crate::config::TargetConfig;
 use crate::keymap;
 use crate::protocol::{ClientMsg, MouseButton, ServerMsg, TileFormat};
 
@@ -48,7 +48,7 @@ type UpgradedFramed = TokioFramed<Box<dyn AsyncReadWrite + Unpin + Send + Sync>>
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Both closing (browser gone / RDP ended) tears the session down.
 pub async fn run(
-    config: AppConfig,
+    config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
@@ -90,9 +90,9 @@ pub async fn run(
 }
 
 /// TCP connect → RDP negotiation → TLS upgrade → CredSSP/finalize.
-async fn connect(config: &AppConfig) -> anyhow::Result<(ConnectionResult, UpgradedFramed)> {
-    let server_name = config.rdp_host.clone();
-    let dest = host_port(&config.rdp_host, config.rdp_port);
+async fn connect(config: &TargetConfig) -> anyhow::Result<(ConnectionResult, UpgradedFramed)> {
+    let server_name = config.host.clone();
+    let dest = host_port(&config.host, config.port);
 
     let stream = TcpStream::connect(&dest)
         .await
@@ -382,14 +382,14 @@ fn host_port(host: &str, port: u16) -> String {
 ///
 /// Enables both TLS and CredSSP/NLA so the server can negotiate the strongest
 /// security it supports. Modeled on the IronRDP `screenshot` example.
-fn build_connector_config(config: &AppConfig) -> Config {
-    let (enable_tls, enable_credssp) = config.rdp_security.flags();
+fn build_connector_config(config: &TargetConfig) -> Config {
+    let (enable_tls, enable_credssp) = config.security.flags();
     Config {
         credentials: Credentials::UsernamePassword {
-            username: config.rdp_username.clone(),
-            password: config.rdp_password.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
         },
-        domain: config.rdp_domain.clone(),
+        domain: config.domain.clone(),
         enable_tls,
         enable_credssp,
         keyboard_type: KeyboardType::IbmEnhanced,
@@ -399,8 +399,8 @@ fn build_connector_config(config: &AppConfig) -> Config {
         ime_file_name: String::new(),
         dig_product_id: String::new(),
         desktop_size: DesktopSize {
-            width: config.rdp_width,
-            height: config.rdp_height,
+            width: config.width,
+            height: config.height,
         },
         bitmap: None,
         client_build: 0,

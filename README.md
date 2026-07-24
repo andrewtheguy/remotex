@@ -26,7 +26,7 @@ the GitHub-published digest, and installs under `/usr/local/opt/rdpweb` with a
 `rdpweb` launcher on your `PATH` (may prompt for `sudo`). Then:
 
 ```bash
-$EDITOR /usr/local/opt/rdpweb/etc/rdpweb.env   # set RDP target + creds
+$EDITOR /usr/local/opt/rdpweb/etc/rdpweb.toml   # set RDP target + creds
 rdpweb serve
 ```
 
@@ -40,8 +40,8 @@ building tarballs.
 src/                 Rust backend (flat module layout)
   main.rs            entry: CLI dispatch + serve
   lib.rs             library surface (shared with the integration tests)
-  cli.rs             clap CLI (serve)
-  config.rs          AppConfig (bind + RDP target + credentials)
+  cli.rs             clap CLI (serve --config/--target)
+  config.rs          TOML config ([server] + [[targets]] profiles)
   server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
   ws.rs              WebSocket <-> RDP session bridge
   rdp.rs             server-side RDP session (IronRDP): connect + active loop
@@ -63,10 +63,10 @@ Run the backend and frontend in two terminals. In dev, Vite (`:5173`) proxies
 `/api` and `/ws` to the Rust server (`:52380`).
 
 ```bash
-# Terminal 1 — backend. Put the RDP target + credentials in a .env file
-# (gitignored, read automatically at startup) rather than on the command line.
-cp .env.example .env               # then edit .env with your host + credentials
-cargo run -- serve                 # http://localhost:52380
+# Terminal 1 — backend. Put the RDP target + credentials in a rdpweb.toml
+# file (gitignored) and pass it explicitly — only an installed deployment has
+# a default config location.
+cargo run -- serve -c rdpweb.toml  # http://localhost:52380
 
 # Terminal 2 — frontend (with hot reload)
 cd frontend
@@ -77,34 +77,48 @@ bun run dev                        # http://localhost:5173
 Open http://localhost:5173. The remote desktop renders on the canvas; mouse and
 keyboard over it drive the session. Use `RUST_LOG=info` (or `debug`) for logs.
 
-`serve` flags (each with a matching `RDPWEB_*` env var):
+## Configuration
 
-| flag | env | default |
-| --- | --- | --- |
-| `--host` | `RDPWEB_HOST` | `127.0.0.1` |
-| `--port` | `RDPWEB_PORT` | `52380` |
-| `--rdp-host` | `RDPWEB_RDP_HOST` | required |
-| `--rdp-port` | `RDPWEB_RDP_PORT` | `3389` |
-| `--rdp-username` | `RDPWEB_RDP_USERNAME` | — |
-| `--rdp-password` | `RDPWEB_RDP_PASSWORD` | — |
-| `--rdp-domain` | `RDPWEB_RDP_DOMAIN` | — |
-| `--rdp-width` | `RDPWEB_RDP_WIDTH` | `1280` |
-| `--rdp-height` | `RDPWEB_RDP_HEIGHT` | `800` |
-| `--rdp-security` | `RDPWEB_RDP_SECURITY` | `auto` |
-| `--static-dir` | `RDPWEB_STATIC_DIR` | installed `share/rdpweb/web`, else `frontend/dist` |
+All configuration lives in one TOML file — no environment variables for server
+or target configuration, and no `.env` loading (env files silently shadowing
+the real environment caused subtle bugs). `RUST_LOG` only controls logging.
+The `serve` subcommand takes only two selectors:
 
-`--rdp-security` is `auto` (advertise TLS + NLA/CredSSP, server picks), `nla`
+- `--config <path>` — the config file. Defaults to the installed
+  `<prefix>/etc/rdpweb.toml`; config is global-only (no per-user or
+  working-directory files), so in a dev checkout this flag is required.
+- `--target <name>` — which `[[targets]]` profile to serve (default: the first).
+
+```toml
+[server]
+#host = "127.0.0.1"        # web UI bind address
+#port = 52380              # web UI port
+#static_dir = ""           # built frontend; defaults to the installed
+                           # share/rdpweb/web, else frontend/dist
+
+[[targets]]
+name = "example"           # unique profile name (picked with --target)
+#protocol = "rdp"          # only "rdp" today; "vnc" arrives in phase 2
+host = "192.0.2.10"
+#port = 3389
+username = "Administrator"
+password = "change-me"
+#domain = ""               # optional; unset = local account
+#width = 1280              # initial desktop size to request
+#height = 800
+#security = "auto"         # auto (TLS+NLA), nla (NLA only), tls (no NLA)
+```
+
+`security` is `auto` (advertise TLS + NLA/CredSSP, server picks), `nla`
 (require NLA), or `tls` (plain TLS, no NLA — the remote shows a graphical login).
 Self-signed server certificates are accepted.
 
 Credentials are used only server-side for the RDP handshake; `GET /api/config`
-returns only the non-secret target host/port.
+returns only the non-secret target name/host/port.
 
-> **Password handling.** Prefer the `.env` file (gitignored) or your secret
-> manager for `RDPWEB_RDP_PASSWORD`. Avoid the `--rdp-password` flag and inline
-> `RDPWEB_RDP_PASSWORD=… cargo run` on real hosts: command-line arguments are
-> visible to other users via the process list (`ps`, `/proc`) and both are
-> captured in your shell history. The flag exists mainly for scripted/CI use.
+> **Password handling.** The config file holds credentials — keep it out of
+> version control (`rdpweb.toml` is gitignored here) and `chmod 600` it on real
+> hosts.
 
 ## Tests
 
@@ -119,14 +133,15 @@ that hangs up, so the session-failure path is reported back over `/ws` as a
 
 ## Production build
 
-The frontend is served from disk (not embedded), so build it and point the
-server at `frontend/dist`:
+The frontend is served from disk (not embedded), so build it first. In a
+checkout the server defaults to `frontend/dist`; set `static_dir` under
+`[server]` in the config to serve it from elsewhere:
 
 ```bash
 cd frontend && bun install && bun run build   # -> frontend/dist/
 cd ..
 cargo build --release
-./target/release/rdpweb serve --static-dir frontend/dist
+./target/release/rdpweb serve -c rdpweb.toml  # static_dir defaults to frontend/dist
 ```
 
 To produce a distributable, relocatable tarball (`bin` + `share`) that
