@@ -164,6 +164,21 @@ export default function FloatingMenu({
     setPosition((prev) => (prev ? clamp(prev.x, prev.y) : prev));
   }, [clamp]);
 
+  // Escape dismisses the gesture-help overlay, matching the backdrop tap and
+  // the Close button. Listener lives only while the overlay is open.
+  useEffect(() => {
+    if (!helpOpen) {
+      return;
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setHelpOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [helpOpen]);
+
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>) => {
       if (
