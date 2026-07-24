@@ -20,9 +20,10 @@ Browser — full-screen canvas SPA (frontend/)
    ▼
 axum server (src/server.rs) ── /ws bridge (src/ws.rs)
    │
-   │  the engine seam (src/session.rs): one spawn path, dispatch on the
-   │  target's protocol — each engine implements the same
-   │  run(config, input_rx, frame_tx) contract
+   │  the session slot (src/session.rs): claim/attach/detach/takeover; the
+   │  engine is spawned per *session*, not per WebSocket, and survives
+   │  detach. One spawn path, dispatch on the target's protocol — each
+   │  engine implements the same run(config, input_rx, frame_tx) contract
    ▼
  ┌───────────────────────┐      ┌───────────────────────────┐
  │ rdp::run (src/rdp.rs) │      │ vnc::run (src/vnc.rs)     │
@@ -39,12 +40,13 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
   session and the framebuffer; the browser only draws tiles. This keeps one
   transport to optimize (backend → browser is the bottleneck link — the
   targets are LAN, the browser may be on weak WAN), enables session
-  resume/takeover later, and makes "add a protocol" mean "write another
+  resume/takeover (phase 6), and makes "add a protocol" mean "write another
   engine", not "ship another in-browser decoder".
 - **Single session, permanently.** This is a single-user program with one
   active session slot. Session takeover (a new browser force-claims the slot
-  and evicts the previous holder) is planned; concurrent sessions, session
-  sharing, or a session broker are permanently out of scope.
+  and evicts the previous holder) and detach/reattach exist (phase 6);
+  concurrent sessions, session sharing, or a session broker are permanently
+  out of scope.
 - **Baseline protocol, no per-implementation workarounds.** Guacamole-style:
   speak the subset every server must support, and spend the cleverness on the
   link we control.
@@ -61,8 +63,9 @@ src/
   cli.rs             clap CLI (serve --config/--target)
   config.rs          TOML config ([server] + [[targets]] profiles)
   server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
-  ws.rs              WebSocket <-> protocol-engine bridge
-  session.rs         the engine seam: spawns rdp::run or vnc::run per target
+  ws.rs              WebSocket <-> session bridge
+  session.rs         the session slot (claim/attach/detach/takeover) and the
+                     engine seam: spawns rdp::run or vnc::run per session
   rdp.rs             RDP engine (IronRDP): connect + active loop
   vnc.rs             VNC engine (built-in RFB client, raw-only + resize)
   keymap.rs          DOM KeyboardEvent.code -> RDP scancode / X11 keysym
@@ -70,11 +73,38 @@ src/
   error.rs           AppError
 ```
 
-Each WebSocket connection spawns its engine on a dedicated thread with a
-current-thread tokio runtime (IronRDP's futures are not `Send`; one shared
-spawn path keeps the seam uniform). The session ends when either side goes
-away: browser disconnect closes the input channel, engine death closes the
-frame channel.
+Each engine runs on a dedicated thread with a current-thread tokio runtime
+(IronRDP's futures are not `Send`; one shared spawn path keeps the seam
+uniform). The engine lives as long as the remote session: it is spawned when
+the first browser attaches and ends when the remote host disconnects — not
+when the browser does.
+
+## The session slot (phase 6)
+
+`SessionManager` (src/session.rs) decouples the engine session (backend ↔
+remote host) from the browser attachment (backend ↔ WebSocket), remotex's
+claim rules on top of a persistent engine:
+
+- **Claim** — `POST /api/session` (`{force?, sessionId?}`) mints the slot
+  token. While another browser's WebSocket is attached the claim answers
+  `409` unless `force` (takeover) or `sessionId` is the current token (the
+  same browser reclaiming after a network drop). Claiming evicts the
+  previously attached WebSocket — its socket closes with code **4001** —
+  but never the engine.
+- **Attach** — `/ws?session=<token>` joins the slot (a stale token closes
+  with code **4000**; the browser claims again). The first attach spawns the
+  engine; a reattach injects `ClientMsg::Refresh`, making the engine
+  re-announce the desktop size and repaint fully — RDP repacks its
+  server-owned `DecodedImage`, VNC issues a non-incremental update request
+  (the VNC server is one LAN hop away; duplicating the framebuffer
+  server-side would buy nothing).
+- **Detach** — the WebSocket went away; the engine keeps running and its
+  frames are dropped until the next attach. Closing the browser therefore
+  *detaches* from the desktop rather than ending it; the remote session ends
+  only when the remote host ends it.
+
+One slot, permanently: takeover replaces the attached browser, never adds
+one — concurrent sessions, sharing, and brokers stay out of scope.
 
 ## The wire protocol (browser ↔ backend)
 
@@ -89,9 +119,12 @@ session error). Measured ~10x smaller than the old base64-in-JSON baseline on
 a full-screen paint; per-session byte totals are logged on disconnect.
 
 **Browser → server.** JSON text frames: `mouseMove`, `mouseButton`, `wheel`,
-`key` (DOM `KeyboardEvent.code`), and `viewport` — the browser's viewport in
-device pixels, i.e. the size it *wants* the remote desktop to be. Engines
-that can drive the remote size act on viewport reports; the rest ignore them.
+`key` (DOM `KeyboardEvent.code`), `viewport` — the browser's viewport in
+device pixels, i.e. the size it *wants* the remote desktop to be (engines
+that can drive the remote size act on viewport reports; the rest ignore
+them) — and `refresh`, a full-repaint request. `refresh` is normally
+injected server-side by the session layer on reattach (phase 6), but a
+browser may also send it to recover a corrupted canvas.
 
 ## Engines
 
@@ -143,9 +176,22 @@ Vite + React 19 + TypeScript, managed with Bun (`frontend/`). Three files
 matter:
 
 - `protocol.ts` — TS mirror of the wire protocol (binary tile parsing).
-- `useRemoteDesktop.ts` — the one hook: WebSocket lifecycle, tile rendering,
-  input capture, viewport reporting.
-- `RemoteDesktop.tsx` — the full-screen canvas + input overlay.
+- `useRemoteDesktop.ts` — the one hook: session claim + WebSocket lifecycle,
+  tile rendering, input capture, viewport reporting.
+- `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
+  connection-status overlay.
+
+**Connection flow (phase 5).** The hook claims the session slot, opens the
+WebSocket with the token, and reconnects automatically with capped backoff
+after any drop (network, server restart, session ended) — no page reload.
+The per-tab token (sessionStorage) makes a reconnect a *reclaim*, so it
+never trips the takeover prompt. Three states wait for the user instead of
+retrying: **busy** (another browser holds the slot; "Take over"
+force-claims), **taken over** (this tab was evicted with close code 4001;
+"Take it back" force-claims), and **error** (the server reported a fatal
+session error; the message is shown with "Retry"). The reconnect backoff
+resets only once a desktop actually arrives, so a session that dies right
+after connecting can't hot-loop.
 
 **Full-screen canvas (phase 3).** The canvas fills the browser viewport and
 renders at **1:1 device pixels**: the backing store stays at the remote pixel
@@ -181,16 +227,20 @@ the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
 
 - **Unit tests** live with the code (protocol encoding, RFB handshake pieces,
   VncAuth vectors, input translation, keymaps, config parsing).
-- **E2E tests** (`tests/`): protocol-level tests against the real axum server,
+- **E2E tests** (`tests/`): protocol-level tests against the real axum server
+  (`protocol_e2e.rs` — claim/attach flows, takeover eviction, and
+  detach/reattach run against a scripted in-process RFB server, so the
+  session-slot semantics are covered deterministically without containers),
   and container-backed happy paths — `rdp_tiles_e2e.rs` against a dummy xrdp,
-  `vnc_tiles_e2e.rs` against a dummy TigerVNC (full-desktop paint and dynamic
-  resize through a real server). Containers run under podman or docker.
-  **Never a headless browser** — browser automation is flaky by policy.
+  `vnc_tiles_e2e.rs` against a dummy TigerVNC (full-desktop paint, dynamic
+  resize, and detach/reattach repaint through a real server). Containers run
+  under podman or docker. **Never a headless browser** — browser automation
+  is flaky by policy.
 
 ## Phase status
 
 Done: phase 1 (MVP), phase 2 (transport + VNC engine + TOML config), phase 3
-(full-screen canvas), phase 4 (VNC dynamic resize). Planned: connection-flow
-UX (5), session management (6), soft keyboard + floating UI (7), multi-target
-picker (8), the remotex-v2 rename (9) — the list lives in
+(full-screen canvas), phase 4 (VNC dynamic resize), phase 5 (connection-flow
+UX), phase 6 (session management). Planned: soft keyboard + floating UI (7),
+multi-target picker (8), the remotex-v2 rename (9) — the list lives in
 [`roadmap.md`](roadmap.md).
