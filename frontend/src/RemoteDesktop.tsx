@@ -47,7 +47,8 @@ export default function RemoteDesktop({
       {/* Minimal disconnect CTA in the dead space below the fixed-size canvas
           (mobile portrait always has some, since the desktop keeps its
           configured size). Disconnecting logs this browser out — same as the
-          Ctrl+Alt+Shift+L chord. */}
+          Ctrl+Alt+Shift+L chord. CSS shows it on touch devices only; desktop
+          uses the chord. */}
       <div className="disconnect-bar">
         <button type="button" className="disconnect-button" onClick={onLogout}>
           Disconnect

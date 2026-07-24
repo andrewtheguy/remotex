@@ -201,10 +201,18 @@ body {
 
 /* Phase 7: the minimal disconnect CTA under the canvas. The desktop keeps its
    fixed configured size, so mobile portrait always has dead space below it —
-   the button lives there and scrolls with the surface. */
+   the button lives there and scrolls with the surface. Touch-only: a desktop
+   browser has the Ctrl+Alt+Shift+L chord and no dead space to spare. */
 .disconnect-bar {
+  display: none;
   padding: 12px;
   line-height: normal;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .disconnect-bar {
+    display: block;
+  }
 }
 
 .disconnect-button {

@@ -138,8 +138,9 @@ the login screen otherwise — with the app version at the bottom, injected
 from Cargo.toml via a Vite define — and returns to it when a claim answers
 401. Until the phase-10 chrome exists, logout is the reserved
 **Ctrl+Alt+Shift+L** chord (swallowed before key pass-through, held input
-released first) or the minimal **Disconnect** button in the dead space below
-the fixed-size canvas; both end the browser's login, not the engine.
+released first) or, on touch devices only, the minimal **Disconnect** button
+in the dead space below the fixed-size canvas; both end the browser's login,
+not the engine.
 
 ## The wire protocol (browser ↔ backend)
 
