@@ -287,6 +287,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
                 Vec::new()
             }
         },
+        // RDP can't resize mid-session without Deactivation-Reactivation,
+        // which is not implemented; the frontend keeps its scrollbars.
+        ClientMsg::Viewport { .. } => Vec::new(),
     }
 }
 

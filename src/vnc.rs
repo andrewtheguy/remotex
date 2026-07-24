@@ -6,6 +6,13 @@
 //! the backend↔VNC hop is LAN, so clever wire encodings buy nothing there;
 //! the browser link is optimized by the shared tile transport instead.
 //!
+//! On top of the baseline, **dynamic resize** (phase 4) is available per
+//! target opt-in (`resize = true`): the DesktopSize/ExtendedDesktopSize
+//! pseudo-encodings are advertised, and browser viewport reports
+//! ([`ClientMsg::Viewport`]) become `SetDesktopSize` requests once the server
+//! declares support, so TigerVNC-family servers render at the browser's size.
+//! Servers (or targets) without it keep the connect-time size.
+//!
 //! Mirrors [`crate::rdp`]'s shape behind the [`crate::session`] seam: connect,
 //! report the desktop size as [`ServerMsg::Resize`], then pump framebuffer
 //! updates out as tiles and browser [`ClientMsg`] input back in.
@@ -28,6 +35,11 @@ use crate::protocol::{ClientMsg, MouseButton, STRIP_ROWS, ServerMsg, Tile};
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC_AUTH: u8 = 2;
 const ENCODING_RAW: i32 = 0;
+/// DesktopSize pseudo-encoding: the server announces a new framebuffer size.
+const ENCODING_DESKTOP_SIZE: i32 = -223;
+/// ExtendedDesktopSize pseudo-encoding: size announcements with a screen
+/// layout, and the server's declaration that it accepts SetDesktopSize.
+const ENCODING_EXTENDED_DESKTOP_SIZE: i32 = -308;
 /// Bytes per pixel of the format we force with SetPixelFormat.
 const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.
@@ -35,6 +47,32 @@ const MAX_STRING: u32 = 1024;
 
 type Reader = BufReader<OwnedReadHalf>;
 type SharedWriter = Arc<Mutex<OwnedWriteHalf>>;
+
+/// One screen in the server's ExtendedDesktopSize layout. Only the id and
+/// flags matter here: SetDesktopSize echoes them back with new dimensions.
+#[derive(Debug, Clone, Copy)]
+struct Screen {
+    id: u32,
+    flags: u32,
+}
+
+/// Desktop geometry, shared between the read loop (which learns about
+/// resizes and server support) and the input side (which requests them).
+/// The lock is never held across an await.
+#[derive(Debug)]
+struct DesktopState {
+    /// Current framebuffer size.
+    size: (u16, u16),
+    /// First screen of the server's layout. `Some` only once the server has
+    /// sent an ExtendedDesktopSize rect — its declaration that SetDesktopSize
+    /// is supported; nothing is requested before that.
+    screen: Option<Screen>,
+    /// A browser viewport report that arrived before support was declared,
+    /// replayed on the first ExtendedDesktopSize rect.
+    pending: Option<(u16, u16)>,
+}
+
+type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
 
 /// Connect to the VNC host, then drive the session until it ends.
 ///
@@ -70,7 +108,15 @@ pub async fn run(
         return; // browser already gone
     }
 
-    if let Err(e) = active_loop(reader, writer, (width, height), input_rx, frame_tx.clone()).await
+    if let Err(e) = active_loop(
+        reader,
+        writer,
+        (width, height),
+        config.resize,
+        input_rx,
+        frame_tx.clone(),
+    )
+    .await
     {
         warn!("vnc: session error: {e:#}");
         let _ = frame_tx
@@ -83,7 +129,8 @@ pub async fn run(
 }
 
 /// TCP connect → RFB version/security handshake → ClientInit/ServerInit →
-/// force our pixel format and the raw-only encoding set.
+/// force our pixel format and the encoding set (raw + the resize
+/// pseudo-encodings).
 async fn connect(
     config: &TargetConfig,
 ) -> anyhow::Result<(Reader, OwnedWriteHalf, u16, u16)> {
@@ -164,7 +211,15 @@ async fn connect(
     anyhow::ensure!(width > 0 && height > 0, "server reported a {width}x{height} desktop");
 
     writer.write_all(&set_pixel_format()).await?;
-    writer.write_all(&set_encodings(&[ENCODING_RAW])).await?;
+    // The resize pseudo-encodings are advertised only when the target opts in
+    // (`resize = true`); without them the server never announces support and
+    // the desktop keeps its connect-time size.
+    let encodings: &[i32] = if config.resize {
+        &[ENCODING_RAW, ENCODING_EXTENDED_DESKTOP_SIZE, ENCODING_DESKTOP_SIZE]
+    } else {
+        &[ENCODING_RAW]
+    };
+    writer.write_all(&set_encodings(encodings)).await?;
 
     Ok((reader, writer, width, height))
 }
@@ -174,17 +229,28 @@ async fn active_loop(
     reader: Reader,
     writer: OwnedWriteHalf,
     size: (u16, u16),
+    resize: bool,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
     // The writer is shared: the read loop sends the next update request after
-    // each update, the input side sends pointer/key events.
+    // each update, the input side sends pointer/key/resize messages.
     let writer: SharedWriter = Arc::new(Mutex::new(writer));
+    let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
+        size,
+        screen: None,
+        pending: None,
+    }));
 
     // Kick off the update cycle with one full (non-incremental) request.
     write_to(&writer, &update_request(false, size)).await?;
 
-    let mut read_task = tokio::spawn(read_loop(reader, Arc::clone(&writer), size, frame_tx));
+    let mut read_task = tokio::spawn(read_loop(
+        reader,
+        Arc::clone(&writer),
+        Arc::clone(&desktop),
+        frame_tx,
+    ));
 
     // RFB pointer events always carry position + full button mask, so both are
     // tracked across browser events (which report only the changed part).
@@ -201,12 +267,23 @@ async fn active_loop(
                     info!("vnc: input channel closed by browser");
                     break Ok(());
                 };
-                let bytes = translate_input(input, &mut button_mask, &mut last_pos);
+                // Viewport reports drive dynamic resize, not an input event;
+                // dropped entirely unless the target opted in.
+                let sent = if let ClientMsg::Viewport { w, h } = input {
+                    if resize {
+                        request_resize(&writer, &desktop, (w, h)).await
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    match translate_input(input, &mut button_mask, &mut last_pos) {
+                        bytes if bytes.is_empty() => Ok(()),
+                        bytes => write_to(&writer, &bytes).await,
+                    }
+                };
                 // Break instead of `?`: the error must pass the trailing
                 // read_task.abort() on its way out.
-                if !bytes.is_empty()
-                    && let Err(e) = write_to(&writer, &bytes).await
-                {
+                if let Err(e) = sent {
                     break Err(e);
                 }
             }
@@ -216,11 +293,36 @@ async fn active_loop(
     result
 }
 
+/// Handle a browser viewport report (phase 4 dynamic resize): send
+/// SetDesktopSize once the server has declared support via an
+/// ExtendedDesktopSize rect; until then, stash the report for replay.
+async fn request_resize(
+    writer: &SharedWriter,
+    desktop: &SharedDesktop,
+    want: (u16, u16),
+) -> anyhow::Result<()> {
+    let msg = {
+        let mut d = desktop.lock().unwrap();
+        if want.0 == 0 || want.1 == 0 || want == d.size {
+            return Ok(());
+        }
+        match d.screen {
+            Some(screen) => set_desktop_size(want, screen),
+            None => {
+                d.pending = Some(want);
+                return Ok(());
+            }
+        }
+    };
+    debug!("vnc: requesting desktop resize to {}x{}", want.0, want.1);
+    write_to(writer, &msg).await
+}
+
 /// Read server messages forever, forwarding framebuffer updates as tiles.
 async fn read_loop(
     mut reader: Reader,
     writer: SharedWriter,
-    size: (u16, u16),
+    desktop: SharedDesktop,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
     loop {
@@ -237,11 +339,14 @@ async fn read_loop(
             0 => {
                 reader.read_u8().await?; // padding
                 let rects = reader.read_u16().await?;
+                let mut resized = false;
                 for _ in 0..rects {
-                    read_rect(&mut reader, size, &frame_tx).await?;
+                    resized |= read_rect(&mut reader, &writer, &desktop, &frame_tx).await?;
                 }
-                // Complete the cycle: ask for the next incremental update.
-                write_to(&writer, &update_request(true, size)).await?;
+                // Complete the cycle. A resize invalidates the old contents,
+                // so repaint fully; otherwise ask for the next increment.
+                let size = desktop.lock().unwrap().size;
+                write_to(&writer, &update_request(!resized, size)).await?;
             }
             // SetColourMapEntries — can't happen for the true-colour format we
             // set, but consume it correctly rather than desyncing the stream.
@@ -265,22 +370,32 @@ async fn read_loop(
     }
 }
 
-/// Read one FramebufferUpdate rectangle (raw encoding only) and forward it as
-/// PNG tiles, split into [`STRIP_ROWS`] strips like the RDP engine.
+/// Read one FramebufferUpdate rectangle — raw pixels forwarded as PNG tiles
+/// (split into [`STRIP_ROWS`] strips like the RDP engine), or one of the
+/// resize pseudo-encodings. Returns whether the desktop was resized.
 async fn read_rect(
     reader: &mut Reader,
-    size: (u16, u16),
+    writer: &SharedWriter,
+    desktop: &SharedDesktop,
     frame_tx: &mpsc::Sender<ServerMsg>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let x = reader.read_u16().await?;
     let y = reader.read_u16().await?;
     let w = reader.read_u16().await?;
     let h = reader.read_u16().await?;
     let encoding = reader.read_i32().await?;
-    anyhow::ensure!(
-        encoding == ENCODING_RAW,
-        "server sent encoding {encoding}, but only raw ({ENCODING_RAW}) was advertised"
-    );
+    match encoding {
+        ENCODING_RAW => {}
+        // DesktopSize: the rect itself is the announcement; no payload.
+        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, (w, h), frame_tx).await,
+        ENCODING_EXTENDED_DESKTOP_SIZE => {
+            return read_extended_desktop_size(reader, writer, desktop, (x, y, w, h), frame_tx)
+                .await;
+        }
+        other => anyhow::bail!("server sent encoding {other}, which was not advertised"),
+    }
+
+    let size = desktop.lock().unwrap().size;
     // Bounds-check before allocating: a rect outside the announced desktop is
     // a protocol violation (and would let a bad length drive the allocation).
     anyhow::ensure!(
@@ -291,7 +406,7 @@ async fn read_rect(
         size.1
     );
     if w == 0 || h == 0 {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut pixels = vec![0u8; usize::from(w) * usize::from(h) * BPP];
@@ -316,7 +431,92 @@ async fn read_rect(
             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
         done += strip_h;
     }
-    Ok(())
+    Ok(false)
+}
+
+/// Handle an ExtendedDesktopSize rect. The rect header is repurposed by the
+/// extension: x = reason (0 server, 1 our SetDesktopSize, 2 another client),
+/// y = status when the reason is 1 (0 = ok), w/h = the framebuffer size; the
+/// payload is the screen layout. Receiving one at all is the server's
+/// declaration that SetDesktopSize is supported.
+async fn read_extended_desktop_size(
+    reader: &mut Reader,
+    writer: &SharedWriter,
+    desktop: &SharedDesktop,
+    (reason, status, w, h): (u16, u16, u16, u16),
+    frame_tx: &mpsc::Sender<ServerMsg>,
+) -> anyhow::Result<bool> {
+    let screens = reader.read_u8().await?;
+    let mut padding = [0u8; 3];
+    reader.read_exact(&mut padding).await?;
+    let mut first = None;
+    for i in 0..screens {
+        let id = reader.read_u32().await?;
+        discard(reader, 8).await?; // x, y, width, height — layout is unused
+        let flags = reader.read_u32().await?;
+        if i == 0 {
+            first = Some(Screen { id, flags });
+        }
+    }
+
+    let pending = {
+        let mut d = desktop.lock().unwrap();
+        if first.is_some() {
+            d.screen = first;
+        }
+        d.pending.take()
+    };
+
+    let resized = if reason == 1 && status != 0 {
+        // Our SetDesktopSize was rejected; the size on the rect is unchanged.
+        warn!("vnc: server rejected SetDesktopSize (status {status})");
+        false
+    } else {
+        apply_resize(desktop, (w, h), frame_tx).await?
+    };
+
+    // Replay a viewport report that arrived before support was declared.
+    if let Some(want) = pending {
+        let msg = {
+            let d = desktop.lock().unwrap();
+            (want != d.size)
+                .then(|| d.screen.map(|screen| set_desktop_size(want, screen)))
+                .flatten()
+        };
+        if let Some(msg) = msg {
+            debug!("vnc: requesting desktop resize to {}x{} (replayed)", want.0, want.1);
+            write_to(writer, &msg).await?;
+        }
+    }
+    Ok(resized)
+}
+
+/// Apply a server-announced framebuffer size: update the shared geometry and
+/// forward it to the browser. Returns whether the size actually changed.
+async fn apply_resize(
+    desktop: &SharedDesktop,
+    new: (u16, u16),
+    frame_tx: &mpsc::Sender<ServerMsg>,
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        new.0 > 0 && new.1 > 0,
+        "server resized the desktop to {}x{}",
+        new.0,
+        new.1
+    );
+    {
+        let mut d = desktop.lock().unwrap();
+        if d.size == new {
+            return Ok(false);
+        }
+        d.size = new;
+    }
+    info!("vnc: desktop resized to {}x{}", new.0, new.1);
+    frame_tx
+        .send(ServerMsg::Resize { w: new.0, h: new.1 })
+        .await
+        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+    Ok(true)
 }
 
 /// Translate one browser input message into RFB client messages, updating the
@@ -365,6 +565,8 @@ fn translate_input(
                 Vec::new()
             }
         },
+        // Intercepted by the input loop (request_resize) before translation.
+        ClientMsg::Viewport { .. } => Vec::new(),
     }
 }
 
@@ -409,6 +611,24 @@ fn update_request(incremental: bool, size: (u16, u16)) -> [u8; 10] {
     // msg[2..6]: x, y = 0
     msg[6..8].copy_from_slice(&size.0.to_be_bytes());
     msg[8..10].copy_from_slice(&size.1.to_be_bytes());
+    msg
+}
+
+/// SetDesktopSize: ask the server to re-render at the given framebuffer size,
+/// laid out as a single screen echoing the server's screen id and flags.
+fn set_desktop_size(size: (u16, u16), screen: Screen) -> [u8; 24] {
+    let mut msg = [0u8; 24];
+    msg[0] = 251; // message type
+    // msg[1]: padding
+    msg[2..4].copy_from_slice(&size.0.to_be_bytes());
+    msg[4..6].copy_from_slice(&size.1.to_be_bytes());
+    msg[6] = 1; // number of screens
+    // msg[7]: padding
+    msg[8..12].copy_from_slice(&screen.id.to_be_bytes());
+    // msg[12..16]: screen x, y = 0
+    msg[16..18].copy_from_slice(&size.0.to_be_bytes());
+    msg[18..20].copy_from_slice(&size.1.to_be_bytes());
+    msg[20..24].copy_from_slice(&screen.flags.to_be_bytes());
     msg
 }
 
@@ -577,6 +797,28 @@ mod tests {
     #[test]
     fn raw_only_encoding_set() {
         assert_eq!(set_encodings(&[ENCODING_RAW]), vec![2, 0, 0, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn resize_encoding_set_appends_the_pseudo_encodings() {
+        let msg = set_encodings(&[ENCODING_RAW, ENCODING_EXTENDED_DESKTOP_SIZE, ENCODING_DESKTOP_SIZE]);
+        assert_eq!(&msg[..4], &[2, 0, 0, 3]);
+        assert_eq!(&msg[4..8], &0i32.to_be_bytes());
+        assert_eq!(&msg[8..12], &(-308i32).to_be_bytes());
+        assert_eq!(&msg[12..16], &(-223i32).to_be_bytes());
+    }
+
+    #[test]
+    fn set_desktop_size_encodes_a_single_screen() {
+        let msg = set_desktop_size((1920, 1200), Screen { id: 0x0A0B0C0D, flags: 1 });
+        assert_eq!(msg[0], 251); // message type
+        assert_eq!(msg[1], 0); // padding
+        assert_eq!(&msg[2..6], &[0x07, 0x80, 0x04, 0xB0]); // 1920, 1200
+        assert_eq!((msg[6], msg[7]), (1, 0)); // one screen + padding
+        assert_eq!(&msg[8..12], &[0x0A, 0x0B, 0x0C, 0x0D]); // screen id
+        assert_eq!(&msg[12..16], &[0; 4]); // screen x, y = 0
+        assert_eq!(&msg[16..20], &[0x07, 0x80, 0x04, 0xB0]); // screen w, h
+        assert_eq!(&msg[20..24], &[0, 0, 0, 1]); // flags echoed
     }
 
     #[test]

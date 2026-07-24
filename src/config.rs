@@ -104,6 +104,13 @@ pub struct TargetConfig {
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
+    /// Dynamic resize (phase 4): drive the remote desktop size from the
+    /// browser viewport where the protocol supports it (VNC `SetDesktopSize`,
+    /// TigerVNC-family servers). Off by default; without it (or on servers
+    /// that can't resize) the desktop keeps its connect-time size and the
+    /// browser shows scrollbars. Ignored for RDP targets.
+    #[serde(default)]
+    pub resize: bool,
 }
 
 fn default_width() -> u16 {
@@ -300,6 +307,7 @@ mod tests {
         assert_eq!((t.width, t.height), (1280, 800));
         assert_eq!(t.security, Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
+        assert!(!t.resize, "dynamic resize is opt-in");
     }
 
     #[test]
@@ -434,6 +442,7 @@ mod tests {
             protocol = "vnc"
             host = "10.0.0.4"
             password = "hunter2"
+            resize = true
             "#,
         )
         .unwrap()
@@ -441,6 +450,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.target.protocol, Protocol::Vnc);
         assert_eq!(config.target.port, 5900);
+        assert!(config.target.resize);
 
         // An explicit port wins over the protocol default.
         let config = ConfigFile::parse(

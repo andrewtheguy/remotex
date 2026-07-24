@@ -63,6 +63,7 @@ async fn spawn_app() -> SocketAddr {
             width: 1280,
             height: 800,
             security: Security::Auto,
+            resize: false,
         },
     };
 

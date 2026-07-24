@@ -77,6 +77,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             width: 1280,
             height: 800,
             security: Security::Auto,
+            resize: false,
         },
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
