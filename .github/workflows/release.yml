@@ -19,7 +19,8 @@ jobs:
         id: version
         run: |
           # Real TOML parse + semver check, not grep/sed (see also packaging/build-tarball.sh).
-          VERSION=$(uv run python -c '
+          # Plain python3 (3.11+ for tomllib): uv is for local dev, not the CI runners.
+          VERSION=$(python3 -c '
           import re, sys, tomllib
           with open("Cargo.toml", "rb") as f:
               version = tomllib.load(f)["package"]["version"]
