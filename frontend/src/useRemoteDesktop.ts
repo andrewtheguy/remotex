@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type ClientMsg,
   type ControlMsg,
@@ -8,12 +8,36 @@ import {
   type TileMsg,
 } from "./protocol.ts";
 
-export type ConnectionStatus = "connecting" | "connected" | "closed" | "error";
+// The connection-flow state machine (phase 5/6):
+//
+//   connecting ──► connected ──(drop)──► reconnecting ──► connected …
+//        │              │                     │
+//     (409) busy     (4001) takenOver      (409) busy
+//        │              │
+//     takeOver()     takeOver()            error ◄─(fatal server error)
+//
+// Reconnects are automatic with capped backoff; busy/takenOver/error wait for
+// the user (takeOver/retry).
+export type ConnectionStatus =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "busy" // another browser holds the session slot (claim answered 409)
+  | "takenOver" // this socket was evicted by a takeover (close code 4001)
+  | "error"; // the server reported a fatal session error
 
 export interface RemoteSize {
   w: number;
   h: number;
 }
+
+// Per-tab session identity: lets this tab reclaim its own slot after a drop
+// without the takeover prompt (sessionStorage is per-tab, so two tabs of the
+// same browser still contend like two browsers — as intended).
+const SESSION_KEY = "rdpweb.sessionId";
+// Close code sent when another browser force-claims the slot.
+const CLOSE_EVICTED = 4001;
+const MAX_RETRY_DELAY_MS = 15_000;
 
 // Phase 3 (full-screen canvas): display the framebuffer at 1:1 device pixels —
 // CSS size = remote pixels / devicePixelRatio. No scaling, no letterboxing;
@@ -52,20 +76,27 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
   return { type: "viewport", w: dim(el.clientWidth), h: dim(el.clientHeight) };
 }
 
-// Opens the /ws WebSocket, renders incoming screen tiles onto `canvasRef`, and
+// Claims the single session slot (POST /api/session), opens the /ws WebSocket
+// with the claim token, renders incoming screen tiles onto `canvasRef`, and
 // forwards mouse + keyboard input captured over `overlayRef` as ClientMsg.
+// Reconnects automatically after drops; busy/takenOver/error surface to the
+// caller with `takeOver`/`retry` to resolve them.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   // Kept in a ref (not just state) so input handlers read the latest size
   // without re-subscribing.
   const sizeRef = useRef<RemoteSize | null>(null);
+  // Lets the takeOver/retry callbacks reach into the connection driver that
+  // lives inside the effect below.
+  const startRef = useRef<((force: boolean) => void) | null>(null);
 
   const sendRef = useRef((msg: ClientMsg) => {
     const ws = wsRef.current;
@@ -74,22 +105,84 @@ export function useRemoteDesktop(
     }
   });
 
-  // Establish the WebSocket connection and render server messages.
+  // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
     ctxRef.current = canvasRef.current?.getContext("2d") ?? null;
 
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
-    setStatus("connecting");
+    let disposed = false;
+    let ws: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    // Set when the server reports a fatal session error; stops the reconnect
+    // loop so the message stays readable until the user retries.
+    let fatal = false;
 
-    // Report the viewport (phase 4 dynamic resize) on connect and whenever it
-    // changes; engines without resize support simply ignore the reports.
-    // Deduped: a resize that settles on the same size sends nothing.
+    const scheduleRetry = () => {
+      if (disposed) {
+        return;
+      }
+      setStatus("reconnecting");
+      const delay = Math.min(1000 * 2 ** attempts, MAX_RETRY_DELAY_MS);
+      attempts += 1;
+      retryTimer = setTimeout(() => void connect(false), delay);
+    };
+
+    // Claim the session slot. Returns the token, "busy" when another browser
+    // holds the slot (409), or null for failures that should retry.
+    const claim = async (force: boolean): Promise<string | "busy" | null> => {
+      let res: Response;
+      try {
+        res = await fetch("/api/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            force,
+            sessionId: sessionStorage.getItem(SESSION_KEY) ?? undefined,
+          }),
+        });
+      } catch {
+        return null;
+      }
+      if (res.status === 409) {
+        return "busy";
+      }
+      if (!res.ok) {
+        return null;
+      }
+      try {
+        const { sessionId } = (await res.json()) as { sessionId: string };
+        return sessionId;
+      } catch {
+        return null;
+      }
+    };
+
+    // Claim the session slot, then open the WebSocket with the token.
+    const connect = async (force: boolean) => {
+      if (disposed) {
+        return;
+      }
+      const claimed = await claim(force);
+      if (disposed) {
+        return;
+      }
+      if (claimed === "busy") {
+        setStatus("busy");
+        return;
+      }
+      if (claimed === null) {
+        scheduleRetry();
+        return;
+      }
+      sessionStorage.setItem(SESSION_KEY, claimed);
+      open(claimed);
+    };
+
+    // Viewport reports (phase 4 dynamic resize), deduped per connection: a
+    // resize that settles on the same size sends nothing.
     let lastViewport: RemoteSize | null = null;
     const sendViewport = () => {
-      if (ws.readyState !== WebSocket.OPEN) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
       const msg = viewportMsg();
@@ -104,19 +197,48 @@ export function useRemoteDesktop(
       ws.send(JSON.stringify(msg));
     };
 
-    ws.onopen = () => {
-      setStatus("connected");
-      sendViewport();
-    };
-    ws.onclose = () => setStatus("closed");
-    ws.onerror = () => setStatus("error");
-    // PNG tiles decode asynchronously (createImageBitmap), so all messages are
-    // chained through one promise queue: draws land in arrival order (later
-    // tiles must overwrite earlier ones) and a resize can't jump the queue.
-    let queue: Promise<void> = Promise.resolve();
-    ws.onmessage = (ev) => {
-      // The catch keeps a garbled frame from stalling the chain.
-      queue = queue.then(() => handleMessage(ev.data)).catch(() => {});
+    const open = (sessionId: string) => {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(
+        `${proto}//${window.location.host}/ws?session=${encodeURIComponent(sessionId)}`,
+      );
+      socket.binaryType = "arraybuffer";
+      ws = socket;
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        if (disposed || ws !== socket) {
+          return;
+        }
+        setStatus("connected");
+        lastViewport = null;
+        sendViewport();
+      };
+      socket.onclose = (ev) => {
+        if (disposed || ws !== socket) {
+          return; // superseded by a newer connection
+        }
+        ws = null;
+        wsRef.current = null;
+        if (ev.code === CLOSE_EVICTED) {
+          setStatus("takenOver");
+          return;
+        }
+        if (fatal) {
+          return; // the error state is already showing; the user retries
+        }
+        // Anything else — network drop, server restart, session ended, stale
+        // token (4000) — goes through the reclaim + reconnect path.
+        scheduleRetry();
+      };
+      // PNG tiles decode asynchronously (createImageBitmap), so all messages
+      // are chained through one promise queue: draws land in arrival order
+      // (later tiles must overwrite earlier ones) and a resize can't jump the
+      // queue. The catch keeps a garbled frame from stalling the chain.
+      let queue: Promise<void> = Promise.resolve();
+      socket.onmessage = (ev) => {
+        queue = queue.then(() => handleMessage(ev.data)).catch(() => {});
+      };
     };
 
     const handleMessage = async (data: unknown) => {
@@ -153,6 +275,10 @@ export function useRemoteDesktop(
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
+      // A desktop arrived, so this session is healthy: reset the reconnect
+      // backoff (an onopen-time reset would let a session that dies right
+      // after connecting retry at full speed forever).
+      attempts = 0;
       const canvas = canvasRef.current;
       const s = { w: msg.w, h: msg.h };
       if (canvas) {
@@ -176,11 +302,31 @@ export function useRemoteDesktop(
           handleResize(msg);
           break;
         case "error":
-          console.error("rdp server error:", msg.message);
+          console.error("remote session error:", msg.message);
+          fatal = true;
+          setErrorMessage(msg.message);
           setStatus("error");
           break;
       }
     };
+
+    // User-driven (re)start: initial connect, takeover, take-back, retry.
+    const start = (force: boolean) => {
+      clearTimeout(retryTimer);
+      fatal = false;
+      attempts = 0;
+      setErrorMessage(null);
+      setStatus("connecting");
+      if (ws) {
+        const old = ws;
+        ws = null; // silence its onclose before closing
+        wsRef.current = null;
+        old.close();
+      }
+      void connect(force);
+    };
+    startRef.current = start;
+    start(false);
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
     // one message, not hundreds. The CSS size is re-derived too: the phase-3
@@ -216,12 +362,21 @@ export function useRemoteDesktop(
     watchDpr();
 
     return () => {
+      disposed = true;
+      startRef.current = null;
+      clearTimeout(retryTimer);
       window.removeEventListener("resize", onViewportChange);
       clearTimeout(resizeTimer);
       dprQuery?.removeEventListener("change", onDprChange);
-      ws.close();
+      ws?.close();
     };
   }, [canvasRef]);
+
+  // Force-claim the slot: the takeover confirmation (busy) and the take-back
+  // action after being evicted (takenOver).
+  const takeOver = useCallback(() => startRef.current?.(true), []);
+  // Start over without force: retry after a fatal session error.
+  const retry = useCallback(() => startRef.current?.(false), []);
 
   // Capture input over the overlay element and forward it to the server,
   // scaling pointer coordinates from the displayed size to the remote size.
@@ -324,5 +479,5 @@ export function useRemoteDesktop(
     };
   }, [overlayRef]);
 
-  return { status, size };
+  return { status, size, errorMessage, takeOver, retry };
 }

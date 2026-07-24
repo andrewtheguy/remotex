@@ -52,7 +52,9 @@ body {
   cursor: none;
 }
 
-/* Centered connection-state readout, shown until the desktop is streaming. */
+/* Centered connection-state readout, shown until the desktop is streaming.
+   The translucent backdrop dims stale canvas content while reconnecting or
+   after an eviction, so the readout stays legible over it. */
 .status-overlay {
   position: fixed;
   inset: 0;
@@ -64,22 +66,48 @@ body {
   text-align: center;
   pointer-events: none;
   font-size: 0.95rem;
+  background: rgba(13, 17, 23, 0.72);
 }
 
 .status-hint {
   color: #8b949e;
   font-size: 0.85rem;
+  max-width: 32rem;
+  overflow-wrap: anywhere;
 }
 
 .status-connected {
   color: #3fb950;
 }
 
-.status-connecting {
+.status-connecting,
+.status-reconnecting {
   color: #d29922;
 }
 
-.status-closed,
+.status-busy,
+.status-takenOver {
+  color: #d29922;
+}
+
 .status-error {
   color: #f85149;
+}
+
+/* The overlay itself must not eat input aimed at the desktop, but its action
+   buttons (take over / take back / retry) obviously must be clickable. */
+.status-action {
+  pointer-events: auto;
+  margin-top: 0.5rem;
+  padding: 0.45rem 1.2rem;
+  font: inherit;
+  color: #e6edf3;
+  background: #21262d;
+  border: 1px solid #8b949e;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.status-action:hover {
+  background: #30363d;
 }
