@@ -475,6 +475,20 @@ export function useRemoteDesktop(
   // Start over without force: retry after a fatal session error.
   const retry = useCallback(() => startRef.current?.(false), []);
 
+  // Inject a key chord from the floating toolbar — keys the browser swallows
+  // (F5, Ctrl+W, Alt+F4…) or a bare modifier tap. Each DOM `code` is pressed in
+  // order then released in reverse; transient, so nothing joins the held-key
+  // set the input effect tracks. A no-op while the socket is down.
+  const sendKeyCombo = useCallback((codes: string[]) => {
+    const send = sendRef.current;
+    for (const code of codes) {
+      send({ type: "key", code, pressed: true });
+    }
+    for (let i = codes.length - 1; i >= 0; i -= 1) {
+      send({ type: "key", code: codes[i], pressed: false });
+    }
+  }, []);
+
   // Capture input over the overlay element and forward it to the server,
   // scaling pointer coordinates from the displayed size to the remote size.
   useEffect(() => {
@@ -616,5 +630,5 @@ export function useRemoteDesktop(
     };
   }, [overlayRef, canvasRef, onLogout]);
 
-  return { status, size, errorMessage, takeOver, retry };
+  return { status, size, errorMessage, takeOver, retry, sendKeyCombo };
 }

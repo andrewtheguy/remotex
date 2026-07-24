@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import FloatingMenu from "./FloatingMenu.tsx";
 import {
   CAN_PINCH_ZOOM,
   type ConnectionStatus,
@@ -23,12 +24,8 @@ export default function RemoteDesktop({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
-  const { status, size, errorMessage, takeOver, retry } = useRemoteDesktop(
-    canvasRef,
-    overlayRef,
-    onLogout,
-    onUnauthorized,
-  );
+  const { status, size, errorMessage, takeOver, retry, sendKeyCombo } =
+    useRemoteDesktop(canvasRef, overlayRef, onLogout, onUnauthorized);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -51,6 +48,10 @@ export default function RemoteDesktop({
           tabIndex={0}
         />
       </div>
+      {/* Phase 9: the draggable floating menu — special keys / modifier taps /
+          gesture help / Disconnect. The interim Ctrl+Alt+Shift+L chord and the
+          below-canvas bar are still present here; the next commit retires them. */}
+      <FloatingMenu onLogout={onLogout} sendKeyCombo={sendKeyCombo} />
       {/* Minimal disconnect CTA in the dead space below the fixed-size canvas
           (mobile portrait always has some, since the desktop keeps its
           configured size). Disconnecting logs this browser out — same as the
