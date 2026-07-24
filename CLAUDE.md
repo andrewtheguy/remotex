@@ -1,0 +1,6 @@
+- strict no backward compatibility since it is a personal project like [remotex](https://github.com/andrewtheguy/remotex) project
+- no cargo fmt
+- run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
+- run biome checks on frontend/ after JS/TS code changes
+- use tmp/ for temporary files and test config toml
+- error handling: `anyhow` for application errors (main, indexer, search), `thiserror` for typed API errors (`AppError` in `src/error.rs`); 
