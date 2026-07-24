@@ -1,4 +1,4 @@
-- strict no backward compatibility since it is a personal project like [remotex](https://github.com/andrewtheguy/remotex) project
+- strict no backward compatibility since it is a personal project
 - no cargo fmt
 - run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
 - run biome checks on frontend/ after JS/TS code changes
