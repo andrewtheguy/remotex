@@ -35,6 +35,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::config::TargetConfig;
+use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{ClientMsg, MouseButton, STRIP_ROWS, ServerMsg, Tile};
 
@@ -477,10 +478,6 @@ async fn send_tiles(
     Ok(())
 }
 
-fn clamp_u16(v: i32) -> u16 {
-    v.clamp(0, i32::from(u16::MAX)) as u16
-}
-
 /// Render an error together with its full `source()` chain, so wrappers like
 /// IronRDP's `ConnectorError` reveal the underlying cause (e.g. the CredSSP /
 /// SSPI reason) instead of just a top-level label.
@@ -493,16 +490,6 @@ fn describe(err: &(dyn std::error::Error + 'static)) -> String {
         source = e.source();
     }
     out
-}
-
-/// Format a `host:port` destination for `TcpStream::connect`, bracketing bare
-/// IPv6 literals (e.g. `fdb8::20` -> `[fdb8::20]:3389`).
-fn host_port(host: &str, port: u16) -> String {
-    if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
 }
 
 /// Build the IronRDP connector config from our runtime config.
@@ -680,18 +667,6 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
-    }
-
-    #[test]
-    fn host_port_brackets_ipv6_literals() {
-        assert_eq!(host_port("192.0.2.10", 3389), "192.0.2.10:3389");
-        assert_eq!(host_port("desktop-vnvgdaf", 3389), "desktop-vnvgdaf:3389");
-        assert_eq!(
-            host_port("fdb8:d92a:f690:3d7f:97a4:120a:2:20", 3389),
-            "[fdb8:d92a:f690:3d7f:97a4:120a:2:20]:3389"
-        );
-        // Already-bracketed input is left as-is.
-        assert_eq!(host_port("[fdb8::20]", 3389), "[fdb8::20]:3389");
     }
 
     #[test]

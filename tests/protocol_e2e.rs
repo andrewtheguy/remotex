@@ -182,6 +182,7 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         height: 800,
         security: Security::Auto,
         resize: false,
+        psk: String::new(),
     }
 }
 

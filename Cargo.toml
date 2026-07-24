@@ -67,6 +67,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+# `tokio::time::pause()` for the rxa engine's reconnect-backoff tests: waiting
+# out a real 1-second backoff in a unit test is a second of nothing.
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 strip = true

@@ -73,6 +73,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             height: 800,
             security: Security::Auto, // RDP-only knob, ignored for VNC
             resize: true,             // exercise the dynamic resize path
+            psk: String::new(),
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

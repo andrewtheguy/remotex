@@ -26,6 +26,10 @@ pub enum Commands {
         /// Username for the web login (must not contain ':')
         username: String,
     },
+
+    /// Generate a pre-shared key for an "rxa" target: prints one key to paste
+    /// into both the target's psk and the Mac agent's config.toml
+    GenPsk,
 }
 
 #[cfg(test)]
@@ -68,5 +72,13 @@ mod tests {
 
         // The username is required.
         assert!(Cli::try_parse_from(["remotex", "gen-passwd"]).is_err());
+    }
+
+    #[test]
+    fn gen_psk_takes_no_arguments() {
+        let cli = Cli::try_parse_from(["remotex", "gen-psk"]).unwrap();
+        assert!(matches!(cli.command, Commands::GenPsk));
+        // Simpler than gen-passwd on purpose: no prompt, no username.
+        assert!(Cli::try_parse_from(["remotex", "gen-psk", "mac"]).is_err());
     }
 }

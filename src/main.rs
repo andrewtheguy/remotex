@@ -29,6 +29,9 @@ async fn main() -> anyhow::Result<()> {
             serve(config).await?;
         }
         Commands::GenPasswd { username } => gen_passwd(&username)?,
+        // The same key goes in two places: the target's `psk` here, and the Mac
+        // agent's own config.toml. That symmetry is the whole credential model.
+        Commands::GenPsk => println!("{}", rxa_proto::psk::generate()),
     }
 
     Ok(())

@@ -7,9 +7,13 @@
 //! `run(config, input_rx, frame_tx)` that connects to the target, consumes
 //! browser input as [`ClientMsg`], emits the uniform [`ServerMsg`] stream
 //! (resize, tiles, error), and returns when the session ends. That shared
-//! signature *is* the seam — with two engines and no dynamic dispatch, a
+//! signature *is* the seam — with three engines and no dynamic dispatch, a
 //! `match` beats a trait object (which IronRDP's non-`Send` futures could not
 //! implement cleanly anyway).
+//!
+//! One engine bends the "returns when the session ends" rule on purpose:
+//! [`crate::rxa`] reconnects to its agent silently rather than ending, because
+//! its PSK handshake needs no human. See that module.
 //!
 //! ## The single session slot
 //!
@@ -51,7 +55,7 @@ use uuid::Uuid;
 
 use crate::config::{Protocol, TargetConfig};
 use crate::protocol::{ClientMsg, ServerMsg};
-use crate::{rdp, vnc};
+use crate::{rdp, rxa, vnc};
 
 /// Capacity of the engine→client frame channels. Bounded so a slow browser
 /// link backpressures the engine instead of buffering unboundedly.
@@ -432,6 +436,7 @@ fn spawn_engine(
         match target.protocol {
             Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx)),
             Protocol::Vnc => rt.block_on(vnc::run(target, input_rx, frame_tx)),
+            Protocol::Rxa => rt.block_on(rxa::run(target, input_rx, frame_tx)),
         }
     });
 }
@@ -465,6 +470,7 @@ mod tests {
             height: 1,
             security: Security::Auto,
             resize,
+            psk: String::new(),
         }
     }
 

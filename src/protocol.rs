@@ -5,9 +5,9 @@
 //! docs/architecture.md):
 //!
 //! - **Screen tiles** are binary WebSocket frames: a fixed 10-byte header
-//!   followed by a PNG-compressed payload. This replaced base64 RGBA inside
-//!   JSON text, which inflated the bottleneck backend->browser link by ~4.3x
-//!   (4 bytes/px, +33% base64).
+//!   followed by an encoded image payload (PNG, or JPEG from the macOS agent).
+//!   This replaced base64 RGBA inside JSON text, which inflated the bottleneck
+//!   backend->browser link by ~4.3x (4 bytes/px, +33% base64).
 //! - **Control messages** (`resize`, `error`, `cursor`, …) are rare and small;
 //!   they stay JSON text frames with a `type` tag. `cursor` carries a base64
 //!   PNG — a pointer shape is a couple of hundred bytes and changes a handful
@@ -72,34 +72,41 @@ pub enum ClientMsg {
 }
 
 /// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
-/// The payload is always a PNG stream (every browser decodes PNG natively);
-/// PNG's worst case over raw is a fraction of a percent, so a raw format is
-/// not worth a second decode path.
+/// The payload is an image stream the browser decodes natively — PNG or JPEG,
+/// named by the `format` byte so `createImageBitmap` gets the right MIME type.
+///
+/// The RDP and VNC engines decode a framebuffer and PNG-compress it here
+/// ([`Tile::from_rgb`]); the macOS agent chooses PNG or JPEG per tile on the
+/// Mac and the gateway relays those bytes untouched ([`Tile::encoded`]), which
+/// is why the format travels with the tile instead of being a constant.
 ///
 /// Frame layout (little-endian):
 ///
 /// ```text
 /// offset 0: u8  frame kind, always 0x01 (tile)
-/// offset 1: u8  format, always 1 (PNG) — reserved for a future codec
+/// offset 1: u8  format: 1 = PNG, 2 = JPEG
 /// offset 2: u16 x
 /// offset 4: u16 y
 /// offset 6: u16 w
 /// offset 8: u16 h
-/// offset 10: payload (a PNG stream)
+/// offset 10: payload (a PNG or JPEG stream)
 /// ```
 #[derive(Debug, Clone)]
 pub struct Tile {
+    /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`].
+    pub format: u8,
     pub x: u16,
     pub y: u16,
     pub w: u16,
     pub h: u16,
-    /// PNG-encoded RGB image.
+    /// The encoded image stream, in `format`.
     pub data: Vec<u8>,
 }
 
 impl Tile {
     pub const FRAME_KIND: u8 = 0x01;
     pub const FORMAT_PNG: u8 = 1;
+    pub const FORMAT_JPEG: u8 = 2;
     pub const HEADER_LEN: usize = 10;
 
     /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
@@ -111,14 +118,35 @@ impl Tile {
             rgb.len()
         );
         let data = encode_png(w, h, png::ColorType::Rgb, rgb)?;
-        Ok(Self { x, y, w, h, data })
+        Ok(Self {
+            format: Self::FORMAT_PNG,
+            x,
+            y,
+            w,
+            h,
+            data,
+        })
+    }
+
+    /// Wrap an already-encoded image stream — the pass-through path for the
+    /// macOS agent (see [`crate::rxa`]), which encodes on the Mac so the
+    /// gateway never decodes and re-encodes a pixel.
+    pub fn encoded(format: u8, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> Self {
+        Self {
+            format,
+            x,
+            y,
+            w,
+            h,
+            data,
+        }
     }
 
     /// Serialize into the binary WebSocket frame described above.
     pub fn to_frame(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::HEADER_LEN + self.data.len());
         out.push(Self::FRAME_KIND);
-        out.push(Self::FORMAT_PNG);
+        out.push(self.format);
         out.extend_from_slice(&self.x.to_le_bytes());
         out.extend_from_slice(&self.y.to_le_bytes());
         out.extend_from_slice(&self.w.to_le_bytes());
@@ -379,6 +407,7 @@ mod tests {
     #[test]
     fn tile_frame_layout_is_kind_format_le_coords_payload() {
         let tile = Tile {
+            format: Tile::FORMAT_PNG,
             x: 0x0102,
             y: 0x0304,
             w: 2,
@@ -398,6 +427,37 @@ mod tests {
             WireFrame::Binary(bytes) => assert_eq!(bytes, frame),
             other => panic!("tile should be a binary frame: {other:?}"),
         }
+    }
+
+    // The pass-through path: the macOS agent's already-encoded bytes reach the
+    // browser byte for byte, with the format byte it chose.
+    #[test]
+    fn encoded_tile_passes_the_payload_and_format_through_untouched() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        let tile = Tile::encoded(Tile::FORMAT_JPEG, 0x0102, 0x0304, 320, 64, jpeg.clone());
+        let frame = tile.to_frame();
+        assert_eq!(frame[0], Tile::FRAME_KIND);
+        assert_eq!(frame[1], Tile::FORMAT_JPEG);
+        assert_eq!(&frame[2..4], &[0x02, 0x01]); // x, little-endian
+        assert_eq!(&frame[4..6], &[0x04, 0x03]); // y
+        assert_eq!(&frame[6..8], &[0x40, 0x01]); // w = 320
+        assert_eq!(&frame[8..10], &[64, 0]); // h
+        assert_eq!(&frame[Tile::HEADER_LEN..], jpeg.as_slice());
+
+        // A PNG the agent encoded itself takes the same path, differing only in
+        // the format byte — the gateway looks inside neither.
+        let png = vec![0x89, b'P', b'N', b'G'];
+        let tile = Tile::encoded(Tile::FORMAT_PNG, 0, 0, 1, 1, png.clone());
+        assert_eq!(tile.to_frame()[1], Tile::FORMAT_PNG);
+        assert_eq!(&tile.to_frame()[Tile::HEADER_LEN..], png.as_slice());
+    }
+
+    // from_rgb still stamps PNG, so RDP and VNC are unaffected by the new field.
+    #[test]
+    fn from_rgb_still_marks_its_payload_as_png() {
+        let tile = Tile::from_rgb(0, 0, 2, 2, &[0u8; 12]).unwrap();
+        assert_eq!(tile.format, Tile::FORMAT_PNG);
+        assert_eq!(tile.to_frame()[1], Tile::FORMAT_PNG);
     }
 
     /// A desktop-like strip: horizontal gradient, repeated rows.

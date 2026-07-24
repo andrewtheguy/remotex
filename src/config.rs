@@ -46,12 +46,14 @@ impl Security {
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via IronRDP
-/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs).
+/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs), `rxa` via the
+/// purpose-built macOS agent (src/rxa.rs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Rdp,
     Vnc,
+    Rxa,
 }
 
 impl Protocol {
@@ -60,6 +62,9 @@ impl Protocol {
         match self {
             Protocol::Rdp => 3389,
             Protocol::Vnc => 5900,
+            // Adjacent to the web server's 52380, in the same private range,
+            // colliding with neither 3389 nor 5900.
+            Protocol::Rxa => rxa_proto::DEFAULT_PORT,
         }
     }
 
@@ -68,6 +73,7 @@ impl Protocol {
         match self {
             Protocol::Rdp => "rdp",
             Protocol::Vnc => "vnc",
+            Protocol::Rxa => "rxa",
         }
     }
 }
@@ -82,13 +88,14 @@ pub struct TargetConfig {
     /// Unique profile name; shown in the post-login target picker and selected
     /// there by the browser.
     pub name: String,
-    /// Remote-desktop protocol: `"rdp"` or `"vnc"`. Required — each target
-    /// must say what it speaks.
+    /// Remote-desktop protocol: `"rdp"`, `"vnc"` or `"rxa"`. Required — each
+    /// target must say what it speaks.
     pub protocol: Protocol,
     /// Target host.
     pub host: String,
     /// Target port. Omitted (or 0) means the protocol's standard port
-    /// (3389 for RDP, 5900 for VNC) — normalized in [`ConfigFile::parse`].
+    /// (3389 for RDP, 5900 for VNC, 52381 for rxa) — normalized in
+    /// [`ConfigFile::parse`].
     #[serde(default)]
     pub port: u16,
     /// Username.
@@ -119,6 +126,17 @@ pub struct TargetConfig {
     /// keeps its connect-time size and the browser shows scrollbars.
     #[serde(default)]
     pub resize: bool,
+    /// Pre-shared key for an `rxa` target, matching the `psk` in the Mac
+    /// agent's own config file. This is the entire credential: the Noise
+    /// handshake authenticates both sides from it, so a reconnect never
+    /// involves a person. Required for `rxa`, rejected for anything else —
+    /// see [`ConfigFile::parse`].
+    ///
+    /// `#[serde(default)]` because [`TargetConfig`] is one struct for every
+    /// protocol and `deny_unknown_fields` leaves no room for a per-protocol
+    /// shape — the same arrangement as the RDP-only `security`/`width`/`height`.
+    #[serde(default)]
+    pub psk: String,
 }
 
 fn default_width() -> u16 {
@@ -213,6 +231,37 @@ impl ConfigFile {
                 "duplicate target name {:?}",
                 target.name
             );
+        }
+        // The PSK is validated here rather than at connect time: a mistyped key
+        // should fail on startup with the CRC's "transcription typo" hint, not
+        // as a handshake rejection the first time someone picks the target.
+        for target in &config.targets {
+            if target.protocol == Protocol::Rxa {
+                let psk = target.psk.trim();
+                anyhow::ensure!(
+                    !psk.is_empty(),
+                    "target {:?} is protocol \"rxa\" but has no psk — \
+                     generate one with `remotex gen-psk`",
+                    target.name
+                );
+                rxa_proto::psk::parse(psk)
+                    .map_err(|e| anyhow::anyhow!("target {:?} has an invalid psk: {e}", target.name))?;
+                // v1 of the agent captures the Mac's own resolution and ignores
+                // viewport reports; accepting `resize = true` would light up the
+                // browser's "Resize to window" control for a no-op.
+                anyhow::ensure!(
+                    !target.resize,
+                    "target {:?} sets resize, which the rxa agent does not support",
+                    target.name
+                );
+            } else {
+                anyhow::ensure!(
+                    target.psk.is_empty(),
+                    "target {:?} is protocol {:?} but sets psk, which only \"rxa\" targets use",
+                    target.name,
+                    target.protocol.name()
+                );
+            }
         }
         Ok(config)
     }
@@ -583,5 +632,93 @@ mod tests {
         .resolve()
         .unwrap();
         assert_eq!(config.targets[0].port, 5901);
+    }
+
+    /// An `rxa` target body, with `psk` filled in from a freshly generated key
+    /// unless `psk` is given.
+    fn rxa_toml(extra: &str) -> String {
+        format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "mac"
+            protocol = "rxa"
+            host = "mac.local"
+            {extra}
+            "#,
+            site_passwd_line()
+        )
+    }
+
+    #[test]
+    fn rxa_target_parses_with_its_own_default_port() {
+        let psk = rxa_proto::psk::generate();
+        let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"")))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        let target = &config.targets[0];
+        assert_eq!(target.protocol, Protocol::Rxa);
+        assert_eq!(target.protocol.name(), "rxa");
+        // Adjacent to the web server's 52380, and not 3389 or 5900.
+        assert_eq!(target.port, 52381);
+        assert_eq!(target.psk, psk);
+        assert!(!target.resize, "the rxa agent has no dynamic resize in v1");
+
+        // An explicit port still wins.
+        let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nport = 52999")))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(config.targets[0].port, 52999);
+    }
+
+    // A mistyped PSK must fail on startup with the CRC's hint, not as an opaque
+    // handshake rejection the first time someone picks the target.
+    #[test]
+    fn rxa_psk_is_validated_at_parse_time() {
+        let err = ConfigFile::parse(&rxa_toml("")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no psk") && msg.contains("gen-psk"), "{msg}");
+
+        let err = ConfigFile::parse(&rxa_toml("psk = \"rxanope\"")).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid psk"), "{err:#}");
+
+        // A single-character typo in an otherwise well-formed key.
+        let psk = rxa_proto::psk::generate();
+        let mut chars: Vec<char> = psk.chars().collect();
+        chars[10] = if chars[10] == 'A' { 'B' } else { 'A' };
+        let typo: String = chars.into_iter().collect();
+        let err = ConfigFile::parse(&rxa_toml(&format!("psk = \"{typo}\""))).unwrap_err();
+        assert!(format!("{err:#}").contains("checksum"), "{err:#}");
+    }
+
+    #[test]
+    fn a_psk_on_a_non_rxa_target_is_rejected() {
+        // Silently ignoring it would leave someone believing a VNC target was
+        // authenticated by a key it never uses.
+        let psk = rxa_proto::psk::generate();
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [[targets]]
+            name = "one"
+            protocol = "vnc"
+            host = "h"
+            psk = "{psk}"
+            "#
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("psk") && msg.contains("rxa"), "{msg}");
+    }
+
+    #[test]
+    fn resize_on_an_rxa_target_is_rejected() {
+        let psk = rxa_proto::psk::generate();
+        let err = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("resize"), "{err:#}");
     }
 }
