@@ -3,6 +3,9 @@ name: Release
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -14,22 +17,49 @@ jobs:
 
       - name: Determine and validate version
         id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
-          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          [ -n "$VERSION" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
+          # Real TOML parse + semver check, not grep/sed (see also packaging/build-tarball.sh).
+          VERSION=$(uv run python -c '
+          import re, sys, tomllib
+          with open("Cargo.toml", "rb") as f:
+              version = tomllib.load(f)["package"]["version"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
+              sys.exit(f"invalid version in Cargo.toml: {version!r}")
+          print(version)
+          ')
           TAG="v${VERSION}"
           echo "Release tag: ${TAG}"
-          if gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists. Bump the version in Cargo.toml first." >&2
-            exit 1
-          fi
           IS_PRERELEASE="false"
           [ "$GITHUB_REF_NAME" = "main" ] || IS_PRERELEASE="true"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Abort if tag already exists
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.tag }}" | grep -q .; then
+            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists on remote. Bump the version in Cargo.toml first."
+            exit 1
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Clean up any leftover draft from a previous failed run with the same
+          # version. A draft release doesn't create the git tag on the remote, so
+          # a stale draft is the only thing that can collide here (real published
+          # tags are caught by the step above).
+          if gh release view "${{ steps.version.outputs.tag }}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx true; then
+            echo "Deleting stale draft release ${{ steps.version.outputs.tag }}"
+            gh release delete "${{ steps.version.outputs.tag }}" --yes
+          fi
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --draft \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            ${{ steps.version.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
 
   # The frontend bundle is platform-agnostic — build it once here and reuse it
   # for every target tarball, rather than rebuilding on each matrix runner.
@@ -89,8 +119,6 @@ jobs:
   release:
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -98,11 +126,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: ${{ needs.prepare.outputs.tag }}
-          files: artifacts/*.tar.gz
-          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
-          generate_release_notes: true
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Upload artifacts to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" artifacts/*.tar.gz --clobber
+
+      - name: Publish release (remove draft, creates the tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
