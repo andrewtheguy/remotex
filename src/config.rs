@@ -110,11 +110,13 @@ pub struct TargetConfig {
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
-    /// Dynamic resize: drive the remote desktop size from the
-    /// browser viewport where the protocol supports it (VNC `SetDesktopSize`,
-    /// TigerVNC-family servers). Off by default; without it (or on servers
-    /// that can't resize) the desktop keeps its connect-time size and the
-    /// browser shows scrollbars. Ignored for RDP targets.
+    /// Dynamic resize: drive the remote desktop size from the browser viewport.
+    /// VNC (`SetDesktopSize`, TigerVNC-family servers) resizes automatically as
+    /// the viewport changes. RDP negotiates the Display Control channel and
+    /// resizes only when the user asks (the floating menu's "Resize to window"),
+    /// since RDP's Deactivation-Reactivation is heavier than VNC's resize. Off
+    /// by default; without it (or on servers that can't resize) the desktop
+    /// keeps its connect-time size and the browser shows scrollbars.
     #[serde(default)]
     pub resize: bool,
 }

@@ -8,9 +8,16 @@
 //!
 //! See docs/architecture.md for the design.
 
+use ironrdp::connector::connection_activation::{
+    ConnectionActivationFactory, ConnectionActivationSequence, ConnectionActivationState,
+};
 use ironrdp::connector::{
     ClientConnector, ConnectionResult, Config, Credentials, DesktopSize, ServerName,
 };
+use ironrdp::core::WriteBuf;
+use ironrdp::displaycontrol::client::DisplayControlClient;
+use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
+use ironrdp::dvc::DrdynvcClient;
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::input::MousePdu;
@@ -19,9 +26,9 @@ use ironrdp::pdu::input::mouse::PointerFlags;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp::session::image::DecodedImage;
-use ironrdp::session::{ActiveStageBuilder, ActiveStageOutput};
+use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
-use ironrdp_tokio::{FramedWrite as _, TokioFramed, split_tokio_framed};
+use ironrdp_tokio::{FramedWrite as _, TokioFramed, single_sequence_step};
 use log::{debug, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -72,7 +79,9 @@ pub async fn run(
         return; // browser already gone
     }
 
-    if let Err(e) = active_loop(connection_result, framed, input_rx, frame_tx.clone()).await {
+    if let Err(e) =
+        active_loop(connection_result, framed, config.resize, input_rx, frame_tx.clone()).await
+    {
         warn!("rdp: session error: {e:#}");
         let _ = frame_tx
             .send(ServerMsg::Error {
@@ -98,6 +107,16 @@ async fn connect(config: &TargetConfig) -> anyhow::Result<(ConnectionResult, Upg
 
     let mut framed = TokioFramed::new(stream);
     let mut connector = ClientConnector::new(build_connector_config(config), client_addr);
+    if config.resize {
+        // Negotiate the Display Control Virtual Channel so the session can drive
+        // the remote resolution from the browser viewport (client-initiated
+        // resize). The capabilities callback is a no-op — `encode_resize` reads
+        // the channel state directly once the server answers.
+        connector = connector.with_static_channel(
+            DrdynvcClient::new()
+                .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new()))),
+        );
+    }
 
     let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
         .await
@@ -134,15 +153,23 @@ async fn connect(config: &TargetConfig) -> anyhow::Result<(ConnectionResult, Upg
 }
 
 /// Drive the active RDP session: server frames in, input out, tiles back.
+///
+/// `resize` mirrors the target's config flag: when set, the Display Control
+/// channel was negotiated at connect and browser [`ClientMsg::Viewport`] reports
+/// drive a client-initiated resolution change (see [`resize_desktop`]).
 async fn active_loop(
     connection_result: ConnectionResult,
-    framed: UpgradedFramed,
+    mut framed: UpgradedFramed,
+    resize: bool,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
-    let (mut reader, mut writer) = split_tokio_framed(framed);
+    // Retained so a DeactivateAll (the server-side half of a resize) can drive a
+    // fresh Deactivation-Reactivation Sequence. The builder below only consumes
+    // the channel/share fields, so pull this out first.
+    let activation_factory = connection_result.activation_factory;
 
-    let desktop = connection_result.desktop_size;
+    let mut desktop = connection_result.desktop_size;
     let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
 
     let mut active_stage = ActiveStageBuilder {
@@ -163,7 +190,7 @@ async fn active_loop(
 
     loop {
         let outputs = tokio::select! {
-            frame = reader.read_pdu() => {
+            frame = framed.read_pdu() => {
                 let (action, payload) = frame.map_err(|e| anyhow::anyhow!("read frame: {e}"))?;
                 active_stage
                     .process(&mut image, action, &payload)
@@ -192,6 +219,16 @@ async fn active_loop(
                     .await?;
                     continue;
                 }
+                // A viewport report is a client-initiated resize. Unlike VNC's
+                // automatic resize, the browser only sends this when the user
+                // asks for it (the menu's "Resize to window") — reactivation is
+                // heavier than VNC's SetDesktopSize. Ignored unless negotiated.
+                if let ClientMsg::Viewport { w, h } = input {
+                    if resize {
+                        resize_desktop(&mut active_stage, &mut framed, w, h).await?;
+                    }
+                    continue;
+                }
                 let events = translate_input(input, &mut last_pos);
                 if events.is_empty() {
                     continue;
@@ -205,7 +242,7 @@ async fn active_loop(
         for out in outputs {
             match out {
                 ActiveStageOutput::ResponseFrame(frame) => {
-                    writer
+                    framed
                         .write_all(&frame)
                         .await
                         .map_err(|e| anyhow::anyhow!("write response: {e}"))?;
@@ -226,9 +263,20 @@ async fn active_loop(
                     return Ok(());
                 }
                 ActiveStageOutput::DeactivateAll => {
-                    // Deactivation-Reactivation (e.g. resolution change) is out of
-                    // scope — see docs/architecture.md.
-                    warn!("rdp: received DeactivateAll (reactivation not implemented)");
+                    // The server accepted a resolution change: run the
+                    // Deactivation-Reactivation Sequence to learn the new size,
+                    // rebuild the framebuffer, and tell the browser to resize.
+                    desktop = reactivate(&mut active_stage, &mut framed, &activation_factory)
+                        .await?;
+                    image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
+                    last_pos = (
+                        last_pos.0.min(desktop.width.saturating_sub(1)),
+                        last_pos.1.min(desktop.height.saturating_sub(1)),
+                    );
+                    frame_tx
+                        .send(ServerMsg::Resize { w: desktop.width, h: desktop.height })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                 }
                 _ => {}
             }
@@ -236,6 +284,63 @@ async fn active_loop(
     }
 
     Ok(())
+}
+
+/// Request a client-initiated resolution change over the Display Control
+/// channel. Sizes are adjusted to the protocol's constraints (even width, 200
+/// to 8192 per axis). A no-op if the channel isn't connected yet (the server
+/// hasn't sent its capabilities); the browser can simply ask again. The server
+/// answers by deactivating the session — see the `DeactivateAll` arm.
+async fn resize_desktop(
+    active_stage: &mut ActiveStage,
+    framed: &mut UpgradedFramed,
+    w: u16,
+    h: u16,
+) -> anyhow::Result<()> {
+    let (w, h) = MonitorLayoutEntry::adjust_display_size(u32::from(w), u32::from(h));
+    match active_stage.encode_resize(w, h, None, None) {
+        Some(Ok(frame)) => {
+            info!("rdp: requesting resize to {w}x{h}");
+            framed
+                .write_all(&frame)
+                .await
+                .map_err(|e| anyhow::anyhow!("write resize: {e}"))?;
+        }
+        Some(Err(e)) => warn!("rdp: could not encode resize: {e}"),
+        None => debug!("rdp: resize requested before the Display Control channel is ready"),
+    }
+    Ok(())
+}
+
+/// Drive a fresh Deactivation-Reactivation Sequence after the server sent
+/// DeactivateAll (its response to a resize). Returns the renegotiated desktop
+/// size. The `ActiveStage` is kept — only its share id changes — so the live
+/// channel set (and thus the Display Control channel) survives.
+async fn reactivate(
+    active_stage: &mut ActiveStage,
+    framed: &mut UpgradedFramed,
+    activation_factory: &ConnectionActivationFactory,
+) -> anyhow::Result<DesktopSize> {
+    let mut sequence: ConnectionActivationSequence = activation_factory.create();
+    let mut buf = WriteBuf::new();
+    loop {
+        single_sequence_step(framed, &mut sequence, &mut buf)
+            .await
+            .map_err(|e| anyhow::anyhow!("reactivation: {}", describe(&e)))?;
+        if let ConnectionActivationState::Finalized {
+            desktop_size,
+            share_id,
+            ..
+        } = sequence.connection_activation_state()
+        {
+            active_stage.set_share_id(share_id);
+            info!(
+                "rdp: reactivated, desktop {}x{}",
+                desktop_size.width, desktop_size.height
+            );
+            return Ok(desktop_size);
+        }
+    }
 }
 
 /// Translate one browser input message into RDP fast-path input events.
@@ -307,8 +412,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
                 Vec::new()
             }
         },
-        // RDP can't resize mid-session without Deactivation-Reactivation,
-        // which is not implemented; the frontend keeps its scrollbars.
+        // Handled by the active loop (client-initiated resize) before
+        // translation, so this arm is unreachable in practice.
         ClientMsg::Viewport { .. } => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),

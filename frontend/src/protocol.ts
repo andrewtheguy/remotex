@@ -32,7 +32,9 @@ export type ControlMsg =
   | { type: "resize"; w: number; h: number }
   | { type: "error"; message: string }
   | { type: "picker" }
-  | { type: "connected"; name: string };
+  // `protocol` ("rdp"/"vnc") and `resize` tell the browser how to handle
+  // resize: VNC follows the viewport automatically, RDP only on request.
+  | { type: "connected"; name: string; protocol: string; resize: boolean };
 
 export interface TileMsg {
   x: number;

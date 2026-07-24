@@ -89,6 +89,7 @@ function readViewport(): Viewport {
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
+  onResizeToWindow,
   sendKeyCombo,
   onKeyboardInset,
 }: {
@@ -96,6 +97,10 @@ export default function FloatingMenu({
   // Return to the post-login target picker ("switch target"): disconnects the
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
+  // Resize the remote desktop to the browser window. Present only when the
+  // target supports on-request resize (RDP with resize enabled); VNC follows
+  // the viewport automatically and needs no button. See useRemoteDesktop.
+  onResizeToWindow?: () => void;
   sendKeyCombo: (codes: string[]) => void;
   // Reports the docked soft keyboard's height so the touch canvas can inset
   // above it (0 when the panel closes or floats). See useRemoteDesktop.
@@ -275,6 +280,13 @@ export default function FloatingMenu({
     setOpen(false);
   }, []);
 
+  // Resize the remote desktop to the window, then collapse the drawer so the
+  // resized desktop is visible.
+  const onResize = useCallback(() => {
+    onResizeToWindow?.();
+    setOpen(false);
+  }, [onResizeToWindow]);
+
   // The drawer anchors to the FAB: right-aligned to it, placed below unless the
   // FAB sits too low, in which case it flips above.
   const toolbarStyle = useMemo(() => {
@@ -379,6 +391,16 @@ export default function FloatingMenu({
           </div>
 
           <div className="toolbar-section toolbar-actions">
+            {onResizeToWindow && (
+              <button
+                type="button"
+                className="toolbar-btn"
+                onClick={onResize}
+                title="Resize the remote desktop to the browser window"
+              >
+                Resize to window
+              </button>
+            )}
             <button
               type="button"
               className="toolbar-btn"

@@ -207,9 +207,20 @@ browser may also send it to recover a corrupted canvas.
 IronRDP client: TLS/NLA per the target's `security` mode, active-stage loop
 decoding into a `DecodedImage`, dirty regions repacked to RGB strips and sent
 as tiles. Input is injected as fast-path PDUs (`keymap::scancode` maps DOM
-codes). Deactivation-Reactivation is not implemented: the desktop size is
-fixed at connect time (`width`/`height` from the target profile) and
-`viewport` reports are ignored — the frontend keeps its scrollbars.
+codes).
+
+**On-request resize (opt-in via `resize = true`).** With the opt-in, the
+connector negotiates the Display Control Virtual Channel; a `viewport` report
+becomes a `DISPLAYCONTROL_MONITOR_LAYOUT` request (`ActiveStage::encode_resize`,
+sizes adjusted to even width and the 200–8192 range). The server answers by
+deactivating the session (`DeactivateAll`), which drives a fresh
+Deactivation-Reactivation Sequence to learn the renegotiated desktop size; the
+framebuffer is rebuilt at that size and a `resize` is sent to the browser.
+Unlike VNC, the browser only reports the viewport when the user asks (the
+floating menu's "Resize to window") — reactivation is heavier than VNC's
+`SetDesktopSize`, so automatic viewport reports are suppressed. Without the
+opt-in the desktop keeps its connect-time size (`width`/`height` from the
+target profile) and the frontend keeps its scrollbars.
 
 ### VNC (src/vnc.rs)
 
@@ -301,7 +312,11 @@ can't spawn phantom scrollbars.
 (debounced 250ms, deduped) the browser sends `viewport` = viewport size ×
 `devicePixelRatio`. Where the engine can act on it (VNC with `resize = true`
 against a TigerVNC-family server) the desktop follows the window and the
-scrollbars disappear.
+scrollbars disappear. RDP with `resize = true` reports the viewport only on
+request: the `connected` status carries the target's protocol and `resize`
+flag, and for RDP the automatic reporters are suppressed (`manualResizeRef`) —
+the floating menu's "Resize to window" button pushes one report, because RDP's
+reactivation is heavier than VNC's resize.
 
 **Mobile.** Pinch-zoom-capable touch devices
 (`navigator.maxTouchPoints >= 2`) diverge from the desktop model in two ways,

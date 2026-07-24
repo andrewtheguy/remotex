@@ -33,9 +33,11 @@ export default function RemoteDesktop({
     connectError,
     pendingTarget,
     size,
+    canResize,
     takeOver,
     connect,
     switchTarget,
+    resizeToWindow,
     sendKeyCombo,
     setBottomInset,
   } = useRemoteDesktop(canvasRef, overlayRef, onUnauthorized);
@@ -74,6 +76,7 @@ export default function RemoteDesktop({
         <FloatingMenu
           onLogout={onLogout}
           onSwitchTarget={switchTarget}
+          onResizeToWindow={canResize ? resizeToWindow : undefined}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}
         />

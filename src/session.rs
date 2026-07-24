@@ -221,7 +221,11 @@ impl SessionManager {
             (Some(target), Some(engine)) => {
                 info!("session: reattached to the running engine, requesting a repaint");
                 let _ = engine.input_tx.send(ClientMsg::Refresh);
-                ServerMsg::Connected { name: target.name.clone() }
+                ServerMsg::Connected {
+                    name: target.name.clone(),
+                    protocol: target.protocol.name(),
+                    resize: target.resize,
+                }
             }
             // No engine (idle, or an engine that ended): the picker.
             _ => ServerMsg::Picker,
@@ -288,13 +292,19 @@ impl SessionManager {
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
 
         let name = target.name.clone();
+        let protocol = target.protocol.name();
+        let resize = target.resize;
         st.selected = Some(target);
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
         // now nothing else feeds this channel — so the buffer holds at most the
         // attach status, never 64 frames, and Connected lands before any tile.
         if let Some(client) = &st.client {
-            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected { name }));
+            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected {
+                name,
+                protocol,
+                resize,
+            }));
         }
         Ok(())
     }
@@ -483,7 +493,7 @@ mod tests {
     /// Assert the next event is the connected status for `name`.
     async fn expect_connected(events: &mut mpsc::Receiver<AttachEvent>, name: &str) {
         match recv(events).await {
-            AttachEvent::Msg(ServerMsg::Connected { name: got }) => assert_eq!(got, name),
+            AttachEvent::Msg(ServerMsg::Connected { name: got, .. }) => assert_eq!(got, name),
             other => panic!("expected connected({name}), got {other:?}"),
         }
     }
