@@ -73,6 +73,11 @@ keyboard over it drive the session. Use `RUST_LOG=info` (or `debug`) for logs.
 | `--rdp-domain` | `RDPWEB_RDP_DOMAIN` | — |
 | `--rdp-width` | `RDPWEB_RDP_WIDTH` | `1280` |
 | `--rdp-height` | `RDPWEB_RDP_HEIGHT` | `800` |
+| `--rdp-security` | `RDPWEB_RDP_SECURITY` | `auto` |
+
+`--rdp-security` is `auto` (advertise TLS + NLA/CredSSP, server picks), `nla`
+(require NLA), or `tls` (plain TLS, no NLA — the remote shows a graphical login).
+Self-signed server certificates are accepted.
 
 Credentials are used only server-side for the RDP handshake; `GET /api/config`
 returns only the non-secret target host/port.

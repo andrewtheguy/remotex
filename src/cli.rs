@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use crate::config::Security;
+
 #[derive(Parser)]
 #[command(name = "rdpweb", version, about = "Browser-based RDP client")]
 pub struct Cli {
@@ -46,5 +48,9 @@ pub enum Commands {
         /// Initial desktop height to request
         #[arg(long, env = "RDPWEB_RDP_HEIGHT", default_value_t = 800)]
         rdp_height: u16,
+
+        /// RDP security mode: auto (TLS+NLA), nla (NLA only), or tls (no NLA)
+        #[arg(long, env = "RDPWEB_RDP_SECURITY", value_enum, default_value_t = Security::Auto)]
+        rdp_security: Security,
     },
 }

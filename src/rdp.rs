@@ -107,7 +107,7 @@ async fn connect(config: &AppConfig) -> anyhow::Result<(ConnectionResult, Upgrad
 
     let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
         .await
-        .map_err(|e| anyhow::anyhow!("RDP negotiation (connect_begin): {e}"))?;
+        .map_err(|e| anyhow::anyhow!("RDP negotiation (connect_begin): {}", describe(&e)))?;
 
     let (initial_stream, leftover) = framed.into_inner();
 
@@ -134,7 +134,7 @@ async fn connect(config: &AppConfig) -> anyhow::Result<(ConnectionResult, Upgrad
         None,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("RDP activation (connect_finalize): {e}"))?;
+    .map_err(|e| anyhow::anyhow!("RDP activation (connect_finalize): {}", describe(&e)))?;
 
     Ok((connection_result, upgraded_framed))
 }
@@ -354,6 +354,20 @@ fn clamp_u16(v: i32) -> u16 {
     v.clamp(0, i32::from(u16::MAX)) as u16
 }
 
+/// Render an error together with its full `source()` chain, so wrappers like
+/// IronRDP's `ConnectorError` reveal the underlying cause (e.g. the CredSSP /
+/// SSPI reason) instead of just a top-level label.
+fn describe(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(e) = source {
+        out.push_str(" -> ");
+        out.push_str(&e.to_string());
+        source = e.source();
+    }
+    out
+}
+
 /// Format a `host:port` destination for `TcpStream::connect`, bracketing bare
 /// IPv6 literals (e.g. `fdb8::20` -> `[fdb8::20]:3389`).
 fn host_port(host: &str, port: u16) -> String {
@@ -369,14 +383,15 @@ fn host_port(host: &str, port: u16) -> String {
 /// Enables both TLS and CredSSP/NLA so the server can negotiate the strongest
 /// security it supports. Modeled on the IronRDP `screenshot` example.
 fn build_connector_config(config: &AppConfig) -> Config {
+    let (enable_tls, enable_credssp) = config.rdp_security.flags();
     Config {
         credentials: Credentials::UsernamePassword {
             username: config.rdp_username.clone(),
             password: config.rdp_password.clone(),
         },
         domain: config.rdp_domain.clone(),
-        enable_tls: true,
-        enable_credssp: true,
+        enable_tls,
+        enable_credssp,
         keyboard_type: KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_layout: 0,

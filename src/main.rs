@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
             rdp_domain,
             rdp_width,
             rdp_height,
+            rdp_security,
         } => {
             let config = AppConfig {
                 host,
@@ -44,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
                 rdp_domain,
                 rdp_width,
                 rdp_height,
+                rdp_security,
             };
             serve(config).await?;
         }

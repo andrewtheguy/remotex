@@ -1,3 +1,25 @@
+/// RDP security negotiation mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Security {
+    /// Advertise both TLS and NLA/CredSSP; the server picks the strongest.
+    Auto,
+    /// Require NLA/CredSSP (network-level auth before the session).
+    Nla,
+    /// Plain TLS security only — no NLA; the remote shows a graphical login.
+    Tls,
+}
+
+impl Security {
+    /// `(enable_tls, enable_credssp)` for the IronRDP connector config.
+    pub fn flags(self) -> (bool, bool) {
+        match self {
+            Security::Auto => (true, true),
+            Security::Nla => (false, true),
+            Security::Tls => (true, false),
+        }
+    }
+}
+
 /// Runtime configuration for the web server and the RDP target.
 ///
 /// Credentials live here (server-side) and are used during the RDP handshake.
@@ -22,4 +44,6 @@ pub struct AppConfig {
     pub rdp_width: u16,
     /// Initial desktop height requested from the server.
     pub rdp_height: u16,
+    /// RDP security negotiation mode.
+    pub rdp_security: Security,
 }

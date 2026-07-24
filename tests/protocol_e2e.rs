@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use rdpweb::config::AppConfig;
+use rdpweb::config::{AppConfig, Security};
 use rdpweb::server;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -58,6 +58,7 @@ async fn spawn_app() -> SocketAddr {
         rdp_domain: None,
         rdp_width: 1280,
         rdp_height: 800,
+        rdp_security: Security::Auto,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
