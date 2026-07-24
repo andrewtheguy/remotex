@@ -140,8 +140,13 @@ from Cargo.toml via a Vite define — and returns to it when a claim answers
 (`FloatingMenu.tsx`) — a draggable ☰ FAB that toggles a toolbar drawer; it
 ends the browser's login, not the engine. The drawer also sends
 browser-swallowed **special keys** (F5, Ctrl+W, Alt+F4…) and **modifier taps**
-via `sendKeyCombo`, and shows the touch-gesture cheat-sheet. (Its **Soft
-keyboard** button and **Clipboard** section are placeholders for later phases.)
+via `sendKeyCombo`, and shows the touch-gesture cheat-sheet. Its **Soft
+keyboard** button opens an on-screen keyboard panel (`SoftKeyboardPanel.tsx`) —
+a compact docked layout with a symbol/nav screen toggle and sticky-modifier
+badges on narrow viewports, a draggable floating PC-keyboard grid at ≥800px;
+every soft key is expressed as a DOM `code` and routed through the same `key`
+messages via `sendKeyCombo`, so it reuses the whole input path with no
+keysym-only detour. (Its **Clipboard** section remains a placeholder.)
 
 ## The wire protocol (browser ↔ backend)
 
@@ -156,7 +161,9 @@ session error). Measured ~10x smaller than the old base64-in-JSON baseline on
 a full-screen paint; per-session byte totals are logged on disconnect.
 
 **Browser → server.** JSON text frames: `mouseMove`, `mouseButton`, `wheel`,
-`key` (DOM `KeyboardEvent.code`), `viewport` — the browser's viewport in
+`key` (DOM `KeyboardEvent.code`, plus a `caps` flag carrying the browser's
+authoritative CapsLock lock state so the backend never has to infer it),
+`viewport` — the browser's viewport in
 device pixels, i.e. the size it *wants* the remote desktop to be (engines
 that can drive the remote size act on viewport reports; the rest ignore
 them) — and `refresh`, a full-repaint request. `refresh` is normally
@@ -190,7 +197,14 @@ A minimal built-in RFB client (RFC 6143), Guacamole-style baseline:
   server-side to RGB and PNG-encoded in the same strips as RDP.
 - **Input:** pointer events carry the tracked button mask + position (wheel =
   press/release of buttons 4–7); keys map DOM `code` → X11 keysym via
-  `keymap::keysym`.
+  `keymap::keysym`, resolved against the live Shift state so the *shifted*
+  keysym is sent (`A`, `!`) rather than the base symbol — VNC servers force
+  the exact keysym requested, so sending the unshifted symbol while Shift is
+  held drops the Shift. CapsLock case is applied the same way from the `key`
+  message's `caps` flag (letters only, XORed with Shift) and the CapsLock key
+  is never forwarded, keeping the server's Lock modifier off to avoid
+  re-casing ambiguity. (RDP needs none of this: it forwards scancodes and the
+  host tracks its own modifier state.)
 
 **Dynamic resize (opt-in via `resize = true` on the target).** The
 engine advertises the DesktopSize/ExtendedDesktopSize pseudo-encodings and
@@ -222,7 +236,10 @@ matter:
 - `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
   connection-status overlay + the floating menu.
 - `FloatingMenu.tsx` — the draggable ☰ FAB and toolbar drawer (Disconnect,
-  plus placeholders for soft keyboard and clipboard).
+  special-key/modifier combos, the soft-keyboard toggle, plus a clipboard
+  placeholder).
+- `SoftKeyboardPanel.tsx` / `softKeyboard.ts` — the on-screen keyboard panel
+  and its layout tables (compact docked screens + the ≥800px PC grid).
 
 **Connection flow.** The hook claims the session slot, opens the
 WebSocket with the token, and reconnects automatically with capped backoff
@@ -299,11 +316,3 @@ the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
   resize, and detach/reattach repaint through a real server). Containers run
   under podman or docker. **Never a headless browser** — browser automation
   is flaky by policy.
-
-## Status
-
-Everything described above is built: the tile transport, both engines, TOML
-config, the full-screen canvas, VNC dynamic resize, the connection-flow UX,
-session management, web login, and mobile gestures. What remains — the
-floating UI, the soft keyboard, the remotex-v2 rename, and the multi-target
-picker — lives in [`roadmap.md`](roadmap.md).
