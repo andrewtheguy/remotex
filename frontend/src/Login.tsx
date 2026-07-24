@@ -5,10 +5,13 @@ import { type FormEvent, useState } from "react";
 // server answers 401. The version is pinned at the bottom.
 export default function Login({
   checking,
+  branding,
   onLogin,
 }: {
   /** True while the mount-time /api/auth/status probe is still in flight. */
   checking: boolean;
+  /** Deployment display name shown as the form heading. */
+  branding: string;
   onLogin: () => void;
 }) {
   const [username, setUsername] = useState("");
@@ -48,7 +51,7 @@ export default function Login({
         <span className="login-hint">Checking authentication…</span>
       ) : (
         <form className="login-form" onSubmit={(e) => void submit(e)}>
-          <h1>remotex</h1>
+          <h1>{branding}</h1>
           {error && <p className="login-error">{error}</p>}
           <label htmlFor="login-username">Username</label>
           <input

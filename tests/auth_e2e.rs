@@ -20,6 +20,7 @@ async fn spawn_app() -> SocketAddr {
         port: 0,
         static_dir: "frontend/dist".into(),
         site_passwd: common::test_site_passwd(),
+        branding: "remotex".to_owned(),
         targets: vec![TargetConfig {
             name: "unreachable".to_owned(),
             protocol: Protocol::Vnc,

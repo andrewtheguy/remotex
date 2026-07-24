@@ -141,7 +141,14 @@ pub struct ServerSection {
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
+    /// Display name shown on the login screen, the interstitials, and as the
+    /// browser tab title. Defaults to [`DEFAULT_BRANDING`]; whitespace-only is
+    /// treated as absent.
+    pub branding: Option<String>,
 }
+
+/// The default display name when `[server].branding` is unset.
+pub const DEFAULT_BRANDING: &str = "remotex";
 
 /// The parsed TOML file, before a target is selected.
 #[derive(Clone, Debug, Deserialize)]
@@ -169,6 +176,8 @@ pub struct AppConfig {
     pub targets: Vec<TargetConfig>,
     /// Web-login credential guarding `/api/*` and `/ws`.
     pub site_passwd: SitePasswd,
+    /// Display name for the login screen, interstitials, and browser tab title.
+    pub branding: String,
 }
 
 impl ConfigFile {
@@ -228,6 +237,14 @@ impl ConfigFile {
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
             site_passwd,
+            branding: self
+                .server
+                .branding
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_BRANDING)
+                .to_owned(),
         })
     }
 }
@@ -336,6 +353,35 @@ mod tests {
         assert_eq!(t.security, Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
+    }
+
+    #[test]
+    fn branding_defaults_and_overrides() {
+        // Unset → the default name.
+        let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
+        assert_eq!(config.branding, DEFAULT_BRANDING);
+
+        // Set → carried through, trimmed.
+        let toml = format!(
+            r#"
+            [server]
+            branding = "  Acme Remote  "
+            {}
+
+            [[targets]]
+            name = "one"
+            protocol = "rdp"
+            host = "192.0.2.10"
+            "#,
+            site_passwd_line()
+        );
+        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        assert_eq!(config.branding, "Acme Remote");
+
+        // Whitespace-only → falls back to the default.
+        let toml = toml.replace("  Acme Remote  ", "   ");
+        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        assert_eq!(config.branding, DEFAULT_BRANDING);
     }
 
     #[test]

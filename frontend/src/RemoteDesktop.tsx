@@ -16,9 +16,12 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 };
 
 export default function RemoteDesktop({
+  branding,
   onLogout,
   onUnauthorized,
 }: {
+  /** Deployment display name shown on the interstitials. */
+  branding: string;
   onLogout: () => void;
   onUnauthorized: () => void;
 }) {
@@ -80,6 +83,7 @@ export default function RemoteDesktop({
           target is connected. */}
       {status === "connected" && mode === "picker" && (
         <TargetPicker
+          branding={branding}
           connect={connect}
           pendingTarget={pendingTarget}
           connectError={connectError}
@@ -90,6 +94,7 @@ export default function RemoteDesktop({
 
       {showStatus && (
         <div className="status-overlay">
+          <span className="status-brand">{branding}</span>
           <span className={`status status-${status}`}>
             {STATUS_LABEL[status]}
           </span>

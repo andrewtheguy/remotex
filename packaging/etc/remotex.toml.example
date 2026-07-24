@@ -18,6 +18,9 @@
 # Web login (required): username:bcrypt_hash guarding the whole surface.
 # Generate with:  remotex gen-passwd <username>
 site_passwd = ""
+# Display name shown on the login screen, the interstitials, and as the browser
+# tab title. Defaults to "remotex".
+#branding = "remotex"
 
 # Target profiles (at least one required). Each needs a unique name. Every
 # profile is served; the browser picks one from a picker after login (there is

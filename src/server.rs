@@ -74,6 +74,8 @@ pub fn router(config: AppConfig) -> Router {
     // of falling through to the SPA index.
     let api = Router::new()
         .route("/health", get(|| async { "ok" }))
+        // Public: the login screen reads its branding before authenticating.
+        .route("/config", get(config_handler))
         .route("/auth/login", post(login_handler))
         .route("/auth/logout", post(logout_handler))
         .route("/auth/status", get(status_handler))
@@ -175,6 +177,19 @@ async fn logout_handler(
         cookie_flags(&headers)
     );
     ([(header::SET_COOKIE, cookie)], Json(OkResponse { ok: true }))
+}
+
+#[derive(Serialize)]
+struct ConfigResponse {
+    branding: String,
+}
+
+/// Public, non-secret client config. Read on load so the login screen and the
+/// browser tab title carry the deployment's branding before authentication.
+async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
+    Json(ConfigResponse {
+        branding: state.config.branding.clone(),
+    })
 }
 
 #[derive(Serialize)]

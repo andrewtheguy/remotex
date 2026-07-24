@@ -19,12 +19,14 @@ interface TargetInfo {
 }
 
 export default function TargetPicker({
+  branding,
   connect,
   pendingTarget,
   connectError,
   onLogout,
   onUnauthorized,
 }: {
+  branding: string;
   connect: (name: string) => void;
   pendingTarget: string | null;
   connectError: string | null;
@@ -65,6 +67,7 @@ export default function TargetPicker({
   return (
     <div className="picker-screen">
       <div className="picker-panel">
+        <span className="picker-brand">{branding}</span>
         <h1>Pick a target</h1>
         {connectError && <p className="picker-error">{connectError}</p>}
         {loadError && <p className="picker-error">{loadError}</p>}
