@@ -6,12 +6,15 @@
 
 export type MouseButton = "left" | "middle" | "right";
 
-// Browser -> server: input events captured over the remote canvas.
+// Browser -> server: input events captured over the remote canvas, plus
+// viewport reports (the desired remote desktop size in device pixels —
+// engines that support dynamic resize act on them, the rest ignore them).
 export type ClientMsg =
   | { type: "mouseMove"; x: number; y: number }
   | { type: "mouseButton"; button: MouseButton; pressed: boolean }
   | { type: "wheel"; dx: number; dy: number }
-  | { type: "key"; code: string; pressed: boolean };
+  | { type: "key"; code: string; pressed: boolean }
+  | { type: "viewport"; w: number; h: number };
 
 // Server -> browser text frames: everything but screen tiles.
 export type ControlMsg =
