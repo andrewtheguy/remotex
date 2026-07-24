@@ -25,7 +25,7 @@ export default function RemoteDesktop({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const { status, size, errorMessage, takeOver, retry, sendKeyCombo } =
-    useRemoteDesktop(canvasRef, overlayRef, onLogout, onUnauthorized);
+    useRemoteDesktop(canvasRef, overlayRef, onUnauthorized);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -49,19 +49,9 @@ export default function RemoteDesktop({
         />
       </div>
       {/* Phase 9: the draggable floating menu — special keys / modifier taps /
-          gesture help / Disconnect. The interim Ctrl+Alt+Shift+L chord and the
-          below-canvas bar are still present here; the next commit retires them. */}
+          gesture help, and the sole logout affordance now (the below-canvas bar
+          and the Ctrl+Alt+Shift+L chord are gone). */}
       <FloatingMenu onLogout={onLogout} sendKeyCombo={sendKeyCombo} />
-      {/* Minimal disconnect CTA in the dead space below the fixed-size canvas
-          (mobile portrait always has some, since the desktop keeps its
-          configured size). Disconnecting logs this browser out — same as the
-          Ctrl+Alt+Shift+L chord. CSS shows it on touch devices only; desktop
-          uses the chord. */}
-      <div className="disconnect-bar">
-        <button type="button" className="disconnect-button" onClick={onLogout}>
-          Disconnect
-        </button>
-      </div>
       {(status !== "connected" || !size) && (
         <div className="status-overlay">
           <span className={`status status-${status}`}>

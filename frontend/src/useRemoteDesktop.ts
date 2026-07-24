@@ -42,10 +42,6 @@ export interface RemoteSize {
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
 export const SESSION_KEY = "rdpweb.sessionId";
-// Logout chord, reserved until the toolbar grows a real button for it: compound
-// enough that no remote app plausibly needs it, swallowed before the key
-// pass-through so the remote never sees the L.
-const LOGOUT_CHORD_CODE = "KeyL";
 // Mobile sizing, with remotex's bounds: pinch-zoom-capable touch devices size
 // the session in CSS pixels (no dpr multiplication — a phone's 3x dpr would
 // mint an enormous desktop), floored per axis at a fixed 1024x768 — so a
@@ -168,14 +164,13 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
 // Reconnects automatically after drops; busy/takenOver/error surface to the
 // caller with `takeOver`/`retry` to resolve them.
 //
-// `onLogout` fires on the Ctrl+Alt+Shift+L chord (after releasing held input);
 // `onUnauthorized` fires when a claim answers 401 — the login is gone, so the
-// caller swaps back to the login screen. Both must be referentially stable
-// (useCallback) or the connection/input effects tear down and redo.
+// caller swaps back to the login screen. It must be referentially stable
+// (useCallback) or the connection/input effects tear down and redo. Logout is
+// the floating menu's Disconnect button (see FloatingMenu.tsx), not this hook.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
-  onLogout: () => void,
   onUnauthorized: () => void,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -573,8 +568,8 @@ export function useRemoteDesktop(
       send({ type: "wheel", dx: e.deltaX, dy: e.deltaY });
     };
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
-    // Release everything still held so nothing sticks on the remote — on
-    // blur, and before logging out via the chord.
+    // Release everything still held so nothing sticks on the remote when focus
+    // leaves the surface.
     const releaseAll = () => {
       for (const code of pressedKeys) {
         send({ type: "key", code, pressed: false });
@@ -588,14 +583,6 @@ export function useRemoteDesktop(
     };
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
-      // The reserved logout chord (a toolbar button will replace it once the
-      // floating chrome lands). The modifiers already went to the remote as they
-      // were pressed, so release them before dropping the session.
-      if (e.ctrlKey && e.altKey && e.shiftKey && e.code === LOGOUT_CHORD_CODE) {
-        releaseAll();
-        onLogout();
-        return;
-      }
       pressedKeys.add(e.code);
       send({ type: "key", code: e.code, pressed: true });
     };
@@ -628,7 +615,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, onLogout]);
+  }, [overlayRef, canvasRef]);
 
   return { status, size, errorMessage, takeOver, retry, sendKeyCombo };
 }
