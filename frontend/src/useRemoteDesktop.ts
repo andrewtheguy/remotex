@@ -40,6 +40,18 @@ export const SESSION_KEY = "rdpweb.sessionId";
 // enough that no remote app plausibly needs it, swallowed before the key
 // pass-through so the remote never sees the L.
 const LOGOUT_CHORD_CODE = "KeyL";
+// Mobile sizing, with remotex's bounds: pinch-zoom-capable touch devices size
+// the session in CSS pixels (no dpr multiplication — a phone's 3x dpr would
+// mint an enormous desktop), floored per axis at a fixed 1024x768 — so a
+// portrait phone raises only the height to its own viewport, never a
+// width-derived height that makes the desktop absurdly tall. The floor is a
+// constant, NOT remotex's geometry-found-on-connect: the engine (and a VNC
+// server) outlives the browser here, so a connect-time floor would inherit
+// whatever damage a previous session left (e.g. a too-tall desktop) and
+// never shrink it — with a constant floor the phone repairs it on connect.
+const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
+const TOUCH_MIN_WIDTH = 1024;
+const TOUCH_MIN_HEIGHT = 768;
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -53,6 +65,15 @@ function applyCanvasCss(
   size: RemoteSize | null,
 ): void {
   if (!canvas || !size) {
+    return;
+  }
+  if (CAN_PINCH_ZOOM) {
+    // Touch display cap (remotex's fit bound): scale the desktop down (never
+    // up) to fit the viewport width; the height scrolls. Pinch-zoom onto the
+    // full-resolution framebuffer is phase 8.
+    const scale = Math.min(document.documentElement.clientWidth / size.w, 1);
+    canvas.style.width = `${size.w * scale}px`;
+    canvas.style.height = `${size.h * scale}px`;
     return;
   }
   const dpr = window.devicePixelRatio || 1;
@@ -89,13 +110,19 @@ async function postClaim(force: boolean): Promise<Response | null> {
 }
 
 // The viewport report sent to the server (phase 4): the desired remote
-// desktop size in device pixels, clamped to the protocol's u16 range.
+// desktop size, clamped to the protocol's u16 range. Desktop asks for the
+// viewport in device pixels; touch asks for CSS pixels floored per axis at
+// 1024x768 (the mobile bounds — see CAN_PINCH_ZOOM).
 function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
-  const dpr = window.devicePixelRatio || 1;
   const el = document.documentElement;
-  const dim = (cssPx: number) =>
-    Math.min(65535, Math.max(1, Math.round(cssPx * dpr)));
-  return { type: "viewport", w: dim(el.clientWidth), h: dim(el.clientHeight) };
+  const dpr = CAN_PINCH_ZOOM ? 1 : window.devicePixelRatio || 1;
+  const dim = (cssPx: number, min: number) =>
+    Math.min(65535, Math.max(min, Math.round(cssPx * dpr)));
+  return {
+    type: "viewport",
+    w: dim(el.clientWidth, CAN_PINCH_ZOOM ? TOUCH_MIN_WIDTH : 1),
+    h: dim(el.clientHeight, CAN_PINCH_ZOOM ? TOUCH_MIN_HEIGHT : 1),
+  };
 }
 
 // Claims the single session slot (POST /api/session), opens the /ws WebSocket
