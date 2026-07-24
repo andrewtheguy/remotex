@@ -7,13 +7,31 @@ mouse and keyboard from a web browser.
   protocol engine runs server-side ([IronRDP](https://crates.io/crates/ironrdp));
   the browser talks to it over a WebSocket.
 - **Frontend** — [Vite](https://vite.dev/) + React 19 + TypeScript, managed with
-  [Bun](https://bun.sh/). The built assets are embedded into the Rust binary
-  (`rust-embed`) so the release is a single self-contained executable.
+  [Bun](https://bun.sh/). The built assets ship alongside the binary and are
+  served from disk (`share/rdpweb/web`), resolved relative to the executable.
 
 > **Status: Phase 1 MVP.** Connects to one RDP host, renders its screen in the
 > browser (dirty-rectangle RGBA tiles over the WebSocket), and forwards mouse and
 > keyboard input. Credentials live server-side and are never sent to the browser.
 > See [`docs/phase1-mvp.md`](docs/phase1-mvp.md) for scope and design.
+
+## Install (Linux & macOS)
+
+```bash
+curl -fsSL https://andrewtheguy.github.io/rdpweb/install.sh | bash
+```
+
+Downloads the release tarball for your platform, verifies its SHA-256 against
+the GitHub-published digest, and installs under `/usr/local/opt/rdpweb` with a
+`rdpweb` launcher on your `PATH` (may prompt for `sudo`). Then:
+
+```bash
+$EDITOR /usr/local/opt/rdpweb/current/etc/rdpweb.env   # set RDP target + creds
+rdpweb serve
+```
+
+See [`packaging/`](packaging/) for the on-disk layout, upgrade/rollback model,
+and how to build the tarballs locally.
 
 ## Layout
 
@@ -23,12 +41,11 @@ src/                 Rust backend (flat module layout)
   lib.rs             library surface (shared with the integration tests)
   cli.rs             clap CLI (serve)
   config.rs          AppConfig (bind + RDP target + credentials)
-  server.rs          axum router (/api/*, /ws, SPA fallback)
+  server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
   ws.rs              WebSocket <-> RDP session bridge
   rdp.rs             server-side RDP session (IronRDP): connect + active loop
   keymap.rs          DOM KeyboardEvent.code -> RDP scancode
   protocol.rs        wire messages (ClientMsg / ServerMsg)
-  assets.rs          rust-embed static file handler
   error.rs           AppError
 frontend/            Vite + React + TS SPA
   src/
@@ -73,6 +90,7 @@ keyboard over it drive the session. Use `RUST_LOG=info` (or `debug`) for logs.
 | `--rdp-width` | `RDPWEB_RDP_WIDTH` | `1280` |
 | `--rdp-height` | `RDPWEB_RDP_HEIGHT` | `800` |
 | `--rdp-security` | `RDPWEB_RDP_SECURITY` | `auto` |
+| `--static-dir` | `RDPWEB_STATIC_DIR` | installed `share/rdpweb/web`, else `frontend/dist` |
 
 `--rdp-security` is `auto` (advertise TLS + NLA/CredSSP, server picks), `nla`
 (require NLA), or `tls` (plain TLS, no NLA — the remote shows a graphical login).
@@ -100,14 +118,22 @@ that hangs up, so the session-failure path is reported back over `/ws` as a
 
 ## Production build
 
-The Rust binary embeds `frontend/dist/`, so **build the frontend first**:
+The frontend is served from disk (not embedded), so build it and point the
+server at `frontend/dist`:
 
 ```bash
 cd frontend && bun install && bun run build   # -> frontend/dist/
 cd ..
-cargo build --release                          # embeds dist/ into the binary
-./target/release/rdpweb serve
+cargo build --release
+./target/release/rdpweb serve --static-dir frontend/dist
 ```
 
-> A plain `cargo build` requires `frontend/dist/` to exist (it is `.gitignore`d),
-> so run the frontend build once before building the backend.
+To produce a distributable, relocatable tarball (`bin` + `etc` + `share`) that
+installs under `/usr/local/opt/rdpweb`, use the packaging scripts:
+
+```bash
+bash packaging/build-tarball.sh               # -> dist/rdpweb-<version>-<os>-<arch>.tar.gz
+```
+
+See [`packaging/README.md`](packaging/README.md) for the full layout, the
+atomic-swap upgrade model, and rollback.

@@ -7,9 +7,14 @@ use rdpweb::server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load a local `.env` if present, so RDPWEB_* (incl. credentials) can live in
-    // a file instead of the shell. Real environment variables take precedence.
+    // Load a local `.env` if present (dev convenience), then the installed
+    // config at <root>/etc/rdpweb.env, so RDPWEB_* (incl. credentials) can live
+    // in a file instead of the shell. dotenvy never overrides already-set
+    // variables, so real environment variables take precedence over both.
     let _ = dotenvy::dotenv();
+    if let Some(env_file) = rdpweb::config::default_env_file() {
+        let _ = dotenvy::from_path(&env_file);
+    }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -34,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
             rdp_width,
             rdp_height,
             rdp_security,
+            static_dir,
         } => {
             let config = AppConfig {
                 host,
@@ -46,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
                 rdp_width,
                 rdp_height,
                 rdp_security,
+                static_dir: static_dir.unwrap_or_else(rdpweb::config::default_static_dir),
             };
             serve(config).await?;
         }

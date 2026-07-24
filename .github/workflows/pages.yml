@@ -1,0 +1,48 @@
+name: Pages
+
+# Publishes the install landing page + install.sh to GitHub Pages, so
+#   curl -fsSL https://andrewtheguy.github.io/rdpweb/install.sh | bash
+# always serves the copy on `main`. Enable Pages (Settings → Pages → Source:
+# GitHub Actions) once for this to deploy.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - site/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel an in-flight deploy; let the latest finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp site/index.html _site/index.html
+          # install.sh is the single source of truth at the repo root.
+          cp install.sh _site/install.sh
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

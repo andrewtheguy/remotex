@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use crate::config::Security;
@@ -52,5 +54,10 @@ pub enum Commands {
         /// RDP security mode: auto (TLS+NLA), nla (NLA only), or tls (no NLA)
         #[arg(long, env = "RDPWEB_RDP_SECURITY", value_enum, default_value_t = Security::Auto)]
         rdp_security: Security,
+
+        /// Directory of the built frontend to serve. Defaults to the installed
+        /// `share/rdpweb/web` next to the binary, or `frontend/dist` in a checkout.
+        #[arg(long, env = "RDPWEB_STATIC_DIR")]
+        static_dir: Option<PathBuf>,
     },
 }
