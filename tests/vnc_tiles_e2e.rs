@@ -13,7 +13,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures_util::StreamExt as _;
+use futures_util::{SinkExt as _, StreamExt as _};
 use rdpweb::config::{AppConfig, Protocol, Security, TargetConfig};
 use rdpweb::server;
 use tokio::net::{TcpListener, TcpStream};
@@ -70,6 +70,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             width: 1280,
             height: 800,
             security: Security::Auto, // RDP-only knob, ignored for VNC
+            resize: true,             // exercise the phase-4 dynamic resize path
         },
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -81,8 +82,9 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary tile frame and return its pixel area.
-fn check_tile_frame(frame: &[u8]) -> u64 {
+/// Validate one binary tile frame against the desktop bounds and return its
+/// pixel area.
+fn check_tile_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> u64 {
     assert!(frame.len() >= TILE_HEADER_LEN, "frame shorter than the header");
     assert_eq!(frame[0], TILE_FRAME_KIND, "unexpected frame kind");
     assert_eq!(frame[1], TILE_FORMAT_PNG, "unexpected tile format byte");
@@ -92,8 +94,8 @@ fn check_tile_frame(frame: &[u8]) -> u64 {
     let h = u16::from_le_bytes([frame[8], frame[9]]);
     assert!(w > 0 && h > 0, "empty tile {w}x{h}");
     assert!(
-        u32::from(x) + u32::from(w) <= DESKTOP_W && u32::from(y) + u32::from(h) <= DESKTOP_H,
-        "tile {w}x{h}+{x}+{y} exceeds the {DESKTOP_W}x{DESKTOP_H} desktop"
+        u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
+        "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
     );
     assert_eq!(
         &frame[TILE_HEADER_LEN..TILE_HEADER_LEN + 8],
@@ -104,7 +106,7 @@ fn check_tile_frame(frame: &[u8]) -> u64 {
 }
 
 #[tokio::test]
-async fn vnc_session_paints_the_full_desktop_as_tiles() {
+async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
         common::start_dummy_server(runtime, "rdpweb-e2e-tigervnc", "vnc-dummy", 5900);
@@ -141,7 +143,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "tile arrived before resize");
-                    covered += check_tile_frame(&frame);
+                    covered += check_tile_frame(&frame, DESKTOP_W, DESKTOP_H);
                     // The first (non-incremental) update must repaint the whole
                     // desktop; once that much area has arrived, the raw->tile
                     // path is proven.
@@ -156,4 +158,53 @@ async fn vnc_session_paints_the_full_desktop_as_tiles() {
     })
     .await
     .expect("timed out waiting for the full-desktop paint");
+
+    // Phase 4 (dynamic resize): report a smaller browser viewport. Xtigervnc
+    // accepts SetDesktopSize, so the engine must announce the new geometry to
+    // the browser and follow with a full repaint at that size.
+    const VIEWPORT_W: u32 = 800;
+    const VIEWPORT_H: u32 = 600;
+    ws.send(Message::Text(
+        format!(r#"{{"type":"viewport","w":{VIEWPORT_W},"h":{VIEWPORT_H}}}"#).into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut resized = false;
+    let mut covered: u64 = 0;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(
+                        !text.contains(r#""type":"error""#),
+                        "session failed: {text}"
+                    );
+                    if text.contains(r#""type":"resize""#) {
+                        assert_eq!(
+                            text,
+                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H}}}"#)
+                        );
+                        resized = true;
+                    }
+                }
+                Message::Binary(frame) => {
+                    // Updates for the old geometry may still be in flight
+                    // until the resize announcement; everything after it must
+                    // fit the new desktop.
+                    if !resized {
+                        continue;
+                    }
+                    covered += check_tile_frame(&frame, VIEWPORT_W, VIEWPORT_H);
+                    if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H) {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("websocket closed after {covered} px of resized tiles");
+    })
+    .await
+    .expect("timed out waiting for the resize + repaint");
 }

@@ -39,6 +39,11 @@ pub enum ClientMsg {
     Wheel { dx: f32, dy: f32 },
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
     Key { code: String, pressed: bool },
+    /// The browser viewport, in device pixels — the size the browser wants
+    /// the remote desktop to be (phase 4). Engines that can drive the remote
+    /// size act on it (VNC `SetDesktopSize`); the rest ignore it and the
+    /// frontend keeps its phase-3 scrollbars.
+    Viewport { w: u16, h: u16 },
 }
 
 /// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
@@ -187,6 +192,13 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"viewport","w":2560,"h":1440}"#).unwrap(),
+            ClientMsg::Viewport { w: 2560, h: 1440 }
+        ));
+        // Viewport dimensions beyond the protocol's u16 range are rejected at
+        // the deserialization boundary, not clamped.
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"viewport","w":70000,"h":1}"#).is_err());
     }
 
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.

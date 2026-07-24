@@ -39,6 +39,12 @@ password = "change-me"
 # RDP only — VNC negotiates VncAuth (password set) or None per the handshake.
 #security = "auto"
 
+# Dynamic resize (opt-in): drive the remote desktop size from the browser
+# viewport. VNC only, and only servers that accept SetDesktopSize (TigerVNC
+# family); otherwise — and by default — the desktop keeps its connect-time
+# size and the browser shows scrollbars.
+#resize = false
+
 # A VNC target only needs host and (usually) a password; username, domain,
 # width/height, and security are ignored.
 # [[targets]]

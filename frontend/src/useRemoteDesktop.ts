@@ -15,6 +15,43 @@ export interface RemoteSize {
   h: number;
 }
 
+// Phase 3 (full-screen canvas): display the framebuffer at 1:1 device pixels —
+// CSS size = remote pixels / devicePixelRatio. No scaling, no letterboxing;
+// when the remote desktop is larger than the viewport the canvas overflows and
+// the screen container scrolls.
+function applyCanvasCss(
+  canvas: HTMLCanvasElement | null,
+  size: RemoteSize | null,
+): void {
+  if (!canvas || !size) {
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  let w = size.w / dpr;
+  let h = size.h / dpr;
+  // When the remote matched the viewport (phase-4 dynamic resize), snap to it
+  // exactly so fractional-dpr rounding can't spawn phantom scrollbars. The
+  // ≤1px scale this introduces is imperceptible.
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  if (Math.abs(w - vw) <= 1 && Math.abs(h - vh) <= 1) {
+    w = vw;
+    h = vh;
+  }
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+}
+
+// The viewport report sent to the server (phase 4): the desired remote
+// desktop size in device pixels, clamped to the protocol's u16 range.
+function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
+  const dpr = window.devicePixelRatio || 1;
+  const el = document.documentElement;
+  const dim = (cssPx: number) =>
+    Math.min(65535, Math.max(1, Math.round(cssPx * dpr)));
+  return { type: "viewport", w: dim(el.clientWidth), h: dim(el.clientHeight) };
+}
+
 // Opens the /ws WebSocket, renders incoming screen tiles onto `canvasRef`, and
 // forwards mouse + keyboard input captured over `overlayRef` as ClientMsg.
 export function useRemoteDesktop(
@@ -47,7 +84,30 @@ export function useRemoteDesktop(
     wsRef.current = ws;
     setStatus("connecting");
 
-    ws.onopen = () => setStatus("connected");
+    // Report the viewport (phase 4 dynamic resize) on connect and whenever it
+    // changes; engines without resize support simply ignore the reports.
+    // Deduped: a resize that settles on the same size sends nothing.
+    let lastViewport: RemoteSize | null = null;
+    const sendViewport = () => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const msg = viewportMsg();
+      if (
+        lastViewport &&
+        lastViewport.w === msg.w &&
+        lastViewport.h === msg.h
+      ) {
+        return;
+      }
+      lastViewport = { w: msg.w, h: msg.h };
+      ws.send(JSON.stringify(msg));
+    };
+
+    ws.onopen = () => {
+      setStatus("connected");
+      sendViewport();
+    };
     ws.onclose = () => setStatus("closed");
     ws.onerror = () => setStatus("error");
     // PNG tiles decode asynchronously (createImageBitmap), so all messages are
@@ -94,9 +154,11 @@ export function useRemoteDesktop(
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
       const canvas = canvasRef.current;
+      const s = { w: msg.w, h: msg.h };
       if (canvas) {
         canvas.width = msg.w;
         canvas.height = msg.h;
+        applyCanvasCss(canvas, s);
         const ctx = canvas.getContext("2d");
         ctxRef.current = ctx;
         if (ctx) {
@@ -104,7 +166,6 @@ export function useRemoteDesktop(
           ctx.fillRect(0, 0, msg.w, msg.h);
         }
       }
-      const s = { w: msg.w, h: msg.h };
       sizeRef.current = s;
       setSize(s);
     };
@@ -121,7 +182,45 @@ export function useRemoteDesktop(
       }
     };
 
-    return () => ws.close();
+    // Window resizes re-report the viewport, debounced so a drag-resize sends
+    // one message, not hundreds. The CSS size is re-derived too: the phase-3
+    // snap-to-viewport depends on the viewport dimensions.
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const onViewportChange = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        applyCanvasCss(canvasRef.current, sizeRef.current);
+        sendViewport();
+      }, 250);
+    };
+    window.addEventListener("resize", onViewportChange);
+
+    // devicePixelRatio changes (moving the window between monitors with
+    // different scale factors, browser zoom) must re-derive the canvas CSS
+    // size immediately to keep the 1:1 device-pixel mapping — they don't
+    // reliably fire a resize event. matchMedia only fires when the current
+    // dpr stops matching, so re-arm the query on each change.
+    let dprQuery: MediaQueryList | null = null;
+    const onDprChange = () => {
+      watchDpr();
+      applyCanvasCss(canvasRef.current, sizeRef.current);
+      onViewportChange();
+    };
+    const watchDpr = () => {
+      dprQuery?.removeEventListener("change", onDprChange);
+      dprQuery = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio || 1}dppx)`,
+      );
+      dprQuery.addEventListener("change", onDprChange);
+    };
+    watchDpr();
+
+    return () => {
+      window.removeEventListener("resize", onViewportChange);
+      clearTimeout(resizeTimer);
+      dprQuery?.removeEventListener("change", onDprChange);
+      ws.close();
+    };
   }, [canvasRef]);
 
   // Capture input over the overlay element and forward it to the server,
