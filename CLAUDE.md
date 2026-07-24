@@ -4,4 +4,4 @@
 - run biome checks on frontend/ after JS/TS code changes
 - use tmp/ for temporary files and test config toml
 - for dev one-off scripts that are more efficient with python, always run with uv
-- error handling: `anyhow` for application errors (main, indexer, search), `thiserror` for typed API errors
+- error handling: `anyhow` for application errors, `thiserror` for typed API errors
