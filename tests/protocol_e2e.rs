@@ -59,6 +59,7 @@ async fn spawn_app() -> SocketAddr {
         rdp_width: 1280,
         rdp_height: 800,
         rdp_security: Security::Auto,
+        static_dir: "frontend/dist".into(),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -8,8 +8,10 @@ axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rust-embed = "8"
-new_mime_guess = "4"
+# Serves the built frontend from disk (see src/server.rs). Assets are no longer
+# embedded in the binary — they ship alongside it under share/rdpweb/web.
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 thiserror = "2"
