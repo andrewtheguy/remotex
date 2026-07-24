@@ -57,6 +57,11 @@ export interface GestureDeps {
   view(): GestureView;
   // Clamp the requested zoom/pan and restyle the canvas.
   applyView(zoom: number, pan: Point): void;
+  // CSS pixels along the bottom edge that are covered by chrome (the docked
+  // soft keyboard) and so excluded from the visible region — the cursor won't
+  // pan under them, and content can pan up above them. 0 when nothing covers
+  // the canvas. Optional: absent means no inset.
+  bottomInset?(): number;
 }
 
 export interface TouchGestures {
@@ -206,9 +211,10 @@ export function attachTouchGestures(
 
   function viewportSize(): { width: number; height: number } {
     const doc = document.documentElement;
+    const inset = deps.bottomInset?.() ?? 0;
     return {
       width: Math.max(1, doc.clientWidth),
-      height: Math.max(1, doc.clientHeight),
+      height: Math.max(1, doc.clientHeight - inset),
     };
   }
 

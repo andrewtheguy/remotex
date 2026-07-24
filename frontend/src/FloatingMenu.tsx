@@ -6,13 +6,15 @@ import {
   useRef,
   useState,
 } from "react";
+import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 
 // Phase 9: the floating chrome ported from remotex — a draggable ☰ button that
 // toggles a toolbar drawer. The drawer carries remotex's functional controls
 // that map onto this project (browser-swallowed keys, modifier taps, the
 // gesture cheat-sheet) plus the logout affordance that used to live in the
-// Ctrl+Alt+Shift+L chord and the below-canvas bar. Clipboard and the soft
-// keyboard are placeholders until their phases land.
+// Ctrl+Alt+Shift+L chord and the below-canvas bar. Phase 10 wired the drawer's
+// Soft keyboard button to the on-screen keyboard panel; Clipboard is still a
+// placeholder until its phase lands.
 const FAB_SIZE = 40;
 const FAB_MARGIN = 12;
 // Pointer travel (px) before a press becomes a drag rather than a click.
@@ -87,12 +89,17 @@ function readViewport(): Viewport {
 export default function FloatingMenu({
   onLogout,
   sendKeyCombo,
+  onKeyboardInset,
 }: {
   onLogout: () => void;
   sendKeyCombo: (codes: string[]) => void;
+  // Reports the docked soft keyboard's height so the touch canvas can inset
+  // above it (0 when the panel closes or floats). See useRemoteDesktop.
+  onKeyboardInset: (px: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   // null = not yet moved; resolvedPosition falls back to the top-right corner.
   const [position, setPosition] = useState<Position | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -257,9 +264,11 @@ export default function FloatingMenu({
     setOpen((prev) => !prev);
   }, []);
 
-  // Phase 10 territory — announce it plainly until the soft keyboard lands.
+  // Open the on-screen keyboard and collapse the drawer so the panel has the
+  // screen to itself; toggling the button again closes the panel.
   const onSoftKeyboard = useCallback(() => {
-    window.alert("Soft keyboard is not implemented yet.");
+    setKeyboardOpen((prev) => !prev);
+    setOpen(false);
   }, []);
 
   // The drawer anchors to the FAB: right-aligned to it, placed below unless the
@@ -377,8 +386,9 @@ export default function FloatingMenu({
               type="button"
               className="toolbar-btn"
               onClick={onSoftKeyboard}
+              aria-pressed={keyboardOpen}
             >
-              Soft keyboard
+              {keyboardOpen ? "Hide keyboard" : "Soft keyboard"}
             </button>
             <button
               type="button"
@@ -416,6 +426,14 @@ export default function FloatingMenu({
             </button>
           </div>
         </div>
+      )}
+
+      {keyboardOpen && (
+        <SoftKeyboardPanel
+          sendKeyCombo={sendKeyCombo}
+          onClose={() => setKeyboardOpen(false)}
+          onDockedHeightChange={onKeyboardInset}
+        />
       )}
     </>
   );

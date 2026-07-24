@@ -6,10 +6,14 @@
 //! The scancode is the set-1 make code; the release variant is derived by the
 //! caller via the `RELEASE` flag.
 //!
-//! Both tables assume a US layout — see docs/architecture.md. For keysyms this
-//! means the *unshifted* symbol of each key is sent; the VNC server combines
-//! it with the modifier state it tracks from Shift/etc. key events, which is
-//! how X servers (Xvnc, x11vnc) resolve keysym → keycode + modifiers.
+//! Both tables assume a US layout — see docs/architecture.md. For keysyms the
+//! caller passes the current Shift state so the *actual* symbol is sent (`A`
+//! not `a`, `!` not `1`): X servers using "fake modifier" resolution (Xvnc,
+//! TigerVNC) force the requested keysym by synthesizing modifier changes, so a
+//! client that sends the unshifted keysym while Shift is held gets the
+//! unshifted character back — Shift appears ignored. Sending the shifted
+//! keysym (with the real Shift key event still passed through) resolves
+//! correctly on a US keymap.
 
 /// Look up the set-1 scancode and extended-key flag for a DOM `code`.
 pub fn scancode(code: &str) -> Option<(u8, bool)> {
@@ -140,25 +144,29 @@ pub fn scancode(code: &str) -> Option<(u8, bool)> {
     Some(entry)
 }
 
-/// Look up the X11 keysym for a DOM `code` (US layout, unshifted symbol).
+/// Look up the X11 keysym for a DOM `code` (US layout), honoring `shift`.
 ///
-/// Letters map to their lowercase keysyms; the server applies Shift itself
-/// from the modifier keysyms it has seen (see the module docs).
-pub fn keysym(code: &str) -> Option<u32> {
+/// Printable keys return their shifted US-layout symbol when `shift` is set
+/// (`A`, `!`, `?`); everything else ignores `shift`. The real Shift key event
+/// is still sent separately so the server's modifier state stays consistent
+/// (see the module docs).
+pub fn keysym(code: &str, shift: bool) -> Option<u32> {
+    // Printable keys whose symbol depends on Shift: pick unshifted/shifted.
+    let printable = |unshifted: u32, shifted: u32| Some(if shift { shifted } else { unshifted });
     let sym = match code {
-        // ── Printable keys: keysym == the US-layout unshifted codepoint ─
-        "Space" => 0x0020,
-        "Quote" => 0x0027,      // '
-        "Comma" => 0x002C,      // ,
-        "Minus" => 0x002D,      // -
-        "Period" => 0x002E,     // .
-        "Slash" => 0x002F,      // /
-        "Semicolon" => 0x003B,  // ;
-        "Equal" => 0x003D,      // =
-        "BracketLeft" => 0x005B,  // [
-        "Backslash" => 0x005C,    // \
-        "BracketRight" => 0x005D, // ]
-        "Backquote" => 0x0060,    // `
+        // ── Printable keys: unshifted / shifted US-layout codepoint ─────
+        "Space" => 0x0020, // unaffected by Shift
+        "Quote" => return printable(0x0027, 0x0022),       // ' "
+        "Comma" => return printable(0x002C, 0x003C),       // , <
+        "Minus" => return printable(0x002D, 0x005F),       // - _
+        "Period" => return printable(0x002E, 0x003E),      // . >
+        "Slash" => return printable(0x002F, 0x003F),       // / ?
+        "Semicolon" => return printable(0x003B, 0x003A),   // ; :
+        "Equal" => return printable(0x003D, 0x002B),       // = +
+        "BracketLeft" => return printable(0x005B, 0x007B),  // [ {
+        "Backslash" => return printable(0x005C, 0x007C),    // \ |
+        "BracketRight" => return printable(0x005D, 0x007D), // ] }
+        "Backquote" => return printable(0x0060, 0x007E),    // ` ~
 
         // ── TTY / editing keys ──────────────────────────────────────────
         "Backspace" => 0xFF08,
@@ -230,7 +238,17 @@ pub fn keysym(code: &str) -> Option<u32> {
             // Letters and digits follow a regular pattern.
             let bytes = code.as_bytes();
             return match bytes {
-                [b'K', b'e', b'y', c @ b'A'..=b'Z'] => Some(u32::from(c.to_ascii_lowercase())),
+                // DOM codes are uppercase (`KeyA`), so the byte already is the
+                // uppercase keysym; lowercase it unless Shift is held.
+                [b'K', b'e', b'y', c @ b'A'..=b'Z'] => {
+                    Some(u32::from(if shift { *c } else { c.to_ascii_lowercase() }))
+                }
+                [b'D', b'i', b'g', b'i', b't', c @ b'0'..=b'9'] if shift => {
+                    // US shifted number row, `0`..`9` → ) ! @ # $ % ^ & * (
+                    const SHIFTED: [u32; 10] =
+                        [0x29, 0x21, 0x40, 0x23, 0x24, 0x25, 0x5E, 0x26, 0x2A, 0x28];
+                    Some(SHIFTED[usize::from(*c - b'0')])
+                }
                 [b'D', b'i', b'g', b'i', b't', c @ b'0'..=b'9'] => Some(u32::from(*c)),
                 _ => None,
             };
@@ -276,29 +294,54 @@ mod tests {
 
     #[test]
     fn keysym_letters_are_lowercase_and_digits_are_ascii() {
-        assert_eq!(keysym("KeyA"), Some(u32::from('a')));
-        assert_eq!(keysym("KeyZ"), Some(u32::from('z')));
-        assert_eq!(keysym("Digit0"), Some(u32::from('0')));
-        assert_eq!(keysym("Digit9"), Some(u32::from('9')));
-        assert_eq!(keysym("Semicolon"), Some(u32::from(';')));
+        assert_eq!(keysym("KeyA", false), Some(u32::from('a')));
+        assert_eq!(keysym("KeyZ", false), Some(u32::from('z')));
+        assert_eq!(keysym("Digit0", false), Some(u32::from('0')));
+        assert_eq!(keysym("Digit9", false), Some(u32::from('9')));
+        assert_eq!(keysym("Semicolon", false), Some(u32::from(';')));
+    }
+
+    #[test]
+    fn keysym_shift_produces_the_shifted_us_symbol() {
+        // Letters uppercase.
+        assert_eq!(keysym("KeyA", true), Some(u32::from('A')));
+        assert_eq!(keysym("KeyZ", true), Some(u32::from('Z')));
+        // Number row.
+        assert_eq!(keysym("Digit1", true), Some(u32::from('!')));
+        assert_eq!(keysym("Digit0", true), Some(u32::from(')')));
+        assert_eq!(keysym("Digit6", true), Some(u32::from('^')));
+        // Punctuation.
+        assert_eq!(keysym("Slash", true), Some(u32::from('?')));
+        assert_eq!(keysym("Semicolon", true), Some(u32::from(':')));
+        assert_eq!(keysym("Equal", true), Some(u32::from('+')));
+        assert_eq!(keysym("Backquote", true), Some(u32::from('~')));
+        assert_eq!(keysym("Quote", true), Some(u32::from('"')));
+    }
+
+    #[test]
+    fn keysym_shift_does_not_affect_nonprintable_keys() {
+        assert_eq!(keysym("Space", true), Some(0x0020));
+        assert_eq!(keysym("Enter", true), Some(0xFF0D));
+        assert_eq!(keysym("ArrowUp", true), Some(0xFF52));
+        assert_eq!(keysym("ShiftLeft", true), Some(0xFFE1));
     }
 
     #[test]
     fn keysym_special_keys_use_the_xk_misc_range() {
-        assert_eq!(keysym("Enter"), Some(0xFF0D));
-        assert_eq!(keysym("Escape"), Some(0xFF1B));
-        assert_eq!(keysym("ArrowUp"), Some(0xFF52));
-        assert_eq!(keysym("ShiftLeft"), Some(0xFFE1));
-        assert_eq!(keysym("F12"), Some(0xFFC9));
-        assert_eq!(keysym("NumpadEnter"), Some(0xFF8D));
+        assert_eq!(keysym("Enter", false), Some(0xFF0D));
+        assert_eq!(keysym("Escape", false), Some(0xFF1B));
+        assert_eq!(keysym("ArrowUp", false), Some(0xFF52));
+        assert_eq!(keysym("ShiftLeft", false), Some(0xFFE1));
+        assert_eq!(keysym("F12", false), Some(0xFFC9));
+        assert_eq!(keysym("NumpadEnter", false), Some(0xFF8D));
     }
 
     #[test]
     fn keysym_rejects_lookalike_codes() {
-        assert_eq!(keysym("Key1"), None); // digits are Digit1, not Key1
-        assert_eq!(keysym("Keya"), None); // DOM codes use uppercase letters
-        assert_eq!(keysym("DigitA"), None);
-        assert_eq!(keysym("MediaPlayPause"), None);
-        assert_eq!(keysym(""), None);
+        assert_eq!(keysym("Key1", false), None); // digits are Digit1, not Key1
+        assert_eq!(keysym("Keya", false), None); // DOM codes use uppercase letters
+        assert_eq!(keysym("DigitA", false), None);
+        assert_eq!(keysym("MediaPlayPause", false), None);
+        assert_eq!(keysym("", false), None);
     }
 }

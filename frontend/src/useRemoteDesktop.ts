@@ -83,6 +83,7 @@ function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
   view: TouchViewState,
+  bottomInset = 0,
 ): void {
   if (!canvas || !size) {
     return;
@@ -94,7 +95,10 @@ function applyCanvasCss(
     // funnels through — and the clamped values are written back so gesture
     // math continues from what is actually on screen.
     const vw = document.documentElement.clientWidth;
-    const vh = document.documentElement.clientHeight;
+    // bottomInset (the docked soft keyboard's height) shrinks the usable
+    // height, so the desktop can pan up until its bottom rests just above the
+    // keyboard instead of being pinned under it.
+    const vh = Math.max(1, document.documentElement.clientHeight - bottomInset);
     view.zoom = Math.min(Math.max(view.zoom, MIN_ZOOM), MAX_ZOOM);
     const scale = touchFitScale(size) * view.zoom;
     const w = size.w * scale;
@@ -185,6 +189,11 @@ export function useRemoteDesktop(
   // The touch pinch-zoom/pan state, shared by the repaint paths (connection
   // effect) and the gesture handlers (input effect). Inert on desktop.
   const viewRef = useRef<TouchViewState>({ zoom: 1, pan: { x: 0, y: 0 } });
+  // CSS pixels of canvas covered along the bottom edge by the docked soft
+  // keyboard (0 when it's closed or floating). Read by every applyCanvasCss
+  // call and by the gesture layer's visible-bounds math. Only meaningful on
+  // touch — the non-pinch branch scrolls natively.
+  const bottomInsetRef = useRef(0);
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
@@ -376,7 +385,7 @@ export function useRemoteDesktop(
       if (canvas) {
         canvas.width = msg.w;
         canvas.height = msg.h;
-        applyCanvasCss(canvas, s, viewRef.current);
+        applyCanvasCss(canvas, s, viewRef.current, bottomInsetRef.current);
         const ctx = canvas.getContext("2d");
         ctxRef.current = ctx;
         if (ctx) {
@@ -427,7 +436,12 @@ export function useRemoteDesktop(
     const onViewportChange = () => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        applyCanvasCss(canvasRef.current, sizeRef.current, viewRef.current);
+        applyCanvasCss(
+          canvasRef.current,
+          sizeRef.current,
+          viewRef.current,
+          bottomInsetRef.current,
+        );
         sendViewport();
       }, 250);
     };
@@ -441,7 +455,12 @@ export function useRemoteDesktop(
     let dprQuery: MediaQueryList | null = null;
     const onDprChange = () => {
       watchDpr();
-      applyCanvasCss(canvasRef.current, sizeRef.current, viewRef.current);
+      applyCanvasCss(
+        canvasRef.current,
+        sizeRef.current,
+        viewRef.current,
+        bottomInsetRef.current,
+      );
       onViewportChange();
     };
     const watchDpr = () => {
@@ -476,13 +495,32 @@ export function useRemoteDesktop(
   // set the input effect tracks. A no-op while the socket is down.
   const sendKeyCombo = useCallback((codes: string[]) => {
     const send = sendRef.current;
+    // Synthetic sends have no CapsLock state; case is expressed by including an
+    // explicit Shift code in `codes` (the soft keyboard's sticky modifier).
     for (const code of codes) {
-      send({ type: "key", code, pressed: true });
+      send({ type: "key", code, pressed: true, caps: false });
     }
     for (let i = codes.length - 1; i >= 0; i -= 1) {
-      send({ type: "key", code: codes[i], pressed: false });
+      send({ type: "key", code: codes[i], pressed: false, caps: false });
     }
   }, []);
+
+  // Report the height (CSS px) of chrome docked over the bottom of the canvas
+  // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
+  // excluded: the desktop can pan up above it and the gesture cursor won't
+  // stray under it. A no-op on desktop (no pan model); 0 clears the inset.
+  const setBottomInset = useCallback(
+    (px: number) => {
+      bottomInsetRef.current = Math.max(0, px);
+      applyCanvasCss(
+        canvasRef.current,
+        sizeRef.current,
+        viewRef.current,
+        bottomInsetRef.current,
+      );
+    },
+    [canvasRef],
+  );
 
   // Capture input over the overlay element and forward it to the server,
   // scaling pointer coordinates from the displayed size to the remote size.
@@ -515,8 +553,14 @@ export function useRemoteDesktop(
           applyView: (zoom, pan) => {
             viewRef.current.zoom = zoom;
             viewRef.current.pan = pan;
-            applyCanvasCss(canvasRef.current, sizeRef.current, viewRef.current);
+            applyCanvasCss(
+              canvasRef.current,
+              sizeRef.current,
+              viewRef.current,
+              bottomInsetRef.current,
+            );
           },
+          bottomInset: () => bottomInsetRef.current,
         })
       : null;
 
@@ -572,7 +616,9 @@ export function useRemoteDesktop(
     // leaves the surface.
     const releaseAll = () => {
       for (const code of pressedKeys) {
-        send({ type: "key", code, pressed: false });
+        // caps is irrelevant on release: the backend releases the keysym it
+        // recorded at press time.
+        send({ type: "key", code, pressed: false, caps: false });
       }
       pressedKeys.clear();
       for (const button of pressedButtons) {
@@ -584,12 +630,22 @@ export function useRemoteDesktop(
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
       pressedKeys.add(e.code);
-      send({ type: "key", code: e.code, pressed: true });
+      send({
+        type: "key",
+        code: e.code,
+        pressed: true,
+        caps: e.getModifierState("CapsLock"),
+      });
     };
     const onKeyUp = (e: KeyboardEvent) => {
       e.preventDefault();
       pressedKeys.delete(e.code);
-      send({ type: "key", code: e.code, pressed: false });
+      send({
+        type: "key",
+        code: e.code,
+        pressed: false,
+        caps: e.getModifierState("CapsLock"),
+      });
     };
     const onBlur = () => releaseAll();
 
@@ -617,5 +673,13 @@ export function useRemoteDesktop(
     };
   }, [overlayRef, canvasRef]);
 
-  return { status, size, errorMessage, takeOver, retry, sendKeyCombo };
+  return {
+    status,
+    size,
+    errorMessage,
+    takeOver,
+    retry,
+    sendKeyCombo,
+    setBottomInset,
+  };
 }

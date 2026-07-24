@@ -289,7 +289,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
             }
             events
         }
-        ClientMsg::Key { code, pressed } => match keymap::scancode(&code) {
+        // `caps` is VNC-only: the RDP host tracks its own CapsLock from the
+        // forwarded scancode.
+        ClientMsg::Key { code, pressed, .. } => match keymap::scancode(&code) {
             Some((scancode, extended)) => {
                 let mut flags = KeyboardFlags::empty();
                 if !pressed {
@@ -544,6 +546,7 @@ mod tests {
             ClientMsg::Key {
                 code: "KeyA".to_owned(),
                 pressed: true,
+                caps: false,
             },
             &mut pos,
         ) {
@@ -558,6 +561,7 @@ mod tests {
             ClientMsg::Key {
                 code: "ArrowUp".to_owned(),
                 pressed: false,
+                caps: false,
             },
             &mut pos,
         ) {
@@ -590,6 +594,7 @@ mod tests {
                 ClientMsg::Key {
                     code: "Nonexistent".to_owned(),
                     pressed: true,
+                    caps: false,
                 },
                 &mut pos,
             )
