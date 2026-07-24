@@ -17,7 +17,3 @@ remains, in planned order:
   today the VNC engine drops it) and from the browser, and pushes changes the
   other way so copy/paste crosses the browser ↔ remote boundary in both
   directions.
-
-Also outstanding (not a phase): verify the VNC engine against real targets —
-including macOS Screen Sharing, the case that motivated the raw-baseline,
-no-workarounds approach.
