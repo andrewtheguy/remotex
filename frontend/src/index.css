@@ -220,6 +220,117 @@ body {
   font-size: 0.8rem;
 }
 
+/* Phase 12: the post-login target picker. A centered panel over the (still
+   0×0) canvas; it owns the screen while no target is connected, so it sits
+   above the input overlay. */
+.picker-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: #0d1117;
+  overflow-y: auto;
+}
+
+.picker-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(420px, 92vw);
+}
+
+.picker-panel h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.4rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.picker-error {
+  margin: 0 0 0.5rem;
+  color: #f85149;
+  font-size: 0.85rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.picker-hint {
+  color: #8b949e;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.picker-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Each target is a full-width button showing the name and its endpoint. */
+.picker-target {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  width: 100%;
+  padding: 0.7rem 0.9rem;
+  font: inherit;
+  color: #e6edf3;
+  text-align: left;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.picker-target:hover:not(:disabled) {
+  background: #21262d;
+  border-color: #4a9eff;
+}
+
+.picker-target:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.picker-target-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.picker-target-meta {
+  color: #8b949e;
+  font-size: 0.8rem;
+}
+
+.picker-logout {
+  align-self: center;
+  margin-top: 0.25rem;
+  padding: 0.4rem 1.1rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #8b949e;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.picker-logout:hover:not(:disabled) {
+  color: #e6edf3;
+  background: #21262d;
+}
+
+.picker-logout:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Phase 9: the floating chrome. A draggable FAB pinned in viewport space
    (position: fixed, moved via left/top) that toggles the toolbar drawer.
    touch-action: none so a drag never scrolls the page under it. */

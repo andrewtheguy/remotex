@@ -18,12 +18,21 @@ export type ClientMsg =
   // already on at connect time). Synthetic sends without a real event pass
   // false — they express case through an explicit Shift code instead.
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
-  | { type: "viewport"; w: number; h: number };
+  | { type: "viewport"; w: number; h: number }
+  // Session control (handled by the server's session slot, not an engine):
+  // pick a target from the post-login picker, or tear the session down and
+  // switch back to it.
+  | { type: "connect"; target: string }
+  | { type: "disconnect" };
 
-// Server -> browser text frames: everything but screen tiles.
+// Server -> browser text frames: everything but screen tiles. `resize`/`error`
+// come from the engine; `picker`/`connected` are the session-slot status the
+// server sends so the browser knows which post-login state it is in.
 export type ControlMsg =
   | { type: "resize"; w: number; h: number }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "picker" }
+  | { type: "connected"; name: string };
 
 export interface TileMsg {
   x: number;

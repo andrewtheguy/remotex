@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import FloatingMenu from "./FloatingMenu.tsx";
+import TargetPicker from "./TargetPicker.tsx";
 import {
   CAN_PINCH_ZOOM,
   type ConnectionStatus,
@@ -12,7 +13,6 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   reconnecting: "Reconnecting…",
   busy: "Session in use",
   takenOver: "Session taken over",
-  error: "Session error",
 };
 
 export default function RemoteDesktop({
@@ -26,13 +26,21 @@ export default function RemoteDesktop({
   const overlayRef = useRef<HTMLDivElement>(null);
   const {
     status,
+    mode,
+    connectError,
+    pendingTarget,
     size,
-    errorMessage,
     takeOver,
-    retry,
+    connect,
+    switchTarget,
     sendKeyCombo,
     setBottomInset,
   } = useRemoteDesktop(canvasRef, overlayRef, onUnauthorized);
+
+  // The status overlay covers the connection lifecycle (connecting/reconnecting)
+  // and the claim conflicts (busy/takenOver); in the desktop it also covers the
+  // gap before the first frame. The picker owns the screen once connected.
+  const showStatus = status !== "connected" || (mode === "desktop" && !size);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -41,7 +49,8 @@ export default function RemoteDesktop({
     <div className={`screen${CAN_PINCH_ZOOM ? " screen-touch" : ""}`}>
       <div className="surface">
         {/* Starts 0×0 so no ghost block shows before the first resize; the
-            resize handler sets the pixel size and the 1:1 CSS size. */}
+            resize handler sets the pixel size and the 1:1 CSS size. Kept
+            mounted in both modes so the hook's canvas ref stays stable. */}
         <canvas ref={canvasRef} className="framebuffer" width={0} height={0} />
         {/* Transparent overlay captures mouse + keyboard input. tabIndex
             makes the div focusable — without it, focus() in the mousedown
@@ -55,20 +64,36 @@ export default function RemoteDesktop({
           tabIndex={0}
         />
       </div>
-      {/* Phase 9: the draggable floating menu — special keys / modifier taps /
-          gesture help, and the sole logout affordance now (the below-canvas bar
-          and the Ctrl+Alt+Shift+L chord are gone). */}
-      <FloatingMenu
-        onLogout={onLogout}
-        sendKeyCombo={sendKeyCombo}
-        onKeyboardInset={setBottomInset}
-      />
-      {(status !== "connected" || !size) && (
+
+      {/* The floating menu is desktop-only; its Switch target button returns to
+          the picker (see FloatingMenu.tsx), and Disconnect ends the login. */}
+      {mode === "desktop" && (
+        <FloatingMenu
+          onLogout={onLogout}
+          onSwitchTarget={switchTarget}
+          sendKeyCombo={sendKeyCombo}
+          onKeyboardInset={setBottomInset}
+        />
+      )}
+
+      {/* The post-login target picker: shown once the slot is held and no
+          target is connected. */}
+      {status === "connected" && mode === "picker" && (
+        <TargetPicker
+          connect={connect}
+          pendingTarget={pendingTarget}
+          connectError={connectError}
+          onLogout={onLogout}
+          onUnauthorized={onUnauthorized}
+        />
+      )}
+
+      {showStatus && (
         <div className="status-overlay">
           <span className={`status status-${status}`}>
             {STATUS_LABEL[status]}
           </span>
-          {status === "connected" && !size && (
+          {status === "connected" && mode === "desktop" && !size && (
             <span className="status-hint">Waiting for the remote desktop…</span>
           )}
           {status === "busy" && (
@@ -96,16 +121,6 @@ export default function RemoteDesktop({
                 onClick={takeOver}
               >
                 Take it back
-              </button>
-            </>
-          )}
-          {status === "error" && (
-            <>
-              {errorMessage && (
-                <span className="status-hint">{errorMessage}</span>
-              )}
-              <button type="button" className="status-action" onClick={retry}>
-                Retry
               </button>
             </>
           )}
