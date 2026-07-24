@@ -1,5 +1,9 @@
 import { useRef } from "react";
-import { type ConnectionStatus, useRemoteDesktop } from "./useRemoteDesktop.ts";
+import {
+  CAN_PINCH_ZOOM,
+  type ConnectionStatus,
+  useRemoteDesktop,
+} from "./useRemoteDesktop.ts";
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connecting: "Connecting…",
@@ -27,7 +31,10 @@ export default function RemoteDesktop({
   );
 
   return (
-    <div className="screen">
+    /* screen-touch swaps native scrolling for the phase-8 gesture transform
+       (pinch zoom + pan) and stretches the input overlay over the whole
+       viewport so gestures land everywhere — see index.css. */
+    <div className={`screen${CAN_PINCH_ZOOM ? " screen-touch" : ""}`}>
       <div className="surface">
         {/* Starts 0×0 so no ghost block shows before the first resize; the
             resize handler sets the pixel size and the 1:1 CSS size. */}

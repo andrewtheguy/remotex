@@ -52,6 +52,35 @@ body {
   cursor: none;
 }
 
+/* Phase 8 (mobile gestures): on pinch-zoom-capable devices the gesture layer
+   replaces native scrolling — the canvas is positioned by a translate3d
+   transform (pan) and CSS size (fit x zoom), both owned by applyCanvasCss.
+   The overlay detaches from the surface and covers the whole viewport so
+   gestures land everywhere, not just over the desktop; touch-action turns
+   off the browser's own pan/zoom in favor of ours. */
+.screen-touch {
+  overflow: hidden;
+}
+
+.screen-touch .framebuffer {
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.screen-touch .input-overlay {
+  position: fixed;
+  inset: 0;
+  touch-action: none;
+}
+
+/* The viewport-covering overlay would swallow the disconnect button's taps;
+   lift the bar above it (it sits in the dead space below the desktop, so it
+   covers nothing that matters at rest). */
+.screen-touch .disconnect-bar {
+  position: relative;
+  z-index: 1;
+}
+
 /* Centered connection-state readout, shown until the desktop is streaming.
    The translucent backdrop dims stale canvas content while reconnecting or
    after an eviction, so the readout stays legible over it. */
