@@ -1,0 +1,123 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: #0d1117;
+  color: #e6edf3;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-header {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #30363d;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.app-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.remote-desktop {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.statusbar {
+  padding: 0.35rem 1rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #30363d;
+  background: #161b22;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.resolution {
+  color: #8b949e;
+}
+
+.status-connected {
+  color: #3fb950;
+}
+
+.status-connecting {
+  color: #d29922;
+}
+
+.status-closed,
+.status-error {
+  color: #f85149;
+}
+
+.screen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #010409;
+}
+
+/* Shrink-wraps the canvas so the input overlay lines up exactly with the
+   displayed framebuffer (for correct coordinate mapping). */
+.surface {
+  position: relative;
+  max-width: 100%;
+  max-height: 100%;
+  line-height: 0;
+}
+
+.framebuffer {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  image-rendering: pixelated;
+}
+
+.input-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+  /* The remote cursor is rendered server-side into the framebuffer, so hide the
+     browser's own cursor to avoid showing two pointers. */
+  cursor: none;
+}
+
+.placeholder {
+  text-align: center;
+  color: #8b949e;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  pointer-events: none;
+}
