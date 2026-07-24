@@ -78,7 +78,8 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
     // Outbound: session events -> browser. Byte counters are logged at the end
     // of the attachment so the transport can be measured in the field (this
     // link — backend to a possibly weak-signal WAN browser — is the bottleneck
-    // phase 2 optimizes). Ends on eviction (explicit close) or engine death.
+    // the binary tile transport optimizes). Ends on eviction (explicit close)
+    // or engine death.
     let mut outbound = tokio::spawn(async move {
         let (mut tiles, mut tile_bytes, mut text_bytes) = (0u64, 0u64, 0u64);
         while let Some(event) = events.recv().await {

@@ -1,4 +1,4 @@
-//! Web login (phase 7): the `site_passwd` credential and the in-memory auth
+//! Web login: the `site_passwd` credential and the in-memory auth
 //! sessions behind the `rdpweb_session` cookie.
 //!
 //! remotex-style, minus remotex's base64 wrapping (TOML strings carry a bcrypt

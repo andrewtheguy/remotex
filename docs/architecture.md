@@ -40,11 +40,11 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
   session and the framebuffer; the browser only draws tiles. This keeps one
   transport to optimize (backend → browser is the bottleneck link — the
   targets are LAN, the browser may be on weak WAN), enables session
-  resume/takeover (phase 6), and makes "add a protocol" mean "write another
+  resume/takeover, and makes "add a protocol" mean "write another
   engine", not "ship another in-browser decoder".
 - **Single session, permanently.** This is a single-user program with one
   active session slot. Session takeover (a new browser force-claims the slot
-  and evicts the previous holder) and detach/reattach exist (phase 6);
+  and evicts the previous holder) and detach/reattach exist;
   concurrent sessions, session sharing, or a session broker are permanently
   out of scope.
 - **Baseline protocol, no per-implementation workarounds.** Guacamole-style:
@@ -80,7 +80,7 @@ uniform). The engine lives as long as the remote session: it is spawned when
 the first browser attaches and ends when the remote host disconnects — not
 when the browser does.
 
-## The session slot (phase 6)
+## The session slot
 
 `SessionManager` (src/session.rs) decouples the engine session (backend ↔
 remote host) from the browser attachment (backend ↔ WebSocket), remotex's
@@ -107,7 +107,7 @@ claim rules on top of a persistent engine:
 One slot, permanently: takeover replaces the attached browser, never adds
 one — concurrent sessions, sharing, and brokers stay out of scope.
 
-## Web login (phase 7)
+## Web login
 
 Everything session-related refuses unauthenticated requests, remotex-style
 (src/auth.rs):
@@ -136,7 +136,7 @@ other browser's WebSocket but never logs it out. In the frontend, `App.tsx`
 mounts the desktop only once authenticated (mounting claims the slot), shows
 the login screen otherwise — with the app version at the bottom, injected
 from Cargo.toml via a Vite define — and returns to it when a claim answers
-401. Until the phase-10 chrome exists, logout is the reserved
+401. Until the floating chrome exists, logout is the reserved
 **Ctrl+Alt+Shift+L** chord (swallowed before key pass-through, held input
 released first) or, on touch devices only, the minimal **Disconnect** button
 in the dead space below the fixed-size canvas; both end the browser's login,
@@ -146,7 +146,7 @@ not the engine.
 
 Defined in `src/protocol.rs`, mirrored in `frontend/src/protocol.ts`.
 
-**Server → browser.** Split by weight (phase 2): screen tiles are **binary
+**Server → browser.** Split by weight: screen tiles are **binary
 WebSocket frames** — a 10-byte little-endian header (kind, format, x, y, w, h)
 followed by a PNG-compressed RGB payload; dirty rectangles taller than
 `STRIP_ROWS` (64) are split into strips. Control messages stay JSON text with
@@ -159,7 +159,7 @@ a full-screen paint; per-session byte totals are logged on disconnect.
 device pixels, i.e. the size it *wants* the remote desktop to be (engines
 that can drive the remote size act on viewport reports; the rest ignore
 them) — and `refresh`, a full-repaint request. `refresh` is normally
-injected server-side by the session layer on reattach (phase 6), but a
+injected server-side by the session layer on reattach, but a
 browser may also send it to recover a corrupted canvas.
 
 ## Engines
@@ -191,7 +191,7 @@ A minimal built-in RFB client (RFC 6143), Guacamole-style baseline:
   press/release of buttons 4–7); keys map DOM `code` → X11 keysym via
   `keymap::keysym`.
 
-**Dynamic resize (phase 4, opt-in via `resize = true` on the target).** The
+**Dynamic resize (opt-in via `resize = true` on the target).** The
 engine advertises the DesktopSize/ExtendedDesktopSize pseudo-encodings and
 turns browser `viewport` reports into `SetDesktopSize` requests, so
 TigerVNC-family servers (Xtigervnc, x0vncserver, …) re-render at the
@@ -212,16 +212,16 @@ Vite + React 19 + TypeScript, managed with Bun (`frontend/`). Three files
 matter:
 
 - `protocol.ts` — TS mirror of the wire protocol (binary tile parsing).
-- `App.tsx` — the auth gate: login screen vs the desktop (phase 7).
+- `App.tsx` — the auth gate: login screen vs the desktop.
 - `Login.tsx` — the login form, with the app version pinned at the bottom.
 - `useRemoteDesktop.ts` — the one hook: session claim + WebSocket lifecycle,
   tile rendering, input capture, viewport reporting, the logout chord, the
   touch view transform (fit-to-width × pinch zoom + pan).
-- `touchGestures.ts` — remotex's touch gesture engine (phase 8), ported.
+- `touchGestures.ts` — remotex's touch gesture engine, ported.
 - `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
   connection-status overlay + the disconnect CTA below the canvas.
 
-**Connection flow (phase 5).** The hook claims the session slot, opens the
+**Connection flow.** The hook claims the session slot, opens the
 WebSocket with the token, and reconnects automatically with capped backoff
 after any drop (network, server restart, session ended) — no page reload.
 The per-tab token (sessionStorage) makes a reconnect a *reclaim*, so it
@@ -233,7 +233,7 @@ session error; the message is shown with "Retry"). The reconnect backoff
 resets only once a desktop actually arrives, so a session that dies right
 after connecting can't hot-loop.
 
-**Full-screen canvas (phase 3).** The canvas fills the browser viewport and
+**Full-screen canvas.** The canvas fills the browser viewport and
 renders at **1:1 device pixels**: the backing store stays at the remote pixel
 size, the CSS size is remote ÷ `devicePixelRatio` — no scaling, no
 letterboxing. A remote desktop larger than the viewport overflows into native
@@ -242,13 +242,13 @@ scrollbars. A re-armed `matchMedia` listener re-derives the CSS size when
 snaps to the viewport when the remote matched it so fractional-dpr rounding
 can't spawn phantom scrollbars.
 
-**Viewport reporting (phase 4).** On connect and on window-resize/dpr changes
+**Viewport reporting.** On connect and on window-resize/dpr changes
 (debounced 250ms, deduped) the browser sends `viewport` = viewport size ×
 `devicePixelRatio`. Where the engine can act on it (VNC with `resize = true`
 against a TigerVNC-family server) the desktop follows the window and the
 scrollbars disappear.
 
-**Mobile (phase 8).** Pinch-zoom-capable touch devices
+**Mobile.** Pinch-zoom-capable touch devices
 (`navigator.maxTouchPoints >= 2`) diverge from the desktop model in two ways,
 both with remotex's battle-tested bounds. *Sizing:* the viewport report uses
 CSS pixels (no dpr — a phone's 3× dpr would mint an enormous desktop),
@@ -297,11 +297,10 @@ the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
   under podman or docker. **Never a headless browser** — browser automation
   is flaky by policy.
 
-## Phase status
+## Status
 
-Done: phase 1 (MVP), phase 2 (transport + VNC engine + TOML config), phase 3
-(full-screen canvas), phase 4 (VNC dynamic resize), phase 5 (connection-flow
-UX), phase 6 (session management), phase 7 (web login), phase 8 (mobile
-gestures). Planned: the remotex-v2 rename (9), soft keyboard + floating UI
-(10), multi-target picker (11) — the list lives in
-[`roadmap.md`](roadmap.md).
+Everything described above is built: the tile transport, both engines, TOML
+config, the full-screen canvas, VNC dynamic resize, the connection-flow UX,
+session management, web login, and mobile gestures. What remains — the
+floating UI, the soft keyboard, the remotex-v2 rename, and the multi-target
+picker — lives in [`roadmap.md`](roadmap.md).

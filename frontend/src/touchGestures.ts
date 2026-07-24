@@ -1,4 +1,4 @@
-// Phase 8 (mobile gestures): remotex's touch controls, ported onto the input
+// Mobile gestures: remotex's touch controls, ported onto the input
 // overlay. The gesture model is a trackpad, not a touchscreen: the cursor is
 // a persistent position that fingers nudge around, and taps click wherever
 // the cursor currently is (the server renders the cursor into the

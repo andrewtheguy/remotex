@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 
-/// The web-login credentials every test server is configured with (phase 7).
+/// The web-login credentials every test server is configured with.
 #[allow(dead_code)]
 pub const TEST_USER: &str = "admin";
 #[allow(dead_code)]

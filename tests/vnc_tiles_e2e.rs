@@ -71,7 +71,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             width: 1280,
             height: 800,
             security: Security::Auto, // RDP-only knob, ignored for VNC
-            resize: true,             // exercise the phase-4 dynamic resize path
+            resize: true,             // exercise the dynamic resize path
         },
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -160,7 +160,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     .await
     .expect("timed out waiting for the full-desktop paint");
 
-    // Phase 4 (dynamic resize): report a smaller browser viewport. Xtigervnc
+    // Dynamic resize: report a smaller browser viewport. Xtigervnc
     // accepts SetDesktopSize, so the engine must announce the new geometry to
     // the browser and follow with a full repaint at that size.
     const VIEWPORT_W: u32 = 800;
@@ -209,7 +209,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     .await
     .expect("timed out waiting for the resize + repaint");
 
-    // Phase 6 (detach/reattach): drop the browser, reclaim the slot with the
+    // Detach/reattach: drop the browser, reclaim the slot with the
     // same token, and reattach. The still-running engine must re-announce the
     // (resized) geometry and repaint the full desktop through a real server.
     ws.close(None).await.unwrap();

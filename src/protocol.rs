@@ -40,12 +40,12 @@ pub enum ClientMsg {
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
     Key { code: String, pressed: bool },
     /// The browser viewport, in device pixels — the size the browser wants
-    /// the remote desktop to be (phase 4). Engines that can drive the remote
+    /// the remote desktop to be. Engines that can drive the remote
     /// size act on it (VNC `SetDesktopSize`); the rest ignore it and the
-    /// frontend keeps its phase-3 scrollbars.
+    /// frontend keeps its scrollbars.
     Viewport { w: u16, h: u16 },
-    /// Re-announce the desktop size and repaint the whole framebuffer
-    /// (phase 6). Injected by the session layer when a browser (re)attaches to
+    /// Re-announce the desktop size and repaint the whole framebuffer.
+    /// Injected by the session layer when a browser (re)attaches to
     /// a running engine; a browser may also send it to recover from a
     /// corrupted canvas.
     Refresh,
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(&buf[..info.buffer_size()], rgb.as_slice());
     }
 
-    // Phase 2's reason to exist: the binary frame must beat the old
+    // The binary tile frame's reason to exist: it must beat the old
     // base64-in-JSON baseline by a wide margin for screen-like content.
     #[test]
     fn tile_frame_beats_old_base64_json_baseline() {

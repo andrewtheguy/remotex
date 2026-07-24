@@ -14,7 +14,7 @@ import {
   type Point,
 } from "./touchGestures.ts";
 
-// The connection-flow state machine (phase 5/6):
+// The connection-flow state machine:
 //
 //   connecting ──► connected ──(drop)──► reconnecting ──► connected …
 //        │              │                     │
@@ -42,7 +42,7 @@ export interface RemoteSize {
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
 export const SESSION_KEY = "rdpweb.sessionId";
-// Logout chord, reserved until phase 10 grows real chrome for it: compound
+// Logout chord, reserved until the toolbar grows a real button for it: compound
 // enough that no remote app plausibly needs it, swallowed before the key
 // pass-through so the remote never sees the L.
 const LOGOUT_CHORD_CODE = "KeyL";
@@ -61,7 +61,7 @@ export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
 const TOUCH_MIN_WIDTH = 1024;
 const TOUCH_MIN_HEIGHT = 768;
 
-// The touch view transform (phase 8): the pinch zoom and pan offset the
+// The touch view transform: the pinch zoom and pan offset the
 // gestures drive, layered on top of the fit-to-width base scale. One object
 // per hook instance, mutated in place; applyCanvasCss clamps it on every
 // repaint (a framebuffer resize or viewport rotation can strand a stale pan).
@@ -79,7 +79,7 @@ function touchFitScale(size: RemoteSize): number {
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
 
-// Phase 3 (full-screen canvas): display the framebuffer at 1:1 device pixels —
+// Full-screen canvas: display the framebuffer at 1:1 device pixels —
 // CSS size = remote pixels / devicePixelRatio. No scaling, no letterboxing;
 // when the remote desktop is larger than the viewport the canvas overflows and
 // the screen container scrolls.
@@ -92,7 +92,7 @@ function applyCanvasCss(
     return;
   }
   if (CAN_PINCH_ZOOM) {
-    // Touch (phase 8): fit-to-width base scale with the pinch zoom on top;
+    // Touch: fit-to-width base scale with the pinch zoom on top;
     // the pan offset (≤ 0 per axis) slides the scaled desktop under the
     // viewport. Zoom and pan are clamped here — the one place every repaint
     // funnels through — and the clamped values are written back so gesture
@@ -115,7 +115,7 @@ function applyCanvasCss(
   const dpr = window.devicePixelRatio || 1;
   let w = size.w / dpr;
   let h = size.h / dpr;
-  // When the remote matched the viewport (phase-4 dynamic resize), snap to it
+  // When the remote matched the viewport (dynamic resize), snap to it
   // exactly so fractional-dpr rounding can't spawn phantom scrollbars. The
   // ≤1px scale this introduces is imperceptible.
   const vw = document.documentElement.clientWidth;
@@ -145,7 +145,7 @@ async function postClaim(force: boolean): Promise<Response | null> {
   }
 }
 
-// The viewport report sent to the server (phase 4): the desired remote
+// The viewport report sent to the server: the desired remote
 // desktop size, clamped to the protocol's u16 range. Desktop asks for the
 // viewport in device pixels; touch asks for CSS pixels floored per axis at
 // 1024x768 (the mobile bounds — see CAN_PINCH_ZOOM).
@@ -275,7 +275,7 @@ export function useRemoteDesktop(
       open(claimed);
     };
 
-    // Viewport reports (phase 4 dynamic resize), deduped per connection: a
+    // Viewport reports (dynamic resize), deduped per connection: a
     // resize that settles on the same size sends nothing.
     let lastViewport: RemoteSize | null = null;
     const sendViewport = () => {
@@ -426,7 +426,7 @@ export function useRemoteDesktop(
     start(false);
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
-    // one message, not hundreds. The CSS size is re-derived too: the phase-3
+    // one message, not hundreds. The CSS size is re-derived too: the
     // snap-to-viewport depends on the viewport dimensions.
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const onViewportChange = () => {
@@ -489,7 +489,7 @@ export function useRemoteDesktop(
     const pressedButtons = new Set<MouseButton>();
     const pressedKeys = new Set<string>();
 
-    // Touch gestures (phase 8), only on pinch-zoom-capable devices — they
+    // Touch gestures, only on pinch-zoom-capable devices — they
     // drive the same view transform applyCanvasCss renders.
     const gestures = CAN_PINCH_ZOOM
       ? attachTouchGestures(el, {
@@ -574,8 +574,8 @@ export function useRemoteDesktop(
     };
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
-      // The reserved logout chord (phase 7; a toolbar button comes with the
-      // phase-10 chrome). The modifiers already went to the remote as they
+      // The reserved logout chord (a toolbar button will replace it once the
+      // floating chrome lands). The modifiers already went to the remote as they
       // were pressed, so release them before dropping the session.
       if (e.ctrlKey && e.altKey && e.shiftKey && e.code === LOGOUT_CHORD_CODE) {
         releaseAll();

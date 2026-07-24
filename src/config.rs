@@ -106,7 +106,7 @@ pub struct TargetConfig {
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
-    /// Dynamic resize (phase 4): drive the remote desktop size from the
+    /// Dynamic resize: drive the remote desktop size from the
     /// browser viewport where the protocol supports it (VNC `SetDesktopSize`,
     /// TigerVNC-family servers). Off by default; without it (or on servers
     /// that can't resize) the desktop keeps its connect-time size and the
@@ -132,7 +132,7 @@ pub struct ServerSection {
     pub port: Option<u16>,
     /// Directory holding the built frontend; overrides [`default_static_dir`].
     pub static_dir: Option<PathBuf>,
-    /// Web-login credential (phase 7): `username:bcrypt_hash`, generated with
+    /// Web-login credential: `username:bcrypt_hash`, generated with
     /// `rdpweb gen-passwd <username>`. Required — without a login everything
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
@@ -161,7 +161,7 @@ pub struct AppConfig {
     pub static_dir: PathBuf,
     /// The target profile this process serves.
     pub target: TargetConfig,
-    /// Web-login credential guarding `/api/*` and `/ws` (phase 7).
+    /// Web-login credential guarding `/api/*` and `/ws`.
     pub site_passwd: SitePasswd,
 }
 

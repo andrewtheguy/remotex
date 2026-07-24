@@ -1,4 +1,4 @@
-//! End-to-end test of the phase-2 tile transport against a real RDP server.
+//! End-to-end test of the tile transport against a real RDP server.
 //!
 //! Starts the dummy xrdp container (`tests/xrdp-dummy/`) with podman or
 //! docker, points the real axum server at it, and connects a raw WebSocket

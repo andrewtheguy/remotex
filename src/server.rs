@@ -25,9 +25,9 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub config: AppConfig,
-    /// The single session slot (phase 6): claim here, attach over `/ws`.
+    /// The single session slot: claim here, attach over `/ws`.
     pub sessions: Arc<SessionManager>,
-    /// Live auth sessions behind the login cookie (phase 7).
+    /// Live auth sessions behind the login cookie.
     pub auth: Arc<AuthSessions>,
 }
 
@@ -36,7 +36,7 @@ pub struct AppState {
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the
 ///   liveness probe.
 /// - the rest of `/api/*` and `/ws` — refuse requests without a valid login
-///   cookie (phase 7); unknown `/api/*` paths return 404 rather than the SPA,
+///   cookie; unknown `/api/*` paths return 404 rather than the SPA,
 ///   so API clients get an honest error.
 /// - `/ws`    — binary WebSocket carrying the remote-desktop session
 /// - fallback — the built SPA, served from `config.static_dir` on disk. Real
@@ -224,7 +224,7 @@ struct ClaimResponse {
     session_id: String,
 }
 
-/// Claim the single session slot (phase 6). Returns the token the WebSocket
+/// Claim the single session slot. Returns the token the WebSocket
 /// must present as `/ws?session=<token>`; 409 while another browser is
 /// attached (retry with `force` to take over).
 async fn claim_handler(
