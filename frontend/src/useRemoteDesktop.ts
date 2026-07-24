@@ -495,11 +495,13 @@ export function useRemoteDesktop(
   // set the input effect tracks. A no-op while the socket is down.
   const sendKeyCombo = useCallback((codes: string[]) => {
     const send = sendRef.current;
+    // Synthetic sends have no CapsLock state; case is expressed by including an
+    // explicit Shift code in `codes` (the soft keyboard's sticky modifier).
     for (const code of codes) {
-      send({ type: "key", code, pressed: true });
+      send({ type: "key", code, pressed: true, caps: false });
     }
     for (let i = codes.length - 1; i >= 0; i -= 1) {
-      send({ type: "key", code: codes[i], pressed: false });
+      send({ type: "key", code: codes[i], pressed: false, caps: false });
     }
   }, []);
 
@@ -614,7 +616,9 @@ export function useRemoteDesktop(
     // leaves the surface.
     const releaseAll = () => {
       for (const code of pressedKeys) {
-        send({ type: "key", code, pressed: false });
+        // caps is irrelevant on release: the backend releases the keysym it
+        // recorded at press time.
+        send({ type: "key", code, pressed: false, caps: false });
       }
       pressedKeys.clear();
       for (const button of pressedButtons) {
@@ -626,12 +630,22 @@ export function useRemoteDesktop(
     const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
       pressedKeys.add(e.code);
-      send({ type: "key", code: e.code, pressed: true });
+      send({
+        type: "key",
+        code: e.code,
+        pressed: true,
+        caps: e.getModifierState("CapsLock"),
+      });
     };
     const onKeyUp = (e: KeyboardEvent) => {
       e.preventDefault();
       pressedKeys.delete(e.code);
-      send({ type: "key", code: e.code, pressed: false });
+      send({
+        type: "key",
+        code: e.code,
+        pressed: false,
+        caps: e.getModifierState("CapsLock"),
+      });
     };
     const onBlur = () => releaseAll();
 

@@ -13,7 +13,11 @@ export type ClientMsg =
   | { type: "mouseMove"; x: number; y: number }
   | { type: "mouseButton"; button: MouseButton; pressed: boolean }
   | { type: "wheel"; dx: number; dy: number }
-  | { type: "key"; code: string; pressed: boolean }
+  // `caps` carries KeyboardEvent.getModifierState("CapsLock") so the backend
+  // knows the lock state authoritatively (it can't otherwise tell CapsLock is
+  // already on at connect time). Synthetic sends without a real event pass
+  // false — they express case through an explicit Shift code instead.
+  | { type: "key"; code: string; pressed: boolean; caps: boolean }
   | { type: "viewport"; w: number; h: number };
 
 // Server -> browser text frames: everything but screen tiles.

@@ -38,7 +38,16 @@ pub enum ClientMsg {
     /// Scroll wheel delta.
     Wheel { dx: f32, dy: f32 },
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
-    Key { code: String, pressed: bool },
+    /// `caps` is the browser's authoritative CapsLock lock state at the moment
+    /// of the event (`KeyboardEvent.getModifierState("CapsLock")`), so the
+    /// backend never has to infer it — it can't be observed until the first key
+    /// event otherwise, which would mis-case letters when CapsLock was already
+    /// on at connect time. Used by the VNC engine; RDP lets the host track it.
+    Key {
+        code: String,
+        pressed: bool,
+        caps: bool,
+    },
     /// The browser viewport, in device pixels — the size the browser wants
     /// the remote desktop to be. Engines that can drive the remote
     /// size act on it (VNC `SetDesktopSize`); the rest ignore it and the
@@ -188,12 +197,19 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"wheel","dx":0.0,"dy":-2.5}"#).unwrap(),
             ClientMsg::Wheel { dy, .. } if dy == -2.5
         ));
-        match serde_json::from_str::<ClientMsg>(r#"{"type":"key","code":"KeyA","pressed":false}"#)
-            .unwrap()
+        match serde_json::from_str::<ClientMsg>(
+            r#"{"type":"key","code":"KeyA","pressed":false,"caps":true}"#,
+        )
+        .unwrap()
         {
-            ClientMsg::Key { code, pressed } => {
+            ClientMsg::Key {
+                code,
+                pressed,
+                caps,
+            } => {
                 assert_eq!(code, "KeyA");
                 assert!(!pressed);
+                assert!(caps);
             }
             other => panic!("unexpected: {other:?}"),
         }

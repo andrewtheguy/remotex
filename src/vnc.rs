@@ -259,7 +259,9 @@ async fn active_loop(
     let mut last_pos = (size.0 / 2, size.1 / 2);
     // The keysym actually sent for each pressed DOM code, so a key released
     // after Shift is let go still releases the shifted keysym it was pressed
-    // with (down/up symmetry). Doubles as the live Shift state.
+    // with (down/up symmetry). Doubles as the live Shift state. CapsLock is not
+    // tracked here — every key event carries the browser's authoritative lock
+    // state (see [`ClientMsg::Key`]).
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
 
     let result = loop {
@@ -585,12 +587,26 @@ fn translate_input(
             }
             out
         }
-        ClientMsg::Key { code, pressed } => {
+        ClientMsg::Key {
+            code,
+            pressed,
+            caps,
+        } => {
+            // CapsLock is never forwarded: leaving the server's Lock modifier
+            // off keeps our pre-resolved keysym from being re-cased by
+            // "Shift+Lock" keymap ambiguity. Case is applied here instead, from
+            // the browser-reported `caps` state carried on every key event.
+            if code == "CapsLock" {
+                return Vec::new();
+            }
             if pressed {
-                // Resolve the symbol against the live Shift state so the
-                // shifted keysym (`A`, `!`) is sent, not the base one.
-                let shift = pressed_keys.contains_key("ShiftLeft")
+                // Resolve the symbol against the live modifier state so the
+                // shifted keysym (`A`, `!`) is sent, not the base one. CapsLock
+                // affects letters only, XORed with Shift.
+                let shift_down = pressed_keys.contains_key("ShiftLeft")
                     || pressed_keys.contains_key("ShiftRight");
+                let is_letter = matches!(code.as_bytes(), [b'K', b'e', b'y', b'A'..=b'Z']);
+                let shift = if is_letter { shift_down ^ caps } else { shift_down };
                 match keymap::keysym(&code, shift) {
                     Some(sym) => {
                         pressed_keys.insert(code, sym);
@@ -1095,17 +1111,15 @@ mod tests {
         assert!(apply_resize(&desktop, (0, 480), &tx).await.is_err());
     }
 
-    /// Feed one key event through `translate_input` with shared state.
-    fn key(
-        keys: &mut HashMap<String, u32>,
-        code: &str,
-        pressed: bool,
-    ) -> Vec<u8> {
+    /// Feed one key event through `translate_input`, carrying the browser's
+    /// `caps` state (as the wire message does) and sharing the pressed-key map.
+    fn key(keys: &mut HashMap<String, u32>, code: &str, pressed: bool, caps: bool) -> Vec<u8> {
         let (mut mask, mut pos) = (0u8, (0u16, 0u16));
         translate_input(
             ClientMsg::Key {
                 code: code.to_owned(),
                 pressed,
+                caps,
             },
             &mut mask,
             &mut pos,
@@ -1116,28 +1130,82 @@ mod tests {
     #[test]
     fn key_input_maps_to_keysyms_and_drops_unknown_codes() {
         let mut keys = HashMap::new();
-        assert_eq!(key(&mut keys, "KeyA", true), key_event(true, 0x61).to_vec());
-        assert!(key(&mut keys, "MediaPlayPause", true).is_empty());
+        assert_eq!(
+            key(&mut keys, "KeyA", true, false),
+            key_event(true, 0x61).to_vec()
+        );
+        assert!(key(&mut keys, "MediaPlayPause", true, false).is_empty());
     }
 
     #[test]
     fn held_shift_sends_the_shifted_keysym() {
         let mut keys = HashMap::new();
         // Shift down, then a letter and a digit resolve to their shifted form.
-        assert_eq!(key(&mut keys, "ShiftLeft", true), key_event(true, 0xFFE1).to_vec());
-        assert_eq!(key(&mut keys, "KeyA", true), key_event(true, 0x41).to_vec()); // 'A'
-        assert_eq!(key(&mut keys, "Digit1", true), key_event(true, 0x21).to_vec()); // '!'
+        assert_eq!(
+            key(&mut keys, "ShiftLeft", true, false),
+            key_event(true, 0xFFE1).to_vec()
+        );
+        assert_eq!(
+            key(&mut keys, "KeyA", true, false),
+            key_event(true, 0x41).to_vec()
+        ); // 'A'
+        assert_eq!(
+            key(&mut keys, "Digit1", true, false),
+            key_event(true, 0x21).to_vec()
+        ); // '!'
     }
 
     #[test]
     fn release_uses_the_keysym_from_press_even_after_shift_is_let_go() {
         let mut keys = HashMap::new();
-        key(&mut keys, "ShiftLeft", true);
-        assert_eq!(key(&mut keys, "KeyA", true), key_event(true, 0x41).to_vec()); // 'A' down
+        key(&mut keys, "ShiftLeft", true, false);
+        assert_eq!(
+            key(&mut keys, "KeyA", true, false),
+            key_event(true, 0x41).to_vec()
+        ); // 'A' down
         // Shift released before the letter — the letter must still release 'A',
         // not 'a', or the server leaves the shifted keysym stuck down.
-        key(&mut keys, "ShiftLeft", false);
-        assert_eq!(key(&mut keys, "KeyA", false), key_event(false, 0x41).to_vec());
+        key(&mut keys, "ShiftLeft", false, false);
+        assert_eq!(
+            key(&mut keys, "KeyA", false, false),
+            key_event(false, 0x41).to_vec()
+        );
         assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn capslock_key_is_never_forwarded() {
+        let mut keys = HashMap::new();
+        // The CapsLock key itself produces no wire bytes and holds no state.
+        assert!(key(&mut keys, "CapsLock", true, true).is_empty());
+        assert!(key(&mut keys, "CapsLock", false, true).is_empty());
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn caps_flag_uppercases_letters_only() {
+        let mut keys = HashMap::new();
+        // With the browser reporting CapsLock on, a plain letter is uppercased.
+        assert_eq!(
+            key(&mut keys, "KeyA", true, true),
+            key_event(true, 0x41).to_vec()
+        ); // 'A'
+        key(&mut keys, "KeyA", false, true);
+        // Digits/symbols are unaffected by CapsLock.
+        assert_eq!(
+            key(&mut keys, "Digit1", true, true),
+            key_event(true, u32::from('1')).to_vec()
+        );
+    }
+
+    #[test]
+    fn caps_and_shift_cancel_for_letters() {
+        let mut keys = HashMap::new();
+        key(&mut keys, "ShiftLeft", true, true); // shift held, caps on
+        // caps XOR shift = off → lowercase letter.
+        assert_eq!(
+            key(&mut keys, "KeyA", true, true),
+            key_event(true, 0x61).to_vec()
+        ); // 'a'
     }
 }
