@@ -1,4 +1,4 @@
-//! The protocol-engine seam (docs/phase2-consolidation.md).
+//! The protocol-engine seam (docs/architecture.md).
 //!
 //! Every engine exposes the same contract: an async
 //! `run(config, input_rx, frame_tx)` that connects to the target, consumes

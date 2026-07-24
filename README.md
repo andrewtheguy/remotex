@@ -20,8 +20,7 @@ it with mouse and keyboard from a web browser.
 > window, otherwise a larger desktop scrolls, never scales. Credentials live
 > server-side and are never sent to the browser. See
 > [`docs/architecture.md`](docs/architecture.md) for the overall architecture
-> and [`docs/phase2-consolidation.md`](docs/phase2-consolidation.md) for the
-> phase plan.
+> and [`docs/roadmap.md`](docs/roadmap.md) for the remaining phases.
 
 ## Install (Linux & macOS)
 
@@ -67,7 +66,7 @@ tests/               end-to-end tests: protocol-level (protocol_e2e.rs) and
                      container-backed happy paths (rdp_tiles_e2e.rs against a
                      dummy xrdp, vnc_tiles_e2e.rs against a dummy TigerVNC)
 docs/architecture.md overall architecture: data path, protocol, engines
-docs/phase1-mvp.md   Phase 1 MVP plan
+docs/roadmap.md      remaining phases (5-9)
 ```
 
 ## Development

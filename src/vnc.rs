@@ -1,6 +1,6 @@
 //! Server-side VNC session: a minimal RFB client (RFC 6143).
 //!
-//! Guacamole-style baseline (docs/phase2-consolidation.md): protocol 3.8,
+//! Guacamole-style baseline (docs/architecture.md): protocol 3.8,
 //! security None or classic VncAuth, and the **Raw encoding only** — the one
 //! encoding every VNC server must support. No per-implementation workarounds:
 //! the backend↔VNC hop is LAN, so clever wire encodings buy nothing there;

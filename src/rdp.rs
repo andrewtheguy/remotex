@@ -6,7 +6,7 @@
 //! session — decoding the framebuffer into [`ServerMsg::Tile`] updates and
 //! injecting [`ClientMsg`] input as RDP fast-path PDUs.
 //!
-//! See docs/phase1-mvp.md for the design.
+//! See docs/architecture.md for the design.
 
 use ironrdp::connector::{
     ClientConnector, ConnectionResult, Config, Credentials, DesktopSize, ServerName,
@@ -209,7 +209,7 @@ async fn active_loop(
                 }
                 ActiveStageOutput::DeactivateAll => {
                     // Deactivation-Reactivation (e.g. resolution change) is out of
-                    // scope for the MVP — see docs/phase1-mvp.md.
+                    // scope — see docs/architecture.md.
                     warn!("rdp: received DeactivateAll (reactivation not implemented)");
                 }
                 _ => {}

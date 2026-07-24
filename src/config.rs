@@ -1,5 +1,5 @@
 //! TOML configuration, in remotex's shape: a `[server]` block plus
-//! `[[targets]]` profiles (see docs/phase2-consolidation.md).
+//! `[[targets]]` profiles (see docs/architecture.md).
 //!
 //! Config comes **only** from the TOML file (plus the `--config`/`--target`
 //! CLI selectors). There are deliberately no environment variables and no
@@ -40,7 +40,7 @@ impl Security {
 }
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
-/// the same browser protocol (docs/phase2-consolidation.md): `rdp` via IronRDP
+/// the same browser protocol (docs/architecture.md): `rdp` via IronRDP
 /// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -70,7 +70,7 @@ impl Protocol {
 /// One `[[targets]]` profile: a remote machine plus its credentials.
 ///
 /// Credentials live here (server-side) and are used during the RDP handshake.
-/// They are never sent to the browser — see docs/phase1-mvp.md.
+/// They are never sent to the browser — see docs/architecture.md.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetConfig {

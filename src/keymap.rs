@@ -6,7 +6,7 @@
 //! The scancode is the set-1 make code; the release variant is derived by the
 //! caller via the `RELEASE` flag.
 //!
-//! Both tables assume a US layout — see docs/phase1-mvp.md. For keysyms this
+//! Both tables assume a US layout — see docs/architecture.md. For keysyms this
 //! means the *unshifted* symbol of each key is sent; the VNC server combines
 //! it with the modifier state it tracks from Shift/etc. key events, which is
 //! how X servers (Xvnc, x11vnc) resolve keysym → keycode + modifiers.

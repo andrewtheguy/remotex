@@ -5,10 +5,8 @@ server with **server-side protocol engines**) plus one Vite/React SPA. The
 browser speaks a single uniform protocol no matter what the target speaks —
 RDP and VNC sessions are indistinguishable to the frontend.
 
-This document describes the system as built. The reasoning that got here
-lives in the phase documents: [`phase1-mvp.md`](phase1-mvp.md) (the MVP) and
-[`phase2-consolidation.md`](phase2-consolidation.md) (server-side decode for
-all protocols, the transport, and the phase plan).
+This document describes the system as built. Remaining work lives in
+[`roadmap.md`](roadmap.md).
 
 ## Data path
 
@@ -42,8 +40,7 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
   transport to optimize (backend → browser is the bottleneck link — the
   targets are LAN, the browser may be on weak WAN), enables session
   resume/takeover later, and makes "add a protocol" mean "write another
-  engine", not "ship another in-browser decoder". Full rationale:
-  [`phase2-consolidation.md`](phase2-consolidation.md).
+  engine", not "ship another in-browser decoder".
 - **Single session, permanently.** This is a single-user program with one
   active session slot. Session takeover (a new browser force-claims the slot
   and evicts the previous holder) is planned; concurrent sessions, session
@@ -196,4 +193,4 @@ Done: phase 1 (MVP), phase 2 (transport + VNC engine + TOML config), phase 3
 (full-screen canvas), phase 4 (VNC dynamic resize). Planned: connection-flow
 UX (5), session management (6), soft keyboard + floating UI (7), multi-target
 picker (8), the remotex-v2 rename (9) — the list lives in
-[`phase2-consolidation.md`](phase2-consolidation.md).
+[`roadmap.md`](roadmap.md).

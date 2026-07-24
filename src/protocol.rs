@@ -1,8 +1,8 @@
 //! Wire protocol shared (in shape) with the frontend `src/protocol.ts`.
 //!
 //! `ClientMsg` flows browser -> server (input events) as JSON text frames.
-//! Server -> browser, the transport is split by weight (phase 2 — see
-//! docs/phase2-consolidation.md):
+//! Server -> browser, the transport is split by weight (see
+//! docs/architecture.md):
 //!
 //! - **Screen tiles** are binary WebSocket frames: a fixed 10-byte header
 //!   followed by a PNG-compressed payload. This replaced base64 RGBA inside
