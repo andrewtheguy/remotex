@@ -77,8 +77,16 @@ main() {
     error "release ${tag} not found"; exit 1
   fi
   local expected
-  expected="$(echo "$release_json" | grep -A40 "\"name\": *\"${asset}\"" \
-    | grep '"digest"' | head -1 | grep -o 'sha256:[a-f0-9]*' | cut -d: -f2)"
+  if command -v jq >/dev/null 2>&1; then
+    # Select the asset by exact name and strip the "sha256:" prefix.
+    expected="$(echo "$release_json" \
+      | jq -r --arg n "$asset" '.assets[] | select(.name == $n) | .digest // empty' \
+      | head -1 | sed 's/^sha256://')"
+  else
+    # Fallback: scan the JSON textually near the matching asset name.
+    expected="$(echo "$release_json" | grep -A40 "\"name\": *\"${asset}\"" \
+      | grep '"digest"' | head -1 | grep -o 'sha256:[a-f0-9]*' | cut -d: -f2)"
+  fi
   if [ -z "$expected" ]; then
     error "no ${asset} in release ${tag} (unsupported platform for this release?)"; exit 1
   fi

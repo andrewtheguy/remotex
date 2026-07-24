@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::Parser;
-use log::info;
+use log::{info, warn};
 use rdpweb::cli::{Cli, Commands};
 use rdpweb::config::AppConfig;
 use rdpweb::server;
@@ -13,7 +13,12 @@ async fn main() -> anyhow::Result<()> {
     // variables, so real environment variables take precedence over both.
     let _ = dotenvy::dotenv();
     if let Some(env_file) = rdpweb::config::default_env_file() {
-        let _ = dotenvy::from_path(&env_file);
+        // Surface failures (e.g. a mistyped RDPWEB_ENV_FILE override, or an
+        // unreadable file) instead of silently ignoring them. The logger isn't
+        // initialized yet, so write to stderr directly.
+        if let Err(e) = dotenvy::from_path(&env_file) {
+            eprintln!("warning: could not load env file {}: {e}", env_file.display());
+        }
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -62,6 +67,20 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
+    // Surface a misconfigured static path before we start listening. The SPA
+    // handler still 404s per-request; this just makes the cause obvious.
+    if !config.static_dir.is_dir() {
+        warn!(
+            "static dir {} not found — the web UI will 404 (set --static-dir / RDPWEB_STATIC_DIR)",
+            config.static_dir.display()
+        );
+    } else if !config.static_dir.join("index.html").is_file() {
+        warn!(
+            "no index.html in static dir {} — the web UI will 404",
+            config.static_dir.display()
+        );
+    }
+
     let app = server::router(config.clone());
 
     let addr = if config.host.contains(':') {
