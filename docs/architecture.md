@@ -60,8 +60,9 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
 src/
   main.rs            entry: CLI dispatch + serve
   lib.rs             library surface (shared with the integration tests)
-  cli.rs             clap CLI (serve --config/--target)
+  cli.rs             clap CLI (serve --config/--target, gen-passwd)
   config.rs          TOML config ([server] + [[targets]] profiles)
+  auth.rs            web login (site_passwd credential + auth sessions)
   server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
   ws.rs              WebSocket <-> session bridge
   session.rs         the session slot (claim/attach/detach/takeover) and the
@@ -105,6 +106,40 @@ claim rules on top of a persistent engine:
 
 One slot, permanently: takeover replaces the attached browser, never adds
 one — concurrent sessions, sharing, and brokers stay out of scope.
+
+## Web login (phase 7)
+
+Everything session-related refuses unauthenticated requests, remotex-style
+(src/auth.rs):
+
+- **Credential** — `[server].site_passwd` holds `username:bcrypt_hash`
+  verbatim (TOML needs no escaping for bcrypt's alphabet; no base64 wrapping
+  like remotex). Required; generated with `rdpweb gen-passwd <username>`
+  (hidden prompt on a TTY, reads a line when piped).
+- **Login** — `POST /api/auth/login` (`{username, password}`) verifies via
+  bcrypt (off the async workers) and sets the `rdpweb_session` cookie:
+  `HttpOnly; SameSite=Strict; Path=/`, plus `Secure` only when
+  `x-forwarded-proto: https` says a TLS proxy is in front (Safari drops
+  Secure cookies set over plain HTTP). Tokens live in an in-memory map with
+  a sliding 6-hour TTL — a restart logs every browser out, harmless for a
+  single-user program. `POST /api/auth/logout` invalidates the caller's
+  token; `GET /api/auth/status` answers `{authenticated}` for the SPA's
+  mount-time check.
+- **Guards** — middleware refuses `/api/config`, `/api/session`, and the
+  `/ws` upgrade (the handshake itself 401s) without a live token. Public:
+  `/api/health`, `/api/auth/*`, and the SPA shell — it renders the login
+  screen and holds no secrets.
+
+The auth session ("may this browser talk to the server?") is independent of
+the session slot ("which browser owns the desktop?"): takeover evicts the
+other browser's WebSocket but never logs it out. In the frontend, `App.tsx`
+mounts the desktop only once authenticated (mounting claims the slot), shows
+the login screen otherwise — with the app version at the bottom, injected
+from Cargo.toml via a Vite define — and returns to it when a claim answers
+401. Until the phase-10 chrome exists, logout is the reserved
+**Ctrl+Alt+Shift+L** chord (swallowed before key pass-through, held input
+released first) or the minimal **Disconnect** button in the dead space below
+the fixed-size canvas; both end the browser's login, not the engine.
 
 ## The wire protocol (browser ↔ backend)
 
@@ -176,10 +211,12 @@ Vite + React 19 + TypeScript, managed with Bun (`frontend/`). Three files
 matter:
 
 - `protocol.ts` — TS mirror of the wire protocol (binary tile parsing).
+- `App.tsx` — the auth gate: login screen vs the desktop (phase 7).
+- `Login.tsx` — the login form, with the app version pinned at the bottom.
 - `useRemoteDesktop.ts` — the one hook: session claim + WebSocket lifecycle,
-  tile rendering, input capture, viewport reporting.
+  tile rendering, input capture, viewport reporting, the logout chord.
 - `RemoteDesktop.tsx` — the full-screen canvas + input overlay + the
-  connection-status overlay.
+  connection-status overlay + the disconnect CTA below the canvas.
 
 **Connection flow (phase 5).** The hook claims the session slot, opens the
 WebSocket with the token, and reconnects automatically with capped backoff
@@ -218,7 +255,8 @@ so nothing sticks on the remote.
 
 One global TOML file (`--config <path>`, or `<prefix>/etc/rdpweb.toml` in the
 installed layout — see [`install.md`](install.md) and `packaging/`). A
-`[server]` block (bind host/port, static dir) plus `[[targets]]` profiles:
+`[server]` block (bind host/port, static dir, the required `site_passwd`
+web-login credential) plus `[[targets]]` profiles:
 protocol, host/port, credentials, RDP-only `width`/`height`/`security`, and
 the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
 (default: the first). See `packaging/etc/rdpweb.toml.example`.
@@ -241,6 +279,6 @@ the VNC `resize` opt-in. The serve subcommand picks a target with `--target`
 
 Done: phase 1 (MVP), phase 2 (transport + VNC engine + TOML config), phase 3
 (full-screen canvas), phase 4 (VNC dynamic resize), phase 5 (connection-flow
-UX), phase 6 (session management). Planned: auth (7), mobile gestures (8),
-the remotex-v2 rename (9), soft keyboard + floating UI (10), multi-target
-picker (11) — the list lives in [`roadmap.md`](roadmap.md).
+UX), phase 6 (session management), phase 7 (web login). Planned: mobile
+gestures (8), the remotex-v2 rename (9), soft keyboard + floating UI (10),
+multi-target picker (11) — the list lives in [`roadmap.md`](roadmap.md).
