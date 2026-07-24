@@ -1,3 +1,20 @@
+# The gateway is the workspace root package; the macOS agent and the protocol
+# crate it shares with the gateway live under crates/ (see
+# docs/mac-agent-plan.md).
+#
+# `default-members` deliberately omits rxa-agent: it only compiles on macOS, so
+# a bare `cargo build` / `cargo clippy -- -D warnings` / `cargo test` on Linux
+# must never reach for it. Build it explicitly with `-p rxa-agent` on a Mac.
+#
+# Note for anyone editing this file: frontend/vite.config.ts regexes the first
+# line matching `^version = "…"` out of this manifest to stamp the login screen.
+# Do not introduce a second top-level `version` key (e.g. a
+# `[workspace.package]` inheritance block) above `[package]`.
+[workspace]
+members = [".", "crates/rxa-proto", "crates/rxa-agent"]
+default-members = [".", "crates/rxa-proto"]
+resolver = "3"
+
 [package]
 name = "remotex"
 version = "0.0.19"

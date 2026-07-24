@@ -1,0 +1,9 @@
+[package]
+name = "rxa-proto"
+version = "0.0.19"
+edition = "2024"
+
+# Deliberately platform-independent and dependency-light: this crate is the one
+# place the gateway and the macOS agent agree on the wire, and it must build and
+# unit-test on Linux (the agent crate never does). See docs/mac-agent-plan.md.
+[dependencies]

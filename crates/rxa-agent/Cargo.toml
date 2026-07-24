@@ -1,0 +1,14 @@
+[package]
+name = "rxa-agent"
+version = "0.0.19"
+edition = "2024"
+
+# macOS only. Excluded from the workspace's `default-members`, so it is never
+# built by a bare `cargo build` / `cargo clippy` / `cargo test` on Linux —
+# build it explicitly on a Mac with `cargo build -p rxa-agent`.
+[[bin]]
+name = "remotex-agent"
+path = "src/main.rs"
+
+[dependencies]
+rxa-proto = { path = "../rxa-proto" }

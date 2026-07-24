@@ -2810,6 +2810,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rxa-agent"
+version = "0.0.19"
+dependencies = [
+ "rxa-proto",
+]
+
+[[package]]
+name = "rxa-proto"
+version = "0.0.19"
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
