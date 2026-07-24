@@ -109,7 +109,9 @@ body {
   align-items: center;
   justify-content: center;
   outline: none;
-  cursor: crosshair;
+  /* The remote cursor is rendered server-side into the framebuffer, so hide the
+     browser's own cursor to avoid showing two pointers. */
+  cursor: none;
 }
 
 .placeholder {
