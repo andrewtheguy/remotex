@@ -163,13 +163,17 @@ jobs:
   # Each arch builds on its own native runner — no QEMU, no cross-compilation —
   # and plain `docker` (rather than buildx) because there is nothing to
   # cross-build and it lets the image be smoke-tested before it is pushed.
+  #
+  # These runners need no pinning (unlike the tarball builds above): the runner
+  # only unpacks a tarball and drives docker, so all that matters is its arch —
+  # the glibc that has to line up is the *base image*'s against the binary's.
   docker:
     needs: [prepare, release]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-latest
             arch: amd64
             target-note: linux-x86_64
           - runner: ubuntu-24.04-arm
