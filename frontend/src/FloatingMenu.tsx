@@ -8,13 +8,12 @@ import {
 } from "react";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 
-// Phase 9: the floating chrome ported from remotex — a draggable ☰ button that
-// toggles a toolbar drawer. The drawer carries remotex's functional controls
-// that map onto this project (browser-swallowed keys, modifier taps, the
-// gesture cheat-sheet) plus the logout affordance that used to live in the
-// Ctrl+Alt+Shift+L chord and the below-canvas bar. Phase 10 wired the drawer's
-// Soft keyboard button to the on-screen keyboard panel; Clipboard is still a
-// placeholder until its phase lands.
+// Phase 9: the floating chrome — a draggable ☰ button that toggles a toolbar
+// drawer. The drawer carries this project's controls (browser-swallowed keys,
+// modifier taps, the gesture cheat-sheet) plus the logout affordance that used
+// to live in the Ctrl+Alt+Shift+L chord and the below-canvas bar. Phase 10
+// wired the drawer's Soft keyboard button to the on-screen keyboard panel;
+// Clipboard is still a placeholder until its phase lands.
 const FAB_SIZE = 40;
 const FAB_MARGIN = 12;
 // Pointer travel (px) before a press becomes a drag rather than a click.

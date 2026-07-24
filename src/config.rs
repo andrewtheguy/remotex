@@ -1,10 +1,10 @@
-//! TOML configuration, in remotex's shape: a `[server]` block plus
-//! `[[targets]]` profiles (see docs/architecture.md).
+//! TOML configuration: a `[server]` block plus `[[targets]]` profiles (see
+//! docs/architecture.md).
 //!
 //! Config comes **only** from the TOML file (plus the `--config`/`--target`
 //! CLI selectors). There are deliberately no environment variables and no
 //! `.env` loading — env files shadowing the real environment caused subtle
-//! bugs in the remotex/bun setup, and credentials belong in one 600-mode file.
+//! setup bugs, and credentials belong in one 600-mode file.
 //!
 //! The config is **global-only**: the installed `<prefix>/etc/rdpweb.toml`, or
 //! an explicit `--config <path>`. No per-user or working-directory files are

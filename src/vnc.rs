@@ -806,8 +806,8 @@ fn host_port(host: &str, port: u16) -> String {
 mod tests {
     use super::*;
 
-    // Vectors generated from remotex's known-good vncAuth implementation
-    // (server/vncAuth.ts, node:crypto des-ecb) with the challenge 00 01 .. 0f.
+    // Vectors generated from a reference VNC auth implementation
+    // (node:crypto des-ecb) with the challenge 00 01 .. 0f.
     #[test]
     fn auth_response_matches_reference_implementation() {
         let challenge: [u8; 16] = std::array::from_fn(|i| i as u8);

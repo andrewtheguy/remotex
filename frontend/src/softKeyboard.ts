@@ -1,13 +1,11 @@
 // Soft-keyboard layout, expressed in DOM `KeyboardEvent.code` strings — the
 // same currency the whole input path already speaks (see protocol.ts and the
-// backend keymap.rs). Ported from remotex's soft keyboard, which emitted raw
-// X11 keysyms (and a separate shiftKeysym per key) because its backend only
-// accepted keysyms. Here we control the backend and already map every DOM code
-// to an RDP scancode *and* an X11 keysym, resolving the shifted symbol from the
-// live Shift state (RDP defers to the remote host; VNC picks the shifted keysym
-// in keymap.rs) — so a soft key is just a code, and shifted symbols fall out of
-// holding the real Shift modifier. That reuses the existing pipeline for both
-// engines instead of minting a second, keysym-only input path.
+// backend keymap.rs). The backend maps every DOM code to an RDP scancode *and*
+// an X11 keysym, resolving the shifted symbol from the live Shift state (RDP
+// defers to the remote host; VNC picks the shifted keysym in keymap.rs) — so a
+// soft key is just a code, and shifted symbols fall out of holding the real
+// Shift modifier. That reuses the existing pipeline for both engines instead
+// of minting a second, keysym-only input path.
 
 // ── Types ──
 
