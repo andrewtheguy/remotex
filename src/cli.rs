@@ -11,16 +11,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start the web server
+    /// Start the web server. Every [[targets]] profile is served; the browser
+    /// picks one after login (there is no --target selector).
     Serve {
         /// TOML config file (default: the installed <prefix>/etc/remotex.toml;
         /// required when running from a checkout)
         #[arg(short, long)]
         config: Option<PathBuf>,
-
-        /// Name of the [[targets]] profile to serve (default: the first one)
-        #[arg(short, long)]
-        target: Option<String>,
     },
 
     /// Generate a [server].site_passwd credential for the web login: prompts
@@ -38,24 +35,27 @@ mod tests {
     use super::{Cli, Commands};
 
     #[test]
-    fn serve_parses_config_and_target() {
-        let cli =
-            Cli::try_parse_from(["remotex", "serve", "-c", "/etc/x.toml", "--target", "win"])
-                .unwrap();
-        let Commands::Serve { config, target } = cli.command else {
+    fn serve_parses_config() {
+        let cli = Cli::try_parse_from(["remotex", "serve", "-c", "/etc/x.toml"]).unwrap();
+        let Commands::Serve { config } = cli.command else {
             panic!("expected the serve subcommand");
         };
         assert_eq!(config.as_deref(), Some(std::path::Path::new("/etc/x.toml")));
-        assert_eq!(target.as_deref(), Some("win"));
     }
 
     #[test]
-    fn serve_selectors_are_optional() {
+    fn serve_config_is_optional() {
         let cli = Cli::try_parse_from(["remotex", "serve"]).unwrap();
-        let Commands::Serve { config, target } = cli.command else {
+        let Commands::Serve { config } = cli.command else {
             panic!("expected the serve subcommand");
         };
-        assert!(config.is_none() && target.is_none());
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn serve_rejects_the_removed_target_selector() {
+        // Target selection is browser-side now: --target is gone.
+        assert!(Cli::try_parse_from(["remotex", "serve", "--target", "win"]).is_err());
     }
 
     #[test]

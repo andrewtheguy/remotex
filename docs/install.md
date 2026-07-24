@@ -34,8 +34,8 @@ remotex serve
 Then open the printed URL (default <http://127.0.0.1:52380>). The TOML config
 format is documented in the [README](../README.md#configuration); all
 configuration lives in that file (no environment variables). Pass
-`--config <path>` to use a different file and `--target <name>` to pick a
-`[[targets]]` profile.
+`--config <path>` to use a different file. Every `[[targets]]` profile is
+served; you pick one from a picker in the browser after logging in.
 
 ## Options
 

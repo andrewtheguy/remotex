@@ -14,23 +14,29 @@ import {
   type Point,
 } from "./touchGestures.ts";
 
-// The connection-flow state machine:
+// The WebSocket/claim connection-flow state machine (independent of the
+// picker-vs-desktop `mode` the attached socket carries):
 //
 //   connecting ──► connected ──(drop)──► reconnecting ──► connected …
 //        │              │                     │
 //     (409) busy     (4001) takenOver      (409) busy
 //        │              │
-//     takeOver()     takeOver()            error ◄─(fatal server error)
+//     takeOver()     takeOver()
 //
-// Reconnects are automatic with capped backoff; busy/takenOver/error wait for
-// the user (takeOver/retry).
+// Reconnects are automatic with capped backoff; busy/takenOver wait for the
+// user (takeOver). A fatal engine error is no longer a connection state — the
+// socket stays up and the session returns to the picker with the error shown
+// there (see `connectError`).
 export type ConnectionStatus =
   | "connecting"
   | "connected"
   | "reconnecting"
   | "busy" // another browser holds the session slot (claim answered 409)
-  | "takenOver" // this socket was evicted by a takeover (close code 4001)
-  | "error"; // the server reported a fatal session error
+  | "takenOver"; // this socket was evicted by a takeover (close code 4001)
+
+// Which post-login state the attached session is in, driven by the server's
+// `picker`/`connected` status messages: the target picker, or a live desktop.
+export type SessionMode = "picker" | "desktop";
 
 export interface RemoteSize {
   w: number;
@@ -161,17 +167,20 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
   };
 }
 
-// Claims the single session slot (POST /api/session), opens the /ws WebSocket
-// with the claim token, renders incoming screen tiles onto `canvasRef`, and
-// forwards mouse + keyboard input (plus touch gestures on pinch-zoom-capable
-// devices — see touchGestures.ts) captured over `overlayRef` as ClientMsg.
-// Reconnects automatically after drops; busy/takenOver/error surface to the
-// caller with `takeOver`/`retry` to resolve them.
+// Claims the single session slot (POST /api/session) and opens the /ws
+// WebSocket with the claim token. The attached socket starts in the post-login
+// **picker** (`mode === "picker"`): call `connect(name)` to start a target
+// session (`mode` flips to "desktop"), and `switchTarget()` to tear it down and
+// return to the picker. In desktop mode it renders incoming screen tiles onto
+// `canvasRef` and forwards mouse + keyboard input (plus touch gestures on
+// pinch-zoom-capable devices — see touchGestures.ts) captured over `overlayRef`
+// as ClientMsg. Reconnects automatically after drops; busy/takenOver surface to
+// the caller with `takeOver` to resolve them.
 //
 // `onUnauthorized` fires when a claim answers 401 — the login is gone, so the
 // caller swaps back to the login screen. It must be referentially stable
 // (useCallback) or the connection/input effects tear down and redo. Logout is
-// the floating menu's Disconnect button (see FloatingMenu.tsx), not this hook.
+// the floating menu's Log out button (see FloatingMenu.tsx), not this hook.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
@@ -179,7 +188,14 @@ export function useRemoteDesktop(
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Picker vs desktop, and (when connected) which target. `connectError` holds
+  // the last engine error to show against the picker after a failed connect.
+  const [mode, setMode] = useState<SessionMode>("picker");
+  const [connectedTarget, setConnectedTarget] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  // The target a connect() is waiting on, so the picker can show progress
+  // until the server answers with `connected` (or an error).
+  const [pendingTarget, setPendingTarget] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -213,14 +229,29 @@ export function useRemoteDesktop(
     let ws: WebSocket | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
-    // Set when the server reports a fatal session error; stops the reconnect
-    // loop so the message stays readable until the user retries.
-    let fatal = false;
+
+    // Drop any retained framebuffer. Every interstitial (connecting,
+    // reconnecting, busy, taken over) and the picker fully hide the canvas
+    // behind a solid overlay, and the desktop is always rebuilt from a full
+    // repaint (the server's Refresh) on the next connect — so there is nothing
+    // worth keeping behind the overlay, and holding stale pixels would only
+    // flash on the way back.
+    const clearDesktop = () => {
+      sizeRef.current = null;
+      setSize(null);
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      ctxRef.current = null;
+    };
 
     const scheduleRetry = () => {
       if (disposed) {
         return;
       }
+      clearDesktop();
       setStatus("reconnecting");
       const delay = Math.min(1000 * 2 ** attempts, MAX_RETRY_DELAY_MS);
       attempts += 1;
@@ -264,6 +295,7 @@ export function useRemoteDesktop(
         return;
       }
       if (claimed === "busy") {
+        clearDesktop();
         setStatus("busy");
         return;
       }
@@ -322,14 +354,13 @@ export function useRemoteDesktop(
         ws = null;
         wsRef.current = null;
         if (ev.code === CLOSE_EVICTED) {
+          clearDesktop();
           setStatus("takenOver");
           return;
         }
-        if (fatal) {
-          return; // the error state is already showing; the user retries
-        }
-        // Anything else — network drop, server restart, session ended, stale
-        // token (4000) — goes through the reclaim + reconnect path.
+        // Anything else — network drop, server restart, stale token (4000) —
+        // goes through the reclaim + reconnect path. (An engine that ends no
+        // longer closes the socket; the server returns it to the picker.)
         scheduleRetry();
       };
       // PNG tiles decode asynchronously (createImageBitmap), so all messages
@@ -376,10 +407,6 @@ export function useRemoteDesktop(
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
-      // A desktop arrived, so this session is healthy: reset the reconnect
-      // backoff (an onopen-time reset would let a session that dies right
-      // after connecting retry at full speed forever).
-      attempts = 0;
       const canvas = canvasRef.current;
       const s = { w: msg.w, h: msg.h };
       if (canvas) {
@@ -398,25 +425,53 @@ export function useRemoteDesktop(
     };
 
     const handleControlMsg = (msg: ControlMsg) => {
+      // Any control message proves the socket attached to the slot, so reset
+      // the reconnect backoff (an onopen-time reset would let a slot that
+      // closes right after connecting retry at full speed forever).
+      attempts = 0;
       switch (msg.type) {
         case "resize":
           handleResize(msg);
           break;
         case "error":
+          // The engine failed (or a connect was refused); show the message
+          // against the picker rather than a dead-end error screen, and end any
+          // pending connect so the picker re-enables. An engine failure is
+          // followed by `picker`; a refusal leaves the slot already there.
           console.error("remote session error:", msg.message);
-          fatal = true;
-          setErrorMessage(msg.message);
-          setStatus("error");
+          setConnectError(msg.message);
+          setPendingTarget(null);
+          break;
+        case "connected":
+          // A target session started (picker connect, reattach, or takeover of
+          // a live desktop): switch to the desktop.
+          setConnectError(null);
+          setPendingTarget(null);
+          setConnectedTarget(msg.name);
+          setMode("desktop");
+          // A freshly-started engine needs the current viewport (dynamic-resize
+          // VNC acts on it); the report sent at socket-open predates this
+          // engine, so re-send it, undeduped.
+          lastViewport = null;
+          sendViewport();
+          break;
+        case "picker":
+          // No target selected (idle attach, switch-target, or an engine that
+          // ended): show the picker. Drop any retained framebuffer so a later
+          // connect starts from a clean "waiting for the desktop" state.
+          setPendingTarget(null);
+          setConnectedTarget(null);
+          setMode("picker");
+          clearDesktop();
           break;
       }
     };
 
-    // User-driven (re)start: initial connect, takeover, take-back, retry.
+    // User-driven (re)start: initial connect, takeover, take-back.
     const start = (force: boolean) => {
       clearTimeout(retryTimer);
-      fatal = false;
       attempts = 0;
-      setErrorMessage(null);
+      clearDesktop();
       setStatus("connecting");
       if (ws) {
         const old = ws;
@@ -486,8 +541,20 @@ export function useRemoteDesktop(
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
   // action after being evicted (takenOver).
   const takeOver = useCallback(() => startRef.current?.(true), []);
-  // Start over without force: retry after a fatal session error.
-  const retry = useCallback(() => startRef.current?.(false), []);
+
+  // Pick a target from the picker: start its session over the live socket. The
+  // server answers `connected` (→ desktop) or `error` (shown on the picker).
+  const connect = useCallback((target: string) => {
+    setConnectError(null);
+    setPendingTarget(target);
+    sendRef.current({ type: "connect", target });
+  }, []);
+
+  // Switch target: tear the current session down and return to the picker. The
+  // server answers `picker`, which flips `mode` back.
+  const switchTarget = useCallback(() => {
+    sendRef.current({ type: "disconnect" });
+  }, []);
 
   // Inject a key chord from the floating toolbar — keys the browser swallows
   // (F5, Ctrl+W, Alt+F4…) or a bare modifier tap. Each DOM `code` is pressed in
@@ -675,10 +742,14 @@ export function useRemoteDesktop(
 
   return {
     status,
+    mode,
+    connectedTarget,
+    connectError,
+    pendingTarget,
     size,
-    errorMessage,
     takeOver,
-    retry,
+    connect,
+    switchTarget,
     sendKeyCombo,
     setBottomInset,
   };

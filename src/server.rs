@@ -62,7 +62,7 @@ pub fn router(config: AppConfig) -> Router {
     });
     let spa = ServeDir::new(&config.static_dir).fallback(spa_index);
 
-    let sessions = Arc::new(SessionManager::new(config.target.clone()));
+    let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     let state = AppState {
         config,
         sessions,
@@ -74,12 +74,14 @@ pub fn router(config: AppConfig) -> Router {
     // of falling through to the SPA index.
     let api = Router::new()
         .route("/health", get(|| async { "ok" }))
+        // Public: the login screen reads its branding before authenticating.
+        .route("/config", get(config_handler))
         .route("/auth/login", post(login_handler))
         .route("/auth/logout", post(logout_handler))
         .route("/auth/status", get(status_handler))
         .merge(
             Router::new()
-                .route("/config", get(config_handler))
+                .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
                 .route_layer(require_auth.clone()),
         )
@@ -178,6 +180,19 @@ async fn logout_handler(
 }
 
 #[derive(Serialize)]
+struct ConfigResponse {
+    branding: String,
+}
+
+/// Public, non-secret client config. Read on load so the login screen and the
+/// browser tab title carry the deployment's branding before authentication.
+async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
+    Json(ConfigResponse {
+        branding: state.config.branding.clone(),
+    })
+}
+
+#[derive(Serialize)]
 struct StatusResponse {
     authenticated: bool,
 }
@@ -191,21 +206,28 @@ async fn status_handler(State(state): State<AppState>, headers: HeaderMap) -> Js
 }
 
 #[derive(Serialize)]
-struct ConfigResponse {
-    target: String,
+struct TargetInfo {
+    name: String,
     protocol: &'static str,
     host: String,
     port: u16,
 }
 
-/// Non-secret info about the configured target. Never returns credentials.
-async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
-    Json(ConfigResponse {
-        target: state.config.target.name.clone(),
-        protocol: state.config.target.protocol.name(),
-        host: state.config.target.host.clone(),
-        port: state.config.target.port,
-    })
+/// The list of target profiles the browser may pick from the post-login picker.
+/// Non-secret info only — credentials never leave the server.
+async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>> {
+    let targets = state
+        .config
+        .targets
+        .iter()
+        .map(|t| TargetInfo {
+            name: t.name.clone(),
+            protocol: t.protocol.name(),
+            host: t.host.clone(),
+            port: t.port,
+        })
+        .collect();
+    Json(targets)
 }
 
 #[derive(Deserialize, Default)]

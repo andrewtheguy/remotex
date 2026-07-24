@@ -10,6 +10,28 @@ type AuthState = "checking" | "unauthenticated" | "authenticated";
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
+  // Deployment branding (login screen, interstitials, tab title). Defaults to
+  // "remotex" and stays there until GET /api/config answers — a public route,
+  // so it resolves before login.
+  const [branding, setBranding] = useState("remotex");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/config")
+      .then((res) => res.json() as Promise<{ branding: string }>)
+      .then(({ branding }) => {
+        if (!cancelled && branding) {
+          setBranding(branding);
+          document.title = branding;
+        }
+      })
+      .catch(() => {
+        // Keep the "remotex" default; the tab title stays index.html's.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -30,7 +52,7 @@ export default function App() {
     };
   }, []);
 
-  // Disconnect/logout: end this browser's login. The slot token goes too, so
+  // Log out: end this browser's login. The slot token goes too, so
   // the next login claims fresh instead of silently reattaching.
   const logout = useCallback(() => {
     sessionStorage.removeItem(SESSION_KEY);
@@ -47,9 +69,16 @@ export default function App() {
     return (
       <Login
         checking={authState === "checking"}
+        branding={branding}
         onLogin={() => setAuthState("authenticated")}
       />
     );
   }
-  return <RemoteDesktop onLogout={logout} onUnauthorized={unauthorized} />;
+  return (
+    <RemoteDesktop
+      branding={branding}
+      onLogout={logout}
+      onUnauthorized={unauthorized}
+    />
+  );
 }
