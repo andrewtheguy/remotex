@@ -20,7 +20,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 # Real TOML parse + semver check, not grep/sed (same as .github/workflows/release.yml).
-version="$(uv run python -c '
+# Plain python3 (3.11+ for tomllib) so this also runs on CI runners without uv.
+version="$(python3 -c '
 import re, sys, tomllib
 with open("Cargo.toml", "rb") as f:
     version = tomllib.load(f)["package"]["version"]
