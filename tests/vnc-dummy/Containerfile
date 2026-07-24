@@ -1,0 +1,19 @@
+# Minimal dummy VNC server for the e2e tests (tests/vnc_tiles_e2e.rs).
+#
+# Xtigervnc is an X server with a built-in RFB server: with no window manager
+# or session it still serves a paintable root window, so a client's first
+# non-incremental FramebufferUpdateRequest gets a real full-screen raw update
+# through the whole pipeline. Classic VncAuth is enabled (password below) so
+# the DES challenge path is exercised too. tigervnc-tools ships tigervncpasswd;
+# xfonts-base is needed for the X server's builtin 'fixed' font at startup.
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tigervnc-standalone-server tigervnc-tools xfonts-base \
+    && rm -rf /var/lib/apt/lists/*
+# The e2e test authenticates with this password (VncAuth ignores bytes past 8).
+RUN printf 'secret42\n' | tigervncpasswd -f > /etc/vncpasswd
+EXPOSE 5900
+CMD ["Xtigervnc", ":1", "-rfbport", "5900", "-interface", "0.0.0.0", \
+     "-SecurityTypes", "VncAuth", "-PasswordFile", "/etc/vncpasswd", \
+     "-geometry", "1024x768", "-depth", "24"]
