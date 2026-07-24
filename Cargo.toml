@@ -52,6 +52,10 @@ rpassword = "7"
 # Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
 des = "0.8"
 
+# The wire protocol shared with the macOS agent (src/rxa.rs, crates/rxa-agent).
+# In-repo so the two halves cannot drift — see docs/mac-agent-plan.md.
+rxa-proto = { path = "crates/rxa-proto" }
+
 # Server-side RDP engine (see docs/architecture.md). `dvc`/`displaycontrol`/`svc`
 # expose the Display Control Virtual Channel used for client-driven resize.
 ironrdp = { version = "0.17", features = ["connector", "session", "graphics", "dvc", "displaycontrol", "svc"] }
