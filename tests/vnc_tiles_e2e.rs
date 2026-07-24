@@ -114,10 +114,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
 
     let addr = spawn_app(vnc_port).await;
     let token = common::claim_session(addr).await;
-    let (mut ws, _resp) =
-        tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session={token}"))
-            .await
-            .unwrap();
+    let mut ws = common::connect_ws(addr, &token).await;
 
     let mut got_resize = false;
     let mut covered: u64 = 0;
@@ -223,10 +220,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
         .as_str()
         .expect("claim response carries a sessionId")
         .to_owned();
-    let (mut ws, _resp) =
-        tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session={token}"))
-            .await
-            .unwrap();
+    let mut ws = common::connect_ws(addr, &token).await;
 
     let mut reannounced = false;
     let mut covered: u64 = 0;

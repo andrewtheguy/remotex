@@ -131,9 +131,11 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
         match msg {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
                 Ok(input) => {
-                    if input_tx.send(input).is_err() {
-                        break; // engine gone; the outbound side is ending too
-                    }
+                    // A failed send means the engine died; its final error
+                    // message may still be in flight through the pump, so keep
+                    // the attachment until the outbound side ends (the select
+                    // arm above) instead of detaching early and dropping it.
+                    let _ = input_tx.send(input);
                 }
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
             },

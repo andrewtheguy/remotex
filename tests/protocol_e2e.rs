@@ -18,6 +18,7 @@ mod common;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use common::{Ws, connect_ws};
 use futures_util::{SinkExt as _, StreamExt as _};
 use rdpweb::config::{AppConfig, Protocol, Security, TargetConfig};
 use rdpweb::server;
@@ -199,16 +200,6 @@ async fn http_get(addr: SocketAddr, path: &str) -> String {
     let text = String::from_utf8_lossy(&raw);
     let (_, body) = text.split_once("\r\n\r\n").expect("response has a body");
     body.to_owned()
-}
-
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
-
-async fn connect_ws(addr: SocketAddr, token: &str) -> Ws {
-    let url = format!("ws://{addr}/ws?session={token}");
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
-    ws
 }
 
 /// Read from the socket until a `resize` control message arrives; fails on an

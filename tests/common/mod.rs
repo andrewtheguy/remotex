@@ -47,6 +47,18 @@ pub async fn claim_session(addr: SocketAddr) -> String {
         .to_owned()
 }
 
+pub type Ws = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+/// Open the session WebSocket with a claim token.
+#[allow(dead_code)]
+pub async fn connect_ws(addr: SocketAddr, token: &str) -> Ws {
+    let url = format!("ws://{addr}/ws?session={token}");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
+    ws
+}
+
 /// Locate a container runtime. The dummy remote-desktop server is part of the
 /// e2e contract, so a machine without one fails loudly instead of silently
 /// skipping the coverage.
