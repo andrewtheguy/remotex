@@ -33,8 +33,25 @@ export interface RemoteSize {
 
 // Per-tab session identity: lets this tab reclaim its own slot after a drop
 // without the takeover prompt (sessionStorage is per-tab, so two tabs of the
-// same browser still contend like two browsers — as intended).
-const SESSION_KEY = "rdpweb.sessionId";
+// same browser still contend like two browsers — as intended). Exported so
+// logout (App.tsx) can drop it.
+export const SESSION_KEY = "rdpweb.sessionId";
+// Logout chord, reserved until phase 10 grows real chrome for it: compound
+// enough that no remote app plausibly needs it, swallowed before the key
+// pass-through so the remote never sees the L.
+const LOGOUT_CHORD_CODE = "KeyL";
+// Mobile sizing, with remotex's bounds: pinch-zoom-capable touch devices size
+// the session in CSS pixels (no dpr multiplication — a phone's 3x dpr would
+// mint an enormous desktop), floored per axis at a fixed 1024x768 — so a
+// portrait phone raises only the height to its own viewport, never a
+// width-derived height that makes the desktop absurdly tall. The floor is a
+// constant, NOT remotex's geometry-found-on-connect: the engine (and a VNC
+// server) outlives the browser here, so a connect-time floor would inherit
+// whatever damage a previous session left (e.g. a too-tall desktop) and
+// never shrink it — with a constant floor the phone repairs it on connect.
+const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
+const TOUCH_MIN_WIDTH = 1024;
+const TOUCH_MIN_HEIGHT = 768;
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -48,6 +65,15 @@ function applyCanvasCss(
   size: RemoteSize | null,
 ): void {
   if (!canvas || !size) {
+    return;
+  }
+  if (CAN_PINCH_ZOOM) {
+    // Touch display cap (remotex's fit bound): scale the desktop down (never
+    // up) to fit the viewport width; the height scrolls. Pinch-zoom onto the
+    // full-resolution framebuffer is phase 8.
+    const scale = Math.min(document.documentElement.clientWidth / size.w, 1);
+    canvas.style.width = `${size.w * scale}px`;
+    canvas.style.height = `${size.h * scale}px`;
     return;
   }
   const dpr = window.devicePixelRatio || 1;
@@ -66,14 +92,37 @@ function applyCanvasCss(
   canvas.style.height = `${h}px`;
 }
 
+// POST /api/session (the slot claim); null on a network failure, which the
+// caller treats as retryable.
+async function postClaim(force: boolean): Promise<Response | null> {
+  try {
+    return await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        force,
+        sessionId: sessionStorage.getItem(SESSION_KEY) ?? undefined,
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
 // The viewport report sent to the server (phase 4): the desired remote
-// desktop size in device pixels, clamped to the protocol's u16 range.
+// desktop size, clamped to the protocol's u16 range. Desktop asks for the
+// viewport in device pixels; touch asks for CSS pixels floored per axis at
+// 1024x768 (the mobile bounds — see CAN_PINCH_ZOOM).
 function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
-  const dpr = window.devicePixelRatio || 1;
   const el = document.documentElement;
-  const dim = (cssPx: number) =>
-    Math.min(65535, Math.max(1, Math.round(cssPx * dpr)));
-  return { type: "viewport", w: dim(el.clientWidth), h: dim(el.clientHeight) };
+  const dpr = CAN_PINCH_ZOOM ? 1 : window.devicePixelRatio || 1;
+  const dim = (cssPx: number, min: number) =>
+    Math.min(65535, Math.max(min, Math.round(cssPx * dpr)));
+  return {
+    type: "viewport",
+    w: dim(el.clientWidth, CAN_PINCH_ZOOM ? TOUCH_MIN_WIDTH : 1),
+    h: dim(el.clientHeight, CAN_PINCH_ZOOM ? TOUCH_MIN_HEIGHT : 1),
+  };
 }
 
 // Claims the single session slot (POST /api/session), opens the /ws WebSocket
@@ -81,9 +130,16 @@ function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
 // forwards mouse + keyboard input captured over `overlayRef` as ClientMsg.
 // Reconnects automatically after drops; busy/takenOver/error surface to the
 // caller with `takeOver`/`retry` to resolve them.
+//
+// `onLogout` fires on the Ctrl+Alt+Shift+L chord (after releasing held input);
+// `onUnauthorized` fires when a claim answers 401 — the login is gone, so the
+// caller swaps back to the login screen. Both must be referentially stable
+// (useCallback) or the connection/input effects tear down and redo.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
+  onLogout: () => void,
+  onUnauthorized: () => void,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
@@ -128,23 +184,20 @@ export function useRemoteDesktop(
     };
 
     // Claim the session slot. Returns the token, "busy" when another browser
-    // holds the slot (409), or null for failures that should retry.
-    const claim = async (force: boolean): Promise<string | "busy" | null> => {
-      let res: Response;
-      try {
-        res = await fetch("/api/session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            force,
-            sessionId: sessionStorage.getItem(SESSION_KEY) ?? undefined,
-          }),
-        });
-      } catch {
+    // holds the slot (409), "unauthorized" when the login is gone (401), or
+    // null for failures that should retry.
+    const claim = async (
+      force: boolean,
+    ): Promise<string | "busy" | "unauthorized" | null> => {
+      const res = await postClaim(force);
+      if (!res) {
         return null;
       }
       if (res.status === 409) {
         return "busy";
+      }
+      if (res.status === 401) {
+        return "unauthorized";
       }
       if (!res.ok) {
         return null;
@@ -168,6 +221,10 @@ export function useRemoteDesktop(
       }
       if (claimed === "busy") {
         setStatus("busy");
+        return;
+      }
+      if (claimed === "unauthorized") {
+        onUnauthorized(); // unmounts this hook's component
         return;
       }
       if (claimed === null) {
@@ -370,7 +427,7 @@ export function useRemoteDesktop(
       dprQuery?.removeEventListener("change", onDprChange);
       ws?.close();
     };
-  }, [canvasRef]);
+  }, [canvasRef, onUnauthorized]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
   // action after being evicted (takenOver).
@@ -434,18 +491,9 @@ export function useRemoteDesktop(
       send({ type: "wheel", dx: e.deltaX, dy: e.deltaY });
     };
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
-    const onKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault();
-      pressedKeys.add(e.code);
-      send({ type: "key", code: e.code, pressed: true });
-    };
-    const onKeyUp = (e: KeyboardEvent) => {
-      e.preventDefault();
-      pressedKeys.delete(e.code);
-      send({ type: "key", code: e.code, pressed: false });
-    };
-    // On blur, release everything still held so nothing sticks on the remote.
-    const onBlur = () => {
+    // Release everything still held so nothing sticks on the remote — on
+    // blur, and before logging out via the chord.
+    const releaseAll = () => {
       for (const code of pressedKeys) {
         send({ type: "key", code, pressed: false });
       }
@@ -455,6 +503,25 @@ export function useRemoteDesktop(
       }
       pressedButtons.clear();
     };
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      // The reserved logout chord (phase 7; a toolbar button comes with the
+      // phase-10 chrome). The modifiers already went to the remote as they
+      // were pressed, so release them before dropping the session.
+      if (e.ctrlKey && e.altKey && e.shiftKey && e.code === LOGOUT_CHORD_CODE) {
+        releaseAll();
+        onLogout();
+        return;
+      }
+      pressedKeys.add(e.code);
+      send({ type: "key", code: e.code, pressed: true });
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      pressedKeys.delete(e.code);
+      send({ type: "key", code: e.code, pressed: false });
+    };
+    const onBlur = () => releaseAll();
 
     el.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
@@ -477,7 +544,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef]);
+  }, [overlayRef, onLogout]);
 
   return { status, size, errorMessage, takeOver, retry };
 }

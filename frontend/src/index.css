@@ -111,3 +111,122 @@ body {
 .status-action:hover {
   background: #30363d;
 }
+
+/* Phase 7: the login gate. A plain centered form; the version sits pinned at
+   the bottom of the screen (remotex-style). */
+.login-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: min(320px, 80vw);
+}
+
+.login-form h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.4rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.login-form label {
+  color: #8b949e;
+  font-size: 0.85rem;
+}
+
+.login-form input {
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  color: #e6edf3;
+  background: #010409;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  outline: none;
+}
+
+.login-form input:focus {
+  border-color: #4a9eff;
+}
+
+.login-form button {
+  margin-top: 0.5rem;
+  padding: 0.45rem 1.2rem;
+  font: inherit;
+  color: #e6edf3;
+  background: #21262d;
+  border: 1px solid #8b949e;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.login-form button:hover {
+  background: #30363d;
+}
+
+.login-form button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.login-error {
+  margin: 0 0 0.5rem;
+  color: #f85149;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.login-hint {
+  color: #8b949e;
+  font-size: 0.85rem;
+}
+
+.login-version {
+  position: absolute;
+  bottom: 16px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: #8b949e;
+  font-size: 0.8rem;
+}
+
+/* Phase 7: the minimal disconnect CTA under the canvas. The desktop keeps its
+   fixed configured size, so mobile portrait always has dead space below it —
+   the button lives there and scrolls with the surface. Touch-only: a desktop
+   browser has the Ctrl+Alt+Shift+L chord and no dead space to spare. */
+.disconnect-bar {
+  display: none;
+  padding: 12px;
+  line-height: normal;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .disconnect-bar {
+    display: block;
+  }
+}
+
+.disconnect-button {
+  padding: 0.3rem 0.9rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: #8b949e;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.disconnect-button:hover {
+  color: #e6edf3;
+  border-color: #8b949e;
+}

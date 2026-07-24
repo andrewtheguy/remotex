@@ -3,7 +3,7 @@
 - run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
 - run biome checks on frontend/ after JS/TS code changes
 - use tmp/ for temporary files and test config
-- for dev one-off scripts that are more efficient with python, always run with uv
+- for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
 - for e2e tests use tests/*, can start dummy RDP server or vnc server with docker or podman if needed, but never start headless browser because automated tests on browser is flaky
 - multi session is always out of scope (never planned, not merely deferred): this is a single-user program with one active session only, with session takeover logic like ../remotex (a new browser force-claims the single session slot and evicts the previous holder) — no concurrent sessions, session sharing, or session broker

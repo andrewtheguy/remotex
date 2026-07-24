@@ -27,8 +27,30 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve(target.as_deref())?;
             serve(config).await?;
         }
+        Commands::GenPasswd { username } => gen_passwd(&username)?,
     }
 
+    Ok(())
+}
+
+/// Generate the `[server].site_passwd` value: prompt for the password (hidden,
+/// asked twice on a TTY; read as one line when piped) and print the encoded
+/// credential to stdout, pipeable straight into the config.
+fn gen_passwd(username: &str) -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+
+    let password = if std::io::stdin().is_terminal() {
+        let password = rpassword::prompt_password("Password: ")?;
+        let confirm = rpassword::prompt_password("Confirm password: ")?;
+        anyhow::ensure!(password == confirm, "passwords do not match");
+        password
+    } else {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        line.trim_end_matches(['\r', '\n']).to_owned()
+    };
+    let encoded = rdpweb::auth::generate(username, &password, rdpweb::auth::DEFAULT_COST)?;
+    println!("{encoded}");
     Ok(())
 }
 
@@ -63,6 +85,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         "target {:?}: {}:{} ({:?})",
         config.target.name, config.target.host, config.target.port, config.target.protocol
     );
+    info!("web login: user {:?}", config.site_passwd.username());
 
     axum::serve(listener, app).await.context("server error")?;
     Ok(())

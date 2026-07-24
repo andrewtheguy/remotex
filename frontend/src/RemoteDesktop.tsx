@@ -10,12 +10,20 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   error: "Session error",
 };
 
-export default function RemoteDesktop() {
+export default function RemoteDesktop({
+  onLogout,
+  onUnauthorized,
+}: {
+  onLogout: () => void;
+  onUnauthorized: () => void;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const { status, size, errorMessage, takeOver, retry } = useRemoteDesktop(
     canvasRef,
     overlayRef,
+    onLogout,
+    onUnauthorized,
   );
 
   return (
@@ -35,6 +43,16 @@ export default function RemoteDesktop() {
           // biome-ignore lint/a11y/noNoninteractiveTabindex: the remote-desktop surface (role=application) must take focus to receive keyboard input
           tabIndex={0}
         />
+      </div>
+      {/* Minimal disconnect CTA in the dead space below the fixed-size canvas
+          (mobile portrait always has some, since the desktop keeps its
+          configured size). Disconnecting logs this browser out — same as the
+          Ctrl+Alt+Shift+L chord. CSS shows it on touch devices only; desktop
+          uses the chord. */}
+      <div className="disconnect-bar">
+        <button type="button" className="disconnect-button" onClick={onLogout}>
+          Disconnect
+        </button>
       </div>
       {(status !== "connected" || !size) && (
         <div className="status-overlay">
