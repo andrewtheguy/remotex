@@ -159,8 +159,15 @@ pub enum ServerMsg {
     Picker,
     /// A target session is live: show the desktop. Sent on attach to a running
     /// engine and right after a [`ClientMsg::Connect`]. `name` is the target
-    /// profile the session is bound to.
-    Connected { name: String },
+    /// profile the session is bound to; `protocol` (`"rdp"`/`"vnc"`) and
+    /// `resize` let the browser choose its resize behaviour — VNC resizes
+    /// automatically with the viewport, RDP only on the user's request (the
+    /// floating menu's "Resize to window").
+    Connected {
+        name: String,
+        protocol: &'static str,
+        resize: bool,
+    },
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -177,7 +184,11 @@ enum ControlMsg<'a> {
     Resize { w: u16, h: u16 },
     Error { message: &'a str },
     Picker,
-    Connected { name: &'a str },
+    Connected {
+        name: &'a str,
+        protocol: &'a str,
+        resize: bool,
+    },
 }
 
 impl ServerMsg {
@@ -188,9 +199,15 @@ impl ServerMsg {
             ServerMsg::Resize { w, h } => WireFrame::Text(control(&ControlMsg::Resize { w: *w, h: *h })),
             ServerMsg::Error { message } => WireFrame::Text(control(&ControlMsg::Error { message })),
             ServerMsg::Picker => WireFrame::Text(control(&ControlMsg::Picker)),
-            ServerMsg::Connected { name } => {
-                WireFrame::Text(control(&ControlMsg::Connected { name }))
-            }
+            ServerMsg::Connected {
+                name,
+                protocol,
+                resize,
+            } => WireFrame::Text(control(&ControlMsg::Connected {
+                name,
+                protocol,
+                resize: *resize,
+            })),
         }
     }
 }

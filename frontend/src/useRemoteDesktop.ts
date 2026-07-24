@@ -196,6 +196,10 @@ export function useRemoteDesktop(
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
+  // True when the connected target supports resize but only on request (RDP):
+  // the floating menu shows a "Resize to window" button and automatic viewport
+  // reports are suppressed. VNC resizes automatically, so it stays false.
+  const [canResize, setCanResize] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -213,6 +217,12 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
+  // Manual-resize mode (RDP with resize enabled): while set, automatic viewport
+  // reports are suppressed and only the menu's "Resize to window" sends one.
+  const manualResizeRef = useRef(false);
+  // Set by the connection effect so the menu's "Resize to window" can push the
+  // current viewport even in manual-resize mode.
+  const resizeToWindowRef = useRef<(() => void) | null>(null);
 
   const sendRef = useRef((msg: ClientMsg) => {
     const ws = wsRef.current;
@@ -312,10 +322,16 @@ export function useRemoteDesktop(
     };
 
     // Viewport reports (dynamic resize), deduped per connection: a
-    // resize that settles on the same size sends nothing.
+    // resize that settles on the same size sends nothing. In manual-resize mode
+    // (RDP) the automatic callers are suppressed — an RDP resize triggers a
+    // heavy Deactivation-Reactivation, so it happens only when the user asks
+    // (`manual: true`, from the menu's "Resize to window").
     let lastViewport: RemoteSize | null = null;
-    const sendViewport = () => {
+    const sendViewport = (opts?: { manual?: boolean }) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (!opts?.manual && manualResizeRef.current) {
         return;
       }
       const msg = viewportMsg();
@@ -329,6 +345,10 @@ export function useRemoteDesktop(
       lastViewport = { w: msg.w, h: msg.h };
       ws.send(JSON.stringify(msg));
     };
+    // The manual "Resize to window" action: report the viewport even in
+    // manual-resize mode. Dedup still applies, so re-clicking at the same
+    // window size won't fire a redundant resize.
+    resizeToWindowRef.current = () => sendViewport({ manual: true });
 
     const open = (sessionId: string) => {
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -344,8 +364,10 @@ export function useRemoteDesktop(
           return;
         }
         setStatus("connected");
+        // The viewport is (re)sent from the `connected` handler, once the
+        // protocol is known — a running RDP engine must not be resized by an
+        // automatic report fired blindly on reconnect.
         lastViewport = null;
-        sendViewport();
       };
       socket.onclose = (ev) => {
         if (disposed || ws !== socket) {
@@ -442,19 +464,26 @@ export function useRemoteDesktop(
           setConnectError(msg.message);
           setPendingTarget(null);
           break;
-        case "connected":
+        case "connected": {
           // A target session started (picker connect, reattach, or takeover of
           // a live desktop): switch to the desktop.
           setConnectError(null);
           setPendingTarget(null);
           setConnectedTarget(msg.name);
           setMode("desktop");
-          // A freshly-started engine needs the current viewport (dynamic-resize
-          // VNC acts on it); the report sent at socket-open predates this
-          // engine, so re-send it, undeduped.
+          // RDP resizes only on request (heavy reactivation); VNC follows the
+          // viewport automatically. In manual mode the report below is
+          // suppressed, so the desktop keeps its connect-time size until the
+          // user picks "Resize to window".
+          const manual = msg.protocol === "rdp" && msg.resize;
+          manualResizeRef.current = manual;
+          setCanResize(manual);
+          // A freshly-started engine needs the current viewport; the report is
+          // sent here (once the protocol is known), undeduped.
           lastViewport = null;
           sendViewport();
           break;
+        }
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
@@ -462,6 +491,8 @@ export function useRemoteDesktop(
           setPendingTarget(null);
           setConnectedTarget(null);
           setMode("picker");
+          manualResizeRef.current = false;
+          setCanResize(false);
           clearDesktop();
           break;
       }
@@ -530,6 +561,7 @@ export function useRemoteDesktop(
     return () => {
       disposed = true;
       startRef.current = null;
+      resizeToWindowRef.current = null;
       clearTimeout(retryTimer);
       window.removeEventListener("resize", onViewportChange);
       clearTimeout(resizeTimer);
@@ -554,6 +586,13 @@ export function useRemoteDesktop(
   // server answers `picker`, which flips `mode` back.
   const switchTarget = useCallback(() => {
     sendRef.current({ type: "disconnect" });
+  }, []);
+
+  // Resize the remote desktop to the current browser window (the floating
+  // menu's "Resize to window", shown only when `canResize`). A no-op while the
+  // socket is down. The engine answers with a `resize` control message.
+  const resizeToWindow = useCallback(() => {
+    resizeToWindowRef.current?.();
   }, []);
 
   // Inject a key chord from the floating toolbar — keys the browser swallows
@@ -747,9 +786,11 @@ export function useRemoteDesktop(
     connectError,
     pendingTarget,
     size,
+    canResize,
     takeOver,
     connect,
     switchTarget,
+    resizeToWindow,
     sendKeyCombo,
     setBottomInset,
   };

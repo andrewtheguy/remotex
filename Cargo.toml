@@ -1,11 +1,11 @@
 [package]
 name = "remotex"
-version = "0.0.16"
+version = "0.0.17"
 edition = "2024"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Serves the built frontend from disk (see src/server.rs). Assets are no longer
@@ -32,8 +32,9 @@ rpassword = "7"
 # Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
 des = "0.8"
 
-# Server-side RDP engine (see docs/architecture.md).
-ironrdp = { version = "0.17", features = ["connector", "session", "graphics"] }
+# Server-side RDP engine (see docs/architecture.md). `dvc`/`displaycontrol`/`svc`
+# expose the Display Control Virtual Channel used for client-driven resize.
+ironrdp = { version = "0.17", features = ["connector", "session", "graphics", "dvc", "displaycontrol", "svc"] }
 ironrdp-tokio = { version = "0.10", features = ["reqwest-rustls-ring"] }
 ironrdp-tls = { version = "0.2", features = ["rustls-ring"] }
 # Direct dep so we can install the ring CryptoProvider as the process default

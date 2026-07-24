@@ -221,7 +221,11 @@ impl SessionManager {
             (Some(target), Some(engine)) => {
                 info!("session: reattached to the running engine, requesting a repaint");
                 let _ = engine.input_tx.send(ClientMsg::Refresh);
-                ServerMsg::Connected { name: target.name.clone() }
+                ServerMsg::Connected {
+                    name: target.name.clone(),
+                    protocol: target.protocol.name(),
+                    resize: target.resize,
+                }
             }
             // No engine (idle, or an engine that ended): the picker.
             _ => ServerMsg::Picker,
@@ -288,13 +292,19 @@ impl SessionManager {
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
 
         let name = target.name.clone();
+        let protocol = target.protocol.name();
+        let resize = target.resize;
         st.selected = Some(target);
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
         // now nothing else feeds this channel — so the buffer holds at most the
         // attach status, never 64 frames, and Connected lands before any tile.
         if let Some(client) = &st.client {
-            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected { name }));
+            let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected {
+                name,
+                protocol,
+                resize,
+            }));
         }
         Ok(())
     }
@@ -439,9 +449,13 @@ mod tests {
     type EngineEnds = (mpsc::UnboundedReceiver<ClientMsg>, mpsc::Sender<ServerMsg>);
 
     fn fake_target(name: &str) -> TargetConfig {
+        fake_target_with(name, Protocol::Vnc, false)
+    }
+
+    fn fake_target_with(name: &str, protocol: Protocol, resize: bool) -> TargetConfig {
         TargetConfig {
             name: name.to_owned(),
-            protocol: Protocol::Vnc,
+            protocol,
             host: "127.0.0.1".to_owned(),
             port: 1,
             username: String::new(),
@@ -450,7 +464,7 @@ mod tests {
             width: 1,
             height: 1,
             security: Security::Auto,
-            resize: false,
+            resize,
         }
     }
 
@@ -461,7 +475,14 @@ mod tests {
         let spawner: EngineSpawner = Box::new(move |_target, input_rx, frame_tx| {
             hook_tx.send((input_rx, frame_tx)).unwrap();
         });
-        let targets = vec![fake_target("fake"), fake_target("other")];
+        let targets = vec![
+            fake_target("fake"),
+            fake_target("other"),
+            // Non-default metadata so the connected status can be checked to
+            // carry the target's protocol and resize flag verbatim.
+            fake_target_with("rdp-resize", Protocol::Rdp, true),
+            fake_target_with("vnc-resize", Protocol::Vnc, true),
+        ];
         (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
 
@@ -480,12 +501,32 @@ mod tests {
         );
     }
 
-    /// Assert the next event is the connected status for `name`.
-    async fn expect_connected(events: &mut mpsc::Receiver<AttachEvent>, name: &str) {
+    /// Assert the next event is the connected status for `name`, carrying the
+    /// expected protocol/resize metadata.
+    async fn expect_connected_meta(
+        events: &mut mpsc::Receiver<AttachEvent>,
+        name: &str,
+        protocol: &str,
+        resize: bool,
+    ) {
         match recv(events).await {
-            AttachEvent::Msg(ServerMsg::Connected { name: got }) => assert_eq!(got, name),
+            AttachEvent::Msg(ServerMsg::Connected {
+                name: got,
+                protocol: got_protocol,
+                resize: got_resize,
+            }) => {
+                assert_eq!(got, name);
+                assert_eq!(got_protocol, protocol, "protocol metadata for {name}");
+                assert_eq!(got_resize, resize, "resize metadata for {name}");
+            }
             other => panic!("expected connected({name}), got {other:?}"),
         }
+    }
+
+    /// Assert the next event is the connected status for `name`. The plain fake
+    /// targets are VNC with resize off, so the metadata is checked against that.
+    async fn expect_connected(events: &mut mpsc::Receiver<AttachEvent>, name: &str) {
+        expect_connected_meta(events, name, "vnc", false).await;
     }
 
     #[tokio::test]
@@ -534,6 +575,30 @@ mod tests {
             mgr.connect(att.id, "other"),
             Err(ConnectError::AlreadyConnected)
         ));
+    }
+
+    #[tokio::test]
+    async fn connected_status_carries_protocol_and_resize_metadata() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+
+        // An RDP target with resize on: the connect status carries the
+        // protocol and resize flag verbatim (the browser keys its manual-resize
+        // UI off them). The VNC/no-resize case is covered by every other test's
+        // expect_connected.
+        mgr.connect(att.id, "rdp-resize").unwrap();
+        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true).await;
+        // Keep the engine channels alive so the engine stays up across the
+        // reattach below (dropping frame_tx would end it and flip to picker).
+        let (_input_rx, _frame_tx) = hooks.try_recv().expect("engine spawned on connect");
+
+        // Reattaching to the running engine reports the same metadata.
+        mgr.detach(att.id);
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true).await;
     }
 
     #[tokio::test]
