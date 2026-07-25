@@ -1,6 +1,6 @@
 [package]
 name = "rxa-proto"
-version = "0.0.19"
+version.workspace = true
 edition = "2024"
 
 # Deliberately platform-independent and dependency-light: this crate is the one

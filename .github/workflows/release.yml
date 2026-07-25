@@ -25,10 +25,12 @@ jobs:
         run: |
           # Real TOML parse + semver check, not grep/sed (see also packaging/build-tarball.sh).
           # Plain python3 (3.11+ for tomllib): uv is for local dev, not the CI runners.
+          # `[workspace.package]`, not `[package]`: every member inherits that one
+          # version, including the root package, so it is the only literal.
           VERSION=$(python3 -c '
           import re, sys, tomllib
           with open("Cargo.toml", "rb") as f:
-              version = tomllib.load(f)["package"]["version"]
+              version = tomllib.load(f)["workspace"]["package"]["version"]
           if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
               sys.exit(f"invalid version in Cargo.toml: {version!r}")
           print(version)

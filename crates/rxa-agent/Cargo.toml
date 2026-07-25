@@ -1,6 +1,6 @@
 [package]
 name = "rxa-agent"
-version = "0.0.19"
+version.workspace = true
 edition = "2024"
 
 # macOS only. Excluded from the workspace's `default-members`, so it is never

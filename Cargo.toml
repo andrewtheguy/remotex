@@ -6,18 +6,27 @@
 # a bare `cargo build` / `cargo clippy -- -D warnings` / `cargo test` on Linux
 # must never reach for it. Build it explicitly with `-p rxa-agent` on a Mac.
 #
-# Note for anyone editing this file: frontend/vite.config.ts regexes the first
-# line matching `^version = "…"` out of this manifest to stamp the login screen.
-# Do not introduce a second top-level `version` key (e.g. a
-# `[workspace.package]` inheritance block) above `[package]`.
+# One version for the whole workspace: the gateway, the agent and the protocol
+# crate they share all ship together, and a release names them from the same
+# number. `[workspace.package]` below is the only literal `version` in the tree
+# — every member inherits it with `version.workspace = true`.
+#
+# Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
+# line matching `^version = "…"` out of this manifest to stamp the login screen,
+# so that line must stay the workspace version. `version.workspace = true` does
+# not match the regex (the `.` after `version` breaks it), which is what keeps
+# the members from shadowing it.
 [workspace]
 members = [".", "crates/rxa-proto", "crates/rxa-agent"]
 default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
+[workspace.package]
+version = "0.0.20"
+
 [package]
 name = "remotex"
-version = "0.0.20"
+version.workspace = true
 edition = "2024"
 
 [dependencies]

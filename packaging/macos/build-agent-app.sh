@@ -62,10 +62,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# The agent inherits `version.workspace = true`, so the number lives in the
+# workspace manifest — reading the agent's own would find the inheritance marker,
+# not a version.
 version="$(python3 -c '
 import tomllib
-with open("crates/rxa-agent/Cargo.toml", "rb") as f:
-    print(tomllib.load(f)["package"]["version"])
+with open("Cargo.toml", "rb") as f:
+    print(tomllib.load(f)["workspace"]["package"]["version"])
 ')"
 
 # ── Optional: a throwaway keychain holding an imported .p12 ─────────────────

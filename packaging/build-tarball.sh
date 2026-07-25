@@ -28,10 +28,12 @@ cd "$repo_root"
 
 # Real TOML parse + semver check, not grep/sed (same as .github/workflows/release.yml).
 # Plain python3 (3.11+ for tomllib) so this also runs on CI runners without uv.
+# `[workspace.package]`, not `[package]`: every member inherits that one version,
+# the root package included, so it is the only literal one in the tree.
 version="$(python3 -c '
 import re, sys, tomllib
 with open("Cargo.toml", "rb") as f:
-    version = tomllib.load(f)["package"]["version"]
+    version = tomllib.load(f)["workspace"]["package"]["version"]
 if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
     sys.exit(f"invalid version in Cargo.toml: {version!r}")
 print(version)
