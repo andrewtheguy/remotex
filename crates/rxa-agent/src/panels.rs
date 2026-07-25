@@ -1,9 +1,11 @@
 //! The agent's modal panels: everything the GUI needs beyond a menu item.
 //!
-//! Three of them. [`config`] is the settings dialog — one panel holding every
-//! setting the agent has — and [`error`] and [`confirm`] are the two answers a
-//! menu cannot give on its own: report a failure, and ask before doing something
-//! the user would rather have been asked about.
+//! [`config`] is the settings dialog — one panel holding every setting the agent
+//! has. [`error`] and [`confirm`] are the two answers a menu cannot give on its
+//! own: report a failure, and ask before doing something the user would rather
+//! have been asked about. [`startup_failure`] is [`error`] from before there is a
+//! menu at all, which is the only thing standing between a failed launch and an
+//! app that appears to do nothing when opened.
 //!
 //! It is deliberately `NSAlert` and nothing more. A settings *window* would be a
 //! window controller, a nib, and a Dock icon's worth of behaviour the agent has
@@ -32,8 +34,9 @@ use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSButton, NSFont,
-    NSPopUpButton, NSTextAlignment, NSTextField, NSView,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
+    NSApplicationActivationPolicy, NSButton, NSFont, NSPopUpButton, NSTextAlignment, NSTextField,
+    NSView,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -184,6 +187,19 @@ pub fn config(
         psk: psk.stringValue().to_string().trim().to_owned(),
         display: chosen,
     })
+}
+
+/// Report a failure from before the menu bar exists, and give up.
+///
+/// Same panel as [`error`], with the activation policy set first. That normally
+/// happens in [`crate::menubar::run`], which a failing startup never reaches — and
+/// without it macOS gives the agent a Dock tile and a menu of its own for as long
+/// as the panel is up, which is a strange last impression for an app that is about
+/// to exit.
+pub fn startup_failure(mtm: MainThreadMarker, title: &str, body: &str) {
+    NSApplication::sharedApplication(mtm)
+        .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    error(mtm, title, body);
 }
 
 /// Report a failure: one button, and nothing to decide.

@@ -473,6 +473,15 @@ and the cursor poll runs as a timer on that run loop.
 
 Two consequences of putting everything there, both deliberate:
 
+- **A failed launch gets a panel too.** A background app has no window to fail
+  in, so a startup that gives up silently is a double-click that does nothing at
+  all — no icon, no error, and no way to find out short of running the binary in a
+  terminal. So the listener is bound on the main thread, before any of the
+  threading is set up, and "the port is already taken" (the common case: the app
+  was opened while a copy was running) or "that config cannot be loaded" says so
+  on screen and exits **0** — zero because launchd's `KeepAlive` would otherwise
+  restart the agent into the same failure and put the same panel back up every ten
+  seconds.
 - **`NSAlert` is the whole panel toolkit** (`panels.rs`). A settings *window* for
   three fields would be a window controller, a nib and a Dock tile's worth of
   behaviour the agent spent real effort not having; an alert with an accessory

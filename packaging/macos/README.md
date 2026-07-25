@@ -94,6 +94,19 @@ So a key change is two steps in either order, with a gap between them: put the
 new key in the gateway's `remotex.toml`, and save it here. Nothing can connect
 until both are done.
 
+### Opening it a second time
+
+Opening the app while a copy is already running puts up a panel saying so and
+pointing at the menu bar, then exits — the running agent keeps the port and the
+session. It is worth knowing that this is what "nothing happened" means, because a
+background app has no window to fail in: any startup problem it cannot get past
+(an unusable config file, a port it cannot bind) gets a panel of its own for the
+same reason.
+
+A second open still re-registers the login item on its way past, which is what
+makes the repair in **Reinstalling over an existing copy** work while the old copy
+is running.
+
 ### Over SSH there is no interface
 
 A status item needs a window server, which an SSH session does not have. Pass

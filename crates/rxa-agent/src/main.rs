@@ -105,7 +105,20 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
     let log_path = init_logging();
 
-    let (config, path, created) = config::load_or_create(args.config.as_deref())?;
+    let (config, path, created) = match config::load_or_create(args.config.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            // Exits 0 despite failing, so launchd's KeepAlive leaves it alone: no
+            // number of restarts fixes a config file, and each one would put this
+            // panel back on screen.
+            report_startup_failure(
+                &args,
+                "remotex-agent could not start",
+                &format!("{e:#}\n\nFix the config file, then open remotex-agent again."),
+            );
+            return Ok(());
+        }
+    };
 
     info!(
         "remotex-agent {} — rxa/{}, config {}",
@@ -137,6 +150,59 @@ fn main() -> anyhow::Result<()> {
         print_first_run(&path);
     }
 
+    // Bound on the main thread, and early — because "the port is taken" is the
+    // one startup failure a user actually meets, and it has to be answerable on
+    // screen. It happens whenever the app is opened while a copy is already
+    // running, which is the normal way to go looking for the menu bar item.
+    // Binding on the network thread instead left that thread calling `exit(0)`
+    // from under a main thread that had not put up a menu yet: the app bounced
+    // and vanished, and the only way to find out why was to run the binary in a
+    // terminal.
+    //
+    // After the login-item registration above, though, and deliberately: opening
+    // a freshly copied bundle while the old one still runs is how a stale launchd
+    // record gets repaired (see packaging/macos/README.md), and that has to keep
+    // working. Before `report_permissions`, equally deliberately: a duplicate
+    // launch has no business raising a TCC prompt.
+    // Infallible after the load above validated it, the same way `psk_bytes` is —
+    // and `?` here would be one more way for a launch to end with nothing on
+    // screen, which is the thing this whole block exists to stop.
+    let addr = config
+        .socket_addr()
+        .expect("listen validated in Config::validate");
+    let listener = match std::net::TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            report_startup_failure(
+                &args,
+                "remotex-agent is already running",
+                &format!(
+                    "Another copy is serving on {}.\n\nIts icon is in the menu bar at the \
+                     top of the screen — that is the agent's whole interface. Opening the \
+                     app again does nothing else.",
+                    config.listen
+                ),
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            report_startup_failure(
+                &args,
+                "remotex-agent cannot listen",
+                &format!(
+                    "{} could not be bound: {e}\n\nChange the listen address from the menu \
+                     bar item of the running agent, or in the config file.",
+                    config.listen
+                ),
+            );
+            return Ok(());
+        }
+    };
+    info!("agent: listening on {}", config.listen);
+    // tokio adopts it below, and only a non-blocking socket can be driven by a
+    // reactor.
+    listener.set_nonblocking(true)?;
+
     report_permissions();
 
     let tracker = Arc::new(cursor::Tracker::new());
@@ -149,7 +215,6 @@ fn main() -> anyhow::Result<()> {
     // AppKit, which owns the menu bar and the pointer shape both.
     let serve_tracker = Arc::clone(&tracker);
     let serve_state = Arc::clone(&state);
-    let listen = config.listen.clone();
     let psk = config.psk_bytes();
     let display = config.display;
     std::thread::Builder::new()
@@ -164,7 +229,7 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            match runtime.block_on(serve(listen, psk, display, serve_tracker, serve_state)) {
+            match runtime.block_on(serve(listener, psk, display, serve_tracker, serve_state)) {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("remotex-agent: {e:#}");
@@ -184,6 +249,29 @@ fn main() -> anyhow::Result<()> {
 
     // Hands the main thread to AppKit and never returns.
     menubar::run(state, tracker, settings, log_path)
+}
+
+/// Say why the agent is about to give up, on screen as well as in the log.
+///
+/// Everything this reports happens before the menu bar exists, which is what
+/// makes it worth a function: the agent has no window, so a startup that fails
+/// silently is a double-click that does nothing at all — no icon, no error, and
+/// no way to find out short of running the binary in a terminal. That is not a
+/// diagnosis anyone should have to make.
+///
+/// `--no-menu` gets the log line only. There is no window server to put a panel
+/// in over SSH, and the caller is a terminal that can read the message.
+fn report_startup_failure(args: &Args, title: &str, body: &str) {
+    warn!("{title}: {body}");
+    if args.no_menu {
+        return;
+    }
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        // Startup failures are all reported from `main`, so this is unreachable —
+        // and a wrong-thread AppKit call is worse than a missing panel.
+        return;
+    };
+    panels::startup_failure(mtm, title, body);
 }
 
 /// Restart the agent in place, to run under a config that has just changed.
@@ -259,25 +347,19 @@ fn log_file() -> Option<(std::fs::File, PathBuf)> {
 }
 
 /// Accept gateway connections, one at a time.
+///
+/// Takes an already-bound listener: binding is the main thread's job, so a port
+/// that is already taken can be reported on screen rather than from this thread
+/// (see `main`).
 async fn serve(
-    listen: String,
+    listener: std::net::TcpListener,
     psk: [u8; 32],
     display: usize,
     tracker: Arc<cursor::Tracker>,
     state: Arc<state::AgentState>,
 ) -> anyhow::Result<()> {
-    let listener = match tokio::net::TcpListener::bind(&listen).await {
-        Ok(listener) => listener,
-        // Almost always "another copy is already running" — launchd started one
-        // at login and the user then opened the bundle by hand. That is not an
-        // error worth a crash loop, so say so and exit cleanly.
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            info!("agent: {listen} is already in use — another remotex-agent is running; exiting");
-            return Ok(());
-        }
-        Err(e) => return Err(anyhow::anyhow!("cannot bind {listen}: {e}")),
-    };
-    info!("agent: listening on {listen}");
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|e| anyhow::anyhow!("cannot drive the listening socket: {e}"))?;
 
     // The single active session, so a new gateway evicts the previous one.
     let mut current: Option<tokio::task::JoinHandle<()>> = None;
