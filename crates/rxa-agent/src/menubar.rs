@@ -444,11 +444,25 @@ mod tests {
     // names here rather than discovering it on a user's menu bar.
     #[test]
     fn both_status_icons_exist_in_sf_symbols() {
-        for symbol in [ICON_IDLE, ICON_CONNECTED] {
-            let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                &NSString::from_str(symbol),
-                None,
-            );
+        let looked_up: Vec<_> = [ICON_IDLE, ICON_CONNECTED]
+            .into_iter()
+            .map(|symbol| {
+                let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(symbol),
+                    None,
+                );
+                (symbol, image)
+            })
+            .collect();
+        // *Both* nil is a session with no window server — over SSH, or in CI —
+        // where AppKit answers nothing at all, not two simultaneous typos. Skip
+        // there, the same way the cursor test does; one nil still fails, which
+        // is the typo this test exists to catch.
+        if looked_up.iter().all(|(_, image)| image.is_none()) {
+            eprintln!("no window server available (headless session); skipping");
+            return;
+        }
+        for (symbol, image) in looked_up {
             assert!(image.is_some(), "SF Symbols has no {symbol:?}");
         }
     }
