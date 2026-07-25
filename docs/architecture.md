@@ -62,7 +62,7 @@ separately records which browser owns the desktop and which target is active.
 4. `connect` starts the selected engine. `disconnect` stops it and returns to
    the picker.
 5. Losing the WebSocket detaches the browser. The RDP, VNC, or `rxa` engine
-   remains available for a 15-second reattach grace period and discards frames
+   remains available for a 60-second reattach grace period and discards frames
    while detached. If no browser returns, the engine stops and the slot returns
    to the picker.
 
@@ -108,9 +108,9 @@ depend on updates seen by the previous browser.
 The gateway sends a WebSocket protocol ping every five seconds. Browsers answer
 with a protocol pong in their networking stack, so background-tab JavaScript
 timer throttling does not affect liveness. A connection with no pong for about
-15 seconds is expired and its engine stops immediately because the missing-pong
+60 seconds is expired and its engine stops immediately because the missing-pong
 wait has already consumed the reattach grace period. An orderly WebSocket close
-starts a fresh 15-second reattach window. These frames are transport-level and
+starts a fresh 60-second reattach window. These frames are transport-level and
 do not appear in the JSON browser protocol.
 
 ## Engines

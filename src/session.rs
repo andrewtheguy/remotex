@@ -63,8 +63,8 @@ const FRAME_BUFFER: usize = 64;
 
 /// How long an engine remains available for a browser to reattach after its
 /// WebSocket disappears. Applies equally to RDP, VNC, and RXA.
-pub(crate) const REATTACH_GRACE_PERIOD: std::time::Duration =
-    std::time::Duration::from_secs(15);
+pub const REATTACH_GRACE_PERIOD: std::time::Duration =
+    std::time::Duration::from_secs(60);
 
 /// What an attached WebSocket receives from the session.
 #[derive(Debug)]
@@ -177,6 +177,20 @@ impl SessionManager {
             spawn_engine,
             state: Mutex::new(State::default()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_spawner(
+        targets: Vec<TargetConfig>,
+        spawn_engine: impl Fn(
+            TargetConfig,
+            mpsc::UnboundedReceiver<ClientMsg>,
+            mpsc::Sender<ServerMsg>,
+        ) + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::with_spawner(targets, Box::new(spawn_engine))
     }
 
     /// Claim the session slot, returning the new token: a live attachment

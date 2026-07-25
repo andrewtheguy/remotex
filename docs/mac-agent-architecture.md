@@ -83,8 +83,8 @@ PSK, permission shortcuts, logs, and the login-item toggle.
 
 Only one gateway may be connected. A new authenticated connection replaces the
 old one. The shared browser heartbeat ends the engine under the same policy as
-RDP and VNC: a missing pong expires it after about 15 seconds, while an orderly
-WebSocket close allows 15 seconds for reattachment. Ending the RXA engine closes
+RDP and VNC: a missing pong expires it after about 60 seconds, while an orderly
+WebSocket close allows 60 seconds for reattachment. Ending the RXA engine closes
 the agent connection, stops capture, and changes the menu from "Sharing this
 screen" to "No gateway connected."
 

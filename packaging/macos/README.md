@@ -75,7 +75,7 @@ reconnects. A deliberate quit remains stopped until the app is opened again or
 the next login; crashes are restarted automatically.
 
 If the browser closes or loses its network path, the gateway's shared session
-heartbeat closes the agent connection after about 15 seconds. Capture then
+heartbeat closes the agent connection after about 60 seconds. Capture then
 stops and the menu returns to **No gateway connected**. Reopening the browser
 during that grace period reuses the existing session.
 

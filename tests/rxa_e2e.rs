@@ -36,6 +36,7 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
 use remotex::protocol::Tile;
 use remotex::server;
+use remotex::session::REATTACH_GRACE_PERIOD;
 use rxa_proto::msg::{AgentMsg, CursorImage, GatewayMsg, format};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -363,14 +364,25 @@ async fn closing_the_browser_releases_the_agent_connection() {
     assert_first_paint(&expect_paint(&mut ws).await);
     assert_eq!(active.load(Ordering::SeqCst), 1);
 
+    tokio::time::pause();
+    ws.send(Message::Close(None)).await.unwrap();
     drop(ws);
-    tokio::time::timeout(Duration::from_secs(25), async {
-        while active.load(Ordering::SeqCst) != 0 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(REATTACH_GRACE_PERIOD).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+        if active.load(Ordering::SeqCst) == 0 {
+            break;
         }
-    })
-    .await
-    .expect("agent connection stayed active after the browser closed");
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    assert_eq!(
+        active.load(Ordering::SeqCst),
+        0,
+        "agent connection stayed active after the browser closed"
+    );
     assert_eq!(
         connections.load(Ordering::SeqCst),
         1,
