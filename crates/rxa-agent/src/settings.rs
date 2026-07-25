@@ -2,17 +2,19 @@
 //! now says.
 //!
 //! Every setting the agent has is editable from the menu bar (see
-//! [`crate::menubar`]), and an edit does exactly two things: validate, and write
-//! the file. **Nothing is applied to the running agent.** Rebinding a listener
-//! under a live connection, swapping the key the current gateway authenticated
-//! with, restarting the capture stream on another display — each is a small pile
-//! of machinery, and all of it exists to save a background agent one restart.
+//! [`crate::menubar`]), and an edit does exactly two things here: validate, and
+//! write the file. **Nothing in this module touches the running agent.** What
+//! applies a change is a restart, which the menu does by re-execing the process
+//! as soon as a save changes anything (see [`crate::restart`]). Rebinding a
+//! listener under a live connection, swapping the key the current gateway
+//! authenticated with, restarting the capture stream on another display — each is
+//! a small pile of machinery, and the re-exec is one line that covers all three
+//! and cannot leave them half-applied.
 //!
-//! So the deal is the plain one: a change takes effect the next time the agent
-//! starts. What that costs is honesty about the gap, which is what [`running`]
-//! is for — the config this process was launched with, kept beside the saved one
-//! so the menu can say "restart to apply" instead of quietly showing a setting
-//! that is not in force.
+//! [`running`] is the config this process was actually launched with, kept beside
+//! the saved one for the case where the restart does *not* happen: a re-exec that
+//! failed, or a file somebody edited by hand. Then the menu can say "restart to
+//! apply" rather than showing a setting that is not in force.
 //!
 //! [`running`]: Settings::running
 
@@ -60,43 +62,32 @@ impl Settings {
         *self.saved.lock().unwrap() != self.running
     }
 
-    /// Change the address the agent listens on, from the next launch.
-    pub fn set_listen(&self, listen: &str) -> anyhow::Result<()> {
-        let listen = listen.trim().to_owned();
-        self.update(|config| config.listen = listen)
-    }
-
-    /// Change which display is shared, by index into the shareable-display list.
-    pub fn set_display(&self, display: usize) -> anyhow::Result<()> {
-        self.update(|config| config.display = display)
-    }
-
-    /// Mint a new pre-shared key, returning it so the GUI can offer it for
-    /// copying — it is the one value the user has to carry somewhere else.
+    /// Replace the config with what the settings dialog collected.
     ///
-    /// The *running* agent keeps accepting the old key until it restarts, which
-    /// the caller has to say out loud: a regenerated credential that is not in
-    /// force yet is the kind of thing someone acts on immediately.
-    pub fn regenerate_psk(&self) -> anyhow::Result<String> {
-        let psk = rxa_proto::psk::generate();
-        self.update(|config| config.psk = psk.clone())?;
-        Ok(psk)
-    }
-
-    /// Validate, then write. Nothing else — see the module docs.
-    fn update(&self, edit: impl FnOnce(&mut Config)) -> anyhow::Result<()> {
+    /// The whole config at once, because the dialog edits it that way: one panel,
+    /// one Save, one write. An error means nothing was written — the file and
+    /// everything this struct reports are exactly as they were, and the caller can
+    /// put the dialog back up on the same values.
+    ///
+    /// Note what this does *not* do: apply anything. Returns whether the file
+    /// changed, which is the caller's cue to restart into it.
+    pub fn apply(&self, next: Config) -> anyhow::Result<bool> {
+        // Whitespace round a pasted value is the user's typing, not their intent.
+        let next = Config {
+            listen: next.listen.trim().to_owned(),
+            psk: next.psk.trim().to_owned(),
+            display: next.display,
+        };
         let mut saved = self.saved.lock().unwrap();
-        let mut next = saved.clone();
-        edit(&mut next);
         if next == *saved {
-            return Ok(());
+            return Ok(false);
         }
         // Validates before it writes, so an invalid edit changes neither the file
         // nor what this struct reports.
         next.save(&self.path)?;
         info!("settings: saved {}", self.path.display());
         *saved = next;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -135,49 +126,69 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_reaches_the_file_and_needs_a_restart() {
+    fn a_saved_edit_reaches_the_file_and_asks_to_be_restarted_into() {
         let (settings, path) = settings("edit");
-        settings.set_listen("127.0.0.1:9001").unwrap();
+        let mut next = settings.saved();
+        next.listen = "127.0.0.1:9001".to_owned();
+        next.display = 2;
 
-        assert_eq!(settings.saved().listen, "127.0.0.1:9001");
-        assert_eq!(on_disk(&path).listen, "127.0.0.1:9001", "not persisted");
+        assert!(settings.apply(next.clone()).unwrap(), "a change was saved");
+        assert_eq!(settings.saved(), next);
+        assert_eq!(on_disk(&path), next, "not persisted");
         assert!(settings.restart_pending());
-        // The running agent is untouched: it is still on the old port, and the
-        // menu bar has to be able to say so.
+        // The running agent is untouched until it restarts, and the menu bar has
+        // to be able to say so.
         assert_eq!(
             settings.running().listen,
             format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT)
         );
-
-        settings.set_display(2).unwrap();
-        assert_eq!(on_disk(&path).display, 2);
         assert_eq!(settings.running().display, 0);
     }
 
+    // The dialog hands back all three values whether or not they were touched, so
+    // pressing Save on an unchanged dialog must not report a change — that is what
+    // would otherwise restart the agent for nothing.
     #[test]
-    fn a_regenerated_key_is_new_valid_and_saved() {
+    fn saving_an_unchanged_config_is_not_a_change() {
+        let (settings, _) = settings("unchanged");
+        assert!(!settings.apply(settings.saved()).unwrap());
+        assert!(!settings.restart_pending());
+    }
+
+    // A key pasted into the dialog is stored verbatim, and the old one keeps
+    // authenticating until the restart.
+    #[test]
+    fn a_new_key_is_saved_without_becoming_the_running_one() {
         let (settings, path) = settings("psk");
         let before = settings.saved().psk;
-        let after = settings.regenerate_psk().unwrap();
+        let after = rxa_proto::psk::generate();
+        let mut next = settings.saved();
+        next.psk = after.clone();
 
-        assert_ne!(before, after);
-        rxa_proto::psk::parse(&after).unwrap();
+        assert!(settings.apply(next).unwrap());
         assert_eq!(settings.saved().psk, after);
         assert_eq!(on_disk(&path).psk, after);
-        // The old key is still the one that authenticates, until a restart.
         assert_eq!(settings.running().psk, before);
         assert!(settings.restart_pending());
     }
 
     // An edit the config layer rejects must leave no trace: not in the file, and
-    // not in what the GUI reports back.
+    // not in what the GUI reports back. The dialog reopens on the typed values,
+    // so nothing here may be half-kept.
     #[test]
     fn a_rejected_edit_changes_nothing() {
         let (settings, path) = settings("reject");
         let before = settings.saved();
 
-        let err = settings.set_listen("port 52381").unwrap_err();
+        let mut bad = before.clone();
+        bad.listen = "port 52381".to_owned();
+        let err = settings.apply(bad).unwrap_err();
         assert!(format!("{err:#}").contains("address:port"), "{err:#}");
+
+        let mut bad = before.clone();
+        bad.psk = "rxanonsense".to_owned();
+        let err = settings.apply(bad).unwrap_err();
+        assert!(format!("{err:#}").contains("psk"), "{err:#}");
 
         assert_eq!(settings.saved(), before);
         assert_eq!(on_disk(&path), before);
@@ -189,18 +200,28 @@ mod tests {
     #[test]
     fn putting_a_value_back_clears_the_pending_restart() {
         let (settings, _) = settings("revert");
-        let original = settings.running().listen.clone();
-        settings.set_listen("127.0.0.1:9003").unwrap();
+        let original = settings.saved();
+        let mut next = original.clone();
+        next.listen = "127.0.0.1:9003".to_owned();
+        settings.apply(next).unwrap();
         assert!(settings.restart_pending());
-        settings.set_listen(&original).unwrap();
+        settings.apply(original).unwrap();
         assert!(!settings.restart_pending());
     }
 
-    // Whitespace round a pasted address is the user's typing, not their intent.
+    // Whitespace round pasted values is the user's typing, not their intent — and
+    // an untrimmed key would be stored as one the config parser barely accepts.
     #[test]
-    fn a_pasted_address_is_trimmed() {
+    fn pasted_values_are_trimmed() {
         let (settings, _) = settings("trim");
-        settings.set_listen("  127.0.0.1:9002\n").unwrap();
+        let psk = rxa_proto::psk::generate();
+        let next = Config {
+            listen: "  127.0.0.1:9002\n".to_owned(),
+            psk: format!(" {psk}\n"),
+            display: 0,
+        };
+        assert!(settings.apply(next).unwrap());
         assert_eq!(settings.saved().listen, "127.0.0.1:9002");
+        assert_eq!(settings.saved().psk, psk);
     }
 }

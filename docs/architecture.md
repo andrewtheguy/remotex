@@ -442,11 +442,19 @@ whoever is sitting at it (see [`roadmap.md`](roadmap.md)).
 **The agent's menu bar item is its entire interface** — no Dock tile, no
 windows, and no CLI beyond three launch flags (`--config`, `--no-register`,
 `--no-menu`). It reports whether a gateway is attached and to which address,
-shows and copies and regenerates the pre-shared key, edits the listen address,
-picks the display, reveals the config, opens the log, links to the two Privacy
-panes, toggles the login item, and quits. Having the item at all is what makes
-the agent's state observable to the person whose screen is being shared, which
-for software of this kind is not a nicety.
+copies the pre-shared key, opens one settings dialog holding all three settings
+(listen address, display, key), reveals the config, opens the log, toggles the
+login item, and quits. Having the item at all is what makes the agent's state
+observable to the person whose screen is being shared, which for software of this
+kind is not a nicety.
+
+The two TCC grants are **not** in that list of settings, because they are not
+settings: the agent does nothing useful without either, so they are health. The
+icon carries a third state for "a permission is missing" — ahead of "connected",
+since a gateway attached to an agent that cannot capture or inject is the case
+most worth warning about — a panel asks for the missing one once per launch and
+offers to open the pane, and the menu grows an **Enable …** row only while one is
+missing. Nothing about them appears when both are granted.
 
 Quit is why the embedded LaunchAgent sets `KeepAlive` to `SuccessfulExit: false`
 rather than `true` — under a plain `true` launchd would restart the agent seconds
@@ -456,21 +464,25 @@ and the cursor poll runs as a timer on that run loop.
 
 Two consequences of putting everything there, both deliberate:
 
-- **`NSAlert` is the whole panel toolkit** (`panels.rs`). Showing a key and
-  taking one line of text are the only things a menu cannot do itself, and a
-  settings window for three settings would be a window controller, a nib and a
-  Dock tile's worth of behaviour the agent spent real effort not having. Panels
-  activate the app first: an accessory app is never active, and a modal it opens
-  without activating lands *behind* everything — invisible, and unreachable from
-  the menu that opened it.
-- **Edits are written, not applied** (`settings.rs`). A change validates, is
-  saved atomically at 0600, and takes effect at the next launch; rebinding a
-  listener under a live connection, or swapping the key its gateway already
-  authenticated with, is machinery bought to save a background agent one
-  restart. What that owes the user is honesty about the gap, so the config the
-  process is *running* is kept beside the saved one and the menu says
-  "restart to apply" while they differ — including, pointedly, that a
-  regenerated key is not the one being accepted yet.
+- **`NSAlert` is the whole panel toolkit** (`panels.rs`). A settings *window* for
+  three fields would be a window controller, a nib and a Dock tile's worth of
+  behaviour the agent spent real effort not having; an alert with an accessory
+  view is three fields. Panels activate the app first: an accessory app is never
+  active, and a modal it opens without activating lands *behind* everything —
+  invisible, and unreachable from the menu that opened it.
+- **A saved change is applied by restarting into it** (`settings.rs`). Editing
+  validates and writes the file, atomically and at 0600, and then the agent
+  re-execs itself if anything actually changed. Rebinding a listener under a live
+  connection, swapping the key the current gateway authenticated with, restarting
+  the capture stream on another display: three piles of machinery replaced by one
+  `exec`, which cannot leave a change half-applied. Not "quit and let launchd
+  restart us" (`KeepAlive` is `SuccessfulExit: false`, so Quit can mean Quit) and
+  not "spawn a copy and exit" (the copy loses a race with the port it is about to
+  bind). The re-exec keeps the PID, the launchd job and the code identity the TCC
+  grants are keyed to; the gateway sees a dropped connection and reconnects, which
+  it is already built to do. The config the process was launched with is kept
+  beside the saved one, so if the `exec` ever fails the menu can say "restart to
+  apply" instead of showing a setting that is not in force.
 
 Reading the permissions is a menu item and not a subcommand for a reason that
 outlasts taste: macOS credits a TCC grant to whatever launched the process, so a

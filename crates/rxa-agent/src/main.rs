@@ -41,10 +41,11 @@
 //!
 //! Both are one-time grants in System Settings → Privacy & Security, both are
 //! attached to this bundle's signed identity, and macOS provides no way to grant
-//! them programmatically. Accessibility is the one that bites: without it the
-//! screen paints, the session looks perfectly healthy, and every click and
-//! keystroke is silently discarded — so [`report_permissions`] says so at
-//! startup.
+//! them programmatically. Neither is optional, so neither is a setting: the menu
+//! bar treats them as health, warns in its icon and asks for the missing one (see
+//! [`menubar`]). Accessibility is the one that bites — without it the screen
+//! paints, the session looks perfectly healthy, and every click and keystroke is
+//! silently discarded.
 //!
 //! Both also require the process to live in the user's GUI (Aqua) session, which
 //! is why the embedded plist is a LaunchAgent and not a LaunchDaemon. The honest
@@ -185,6 +186,41 @@ fn main() -> anyhow::Result<()> {
     menubar::run(state, tracker, settings, log_path)
 }
 
+/// Restart the agent in place, to run under a config that has just changed.
+///
+/// `exec`, not "quit and be relaunched", and not "spawn a copy and exit":
+///
+/// - The embedded LaunchAgent's `KeepAlive` is `SuccessfulExit: false` — that is
+///   what makes Quit mean Quit (see [`menubar`]) — so a clean exit would leave the
+///   agent stopped, not restarted.
+/// - Spawning a second copy first loses a race with its own listener: the new
+///   process binds before this one has let the port go, finds it in use, and
+///   exits cleanly (see [`serve`]), leaving nothing running.
+///
+/// Replacing the process image has neither problem. The PID, the launchd job and
+/// the code identity the two TCC grants are keyed to all survive, the listening
+/// socket closes on the way (Rust opens sockets `CLOEXEC`), and the new image
+/// re-reads the config from scratch. The gateway sees a dropped connection and
+/// reconnects, which it is already built to do.
+///
+/// Only returns if the exec failed, in which case nothing has changed and the
+/// caller still has a running agent to report to.
+fn restart() -> anyhow::Error {
+    use std::os::unix::process::CommandExt as _;
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return anyhow::anyhow!("cannot find my own executable: {e}"),
+    };
+    info!("restarting into {}", exe.display());
+    // Same arguments, so a `--config` path or a `--no-menu` session restarts as
+    // itself rather than as a default agent.
+    let error = std::process::Command::new(&exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    anyhow::anyhow!("cannot restart {}: {error}", exe.display())
+}
+
 /// Log to stderr on a terminal, and to `~/Library/Logs/remotex-agent.log`
 /// otherwise.
 ///
@@ -296,7 +332,9 @@ async fn serve(
 ///   and keystroke vanishes.
 ///
 /// macOS remembers the answer, so a granted (or firmly refused) permission does
-/// not re-prompt on later launches.
+/// not re-prompt on later launches — which is exactly why the menu bar asks again
+/// in its own words once the run loop is up (see [`menubar`]). This function is
+/// the system prompt and the log line; that one is the explanation.
 fn report_permissions() {
     if capture::screen_recording_granted() {
         info!("permissions: Screen Recording granted");

@@ -220,13 +220,14 @@ agent in System Settings > General > Login Items.
 Everything after that is in the menu bar item, which is the agent's whole
 interface — there are no subcommands. Open it for:
 
-    Pre-Shared Key       to copy the key into the gateway's rxa target
-    Screen Recording     ) both must be granted, and the menu ticks them
-    Accessibility        ) as System Settings sees them
+    Copy Pre-Shared Key  to paste the key into the gateway's rxa target
+    Settings...          listen address, display and key, in one dialog
 
-Read the grants from the menu and not from a shell: macOS credits a permission
-to whatever launched the process, so a shell asking on the agent's behalf answers
-for the shell. The agent's own log has its answer too:
+It also needs Screen Recording and Accessibility, and asks for whichever is
+missing: the icon warns and the menu offers the right Privacy pane. Read the
+grants there and not from a shell — macOS credits a permission to whatever
+launched the process, so a shell asking on the agent's behalf answers for the
+shell. The agent's own log has its answer too:
 
     grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
 NOTES

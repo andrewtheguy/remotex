@@ -43,19 +43,18 @@ subcommands, and nothing below needs a terminal.
 |---|---|
 | 🖥 | idle — running, nobody connected |
 | 👁 | a gateway is connected and watching this screen |
+| ⚠️ | a required permission is missing; nothing will work until it is granted |
 
 Opening it shows the connected gateway's address, how long it has been attached,
 and the address the agent is listening on. Then:
 
 | | |
 |---|---|
-| **Pre-Shared Key…** | shows the key, copies it, or mints a new one |
-| **Copy Pre-Shared Key** | the same copy, without the panel |
-| **Listen Address…** | `address:port` to wait for the gateway on |
-| **Display** | which screen to share, when more than one is attached |
+| **Copy Pre-Shared Key** | the key, straight to the clipboard |
+| **Settings…** | listen address, display and pre-shared key, in one dialog |
 | **Reveal Config in Finder** | where the config file is |
 | **Open Log** | `~/Library/Logs/remotex-agent.log` |
-| **Screen Recording** / **Accessibility** | ticked when granted; each opens the right Privacy pane, which is otherwise four levels down a settings tree |
+| **Enable Screen Recording…** / **Enable Accessibility…** | only while one is missing; each opens the right Privacy pane, which is otherwise four levels down a settings tree |
 | **Start at Login** | the `SMAppService` registration, as a toggle |
 | **Quit remotex-agent** | really quits — see below |
 
@@ -64,16 +63,24 @@ Quit really quits: the embedded LaunchAgent uses `KeepAlive` /
 still restarted. The agent comes back at your next login, or whenever you open
 it from `/Applications` again.
 
-### Settings apply at the next start
+### One settings dialog, and Save restarts
 
-Changing the listen address, the display or the key writes the config file and
-nothing more — the running agent keeps serving what it was launched with. The
-menu says `⚠︎ Saved changes apply after a restart` while the two disagree, and
-**Quit** followed by opening the app again is the restart.
+**Settings…** holds all three settings at once:
 
-That matters most for the key: after regenerating, the agent still
-authenticates with the *previous* one until it restarts, so put the new key on
-the gateway and restart the agent together.
+| | |
+|---|---|
+| Listen address | `address:port` to wait for the gateway on. `0.0.0.0` is every interface |
+| Display | which screen to share, when more than one is attached |
+| Pre-shared key | editable, so a key can be pasted in — plus **Regenerate**, which fills the field with a fresh one |
+
+Nothing is written until **Save**, so **Regenerate** followed by **Cancel**
+changes nothing. Saving a change **restarts the agent immediately** — that is
+how a new port, display or key takes effect — which drops any connection in
+progress. The gateway reconnects on its own.
+
+So a key change is two steps in either order, with a gap between them: put the
+new key in the gateway's `remotex.toml`, and save it here. Nothing can connect
+until both are done.
 
 ### Over SSH there is no interface
 
@@ -84,8 +91,8 @@ file is plain TOML if you are stuck without a screen.
 
 ## Then two permissions, and one key
 
-Open the menu bar item, choose **Pre-Shared Key…**, and copy it. Paste it as
-`psk` on the matching `[[targets]]` entry in the gateway's `remotex.toml`:
+Open the menu bar item, choose **Copy Pre-Shared Key**, and paste it as `psk` on
+the matching `[[targets]]` entry in the gateway's `remotex.toml`:
 
 ```toml
 [[targets]]
@@ -95,8 +102,8 @@ host = "mac.local"
 psk = "rxa..."
 ```
 
-Then open **System Settings → Privacy & Security** and enable `remotex-agent`
-under **both**:
+Both permissions are needed in **System Settings → Privacy & Security**, under
+`remotex-agent`:
 
 | Permission | Without it |
 |---|---|
@@ -104,20 +111,21 @@ under **both**:
 | Accessibility | the session looks perfectly healthy and silently ignores every click and keystroke |
 
 The second is the one that wastes an afternoon — with only Screen Recording
-granted, everything appears to work except that nothing responds.
+granted, everything appears to work except that nothing responds. So neither is
+treated as an option: the agent asks for the missing one at startup and offers to
+open the right pane, the menu bar icon shows ⚠️ until both are on, and the menu
+carries an **Enable …** item for whichever is missing. When both are granted,
+none of that appears.
 
 macOS provides no way to grant these programmatically. Because the bundle is
 code-signed with a stable identifier, you only grant them once; they survive
 upgrades.
 
-Check the result **in the menu bar**, where Screen Recording and Accessibility
-are ticked when granted.
-
-That is the only place worth reading them from. Both permissions are attributed
-to whatever launched the process, so the binary run from a terminal reports your
-*terminal's* permissions — the same binary says "NOT granted" from a shell and
-"granted" a second later when macOS launches it as the app. The agent's own log
-is the other honest answer:
+The menu bar is also the only place worth *reading* them from. Both permissions
+are attributed to whatever launched the process, so the binary run from a terminal
+reports your *terminal's* permissions — the same binary says "NOT granted" from a
+shell and "granted" a second later when macOS launches it as the app. The agent's
+own log is the other honest answer:
 
 ```sh
 grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
@@ -129,7 +137,7 @@ grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
 |---|---|
 | Config | `~/Library/Application Support/remotex-agent/config.toml` (**Reveal Config in Finder**) |
 | Log | `~/Library/Logs/remotex-agent.log` (**Open Log**) |
-| Port | 52381 by default (**Listen Address…**) |
+| Port | 52381 by default (**Settings…**) |
 
 The config is written by the menu, and rewritten whole on every change — so
 comments you add to it by hand will not survive the next one. It is mode 0600,

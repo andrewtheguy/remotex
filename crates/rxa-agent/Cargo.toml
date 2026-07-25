@@ -75,6 +75,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSText",
     "NSFont",
     "NSWindow",
+    "NSPopUpButton",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
