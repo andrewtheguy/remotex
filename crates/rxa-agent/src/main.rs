@@ -19,6 +19,13 @@
 //! Uninstalling is moving the bundle to the Trash — or `--unregister` first, to
 //! take it out of Login Items cleanly.
 //!
+//! ## It has a menu bar item
+//!
+//! There are no windows, but there is a status item (see [`menubar`]): it says
+//! whether a gateway is connected, copies the pre-shared key, links to the two
+//! Privacy panes, and quits. Everything the agent can be asked to do is reachable
+//! from there without a terminal.
+//!
 //! ## Two permissions
 //!
 //! - **Screen Recording**, for `SCStream` (see [`capture`]).
@@ -38,11 +45,12 @@
 //!
 //! ## Threading
 //!
-//! AppKit is main-thread-only, and reading the pointer shape goes through
-//! `NSCursor` — so the **main thread polls the cursor** into a cache and the
-//! tokio runtime serving the socket runs on a thread of its own. Sessions only
-//! ever read that cache. ScreenCaptureKit needs no run loop; it delivers frames
-//! on its own dispatch queues.
+//! AppKit is main-thread-only, and both the menu bar and reading the pointer
+//! shape through `NSCursor` are AppKit — so the **main thread runs the
+//! `NSApplication` run loop** (see [`menubar`]), polling the cursor into a cache
+//! from a timer on it, while the tokio runtime serving the socket runs on a
+//! thread of its own. Sessions only ever read that cache. ScreenCaptureKit needs
+//! no run loop; it delivers frames on its own dispatch queues.
 //!
 //! ## One gateway at a time
 //!
@@ -67,21 +75,24 @@ mod cursor;
 mod encode;
 mod input;
 mod loginitem;
+mod menubar;
 mod session;
+mod state;
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
-/// How often the main thread re-reads the system cursor.
+/// How often the main thread re-reads the system cursor when `--no-menu` has
+/// taken the run loop away. The menu bar polls at the same rate from a timer.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
-    init_logging();
+    let log_path = init_logging();
 
     // Subcommands that do one thing and exit, before any config is needed.
     if args.gen_psk {
@@ -138,10 +149,12 @@ fn main() -> anyhow::Result<()> {
     report_permissions();
 
     let tracker = Arc::new(cursor::Tracker::new());
+    let state = Arc::new(state::AgentState::new());
 
     // The socket runs on its own thread so the main thread stays free for
-    // AppKit. `main` then becomes the cursor poller and never returns.
+    // AppKit, which owns the menu bar and the pointer shape both.
     let serve_tracker = Arc::clone(&tracker);
+    let serve_state = Arc::clone(&state);
     let listen = config.listen.clone();
     let psk = config.psk_bytes();
     let display = config.display;
@@ -157,7 +170,7 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            match runtime.block_on(serve(listen, psk, display, serve_tracker)) {
+            match runtime.block_on(serve(listen, psk, display, serve_tracker, serve_state)) {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("remotex-agent: {e:#}");
@@ -166,11 +179,17 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
 
-    // Main thread: poll the pointer shape forever. Sessions read the cache.
-    loop {
-        tracker.poll();
-        std::thread::sleep(CURSOR_POLL);
+    if args.no_menu {
+        // No run loop, so nothing drives an NSTimer: poll the pointer shape the
+        // plain way instead. Sessions read the same cache either way.
+        loop {
+            tracker.poll();
+            std::thread::sleep(CURSOR_POLL);
+        }
     }
+
+    // Hands the main thread to AppKit and never returns.
+    menubar::run(state, tracker, config.psk, config.listen, log_path)
 }
 
 /// Log to stderr on a terminal, and to `~/Library/Logs/remotex-agent.log`
@@ -180,26 +199,34 @@ fn main() -> anyhow::Result<()> {
 /// path and sets no `StandardErrorPath` at all — output would go nowhere. The
 /// agent redirects its own logging instead, which also keeps a hand-run agent
 /// printing to the terminal where you expect it.
-fn init_logging() {
+///
+/// Returns the file it chose, if any, so the menu bar can offer to open it —
+/// and, on a terminal, correctly offers nothing.
+fn init_logging() -> Option<PathBuf> {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    let mut path = None;
     if !std::io::stderr().is_terminal()
-        && let Some(file) = log_file()
+        && let Some((file, chosen)) = log_file()
     {
         builder.target(env_logger::Target::Pipe(Box::new(file)));
+        path = Some(chosen);
     }
     builder.init();
+    path
 }
 
-fn log_file() -> Option<std::fs::File> {
+fn log_file() -> Option<(std::fs::File, PathBuf)> {
     let home = std::env::var_os("HOME")?;
     let dir = Path::new(&home).join("Library/Logs");
     std::fs::create_dir_all(&dir).ok()?;
-    std::fs::OpenOptions::new()
+    let path = dir.join("remotex-agent.log");
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("remotex-agent.log"))
-        .ok()
+        .open(&path)
+        .ok()?;
+    Some((file, path))
 }
 
 /// Accept gateway connections, one at a time.
@@ -208,6 +235,7 @@ async fn serve(
     psk: [u8; 32],
     display: usize,
     tracker: Arc<cursor::Tracker>,
+    state: Arc<state::AgentState>,
 ) -> anyhow::Result<()> {
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(listener) => listener,
@@ -237,12 +265,17 @@ async fn serve(
             }
         };
         info!("agent: gateway connected from {peer}");
+        // Recorded before the eviction, so the menu bar never blinks through a
+        // "not connected" state during a reconnect. The id is what keeps the
+        // evicted session from clearing this one on its way out.
+        let id = state.connected(peer, Instant::now());
         if let Some(previous) = current.take() {
             info!("agent: evicting the previous gateway connection");
             previous.abort();
         }
 
         let tracker = Arc::clone(&tracker);
+        let session_state = Arc::clone(&state);
         current = Some(tokio::spawn(async move {
             match session::serve(stream, psk, display, tracker).await {
                 Ok(()) => info!("agent: gateway {peer} disconnected"),
@@ -250,6 +283,7 @@ async fn serve(
                 // dropped, never fatal to the agent.
                 Err(e) => warn!("agent: session with {peer} ended: {e:#}"),
             }
+            session_state.disconnected(id);
         }));
     }
 }
@@ -345,6 +379,7 @@ struct Args {
     show_psk: bool,
     status: bool,
     no_register: bool,
+    no_menu: bool,
     unregister: bool,
 }
 
@@ -364,6 +399,7 @@ impl Args {
                 "--show-psk" => parsed.show_psk = true,
                 "--status" => parsed.status = true,
                 "--no-register" => parsed.no_register = true,
+                "--no-menu" => parsed.no_menu = true,
                 "--unregister" => parsed.unregister = true,
                 "-h" | "--help" => {
                     println!("{USAGE}");
@@ -395,6 +431,8 @@ Options:
       --gen-psk        Print a fresh pre-shared key and exit
       --status         Show config, login-item and permission state, then exit
       --no-register    Serve without registering as a login item (for development)
+      --no-menu        Serve without a menu bar item. Needed over SSH, where
+                       there is no window server to put one in
       --unregister     Remove from Login Items and exit
   -h, --help           Show this help
   -V, --version        Show the version
@@ -418,6 +456,9 @@ mod tests {
         assert!(!args.gen_psk && !args.show_psk && !args.status);
         // Registering is the default: installing is meant to be "open it once".
         assert!(!args.no_register);
+        // So is the menu bar — an agent with no visible sign of itself and no
+        // way to quit is the thing --no-menu exists to opt *out* of.
+        assert!(!args.no_menu);
         assert!(!args.unregister);
     }
 
@@ -435,6 +476,7 @@ mod tests {
         assert!(parse(&["--show-psk"]).unwrap().show_psk);
         assert!(parse(&["--status"]).unwrap().status);
         assert!(parse(&["--no-register"]).unwrap().no_register);
+        assert!(parse(&["--no-menu"]).unwrap().no_menu);
         assert!(parse(&["--unregister"]).unwrap().unregister);
     }
 
@@ -469,6 +511,7 @@ mod tests {
             "--gen-psk",
             "--status",
             "--no-register",
+            "--no-menu",
             "--unregister",
             "--help",
             "--version",

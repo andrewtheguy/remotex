@@ -32,10 +32,14 @@ png = "0.18"
 # Retina desktop.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
 
-# Input injection (CGEvent*) and the pointer shape (NSCursor).
+# Input injection (CGEvent*), the pointer shape (NSCursor) and the menu bar
+# item (NSStatusItem and friends).
 objc2 = "0.6"
 objc2-core-graphics = "0.3"
 objc2-core-foundation = "0.3"
+# Features here do not imply sibling features: NSStatusBarButton gets the type
+# but none of NSButton's methods, so every superclass in a chain we call
+# through has to be listed too.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSCursor",
@@ -43,6 +47,23 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSBitmapImageRep",
     "NSImageRep",
     "NSGraphics",
+    "NSApplication",
+    # NSApplicationActivationPolicy lives in NSRunningApplication's header, and
+    # NSVariableStatusItemLength is a CGFloat, which needs the CF interop.
+    "NSRunningApplication",
+    "objc2-core-foundation",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSButton",
+    "NSControl",
+    "NSCell",
+    "NSView",
+    "NSResponder",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPasteboard",
+    "NSWorkspace",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
@@ -51,6 +72,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
     "NSString",
     "NSError",
+    "NSURL",
+    "NSDate",
+    "NSTimer",
+    "NSRunLoop",
 ] }
 # SMAppService: the agent registers itself as a login item, so there is no
 # install script and no plist in ~/Library/LaunchAgents. macOS 13+; this crate

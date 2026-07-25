@@ -38,8 +38,18 @@
 	<string>Contents/MacOS/remotex-agent</string>
 	<key>RunAtLoad</key>
 	<true/>
+	<!-- Restart the agent if it dies, but not if it exited on purpose. A plain
+	     `KeepAlive: true` would make the menu bar's Quit item a lie — launchd
+	     would bring the agent straight back a second later. `SuccessfulExit:
+	     false` keeps crash recovery and lets a deliberate exit 0 stick until the
+	     next login (or until the user opens the app again). The agent also exits
+	     0 when the port is already bound, which is another case where coming
+	     back would achieve nothing. -->
 	<key>KeepAlive</key>
-	<true/>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>EnvironmentVariables</key>
