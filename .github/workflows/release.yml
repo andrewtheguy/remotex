@@ -1,4 +1,4 @@
-name: Release remotex
+name: Release remotex and mac agent
 
 on:
   workflow_dispatch:
