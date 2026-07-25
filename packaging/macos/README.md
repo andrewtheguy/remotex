@@ -84,10 +84,20 @@ macOS provides no way to grant these programmatically. Because the bundle is
 code-signed with a stable identifier, you only grant them once; they survive
 upgrades.
 
-Check the result:
+Check the result **in the menu bar**, where Screen Recording and Accessibility
+are ticked when granted.
+
+Do not trust `--status` for this. Both permissions are attributed to whatever
+launched the process, so running the binary from a terminal reports your
+*terminal's* permissions, not the agent's — the same binary says "NOT granted"
+from a shell and "granted" a second later when launched as the app:
 
 ```sh
+# Everything except the two permission lines is accurate here.
 /Applications/remotex-agent.app/Contents/MacOS/remotex-agent --status
+
+# The truth about the permissions, from the agent as macOS actually runs it.
+grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
 ```
 
 ## Where things are

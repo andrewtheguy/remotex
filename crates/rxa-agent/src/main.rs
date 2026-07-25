@@ -352,6 +352,18 @@ fn print_status(config: &config::Config, path: &Path) {
             "NOT granted (input will be silently ignored)"
         }
     );
+    // Both permissions are attributed to whatever launched the process, so run
+    // from a shell these two lines describe the *terminal*, not the agent — the
+    // same binary reports "NOT granted" here and "granted" a moment later when
+    // macOS launches it as the app. Saying so is the difference between a
+    // confusing afternoon and none: the two answers disagree and neither is
+    // obviously the wrong one. Printed unconditionally — `--status` output is
+    // for a human whether or not it went through a pipe on the way.
+    println!();
+    println!("Note: those last two lines describe whatever launched this command, not");
+    println!("the agent — macOS credits the permissions to the responsible process. Read");
+    println!("them from the menu bar, or from the agent's own log:");
+    println!("  grep permissions: ~/Library/Logs/remotex-agent.log | tail -2");
 }
 
 fn print_first_run(config: &config::Config, path: &Path) {
