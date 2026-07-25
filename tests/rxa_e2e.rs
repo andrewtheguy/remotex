@@ -388,7 +388,7 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
                     } else if text.contains(r#""type":"cursor""#) {
                         cursor = Some(text.to_string());
                     } else if text.contains(r#""type":"displayModes""#) {
-                        modes = Some(parse_modes(&text));
+                        modes = Some(parse_modes_text(&text));
                     }
                 }
                 Message::Binary(frame) => tile = Some(frame.to_vec()),
@@ -535,17 +535,30 @@ async fn expect_clipboard(ws: &mut Ws) -> String {
 }
 
 /// Drain the socket until a control frame of `kind` arrives; returns it parsed.
+/// Other controls are retained so a later assertion can accept either order.
 /// Fails on an error or a close, like the paint helper.
-async fn expect_control(ws: &mut Ws, kind: &str) -> serde_json::Value {
-    let tag = format!(r#""type":"{kind}""#);
+async fn expect_control(
+    ws: &mut Ws,
+    kind: &str,
+    retained: &mut Vec<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(index) = retained
+        .iter()
+        .position(|frame| frame["type"].as_str() == Some(kind))
+    {
+        return retained.remove(index);
+    }
     tokio::time::timeout(Duration::from_secs(20), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
-                    if text.contains(&tag) {
-                        return serde_json::from_str(&text).unwrap();
+                    let frame: serde_json::Value = serde_json::from_str(&text)
+                        .unwrap_or_else(|error| panic!("invalid control frame {text}: {error}"));
+                    if frame["type"].as_str() == Some(kind) {
+                        return frame;
                     }
+                    retained.push(frame);
                 }
                 Message::Close(frame) => panic!("session closed: {frame:?}"),
                 _ => {}
@@ -558,20 +571,30 @@ async fn expect_control(ws: &mut Ws, kind: &str) -> serde_json::Value {
 }
 
 /// The resolutions the browser was offered, in order.
-async fn expect_display_modes(ws: &mut Ws) -> Vec<(u16, u16)> {
-    let frame = expect_control(ws, "displayModes").await;
-    parse_modes(&frame.to_string())
+async fn expect_display_modes(
+    ws: &mut Ws,
+    retained: &mut Vec<serde_json::Value>,
+) -> Vec<(u16, u16)> {
+    let frame = expect_control(ws, "displayModes", retained).await;
+    parse_modes(&frame)
 }
 
 /// The `modes` array of a `displayModes` frame, as pairs.
-fn parse_modes(text: &str) -> Vec<(u16, u16)> {
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    parsed["modes"]
+fn parse_modes(frame: &serde_json::Value) -> Vec<(u16, u16)> {
+    frame["modes"]
         .as_array()
         .expect("modes should be an array")
         .iter()
         .map(|m| (m["w"].as_u64().unwrap() as u16, m["h"].as_u64().unwrap() as u16))
         .collect()
+}
+
+/// Text-frame wrapper for [`expect_paint`], which keeps the original frame in
+/// parse failures while the other helpers avoid a JSON serialize/parse cycle.
+fn parse_modes_text(text: &str) -> Vec<(u16, u16)> {
+    let frame = serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("invalid displayModes frame {text}: {error}"));
+    parse_modes(&frame)
 }
 
 /// How long [`assert_quiet`] listens before deciding nothing is coming. Short
@@ -788,12 +811,12 @@ async fn the_resolution_menu_reaches_the_browser_and_a_pick_reaches_the_agent() 
         GatewayMsg::SetDisplaySize { w: 240, h: 180 }
     );
 
-    // The Mac's new size comes back as an ordinary resize — the browser learns
-    // it the same way it learns about a resize nothing asked for.
-    let resized = expect_control(&mut ws, "resize").await;
+    // The Mac's new size and regenerated mode list can arrive in either order.
+    let mut retained = Vec::new();
+    let resized = expect_control(&mut ws, "resize", &mut retained).await;
+    let modes = expect_display_modes(&mut ws, &mut retained).await;
     assert_eq!((resized["w"].as_u64(), resized["h"].as_u64()), (Some(240), Some(180)));
-    // And the menu is re-sent, because a reconfigure regenerates the Mac's list.
-    assert_eq!(expect_display_modes(&mut ws).await, AGENT_MODES.to_vec());
+    assert_eq!(modes, AGENT_MODES.to_vec());
 }
 
 // Both halves are required. A target that did not opt in gets no menu and its

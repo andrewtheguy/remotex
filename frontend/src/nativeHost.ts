@@ -115,7 +115,14 @@ function parseCommand(value: unknown): NativeCommand | null {
         ? { type: "clipboard", text: command.text }
         : null;
     case "setResolution":
-      return typeof command.w === "number" && typeof command.h === "number"
+      return typeof command.w === "number" &&
+        Number.isFinite(command.w) &&
+        Number.isInteger(command.w) &&
+        command.w > 0 &&
+        typeof command.h === "number" &&
+        Number.isFinite(command.h) &&
+        Number.isInteger(command.h) &&
+        command.h > 0
         ? { type: "setResolution", w: command.w, h: command.h }
         : null;
     case "releaseKeys":

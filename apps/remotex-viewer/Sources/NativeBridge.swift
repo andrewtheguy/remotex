@@ -23,7 +23,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
     ) {
         guard message.frameInfo.isMainFrame,
               let model,
-              model.gateway.origin.contains(message.frameInfo.request.url ?? model.gateway.url),
+              let messageURL = message.frameInfo.request.url,
+              model.gateway.origin.contains(messageURL),
               let body = message.body as? [String: Any],
               let type = body["type"] as? String
         else {

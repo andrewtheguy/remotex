@@ -67,6 +67,12 @@ final class KeyboardCapture {
         guard model.canCaptureKeyboardNow else {
             return false
         }
+        if event.modifierFlags.contains(.command),
+           let code = KeyboardTranslator.domCode(for: event.keyCode),
+           ["KeyQ", "KeyW", "Comma"].contains(code)
+        {
+            return false
+        }
 
         let mapCommandToControl = model.macOSKeyboardOverridesActive
         if event.type == .keyDown,

@@ -20,7 +20,9 @@ struct KeyboardTranslatorTests {
     @Test
     func commandVBecomesControlVWithoutAWindowsKey() {
         var translator = KeyboardTranslator()
-        #expect(translator.translate(event(.flagsChanged, 0x37, [.command])).isEmpty)
+        #expect(
+            translator.translate(event(.flagsChanged, 0x37, [.command], sideMask: 0x0008)).isEmpty
+        )
         #expect(
             translator.translate(event(.keyDown, 0x09, [.command]))
                 == [
@@ -43,7 +45,7 @@ struct KeyboardTranslatorTests {
         var translator = KeyboardTranslator()
         #expect(
             translator.translate(
-                event(.flagsChanged, 0x37, [.command]),
+                event(.flagsChanged, 0x37, [.command], sideMask: 0x0008),
                 mapCommandToControl: false
             )
                 == [
@@ -84,7 +86,7 @@ struct KeyboardTranslatorTests {
         var translator = KeyboardTranslator()
         #expect(
             translator.translate(
-                event(.flagsChanged, 0x37, [.command]),
+                event(.flagsChanged, 0x37, [.command], sideMask: 0x0008),
                 mapCommandToControl: false
             )
                 == [
@@ -105,7 +107,9 @@ struct KeyboardTranslatorTests {
     @Test
     func bareCommandTapsTheRemoteWindowsKey() {
         var translator = KeyboardTranslator()
-        #expect(translator.translate(event(.flagsChanged, 0x37, [.command])).isEmpty)
+        #expect(
+            translator.translate(event(.flagsChanged, 0x37, [.command], sideMask: 0x0008)).isEmpty
+        )
         #expect(
             translator.translate(event(.flagsChanged, 0x37, []))
                 == [
@@ -118,7 +122,7 @@ struct KeyboardTranslatorTests {
     @Test
     func commandQIsForwardedAsAWindowsChordInsteadOfQuittingLocally() {
         var translator = KeyboardTranslator()
-        _ = translator.translate(event(.flagsChanged, 0x37, [.command]))
+        _ = translator.translate(event(.flagsChanged, 0x37, [.command], sideMask: 0x0008))
         #expect(
             translator.translate(event(.keyDown, 0x0C, [.command]))
                 == [
@@ -140,15 +144,82 @@ struct KeyboardTranslatorTests {
         )
     }
 
+    @Test
+    func releasingOneModifierKeepsOnlyTheOtherSidePressed() {
+        let pairs: [
+            (
+                independent: NSEvent.ModifierFlags,
+                leftCode: UInt16,
+                rightCode: UInt16,
+                leftName: String,
+                rightName: String,
+                leftMask: UInt,
+                rightMask: UInt,
+                mapCommandToControl: Bool
+            )
+        ] = [
+            (.shift, 0x38, 0x3C, "ShiftLeft", "ShiftRight", 0x0002, 0x0004, true),
+            (.control, 0x3B, 0x3E, "ControlLeft", "ControlRight", 0x0001, 0x2000, true),
+            (.option, 0x3A, 0x3D, "AltLeft", "AltRight", 0x0020, 0x0040, true),
+            (.command, 0x37, 0x36, "MetaLeft", "MetaRight", 0x0008, 0x0010, false),
+        ]
+
+        for pair in pairs {
+            var translator = KeyboardTranslator()
+            #expect(
+                translator.translate(
+                    event(.flagsChanged, pair.leftCode, pair.independent, sideMask: pair.leftMask),
+                    mapCommandToControl: pair.mapCommandToControl
+                )
+                    == [
+                        TranslatedKeyEvent(code: pair.leftName, pressed: true, caps: false),
+                    ]
+            )
+            #expect(
+                translator.translate(
+                    event(
+                        .flagsChanged,
+                        pair.rightCode,
+                        pair.independent,
+                        sideMask: pair.leftMask | pair.rightMask
+                    ),
+                    mapCommandToControl: pair.mapCommandToControl
+                )
+                    == [
+                        TranslatedKeyEvent(code: pair.rightName, pressed: true, caps: false),
+                    ]
+            )
+            #expect(
+                translator.translate(
+                    event(.flagsChanged, pair.leftCode, pair.independent, sideMask: pair.rightMask),
+                    mapCommandToControl: pair.mapCommandToControl
+                )
+                    == [
+                        TranslatedKeyEvent(code: pair.leftName, pressed: false, caps: false),
+                    ]
+            )
+            #expect(
+                translator.translate(
+                    event(.flagsChanged, pair.rightCode, [], sideMask: 0),
+                    mapCommandToControl: pair.mapCommandToControl
+                )
+                    == [
+                        TranslatedKeyEvent(code: pair.rightName, pressed: false, caps: false),
+                    ]
+            )
+        }
+    }
+
     private func event(
         _ type: NSEvent.EventType,
         _ keyCode: UInt16,
-        _ modifiers: NSEvent.ModifierFlags
+        _ modifiers: NSEvent.ModifierFlags,
+        sideMask: UInt = 0
     ) -> NSEvent {
         NSEvent.keyEvent(
             with: type,
             location: .zero,
-            modifierFlags: modifiers,
+            modifierFlags: NSEvent.ModifierFlags(rawValue: modifiers.rawValue | sideMask),
             timestamp: 0,
             windowNumber: 0,
             context: nil,

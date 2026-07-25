@@ -131,6 +131,7 @@ cargo test
 
 cd frontend
 bun run check
+cd ..
 
 swift test --package-path apps/remotex-viewer
 ```

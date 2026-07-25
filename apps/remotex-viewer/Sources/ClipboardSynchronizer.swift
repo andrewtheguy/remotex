@@ -11,6 +11,11 @@ final class ClipboardSynchronizer {
     private var lastFromRemote: String?
     private var lastToRemote: String?
 
+    isolated deinit {
+        timer?.invalidate()
+        timer = nil
+    }
+
     func update(enabled: Bool) {
         guard self.enabled != enabled else {
             return

@@ -449,12 +449,15 @@ export default function FloatingMenu({
     if (clipboardPending) {
       return; // a second press while the first is still in flight
     }
+    const panelAtFetchStart = panel;
     setClipboardPending(true);
     void onFetchClipboard().finally(() => {
       setClipboardPending(false);
       // Opened even when nothing answered: the panel reports the empty result
       // and its own Fetch is right there to retry.
-      setPanel("clipboard");
+      setPanel((current) =>
+        current === panelAtFetchStart ? "clipboard" : current,
+      );
     });
   }, [panel, clipboardPending, onFetchClipboard, closePanel, setPanel]);
 

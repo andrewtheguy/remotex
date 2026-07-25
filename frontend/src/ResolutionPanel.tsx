@@ -50,25 +50,29 @@ export function ResolutionPanel({
       </div>
 
       <div className="res-modes">
-        {modes.map((mode) => {
-          const active = current?.w === mode.w && current?.h === mode.h;
-          return (
-            <button
-              key={`${mode.w}x${mode.h}`}
-              type="button"
-              className={active ? "res-mode res-mode-active" : "res-mode"}
-              onClick={() => onPick(mode.w, mode.h)}
-              aria-pressed={active}
-              title={
-                active
-                  ? `The remote is already ${mode.w}×${mode.h}`
-                  : `Set the remote display to ${mode.w}×${mode.h}`
-              }
-            >
-              {mode.w} × {mode.h}
-            </button>
-          );
-        })}
+        {modes.length === 0 ? (
+          <span>No display modes are currently available.</span>
+        ) : (
+          modes.map((mode) => {
+            const active = current?.w === mode.w && current?.h === mode.h;
+            return (
+              <button
+                key={`${mode.w}x${mode.h}`}
+                type="button"
+                className={active ? "res-mode res-mode-active" : "res-mode"}
+                onClick={() => onPick(mode.w, mode.h)}
+                aria-pressed={active}
+                title={
+                  active
+                    ? `The remote is already ${mode.w}×${mode.h}`
+                    : `Set the remote display to ${mode.w}×${mode.h}`
+                }
+              >
+                {mode.w} × {mode.h}
+              </button>
+            );
+          })
+        )}
       </div>
     </div>
   );

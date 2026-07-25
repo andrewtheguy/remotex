@@ -671,6 +671,8 @@ export function useRemoteDesktop(
         return;
       }
       lastFromRemoteRef.current = text;
+      // The runtime getter is intentional: this effect does not depend on the
+      // nativeHost prop, whose captured value could therefore be stale.
       if (!isNativeHostConnected()) {
         void navigator.clipboard?.writeText?.(text).catch(() => {});
       }

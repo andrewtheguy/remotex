@@ -479,6 +479,15 @@ mod tests {
             ),
             other => panic!("connected should be a text frame: {other:?}"),
         }
+        for macos in [false, true] {
+            match (ServerMsg::RemoteOs { macos }).encode() {
+                WireFrame::Text(json) => assert_eq!(
+                    json,
+                    format!(r#"{{"type":"remoteOs","macos":{macos}}}"#)
+                ),
+                other => panic!("remoteOs should be a text frame: {other:?}"),
+            }
+        }
         match (ServerMsg::Clipboard { text: "hi \"there\"".to_owned() }).encode() {
             WireFrame::Text(json) => {
                 assert_eq!(json, r#"{"type":"clipboard","text":"hi \"there\""}"#);

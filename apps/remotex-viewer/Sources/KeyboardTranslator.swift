@@ -68,23 +68,26 @@ struct KeyboardTranslator {
         }
         if code == "MetaLeft" || code == "MetaRight" {
             if !mapCommandToControl {
+                guard let mask = Self.sideMask(for: code) else {
+                    return []
+                }
                 return [
                     TranslatedKeyEvent(
                         code: code,
-                        pressed: event.modifierFlags.contains(.command),
+                        pressed: event.modifierFlags.rawValue & mask != 0,
                         caps: caps
                     ),
                 ]
             }
             return translateCommandModifier(event, code: code, caps: caps)
         }
-        guard let flag = Self.modifierFlag(for: code) else {
+        guard let mask = Self.sideMask(for: code) else {
             return []
         }
         return [
             TranslatedKeyEvent(
                 code: code,
-                pressed: event.modifierFlags.contains(flag),
+                pressed: event.modifierFlags.rawValue & mask != 0,
                 caps: caps
             ),
         ]
@@ -95,7 +98,10 @@ struct KeyboardTranslator {
         code: String,
         caps: Bool
     ) -> [TranslatedKeyEvent] {
-        let pressed = event.modifierFlags.contains(.command)
+        guard let mask = Self.sideMask(for: code) else {
+            return []
+        }
+        let pressed = event.modifierFlags.rawValue & mask != 0
         if pressed {
             pendingCommandCodes.insert(event.keyCode)
             return []
@@ -184,16 +190,19 @@ struct KeyboardTranslator {
         }
     }
 
-    private static func modifierFlag(for code: String) -> NSEvent.ModifierFlags? {
+    // Device-dependent bits (NX_DEVICE*_KEYMASK) are the only way to tell the
+    // two physical keys of a pair apart.
+    private static func sideMask(for code: String) -> UInt? {
         switch code {
-        case "ShiftLeft", "ShiftRight":
-            .shift
-        case "ControlLeft", "ControlRight":
-            .control
-        case "AltLeft", "AltRight":
-            .option
-        default:
-            nil
+        case "ShiftLeft": 0x0002
+        case "ShiftRight": 0x0004
+        case "ControlLeft": 0x0001
+        case "ControlRight": 0x2000
+        case "AltLeft": 0x0020
+        case "AltRight": 0x0040
+        case "MetaLeft": 0x0008
+        case "MetaRight": 0x0010
+        default: nil
         }
     }
 
