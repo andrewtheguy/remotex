@@ -166,9 +166,21 @@ fn parse_provide(formats: u32, deflated: &[u8]) -> anyhow::Result<Option<String>
     Ok(None)
 }
 
-/// The 4-byte flags word. Actions live in the top byte, formats in the bottom.
+/// The 4-byte flags word, big-endian: actions in the top byte, the full
+/// 16-bit format set in the bottom two.
+///
+/// Both format bytes are written even though this build only ever sets
+/// [`FORMAT_TEXT`], so that encoding stays the exact inverse of [`parse`],
+/// which reads all 16 bits. noVNC truncates to one byte here and gets away
+/// with it for the same reason we would; an asymmetry that only shows up on a
+/// format nobody has needed yet is not worth leaving in.
 fn flags(actions: u32, formats: u32) -> [u8; 4] {
-    [(actions >> 24) as u8, 0, 0, formats as u8]
+    [
+        (actions >> 24) as u8,
+        0, // reserved
+        (formats >> 8) as u8,
+        formats as u8,
+    ]
 }
 
 /// Our capabilities: text, every action, and no appetite for unsolicited data.
@@ -248,6 +260,26 @@ mod tests {
         assert_eq!(flags(ACTION_NOTIFY, FORMAT_TEXT), [0x08, 0, 0, 0x01]);
         assert_eq!(flags(ACTION_PROVIDE, FORMAT_TEXT), [0x10, 0, 0, 0x01]);
         assert_eq!(flags(ACTION_NOTIFY, 0), [0x08, 0, 0, 0x00]);
+    }
+
+    // Formats are 16 bits wide. Writing only the low byte would round-trip
+    // every format this build uses and silently drop the rest, so encoding is
+    // checked against the full range rather than against what we happen to
+    // send.
+    #[test]
+    fn the_whole_16_bit_format_set_survives_encoding() {
+        assert_eq!(flags(ACTION_NOTIFY, 0xffff), [0x08, 0, 0xff, 0xff]);
+        assert_eq!(flags(ACTION_NOTIFY, 1 << 8), [0x08, 0, 0x01, 0x00]);
+
+        // And parse reads back exactly what flags wrote, for every bit.
+        for bit in 0..16 {
+            let formats = 1u32 << bit;
+            assert_eq!(
+                parse(&notify(formats)).expect("parse"),
+                Incoming::Notify(formats),
+                "format bit {bit}"
+            );
+        }
     }
 
     #[test]

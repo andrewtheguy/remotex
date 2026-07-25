@@ -600,9 +600,17 @@ async fn extended_cut_text(
                 let request = vnc_clipboard::request(vnc_clipboard::FORMAT_TEXT);
                 write_to(writer, &cut_text_extended(&request)).await?;
             } else {
-                // An image or file copy. Nothing the browser protocol can
-                // carry, and the previous text is now stale.
+                // An image or file copy, or `formats == 0` for a clipboard
+                // that was cleared. Either way the remote no longer holds the
+                // text we cached, so drop it — a later Fetch answering with it
+                // would be reporting a clipboard that has moved on.
+                //
+                // Not forwarded as an empty push: the browser would clear an
+                // open panel over what may be a screenshot copy. Leaving the
+                // panel as it is until something asks is the quieter half of
+                // the same truth, and Fetch now answers correctly.
                 debug!("vnc: remote copied a format the browser cannot hold");
+                clipboard.lock().unwrap().remote = None;
             }
         }
         // The answer to that request.
