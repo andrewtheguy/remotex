@@ -467,6 +467,39 @@ async fn expect_clipboard(ws: &mut Ws) -> String {
     .expect("timed out waiting for clipboard")
 }
 
+/// How long [`assert_quiet`] listens before deciding nothing is coming. Short
+/// because it is spent on every pass, and it only has to cover the hop from the
+/// engine to the WebSocket writer task — the fence in the caller has already
+/// established that the gateway processed the messages under test.
+const QUIET_WINDOW: Duration = Duration::from_millis(500);
+
+/// The inverse of the `expect_*` helpers: assert the browser link stays silent.
+///
+/// Timing out is the pass condition, hence the short window. Tiles and cursor
+/// updates are the engine doing its job and are ignored; a `clipboard` frame,
+/// an `error`, or a close are not.
+async fn assert_quiet(ws: &mut Ws) {
+    // The inner loop only ever leaves by panicking, so the timeout firing is
+    // the success path and its result is deliberately discarded.
+    let _ = tokio::time::timeout(QUIET_WINDOW, async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(
+                        !text.contains(r#""type":"clipboard""#),
+                        "a clipboard frame reached a browser that never opted in: {text}"
+                    );
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                }
+                Message::Close(frame) => panic!("session closed: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended");
+    })
+    .await;
+}
+
 // The other half of a session, and the half with nothing to look at afterwards:
 // a mistranslated click paints no evidence anywhere, so the browser looks fine
 // while the Mac does the wrong thing. This drives the real WebSocket with the
@@ -608,6 +641,14 @@ async fn clipboard_is_inert_when_the_rxa_target_did_not_opt_in() {
             caps: false,
         }
     );
+
+    // The other direction, checked once the fence above proves the gateway is
+    // past both clipboard messages: anything it meant to send back is already
+    // on its way. Nothing may be — not a `clipboard` frame (the engine drops an
+    // agent push for a target that said no, and the browser writes an incoming
+    // one straight into the real OS clipboard) and not an `error`, since a
+    // clipboard message the target didn't opt into is ignored, not a failure.
+    assert_quiet(&mut ws).await;
 }
 
 // The whole reason for this subsystem: an established session that drops comes
