@@ -439,17 +439,42 @@ gap: unlike RDP, which resizes its own isolated session, a Mac has one console
 session, so the only thing there is to resize is the physical display of
 whoever is sitting at it (see [`roadmap.md`](roadmap.md)).
 
-**The agent has a menu bar item** and nothing else: no Dock tile, no windows.
-It reports whether a gateway is attached and to which address, copies the
-pre-shared key, links to the two Privacy panes, toggles the login item, and
-quits. That last one is why the embedded LaunchAgent sets `KeepAlive` to
-`SuccessfulExit: false` rather than `true` — under a plain `true` launchd would
-restart the agent seconds after the user asked it to stop, while the narrower
-form still recovers from a crash. Having the item at all is what makes the
-agent's state observable to the person whose screen is being shared, which for
-software of this kind is not a nicety. It also means AppKit owns the main
-thread: `menubar::run` takes it, and the cursor poll that used to be a sleep
-loop there is now a timer on the run loop.
+**The agent's menu bar item is its entire interface** — no Dock tile, no
+windows, and no CLI beyond three launch flags (`--config`, `--no-register`,
+`--no-menu`). It reports whether a gateway is attached and to which address,
+shows and copies and regenerates the pre-shared key, edits the listen address,
+picks the display, reveals the config, opens the log, links to the two Privacy
+panes, toggles the login item, and quits. Having the item at all is what makes
+the agent's state observable to the person whose screen is being shared, which
+for software of this kind is not a nicety.
+
+Quit is why the embedded LaunchAgent sets `KeepAlive` to `SuccessfulExit: false`
+rather than `true` — under a plain `true` launchd would restart the agent seconds
+after the user asked it to stop, while the narrower form still recovers from a
+crash. The menu also means AppKit owns the main thread: `menubar::run` takes it,
+and the cursor poll runs as a timer on that run loop.
+
+Two consequences of putting everything there, both deliberate:
+
+- **`NSAlert` is the whole panel toolkit** (`panels.rs`). Showing a key and
+  taking one line of text are the only things a menu cannot do itself, and a
+  settings window for three settings would be a window controller, a nib and a
+  Dock tile's worth of behaviour the agent spent real effort not having. Panels
+  activate the app first: an accessory app is never active, and a modal it opens
+  without activating lands *behind* everything — invisible, and unreachable from
+  the menu that opened it.
+- **Edits are written, not applied** (`settings.rs`). A change validates, is
+  saved atomically at 0600, and takes effect at the next launch; rebinding a
+  listener under a live connection, or swapping the key its gateway already
+  authenticated with, is machinery bought to save a background agent one
+  restart. What that owes the user is honesty about the gap, so the config the
+  process is *running* is kept beside the saved one and the menu says
+  "restart to apply" while they differ — including, pointedly, that a
+  regenerated key is not the one being accepted yet.
+
+Reading the permissions is a menu item and not a subcommand for a reason that
+outlasts taste: macOS credits a TCC grant to whatever launched the process, so a
+shell asking on the agent's behalf gets the shell's answer.
 
 Installing, signing and the permission grants are covered in
 [`packaging/macos/README.md`](../packaging/macos/README.md). Why the design is
@@ -598,5 +623,9 @@ someone believing a target was authenticated by a key it never uses.
   the Noise chunk boundary, per-variant message roundtrips, keycodes), all of
   which runs on Linux — deliberately, since the agent crate never builds there.
 - **The agent** can only be tested on macOS, and its capture and injection
-  paths additionally need the two TCC grants, so they are verified by hand
-  (`remotex-agent --status` reports both).
+  paths additionally need the two TCC grants, so they are verified by hand (the
+  menu bar item ticks both, read live from the running agent — the only thing
+  that can answer, since macOS credits a permission to whatever launched the
+  process). Its GUI is hand-verified for the same kind of reason: `NSAlert` and
+  `NSStatusItem` need a window server, so nothing under `cargo test` can open a
+  menu.

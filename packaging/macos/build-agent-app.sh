@@ -215,16 +215,18 @@ To install:
     open /Applications/remotex-agent.app
 
 That first open writes the config with a fresh pre-shared key and registers the
-agent in System Settings > General > Login Items. Then:
+agent in System Settings > General > Login Items.
 
-    /Applications/remotex-agent.app/Contents/MacOS/remotex-agent --show-psk
+Everything after that is in the menu bar item, which is the agent's whole
+interface — there are no subcommands. Open it for:
 
-for the key to paste into the gateway's rxa target, and grant "remotex-agent"
-BOTH Screen Recording and Accessibility in System Settings > Privacy & Security.
+    Pre-Shared Key       to copy the key into the gateway's rxa target
+    Screen Recording     ) both must be granted, and the menu ticks them
+    Accessibility        ) as System Settings sees them
 
-Read where those two grants stand from the menu bar item, or from the agent's
-own log — macOS credits the permissions to whatever launched the process, so a
-shell asking on the agent's behalf answers for the shell:
+Read the grants from the menu and not from a shell: macOS credits a permission
+to whatever launched the process, so a shell asking on the agent's behalf answers
+for the shell. The agent's own log has its answer too:
 
     grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
 NOTES

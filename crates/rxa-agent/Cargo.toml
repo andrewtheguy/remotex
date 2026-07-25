@@ -66,6 +66,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSMenuItem",
     "NSPasteboard",
     "NSWorkspace",
+    # The modal panels (src/panels.rs): the agent has no windows, so showing the
+    # pre-shared key and taking a listen address are both NSAlert with an
+    # NSTextField accessory. NSWindow comes with NSAlert (`alert.window()`, for
+    # focusing the field), NSText and NSFont with the field.
+    "NSAlert",
+    "NSTextField",
+    "NSText",
+    "NSFont",
+    "NSWindow",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",

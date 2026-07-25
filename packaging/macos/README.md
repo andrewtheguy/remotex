@@ -34,8 +34,8 @@ That single open does everything an install script would have:
   appears in **System Settings → General → Login Items**.
 
 There is no Dock icon and no window — it is a background agent. What it does
-have is a **menu bar item**, which is where everything below can also be done
-without a terminal.
+have is a **menu bar item**, and that is the entire interface: there are no
+subcommands, and nothing below needs a terminal.
 
 ## The menu bar item
 
@@ -44,34 +44,48 @@ without a terminal.
 | 🖥 | idle — running, nobody connected |
 | 👁 | a gateway is connected and watching this screen |
 
-Opening it shows the connected gateway's address and how long it has been
-attached, and offers:
+Opening it shows the connected gateway's address, how long it has been attached,
+and the address the agent is listening on. Then:
 
-- **Copy Pre-Shared Key** — the same value as `--show-psk`
-- **Open Log**
-- **Screen Recording** / **Accessibility** — ticked when granted, and each opens
-  the right Privacy pane, which is otherwise four levels down a settings tree
-- **Start at Login** — the `SMAppService` registration, as a toggle
-- **Quit remotex-agent**
+| | |
+|---|---|
+| **Pre-Shared Key…** | shows the key, copies it, or mints a new one |
+| **Copy Pre-Shared Key** | the same copy, without the panel |
+| **Listen Address…** | `address:port` to wait for the gateway on |
+| **Display** | which screen to share, when more than one is attached |
+| **Reveal Config in Finder** | where the config file is |
+| **Open Log** | `~/Library/Logs/remotex-agent.log` |
+| **Screen Recording** / **Accessibility** | ticked when granted; each opens the right Privacy pane, which is otherwise four levels down a settings tree |
+| **Start at Login** | the `SMAppService` registration, as a toggle |
+| **Quit remotex-agent** | really quits — see below |
 
 Quit really quits: the embedded LaunchAgent uses `KeepAlive` /
 `SuccessfulExit: false`, so a deliberate exit stays exited while a crash is
 still restarted. The agent comes back at your next login, or whenever you open
 it from `/Applications` again.
 
-Over SSH there is no window server to put a status item in; pass `--no-menu`
-there.
+### Settings apply at the next start
+
+Changing the listen address, the display or the key writes the config file and
+nothing more — the running agent keeps serving what it was launched with. The
+menu says `⚠︎ Saved changes apply after a restart` while the two disagree, and
+**Quit** followed by opening the app again is the restart.
+
+That matters most for the key: after regenerating, the agent still
+authenticates with the *previous* one until it restarts, so put the new key on
+the gateway and restart the agent together.
+
+### Over SSH there is no interface
+
+A status item needs a window server, which an SSH session does not have. Pass
+`--no-menu` there — and note that with no menu there is nothing to read the key
+or change a setting with, which is why that flag is for development. The config
+file is plain TOML if you are stuck without a screen.
 
 ## Then two permissions, and one key
 
-Get the key to put on the gateway:
-
-```sh
-/Applications/remotex-agent.app/Contents/MacOS/remotex-agent --show-psk
-```
-
-Paste it as `psk` on the matching `[[targets]]` entry in the gateway's
-`remotex.toml`:
+Open the menu bar item, choose **Pre-Shared Key…**, and copy it. Paste it as
+`psk` on the matching `[[targets]]` entry in the gateway's `remotex.toml`:
 
 ```toml
 [[targets]]
@@ -99,16 +113,13 @@ upgrades.
 Check the result **in the menu bar**, where Screen Recording and Accessibility
 are ticked when granted.
 
-Do not trust `--status` for this. Both permissions are attributed to whatever
-launched the process, so running the binary from a terminal reports your
-*terminal's* permissions, not the agent's — the same binary says "NOT granted"
-from a shell and "granted" a second later when launched as the app:
+That is the only place worth reading them from. Both permissions are attributed
+to whatever launched the process, so the binary run from a terminal reports your
+*terminal's* permissions — the same binary says "NOT granted" from a shell and
+"granted" a second later when macOS launches it as the app. The agent's own log
+is the other honest answer:
 
 ```sh
-# Everything except the two permission lines is accurate here.
-/Applications/remotex-agent.app/Contents/MacOS/remotex-agent --status
-
-# The truth about the permissions, from the agent as macOS actually runs it.
 grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
 ```
 
@@ -116,20 +127,22 @@ grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
 
 | | |
 |---|---|
-| Config | `~/Library/Application Support/remotex-agent/config.toml` |
-| Log | `~/Library/Logs/remotex-agent.log` |
-| Port | 52381 by default (`listen` in the config) |
+| Config | `~/Library/Application Support/remotex-agent/config.toml` (**Reveal Config in Finder**) |
+| Log | `~/Library/Logs/remotex-agent.log` (**Open Log**) |
+| Port | 52381 by default (**Listen Address…**) |
+
+The config is written by the menu, and rewritten whole on every change — so
+comments you add to it by hand will not survive the next one. It is mode 0600,
+because the key in it is the entire credential.
 
 ## Uninstall
 
-```sh
-/Applications/remotex-agent.app/Contents/MacOS/remotex-agent --unregister
-rm -rf /Applications/remotex-agent.app
-```
+1. Switch **Start at Login** off in the menu bar item, then **Quit**.
+2. `rm -rf /Applications/remotex-agent.app`
 
-`--unregister` takes it out of Login Items; without it, moving the bundle to the
-Trash leaves a dangling entry there. The config file is left behind, since it
-holds the key — delete
+Step 1 is the part that matters: trashing the bundle without unregistering
+leaves a dangling entry in Login Items. The config file is left behind either
+way, since it holds the key — delete
 `~/Library/Application Support/remotex-agent` to remove that too, and clear
 `remotex-agent` from the two Privacy & Security lists by hand.
 
@@ -139,9 +152,9 @@ Replace the bundle by **opening the new one**, not just copying it into place.
 The Login Items registration is a Background Task Management record that points
 at the bundle it was made from; delete that bundle and drop a new one at the
 same path and the record goes stale, launchd fails to spawn with `EX_CONFIG`,
-and nothing appears in the log because the binary never runs. `--status` still
-cheerfully reports the login item as enabled, because launchd's registration is
-intact — only the thing it points at is gone.
+and nothing appears in the log because the binary never runs. **Start at Login**
+still shows a tick, because launchd's registration is intact — only the thing it
+points at is gone.
 
 The fix, and the way to avoid it:
 
@@ -150,7 +163,8 @@ cp -R remotex-agent.app /Applications/
 open /Applications/remotex-agent.app          # re-registers, repairing the record
 ```
 
-If it is already broken, `--unregister` and then open the app again.
+If it is already broken, open the new bundle and switch **Start at Login** off
+and on again.
 
 ## No login-window support
 

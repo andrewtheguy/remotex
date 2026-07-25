@@ -1,4 +1,4 @@
-//! The menu bar item: the only part of the agent a user ever sees.
+//! The menu bar item: the only interface the agent has.
 //!
 //! Without it the agent is completely invisible. Nothing says whether it is
 //! running, nothing says when somebody is looking at your screen, and stopping
@@ -11,9 +11,14 @@
 //!    the peer.
 //! 3. **How do I stop it?** Quit, which really quits — see below.
 //!
-//! It also carries the two things setup needs and a terminal would otherwise be
-//! required for: copying the pre-shared key, and jumping straight to the two
-//! Privacy panes the agent cannot open its own way into.
+//! ## Everything is here, because there is nowhere else
+//!
+//! This menu is the agent's whole interface — the CLI is three launch flags and
+//! no operations at all. So it reads the pre-shared key, mints a new one, changes
+//! the listen address, picks the display, reveals the config, opens the log,
+//! links to the two Privacy panes, toggles the login item and quits. The panels
+//! some of that needs live in [`crate::panels`]; what a change *means* lives in
+//! [`crate::settings`].
 //!
 //! ## Quit has to defeat launchd
 //!
@@ -24,12 +29,12 @@
 //!
 //! ## Why the main thread ends up here
 //!
-//! AppKit is main-thread-only and so is `NSCursor`, which the agent already
-//! polled from `main` (see [`crate::cursor`]). Running an `NSApplication` needs
-//! that same thread, so the poll moves onto an `NSTimer` in the run loop and the
-//! run loop takes over. The timer is added in `NSRunLoopCommonModes` so the
-//! pointer keeps updating while the menu is open — in the default mode alone it
-//! would stall for as long as the user held the menu down.
+//! AppKit is main-thread-only, and so is the `NSCursor` the agent reads the
+//! pointer shape from (see [`crate::cursor`]). Running an `NSApplication` needs
+//! that same thread, so the run loop owns it and the cursor poll is an `NSTimer`
+//! on that loop. The timer is added in `NSRunLoopCommonModes` so the pointer
+//! keeps updating while the menu is open — in the default mode alone it would
+//! stall for as long as the user held the menu down.
 
 use std::cell::{Cell, OnceCell};
 use std::path::PathBuf;
@@ -49,12 +54,12 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSURL};
 
-use crate::{capture, cursor, input, loginitem, state};
+use crate::{capture, cursor, input, loginitem, panels, settings, state};
 
 /// How often the run loop re-reads the system cursor and refreshes the icon.
 ///
-/// The same 100ms the plain polling loop used before the menu bar existed; the
-/// pointer shape has to keep up with the mouse crossing a window edge.
+/// 100ms, because the pointer shape has to keep up with the mouse crossing a
+/// window edge.
 const TICK: f64 = 0.1;
 
 /// The status item, idle and with a gateway attached.
@@ -70,6 +75,14 @@ const ICON_CONNECTED: &str = "eye.fill";
 const ICON_FALLBACK_IDLE: &str = "rxa";
 const ICON_FALLBACK_CONNECTED: &str = "rxa*";
 
+/// Title of the display submenu's `NSMenu`, which is how `menuNeedsUpdate:`
+/// tells the two menus apart — the delegate for both is this one controller, and
+/// AppKit hands it only the menu that needs filling in.
+///
+/// It is a title nothing displays: a submenu shows its *item's* title, not its
+/// own.
+const DISPLAY_MENU: &str = "rxa-displays";
+
 /// Deep links into the two Privacy panes. There is no API to grant these, and
 /// finding them by hand is four levels down a settings tree.
 const URL_SCREEN_RECORDING: &str =
@@ -81,10 +94,8 @@ const URL_LOGIN_ITEMS: &str = "x-apple.systempreferences:com.apple.LoginItems-Se
 struct Ivars {
     state: Arc<state::AgentState>,
     tracker: Arc<cursor::Tracker>,
-    /// Copied to the clipboard on demand. Already on disk in a 0600 file, and
-    /// putting it on the clipboard is the whole point of the menu item.
-    psk: String,
-    listen: String,
+    /// The config, and the only thing allowed to change it.
+    settings: Arc<settings::Settings>,
     log_path: Option<PathBuf>,
     /// Set once, immediately after the status item exists — it cannot go in the
     /// initial ivars because the item's menu delegate is this very object.
@@ -109,14 +120,19 @@ define_class!(
     unsafe impl NSObjectProtocol for Controller {}
 
     unsafe impl NSMenuDelegate for Controller {
-        // The menu is rebuilt on open rather than kept in sync, so everything in
-        // it is read at the moment it is displayed. Permission state and login
-        // item registration both change *outside* this process — in System
-        // Settings — with no notification we could subscribe to, so anything
-        // cached would be stale exactly when the user went to look at it.
+        // Both menus are rebuilt on open rather than kept in sync, so everything
+        // in them is read at the moment it is displayed. Permission state, login
+        // item registration and the set of attached displays all change *outside*
+        // this process — in System Settings, or by plugging in a monitor — with no
+        // notification we could subscribe to, so anything cached would be stale
+        // exactly when the user went to look at it.
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, menu: &NSMenu) {
-            self.rebuild(menu);
+            if menu.title().to_string() == DISPLAY_MENU {
+                self.rebuild_displays(menu);
+            } else {
+                self.rebuild(menu);
+            }
         }
     }
 
@@ -127,20 +143,118 @@ define_class!(
             self.refresh_icon();
         }
 
+        /// Show the key, and offer the two things one can do with it.
+        ///
+        /// Loops so that regenerating lands back on the panel showing the *new*
+        /// key: it has to be copied onto the gateway before anything can connect
+        /// again, and the moment it is minted is the one moment the user is
+        /// certainly thinking about that.
+        #[unsafe(method(showPsk:))]
+        fn show_psk(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let settings = &self.ivars().settings;
+            loop {
+                let psk = settings.saved().psk;
+                let mut body = "This is the entire credential for reaching this Mac. Put it on \
+                                the matching [[targets]] entry in the gateway's remotex.toml, \
+                                as `psk`."
+                    .to_owned();
+                // Saying this is the whole reason the running key is tracked
+                // separately: a key that has been regenerated but is not in force
+                // yet gets acted on immediately, and the gateway would then fail
+                // to connect for a reason nothing on screen explained.
+                if psk != settings.running().psk {
+                    body.push_str(
+                        "\n\nThe agent is still authenticating with the previous key. Restart \
+                         it to start using this one.",
+                    );
+                }
+                match panels::secret(mtm, "Pre-Shared Key", &body, &psk) {
+                    panels::Secret::Copy => {
+                        self.copy_to_clipboard(&psk);
+                        return;
+                    }
+                    panels::Secret::Close => return,
+                    panels::Secret::Regenerate => {
+                        if !self.regenerate() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         #[unsafe(method(copyPsk:))]
         fn copy_psk(&self, _sender: Option<&AnyObject>) {
-            let pasteboard = NSPasteboard::generalPasteboard();
-            pasteboard.clearContents();
-            let copied = unsafe {
-                pasteboard.setString_forType(
-                    &NSString::from_str(&self.ivars().psk),
-                    NSPasteboardTypeString,
-                )
+            self.copy_to_clipboard(&self.ivars().settings.saved().psk);
+        }
+
+        #[unsafe(method(editListen:))]
+        fn edit_listen(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let settings = &self.ivars().settings;
+            let current = settings.saved().listen;
+            let Some(listen) = panels::prompt(
+                mtm,
+                "Listen Address",
+                "Where the agent waits for the gateway, as address:port. 0.0.0.0 is every \
+                 interface; narrow it to one if you prefer.",
+                &current,
+                "Change",
+            ) else {
+                return;
             };
-            if copied {
-                info!("menu: pre-shared key copied to the clipboard");
-            } else {
-                warn!("menu: the clipboard refused the pre-shared key");
+            if listen == current {
+                return;
+            }
+            match settings.set_listen(&listen) {
+                // Whether the address can actually be *bound* is settled at the
+                // next launch, not here — a port already in use is an error in
+                // the log then, not a panel now.
+                Ok(()) => self.note_restart("The new listen address"),
+                Err(e) => panels::error(mtm, "That is not an address", &format!("{e:#}")),
+            }
+        }
+
+        /// Share a different display. The index rides on the menu item's tag.
+        #[unsafe(method(chooseDisplay:))]
+        fn choose_display(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            // The sender is the NSMenuItem that was clicked; `tag` is the only
+            // thing wanted from it, so it is read with a plain message send
+            // rather than a downcast.
+            //
+            // Safety: every item wired to this action is an NSMenuItem, which
+            // responds to `tag`.
+            let index: isize = unsafe { msg_send![sender, tag] };
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            match self.ivars().settings.set_display(index) {
+                Ok(()) => self.note_restart(&format!("Sharing display {}", index + 1)),
+                Err(e) => panels::error(
+                    MainThreadMarker::from(self),
+                    "Could not change the display",
+                    &format!("{e:#}"),
+                ),
+            }
+        }
+
+        /// Show the config file in the Finder.
+        ///
+        /// Not "open" it: the file holds the key, and handing it to whatever has
+        /// claimed `.toml` is a surprise. Revealing it is the useful half anyway
+        /// — it answers "where is this thing?" without putting the credential in
+        /// front of an editor.
+        #[unsafe(method(revealConfig:))]
+        fn reveal_config(&self, _sender: Option<&AnyObject>) {
+            let path = self.ivars().settings.path().to_owned();
+            let shown = NSWorkspace::sharedWorkspace().selectFile_inFileViewerRootedAtPath(
+                Some(&NSString::from_str(&path.to_string_lossy())),
+                &NSString::from_str(""),
+            );
+            if !shown {
+                warn!("menu: could not reveal {}", path.display());
             }
         }
 
@@ -179,7 +293,17 @@ define_class!(
             };
             match outcome {
                 Ok(()) => info!("menu: login item is now {}", loginitem::status()),
-                Err(e) => warn!("menu: could not change the login item: {e:#}"),
+                Err(e) => {
+                    warn!("menu: could not change the login item: {e:#}");
+                    panels::error(
+                        MainThreadMarker::from(self),
+                        "Could not change Start at Login",
+                        &format!(
+                            "{e:#}\n\nSMAppService refuses an improperly signed bundle. Running \
+                             the binary outside remotex-agent.app cannot register at all."
+                        ),
+                    );
+                }
             }
         }
 
@@ -240,17 +364,43 @@ impl Controller {
     fn rebuild(&self, menu: &NSMenu) {
         let mtm = MainThreadMarker::from(self);
         let ivars = self.ivars();
+        let settings = &ivars.settings;
+        let saved = settings.saved();
         menu.removeAllItems();
 
         let connection = ivars.state.current();
         menu.addItem(&self.info(&state::describe(connection.as_ref(), Instant::now()), mtm));
+        // The address the agent is *serving*, not the one in the file — they
+        // differ until a pending change has been restarted into, and this line is
+        // the one place that has to be true about right now.
         menu.addItem(&self.info(
-            &format!("Listening on {} · v{}", ivars.listen, env!("CARGO_PKG_VERSION")),
+            &format!(
+                "Listening on {} · v{}",
+                settings.running().listen,
+                env!("CARGO_PKG_VERSION")
+            ),
             mtm,
         ));
+        if settings.restart_pending() {
+            menu.addItem(&self.info("⚠︎ Saved changes apply after a restart", mtm));
+        }
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
+        menu.addItem(&self.action("Pre-Shared Key…", sel!(showPsk:), mtm));
+        // Alongside the panel, not inside it: copying the key onto the gateway is
+        // the one thing anybody does with it, and it should not need two clicks
+        // and a dialog every time.
         menu.addItem(&self.action("Copy Pre-Shared Key", sel!(copyPsk:), mtm));
+
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let item = self.action("Listen Address…", sel!(editListen:), mtm);
+        item.setToolTip(Some(&NSString::from_str(&format!(
+            "Currently {}. The gateway's target must name the same port.",
+            saved.listen
+        ))));
+        menu.addItem(&item);
+        menu.addItem(&self.display_item(saved.display, mtm));
+        menu.addItem(&self.action("Reveal Config in Finder", sel!(revealConfig:), mtm));
         if ivars.log_path.is_some() {
             menu.addItem(&self.action("Open Log", sel!(openLog:), mtm));
         }
@@ -293,23 +443,165 @@ impl Controller {
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let item = self.action("Quit remotex-agent", sel!(quit:), mtm);
         item.setToolTip(Some(&NSString::from_str(
-            "Stops sharing until you log in again, or open remotex-agent yourself.",
+            "Stops sharing until you log in again, or open remotex-agent yourself. Opening \
+             it again is also what applies a saved change.",
         )));
         menu.addItem(&item);
     }
 
-    /// A line of text, not a control. With `autoenablesItems` on (the default) a
-    /// menu item without an action is drawn greyed out, which is exactly how a
-    /// heading should look.
+    /// The display picker: a parent item naming the current choice, with the
+    /// list itself built only if the user opens it.
+    ///
+    /// Listing displays means asking ScreenCaptureKit, which is a synchronous
+    /// call into another process — cheap, but not free, and the main menu opens
+    /// far more often than anyone changes their display.
+    fn display_item(&self, current: usize, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+        let item = self.info(&format!("Display: {}", current + 1), mtm);
+        let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(DISPLAY_MENU));
+        submenu.setAutoenablesItems(false);
+        submenu.setDelegate(Some(ProtocolObject::from_ref(self)));
+        item.setSubmenu(Some(&submenu));
+        // It has no action of its own — opening the submenu is the whole job —
+        // but `info` disabled it, and a disabled parent never opens.
+        item.setEnabled(true);
+        item
+    }
+
+    /// Fill in the display submenu, ticking the one that is chosen.
+    fn rebuild_displays(&self, menu: &NSMenu) {
+        let mtm = MainThreadMarker::from(self);
+        let current = self.ivars().settings.saved().display;
+        menu.removeAllItems();
+
+        let displays = match capture::displays() {
+            Ok(displays) => displays,
+            Err(e) => {
+                // Almost always the missing Screen Recording grant, which the
+                // menu above already reports — so this says what it could not do
+                // and leaves the fix where it belongs.
+                warn!("menu: cannot list displays: {e:#}");
+                menu.addItem(&self.info("Cannot list displays — grant Screen Recording", mtm));
+                return;
+            }
+        };
+
+        for display in &displays {
+            let geometry = display.geometry;
+            let item = self.action(
+                &format!(
+                    "Display {} · {}×{} at {}x",
+                    display.index + 1,
+                    geometry.width,
+                    geometry.height,
+                    geometry.scale
+                ),
+                sel!(chooseDisplay:),
+                mtm,
+            );
+            item.setTag(display.index as isize);
+            item.setState(checkmark(display.index == current));
+            item.setToolTip(Some(&NSString::from_str(&format!(
+                "CoreGraphics display {}. Applies when the agent restarts.",
+                display.id
+            ))));
+            menu.addItem(&item);
+        }
+
+        // A `display = 3` left over from a monitor that has since been unplugged
+        // still captures — the agent falls back to the main display — but nothing
+        // above would show it, and "why is Display: 4 not ticked" deserves an
+        // answer in the menu rather than in the log.
+        if current >= displays.len() {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            menu.addItem(&self.info(
+                &format!(
+                    "Display {} is not attached — sharing Display 1",
+                    current + 1
+                ),
+                mtm,
+            ));
+        }
+    }
+
+    fn copy_to_clipboard(&self, psk: &str) {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        pasteboard.clearContents();
+        let copied = unsafe {
+            pasteboard.setString_forType(&NSString::from_str(psk), NSPasteboardTypeString)
+        };
+        if copied {
+            info!("menu: pre-shared key copied to the clipboard");
+        } else {
+            warn!("menu: the clipboard refused the pre-shared key");
+        }
+    }
+
+    /// Confirm, then mint a new key. `false` if the user backed out or it failed.
+    fn regenerate(&self) -> bool {
+        let mtm = MainThreadMarker::from(self);
+        if !panels::confirm(
+            mtm,
+            "Regenerate the pre-shared key?",
+            "The new key has to go into the gateway's remotex.toml, and the agent only \
+             starts using it once it restarts — so the gateway cannot connect between \
+             those two steps.",
+            "Regenerate",
+        ) {
+            return false;
+        }
+        match self.ivars().settings.regenerate_psk() {
+            Ok(_) => {
+                info!("menu: pre-shared key regenerated at the user's request");
+                true
+            }
+            Err(e) => {
+                warn!("menu: could not regenerate the pre-shared key: {e:#}");
+                panels::error(mtm, "Could not save the new key", &format!("{e:#}"));
+                false
+            }
+        }
+    }
+
+    /// Say that a saved change is not in force yet.
+    ///
+    /// Shown after every successful edit — a setting that appears to have taken
+    /// hold and has not is worse than an extra click, and the menu's warning line
+    /// is easy to miss when you have just come from a panel. Skipped when the
+    /// edit happened to put the value back to what the agent is already running,
+    /// where there is nothing to restart for.
+    fn note_restart(&self, what: &str) {
+        if !self.ivars().settings.restart_pending() {
+            return;
+        }
+        panels::message(
+            MainThreadMarker::from(self),
+            "Saved — restart to apply",
+            &format!(
+                "{what} takes effect the next time remotex-agent starts. Quit it from this \
+                 menu, then open remotex-agent again."
+            ),
+        );
+    }
+
+    /// A line of text, not a control: disabled, which is how AppKit draws a
+    /// heading — greyed out and unclickable.
+    ///
+    /// Explicitly disabled rather than left to `autoenablesItems`, which both
+    /// menus here switch off. Automatic enabling decides a submenu's parent from
+    /// whether the submenu has any enabled items, and the display submenu is
+    /// deliberately empty until it is opened — so it would be greyed out and
+    /// could never be opened to fill itself in.
     fn info(&self, title: &str, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
-        unsafe {
+        let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
                 &NSString::from_str(title),
                 None,
                 &NSString::from_str(""),
             )
-        }
+        };
+        item.setEnabled(false);
+        item
     }
 
     fn action(&self, title: &str, action: Sel, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
@@ -340,8 +632,7 @@ impl Controller {
 pub fn run(
     state: Arc<state::AgentState>,
     tracker: Arc<cursor::Tracker>,
-    psk: String,
-    listen: String,
+    settings: Arc<settings::Settings>,
     log_path: Option<PathBuf>,
 ) -> ! {
     let mtm = MainThreadMarker::new().expect("menubar::run must be called on the main thread");
@@ -349,6 +640,8 @@ pub fn run(
     // Accessory: a menu bar item, no Dock tile, no menu of our own in the menu
     // bar, and the agent never steals focus. The bundle's `LSUIElement` already
     // says this, but a hand-run binary has no Info.plist to read it from.
+    //
+    // It does still activate for a modal panel — see crate::panels.
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let controller = Controller::new(
@@ -356,8 +649,7 @@ pub fn run(
         Ivars {
             state,
             tracker,
-            psk,
-            listen,
+            settings,
             log_path,
             status_item: OnceCell::new(),
             icon_connected: Cell::new(None),
@@ -366,6 +658,8 @@ pub fn run(
 
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("remotex-agent"));
+    // Enablement is decided item by item (see `Controller::info`), not inferred.
+    menu.setAutoenablesItems(false);
     menu.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
     item.setMenu(Some(&menu));
     controller
@@ -465,5 +759,15 @@ mod tests {
         for (symbol, image) in looked_up {
             assert!(image.is_some(), "SF Symbols has no {symbol:?}");
         }
+    }
+
+    // The submenu is told apart from the main menu by its title, and a title
+    // that ever collided with a real menu's would send AppKit's fill-in request
+    // to the wrong builder — an empty display list, or a display list where the
+    // whole menu should be.
+    #[test]
+    fn the_display_submenus_title_is_not_a_title_anything_displays() {
+        assert!(DISPLAY_MENU.starts_with("rxa-"));
+        assert_ne!(DISPLAY_MENU, "remotex-agent");
     }
 }

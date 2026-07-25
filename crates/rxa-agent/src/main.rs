@@ -16,15 +16,23 @@
 //! 2. registers itself with `SMAppService` (see [`loginitem`]), which puts it in
 //!    **System Settings → General → Login Items** and starts it at every login.
 //!
-//! Uninstalling is moving the bundle to the Trash — or `--unregister` first, to
-//! take it out of Login Items cleanly.
+//! Uninstalling is switching **Start at Login** off in the menu and moving the
+//! bundle to the Trash. Trashing it without that leaves a dangling Login Items
+//! entry.
 //!
-//! ## It has a menu bar item
+//! ## Everything happens in the menu bar
 //!
-//! There are no windows, but there is a status item (see [`menubar`]): it says
-//! whether a gateway is connected, copies the pre-shared key, links to the two
-//! Privacy panes, and quits. Everything the agent can be asked to do is reachable
-//! from there without a terminal.
+//! There are no windows, but there is a status item (see [`menubar`]), and it is
+//! the entire interface: whether a gateway is connected, the pre-shared key and a
+//! button to mint a new one, the listen address, which display is shared, the
+//! config file, the log, the two Privacy panes, the login item, and Quit.
+//! Anything the agent can be asked to do is done there.
+//!
+//! The flags below are launch modes only — where to read the config, and whether
+//! to register or to put up a menu at all. No operation has a flag: a permission
+//! read from a terminal is the *terminal's* permission (see
+//! [`report_permissions`]), and a key printed to a terminal is a credential in
+//! somebody's shell history.
 //!
 //! ## Two permissions
 //!
@@ -76,7 +84,9 @@ mod encode;
 mod input;
 mod loginitem;
 mod menubar;
+mod panels;
 mod session;
+mod settings;
 mod state;
 
 use std::io::IsTerminal as _;
@@ -94,27 +104,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
     let log_path = init_logging();
 
-    // Subcommands that do one thing and exit, before any config is needed.
-    if args.gen_psk {
-        println!("{}", rxa_proto::psk::generate());
-        return Ok(());
-    }
-    if args.unregister {
-        loginitem::unregister()?;
-        println!("remotex-agent removed from Login Items.");
-        println!("Move remotex-agent.app to the Trash to finish uninstalling.");
-        return Ok(());
-    }
-
     let (config, path, created) = config::load_or_create(args.config.as_deref())?;
-    if args.show_psk {
-        println!("{}", config.psk);
-        return Ok(());
-    }
-    if args.status {
-        print_status(&config, &path);
-        return Ok(());
-    }
 
     info!(
         "remotex-agent {} — rxa/{}, config {}",
@@ -139,19 +129,20 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Only worth printing where somebody can read it. Secrets stay out of the
-    // log files, so a terminal-less first launch (the usual case: the bundle was
-    // double-clicked) shows nothing here — the key comes from the menu bar's
-    // "Copy Pre-Shared Key" or from `--show-psk`. The config file is already
-    // 0600.
+    // Only worth printing where somebody can read it, and the key is not in it:
+    // secrets stay out of log files, out of shell history and out of a terminal
+    // somebody may be screen-sharing. Reading it is a menu item.
     if created && std::io::stdout().is_terminal() {
-        print_first_run(&config, &path);
+        print_first_run(&path);
     }
 
     report_permissions();
 
     let tracker = Arc::new(cursor::Tracker::new());
     let state = Arc::new(state::AgentState::new());
+    // The GUI's view of the config: what this process is serving, and what the
+    // file says after any edits made from the menu (see `crate::settings`).
+    let settings = settings::Settings::new(config.clone(), path);
 
     // The socket runs on its own thread so the main thread stays free for
     // AppKit, which owns the menu bar and the pointer shape both.
@@ -191,7 +182,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Hands the main thread to AppKit and never returns.
-    menubar::run(state, tracker, config.psk, config.listen, log_path)
+    menubar::run(state, tracker, settings, log_path)
 }
 
 /// Log to stderr on a terminal, and to `~/Library/Logs/remotex-agent.log`
@@ -330,71 +321,28 @@ fn report_permissions() {
     }
 }
 
-fn print_status(config: &config::Config, path: &Path) {
-    println!("remotex-agent {}", env!("CARGO_PKG_VERSION"));
-    println!("  config:        {}", path.display());
-    println!("  listen:        {}", config.listen);
-    println!("  display:       {}", config.display);
-    println!("  login item:    {}", loginitem::status());
-    println!(
-        "  Screen Recording: {}",
-        match capture::probe(config.display) {
-            Ok(geometry) => format!(
-                "granted ({}x{} at {}x)",
-                geometry.width, geometry.height, geometry.scale
-            ),
-            Err(e) => format!("NOT granted or unavailable — {e}"),
-        }
-    );
-    println!(
-        "  Accessibility:    {}",
-        if input::accessibility_granted() {
-            "granted"
-        } else {
-            "NOT granted (input will be silently ignored)"
-        }
-    );
-    // Both permissions are attributed to whatever launched the process, so run
-    // from a shell these two lines describe the *terminal*, not the agent — the
-    // same binary reports "NOT granted" here and "granted" a moment later when
-    // macOS launches it as the app. Saying so is the difference between a
-    // confusing afternoon and none: the two answers disagree and neither is
-    // obviously the wrong one. Printed unconditionally — `--status` output is
-    // for a human whether or not it went through a pipe on the way.
+fn print_first_run(path: &Path) {
     println!();
-    println!("Note: those last two lines describe whatever launched this command, not");
-    println!("the agent — macOS credits the permissions to the responsible process. Read");
-    println!("them from the menu bar, or from the agent's own log:");
-    println!("  grep permissions: ~/Library/Logs/remotex-agent.log | tail -2");
-}
-
-fn print_first_run(config: &config::Config, path: &Path) {
+    println!("Set up {}, with a fresh pre-shared key.", path.display());
     println!();
-    println!("Set up {}.", path.display());
+    println!("The rest is in the menu bar, under the remotex-agent icon:");
     println!();
-    println!("Put this on the gateway's rxa target:");
-    println!();
-    println!("    psk = \"{}\"", config.psk);
-    println!();
-    println!("Then grant two permissions in System Settings > Privacy & Security,");
-    println!("enabling \"remotex-agent\" under BOTH of:");
-    println!();
+    println!("    Pre-Shared Key     — the one credential; it goes on the gateway target");
     println!("    Screen Recording   — without it the screen never paints");
     println!("    Accessibility      — without it input is silently ignored");
     println!();
 }
 
-/// The agent's argument surface, kept deliberately tiny — `clap` would be a
-/// dependency for a handful of flags.
+/// The agent's argument surface: three launch modes and nothing else.
+///
+/// Every *operation* is a menu item (see [`menubar`]), so what is left here is
+/// only how to start — which config to read, and whether to register and put up a
+/// menu. `clap` would be a dependency for that.
 #[derive(Debug, Default)]
 struct Args {
     config: Option<PathBuf>,
-    gen_psk: bool,
-    show_psk: bool,
-    status: bool,
     no_register: bool,
     no_menu: bool,
-    unregister: bool,
 }
 
 impl Args {
@@ -409,12 +357,8 @@ impl Args {
                         .ok_or_else(|| anyhow::anyhow!("--config needs a path"))?;
                     parsed.config = Some(PathBuf::from(path));
                 }
-                "--gen-psk" => parsed.gen_psk = true,
-                "--show-psk" => parsed.show_psk = true,
-                "--status" => parsed.status = true,
                 "--no-register" => parsed.no_register = true,
                 "--no-menu" => parsed.no_menu = true,
-                "--unregister" => parsed.unregister = true,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -441,18 +385,17 @@ serve. Normally launched by macOS at login rather than by hand.
 Options:
   -c, --config <path>  Config file (default:
                        ~/Library/Application Support/remotex-agent/config.toml)
-      --show-psk       Print this agent's pre-shared key and exit
-      --gen-psk        Print a fresh pre-shared key and exit
-      --status         Show config, login-item and permission state, then exit
       --no-register    Serve without registering as a login item (for development)
       --no-menu        Serve without a menu bar item. Needed over SSH, where
-                       there is no window server to put one in
-      --unregister     Remove from Login Items and exit
+                       there is no window server to put one in — and with no menu
+                       there is no interface at all, so this is for development
   -h, --help           Show this help
   -V, --version        Show the version
 
-The key from --show-psk goes on the matching [[targets]] entry in the gateway's
-remotex.toml, as `psk`. It is the only credential either side uses.
+Everything else is in the menu bar: the pre-shared key (which goes on the
+matching [[targets]] entry in the gateway's remotex.toml, and is the only
+credential either side uses), the listen address, the display, the config file,
+the log, the two permissions, Start at Login, and Quit.
 ";
 
 #[cfg(test)]
@@ -467,13 +410,12 @@ mod tests {
     fn no_arguments_serves_with_the_default_config_path() {
         let args = parse(&[]).unwrap();
         assert!(args.config.is_none());
-        assert!(!args.gen_psk && !args.show_psk && !args.status);
         // Registering is the default: installing is meant to be "open it once".
         assert!(!args.no_register);
-        // So is the menu bar — an agent with no visible sign of itself and no
-        // way to quit is the thing --no-menu exists to opt *out* of.
+        // So is the menu bar, which is the agent's whole interface — an agent
+        // with no visible sign of itself, no way to read its key and no way to
+        // quit is what --no-menu opts *out* of.
         assert!(!args.no_menu);
-        assert!(!args.unregister);
     }
 
     #[test]
@@ -486,19 +428,15 @@ mod tests {
 
     #[test]
     fn every_flag_parses() {
-        assert!(parse(&["--gen-psk"]).unwrap().gen_psk);
-        assert!(parse(&["--show-psk"]).unwrap().show_psk);
-        assert!(parse(&["--status"]).unwrap().status);
         assert!(parse(&["--no-register"]).unwrap().no_register);
         assert!(parse(&["--no-menu"]).unwrap().no_menu);
-        assert!(parse(&["--unregister"]).unwrap().unregister);
     }
 
     #[test]
     fn flags_combine_with_a_config_path() {
-        let args = parse(&["--config", "/tmp/a.toml", "--status"]).unwrap();
+        let args = parse(&["--config", "/tmp/a.toml", "--no-menu"]).unwrap();
         assert_eq!(args.config, Some(PathBuf::from("/tmp/a.toml")));
-        assert!(args.status);
+        assert!(args.no_menu);
     }
 
     #[test]
@@ -519,17 +457,7 @@ mod tests {
     // it must mention every flag `parse` accepts.
     #[test]
     fn the_usage_text_documents_every_flag() {
-        for flag in [
-            "--config",
-            "--show-psk",
-            "--gen-psk",
-            "--status",
-            "--no-register",
-            "--no-menu",
-            "--unregister",
-            "--help",
-            "--version",
-        ] {
+        for flag in ["--config", "--no-register", "--no-menu", "--help", "--version"] {
             assert!(USAGE.contains(flag), "usage does not mention {flag}");
         }
     }
