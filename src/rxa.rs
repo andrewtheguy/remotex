@@ -34,7 +34,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 
 use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
-use crate::protocol::{ClientMsg, CursorShape, MouseButton, ServerMsg, Tile};
+use crate::protocol::{ClientMsg, CursorShape, MouseButton, ServerMsg, Tile, clamp_clipboard};
 
 /// How long a connect + handshake + `Hello` may take before we give up on this
 /// attempt. Guards against a host that accepts the TCP connection and then says
@@ -104,7 +104,15 @@ pub async fn run(
     loop {
         let size = (session.width, session.height);
         info!("rxa: session up, desktop {}x{}", size.0, size.1);
-        match pump(session, &mut input_rx, &frame_tx, &mut announced).await {
+        match pump(
+            session,
+            &mut input_rx,
+            &frame_tx,
+            &mut announced,
+            config.clipboard,
+        )
+        .await
+        {
             Ok(()) => {
                 info!("rxa: session ended");
                 return;
@@ -196,6 +204,7 @@ async fn pump(
     input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: &mpsc::Sender<ServerMsg>,
     announced: &mut Option<(u16, u16)>,
+    clipboard: bool,
 ) -> anyhow::Result<()> {
     let Session {
         reader,
@@ -228,6 +237,15 @@ async fn pump(
     let _abort = AbortOnDrop(read_task);
 
     writer.send(&GatewayMsg::Attach.encode()).await?;
+
+    // Sent per attach, not once per process: this runs again after every
+    // reconnect, and the agent's watch state died with the old session. Only
+    // for an opted-in target — the agent reads nothing unprompted otherwise.
+    if clipboard {
+        writer
+            .send(&GatewayMsg::ClipboardWatch { enabled: true }.encode())
+            .await?;
+    }
 
     let mut ping = interval(PING_INTERVAL);
     // A blocked browser must not cause a burst of catch-up pings.
@@ -279,6 +297,24 @@ async fn pump(
                         }
                     }
                     AgentMsg::Pong { .. } => {}
+                    // Either a reply to a ClipboardRequest this pump sent, or
+                    // an unprompted push from the agent's pasteboard watcher.
+                    // Identical to the browser either way, which is what lets
+                    // the panel and the automatic sync share one path.
+                    //
+                    // Dropped outright for a target that didn't opt in: this
+                    // pump then never asked and never enabled the watch, so
+                    // anything arriving is an agent that disagrees with us —
+                    // and the browser writes an incoming clipboard into the
+                    // real OS clipboard. Same belt-and-braces as VNC's
+                    // ServerCutText.
+                    AgentMsg::Clipboard { text } => {
+                        if clipboard
+                            && frame_tx.send(ServerMsg::Clipboard { text }).await.is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
                     // The agent can't proceed — a missing TCC grant, typically.
                     // Reconnecting would just rediscover it, so this is fatal.
                     AgentMsg::Error { message } => {
@@ -304,7 +340,7 @@ async fn pump(
                 {
                     return Ok(());
                 }
-                if let Some(out) = to_agent(&msg) {
+                if let Some(out) = to_agent(&msg, clipboard) {
                     writer.send(&out.encode()).await?;
                 }
             }
@@ -361,9 +397,11 @@ impl Drop for AbortOnDrop {
 ///
 /// `None` for messages this engine has nothing to send for:
 /// [`ClientMsg::Viewport`] because v1 has no dynamic resize (the agent captures
-/// the Mac's own resolution), and `Connect`/`Disconnect` because the session
-/// layer handles those and never forwards them.
-fn to_agent(msg: &ClientMsg) -> Option<GatewayMsg> {
+/// the Mac's own resolution), `Connect`/`Disconnect` because the session layer
+/// handles those and never forwards them, and the clipboard pair when the
+/// target did not opt in (`clipboard = false`) — the browser hides the control
+/// then, so this is the belt to that UI's braces.
+fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
     Some(match msg {
         ClientMsg::MouseMove { x, y } => GatewayMsg::PointerMove {
             x: clamp_u16(*x),
@@ -392,7 +430,18 @@ fn to_agent(msg: &ClientMsg) -> Option<GatewayMsg> {
             caps: *caps,
         },
         ClientMsg::Refresh => GatewayMsg::Refresh,
-        ClientMsg::Viewport { .. } | ClientMsg::Connect { .. } | ClientMsg::Disconnect => {
+        // The agent reads its pasteboard only when asked, so a fetch is a real
+        // round trip rather than a cached value (unlike VNC, where the server
+        // pushes and the engine caches).
+        ClientMsg::ClipboardRequest if clipboard => GatewayMsg::ClipboardRequest,
+        ClientMsg::Clipboard { text } if clipboard => GatewayMsg::Clipboard {
+            text: clamp_clipboard(text).to_owned(),
+        },
+        ClientMsg::ClipboardRequest
+        | ClientMsg::Clipboard { .. }
+        | ClientMsg::Viewport { .. }
+        | ClientMsg::Connect { .. }
+        | ClientMsg::Disconnect => {
             return None;
         }
     })
@@ -431,12 +480,12 @@ mod tests {
     #[test]
     fn pointer_moves_carry_clamped_framebuffer_coordinates() {
         assert_eq!(
-            to_agent(&ClientMsg::MouseMove { x: 1279, y: 799 }),
+            to_agent(&ClientMsg::MouseMove { x: 1279, y: 799 }, false),
             Some(GatewayMsg::PointerMove { x: 1279, y: 799 })
         );
         // A drag off the canvas edge pins to the edge instead of vanishing.
         assert_eq!(
-            to_agent(&ClientMsg::MouseMove { x: -5, y: 70_000 }),
+            to_agent(&ClientMsg::MouseMove { x: -5, y: 70_000 }, false),
             Some(GatewayMsg::PointerMove { x: 0, y: u16::MAX })
         );
     }
@@ -452,7 +501,7 @@ mod tests {
                 to_agent(&ClientMsg::MouseButton {
                     button,
                     pressed: true
-                }),
+                }, false),
                 Some(GatewayMsg::PointerButton {
                     button: expected,
                     pressed: true
@@ -463,7 +512,7 @@ mod tests {
             to_agent(&ClientMsg::MouseButton {
                 button: MouseButton::Left,
                 pressed: false
-            }),
+            }, false),
             Some(GatewayMsg::PointerButton {
                 button: 0,
                 pressed: false
@@ -476,7 +525,7 @@ mod tests {
     #[test]
     fn wheel_deltas_pass_through_unmodified() {
         assert_eq!(
-            to_agent(&ClientMsg::Wheel { dx: 0.0, dy: -2.5 }),
+            to_agent(&ClientMsg::Wheel { dx: 0.0, dy: -2.5 }, false),
             Some(GatewayMsg::Wheel { dx: 0.0, dy: -2.5 })
         );
     }
@@ -488,7 +537,7 @@ mod tests {
                 code: "KeyA".to_owned(),
                 pressed: true,
                 caps: true,
-            }),
+            }, false),
             Some(GatewayMsg::Key {
                 code: "KeyA".to_owned(),
                 pressed: true,
@@ -502,7 +551,7 @@ mod tests {
                 code: "MediaPlayPause".to_owned(),
                 pressed: false,
                 caps: false,
-            }),
+            }, false),
             Some(GatewayMsg::Key {
                 code: "MediaPlayPause".to_owned(),
                 pressed: false,
@@ -513,21 +562,71 @@ mod tests {
 
     #[test]
     fn refresh_asks_the_agent_for_a_full_repaint() {
-        assert_eq!(to_agent(&ClientMsg::Refresh), Some(GatewayMsg::Refresh));
+        assert_eq!(to_agent(&ClientMsg::Refresh, false), Some(GatewayMsg::Refresh));
     }
 
     // v1 has no dynamic resize, and the session layer never forwards
     // Connect/Disconnect — none of the three may reach the agent.
     #[test]
     fn messages_with_no_agent_equivalent_are_dropped() {
-        assert_eq!(to_agent(&ClientMsg::Viewport { w: 2560, h: 1440 }), None);
+        assert_eq!(to_agent(&ClientMsg::Viewport { w: 2560, h: 1440 }, false), None);
         assert_eq!(
-            to_agent(&ClientMsg::Connect {
-                target: "mac".to_owned()
-            }),
+            to_agent(
+                &ClientMsg::Connect {
+                    target: "mac".to_owned()
+                },
+                false
+            ),
             None
         );
-        assert_eq!(to_agent(&ClientMsg::Disconnect), None);
+        assert_eq!(to_agent(&ClientMsg::Disconnect, false), None);
+    }
+
+    // The clipboard pair is the only thing the flag gates, and it gates both
+    // directions: a target that didn't opt in neither reads nor writes the
+    // Mac's pasteboard, whatever the browser sends.
+    #[test]
+    fn clipboard_messages_reach_the_agent_only_when_the_target_opted_in() {
+        assert_eq!(
+            to_agent(&ClientMsg::ClipboardRequest, true),
+            Some(GatewayMsg::ClipboardRequest)
+        );
+        assert_eq!(
+            to_agent(
+                &ClientMsg::Clipboard {
+                    text: "copied — 画面".to_owned()
+                },
+                true
+            ),
+            Some(GatewayMsg::Clipboard {
+                text: "copied — 画面".to_owned()
+            })
+        );
+
+        assert_eq!(to_agent(&ClientMsg::ClipboardRequest, false), None);
+        assert_eq!(
+            to_agent(
+                &ClientMsg::Clipboard {
+                    text: "copied".to_owned()
+                },
+                false
+            ),
+            None
+        );
+    }
+
+    // An oversized paste is truncated at the gateway rather than handed to the
+    // agent whole — and on a char boundary, since the wire carries UTF-8.
+    #[test]
+    fn oversized_clipboard_text_is_clamped_before_the_agent_sees_it() {
+        let text = "é".repeat(crate::protocol::MAX_CLIPBOARD_BYTES);
+        match to_agent(&ClientMsg::Clipboard { text }, true) {
+            Some(GatewayMsg::Clipboard { text }) => {
+                assert_eq!(text.len(), crate::protocol::MAX_CLIPBOARD_BYTES);
+                assert!(text.chars().all(|c| c == 'é'));
+            }
+            other => panic!("expected a clipboard message, got {other:?}"),
+        }
     }
 
     #[test]

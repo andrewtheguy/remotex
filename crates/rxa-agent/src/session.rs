@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
-use rxa_proto::msg::{AgentMsg, GatewayMsg};
+use rxa_proto::msg::{AgentMsg, GatewayMsg, clamp_clipboard};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
@@ -40,6 +40,7 @@ use crate::capture::{self, Capture, FrameSink, RawTile};
 use crate::cursor;
 use crate::encode;
 use crate::input::Injector;
+use crate::pasteboard;
 
 /// Frames of raw tiles buffered between the capture callback and the encoder.
 /// Small on purpose: see the coalescing note in the module docs.
@@ -186,6 +187,12 @@ async fn pump(
     cursor_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heard = Instant::now();
 
+    // Pasteboard watch state. `None` means not watching, and the gateway only
+    // turns it on for a target that opted in — so the default costs nothing and
+    // reads nothing. `Some(count)` is the last change counter this session has
+    // accounted for; contents are read only when the live counter differs.
+    let mut clipboard_seen: Option<isize> = None;
+
     let result = loop {
         // `out_rx` only exists once the stream is attached; before that, park
         // that branch on a future that never completes.
@@ -293,6 +300,52 @@ async fn pump(
                     GatewayMsg::Ping { nonce } => {
                         writer.send(&AgentMsg::Pong { nonce }.encode()).await?;
                     }
+                    // The gateway only asks when the browser presses Fetch, so
+                    // this is one read per click — see [`crate::pasteboard`].
+                    // An empty reply covers both "nothing copied" and "the
+                    // pasteboard holds an image": the browser wants text.
+                    GatewayMsg::ClipboardRequest => {
+                        let text = pasteboard::read().unwrap_or_default();
+                        let text = clamp_clipboard(&text);
+                        debug!("session: pasteboard read, {} bytes", text.len());
+                        writer
+                            .send(&AgentMsg::Clipboard { text: text.to_owned() }.encode())
+                            .await?;
+                    }
+                    GatewayMsg::Clipboard { text } => {
+                        // A refused write still cleared the pasteboard, so the
+                        // counter moved either way — but only re-baseline when
+                        // the text actually landed. Leaving the stale baseline
+                        // after a refusal lets the watcher notice on its next
+                        // tick and tell the browser the pasteboard is now
+                        // empty, which beats silently pretending the paste
+                        // worked. `pasteboard::write` logs the refusal; there
+                        // is no negative acknowledgement on this wire, and
+                        // AgentMsg::Error is fatal at the gateway — far too
+                        // blunt for one lost paste.
+                        let wrote = pasteboard::write(clamp_clipboard(&text));
+                        // Our own write bumps the counter. Without this the
+                        // watcher would read it straight back and push it to
+                        // the browser that just sent it.
+                        if wrote && clipboard_seen.is_some() {
+                            clipboard_seen = Some(pasteboard::change_count());
+                        }
+                    }
+                    // Baseline the counter without reading anything: the first
+                    // push should be the user's next copy, not whatever
+                    // happened to be on the pasteboard when the browser
+                    // connected. That also matches VNC, where ServerCutText
+                    // only arrives on a change.
+                    GatewayMsg::ClipboardWatch { enabled } => {
+                        clipboard_seen = enabled.then(pasteboard::change_count);
+                        info!(
+                            "session: pasteboard watch {}",
+                            if enabled { "on" } else { "off" }
+                        );
+                        if enabled && let Some(warning) = pasteboard::access_warning() {
+                            warn!("session: {warning}");
+                        }
+                    }
                 }
             }
 
@@ -306,6 +359,24 @@ async fn pump(
                 if let Some((generation, shape)) = cursor_tracker.changed_since(cursor_seen) {
                     cursor_seen = generation;
                     writer.send(&AgentMsg::Cursor(shape).encode()).await?;
+                }
+                // Riding the cursor tick rather than a timer of its own: both
+                // want the same "has anything changed" cadence, and a counter
+                // compare is far cheaper than the cursor poll already here.
+                if let Some(seen) = clipboard_seen {
+                    let now = pasteboard::change_count();
+                    if now != seen {
+                        clipboard_seen = Some(now);
+                        // The one content read, and only because the counter
+                        // moved. An empty string covers a pasteboard holding
+                        // an image or a file — the browser wants text.
+                        let text = pasteboard::read().unwrap_or_default();
+                        let text = clamp_clipboard(&text);
+                        debug!("session: pasteboard changed, pushing {} bytes", text.len());
+                        writer
+                            .send(&AgentMsg::Clipboard { text: text.to_owned() }.encode())
+                            .await?;
+                    }
                 }
             }
         }

@@ -87,6 +87,7 @@ mod input;
 mod loginitem;
 mod menubar;
 mod panels;
+mod pasteboard;
 mod session;
 mod settings;
 mod state;

@@ -903,3 +903,139 @@ body {
 .sk-dk-home-spacer {
   flex: 2.1;
 }
+
+/* ── Clipboard panel ─────────────────────────────────────────────────────── */
+/* Same docking model as the soft keyboard: full-width along the bottom edge on
+   mobile, a floating card on desktop. Only one of the two is ever open, so they
+   share the canvas inset channel. */
+
+.cb-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: rgba(22, 27, 34, 0.98);
+  border-top: 1px solid #30363d;
+  z-index: 2000;
+  padding: 0.6rem 0.7rem 0.8rem;
+  color: #e6edf3;
+}
+
+@media (min-width: 800px) {
+  .cb-panel {
+    bottom: 16px;
+    right: 16px;
+    left: auto;
+    width: 460px;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(1, 4, 9, 0.6);
+  }
+}
+
+.cb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cb-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8b949e;
+}
+
+.cb-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  font: inherit;
+  color: #e6edf3;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.cb-close:hover {
+  background: #30363d;
+}
+
+.cb-text {
+  /* Tall enough for a paragraph, short enough to leave the desktop visible on
+     a phone in landscape. */
+  min-height: 6.5rem;
+  max-height: 40vh;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #e6edf3;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  resize: vertical;
+}
+
+.cb-text:focus {
+  outline: 2px solid #1f6feb;
+  outline-offset: -1px;
+}
+
+.cb-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.cb-btn {
+  flex: 1;
+  padding: 0.45rem 0.8rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #e6edf3;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.cb-btn:hover:not(:disabled) {
+  background: #30363d;
+}
+
+.cb-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cb-btn-primary {
+  background: #1f6feb;
+  border-color: #1f6feb;
+}
+
+.cb-btn-primary:hover:not(:disabled) {
+  background: #388bfd;
+}
+
+.cb-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+
+.cb-count-over {
+  color: #f85149;
+}
+
+.cb-notice {
+  color: #7ee787;
+}

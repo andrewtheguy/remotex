@@ -181,8 +181,9 @@ function SoftKeyButton({
 // ── Viewport detection ──
 
 // Wide viewports render a full PC keyboard grid; narrow ones the compact
-// mobile layout with a screen toggle.
-function useIsDesktop(breakpoint = 800): boolean {
+// mobile layout with a screen toggle. Exported because the clipboard panel
+// makes the same docked-vs-floating call off the same breakpoint.
+export function useIsDesktop(breakpoint = 800): boolean {
   const [desktop, setDesktop] = useState(() => window.innerWidth >= breakpoint);
   useEffect(() => {
     const mql = window.matchMedia(`(min-width: ${breakpoint}px)`);

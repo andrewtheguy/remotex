@@ -21,6 +21,12 @@ use serde::{Deserialize, Serialize};
 /// produce one huge WebSocket message.
 pub const STRIP_ROWS: u16 = 64;
 
+/// The clipboard transfer cap and its clamp, defined in `rxa-proto` so the
+/// browser link, the gateway and the Mac agent cannot drift apart on it (the
+/// agent crate can't see this file). Re-exported here because every other
+/// boundary in this crate reaches for `protocol::` first.
+pub use rxa_proto::msg::{MAX_CLIPBOARD_BYTES, clamp_clipboard};
+
 /// A mouse button, matching the DOM `MouseEvent.button` numbering.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +75,15 @@ pub enum ClientMsg {
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
     Disconnect,
+    /// Put `text` on the remote's clipboard (the clipboard panel's "Send").
+    /// Ignored by engines whose target did not opt in (`clipboard` in the
+    /// target profile) and by the ones with no clipboard support yet (RDP).
+    Clipboard { text: String },
+    /// Ask for the remote's current clipboard text (the panel's "Fetch"); the
+    /// engine answers with [`ServerMsg::Clipboard`]. Pull rather than push by
+    /// design — the browser holds no clipboard state and reads nothing without
+    /// the user asking. See docs/architecture.md.
+    ClipboardRequest,
 }
 
 /// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
@@ -229,12 +244,19 @@ pub enum ServerMsg {
     /// profile the session is bound to; `protocol` (`"rdp"`/`"vnc"`) and
     /// `resize` let the browser choose its resize behaviour — VNC resizes
     /// automatically with the viewport, RDP only on the user's request (the
-    /// floating menu's "Resize to window").
+    /// floating menu's "Resize to window"). `clipboard` says whether this
+    /// target opted into the clipboard bridge, which is what enables the
+    /// floating menu's Clipboard button.
     Connected {
         name: String,
         protocol: &'static str,
         resize: bool,
+        clipboard: bool,
     },
+    /// The remote's clipboard text, in reply to a
+    /// [`ClientMsg::ClipboardRequest`]. Only ever sent when asked: the browser
+    /// is never pushed clipboard contents it did not request.
+    Clipboard { text: String },
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -264,7 +286,9 @@ enum ControlMsg<'a> {
         name: &'a str,
         protocol: &'a str,
         resize: bool,
+        clipboard: bool,
     },
+    Clipboard { text: &'a str },
 }
 
 impl ServerMsg {
@@ -295,10 +319,17 @@ impl ServerMsg {
                 name,
                 protocol,
                 resize,
+                clipboard,
             } => WireFrame::Text(control(&ControlMsg::Connected {
                 name,
                 protocol,
                 resize: *resize,
+                clipboard: *clipboard,
+            })),
+            // Clamped here as well as at the engines, so no path can put an
+            // unbounded string on the browser link.
+            ServerMsg::Clipboard { text } => WireFrame::Text(control(&ControlMsg::Clipboard {
+                text: clamp_clipboard(text),
             })),
         }
     }
@@ -361,6 +392,14 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
         ));
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"clipboardRequest"}"#).unwrap(),
+            ClientMsg::ClipboardRequest
+        ));
+        match serde_json::from_str::<ClientMsg>(r#"{"type":"clipboard","text":"héllo"}"#).unwrap() {
+            ClientMsg::Clipboard { text } => assert_eq!(text, "héllo"),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.
@@ -373,6 +412,54 @@ mod tests {
         match (ServerMsg::Error { message: "boom".to_owned() }).encode() {
             WireFrame::Text(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
             other => panic!("error should be a text frame: {other:?}"),
+        }
+        match (ServerMsg::Connected {
+            name: "mac".to_owned(),
+            protocol: "rxa",
+            resize: false,
+            clipboard: true,
+        })
+        .encode()
+        {
+            WireFrame::Text(json) => assert_eq!(
+                json,
+                r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true}"#
+            ),
+            other => panic!("connected should be a text frame: {other:?}"),
+        }
+        match (ServerMsg::Clipboard { text: "hi \"there\"".to_owned() }).encode() {
+            WireFrame::Text(json) => {
+                assert_eq!(json, r#"{"type":"clipboard","text":"hi \"there\""}"#);
+            }
+            other => panic!("clipboard should be a text frame: {other:?}"),
+        }
+    }
+
+    // Nothing may put an unbounded string on the browser link, and a cut in the
+    // middle of a multi-byte character would not be valid UTF-8 to cut at.
+    #[test]
+    fn clipboard_text_is_clamped_on_a_char_boundary() {
+        let text = "é".repeat(MAX_CLIPBOARD_BYTES); // 2 bytes each
+        let clamped = clamp_clipboard(&text);
+        assert_eq!(clamped.len(), MAX_CLIPBOARD_BYTES);
+        assert!(clamped.chars().all(|c| c == 'é'));
+
+        // An odd cap would land mid-character; the clamp must back off.
+        let text = format!("{}é", "a".repeat(MAX_CLIPBOARD_BYTES - 1));
+        assert_eq!(clamp_clipboard(&text).len(), MAX_CLIPBOARD_BYTES - 1);
+
+        // Fits: returned untouched.
+        assert_eq!(clamp_clipboard("short"), "short");
+
+        match (ServerMsg::Clipboard { text: "x".repeat(MAX_CLIPBOARD_BYTES + 10) }).encode() {
+            WireFrame::Text(json) => assert_eq!(
+                json,
+                format!(
+                    r#"{{"type":"clipboard","text":"{}"}}"#,
+                    "x".repeat(MAX_CLIPBOARD_BYTES)
+                )
+            ),
+            other => panic!("clipboard should be a text frame: {other:?}"),
         }
     }
 

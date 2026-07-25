@@ -126,6 +126,17 @@ pub struct TargetConfig {
     /// keeps its connect-time size and the browser shows scrollbars.
     #[serde(default)]
     pub resize: bool,
+    /// Clipboard bridge: let the browser read and write this target's
+    /// clipboard, through the floating menu's Clipboard panel. Off by default —
+    /// a remote desktop's clipboard often holds whatever was last copied there,
+    /// so exposing it is a per-target decision rather than a default.
+    ///
+    /// Supported by `vnc` (RFB `ServerCutText`/`ClientCutText`, latin-1) and
+    /// `rxa` (the Mac agent reads `NSPasteboard` on request, UTF-8). Rejected
+    /// for `rdp` until the clipboard virtual channel lands — see
+    /// [`ConfigFile::parse`] and docs/roadmap.md.
+    #[serde(default)]
+    pub clipboard: bool,
     /// Pre-shared key for an `rxa` target, matching the `psk` in the Mac
     /// agent's own config file. This is the entire credential: the Noise
     /// handshake authenticates both sides from it, so a reconnect never
@@ -263,6 +274,16 @@ impl ConfigFile {
                     "target {:?} is protocol {:?} but sets psk, which only \"rxa\" targets use",
                     target.name,
                     target.protocol.name()
+                );
+            }
+            // Refused rather than ignored: a silently dead clipboard button is
+            // worse than a startup error naming the reason.
+            if target.protocol == Protocol::Rdp {
+                anyhow::ensure!(
+                    !target.clipboard,
+                    "target {:?} sets clipboard, which the RDP engine does not support yet \
+                     (see docs/roadmap.md)",
+                    target.name
                 );
             }
         }
@@ -407,6 +428,7 @@ mod tests {
         assert_eq!(t.security, Security::Auto);
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
+        assert!(!t.clipboard, "the clipboard bridge is opt-in");
     }
 
     #[test]
@@ -723,5 +745,52 @@ mod tests {
         let err = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
             .unwrap_err();
         assert!(format!("{err:#}").contains("resize"), "{err:#}");
+    }
+
+    #[test]
+    fn clipboard_is_accepted_for_vnc_and_rxa_and_rejected_for_rdp() {
+        let psk = rxa_proto::psk::generate();
+        let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nclipboard = true")))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(config.targets[0].clipboard);
+
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "box"
+            protocol = "vnc"
+            host = "10.0.0.4"
+            clipboard = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].clipboard);
+
+        // RDP has no clipboard channel yet, and a silently dead Clipboard
+        // button would be worse than saying so at startup.
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            clipboard = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("clipboard") && msg.contains("RDP"), "{msg}");
     }
 }

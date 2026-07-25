@@ -21,6 +21,12 @@
 //! declares support, so TigerVNC-family servers render at the browser's size.
 //! Servers (or targets) without it keep the connect-time size.
 //!
+//! Also per target opt-in (`clipboard = true`): the **cut text** messages.
+//! `ServerCutText` fills a buffer the browser fetches on demand, and the
+//! browser's sends become `ClientCutText`. Baseline only — the Extended
+//! Clipboard pseudo-encoding (UTF-8, zlib, a capability handshake) is not
+//! negotiated, so this text is latin-1 and anything outside it becomes `?`.
+//!
 //! Mirrors [`crate::rdp`]'s shape behind the [`crate::session`] seam: connect,
 //! report the desktop size as [`ServerMsg::Resize`], then pump framebuffer
 //! updates out as tiles and browser [`ClientMsg`] input back in.
@@ -40,7 +46,9 @@ use tokio::sync::{Mutex, mpsc};
 use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
-use crate::protocol::{ClientMsg, CursorShape, MouseButton, STRIP_ROWS, ServerMsg, Tile};
+use crate::protocol::{
+    ClientMsg, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS, ServerMsg, Tile,
+};
 
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC_AUTH: u8 = 2;
@@ -108,6 +116,18 @@ enum CursorState {
 
 type SharedCursor = Arc<std::sync::Mutex<CursorState>>;
 
+/// The remote's clipboard, as last announced by the server.
+///
+/// RFB has no "read the clipboard" request — the server pushes `ServerCutText`
+/// whenever the remote clipboard changes — so the latest text is kept here to
+/// answer [`ClientMsg::ClipboardRequest`]. The push is also forwarded live, but
+/// that is not enough on its own: a browser that attaches mid-session, or
+/// reattaches after a drop, has missed every push so far and would see an empty
+/// panel with no way to ask. Shared between the read loop (which fills it) and
+/// the input side (which answers from it); `None` means the remote has not
+/// copied anything this session.
+type SharedClipboard = Arc<std::sync::Mutex<Option<String>>>;
+
 /// Connect to the VNC host, then drive the session until it ends.
 ///
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
@@ -147,6 +167,7 @@ pub async fn run(
         writer,
         (width, height),
         config.resize,
+        config.clipboard,
         input_rx,
         frame_tx.clone(),
     )
@@ -270,6 +291,7 @@ async fn active_loop(
     writer: OwnedWriteHalf,
     size: (u16, u16),
     resize: bool,
+    clipboard_enabled: bool,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
@@ -282,6 +304,7 @@ async fn active_loop(
         pending: None,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+    let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(None));
 
     // Kick off the update cycle with one full (non-incremental) request.
     write_to(&writer, &update_request(false, size)).await?;
@@ -291,6 +314,8 @@ async fn active_loop(
         Arc::clone(&writer),
         Arc::clone(&desktop),
         Arc::clone(&cursor),
+        Arc::clone(&clipboard),
+        clipboard_enabled,
         frame_tx.clone(),
     ));
 
@@ -346,6 +371,24 @@ async fn active_loop(
                         break Err(anyhow::anyhow!("frame channel closed"));
                     }
                     write_to(&writer, &update_request(false, size)).await
+                } else if matches!(input, ClientMsg::ClipboardRequest) {
+                    // Answered from the buffer the read loop fills: RFB has no
+                    // way to *ask* the server for its clipboard. Empty until
+                    // the remote copies something, which reads in the panel as
+                    // "nothing has been copied over there yet".
+                    if clipboard_enabled {
+                        let text = clipboard.lock().unwrap().clone().unwrap_or_default();
+                        if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                            break Err(anyhow::anyhow!("frame channel closed"));
+                        }
+                    }
+                    Ok(())
+                } else if let ClientMsg::Clipboard { text } = &input {
+                    if clipboard_enabled {
+                        write_to(&writer, &client_cut_text(text)).await
+                    } else {
+                        Ok(())
+                    }
                 } else {
                     match translate_input(input, &mut button_mask, &mut last_pos, &mut pressed_keys) {
                         bytes if bytes.is_empty() => Ok(()),
@@ -401,6 +444,8 @@ async fn read_loop(
     writer: SharedWriter,
     desktop: SharedDesktop,
     cursor: SharedCursor,
+    clipboard: SharedClipboard,
+    clipboard_enabled: bool,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
     loop {
@@ -436,12 +481,34 @@ async fn read_loop(
             }
             // Bell — nothing to ring in the browser (yet).
             2 => {}
-            // ServerCutText — clipboard support is not planned; drain and drop.
+            // ServerCutText — the remote's clipboard changed. Pushed to the
+            // browser as it arrives *and* stashed, because the two serve
+            // different readers: the push drives automatic sync, the stash
+            // answers a Fetch from a browser that attached later and so never
+            // saw the push. Drained and dropped when the target didn't opt in.
             3 => {
                 let mut padding = [0u8; 3];
                 reader.read_exact(&mut padding).await?;
-                let len = reader.read_u32().await?;
-                discard(&mut reader, u64::from(len)).await?;
+                let len = u64::from(reader.read_u32().await?);
+                if !clipboard_enabled {
+                    discard(&mut reader, len).await?;
+                    continue;
+                }
+                // Read what fits and drop the rest: the stream position must
+                // stay exact whatever the server sends.
+                let take = len.min(MAX_CLIPBOARD_BYTES as u64);
+                let mut bytes = vec![0u8; take as usize];
+                reader.read_exact(&mut bytes).await?;
+                discard(&mut reader, len - take).await?;
+                if len > take {
+                    warn!("vnc: clipboard from the remote truncated at {take} of {len} bytes");
+                }
+                let text = latin1_to_string(&bytes);
+                debug!("vnc: remote clipboard updated, {} bytes", bytes.len());
+                *clipboard.lock().unwrap() = Some(text.clone());
+                if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                    return Ok(()); // browser link gone; the session layer handles it
+                }
             }
             other => anyhow::bail!("unknown server message type {other}"),
         }
@@ -749,6 +816,9 @@ fn translate_input(
         ClientMsg::Viewport { .. } => Vec::new(),
         // Intercepted by the input loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
+        // Intercepted by the input loop (the clipboard bridge, which needs the
+        // shared buffer and frame_tx) before translation.
+        ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.
         ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
@@ -837,7 +907,48 @@ fn pointer_event(button_mask: u8, pos: (u16, u16)) -> [u8; 6] {
     msg
 }
 
+/// ClientCutText: put `text` on the remote's clipboard.
+///
+/// RFB cut text is latin-1 ([`latin1_from_str`]), and the length is capped at
+/// [`MAX_CLIPBOARD_BYTES`] — after the latin-1 conversion, which is one byte
+/// per char, so the cap applies to characters here.
+fn client_cut_text(text: &str) -> Vec<u8> {
+    let bytes = latin1_from_str(text);
+    let mut msg = vec![6u8, 0, 0, 0]; // message type + 3 padding
+    msg.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    msg.extend_from_slice(&bytes);
+    msg
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Decode RFB cut text (latin-1) into a `String`: every byte is the codepoint
+/// of the same value.
+fn latin1_to_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| char::from(b)).collect()
+}
+
+/// Encode a `String` as RFB cut text (latin-1), truncated to
+/// [`MAX_CLIPBOARD_BYTES`].
+///
+/// Anything outside latin-1 becomes `?`, which is what noVNC does and all the
+/// baseline protocol can carry — RFB's UTF-8 clipboard lives in the Extended
+/// Clipboard pseudo-encoding, which this client does not negotiate.
+fn latin1_from_str(text: &str) -> Vec<u8> {
+    let bytes: Vec<u8> = text
+        .chars()
+        .take(MAX_CLIPBOARD_BYTES)
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+        .collect();
+    if bytes.len() < text.chars().count() {
+        warn!(
+            "vnc: clipboard to the remote truncated at {} of {} characters",
+            bytes.len(),
+            text.chars().count()
+        );
+    }
+    bytes
+}
 
 /// Classic VNC authentication: DES-ECB over the 16-byte challenge, keyed by
 /// the first 8 bytes of the password (zero-padded) with the bit order of each
@@ -990,6 +1101,47 @@ mod tests {
         // Two pixels: pure red and pure blue in BGRX order.
         let bgrx = [0, 0, 255, 0, 255, 0, 0, 0];
         assert_eq!(bgrx_to_rgb(&bgrx), vec![255, 0, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn client_cut_text_is_type_6_with_a_big_endian_length() {
+        let msg = client_cut_text("hi");
+        assert_eq!(msg[0], 6);
+        assert_eq!(&msg[1..4], &[0, 0, 0]); // padding
+        assert_eq!(&msg[4..8], &2u32.to_be_bytes()); // length, big-endian
+        assert_eq!(&msg[8..], b"hi");
+
+        // Empty text is a well-formed message, not a skipped one — clearing the
+        // remote clipboard is a legitimate thing to ask for.
+        let msg = client_cut_text("");
+        assert_eq!(msg.len(), 8);
+        assert_eq!(&msg[4..8], &0u32.to_be_bytes());
+    }
+
+    #[test]
+    fn cut_text_is_latin1_with_a_question_mark_for_the_rest() {
+        // Latin-1 survives; anything above U+00FF degrades to '?'.
+        let msg = client_cut_text("café ☕");
+        assert_eq!(&msg[8..], &[b'c', b'a', b'f', 0xE9, b' ', b'?']);
+
+        // Round trip: what a server echoes back decodes to the same latin-1.
+        assert_eq!(latin1_to_string(&msg[8..]), "café ?");
+        // Every byte maps to the codepoint of the same value, 0x80..0x9F
+        // included (latin-1, not Windows-1252).
+        assert_eq!(latin1_to_string(&[0x00, 0x80, 0xFF]), "\u{0}\u{80}\u{ff}");
+    }
+
+    #[test]
+    fn cut_text_to_the_remote_is_capped() {
+        // One latin-1 byte per char, so the cap counts characters here.
+        let msg = client_cut_text(&"a".repeat(MAX_CLIPBOARD_BYTES + 100));
+        assert_eq!(msg.len(), 8 + MAX_CLIPBOARD_BYTES);
+        assert_eq!(&msg[4..8], &(MAX_CLIPBOARD_BYTES as u32).to_be_bytes());
+
+        // Multi-byte characters count as one each, and the '?' they degrade to
+        // must not push the message past the cap either.
+        let msg = client_cut_text(&"☕".repeat(MAX_CLIPBOARD_BYTES + 100));
+        assert_eq!(msg.len(), 8 + MAX_CLIPBOARD_BYTES);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The message set, hand-rolled little-endian in the style of `src/vnc.rs`.
 //!
-//! There are thirteen messages between the two enums, so a serialization
+//! There are seventeen messages between the two enums, so a serialization
 //! dependency would buy nothing that these ~200 lines and their roundtrip tests
 //! don't. The payload of a [`AgentMsg::Tile`] is **already** a PNG or JPEG
 //! stream — the exact bytes the browser decodes — so the gateway relays it
@@ -10,7 +10,8 @@
 //! adds the length prefix. Conventions inside a body:
 //!
 //! - integers little-endian
-//! - `String` as `u16` byte length + UTF-8
+//! - `String` as `u16` byte length + UTF-8, for the short strings ([`put_str`])
+//! - long text as `u32` byte length + UTF-8, for clipboard ([`put_text`])
 //! - `Vec<u8>` as `u32` byte length + bytes
 //! - `Option<T>` as `u8` 0/1 followed by `T`'s body when present
 
@@ -31,6 +32,31 @@ pub enum MsgError {
     BadUtf8,
     #[error("invalid boolean byte 0x{0:02x}")]
     BadBool(u8),
+}
+
+/// Ceiling on one clipboard transfer, in bytes, in either direction.
+///
+/// Lives here rather than in the gateway because all three hops — browser link,
+/// gateway, agent — have to agree on it, and the agent cannot see the gateway's
+/// `src/protocol.rs`. Clipboard text rides the same link as live frames, so an
+/// accidental 200 MB copy must not stall a session; text over this is truncated
+/// (see [`clamp_clipboard`]) rather than refused, because a truncated paste is
+/// recoverable and a silently dropped one just looks broken.
+pub const MAX_CLIPBOARD_BYTES: usize = 65_536;
+
+/// Truncate `text` to at most [`MAX_CLIPBOARD_BYTES`], on a char boundary.
+///
+/// Returns the input untouched when it already fits, so the common case does
+/// not allocate.
+pub fn clamp_clipboard(text: &str) -> &str {
+    if text.len() <= MAX_CLIPBOARD_BYTES {
+        return text;
+    }
+    let mut end = MAX_CLIPBOARD_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// The tile payload codec, mirroring the gateway's `Tile::FORMAT_*` constants
@@ -80,6 +106,12 @@ pub enum AgentMsg {
     /// Something the user has to act on — most often a missing TCC grant.
     /// Surfaced in the browser rather than dying quietly in a log.
     Error { message: String },
+    /// The Mac's pasteboard text. Sent either in reply to a
+    /// [`GatewayMsg::ClipboardRequest`], or unprompted after
+    /// [`GatewayMsg::ClipboardWatch`] turned the watcher on and the pasteboard
+    /// changed. Never sent otherwise: with the watch off the agent does not
+    /// look at the pasteboard at all.
+    Clipboard { text: String },
 }
 
 impl AgentMsg {
@@ -89,6 +121,7 @@ impl AgentMsg {
     const T_DISPLAY_SIZE: u8 = 0x04;
     const T_PONG: u8 = 0x05;
     const T_ERROR: u8 = 0x06;
+    const T_CLIPBOARD: u8 = 0x07;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -149,6 +182,10 @@ impl AgentMsg {
                 out.push(Self::T_ERROR);
                 put_str(&mut out, message);
             }
+            AgentMsg::Clipboard { text } => {
+                out.push(Self::T_CLIPBOARD);
+                put_text(&mut out, text);
+            }
         }
         out
     }
@@ -190,6 +227,7 @@ impl AgentMsg {
             Self::T_ERROR => AgentMsg::Error {
                 message: r.string()?,
             },
+            Self::T_CLIPBOARD => AgentMsg::Clipboard { text: r.text()? },
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -218,6 +256,21 @@ pub enum GatewayMsg {
         caps: bool,
     },
     Ping { nonce: u64 },
+    /// Read the Mac's pasteboard and reply with [`AgentMsg::Clipboard`].
+    /// Sent when the browser presses Fetch.
+    ClipboardRequest,
+    /// Put `text` on the Mac's pasteboard.
+    Clipboard { text: String },
+    /// Start or stop watching the pasteboard for changes. While on, the agent
+    /// pushes [`AgentMsg::Clipboard`] whenever the Mac's pasteboard changes,
+    /// so a copy on the Mac reaches the browser without a Fetch.
+    ///
+    /// Gated by the gateway's per-target `clipboard` flag, and load-bearing:
+    /// watching costs one pasteboard *content* read per change, which recent
+    /// macOS may report to the user as a paste. A target that did not opt in
+    /// never sends this, and the agent then never reads the pasteboard
+    /// unprompted.
+    ClipboardWatch { enabled: bool },
 }
 
 impl GatewayMsg {
@@ -228,6 +281,9 @@ impl GatewayMsg {
     const T_WHEEL: u8 = 0x05;
     const T_KEY: u8 = 0x06;
     const T_PING: u8 = 0x07;
+    const T_CLIPBOARD_REQUEST: u8 = 0x08;
+    const T_CLIPBOARD: u8 = 0x09;
+    const T_CLIPBOARD_WATCH: u8 = 0x0a;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -263,6 +319,15 @@ impl GatewayMsg {
                 out.push(Self::T_PING);
                 out.extend_from_slice(&nonce.to_le_bytes());
             }
+            GatewayMsg::ClipboardRequest => out.push(Self::T_CLIPBOARD_REQUEST),
+            GatewayMsg::Clipboard { text } => {
+                out.push(Self::T_CLIPBOARD);
+                put_text(&mut out, text);
+            }
+            GatewayMsg::ClipboardWatch { enabled } => {
+                out.push(Self::T_CLIPBOARD_WATCH);
+                out.push(u8::from(*enabled));
+            }
         }
         out
     }
@@ -291,6 +356,11 @@ impl GatewayMsg {
                 caps: r.bool()?,
             },
             Self::T_PING => GatewayMsg::Ping { nonce: r.u64()? },
+            Self::T_CLIPBOARD_REQUEST => GatewayMsg::ClipboardRequest,
+            Self::T_CLIPBOARD => GatewayMsg::Clipboard { text: r.text()? },
+            Self::T_CLIPBOARD_WATCH => GatewayMsg::ClipboardWatch {
+                enabled: r.bool()?,
+            },
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -315,6 +385,17 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
 fn put_bytes(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
     out.extend_from_slice(data);
+}
+
+/// Long text: `u32` byte length + UTF-8.
+///
+/// Separate from [`put_str`] because clipboard text can exceed that encoder's
+/// `u16::MAX` ceiling — a 64 KiB copy is ordinary, and silently losing its tail
+/// to a length field would be a puzzling bug. Both ends cap clipboard text
+/// before it gets here; the framing itself is bounded by
+/// [`crate::frame::MAX_FRAME_LEN`].
+fn put_text(out: &mut Vec<u8>, text: &str) {
+    put_bytes(out, text.as_bytes());
 }
 
 /// A cursor over a message body.
@@ -377,6 +458,13 @@ impl<'a> Reader<'a> {
     fn bytes(&mut self) -> Result<&'a [u8], MsgError> {
         let len = self.u32()? as usize;
         self.take(len)
+    }
+
+    /// The [`put_text`] counterpart: `u32` byte length + UTF-8.
+    fn text(&mut self) -> Result<String, MsgError> {
+        std::str::from_utf8(self.bytes()?)
+            .map(str::to_owned)
+            .map_err(|_| MsgError::BadUtf8)
     }
 
     /// Reject a body with bytes left over: a length field that disagrees with
@@ -442,6 +530,13 @@ mod tests {
             AgentMsg::Error {
                 message: "écran — 画面".to_owned(),
             },
+            AgentMsg::Clipboard {
+                text: "pasteboard contents — 画面".to_owned(),
+            },
+            // An empty pasteboard is text too, and distinct from "no reply".
+            AgentMsg::Clipboard {
+                text: String::new(),
+            },
         ]
     }
 
@@ -478,6 +573,15 @@ mod tests {
                 caps: true,
             },
             GatewayMsg::Ping { nonce: 7 },
+            GatewayMsg::ClipboardRequest,
+            GatewayMsg::Clipboard {
+                text: "copied in the browser — 画面".to_owned(),
+            },
+            GatewayMsg::Clipboard {
+                text: String::new(),
+            },
+            GatewayMsg::ClipboardWatch { enabled: true },
+            GatewayMsg::ClipboardWatch { enabled: false },
         ]
     }
 
@@ -505,12 +609,48 @@ mod tests {
         let mut agent: Vec<u8> = agent_variants().iter().map(|m| m.encode()[0]).collect();
         agent.sort_unstable();
         agent.dedup();
-        assert_eq!(agent.len(), 6, "six agent message types");
+        assert_eq!(agent.len(), 7, "seven agent message types");
 
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 7, "seven gateway message types");
+        assert_eq!(gateway.len(), 10, "ten gateway message types");
+    }
+
+    // Clipboard text uses u32 framing, not the u16 `put_str` every other string
+    // field uses — a copy larger than u16::MAX must arrive whole rather than
+    // silently losing its tail.
+    #[test]
+    fn clipboard_text_roundtrips_past_the_u16_string_ceiling() {
+        let text = "é".repeat(usize::from(u16::MAX)); // 128 KiB of UTF-8
+        assert!(text.len() > usize::from(u16::MAX));
+
+        let msg = AgentMsg::Clipboard { text: text.clone() };
+        assert_eq!(AgentMsg::decode(&msg.encode()).unwrap(), msg);
+
+        let msg = GatewayMsg::Clipboard { text };
+        assert_eq!(GatewayMsg::decode(&msg.encode()).unwrap(), msg);
+    }
+
+    #[test]
+    fn clipboard_text_that_is_not_utf8_is_rejected() {
+        // A well-formed frame whose payload is not UTF-8: length 2, then a lone
+        // continuation byte pair.
+        let mut bytes = vec![AgentMsg::T_CLIPBOARD];
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xC3, 0x28]);
+        assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::BadUtf8));
+
+        let mut bytes = vec![GatewayMsg::T_CLIPBOARD];
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xC3, 0x28]);
+        assert_eq!(GatewayMsg::decode(&bytes), Err(MsgError::BadUtf8));
+
+        // A length that overruns the body is truncation, not bad UTF-8.
+        let mut bytes = vec![AgentMsg::T_CLIPBOARD];
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        bytes.extend_from_slice(b"short");
+        assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Truncated));
     }
 
     // A tile's on-the-wire layout, byte for byte: the gateway copies `format`

@@ -24,6 +24,7 @@ use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
 use remotex::server;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 const FAKE_DESKTOP: u16 = 16;
@@ -51,19 +52,41 @@ async fn spawn_rejecting_rdp() -> u16 {
 /// requests are left pending, like a real server with no screen changes).
 /// Everything else the engine sends is consumed and ignored.
 async fn spawn_fake_vnc() -> u16 {
+    spawn_fake_vnc_with_clipboard(None).await.0
+}
+
+/// As [`spawn_fake_vnc`], but the server announces `cut_text` as its clipboard
+/// and reports every `ClientCutText` it receives on the returned channel.
+///
+/// `cut_text` is raw bytes, not a `str`, because RFB cut text is latin-1 — a
+/// UTF-8 literal here would test the wrong wire format.
+///
+/// The announcement is written *before* the framebuffer update that answers the
+/// same request, which is what makes the test deterministic: RFB is one ordered
+/// stream, so a browser that has seen the tile is guaranteed to be talking to an
+/// engine that has already filed the clipboard.
+async fn spawn_fake_vnc_with_clipboard(
+    cut_text: Option<&'static [u8]>,
+) -> (u16, mpsc::UnboundedReceiver<Vec<u8>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
+            let tx = tx.clone();
             tokio::spawn(async move {
-                let _ = serve_fake_vnc(stream).await;
+                let _ = serve_fake_vnc(stream, cut_text, tx).await;
             });
         }
     });
-    port
+    (port, rx)
 }
 
-async fn serve_fake_vnc(mut stream: TcpStream) -> std::io::Result<()> {
+async fn serve_fake_vnc(
+    mut stream: TcpStream,
+    cut_text: Option<&'static [u8]>,
+    received_cut_text: mpsc::UnboundedSender<Vec<u8>>,
+) -> std::io::Result<()> {
     // Version + security (None) + ClientInit/ServerInit.
     stream.write_all(b"RFB 003.008\n").await?;
     stream.read_exact(&mut [0u8; 12]).await?; // client version
@@ -103,6 +126,14 @@ async fn serve_fake_vnc(mut stream: TcpStream) -> std::io::Result<()> {
                 if req[0] != 0 {
                     continue; // incremental: nothing changed, stay quiet
                 }
+                // ServerCutText first, so the engine has filed it by the time
+                // the tile from the same request reaches the browser.
+                if let Some(text) = cut_text {
+                    let mut msg = vec![3u8, 0, 0, 0]; // type + 3 padding
+                    msg.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                    msg.extend_from_slice(text);
+                    stream.write_all(&msg).await?;
+                }
                 let mut update = vec![0u8, 0]; // FramebufferUpdate + padding
                 update.extend_from_slice(&1u16.to_be_bytes()); // one rect
                 update.extend_from_slice(&0u16.to_be_bytes()); // x
@@ -130,8 +161,11 @@ async fn serve_fake_vnc(mut stream: TcpStream) -> std::io::Result<()> {
                 let mut head = [0u8; 7];
                 stream.read_exact(&mut head).await?;
                 let len = u32::from_be_bytes([head[3], head[4], head[5], head[6]]);
-                tokio::io::copy(&mut (&mut stream).take(u64::from(len)), &mut tokio::io::sink())
-                    .await?;
+                let mut body = vec![0u8; len as usize];
+                stream.read_exact(&mut body).await?;
+                // Raw latin-1 bytes: what the engine put on the wire, not a
+                // String, so the test can assert the encoding too.
+                let _ = received_cut_text.send(body);
             }
             other => panic!("fake vnc server got unexpected message type {other}"),
         }
@@ -170,6 +204,10 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
 }
 
 fn target(protocol: Protocol, port: u16) -> TargetConfig {
+    target_with_clipboard(protocol, port, false)
+}
+
+fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> TargetConfig {
     TargetConfig {
         name: "test-target".to_owned(),
         protocol,
@@ -182,6 +220,7 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         height: 800,
         security: Security::Auto,
         resize: false,
+        clipboard,
         psk: String::new(),
     }
 }
@@ -477,4 +516,116 @@ async fn switch_target_returns_to_the_picker_then_reconnects() {
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_tile(&mut ws).await;
+}
+
+/// Read from the socket until a `clipboard` control message arrives, and return
+/// its text.
+async fn expect_clipboard(ws: &mut Ws) -> String {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                    if text.contains(r#""type":"clipboard""#) {
+                        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        return parsed["text"].as_str().unwrap().to_owned();
+                    }
+                }
+                Message::Close(frame) => panic!("closed while waiting for clipboard: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for clipboard");
+    })
+    .await
+    .expect("timed out waiting for clipboard")
+}
+
+// The full VNC clipboard round trip over a real socket: what the server cut
+// reaches the browser when it asks, and what the browser sends becomes a
+// ClientCutText on the wire.
+#[tokio::test]
+async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
+    // Latin-1 above ASCII on the way in (0xE9 is é, one byte on the wire), and
+    // a character that has no latin-1 form on the way out — the two encoding
+    // edges of RFB cut text.
+    let (vnc_port, mut cut_texts) =
+        spawn_fake_vnc_with_clipboard(Some(b"copied on caf\xE9")).await;
+    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, true)).await;
+    let cookie = common::login(addr).await;
+
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+
+    // Remote → browser, unprompted: ServerCutText is forwarded as it arrives,
+    // which is what drives automatic sync. Deterministic because the fake
+    // writes the cut text ahead of the framebuffer update, so it cannot be
+    // racing the tile below. The engine decodes latin-1, so the é the server
+    // sent as one byte arrives as one character.
+    assert_eq!(expect_clipboard(&mut ws).await, "copied on café");
+    expect_tile(&mut ws).await;
+
+    // And the same text is still there to be fetched: a browser that attached
+    // after the push — or reattached — has to be able to ask.
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    assert_eq!(expect_clipboard(&mut ws).await, "copied on café");
+
+    // Browser → remote. Latin-1 survives; anything beyond it becomes '?'.
+    ws.send(Message::text(r#"{"type":"clipboard","text":"typed ☕ here"}"#))
+        .await
+        .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(10), cut_texts.recv())
+        .await
+        .expect("timed out waiting for ClientCutText")
+        .expect("cut text channel closed");
+    assert_eq!(received, b"typed ? here");
+}
+
+// The opt-out path: the flag off means the engine neither answers a fetch nor
+// writes to the remote, whatever the browser sends.
+#[tokio::test]
+async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
+    let (vnc_port, mut cut_texts) = spawn_fake_vnc_with_clipboard(Some(b"secret")).await;
+    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, false)).await;
+    let cookie = common::login(addr).await;
+
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+    expect_tile(&mut ws).await;
+
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    ws.send(Message::text(r#"{"type":"clipboard","text":"leaked"}"#))
+        .await
+        .unwrap();
+
+    // Nothing may come back, and nothing may reach the server. A refresh acts
+    // as the fence: its tile can only arrive after both clipboard messages have
+    // been handled, so silence up to that point is silence for good.
+    ws.send(Message::text(r#"{"type":"refresh"}"#)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(
+                        !text.contains(r#""type":"clipboard""#),
+                        "clipboard answered for a target that did not opt in: {text}"
+                    );
+                }
+                Message::Binary(_) => return, // the refresh's tile: the fence
+                Message::Close(frame) => panic!("closed unexpectedly: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for the refresh tile");
+    })
+    .await
+    .expect("timed out waiting for the refresh tile");
+    assert!(
+        cut_texts.try_recv().is_err(),
+        "a target that did not opt in must not write the remote's clipboard"
+    );
 }

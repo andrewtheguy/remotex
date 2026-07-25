@@ -88,14 +88,15 @@ u8 kind | u8 format | u16 x | u16 y | u16 width | u16 height | image bytes
 ```
 
 Formats are PNG and JPEG. Control messages cover picker/connected state,
-desktop size, cursor shape, and errors. Large dirty rectangles are split into
-64-row strips to bound individual WebSocket frames.
+desktop size, cursor shape, clipboard text, and errors. Large dirty rectangles
+are split into 64-row strips to bound individual WebSocket frames.
 
 Browser-to-server traffic is JSON:
 
 - session control: connect or disconnect;
 - input: mouse movement/buttons, wheel, and DOM keyboard codes;
-- display control: viewport size and full-refresh request.
+- display control: viewport size and full-refresh request;
+- clipboard: send text to the remote, or request the remote's text.
 
 Viewport reports affect only engines configured for resize. RDP resize is
 explicit from the UI; VNC resize follows the browser when the server advertises
@@ -104,6 +105,21 @@ the extension; `rxa` ignores viewport size.
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine so a new canvas does not
 depend on updates seen by the previous browser.
+
+The clipboard is per-target opt-in (`clipboard = true`, supported by VNC and
+`rxa`) and works two ways at once. The backend owns the data: the VNC engine
+forwards `ServerCutText` as it arrives and also buffers it, while the Mac agent
+watches its pasteboard and pushes changes. On top of that the browser can
+always request the current text, which is what a browser attaching mid-session
+does, having missed every push so far.
+
+In the browser those arrivals feed both the clipboard panel and, where the
+Clipboard API is available, the local OS clipboard. Automatic sync is best
+effort by design — `navigator.clipboard` is absent on a non-secure origin, the
+usual LAN deployment over plain HTTP, and Safari will not read the clipboard
+without a paste gesture. The panel is a plain text box needing no permission,
+so the feature degrades to manual rather than breaking. One transfer is capped
+at 64 KiB in each direction.
 
 The gateway sends a WebSocket protocol ping every five seconds. Browsers answer
 with a protocol pong in their networking stack, so background-tab JavaScript
@@ -133,8 +149,15 @@ Cursor pseudo-encoding. This path can connect directly to macOS Screen Sharing;
 the companion agent is not required for Mac targets.
 
 With `resize = true`, it advertises DesktopSize/ExtendedDesktopSize and sends
-`SetDesktopSize` after the server confirms support. Clipboard and non-raw
-encodings are not currently implemented.
+`SetDesktopSize` after the server confirms support. Non-raw encodings are not
+implemented.
+
+With `clipboard = true`, `ServerCutText` is forwarded to the browser as it
+arrives and also fills a per-session buffer that answers a later fetch, and a
+browser send becomes `ClientCutText`. The text is
+latin-1, as the baseline protocol defines it: characters outside latin-1 become
+`?` on the way out. The Extended Clipboard pseudo-encoding, which would carry
+UTF-8, is not negotiated.
 
 Pointer button state is tracked across RFB pointer events. Keyboard input maps
 DOM codes to X11 keysyms using live Shift and browser-reported Caps Lock state.
@@ -166,8 +189,13 @@ capture pipeline, protocol, and lifecycle.
 
 The SPA has three states: login, target picker, and remote desktop. The desktop
 uses a canvas for tiles and an overlay for input. It supports desktop mouse and
-keyboard input, touch gestures, an on-screen keyboard, target switching,
-takeover, and explicit RDP resize.
+keyboard input, touch gestures, an on-screen keyboard, a clipboard panel, target
+switching, takeover, and explicit RDP resize. Clipboard text arriving from the
+server is mirrored into the local OS clipboard, and the local clipboard is sent
+to the remote when the tab regains focus; both are skipped silently wherever the
+Clipboard API is unavailable. The on-screen keyboard and the
+clipboard panel are mutually exclusive: both dock to the bottom edge on mobile
+and report their height so the canvas insets above them.
 
 Incoming image decodes are serialized so tiles and resize messages are applied
 in wire order. A remote cursor shape is installed as a CSS cursor for mouse
@@ -190,8 +218,8 @@ sections. See [`install.md`](install.md) and
 [`packaging/etc/remotex.toml.example`](../packaging/etc/remotex.toml.example).
 
 Protocol-specific fields are validated during startup. In particular, `rxa`
-requires a checksum-valid PSK and rejects resize; incompatible fields are
-rejected rather than silently accepted.
+requires a checksum-valid PSK and rejects resize, and RDP rejects clipboard;
+incompatible fields are rejected rather than silently accepted.
 
 Unit tests cover protocol, config, authentication, key mapping, and engine
 helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and

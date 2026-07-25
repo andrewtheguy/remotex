@@ -418,6 +418,12 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         ClientMsg::Viewport { .. } => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
+        // No clipboard channel here yet — MS-RDPECLIP is a static virtual
+        // channel with its own format-negotiation handshake, unlike VNC's two
+        // cut-text messages. `clipboard = true` is refused for RDP targets at
+        // config parse time, so the browser never offers the control and these
+        // never arrive; dropped rather than trusted. See docs/roadmap.md.
+        ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.
         ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),

@@ -43,10 +43,10 @@ endpoints and includes a checksum to catch transcription errors.
 
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
-- agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, and heartbeat
-  pongs;
-- gateway to agent: mouse, wheel, and keyboard input, session control, and
-  heartbeat pings.
+- agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, pasteboard text
+  (on request or when the watched pasteboard changes), and heartbeat pongs;
+- gateway to agent: mouse, wheel, and keyboard input, session control, clipboard
+  read requests, writes and the watch toggle, and heartbeat pings.
 
 The gateway translates these into the same browser protocol used by RDP and
 VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
@@ -110,6 +110,23 @@ launchd.
 - It runs only in a logged-in GUI session. It does not support the macOS login
   window or an unattended service mode.
 - Screen Recording and Accessibility grants are tied to the app's signing
-  identity. Ad-hoc-signed builds generally require approval again after an
-  upgrade; stable Developer ID signing preserves identity.
-- Clipboard and audio are not part of the current protocol.
+  identity, so builds must not alternate between identities. An ad-hoc signature
+  differs on every build, and the grants then neither carry over nor re-prompt:
+  System Settings keeps the stale path-matched entry while the system refuses
+  the app behind it, so each install needs both entries removed and re-added by
+  hand. Mixing sources — the ad-hoc GitHub release over a locally signed build,
+  or the reverse — does the same. `packaging/macos/build-agent-app.sh` therefore
+  signs with a keychain identity by default and treats ad-hoc as a last resort.
+- The clipboard has no change notification to subscribe to. AppKit's
+  `NSPasteboard` posts none — unlike iOS `UIPasteboard` — so the agent polls
+  `changeCount`, which is a counter rather than a pasteboard access, and reads
+  the *contents* only when it moves. That keeps content reads to one per copy.
+  Reads happen only while the gateway has enabled the watch, which it does only
+  for a target with `clipboard = true`; otherwise the agent never looks.
+- macOS 15.4+ governs those content reads. The general pasteboard asks the user
+  by default, and only after the first alert does the app appear in System
+  Settings › Privacy & Security › Paste from Other Apps, where "Always Allow"
+  makes sync silent. The agent reads `NSPasteboard.accessBehavior` and reports
+  it in the menu bar, since the property is read-only and the fix is the user's
+  to apply. This is the sole reason the deployment target is 15.4.
+- Audio is not part of the current protocol.

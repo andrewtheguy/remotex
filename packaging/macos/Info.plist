@@ -42,12 +42,13 @@
 	<string>0.0.0</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.0.0</string>
-	<!-- The agent registers itself as a login item via SMAppService, which is
-	     macOS 13+; 14.0 is the floor the project targets (see
-	     .cargo/config.toml, where the same version is load-bearing for how the
-	     Swift bridge links). Nothing here needs a macOS 15 API. -->
+	<!-- 15.4 is the floor the project targets, set by the clipboard watcher's
+	     use of NSPasteboard.accessBehavior; keep it in step with
+	     .cargo/config.toml, where the same version is also load-bearing for how
+	     the Swift bridge links. Everything else is older — SMAppService login
+	     item registration is 13+. -->
 	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>15.4</string>
 	<!-- No dock icon, no menu bar, no windows: this is a background agent that
 	     happens to need a GUI session (see main.rs). LSUIElement rather than
 	     LSBackgroundOnly, because LSBackgroundOnly processes are denied some

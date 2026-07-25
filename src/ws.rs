@@ -256,6 +256,7 @@ mod tests {
             height: 1,
             security: Security::Auto,
             resize: false,
+            clipboard: false,
             psk: String::new(),
         };
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
