@@ -25,13 +25,6 @@ final class AppModel {
     private(set) var session = ViewerSessionState()
     private(set) var bridgeStatus = BridgeStatus.loading
     private(set) var navigationError: String?
-    var keyboardCaptureEnabled = true {
-        didSet {
-            if !keyboardCaptureEnabled {
-                releaseNativeKeys()
-            }
-        }
-    }
 
     let clipboard: ClipboardSynchronizer
 
@@ -72,7 +65,6 @@ final class AppModel {
     var canCaptureKeyboardNow: Bool {
         bridgeStatus == .ready
             && session.canCaptureKeyboard
-            && keyboardCaptureEnabled
     }
 
     var macOSKeyboardOverridesActive: Bool {

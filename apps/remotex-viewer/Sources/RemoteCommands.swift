@@ -5,12 +5,6 @@ struct RemoteCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Remote") {
-            Button(model.keyboardCaptureEnabled ? "Release Keyboard" : "Capture Keyboard") {
-                model.keyboardCaptureEnabled.toggle()
-            }
-            .keyboardShortcut(.escape, modifiers: [.control, .option, .command])
-            .disabled(!model.session.canCaptureKeyboard)
-
             Toggle(
                 model.macOSKeyboardOverridesLabel,
                 isOn: Binding(

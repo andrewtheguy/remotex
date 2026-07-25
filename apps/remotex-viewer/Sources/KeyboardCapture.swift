@@ -8,7 +8,6 @@ final class KeyboardCapture {
     private var translator = KeyboardTranslator()
     private var monitor: Any?
     private var observers: [NSObjectProtocol] = []
-    private var suppressedKeyUps = Set<UInt16>()
 
     init(model: AppModel, webView: WKWebView) {
         self.model = model
@@ -65,21 +64,6 @@ final class KeyboardCapture {
         guard let model, let webView, event.window === webView.window else {
             return false
         }
-        if event.type == .keyUp, suppressedKeyUps.remove(event.keyCode) != nil {
-            return true
-        }
-        if isCaptureToggle(event), model.session.canCaptureKeyboard {
-            guard model.keyboardCaptureEnabled else {
-                // Let the SwiftUI menu key equivalent turn capture back on.
-                return false
-            }
-            if event.type == .keyDown {
-                suppressedKeyUps.insert(event.keyCode)
-                releaseAll()
-                model.keyboardCaptureEnabled = false
-            }
-            return true
-        }
         guard model.canCaptureKeyboardNow else {
             return false
         }
@@ -108,14 +92,5 @@ final class KeyboardCapture {
     private func releaseAll() {
         translator.reset()
         model?.releaseNativeKeys()
-    }
-
-    private func isCaptureToggle(_ event: NSEvent) -> Bool {
-        guard event.type == .keyDown || event.type == .keyUp else {
-            return false
-        }
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        return KeyboardTranslator.domCode(for: event.keyCode) == "Escape"
-            && modifiers.contains([.control, .option, .command])
     }
 }
