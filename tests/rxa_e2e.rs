@@ -208,13 +208,17 @@ async fn open_session(addr: SocketAddr) -> Ws {
 }
 
 /// One complete paint as the browser sees it.
+///
+/// `resize` is optional because a silent reconnect to an unchanged desktop
+/// deliberately sends none — see the reconnect test.
 struct Paint {
-    resize: String,
+    resize: Option<String>,
     tile: Vec<u8>,
     cursor: String,
 }
 
-/// Drain the socket until a resize, a tile, and a cursor have all arrived.
+/// Drain the socket until a tile and a cursor have arrived, keeping any resize
+/// seen on the way (it always precedes the pixels it applies to).
 ///
 /// Fails on an `error` control message, on a `picker` after the session went
 /// live, or on a close — those are precisely the three ways a dropped agent
@@ -250,7 +254,7 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
                 Message::Close(frame) => panic!("session closed: {frame:?}"),
                 _ => {}
             }
-            if let (Some(resize), Some(tile), Some(cursor)) = (&resize, &tile, &cursor) {
+            if let (Some(tile), Some(cursor)) = (&tile, &cursor) {
                 return Paint {
                     resize: resize.clone(),
                     tile: tile.clone(),
@@ -265,10 +269,15 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
 
 fn assert_first_paint(paint: &Paint) {
     assert_eq!(
-        paint.resize,
-        format!(r#"{{"type":"resize","w":{AGENT_W},"h":{AGENT_H}}}"#)
+        paint.resize.as_deref(),
+        Some(format!(r#"{{"type":"resize","w":{AGENT_W},"h":{AGENT_H}}}"#).as_str()),
+        "the initial connect must announce the desktop size"
     );
+    assert_paint_pixels(paint);
+}
 
+/// The half of a paint that looks the same however the link came up.
+fn assert_paint_pixels(paint: &Paint) {
     // The tile frame: the agent's format byte and its bytes, untouched.
     let expected = fake_jpeg();
     assert_eq!(paint.tile[0], Tile::FRAME_KIND);
@@ -330,7 +339,14 @@ async fn a_dropped_agent_link_reconnects_and_repaints_instead_of_erroring() {
 
     // The agent has now vanished. The engine should dial again on its own and
     // repaint — `expect_paint` fails on an error, a picker, or a close.
-    assert_first_paint(&expect_paint(&mut ws).await);
+    let repaint = expect_paint(&mut ws).await;
+    assert_paint_pixels(&repaint);
+    assert_eq!(
+        repaint.resize, None,
+        "the Mac came back the same size, so the reconnect must not resize the \
+         browser's canvas (a resize clears it) — got {:?}",
+        repaint.resize
+    );
     assert!(
         connections.load(Ordering::SeqCst) >= 2,
         "the engine should have reconnected, saw {} connection(s)",

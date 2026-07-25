@@ -97,10 +97,14 @@ pub async fn run(
     };
 
     let mut backoff = BACKOFF_MIN;
+    // The size the browser has been told about, carried across reconnects: a
+    // `Resize` costs the frontend its canvas contents, so a silent reconnect to
+    // an unchanged desktop must not announce one.
+    let mut announced: Option<(u16, u16)> = None;
     loop {
         let size = (session.width, session.height);
         info!("rxa: session up, desktop {}x{}", size.0, size.1);
-        match pump(session, &mut input_rx, &frame_tx).await {
+        match pump(session, &mut input_rx, &frame_tx, &mut announced).await {
             Ok(()) => {
                 info!("rxa: session ended");
                 return;
@@ -191,6 +195,7 @@ async fn pump(
     session: Session,
     input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: &mpsc::Sender<ServerMsg>,
+    announced: &mut Option<(u16, u16)>,
 ) -> anyhow::Result<()> {
     let Session {
         reader,
@@ -199,12 +204,18 @@ async fn pump(
         mut height,
     } = session;
 
-    if frame_tx
-        .send(ServerMsg::Resize { w: width, h: height })
-        .await
-        .is_err()
-    {
-        return Ok(()); // browser link already gone
+    // On the initial connect, and afterwards only when the Mac came back a
+    // different size. Unchanged, the browser keeps the canvas it already has and
+    // the reconnect stays invisible beyond a pause in frames.
+    if *announced != Some((width, height)) {
+        if frame_tx
+            .send(ServerMsg::Resize { w: width, h: height })
+            .await
+            .is_err()
+        {
+            return Ok(()); // browser link already gone
+        }
+        *announced = Some((width, height));
     }
 
     // `FrameReader::recv` is not cancel-safe, so it cannot live in the
@@ -253,6 +264,7 @@ async fn pump(
                     AgentMsg::DisplaySize { w, h } => {
                         info!("rxa: display reconfigured to {w}x{h}");
                         (width, height) = (w, h);
+                        *announced = Some((w, h));
                         if frame_tx.send(ServerMsg::Resize { w, h }).await.is_err() {
                             return Ok(());
                         }
@@ -261,6 +273,7 @@ async fn pump(
                     // stream) carries the current size; treat it as a resize.
                     AgentMsg::Hello { w, h, .. } => {
                         (width, height) = (w, h);
+                        *announced = Some((w, h));
                         if frame_tx.send(ServerMsg::Resize { w, h }).await.is_err() {
                             return Ok(());
                         }
