@@ -1,0 +1,94 @@
+name: Agent validation
+
+# The macOS agent is excluded from the workspace's default-members, so a bare
+# `cargo build` / `cargo clippy` / `cargo test` on Linux never compiles it —
+# which means nothing on a Linux dev box or in any other job here would notice
+# it breaking. This is the job that notices.
+#
+# A merge into main *is* a push to main, so one trigger covers both. It builds
+# the bundle the same way release.yml does, with an ad-hoc signature, and
+# deliberately produces nothing to download: shipping it is release.yml's job
+# (the bundle rides the gateway's own release), and this only has to prove the
+# agent still builds, signs and passes its tests before that day comes.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# macOS runner minutes bill at a multiple of Linux, so a run superseded by
+# another push to main is not worth finishing.
+concurrency:
+  group: agent-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Clippy first, and only for the agent: it is the crate no other
+      # environment ever compiles, so `-D warnings` here is the only place a
+      # warning in it can surface.
+      - name: Clippy (rxa-agent)
+        run: cargo clippy -p rxa-agent --all-targets -- -D warnings
+
+      - name: Test the agent
+        run: cargo test -p rxa-agent
+
+      # The protocol both halves share. It is unit tested on Linux too, but this
+      # is where it is checked against the platform the agent actually runs on.
+      - name: Test the shared protocol
+        run: cargo test -p rxa-proto
+
+      # The gateway's own tests, minus the two container-backed ones, which are
+      # named out rather than left to fail: a macOS runner ships no container
+      # engine, and getting one means standing up a VM (colima / podman machine)
+      # first — doable, but a lot of moving parts for tests that have nothing to
+      # do with the agent. If rdp_tiles_e2e and vnc_tiles_e2e ever want CI, a
+      # Linux runner gives them a container engine for free.
+      #
+      # rxa_e2e is the one that matters here anyway: it drives the real server
+      # against a fake agent speaking the real Noise handshake, so it covers the
+      # gateway half of this protocol, and it needs no container by design.
+      - name: Test the gateway (container-free targets)
+        run: cargo test -p remotex --lib --test protocol_e2e --test auth_e2e --test rxa_e2e
+
+      - name: Build remotex-agent.app
+        # `-` pins the ad-hoc path rather than searching the runner's keychain,
+        # so a signing identity appearing in a future runner image cannot change
+        # what this validates. Xcode is preinstalled, which the Swift bridge in
+        # the capture bindings needs.
+        env:
+          CODESIGN_IDENTITY: "-"
+        run: bash packaging/macos/build-agent-app.sh
+
+      - name: Verify the bundle
+        # `--version` parses argv and exits before any config, capture or launchd
+        # work, so it needs no GUI session and neither TCC grant — and it is
+        # where a Swift-runtime link error surfaces, the failure
+        # MACOSX_DEPLOYMENT_TARGET exists to prevent (see .cargo/config.toml),
+        # which builds clean and only dies on launch.
+        #
+        # The strict codesign verify then covers the bundle's own structure: a
+        # resource the signature does not seal fails here.
+        run: |
+          # The agent inherits `version.workspace = true`, so the number is in the
+          # workspace manifest; its own would only hold the inheritance marker.
+          version=$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["workspace"]["package"]["version"])
+          ')
+          got=$(dist/remotex-agent.app/Contents/MacOS/remotex-agent --version)
+          echo "bundle reports: ${got}"
+          [ "$got" = "remotex-agent ${version}" ] || {
+            echo "::error::expected 'remotex-agent ${version}'"
+            exit 1
+          }
+          codesign --verify --deep --strict --verbose=2 dist/remotex-agent.app
