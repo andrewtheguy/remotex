@@ -18,11 +18,6 @@
 
 ## Deferred, with reasons
 
-- **Dynamic resize for `rxa`.** The agent captures the Mac's own resolution and
-  ignores viewport reports; `resize = true` on an `rxa` target is a config
-  error rather than a silent no-op. Driving a Mac's display mode from the
-  browser means changing the actual display mode, which is a different and much
-  more intrusive thing than VNC's `SetDesktopSize`.
 - **Hardware H.264 for `rxa`.** Per-tile PNG/JPEG has only ever been measured
   against a 1280×800 1× display, so how it behaves on a Retina desktop is an
   open question. If it does not keep up, the ladder is: downscale in
@@ -46,6 +41,28 @@
 - **Audio.** No engine carries it.
 
 ## Not planned
+
+- **Dynamic resize for `rxa`.** The agent captures the Mac's own resolution and
+  ignores viewport reports; `resize = true` on an `rxa` target is a config error
+  rather than a silent no-op.
+
+  Windows RDP can resize to the browser's viewport because an RDP connection
+  gets its **own session** with its own virtual desktop — resizing it disturbs
+  nobody, because nobody else is looking at it. A Mac has one console session
+  and remotex mirrors the physical screen, so the only lever available is the
+  **real display mode**. Pulling it would resize the actual monitor, re-lay out
+  every window on it, and leave the Mac that way after the browser closed. That
+  is a remote client reaching out and rearranging someone's desk, which is a
+  different and much more intrusive thing than VNC's `SetDesktopSize` on a
+  virtual server.
+
+  The only route to RDP-like behaviour is a **virtual display** — a second,
+  session-scoped desktop sized to the browser — and macOS has no public API for
+  one. It would mean either a DriverKit display extension or a private
+  `CGVirtualDisplay`, and it would change what the product *is*: you would be
+  looking at a separate desktop, not at the Mac's screen. So this is not
+  planned unless macOS grows a supported way to present a display that the
+  person at the keyboard does not share.
 
 - **Service mode for `rxa` — reaching a Mac nobody is logged into**, the way
   RealVNC and RustDesk can. The agent is a LaunchAgent living in the user's GUI

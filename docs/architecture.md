@@ -430,9 +430,12 @@ replayed: a mouse position from eight seconds ago is worse than no event.
 **Cursor shapes** ride the existing `cursor` control channel, so the frontend's
 `paintCursor` — built for VNC — needs no changes at all.
 
-**v1 scope.** Screen, keyboard/mouse and cursor shapes. Out: dynamic resize
-(the agent captures the Mac's own resolution, and `resize = true` is rejected
-on an `rxa` target), clipboard, and audio.
+**Scope.** Screen, keyboard/mouse and cursor shapes. Out: clipboard, audio, and
+dynamic resize — the agent captures the Mac's own resolution and `resize = true`
+is rejected on an `rxa` target. That last one is a design decision rather than a
+gap: unlike RDP, which resizes its own isolated session, a Mac has one console
+session, so the only thing there is to resize is the physical display of
+whoever is sitting at it (see [`roadmap.md`](roadmap.md)).
 
 **The agent has a menu bar item** and nothing else: no Dock tile, no windows.
 It reports whether a gateway is attached and to which address, copies the

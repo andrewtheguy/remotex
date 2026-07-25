@@ -246,9 +246,12 @@ impl ConfigFile {
                 );
                 rxa_proto::psk::parse(psk)
                     .map_err(|e| anyhow::anyhow!("target {:?} has an invalid psk: {e}", target.name))?;
-                // v1 of the agent captures the Mac's own resolution and ignores
+                // The agent captures the Mac's own resolution and ignores
                 // viewport reports; accepting `resize = true` would light up the
-                // browser's "Resize to window" control for a no-op.
+                // browser's "Resize to window" control for a no-op. Not a v1
+                // gap: a Mac has one console session, so the only thing to
+                // resize is the physical display, which would rearrange the
+                // screen of whoever is sitting at it. See docs/roadmap.md.
                 anyhow::ensure!(
                     !target.resize,
                     "target {:?} sets resize, which the rxa agent does not support",
@@ -665,7 +668,7 @@ mod tests {
         // Adjacent to the web server's 52380, and not 3389 or 5900.
         assert_eq!(target.port, 52381);
         assert_eq!(target.psk, psk);
-        assert!(!target.resize, "the rxa agent has no dynamic resize in v1");
+        assert!(!target.resize, "the rxa agent has no dynamic resize");
 
         // An explicit port still wins.
         let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nport = 52999")))
