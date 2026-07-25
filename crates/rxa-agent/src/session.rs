@@ -419,6 +419,29 @@ async fn pump(
             }
 
             _ = cursor_tick.tick() => {
+                // A display that changed mode does not resize the capture
+                // surface on its own — see `Capture::follow_display`, which
+                // explains why this is a poll rather than an event. Riding the
+                // cursor tick like the pasteboard check does: comparing two
+                // integers against the display's current mode is far cheaper
+                // than the cursor poll already on this tick, and a resize the
+                // browser asked for should not wait on a slower timer.
+                if let Some(capture) = capture.as_mut() {
+                    match capture.follow_display() {
+                        Ok(Some(live)) => {
+                            // Input is converted with these, so they have to
+                            // move with the surface — a stale scale or origin
+                            // puts clicks in the wrong place. The browser is
+                            // told by the frame that arrives next, which the
+                            // resized surface is what produces.
+                            injector = Injector::new(live.scale, live.origin);
+                            cursor_tracker.set_scale(live.scale);
+                            cursor_seen = cursor::UNSEEN;
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!("session: {e:#}"),
+                    }
+                }
                 if last_heard.elapsed() > GATEWAY_IDLE_TIMEOUT {
                     break Err(anyhow::anyhow!(
                         "no traffic from the gateway for {}s",
