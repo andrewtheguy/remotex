@@ -139,9 +139,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // When the user has just double-clicked the bundle, the terminal-less
-    // launch has nowhere to show the key — so put it in the log, which
-    // `--show-psk` also prints. The config file is already 0600.
+    // Only worth printing where somebody can read it. Secrets stay out of the
+    // log files, so a terminal-less first launch (the usual case: the bundle was
+    // double-clicked) shows nothing here — the key comes from the menu bar's
+    // "Copy Pre-Shared Key" or from `--show-psk`. The config file is already
+    // 0600.
     if created && std::io::stdout().is_terminal() {
         print_first_run(&config, &path);
     }

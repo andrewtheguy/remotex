@@ -19,7 +19,7 @@ This document describes the system as built. Remaining work lives in
 Browser — full-screen canvas SPA (frontend/)
    │
    │  WebSocket /ws — the uniform protocol (src/protocol.rs, protocol.ts):
-   │    server → browser: screen tiles as binary frames (PNG-compressed),
+   │    server → browser: screen tiles as binary frames (PNG or JPEG),
    │                      resize/error as JSON text
    │    browser → server: input events + viewport reports as JSON text
    ▼
@@ -418,9 +418,11 @@ in one way:
   engines — a wrong host or a wrong PSK must be visible immediately in the
   picker, not buried in a retry loop;
 - an **established** session that drops retries silently with capped backoff
-  (1 s → 15 s), forever. On reconnect it re-announces the size and repaints.
-  The browser sees frames pause and resume; it never bounces back to the
-  picker, and there is never a credential prompt.
+  (1 s → 15 s), forever. On reconnect it repaints, and announces a size only if
+  the Mac came back a *different* one — a `resize` costs the frontend its canvas
+  contents, so the usual unchanged-desktop reconnect must not send one. The
+  browser sees frames pause and resume; it never bounces back to the picker, and
+  there is never a credential prompt.
 
 Application-level ping/pong on an idle timer catches the half-open TCP
 connection that `SO_KEEPALIVE` would take minutes to notice — the exact shape a

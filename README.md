@@ -17,9 +17,11 @@ drive it with mouse and keyboard from a web browser.
   served from disk (`share/remotex/web`), resolved relative to the executable.
 
 > **Status: phases 1–4 done** (MVP; transport + VNC engine + TOML config;
-> full-screen canvas; VNC dynamic resize). Connects to one RDP or VNC host,
-> renders its screen in the browser (dirty-rectangle tiles as binary WebSocket
-> frames, PNG-compressed), and forwards mouse and keyboard input. The canvas
+> full-screen canvas; VNC dynamic resize) **plus macOS over `rxa`**. Connects to
+> one RDP, VNC or macOS host, renders its screen in the browser
+> (dirty-rectangle tiles as binary WebSocket frames, PNG-compressed — or PNG and
+> JPEG relayed byte-for-byte from the Mac agent), and forwards mouse and
+> keyboard input. The canvas
 > fills the browser viewport at 1:1 device pixels; where the server supports
 > resizing (VNC targets with `resize = true`) the remote desktop follows the
 > window, otherwise a larger desktop scrolls, never scales. Credentials live
