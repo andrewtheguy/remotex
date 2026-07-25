@@ -57,13 +57,14 @@ before WebKit and application menu equivalents while the SPA reports a
 connected desktop. macOS virtual keycodes map to the same physical DOM `code`
 values the browser protocol already uses.
 
-For Windows and Linux guests, standard Mac Command shortcuts map to remote
-Control shortcuts. A bare Command taps remote Meta, and other Command chords
-are sent as remote Meta chords. For a macOS guest, Command remains Meta for
-every chord, so Command-V arrives as Command-V rather than Control-V. This is
-selected by target OS, not by backend. The default-on **Enable macOS Keyboard
-Overrides** item in the **Remote** menu can disable Command shortcut translation
-globally; when disabled, Command is always sent as remote Meta.
+For a non-Mac remote, standard Mac Command shortcuts map to remote Control
+shortcuts. A bare Command taps remote Meta, and other Command chords are sent
+as remote Meta chords. For a Mac remote, Command remains Meta for every chord,
+so Command-V arrives as Command-V rather than Control-V. Which applies follows
+the discovered `remoteOs` bit, not the backend. The default-on **Enable macOS
+Keyboard Overrides** item in the **Remote** menu can disable Command shortcut
+translation globally; when disabled, Command is always sent as remote Meta —
+which is also the fix if a Mac is ever not recognized as one.
 **Control-Option-Command-Escape** releases capture; the Remote menu captures it
 again.
 
