@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build, sign and optionally notarize remotex-agent.app, and wrap it in a .dmg.
+# Build remotex-agent.app, ad-hoc sign it, and wrap it in a .dmg. Optionally use
+# an explicit signing identity and notarize it instead.
 #
 # Builds dist/remotex-agent.app — a background-only, self-registering bundle
 # wrapping the `remotex-agent` binary. Two reasons it is a bundle at all:
@@ -27,6 +28,10 @@
 # Usage:
 #   packaging/macos/build-agent-app.sh [options]
 #
+#   With no signing environment, this matches the release workflow and creates
+#   the ad-hoc-signed `-unsigned.dmg`. Set CODESIGN_IDENTITY only when a signed
+#   package is intentionally required.
+#
 #   --debug                  Build the debug profile instead of release.
 #   --no-dmg                 Stop after the .app. For a local build being run
 #                            straight out of dist/.
@@ -38,12 +43,10 @@
 #                                --issuer <UUID>
 #                            Requires a "Developer ID Application" identity.
 #
-# Signing identity, in order of preference:
-#   1. $CODESIGN_IDENTITY, if set
-#   2. a "Developer ID Application" identity (the one notarization needs)
-#   3. the first "Apple Development" identity (fine for this Mac only)
-#   4. ad-hoc ("-"), which works but changes the code identity on every build,
-#      so both TCC grants need re-approving each time
+# Signing is deliberately opt-in so local builds and release artifacts do not
+# alternate between signed and ad-hoc identities, which invalidates their TCC
+# permissions. CODESIGN_IDENTITY selects a certificate; otherwise the script
+# uses ad-hoc signing ("-"), exactly like .github/workflows/release.yml.
 #
 # ## Signing non-interactively (CI, or an SSH session)
 #
@@ -52,7 +55,8 @@
 # session that cannot show UI — CI, or SSH/VS Code Remote into a Mac — signing
 # otherwise fails with `errSecInternalComponent` no matter how the keychain is
 # unlocked. Set these to import a .p12 into a throwaway keychain instead, the
-# same pattern ../ezvpn-apple uses in CI:
+# same pattern ../ezvpn-apple uses in CI. Also set CODESIGN_IDENTITY to the
+# imported identity's name:
 #
 #   MACOS_CERT_P12         base64 of a .p12 exported *with its private key*
 #   MACOS_CERT_PASSWORD    that .p12's export password
@@ -79,7 +83,7 @@ while [ $# -gt 0 ]; do
     --debug) profile=debug; cargo_flags=(--profile dev); shift ;;
     --no-dmg) make_dmg=0; shift ;;
     --notary-profile) notary_profile="${2:?--notary-profile needs a name}"; shift 2 ;;
-    -h|--help) sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     *) echo "unexpected argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -182,21 +186,9 @@ cp packaging/macos/embedded-launchagent.plist \
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   identity="$CODESIGN_IDENTITY"
 else
-  available="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-  # Developer ID first: it is the only kind notarization accepts, and the only
-  # kind that runs on someone else's Mac.
-  identity="$(printf '%s' "$available" \
-    | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
-  if [ -z "$identity" ]; then
-    identity="$(printf '%s' "$available" \
-      | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
-  fi
-  if [ -z "$identity" ]; then
-    echo ">> no signing identity found; falling back to ad-hoc"
-    echo "   (the code identity changes every build, so macOS will ask for the"
-    echo "    Screen Recording and Accessibility grants again each time)"
-    identity="-"
-  fi
+  identity="-"
+  echo ">> no signing identity requested; using the release workflow's ad-hoc identity"
+  echo "   (set CODESIGN_IDENTITY explicitly to build a signed package)"
 fi
 echo ">> signing as: $identity"
 
