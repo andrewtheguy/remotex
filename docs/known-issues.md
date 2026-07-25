@@ -9,19 +9,25 @@ section so the original reproduction and its guard are not lost.
 ### RX-003 — Gateway can remain alive after its launcher is closed
 
 - **Found:** 2026-07-25
-- **Area:** local server lifecycle
+- **Area:** launcher integration / local server lifecycle
 - **Reproduction:** Intermittent. A gateway launched with `cargo run -- serve`
   remained listening after the launching Codex terminal session was
   interrupted.
-- **Known boundary:** Sending the gateway process SIGINT directly exits
-  immediately and releases its port. In the observed lingering case the
-  launcher never delivered a shutdown signal, so this may be terminal/launcher
-  teardown rather than the gateway ignoring one.
-- **Required investigation:** Reproduce separately for Ctrl-C, terminal-window
-  close, SIGHUP, SIGTERM, and interrupted automation. Record which signal or
-  EOF the gateway receives before changing shutdown behavior.
-- **Required guard:** A subprocess lifecycle test for the confirmed failing
-  exit path.
+- **QA matrix:** Direct SIGINT and SIGTERM both exit successfully and release
+  the listening port. SIGHUP and closing the controlling PTY both terminate
+  the process and release the port. A local `cargo run` probe did not leave a
+  separate Cargo launcher process that could orphan the gateway.
+- **Known boundary:** The only lingering case observed so far was an
+  interrupted Codex automation session that left the gateway alive and
+  delivered no signal or controlling-terminal close. No gateway shutdown
+  failure has been reproduced when an actual shutdown event reaches it.
+- **Next investigation:** Capture the exact process-tree and signal behavior
+  of the launcher cancellation path. Keep this issue open against the launcher
+  integration; do not change gateway shutdown behavior until that path is
+  reproduced.
+- **Required guard:** A subprocess lifecycle test for any confirmed failing
+  application exit path, or a launcher test if cancellation is confirmed to
+  omit teardown.
 
 ## Resolved
 
