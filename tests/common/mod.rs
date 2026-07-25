@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 /// The web-login credentials every test server is configured with.
 #[allow(dead_code)]
@@ -161,9 +162,26 @@ impl Drop for Container {
     }
 }
 
+/// The address these tests reach a published container port on.
+///
+/// `127.0.0.1` for a local engine. Set `REMOTEX_TEST_CONTAINER_HOST` to the
+/// engine host's address when the engine is **remote** — a `podman system
+/// connection` or `docker context` pointing at another machine over SSH. A
+/// remote engine publishes ports on *its own* loopback, so a test connecting to
+/// its own `127.0.0.1` finds nothing there; this is the one thing that has to
+/// change for a remote engine to work.
+///
+/// Needed because macOS cannot always run a container engine locally: inside a
+/// VM, `podman machine` fails with "Virtualization is not available on this
+/// hardware" (no nested virt), and there is nothing to fix on this side.
+#[allow(dead_code)]
+pub fn container_host() -> String {
+    std::env::var("REMOTEX_TEST_CONTAINER_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned())
+}
+
 /// Build the image from `tests/<context>` (cached after the first run) and
-/// start it with the container's `internal_port` published on an ephemeral
-/// localhost port. Returns the container guard and the published port.
+/// start it with the container's `internal_port` published on an ephemeral port
+/// of [`container_host`]. Returns the container guard and the published port.
 #[allow(dead_code)]
 pub fn start_dummy_server(
     runtime: &'static str,
@@ -172,6 +190,8 @@ pub fn start_dummy_server(
     internal_port: u16,
 ) -> (Container, u16) {
     let context_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(context);
+    // With a remote engine the build context is sent over the connection, so a
+    // local path still works.
     let build = Command::new(runtime)
         .args(["build", "-t", image])
         .arg(&context_dir)
@@ -183,25 +203,33 @@ pub fn start_dummy_server(
         String::from_utf8_lossy(&build.stderr)
     );
 
-    // Grab a free port; the tiny window before the container binds it is fine.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // The engine picks the host port, not this process. The bind happens on the
+    // *engine's* host, so a port a local `TcpListener` found free says nothing
+    // about a remote engine — and an ephemeral port with no address before the
+    // colon is the one form both podman and docker read as "choose one".
+    //
+    // A remote engine also has to publish on all interfaces for this machine to
+    // reach it; a local one stays on loopback so a test never exposes a service
+    // to the network.
+    let host = container_host();
+    let publish = if host == "127.0.0.1" || host == "localhost" {
+        format!("127.0.0.1::{internal_port}")
+    } else {
+        format!("0.0.0.0::{internal_port}")
+    };
 
-    let name = format!("{image}-{port}");
+    // Unique without a port to name it after: pid plus a counter, so two tests
+    // in one binary never collide.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = format!(
+        "{image}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, AtomicOrdering::Relaxed)
+    );
     let container = Container { runtime, name: name.clone() };
     let run = Command::new(runtime)
         .args([
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &name,
-            "-p",
-            &format!("127.0.0.1:{port}:{internal_port}"),
-            image,
+            "run", "-d", "--rm", "--name", &name, "-p", &publish, image,
         ])
         .output()
         .expect("run container");
@@ -210,5 +238,28 @@ pub fn start_dummy_server(
         "container start failed:\n{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    (container, port)
+    (container, published_port(runtime, &name, internal_port))
+}
+
+/// Ask the engine which host port it published `internal_port` on.
+///
+/// `<runtime> port <name> <port>/tcp` prints one `address:port` line per
+/// binding — podman adds an IPv6 one — and every line carries the same host
+/// port, so the first parseable one is the answer.
+#[allow(dead_code)]
+fn published_port(runtime: &'static str, name: &str, internal_port: u16) -> u16 {
+    let out = Command::new(runtime)
+        .args(["port", name, &format!("{internal_port}/tcp")])
+        .output()
+        .expect("query the container's published port");
+    assert!(
+        out.status.success(),
+        "could not read the published port:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter_map(|line| line.trim().rsplit_once(':')?.1.parse::<u16>().ok())
+        .find(|port| *port != 0)
+        .unwrap_or_else(|| panic!("no published port in {runtime} port output: {text:?}"))
 }

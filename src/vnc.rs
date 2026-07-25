@@ -38,6 +38,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::TargetConfig;
+use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{ClientMsg, CursorShape, MouseButton, STRIP_ROWS, ServerMsg, Tile};
 
@@ -925,19 +926,6 @@ async fn write_to<W: AsyncWrite + Unpin>(
         .write_all(bytes)
         .await
         .map_err(|e| anyhow::anyhow!("write to VNC server: {e}"))
-}
-
-fn clamp_u16(v: i32) -> u16 {
-    v.clamp(0, i32::from(u16::MAX)) as u16
-}
-
-/// Format a `host:port` destination, bracketing bare IPv6 literals.
-fn host_port(host: &str, port: u16) -> String {
-    if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
 }
 
 #[cfg(test)]

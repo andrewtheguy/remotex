@@ -38,7 +38,7 @@ async fn wait_for_rdp_port(port: u16) {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let attempt = async {
-                let mut stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+                let mut stream = TcpStream::connect((common::container_host(), port)).await.ok()?;
                 stream.write_all(&X224_CONNECT).await.ok()?;
                 let mut buf = [0u8; 4];
                 stream.read_exact(&mut buf).await.ok()
@@ -71,7 +71,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
         targets: vec![TargetConfig {
             name: "xrdp-dummy".to_owned(),
             protocol: Protocol::Rdp,
-            host: "127.0.0.1".to_owned(),
+            host: common::container_host(),
             port: rdp_port,
             username: "dummy".to_owned(),
             password: "dummy".to_owned(),
@@ -80,6 +80,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             height: 800,
             security: Security::Auto,
             resize: false,
+            psk: String::new(),
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

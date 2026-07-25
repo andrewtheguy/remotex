@@ -3,7 +3,12 @@
 A single-user web gateway to remote desktops: one Rust binary (an axum web
 server with **server-side protocol engines**) plus one Vite/React SPA. The
 browser speaks a single uniform protocol no matter what the target speaks —
-RDP and VNC sessions are indistinguishable to the frontend.
+RDP, VNC and `rxa` sessions are indistinguishable to the frontend.
+
+Macs are reached over **`rxa`**, a protocol built for this one client, served by
+a small agent that ships alongside the gateway (`crates/rxa-agent`). It exists
+because Apple's Screen Sharing re-prompts for a login on every reconnect; see
+[Engines → rxa](#rxa-srcrxars).
 
 This document describes the system as built. Remaining work lives in
 [`roadmap.md`](roadmap.md).
@@ -14,7 +19,7 @@ This document describes the system as built. Remaining work lives in
 Browser — full-screen canvas SPA (frontend/)
    │
    │  WebSocket /ws — the uniform protocol (src/protocol.rs, protocol.ts):
-   │    server → browser: screen tiles as binary frames (PNG-compressed),
+   │    server → browser: screen tiles as binary frames (PNG or JPEG),
    │                      resize/error as JSON text
    │    browser → server: input events + viewport reports as JSON text
    ▼
@@ -25,14 +30,21 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
    │  detach. One spawn path, dispatch on the target's protocol — each
    │  engine implements the same run(config, input_rx, frame_tx) contract
    ▼
- ┌───────────────────────┐      ┌───────────────────────────┐
- │ rdp::run (src/rdp.rs) │      │ vnc::run (src/vnc.rs)     │
- │ IronRDP client        │      │ built-in RFB 3.8 client   │
- └───────────┬───────────┘      └────────────┬──────────────┘
-             │ RDP (TLS/NLA)                 │ RFB (raw encoding)
-             ▼                               ▼
-        RDP server                      VNC server          (LAN targets)
+ ┌───────────────────────┐   ┌────────────────────────┐   ┌──────────────────────┐
+ │ rdp::run (src/rdp.rs) │   │ vnc::run (src/vnc.rs)  │   │ rxa::run (src/rxa.rs)│
+ │ IronRDP client        │   │ built-in RFB 3.8 client│   │ Noise + tile relay   │
+ └───────────┬───────────┘   └───────────┬────────────┘   └──────────┬───────────┘
+             │ RDP (TLS/NLA)             │ RFB (raw)                 │ rxa (Noise/TCP)
+             ▼                           ▼                           ▼
+        RDP server                  VNC server                 remotex-agent      (LAN)
+                                                               (crates/rxa-agent,
+                                                                on the Mac)
 ```
+
+The `rxa` engine is the one place tiles are **not** decoded server-side: the
+agent encodes PNG/JPEG on the Mac and the gateway relays those bytes untouched.
+That is a deliberate exception to the tenet below, and the reasoning is in
+[Engines → rxa](#rxa-srcrxars).
 
 ## Design tenets
 
@@ -42,6 +54,11 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
   targets are LAN, the browser may be on weak WAN), enables session
   resume/takeover, and makes "add a protocol" mean "write another
   engine", not "ship another in-browser decoder".
+
+  `rxa` is the deliberate exception, and it does not weaken the tenet: the
+  agent is *ours*, so it emits the browser's own tile format directly. Nothing
+  is decoded in the browser that was not already (PNG and JPEG are native), and
+  the gateway is spared decoding a Retina desktop only to re-encode it.
 - **Single session, permanently.** This is a single-user program with one
   active session slot. Session takeover (a new browser force-claims the slot
   and evicts the previous holder) and detach/reattach exist;
@@ -60,19 +77,31 @@ axum server (src/server.rs) ── /ws bridge (src/ws.rs)
 src/
   main.rs            entry: CLI dispatch + serve
   lib.rs             library surface (shared with the integration tests)
-  cli.rs             clap CLI (serve --config, gen-passwd)
+  cli.rs             clap CLI (serve --config, gen-passwd, gen-psk)
   config.rs          TOML config ([server] + [[targets]] profiles)
   auth.rs            web login (site_passwd credential + auth sessions)
   server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
   ws.rs              WebSocket <-> session bridge
   session.rs         the session slot (claim/attach/connect/disconnect/
                      takeover, with a picker state) and the engine seam:
-                     spawns rdp::run or vnc::run for the chosen target
+                     spawns rdp::run, vnc::run or rxa::run for the target
   rdp.rs             RDP engine (IronRDP): connect + active loop
   vnc.rs             VNC engine (built-in RFB client, raw-only + resize)
+  rxa.rs             macOS agent engine: Noise handshake, tile pass-through,
+                     silent reconnect
+  engine.rs          helpers shared by the engines (host_port, clamp_u16)
   keymap.rs          DOM KeyboardEvent.code -> RDP scancode / X11 keysym
   protocol.rs        wire messages (ClientMsg / ServerMsg / Tile)
   error.rs           AppError
+
+crates/
+  rxa-proto/         the rxa wire protocol, shared by both sides so it cannot
+                     drift: PSK, Noise handshake, framing, messages, and the
+                     DOM-code -> macOS-keycode table. Cross-platform, and unit
+                     tested on Linux because the agent crate never builds there
+  rxa-agent/         the macOS agent binary (see below). macOS-only, and
+                     excluded from the workspace's default-members so a bare
+                     cargo build/clippy/test on Linux never reaches for it
 ```
 
 Each engine runs on a dedicated thread with a current-thread tokio runtime
@@ -279,6 +308,156 @@ keep the fixed connect-time size — acceptable per the no-workarounds rule.
 Deliberately out of the VNC baseline: clipboard (`ServerCutText` is drained
 and dropped), Bell, and non-raw encodings.
 
+### rxa (src/rxa.rs)
+
+The way remotex reaches a **Mac**. VNC still works against Apple's Screen
+Sharing, but it was an ongoing pain point: sessions dropped, and a disconnect
+forced a fresh **login** every time — the credential prompt is a property of
+Apple's server, so there was nothing to fix on our side of the RFB connection.
+Screen Sharing also ignores `SetDesktopSize` and never composites a cursor
+(the reason the Cursor pseudo-encoding path above exists at all). RealVNC is
+stable and does not re-prompt, but its free tier has no LAN direct-connect.
+
+So `rxa` (remote**X** **a**gent) stops speaking VNC to the Mac. A small agent
+(`crates/rxa-agent`) runs there and the gateway dials it with a **pre-shared
+key**. Because the PSK lives in the config file, a reconnect is a two-message
+cryptographic handshake with **no interactive login, ever** — which is
+precisely the RealVNC property that was missing.
+
+**Transport.** TCP + `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` (`snow`), with the
+protocol version bound in as the Noise prologue so a mismatch fails cleanly at
+the handshake instead of desynchronising later. The PSK alone provides mutual
+authentication: no certificates, no CA, nothing that expires. `NN` adds an
+ephemeral DH on top, so a recorded session stays unreadable even if the PSK
+later leaks. Everything both sides must agree on lives in `crates/rxa-proto`,
+in the same repo, so the two halves cannot drift.
+
+The PSK carries a **CRC**, so a mistyped key is a config-parse error naming the
+checksum rather than a handshake that mysteriously never completes once the
+gateway starts dialling.
+
+**Framing treats Noise as a byte stream.** A Noise transport message caps at
+65535 bytes and a full-screen keyframe is far larger, so rather than inventing a
+chunking flag, `frame.rs` splits transparently into ≤65519-byte Noise messages
+and application framing sits on top as plain `u32 LE length + u8 type + body`.
+Chunking never reaches the message definitions, and the whole layer is testable
+against an in-memory duplex. One consequence is load-bearing: the read and write
+halves each need their own nonce counter, so the framing holds a
+`snow::StatelessTransportState` rather than the stateful transport. With the
+stateful one, a reader blocked waiting for a tile would block the writer trying
+to send input.
+
+**Pixels pass through.** The agent captures with ScreenCaptureKit, takes the
+**native dirty rects** macOS reports, and encodes each tile as PNG or JPEG
+*on the Mac*, choosing per tile — PNG for flat UI and text (smaller *and*
+sharper), JPEG for photographic content. The gateway relays those bytes into
+`Tile::encoded` without decoding a pixel, which is why `Tile` carries a
+`format` byte. Nothing new lands in the browser: `createImageBitmap` decodes
+JPEG natively.
+
+The classifier has to run on every tile, so it samples a strided subset and
+counts distinct colours quantised to 5 bits per channel: few colours means UI,
+many means photo. On a real desktop that lands where you would expect — text and
+window chrome as PNG, wallpaper gradients as JPEG. Dirty rects are split at
+`STRIP_ROWS = 64`, the same as the other engines, so a full repaint does not
+become one enormous message and the browser can start painting early.
+
+Two capture details are the classic ways to get this wrong, and both are
+handled explicitly. `CVPixelBuffer`'s **`bytesPerRow` is not `width * 4`** —
+rows are read at the reported stride, or the image shears. And a Retina display
+**captures at pixel dimensions that differ from the point dimensions**
+`CGEventPost` wants, so both are kept and converted at the input boundary.
+
+**The pipeline is bounded and coalescing, with one encoder thread.**
+
+```
+SCStream callback ──▶ raw tiles ──▶ encoder ──▶ out ──▶ pump ──▶ socket
+  (dispatch queue)     (bounded)    (thread)   (bounded)  (tokio)
+```
+
+The capture callback never encodes and never blocks — blocking
+ScreenCaptureKit's dispatch queue stalls capture itself. When the link cannot
+keep up the sink drops the frame and sets the full-repaint flag, so falling
+behind degrades into one later, coarser repaint instead of a queue of stale
+tiles. And there is deliberately **one** encoder thread rather than a pool: a
+pool lets two frames' tiles finish out of order, and the same region is commonly
+dirty in consecutive frames, so an older tile could land on top of a newer one
+and leave stale pixels until something else redraws them. Ordering is worth more
+than the parallelism until measurement says otherwise.
+
+**Input** is `CGEvent*` + `CGEventPost`. Keys go through
+`rxa_proto::keymap::mac_keycode` with modifier flags tracked from what the
+browser reports; remotex sends `caps` as an authoritative flag on every key
+event, so the agent never has to infer lock state. Pointer coordinates arrive as
+framebuffer pixels and must become global display points — divide by the
+capture's backing scale, offset by the display origin. That conversion is the
+most likely "clicks land in the wrong place" bug in the agent, so it is a pure
+function tested at 1×, 2× and offset corners.
+
+**Two TCC permissions, and neither can be obtained by simply using the API.**
+Screen Recording for `SCStream`, Accessibility for `CGEventPost`. Asking is not
+politeness: `SCShareableContent` fails with something that reads like a refusal
+but also happens when the question was never asked — and until it *is* asked the
+agent does not appear in the Screen Recording list at all, so there is nothing
+for the user to switch on. `CGEventPost` is worse; it never fails. Without
+Accessibility the screen paints, the session looks perfectly healthy, and every
+click and keystroke is silently discarded. So the agent calls
+`CGRequestScreenCaptureAccess` and `AXIsProcessTrustedWithOptions` explicitly at
+startup, and reports where both stand.
+
+Both grants are keyed to the **signed code identity**, which is why signing is
+not optional: an ad-hoc signature has no stable identity, so every rebuild
+re-prompts. Both also require a window server connection, which exists only
+inside the user's GUI session — hence a LaunchAgent, never a LaunchDaemon, and
+hence no login-window support (see [`roadmap.md`](roadmap.md)).
+
+**Reconnect is the point.** This engine deliberately differs from RDP and VNC
+in one way:
+
+- an **initial** connect failure is fatal and reported, exactly like the other
+  engines — a wrong host or a wrong PSK must be visible immediately in the
+  picker, not buried in a retry loop;
+- an **established** session that drops retries silently with capped backoff
+  (1 s → 15 s), forever. On reconnect it repaints, and announces a size only if
+  the Mac came back a *different* one — a `resize` costs the frontend its canvas
+  contents, so the usual unchanged-desktop reconnect must not send one. The
+  browser sees frames pause and resume; it never bounces back to the picker, and
+  there is never a credential prompt.
+
+Application-level ping/pong on an idle timer catches the half-open TCP
+connection that `SO_KEEPALIVE` would take minutes to notice — the exact shape a
+Wi-Fi drop takes. Input buffered during an outage is discarded rather than
+replayed: a mouse position from eight seconds ago is worse than no event.
+
+**Cursor shapes** ride the existing `cursor` control channel, so the frontend's
+`paintCursor` — built for VNC — needs no changes at all.
+
+**Scope.** Screen, keyboard/mouse and cursor shapes. Out: clipboard, audio, and
+dynamic resize — the agent captures the Mac's own resolution and `resize = true`
+is rejected on an `rxa` target. That last one is a design decision rather than a
+gap: unlike RDP, which resizes its own isolated session, a Mac has one console
+session, so the only thing there is to resize is the physical display of
+whoever is sitting at it (see [`roadmap.md`](roadmap.md)).
+
+**The agent has a menu bar item** and nothing else: no Dock tile, no windows.
+It reports whether a gateway is attached and to which address, copies the
+pre-shared key, links to the two Privacy panes, toggles the login item, and
+quits. That last one is why the embedded LaunchAgent sets `KeepAlive` to
+`SuccessfulExit: false` rather than `true` — under a plain `true` launchd would
+restart the agent seconds after the user asked it to stop, while the narrower
+form still recovers from a crash. Having the item at all is what makes the
+agent's state observable to the person whose screen is being shared, which for
+software of this kind is not a nicety. It also means AppKit owns the main
+thread: `menubar::run` takes it, and the cursor poll that used to be a sleep
+loop there is now a timer on the run loop.
+
+Installing, signing and the permission grants are covered in
+[`packaging/macos/README.md`](../packaging/macos/README.md). Why the design is
+shaped this way, and what the machine disagreed with, is in
+[`mac-agent-plan.md`](mac-agent-plan.md); what it would take to reach a
+logged-out Mac, and why that is not planned, is in
+[`roadmap.md`](roadmap.md).
+
 ## Frontend
 
 Vite + React 19 + TypeScript, managed with Bun (`frontend/`). The files that
@@ -378,10 +557,16 @@ One global TOML file (`--config <path>`, or `<prefix>/etc/remotex.toml` in the
 installed layout — see [`install.md`](install.md) and `packaging/`). A
 `[server]` block (bind host/port, static dir, the required `site_passwd`
 web-login credential) plus `[[targets]]` profiles:
-protocol, host/port, credentials, RDP-only `width`/`height`/`security`, and
-the VNC `resize` opt-in. Every profile is served; the browser picks one from
-the post-login picker (there is no `--target` selector — one pathway to a
-target). See `packaging/etc/remotex.toml.example`.
+protocol, host/port, credentials, RDP-only `width`/`height`/`security`, the
+VNC `resize` opt-in, and the rxa-only `psk`. Every profile is served; the
+browser picks one from the post-login picker (there is no `--target` selector —
+one pathway to a target). See `packaging/etc/remotex.toml.example`.
+
+Per-protocol fields are validated at parse time rather than ignored: an `rxa`
+target without a `psk` — or with one whose checksum fails — is a startup error
+naming the typo, not a handshake that mysteriously never completes. A `psk` on
+a non-`rxa` target is refused too, since silently ignoring it would leave
+someone believing a target was authenticated by a key it never uses.
 
 ## Testing
 
@@ -395,5 +580,23 @@ target). See `packaging/etc/remotex.toml.example`.
   and container-backed happy paths — `rdp_tiles_e2e.rs` against a dummy xrdp,
   `vnc_tiles_e2e.rs` against a dummy TigerVNC (full-desktop paint, dynamic
   resize, and detach/reattach repaint through a real server). Containers run
-  under podman or docker. **Never a headless browser** — browser automation
-  is flaky by policy.
+  under podman or docker. For a **remote** engine over SSH — the only option on
+  a Mac that cannot run one locally (inside a VM there is no nested
+  virtualization, so `podman machine` fails outright) — set
+  `CONTAINER_CONNECTION` to the connection name and
+  `REMOTEX_TEST_CONTAINER_HOST` to the address the published port is reachable
+  on, since a remote engine publishes on its own loopback. **Never a headless
+  browser** — browser automation is flaky by policy.
+- **The rxa engine** is covered container-free by `rxa_e2e.rs`, which drives
+  the real server against an in-process fake agent speaking the real Noise
+  handshake: a JPEG tile arrives byte-for-byte as `format = 2`, the cursor
+  lands on the control channel, a dropped link reconnects and repaints without
+  an error or a picker bounce (and without resizing an unchanged canvas), a
+  wrong PSK is reported rather than retried, and browser input reaches the agent
+  in order and untranslated with `viewport` swallowed.
+  `rxa-proto` carries the protocol's own suite (PSK, handshake, framing across
+  the Noise chunk boundary, per-variant message roundtrips, keycodes), all of
+  which runs on Linux — deliberately, since the agent crate never builds there.
+- **The agent** can only be tested on macOS, and its capture and injection
+  paths additionally need the two TCC grants, so they are verified by hand
+  (`remotex-agent --status` reports both).

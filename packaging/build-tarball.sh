@@ -12,6 +12,13 @@
 #   ├── install.sh
 #   └── uninstall.sh
 #
+# On macOS it also stages the screen agent, which is a separate program with a
+# separate install story — you drag it in and open it once, and it registers
+# itself (see packaging/macos/):
+#
+#   remotex-<version>/
+#   └── share/remotex/macos/remotex-agent.app
+#
 # Run on each target platform you want to ship (macOS builds the mac tarball,
 # Linux builds the linux tarball) — this does not cross-compile.
 set -euo pipefail
@@ -21,10 +28,12 @@ cd "$repo_root"
 
 # Real TOML parse + semver check, not grep/sed (same as .github/workflows/release.yml).
 # Plain python3 (3.11+ for tomllib) so this also runs on CI runners without uv.
+# `[workspace.package]`, not `[package]`: every member inherits that one version,
+# the root package included, so it is the only literal one in the tree.
 version="$(python3 -c '
 import re, sys, tomllib
 with open("Cargo.toml", "rb") as f:
-    version = tomllib.load(f)["package"]["version"]
+    version = tomllib.load(f)["workspace"]["package"]["version"]
 if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
     sys.exit(f"invalid version in Cargo.toml: {version!r}")
 print(version)
@@ -68,6 +77,19 @@ cp -R frontend/dist "$root/share/remotex/web"
 cp packaging/install.sh packaging/uninstall.sh "$root/"
 chmod +x "$root/install.sh" "$root/uninstall.sh" "$root/bin/remotex"
 printf '%s\n' "$version" > "$root/VERSION"
+
+# The macOS screen agent (protocol "rxa"). Only on Darwin: it needs
+# ScreenCaptureKit and a Swift toolchain, and does not cross-compile. It is
+# staged as a bundle rather than a bare binary because its two TCC grants attach
+# to the bundle's signed identity, and because the bundle registers itself as a
+# login item — so there is nothing for install.sh to do with it.
+if [ "$os" = macos ]; then
+  echo ">> building the macOS screen agent"
+  packaging/macos/build-agent-app.sh >/dev/null
+  mkdir -p "$root/share/remotex/macos"
+  cp -R dist/remotex-agent.app "$root/share/remotex/macos/"
+  cp packaging/macos/README.md "$root/share/remotex/macos/README.md"
+fi
 
 mkdir -p dist
 tarball="dist/${pkg}-${os}-${arch}.tar.gz"

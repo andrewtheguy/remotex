@@ -27,9 +27,9 @@ site_passwd = ""
 # no --target selector).
 [[targets]]
 name = "example"
-protocol = "rdp"           # required: "rdp" or "vnc"
+protocol = "rdp"           # required: "rdp", "vnc" or "rxa"
 host = "192.0.2.10"
-# Default: the protocol's standard port (3389 for rdp, 5900 for vnc).
+# Default: the protocol's standard port (3389 rdp, 5900 vnc, 52381 rxa).
 #port = 3389
 
 # Credentials (used server-side only; never sent to the browser).
@@ -61,3 +61,25 @@ password = "change-me"
 # protocol = "vnc"
 # host = "10.0.0.2"
 # password = "change-me"
+
+# A Mac running the remotex agent (protocol "rxa"). This is the preferred way
+# to reach a Mac: unlike Screen Sharing, a dropped connection reconnects
+# silently and never re-prompts for a login, because the pre-shared key below
+# *is* the credential — the Noise handshake authenticates both ends from it.
+#
+# The same key goes in two places, and they must match exactly:
+#   1. `psk` here, and
+#   2. `psk` in the Mac's ~/Library/Application Support/remotex-agent/config.toml
+# Generate one with:  remotex gen-psk
+#
+# The agent runs in the Mac user's login session and needs two one-time grants
+# in System Settings -> Privacy & Security: Screen Recording and Accessibility.
+# It cannot run at the login window, so nobody logged in means nothing to reach.
+#
+# username/password/domain/width/height/security are all ignored here, and
+# `resize` is rejected — the agent captures the Mac's own resolution.
+# [[targets]]
+# name = "mac"
+# protocol = "rxa"
+# host = "mac.local"
+# psk = "rxa..."

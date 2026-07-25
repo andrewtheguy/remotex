@@ -54,21 +54,25 @@ export interface TileMsg {
   y: number;
   w: number;
   h: number;
-  // A PNG stream (the only tile payload encoding).
+  // An encoded image stream, in `mime`.
   data: Uint8Array;
+  // What `data` is, for the Blob handed to createImageBitmap. The RDP and VNC
+  // engines always send PNG; the macOS agent picks per tile.
+  mime: "image/png" | "image/jpeg";
 }
 
 const TILE_FRAME_KIND = 0x01;
 const TILE_FORMAT_PNG = 1;
+const TILE_FORMAT_JPEG = 2;
 const TILE_HEADER_LEN = 10;
 
 // Parse a binary tile frame. Layout (little-endian, matching `Tile::to_frame`
 // in the backend):
 //
 //   offset 0: u8  frame kind, always 0x01 (tile)
-//   offset 1: u8  format, always 1 (PNG) — reserved for a future codec
+//   offset 1: u8  format: 1 = PNG, 2 = JPEG
 //   offset 2: u16 x | 4: u16 y | 6: u16 w | 8: u16 h
-//   offset 10: payload (a PNG stream)
+//   offset 10: payload (a PNG or JPEG stream)
 //
 // Returns null for anything malformed or unknown.
 export function decodeTileFrame(buf: ArrayBuffer): TileMsg | null {
@@ -76,11 +80,19 @@ export function decodeTileFrame(buf: ArrayBuffer): TileMsg | null {
     return null;
   }
   const view = new DataView(buf);
-  if (
-    view.getUint8(0) !== TILE_FRAME_KIND ||
-    view.getUint8(1) !== TILE_FORMAT_PNG
-  ) {
+  if (view.getUint8(0) !== TILE_FRAME_KIND) {
     return null;
+  }
+  let mime: TileMsg["mime"];
+  switch (view.getUint8(1)) {
+    case TILE_FORMAT_PNG:
+      mime = "image/png";
+      break;
+    case TILE_FORMAT_JPEG:
+      mime = "image/jpeg";
+      break;
+    default:
+      return null;
   }
   return {
     x: view.getUint16(2, true),
@@ -88,6 +100,7 @@ export function decodeTileFrame(buf: ArrayBuffer): TileMsg | null {
     w: view.getUint16(6, true),
     h: view.getUint16(8, true),
     data: new Uint8Array(buf, TILE_HEADER_LEN),
+    mime,
   };
 }
 

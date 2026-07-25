@@ -6,10 +6,12 @@
 pub mod auth;
 pub mod cli;
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod keymap;
 pub mod protocol;
 pub mod rdp;
+pub mod rxa;
 pub mod server;
 pub mod session;
 pub mod vnc;

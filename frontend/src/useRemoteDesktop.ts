@@ -580,7 +580,7 @@ export function useRemoteDesktop(
       }
       const bitmap = await createImageBitmap(
         new Blob([tile.data as Uint8Array<ArrayBuffer>], {
-          type: "image/png",
+          type: tile.mime,
         }),
       );
       ctx.drawImage(bitmap, tile.x, tile.y);

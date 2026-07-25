@@ -37,7 +37,7 @@ async fn wait_for_vnc_port(port: u16) {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let attempt = async {
-                let mut stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+                let mut stream = TcpStream::connect((common::container_host(), port)).await.ok()?;
                 let mut greeting = [0u8; 12];
                 stream.read_exact(&mut greeting).await.ok()?;
                 greeting.starts_with(b"RFB ").then_some(())
@@ -63,7 +63,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         targets: vec![TargetConfig {
             name: "tigervnc-dummy".to_owned(),
             protocol: Protocol::Vnc,
-            host: "127.0.0.1".to_owned(),
+            host: common::container_host(),
             port: vnc_port,
             username: String::new(),
             // Must match tests/vnc-dummy/Containerfile — exercises VncAuth.
@@ -73,6 +73,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             height: 800,
             security: Security::Auto, // RDP-only knob, ignored for VNC
             resize: true,             // exercise the dynamic resize path
+            psk: String::new(),
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

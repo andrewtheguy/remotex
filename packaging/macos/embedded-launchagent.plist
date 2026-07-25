@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Embedded LaunchAgent plist. Copied verbatim into
+  remotex-agent.app/Contents/Library/LaunchAgents/dev.remotex.agent.plist by
+  build-agent-app.sh, and handed to launchd by SMAppService when the agent
+  registers itself (see crates/rxa-agent/src/loginitem.rs).
+
+  Nothing installs a copy of this into ~/Library/LaunchAgents. That is the point:
+  the bundle is self-contained, it shows up in System Settings > General > Login
+  Items, and uninstalling is moving it to the Trash.
+
+  `Label` must match `loginitem::LABEL` and this file's installed name, or
+  registration finds nothing.
+
+  `BundleProgram` is a path *relative to the app bundle* — an SMAppService
+  extension to launchd's schema. It is what lets the user move the app after
+  registering without breaking it; an absolute `Program` would not survive that.
+
+  A LaunchAgent, never a LaunchDaemon: both TCC grants the agent needs require a
+  window server connection, which exists only inside the user's GUI (Aqua)
+  session. A daemon has none and both capture and event injection fail outright.
+  The honest consequence is that the agent does not run at the login window and
+  cannot — if nobody is logged in, there is nothing for the gateway to reach.
+
+  ProcessType Interactive keeps the agent off the throttled background tier, so
+  macOS does not slow its capture and encode work down.
+
+  No StandardOutPath/StandardErrorPath: launchd does not expand `~`, and there is
+  no absolute path that is correct for every user. The agent redirects its own
+  logging to ~/Library/Logs/remotex-agent.log when it is not on a terminal.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.remotex.agent</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/remotex-agent</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Restart the agent if it dies, but not if it exited on purpose. A plain
+	     `KeepAlive: true` would make the menu bar's Quit item a lie — launchd
+	     would bring the agent straight back a second later. `SuccessfulExit:
+	     false` keeps crash recovery and lets a deliberate exit 0 stick until the
+	     next login (or until the user opens the app again). The agent also exits
+	     0 when the port is already bound, which is another case where coming
+	     back would achieve nothing. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>RUST_LOG</key>
+		<string>info</string>
+	</dict>
+</dict>
+</plist>
