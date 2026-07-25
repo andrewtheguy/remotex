@@ -8,6 +8,10 @@
 //!
 //! See docs/architecture.md for the design.
 
+use ironrdp::cliprdr::pdu::{ClipboardFormat, ClipboardFormatId, FormatDataResponse};
+use ironrdp::cliprdr::{Client, CliprdrClient, CliprdrSvcMessages};
+use ironrdp::core::IntoOwned as _;
+use ironrdp::pdu::PduResult;
 use ironrdp::connector::connection_activation::{
     ConnectionActivationFactory, ConnectionActivationSequence, ConnectionActivationState,
 };
@@ -38,6 +42,7 @@ use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{ClientMsg, MouseButton, STRIP_ROWS, ServerMsg, Tile};
+use crate::rdp_clipboard::{self, ClipboardEvent};
 
 // A type-erased async stream, so the connect path (which upgrades TCP → TLS) can
 // return a single concrete framed type.
@@ -54,7 +59,12 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    let (connection_result, framed) = match connect(&config).await {
+    // The clipboard channel processor runs inside `ActiveStage` and can only
+    // report through a channel — see [`crate::rdp_clipboard`]. Created here so
+    // it outlives `connect`, which is where the backend is handed over.
+    let (clip_tx, clip_rx) = mpsc::unbounded_channel();
+
+    let (connection_result, framed) = match connect(&config, clip_tx).await {
         Ok(v) => v,
         Err(e) => {
             warn!("rdp: connect failed: {e:#}");
@@ -80,8 +90,16 @@ pub async fn run(
         return; // browser already gone
     }
 
-    if let Err(e) =
-        active_loop(connection_result, framed, config.resize, input_rx, frame_tx.clone()).await
+    if let Err(e) = active_loop(
+        connection_result,
+        framed,
+        config.resize,
+        config.clipboard,
+        clip_rx,
+        input_rx,
+        frame_tx.clone(),
+    )
+    .await
     {
         warn!("rdp: session error: {e:#}");
         let _ = frame_tx
@@ -94,7 +112,13 @@ pub async fn run(
 }
 
 /// TCP connect → RDP negotiation → TLS upgrade → CredSSP/finalize.
-async fn connect(config: &TargetConfig) -> anyhow::Result<(ConnectionResult, UpgradedFramed)> {
+///
+/// `clip_tx` is handed to the clipboard backend when the target opted in; it is
+/// dropped unused otherwise, and the channel is then never registered at all.
+async fn connect(
+    config: &TargetConfig,
+    clip_tx: mpsc::UnboundedSender<ClipboardEvent>,
+) -> anyhow::Result<(ConnectionResult, UpgradedFramed)> {
     let server_name = config.host.clone();
     let dest = host_port(&config.host, config.port);
 
@@ -117,6 +141,14 @@ async fn connect(config: &TargetConfig) -> anyhow::Result<(ConnectionResult, Upg
             DrdynvcClient::new()
                 .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new()))),
         );
+    }
+    if config.clipboard {
+        // MS-RDPECLIP. Registered only on opt-in, so a target without the flag
+        // never even negotiates the channel and the remote cannot advertise a
+        // clipboard at us.
+        connector = connector.with_static_channel(CliprdrClient::new(Box::new(
+            rdp_clipboard::Backend::new(clip_tx),
+        )));
     }
 
     let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
@@ -158,10 +190,18 @@ async fn connect(config: &TargetConfig) -> anyhow::Result<(ConnectionResult, Upg
 /// `resize` mirrors the target's config flag: when set, the Display Control
 /// channel was negotiated at connect and browser [`ClientMsg::Viewport`] reports
 /// drive a client-initiated resolution change (see [`resize_desktop`]).
+///
+/// `clipboard` does the same for MS-RDPECLIP, and `clip_rx` carries what that
+/// channel's processor noticed. Both clipboard buffers live here rather than in
+/// the backend: the backend is called from inside `ActiveStage`, which this
+/// function owns exclusively, so keeping the state on this side avoids sharing
+/// it through a lock.
 async fn active_loop(
     connection_result: ConnectionResult,
     mut framed: UpgradedFramed,
     resize: bool,
+    clipboard: bool,
+    mut clip_rx: mpsc::UnboundedReceiver<ClipboardEvent>,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
@@ -189,7 +229,30 @@ async fn active_loop(
     // sends without coordinates) land where the cursor actually is.
     let mut last_pos: (u16, u16) = (desktop.width / 2, desktop.height / 2);
 
+    // The remote's clipboard as last fetched, which is what answers the panel's
+    // Fetch — RDP, like RFB, has no way to *ask* for the current contents, only
+    // to react to a change. `None` means nothing has been copied over there
+    // since this session started.
+    let mut remote_clipboard: Option<String> = None;
+    // What the browser last sent, held until the remote actually pastes and
+    // asks for it. That deferral is MS-RDPECLIP's delayed rendering: we
+    // advertise the format, the bytes travel only if they are wanted.
+    let mut local_clipboard: Option<String> = None;
+
     loop {
+        // The clipboard sender lives inside `active_stage`, so it is only
+        // closed when the target did not opt in and the backend was never
+        // built. Parking on a future that never completes retires the branch;
+        // returning `None` into the `select!` instead would spin the loop, and
+        // treating it as end-of-session would end every non-clipboard session
+        // before the first tile.
+        let clipboard_event = async {
+            match clip_rx.recv().await {
+                Some(event) => event,
+                None => std::future::pending().await,
+            }
+        };
+
         let outputs = tokio::select! {
             frame = framed.read_pdu() => {
                 let (action, payload) = frame.map_err(|e| anyhow::anyhow!("read frame: {e}"))?;
@@ -230,6 +293,40 @@ async fn active_loop(
                     }
                     continue;
                 }
+                // The clipboard pair, intercepted here for the same reason as
+                // the two above: they act on a virtual channel rather than
+                // translating to fast-path input. Both are no-ops when the
+                // target did not opt in — the browser hides the control then,
+                // so this is the belt to that UI's braces.
+                if let ClientMsg::Clipboard { text } = &input {
+                    if clipboard {
+                        // Only advertised, not sent. The remote asks for the
+                        // bytes if and when someone pastes.
+                        let text = rdp_clipboard::to_remote(text);
+                        debug!("rdp: advertising {} bytes to the remote clipboard", text.len());
+                        local_clipboard = Some(text);
+                        advertise_clipboard(
+                            &mut active_stage,
+                            &mut framed,
+                            local_clipboard.as_deref(),
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+                if matches!(input, ClientMsg::ClipboardRequest) {
+                    // Answered from the buffer the channel fills. Empty until
+                    // the remote copies something, which reads in the panel as
+                    // "nothing has been copied over there yet".
+                    if clipboard {
+                        let text = remote_clipboard.clone().unwrap_or_default();
+                        frame_tx
+                            .send(ServerMsg::Clipboard { text })
+                            .await
+                            .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                    }
+                    continue;
+                }
                 let events = translate_input(input, &mut last_pos);
                 if events.is_empty() {
                     continue;
@@ -237,6 +334,60 @@ async fn active_loop(
                 active_stage
                     .process_fastpath_input(&mut image, &events)
                     .map_err(|e| anyhow::anyhow!("process input: {e}"))?
+            }
+
+            // The clipboard channel processor ran inside `active_stage.process`
+            // above and left its findings here. Acting on them is a separate
+            // turn of the loop because the callbacks cannot answer themselves.
+            event = clipboard_event => {
+                match event {
+                    // Both mean "advertise what we have". The first
+                    // `initiate_copy` is load-bearing beyond the advertisement
+                    // itself: it carries the Capabilities and TemporaryDirectory
+                    // PDUs that finish the handshake, so an empty clipboard
+                    // still has to answer.
+                    ClipboardEvent::Ready | ClipboardEvent::FormatListRequested => {
+                        advertise_clipboard(
+                            &mut active_stage,
+                            &mut framed,
+                            local_clipboard.as_deref(),
+                        )
+                        .await?;
+                    }
+                    // Ask straight away rather than waiting for the panel's
+                    // Fetch, so a copy on the remote reaches the browser
+                    // unprompted exactly as it does for VNC and rxa.
+                    ClipboardEvent::RemoteFormats(formats) => {
+                        match rdp_clipboard::pick_text_format(&formats) {
+                            Some(format) => {
+                                request_clipboard(&mut active_stage, &mut framed, format).await?;
+                            }
+                            None => debug!("rdp: the remote copied no text format we can carry"),
+                        }
+                    }
+                    ClipboardEvent::RemoteData(Some(text)) => {
+                        let text = rdp_clipboard::from_remote(&text);
+                        debug!("rdp: remote clipboard updated, {} bytes", text.len());
+                        remote_clipboard = Some(text.clone());
+                        frame_tx
+                            .send(ServerMsg::Clipboard { text })
+                            .await
+                            .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                    }
+                    // Nothing to show, and deliberately not forwarded as empty
+                    // text: that would wipe the panel over a transient refusal.
+                    ClipboardEvent::RemoteData(None) => {}
+                    ClipboardEvent::DataRequested(format) => {
+                        provide_clipboard(
+                            &mut active_stage,
+                            &mut framed,
+                            format,
+                            local_clipboard.as_deref(),
+                        )
+                        .await?;
+                    }
+                }
+                continue;
             }
         };
 
@@ -311,6 +462,108 @@ async fn resize_desktop(
         None => debug!("rdp: resize requested before the Display Control channel is ready"),
     }
     Ok(())
+}
+
+/// Tell the remote what our clipboard now holds (MS-RDPECLIP Format List).
+///
+/// `text` of `None` advertises nothing, which is the honest answer before the
+/// browser has sent anything and is still worth sending — see the handshake
+/// note at the call site.
+async fn advertise_clipboard(
+    active_stage: &mut ActiveStage,
+    framed: &mut UpgradedFramed,
+    text: Option<&str>,
+) -> anyhow::Result<()> {
+    let formats: &[ClipboardFormat] = match text {
+        Some(_) => &[ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)],
+        None => &[],
+    };
+    let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
+        return Ok(()); // the target did not opt in
+    };
+    let messages = cliprdr.initiate_copy(formats);
+    write_clipboard(active_stage, framed, messages, "advertise").await
+}
+
+/// Ask the remote for its clipboard in `format` (Format Data Request).
+async fn request_clipboard(
+    active_stage: &mut ActiveStage,
+    framed: &mut UpgradedFramed,
+    format: ClipboardFormatId,
+) -> anyhow::Result<()> {
+    let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
+        return Ok(());
+    };
+    let messages = cliprdr.initiate_paste(format);
+    write_clipboard(active_stage, framed, messages, "paste request").await
+}
+
+/// Hand the remote the text it just asked for (Format Data Response).
+///
+/// Answers with the PDU's error form when we hold nothing, or when the remote
+/// asks for a format we never advertised. Staying silent instead would leave
+/// the paste hanging until the remote's own timeout.
+async fn provide_clipboard(
+    active_stage: &mut ActiveStage,
+    framed: &mut UpgradedFramed,
+    format: ClipboardFormatId,
+    text: Option<&str>,
+) -> anyhow::Result<()> {
+    let response = match text {
+        Some(text) if format == ClipboardFormatId::CF_UNICODETEXT => {
+            debug!("rdp: handing {} bytes to the remote's paste", text.len());
+            FormatDataResponse::new_unicode_string(text)
+        }
+        Some(_) => {
+            warn!("rdp: the remote asked for clipboard format {format:?}, which we never offered");
+            FormatDataResponse::new_error()
+        }
+        None => FormatDataResponse::new_error(),
+    };
+    let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
+        return Ok(());
+    };
+    let messages = cliprdr.submit_format_data(response.into_owned());
+    write_clipboard(active_stage, framed, messages, "data response").await
+}
+
+/// Encode clipboard PDUs onto the wire, reporting failures rather than raising
+/// them.
+///
+/// Nothing here is worth ending a session over. The likeliest failure is a
+/// server that accepted our channel registration and then never joined the
+/// channel, which makes `process_svc_processor_messages` fail with "channel not
+/// found" on every copy — the clipboard should degrade to doing nothing while
+/// the desktop keeps working.
+// `&mut` rather than the `&` that `process_svc_processor_messages` would
+// accept: `ActiveStage` holds a `Box<dyn SvcProcessor>`, which is `Send` but
+// not `Sync`, so a shared reference held across the `.await` below makes the
+// whole engine future non-`Send`. The engine runs on its own current-thread
+// runtime today (`session::spawn_engine`) and so does not need `Send`, but
+// giving that up for nothing would be a poor trade.
+async fn write_clipboard(
+    active_stage: &mut ActiveStage,
+    framed: &mut UpgradedFramed,
+    messages: PduResult<CliprdrSvcMessages<Client>>,
+    what: &str,
+) -> anyhow::Result<()> {
+    let messages = match messages {
+        Ok(messages) => messages,
+        Err(e) => {
+            warn!("rdp: could not encode a clipboard {what}: {e}");
+            return Ok(());
+        }
+    };
+    match active_stage.process_svc_processor_messages(messages) {
+        Ok(frame) => framed
+            .write_all(&frame)
+            .await
+            .map_err(|e| anyhow::anyhow!("write clipboard {what}: {e}")),
+        Err(e) => {
+            warn!("rdp: could not send a clipboard {what}: {e}");
+            Ok(())
+        }
+    }
 }
 
 /// Drive a fresh Deactivation-Reactivation Sequence after the server sent
@@ -418,11 +671,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         ClientMsg::Viewport { .. } => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
-        // No clipboard channel here yet — MS-RDPECLIP is a static virtual
-        // channel with its own format-negotiation handshake, unlike VNC's two
-        // cut-text messages. `clipboard = true` is refused for RDP targets at
-        // config parse time, so the browser never offers the control and these
-        // never arrive; dropped rather than trusted. See docs/roadmap.md.
+        // Handled by the active loop (MS-RDPECLIP, a static virtual channel)
+        // before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.

@@ -11,6 +11,7 @@ pub mod error;
 pub mod keymap;
 pub mod protocol;
 pub mod rdp;
+pub mod rdp_clipboard;
 pub mod rxa;
 pub mod server;
 pub mod session;

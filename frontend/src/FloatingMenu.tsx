@@ -377,8 +377,8 @@ export default function FloatingMenu({
         <div className="toolbar" style={toolbarStyle}>
           <div className="toolbar-section">
             <span className="toolbar-label">Clipboard</span>
-            {/* Enabled per target (`clipboard = true`); RDP has no clipboard
-                channel yet, so those targets can't opt in at all. */}
+            {/* Enabled per target (`clipboard = true`), which every protocol
+                supports; a target that didn't opt in leaves this disabled. */}
             <button
               type="button"
               className="toolbar-btn"

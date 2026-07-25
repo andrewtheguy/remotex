@@ -75,14 +75,14 @@ pub enum ClientMsg {
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
     Disconnect,
-    /// Put `text` on the remote's clipboard (the clipboard panel's "Send").
-    /// Ignored by engines whose target did not opt in (`clipboard` in the
-    /// target profile) and by the ones with no clipboard support yet (RDP).
+    /// Put `text` on the remote's clipboard (the clipboard panel's "Send", or
+    /// the browser's automatic push when the tab regains focus). Ignored by
+    /// engines whose target did not opt in (`clipboard` in the target profile).
     Clipboard { text: String },
     /// Ask for the remote's current clipboard text (the panel's "Fetch"); the
-    /// engine answers with [`ServerMsg::Clipboard`]. Pull rather than push by
-    /// design — the browser holds no clipboard state and reads nothing without
-    /// the user asking. See docs/architecture.md.
+    /// engine answers with [`ServerMsg::Clipboard`]. Still worth having
+    /// alongside the automatic pushes: a browser attaching mid-session has
+    /// missed every one of them. See docs/architecture.md.
     ClipboardRequest,
 }
 

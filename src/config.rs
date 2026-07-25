@@ -131,10 +131,11 @@ pub struct TargetConfig {
     /// a remote desktop's clipboard often holds whatever was last copied there,
     /// so exposing it is a per-target decision rather than a default.
     ///
-    /// Supported by `vnc` (RFB `ServerCutText`/`ClientCutText`, latin-1) and
-    /// `rxa` (the Mac agent reads `NSPasteboard` on request, UTF-8). Rejected
-    /// for `rdp` until the clipboard virtual channel lands — see
-    /// [`ConfigFile::parse`] and docs/roadmap.md.
+    /// Supported by every engine, though what reaches the far side differs:
+    /// `vnc` uses RFB `ServerCutText`/`ClientCutText` and is latin-1, so
+    /// anything outside it becomes `?`; `rdp` uses the MS-RDPECLIP virtual
+    /// channel with `CF_UNICODETEXT`; `rxa` has the Mac agent read and write
+    /// `NSPasteboard`. The latter two are UTF-8 end to end.
     #[serde(default)]
     pub clipboard: bool,
     /// Pre-shared key for an `rxa` target, matching the `psk` in the Mac
@@ -274,16 +275,6 @@ impl ConfigFile {
                     "target {:?} is protocol {:?} but sets psk, which only \"rxa\" targets use",
                     target.name,
                     target.protocol.name()
-                );
-            }
-            // Refused rather than ignored: a silently dead clipboard button is
-            // worse than a startup error naming the reason.
-            if target.protocol == Protocol::Rdp {
-                anyhow::ensure!(
-                    !target.clipboard,
-                    "target {:?} sets clipboard, which the RDP engine does not support yet \
-                     (see docs/roadmap.md)",
-                    target.name
                 );
             }
         }
@@ -748,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_is_accepted_for_vnc_and_rxa_and_rejected_for_rdp() {
+    fn clipboard_is_accepted_for_every_protocol() {
         let psk = rxa_proto::psk::generate();
         let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nclipboard = true")))
             .unwrap()
@@ -774,9 +765,9 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].clipboard);
 
-        // RDP has no clipboard channel yet, and a silently dead Clipboard
-        // button would be worse than saying so at startup.
-        let err = ConfigFile::parse(&format!(
+        // RDP was the last engine to gain a clipboard (MS-RDPECLIP) and used to
+        // be refused here; the flag is now accepted for all three.
+        let config = ConfigFile::parse(&format!(
             r#"
             [server]
             {}
@@ -789,8 +780,9 @@ mod tests {
             "#,
             site_passwd_line()
         ))
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("clipboard") && msg.contains("RDP"), "{msg}");
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].clipboard);
     }
 }

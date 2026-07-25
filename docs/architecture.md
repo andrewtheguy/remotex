@@ -106,12 +106,13 @@ the extension; `rxa` ignores viewport size.
 layer injects it after attaching to an existing engine so a new canvas does not
 depend on updates seen by the previous browser.
 
-The clipboard is per-target opt-in (`clipboard = true`, supported by VNC and
-`rxa`) and works two ways at once. The backend owns the data: the VNC engine
-forwards `ServerCutText` as it arrives and also buffers it, while the Mac agent
-watches its pasteboard and pushes changes. On top of that the browser can
-always request the current text, which is what a browser attaching mid-session
-does, having missed every push so far.
+The clipboard is per-target opt-in (`clipboard = true`, supported by every
+engine) and works two ways at once. The backend owns the data: the VNC engine
+forwards `ServerCutText` as it arrives and also buffers it, the RDP engine asks
+for the text as soon as the remote announces a copy, and the Mac agent watches
+its pasteboard and pushes changes. On top of that the browser can always
+request the current text, which is what a browser attaching mid-session does,
+having missed every push so far.
 
 In the browser those arrivals feed both the clipboard panel and, where the
 Clipboard API is available, the local OS clipboard. Automatic sync is best
@@ -140,6 +141,17 @@ browser. Input uses fast-path PDUs after mapping DOM codes to scancodes.
 With `resize = true`, the Display Control Virtual Channel resizes the remote
 desktop when requested from the browser. Otherwise the configured initial
 width and height remain fixed.
+
+With `clipboard = true`, the MS-RDPECLIP static virtual channel carries
+`CF_UNICODETEXT` in both directions. RDP uses delayed rendering: a copy
+announces only the available formats, and the text costs a second round trip.
+The engine hides that from the browser by requesting the text as soon as the
+remote announces it, so a remote copy arrives unprompted as it does for the
+other engines; in the other direction the browser's text is advertised and held
+until the remote actually pastes. Line endings are converted between CRLF and
+LF at the boundary. Images, HTML and file transfer are out of scope, and a
+server that never joins the channel leaves the clipboard inert rather than
+ending the session.
 
 ### VNC
 
@@ -218,8 +230,8 @@ sections. See [`install.md`](install.md) and
 [`packaging/etc/remotex.toml.example`](../packaging/etc/remotex.toml.example).
 
 Protocol-specific fields are validated during startup. In particular, `rxa`
-requires a checksum-valid PSK and rejects resize, and RDP rejects clipboard;
-incompatible fields are rejected rather than silently accepted.
+requires a checksum-valid PSK and rejects resize; incompatible fields are
+rejected rather than silently accepted.
 
 Unit tests cover protocol, config, authentication, key mapping, and engine
 helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and
