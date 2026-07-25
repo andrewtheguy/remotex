@@ -1161,8 +1161,10 @@ export function useRemoteDesktop(
     el.addEventListener("contextmenu", onContextMenu);
     // Keyboard is scoped to the focused overlay (not window) so the remote
     // surface only grabs keys when the user is interacting with it.
-    el.addEventListener("keydown", onKeyDown);
-    el.addEventListener("keyup", onKeyUp);
+    if (!nativeHost) {
+      el.addEventListener("keydown", onKeyDown);
+      el.addEventListener("keyup", onKeyUp);
+    }
     el.addEventListener("blur", onBlur);
 
     return () => {
@@ -1172,11 +1174,13 @@ export function useRemoteDesktop(
       window.removeEventListener("mouseup", onMouseUp);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onContextMenu);
-      el.removeEventListener("keydown", onKeyDown);
-      el.removeEventListener("keyup", onKeyUp);
+      if (!nativeHost) {
+        el.removeEventListener("keydown", onKeyDown);
+        el.removeEventListener("keyup", onKeyUp);
+      }
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, syncCursor]);
+  }, [overlayRef, canvasRef, syncCursor, nativeHost]);
 
   return {
     status,
