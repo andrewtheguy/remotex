@@ -5,3 +5,4 @@ frontend/dist
 tmp/
 .env
 .DS_Store
+CLAUDE.local.md
