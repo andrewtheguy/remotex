@@ -583,6 +583,31 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
     assert_eq!(received, b"typed ? here");
 }
 
+// A fetch is answered even when the remote has copied nothing, and the answer
+// is empty text rather than silence.
+//
+// Load-bearing rather than a curiosity: the browser fetches every time the
+// clipboard panel is opened and keeps the panel shut until the reply lands, so
+// an engine that stayed quiet here would hang the button on every fresh session
+// until the client-side timeout expired.
+#[tokio::test]
+async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
+    let (vnc_port, _cut_texts) = spawn_fake_vnc_with_clipboard(None).await;
+    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, true)).await;
+    let cookie = common::login(addr).await;
+
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+    // The tile first, so the engine is demonstrably live and has simply nothing
+    // filed rather than not having got there yet.
+    expect_tile(&mut ws).await;
+
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    assert_eq!(expect_clipboard(&mut ws).await, "");
+}
+
 // The opt-out path: the flag off means the engine neither answers a fetch nor
 // writes to the remote, whatever the browser sends.
 #[tokio::test]

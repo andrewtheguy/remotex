@@ -117,14 +117,20 @@ export default function FloatingMenu({
   canClipboard: boolean;
   // The last clipboard reply from the server, and the fetch actions. See
   // ClipboardPanel — the browser holds no clipboard state of its own.
+  // `onFetchClipboard` resolves with the remote's text, or null if nothing
+  // answered.
   remoteClipboard: { text: string; seq: number } | null;
-  onFetchClipboard: () => void;
+  onFetchClipboard: () => Promise<string | null>;
   onSendClipboard: (text: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [clipboardOpen, setClipboardOpen] = useState(false);
+  // True between pressing Clipboard and the remote's text arriving. The panel
+  // stays closed for that moment so it never opens on stale text that visibly
+  // rewrites itself a beat later.
+  const [clipboardPending, setClipboardPending] = useState(false);
   // null = not yet moved; resolvedPosition falls back to the top-right corner.
   const [position, setPosition] = useState<Position | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -304,15 +310,29 @@ export default function FloatingMenu({
   // Same deal for the clipboard panel: open it and get the drawer out of the
   // way. The two panels are mutually exclusive — both dock to the bottom edge
   // on mobile and both report an inset, so the second would sit on the first.
+  //
+  // Opening fetches first and waits for the answer, so the panel appears
+  // already showing what the remote holds right now. Without that it would open
+  // on whatever arrived last — which is nothing at all for a browser that
+  // attached mid-session, since it missed every push that came before it.
   const onClipboard = useCallback(() => {
-    setClipboardOpen((prev) => {
-      if (!prev) {
-        setKeyboardOpen(false);
-      }
-      return !prev;
-    });
     setOpen(false);
-  }, []);
+    if (clipboardOpen) {
+      setClipboardOpen(false);
+      return;
+    }
+    if (clipboardPending) {
+      return; // a second press while the first is still in flight
+    }
+    setKeyboardOpen(false);
+    setClipboardPending(true);
+    void onFetchClipboard().finally(() => {
+      setClipboardPending(false);
+      // Opened even when nothing answered: the panel reports the empty result
+      // and its own Fetch is right there to retry.
+      setClipboardOpen(true);
+    });
+  }, [clipboardOpen, clipboardPending, onFetchClipboard]);
 
   // Resize the remote desktop to the window, then collapse the drawer so the
   // resized desktop is visible.
@@ -383,15 +403,20 @@ export default function FloatingMenu({
               type="button"
               className="toolbar-btn"
               onClick={onClipboard}
-              disabled={!canClipboard}
+              disabled={!canClipboard || clipboardPending}
               aria-pressed={clipboardOpen}
+              aria-busy={clipboardPending}
               title={
                 canClipboard
                   ? "Read and write the remote's clipboard"
                   : "Clipboard sync is not enabled for this target"
               }
             >
-              {clipboardOpen ? "Hide clipboard" : "Clipboard"}
+              {clipboardPending
+                ? "Fetching…"
+                : clipboardOpen
+                  ? "Hide clipboard"
+                  : "Clipboard"}
             </button>
           </div>
 
