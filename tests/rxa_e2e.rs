@@ -8,7 +8,7 @@
 //! The fake agent speaks the real protocol: it completes a genuine
 //! `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` handshake with a known PSK, sends
 //! `Hello`, then a pre-encoded JPEG tile and a cursor shape, and it records the
-//! input it is sent. Three things are under test:
+//! input it is sent. Four things are under test:
 //!
 //! 1. **Pass-through.** A JPEG the agent encoded reaches the browser as a
 //!    `format = 2` tile frame, byte for byte, and the cursor shape arrives on
@@ -20,6 +20,8 @@
 //! 3. **Input.** The browser's JSON input arrives at the agent in order and
 //!    untranslated, and a `viewport` report is swallowed — the half of a session
 //!    that leaves no evidence on screen when it goes wrong.
+//! 4. **Session expiry.** Closing the browser releases the agent connection
+//!    after the shared reattach grace period.
 
 mod common;
 
@@ -73,26 +75,36 @@ fn fake_cursor_png() -> Vec<u8> {
 async fn spawn_fake_agent(
     psk: [u8; 32],
     hang_up_first: bool,
-) -> (u16, Arc<AtomicUsize>, mpsc::UnboundedReceiver<GatewayMsg>) {
+) -> (
+    u16,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    mpsc::UnboundedReceiver<GatewayMsg>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let connections = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&connections);
+    let active = Arc::new(AtomicUsize::new(0));
+    let active_connections = Arc::clone(&active);
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let nth = counter.fetch_add(1, Ordering::SeqCst) + 1;
             let hang_up = hang_up_first && nth == 1;
             let input_tx = input_tx.clone();
+            let active = Arc::clone(&active_connections);
             tokio::spawn(async move {
+                active.fetch_add(1, Ordering::SeqCst);
                 if let Err(e) = serve_fake_agent(stream, psk, hang_up, input_tx).await {
                     // Expected on the hang-up path and at test teardown.
                     eprintln!("fake agent connection ended: {e}");
                 }
+                active.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
-    (port, connections, input_rx)
+    (port, connections, active, input_rx)
 }
 
 async fn serve_fake_agent(
@@ -328,7 +340,7 @@ fn assert_paint_pixels(paint: &Paint) {
 async fn agent_tiles_and_cursor_reach_the_browser_untouched() {
     let psk_text = rxa_proto::psk::generate();
     let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, connections, _input) = spawn_fake_agent(psk, false).await;
+    let (port, connections, _active, _input) = spawn_fake_agent(psk, false).await;
     let addr = spawn_app(port, &psk_text).await;
 
     let mut ws = open_session(addr).await;
@@ -337,6 +349,32 @@ async fn agent_tiles_and_cursor_reach_the_browser_untouched() {
         connections.load(Ordering::SeqCst),
         1,
         "a healthy session should connect exactly once"
+    );
+}
+
+#[tokio::test]
+async fn closing_the_browser_releases_the_agent_connection() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, connections, active, _input) = spawn_fake_agent(psk, false).await;
+    let addr = spawn_app(port, &psk_text).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+    assert_eq!(active.load(Ordering::SeqCst), 1);
+
+    drop(ws);
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while active.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("agent connection stayed active after the browser closed");
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "browser loss must end the RXA session instead of reconnecting it"
     );
 }
 
@@ -356,7 +394,7 @@ async fn expect_input(rx: &mut mpsc::UnboundedReceiver<GatewayMsg>) -> GatewayMs
 async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
     let psk_text = rxa_proto::psk::generate();
     let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, mut input) = spawn_fake_agent(psk, false).await;
+    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
     let addr = spawn_app(port, &psk_text).await;
 
     let mut ws = open_session(addr).await;
@@ -417,7 +455,7 @@ async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
 async fn a_dropped_agent_link_reconnects_and_repaints_instead_of_erroring() {
     let psk_text = rxa_proto::psk::generate();
     let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, connections, _input) = spawn_fake_agent(psk, true).await;
+    let (port, connections, _active, _input) = spawn_fake_agent(psk, true).await;
     let addr = spawn_app(port, &psk_text).await;
 
     let mut ws = open_session(addr).await;
@@ -444,7 +482,7 @@ async fn a_dropped_agent_link_reconnects_and_repaints_instead_of_erroring() {
 // reported immediately rather than disappearing into the retry loop.
 #[tokio::test]
 async fn a_wrong_psk_is_reported_instead_of_retried_forever() {
-    let (port, connections, _input) = spawn_fake_agent(
+    let (port, connections, _active, _input) = spawn_fake_agent(
         rxa_proto::psk::parse(&rxa_proto::psk::generate()).unwrap(),
         false,
     )

@@ -15,9 +15,9 @@
 //! - `4000` — the token is missing or superseded; claim again.
 //! - `4001` — evicted: another browser force-claimed the slot (takeover).
 //!
-//! Any other close leaves the session (picker or a running engine) in place;
-//! reattaching restores it — the picker, or a full repaint from the
-//! server-owned framebuffer.
+//! Any other close detaches the browser. Reattaching within the grace period
+//! restores the picker or live engine; otherwise the engine ends for every
+//! protocol.
 
 use axum::{
     extract::{
@@ -29,11 +29,13 @@ use axum::{
 use futures_util::{SinkExt as _, StreamExt as _};
 use log::{info, warn};
 use serde::Deserialize;
+use std::time::Duration;
+use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
     protocol::{ClientMsg, WireFrame},
     server::AppState,
-    session::AttachEvent,
+    session::{AttachEvent, REATTACH_GRACE_PERIOD},
 };
 
 /// Close code: the session token is missing, invalid, or superseded.
@@ -41,6 +43,9 @@ const CLOSE_INVALID_TOKEN: u16 = 4000;
 /// Close code: another browser took over the session slot.
 const CLOSE_EVICTED: u16 = 4001;
 
+/// WebSocket keepalive interval. Browsers answer protocol pings in the network
+/// stack, so background-tab JavaScript timer throttling cannot suppress it.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 #[derive(Deserialize)]
 pub struct WsParams {
     session: Option<String>,
@@ -79,7 +84,23 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
     // or engine death.
     let mut outbound = tokio::spawn(async move {
         let (mut tiles, mut tile_bytes, mut text_bytes) = (0u64, 0u64, 0u64);
-        while let Some(event) = events.recv().await {
+        let mut heartbeat = interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    event
+                }
+                _ = heartbeat.tick() => {
+                    if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let msg = match event {
                 AttachEvent::Msg(msg) => msg,
                 AttachEvent::Evicted => {
@@ -115,6 +136,9 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
     // side finishes (eviction / engine death), so a socket that lingers after
     // eviction can't keep injecting input into the session.
     let mut outbound_done = false;
+    let mut heartbeat_check = interval(HEARTBEAT_INTERVAL);
+    heartbeat_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_heartbeat = Instant::now();
     loop {
         let msg = tokio::select! {
             res = &mut outbound => {
@@ -125,6 +149,19 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
                 break;
             }
             msg = ws_rx.next() => msg,
+            _ = heartbeat_check.tick() => {
+                if last_heartbeat.elapsed() >= REATTACH_GRACE_PERIOD {
+                    warn!(
+                        "ws: browser heartbeat timed out after {}s",
+                        last_heartbeat.elapsed().as_secs()
+                    );
+                    // Waiting for the missing pong already consumed the
+                    // reattach grace period, so end the engine immediately.
+                    state.sessions.expire_attachment(attach_id);
+                    break;
+                }
+                continue;
+            }
         };
         match msg {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
@@ -145,7 +182,10 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
             },
             Some(Ok(Message::Close(_))) | None => break,
-            Some(Ok(_)) => {} // Binary/Ping/Pong: nothing to do
+            Some(Ok(Message::Pong(_))) => {
+                last_heartbeat = Instant::now();
+            }
+            Some(Ok(_)) => {} // Binary/Ping: nothing to do
             Some(Err(e)) => {
                 warn!("ws: receive error: {e}");
                 break;
@@ -153,8 +193,8 @@ async fn session(mut socket: WebSocket, state: AppState, token: Option<String>) 
         }
     }
 
-    // Give the slot back; the engine keeps running detached. If the slot has
-    // already moved on (takeover) this is a no-op.
+    // Give the slot back and start the shared reattach grace period. If the
+    // slot already moved on (takeover or heartbeat expiry) this is a no-op.
     state.sessions.detach(attach_id);
 
     // Let the outbound task drain (its totals line should still be logged),

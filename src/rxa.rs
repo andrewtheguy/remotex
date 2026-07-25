@@ -11,14 +11,13 @@
 //! [`Tile::encoded`] without decoding a pixel. There is no framebuffer here and
 //! no strip loop; the agent already split the work.
 //!
-//! **A dropped session reconnects silently, forever.** Against Apple's Screen
-//! Sharing every disconnect meant a fresh credential prompt, because the prompt
-//! belonged to Apple's server. Here the PSK lives in the config file, so a
-//! reconnect is a TCP connect plus a two-message Noise handshake — sub-
-//! millisecond on a LAN, with no human in it. So an established session that
-//! drops retries with capped backoff rather than surfacing an error and
-//! bouncing the browser back to the picker. The browser sees frames pause and
-//! resume.
+//! **A dropped agent link reconnects silently while the browser is live.**
+//! Against Apple's Screen Sharing every disconnect meant a fresh credential
+//! prompt, because the prompt belonged to Apple's server. Here the PSK lives in
+//! the config file, so an established link retries with capped backoff rather
+//! than surfacing an error and bouncing the browser back to the picker. The
+//! shared session layer ends the engine when the browser stays absent; RXA's
+//! own ping/pong detects a half-open agent link and drives reconnection.
 //!
 //! An *initial* connect failure is still fatal and reported: a wrong host or a
 //! wrong PSK has to be visible immediately, not hidden behind an infinite retry.
@@ -402,7 +401,7 @@ fn to_agent(msg: &ClientMsg) -> Option<GatewayMsg> {
 /// Wait out a reconnect backoff, discarding input that arrives meanwhile.
 ///
 /// Returns `false` when there is no longer anything to reconnect *for* — the
-/// session layer dropped the input channel, or the browser link closed. Input
+/// session layer dropped the input channel or output receiver. Input
 /// buffered during an outage is deliberately thrown away rather than replayed:
 /// a mouse position from eight seconds ago is worse than no event at all, and
 /// an undrained unbounded channel would grow for as long as the outage lasts.
