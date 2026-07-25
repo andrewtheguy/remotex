@@ -60,7 +60,9 @@ export default function Login({
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoComplete="username"
-            autoCapitalize="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
             disabled={submitting}
           />
           <label htmlFor="login-password">Password</label>

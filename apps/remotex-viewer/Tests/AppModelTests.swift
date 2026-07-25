@@ -20,4 +20,29 @@ struct AppModelTests {
         let restored = AppModel(defaults: defaults)
         #expect(!restored.macOSKeyboardOverridesEnabled)
     }
+
+    @Test
+    @MainActor
+    func keyboardOverridesAppearInactiveForAMacWithoutChangingThePreference() {
+        let suiteName = "AppModelTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let model = AppModel(defaults: defaults)
+        #expect(model.macOSKeyboardOverridesActive)
+        #expect(model.macOSKeyboardOverridesLabel == "Enable macOS Keyboard Overrides")
+
+        var macSession = ViewerSessionState()
+        macSession.remoteIsMac = true
+        model.apply(session: macSession)
+
+        #expect(!model.macOSKeyboardOverridesActive)
+        #expect(model.macOSKeyboardOverridesEnabled)
+        #expect(
+            model.macOSKeyboardOverridesLabel
+                == "macOS Keyboard Overrides (Not Applicable)"
+        )
+    }
 }

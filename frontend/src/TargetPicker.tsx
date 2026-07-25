@@ -14,7 +14,6 @@ import { useEffect, useState } from "react";
 interface TargetInfo {
   name: string;
   protocol: string;
-  os: "windows" | "macos" | "linux";
   host: string;
   port: number;
 }
@@ -93,7 +92,7 @@ export default function TargetPicker({
                   <span className="picker-target-meta">
                     {connecting
                       ? "Connecting…"
-                      : `${t.os} · ${t.protocol.toUpperCase()} · ${t.host}:${t.port}`}
+                      : `${t.protocol.toUpperCase()} · ${t.host}:${t.port}`}
                   </span>
                 </button>
               </li>

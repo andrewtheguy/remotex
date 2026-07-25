@@ -1,5 +1,8 @@
 # Roadmap
 
+Active defects and their required regression guards are tracked in
+[`known-issues.md`](known-issues.md).
+
 ## Planned
 
 ## Deferred pending measurements

@@ -12,9 +12,13 @@ struct RemoteCommands: Commands {
             .disabled(!model.session.canCaptureKeyboard)
 
             Toggle(
-                "Enable macOS Keyboard Overrides",
-                isOn: $model.macOSKeyboardOverridesEnabled
+                model.macOSKeyboardOverridesLabel,
+                isOn: Binding(
+                    get: { model.macOSKeyboardOverridesActive },
+                    set: { model.macOSKeyboardOverridesEnabled = $0 }
+                )
             )
+            .disabled(model.session.remoteIsMac)
 
             Divider()
 

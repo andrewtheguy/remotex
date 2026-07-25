@@ -84,8 +84,7 @@ final class KeyboardCapture {
             return false
         }
 
-        let mapCommandToControl =
-            model.macOSKeyboardOverridesEnabled && !model.session.remoteIsMac
+        let mapCommandToControl = model.macOSKeyboardOverridesActive
         if event.type == .keyDown,
            KeyboardTranslator.domCode(for: event.keyCode) == "KeyV",
            event.modifierFlags.contains(.command),

@@ -75,6 +75,16 @@ final class AppModel {
             && keyboardCaptureEnabled
     }
 
+    var macOSKeyboardOverridesActive: Bool {
+        macOSKeyboardOverridesEnabled && !session.remoteIsMac
+    }
+
+    var macOSKeyboardOverridesLabel: String {
+        session.remoteIsMac
+            ? "macOS Keyboard Overrides (Not Applicable)"
+            : "Enable macOS Keyboard Overrides"
+    }
+
     var windowTitle: String {
         if let target = session.connectedTarget {
             "\(target) — remotex"
