@@ -81,6 +81,17 @@
   reports on Sonoma and Sequoia. Adopting somebody else's agent to get this
   would be adopting an unfinished feature.
 
+  **It is easy to assume otherwise, because on Windows "install as a service"
+  really does mean this**, and both products ship one cross-platform toggle for
+  it. The two systems gate screen access on opposite things. Windows gates on
+  *privilege*: a SYSTEM service spawns a helper into the active console session
+  and switches to the `Winlogon` desktop, which reaches the login screen and the
+  UAC secure desktop with no per-user consent anywhere in the path. macOS gates
+  on *consent*: root buys nothing, TCC has no "SYSTEM may bypass", and consent
+  is per-user — so at the login window, where there is no user, there is nothing
+  that could have consented. This is a platform difference, not a gap somebody
+  will get round to closing.
+
   Two states get conflated, and only one is hard. **Logged in with the screen
   locked** is a session the agent is already running in, so it may already work;
   untested here, and RustDesk's lock-screen input bug suggests testing it rather
