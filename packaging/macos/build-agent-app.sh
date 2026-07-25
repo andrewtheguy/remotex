@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Build remotex-agent.app, ad-hoc sign it, and wrap it in a .dmg. Optionally use
-# an explicit signing identity and notarize it instead.
+# Build, sign and optionally notarize remotex-agent.app, and wrap it in a .dmg.
 #
 # Builds dist/remotex-agent.app — a background-only, self-registering bundle
 # wrapping the `remotex-agent` binary. Two reasons it is a bundle at all:
@@ -28,9 +27,8 @@
 # Usage:
 #   packaging/macos/build-agent-app.sh [options]
 #
-#   With no signing environment, this matches the release workflow and creates
-#   the ad-hoc-signed `-unsigned.dmg`. Set CODESIGN_IDENTITY only when a signed
-#   package is intentionally required.
+#   A signing identity from the keychain is used by default. Ad-hoc signing is
+#   the last resort, not the norm — see the warning below for what it costs.
 #
 #   --debug                  Build the debug profile instead of release.
 #   --no-dmg                 Stop after the .app. For a local build being run
@@ -43,10 +41,34 @@
 #                                --issuer <UUID>
 #                            Requires a "Developer ID Application" identity.
 #
-# Signing is deliberately opt-in so local builds and release artifacts do not
-# alternate between signed and ad-hoc identities, which invalidates their TCC
-# permissions. CODESIGN_IDENTITY selects a certificate; otherwise the script
-# uses ad-hoc signing ("-"), exactly like .github/workflows/release.yml.
+# Signing identity, in order of preference:
+#   1. $CODESIGN_IDENTITY, if set
+#   2. a "Developer ID Application" identity (the one notarization needs)
+#   3. the first "Apple Development" identity (fine for this Mac only)
+#   4. ad-hoc ("-"), only when the keychain has nothing else
+#
+# ## Why ad-hoc signing is the last resort
+#
+# An ad-hoc signature has no stable code identity: every build produces a
+# different one, and macOS treats each as a *different app*. The TCC grants do
+# not carry over, and worse, they do not simply re-prompt — System Settings
+# keeps the old entry, matching by path, while the system refuses the app behind
+# it. After installing each new ad-hoc build you have to go to System Settings >
+# Privacy & Security and, under BOTH Screen Recording and Accessibility, remove
+# remotex-agent with the "-" button and add it again with "+", then reopen the
+# agent. Every build. A signed identity — even a free "Apple Development" one,
+# which is enough for your own Mac — makes the grants stick.
+#
+# The release workflow (.github/workflows/release.yml) still ships ad-hoc, which
+# is why its artifact is named `-unsigned.dmg`.
+#
+# ## Do not alternate between the two
+#
+# Pick one source of builds and stay on it. Installing the GitHub release's
+# ad-hoc `-unsigned.dmg` over a locally signed build — or the reverse — changes
+# the code identity just as surely as two ad-hoc builds do, so the grants break
+# and need the same manual remove-and-re-add. The symptom is an agent that looks
+# approved in System Settings and still cannot capture the screen.
 #
 # ## Signing non-interactively (CI, or an SSH session)
 #
@@ -75,6 +97,9 @@ profile=release
 cargo_flags=(--release)
 notary_profile=""
 make_dmg=1
+# Set when the build ends up ad-hoc signed, so the closing notes can repeat what
+# that costs — the warning at signing time scrolls away behind the build output.
+adhoc=0
 while [ $# -gt 0 ]; do
   case "$1" in
     # `--profile dev` rather than no flag at all: bash 3.2 (what macOS ships) is
@@ -185,10 +210,33 @@ cp packaging/macos/embedded-launchagent.plist \
 # ── Resolve a signing identity ──────────────────────────────────────────────
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   identity="$CODESIGN_IDENTITY"
+  # An explicit "-" is still ad-hoc, and costs the same as stumbling into it.
+  # Spelled out rather than `[ ... ] && adhoc=1`, which under `set -e` exits the
+  # script whenever the test is false.
+  if [ "$identity" = "-" ]; then
+    adhoc=1
+  fi
 else
-  identity="-"
-  echo ">> no signing identity requested; using the release workflow's ad-hoc identity"
-  echo "   (set CODESIGN_IDENTITY explicitly to build a signed package)"
+  available="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  # Developer ID first: it is the only kind notarization accepts, and the only
+  # kind that runs on someone else's Mac.
+  identity="$(printf '%s' "$available" \
+    | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+  if [ -z "$identity" ]; then
+    identity="$(printf '%s' "$available" \
+      | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
+  fi
+  if [ -z "$identity" ]; then
+    identity="-"
+    adhoc=1
+    echo ">> WARNING: no signing identity in the keychain; falling back to ad-hoc" >&2
+    echo "   Every ad-hoc build is a different app to macOS, so the Screen" >&2
+    echo "   Recording and Accessibility grants will not carry over — and they" >&2
+    echo "   will not re-prompt either. After installing this build, open System" >&2
+    echo "   Settings > Privacy & Security and, under BOTH Screen Recording and" >&2
+    echo "   Accessibility, remove remotex-agent with '-' and add it back with" >&2
+    echo "   '+'. You will have to repeat that for every ad-hoc build." >&2
+  fi
 fi
 echo ">> signing as: $identity"
 
@@ -306,10 +354,25 @@ else
     open /Applications/remotex-agent.app"
 fi
 
+if [ "$adhoc" -eq 1 ]; then
+  adhoc_note="
+!! This build is AD-HOC SIGNED, so macOS sees it as a different app from every
+   other build. The Screen Recording and Accessibility grants will not carry
+   over, and will not re-prompt: System Settings keeps the stale entry while the
+   system refuses the app behind it. After installing, go to System Settings >
+   Privacy & Security and, under BOTH Screen Recording and Accessibility, remove
+   remotex-agent with '-' and add it back with '+', then reopen the agent.
+   Repeat after every ad-hoc build. Signing with an identity avoids all of this.
+"
+else
+  adhoc_note=""
+fi
+
 cat <<NOTES
 
 ${wrote}
 ${install_note}
+${adhoc_note}
 
 That first open writes the config with a fresh pre-shared key and registers the
 agent in System Settings > General > Login Items.

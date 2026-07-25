@@ -57,9 +57,31 @@ after you enable it, the menu offers to quit the agent and tells you to reopen i
 from Applications. Accessibility is detected while the agent remains open and
 needs no restart.
 
-Permissions are tied to the app's signing identity. The ad-hoc-signed release
-may need both grants again after an upgrade. A stable Developer ID signature
-preserves the identity.
+### Signing identity and the grants
+
+Permissions are tied to the app's signing identity, and this is the single
+biggest source of "the agent is approved but still cannot capture the screen".
+
+A **signed** build (Developer ID, or a free Apple Development certificate — good
+enough for your own Mac) keeps one identity across rebuilds, so both grants are
+given once and stay.
+
+An **ad-hoc** build has no stable identity: macOS treats every build as a
+different app. The grants do not carry over, and they do not re-prompt either —
+System Settings keeps the old entry, matched by path, while the system refuses
+the app behind it. After installing each ad-hoc build you must open **System
+Settings → Privacy & Security** and, under **both** Screen Recording and
+Accessibility, remove `remotex-agent` with **−** and add it back with **+**,
+then reopen the agent. Every time.
+
+> **Do not alternate between build sources.** Installing the GitHub release's
+> ad-hoc `-unsigned.dmg` over a locally signed build, or the reverse, changes the
+> code identity exactly as two ad-hoc builds would, and breaks the grants the
+> same way. Pick one and stay on it; switching costs one round of the manual
+> remove-and-re-add above.
+
+Building from source signs with a keychain identity by default, so a local build
+is the way to avoid all of this — see [Build from source](#build-from-source).
 
 A third permission appears only if you use the clipboard bridge (`clipboard =
 true` on the gateway's target). macOS asks before letting the agent read the
@@ -109,6 +131,11 @@ Replace the app in Applications, then open the new copy once. Opening it
 refreshes the login-item registration, which can otherwise continue pointing
 at the replaced bundle.
 
+Stay with the same kind of build you already have — see [Signing identity and
+the grants](#signing-identity-and-the-grants). Upgrading a signed install with
+an ad-hoc one (or the reverse) silently invalidates Screen Recording and
+Accessibility, and the fix is manual.
+
 ## Uninstall
 
 1. Turn off **Start at Login** and choose **Quit**.
@@ -143,6 +170,14 @@ packaging/macos/build-agent-app.sh --no-dmg
 ```
 
 The first command creates the DMG; the second keeps the `.app` in `dist/`.
+
+The build signs with a keychain identity by default — `$CODESIGN_IDENTITY` if
+set, otherwise the first Developer ID Application certificate, otherwise the
+first Apple Development one. It falls back to ad-hoc only when the keychain has
+none, and says so loudly, because that costs the manual re-granting described
+under [Permissions](#permissions). Note that a build signed this way has a
+different identity from the ad-hoc GitHub release, so the first local build
+after running the release needs both grants re-added once.
 Both default to the same ad-hoc signing used by the release workflow, so local
 and downloaded builds have the same code identity class. The DMG is named with
 the `-unsigned` suffix.

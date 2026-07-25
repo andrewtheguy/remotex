@@ -110,8 +110,13 @@ launchd.
 - It runs only in a logged-in GUI session. It does not support the macOS login
   window or an unattended service mode.
 - Screen Recording and Accessibility grants are tied to the app's signing
-  identity. Ad-hoc-signed builds generally require approval again after an
-  upgrade; stable Developer ID signing preserves identity.
+  identity, so builds must not alternate between identities. An ad-hoc signature
+  differs on every build, and the grants then neither carry over nor re-prompt:
+  System Settings keeps the stale path-matched entry while the system refuses
+  the app behind it, so each install needs both entries removed and re-added by
+  hand. Mixing sources — the ad-hoc GitHub release over a locally signed build,
+  or the reverse — does the same. `packaging/macos/build-agent-app.sh` therefore
+  signs with a keychain identity by default and treats ad-hoc as a last resort.
 - The clipboard has no change notification to subscribe to. AppKit's
   `NSPasteboard` posts none — unlike iOS `UIPasteboard` — so the agent polls
   `changeCount`, which is a counter rather than a pasteboard access, and reads
