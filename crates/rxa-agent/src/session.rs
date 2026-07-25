@@ -317,8 +317,14 @@ async fn pump(
     injector.release_all();
     // Stop capturing: the stream costs CPU and battery with nobody watching.
     drop(capture);
+    // Before the join, and load-bearing: an encoder parked in `blocking_send` on
+    // a full output channel only wakes when the receiver is gone. Joining first
+    // would deadlock exactly in the case this teardown matters most — a browser
+    // that vanished while behind on tiles.
+    drop(out_rx);
     if let Some(thread) = encoder_thread {
-        // The encoder exits once its channel closes with the sink.
+        // The encoder exits once its channel closes with the sink, or once this
+        // dropped receiver fails its send.
         let _ = thread.join();
     }
     result
