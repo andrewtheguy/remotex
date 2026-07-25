@@ -301,8 +301,17 @@ async fn pump(
                     // an unprompted push from the agent's pasteboard watcher.
                     // Identical to the browser either way, which is what lets
                     // the panel and the automatic sync share one path.
+                    //
+                    // Dropped outright for a target that didn't opt in: this
+                    // pump then never asked and never enabled the watch, so
+                    // anything arriving is an agent that disagrees with us —
+                    // and the browser writes an incoming clipboard into the
+                    // real OS clipboard. Same belt-and-braces as VNC's
+                    // ServerCutText.
                     AgentMsg::Clipboard { text } => {
-                        if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                        if clipboard
+                            && frame_tx.send(ServerMsg::Clipboard { text }).await.is_err()
+                        {
                             return Ok(());
                         }
                     }

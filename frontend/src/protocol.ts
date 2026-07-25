@@ -27,8 +27,9 @@ export type ClientMsg =
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
   // text on the remote's clipboard, "clipboardRequest" asks for the remote's
   // current text and is answered with a `clipboard` control message. Both are
-  // user-driven (the floating menu's Clipboard panel) — the browser never reads
-  // or writes the local OS clipboard on its own, and retains nothing.
+  // sent either by the floating menu's Clipboard panel or by the automatic
+  // sync in useRemoteDesktop, which pushes the local OS clipboard on focus
+  // where the browser permits reading it. Nothing is retained here.
   | { type: "clipboard"; text: string }
   | { type: "clipboardRequest" };
 
@@ -67,7 +68,8 @@ export type ControlMsg =
       resize: boolean;
       clipboard: boolean;
     }
-  // The remote's clipboard text, only ever in reply to a "clipboardRequest".
+  // The remote's clipboard text: either the reply to a "clipboardRequest" or
+  // an unprompted push when the remote's clipboard changed.
   | { type: "clipboard"; text: string };
 
 export interface TileMsg {

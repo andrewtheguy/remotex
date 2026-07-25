@@ -693,8 +693,15 @@ export function useRemoteDesktop(
           // is absent on a non-secure origin (plain HTTP on a LAN — the usual
           // deployment) and rejects when the tab is unfocused. The panel is
           // the fallback in both cases, so a failure is not worth reporting.
-          lastFromRemoteRef.current = text;
-          void navigator.clipboard?.writeText?.(text).catch(() => {});
+          //
+          // Never for an empty reply, which is what the remote sends when its
+          // clipboard holds no text at all (an image, or nothing yet) —
+          // mirroring that would wipe the local clipboard on connect. The
+          // panel still reports it as empty.
+          if (text !== "") {
+            lastFromRemoteRef.current = text;
+            void navigator.clipboard?.writeText?.(text).catch(() => {});
+          }
           break;
         }
         case "picker":

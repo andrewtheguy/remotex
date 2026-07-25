@@ -178,9 +178,6 @@ none, and says so loudly, because that costs the manual re-granting described
 under [Permissions](#permissions). Note that a build signed this way has a
 different identity from the ad-hoc GitHub release, so the first local build
 after running the release needs both grants re-added once.
-Both default to the same ad-hoc signing used by the release workflow, so local
-and downloaded builds have the same code identity class. The DMG is named with
-the `-unsigned` suffix.
 
 `icon.svg` is the source for the committed `AppIcon.icns`. Regenerate it after
 changing the SVG:
@@ -189,10 +186,6 @@ changing the SVG:
 brew install librsvg
 packaging/macos/make-icon.sh
 ```
-
-Signing is opt-in. Set `CODESIGN_IDENTITY` explicitly when a signed package is
-required; otherwise the script does not search the local keychain and uses
-ad-hoc signing.
 
 ### Notarization
 

@@ -1,6 +1,6 @@
 //! The message set, hand-rolled little-endian in the style of `src/vnc.rs`.
 //!
-//! There are sixteen messages between the two enums, so a serialization
+//! There are seventeen messages between the two enums, so a serialization
 //! dependency would buy nothing that these ~200 lines and their roundtrip tests
 //! don't. The payload of a [`AgentMsg::Tile`] is **already** a PNG or JPEG
 //! stream — the exact bytes the browser decodes — so the gateway relays it

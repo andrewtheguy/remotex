@@ -313,11 +313,21 @@ async fn pump(
                             .await?;
                     }
                     GatewayMsg::Clipboard { text } => {
-                        pasteboard::write(clamp_clipboard(&text));
+                        // A refused write still cleared the pasteboard, so the
+                        // counter moved either way — but only re-baseline when
+                        // the text actually landed. Leaving the stale baseline
+                        // after a refusal lets the watcher notice on its next
+                        // tick and tell the browser the pasteboard is now
+                        // empty, which beats silently pretending the paste
+                        // worked. `pasteboard::write` logs the refusal; there
+                        // is no negative acknowledgement on this wire, and
+                        // AgentMsg::Error is fatal at the gateway — far too
+                        // blunt for one lost paste.
+                        let wrote = pasteboard::write(clamp_clipboard(&text));
                         // Our own write bumps the counter. Without this the
                         // watcher would read it straight back and push it to
                         // the browser that just sent it.
-                        if clipboard_seen.is_some() {
+                        if wrote && clipboard_seen.is_some() {
                             clipboard_seen = Some(pasteboard::change_count());
                         }
                     }
