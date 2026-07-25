@@ -7,7 +7,7 @@ RDP, VNC and `rxa` sessions are indistinguishable to the frontend.
 
 Macs are reached over **`rxa`**, a protocol built for this one client, served by
 a small agent that ships alongside the gateway (`crates/rxa-agent`). It exists
-because Apple's Screen Sharing re-prompts for a login on every reconnect; see
+because Apple's Screen Sharing re-prompts for a login on every reconnect, and I want to offer a choice for experiences similar to realvnc which is less intrusive; see
 [Engines → rxa](#rxa-srcrxars).
 
 This document describes the system as built. Remaining work lives in
