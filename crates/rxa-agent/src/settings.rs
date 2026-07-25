@@ -94,23 +94,21 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::scratch::TempDir;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("rxa-settings-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("config.toml")
-    }
-
-    fn settings(tag: &str) -> (Arc<Settings>, PathBuf) {
-        let path = scratch(tag);
+    /// The `TempDir` comes back with the settings: dropping it removes the
+    /// directory, the config written into it and the key that config carries, so
+    /// it has to outlive the test rather than the helper.
+    fn settings(tag: &str) -> (Arc<Settings>, PathBuf, TempDir) {
+        let dir = TempDir::new(&format!("settings-{tag}"));
+        let path = dir.join("config.toml");
         let config = Config {
             listen: format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT),
             psk: rxa_proto::psk::generate(),
             display: 0,
         };
         config.save(&path).unwrap();
-        (Settings::new(config, path.clone()), path)
+        (Settings::new(config, path.clone()), path, dir)
     }
 
     fn on_disk(path: &Path) -> Config {
@@ -119,7 +117,7 @@ mod tests {
 
     #[test]
     fn a_fresh_agent_is_running_what_the_file_says() {
-        let (settings, path) = settings("fresh");
+        let (settings, path, _dir) = settings("fresh");
         assert!(!settings.restart_pending());
         assert_eq!(settings.saved(), on_disk(&path));
         assert_eq!(&settings.saved(), settings.running());
@@ -127,7 +125,7 @@ mod tests {
 
     #[test]
     fn a_saved_edit_reaches_the_file_and_asks_to_be_restarted_into() {
-        let (settings, path) = settings("edit");
+        let (settings, path, _dir) = settings("edit");
         let mut next = settings.saved();
         next.listen = "127.0.0.1:9001".to_owned();
         next.display = 2;
@@ -150,7 +148,7 @@ mod tests {
     // would otherwise restart the agent for nothing.
     #[test]
     fn saving_an_unchanged_config_is_not_a_change() {
-        let (settings, _) = settings("unchanged");
+        let (settings, _, _dir) = settings("unchanged");
         assert!(!settings.apply(settings.saved()).unwrap());
         assert!(!settings.restart_pending());
     }
@@ -159,7 +157,7 @@ mod tests {
     // authenticating until the restart.
     #[test]
     fn a_new_key_is_saved_without_becoming_the_running_one() {
-        let (settings, path) = settings("psk");
+        let (settings, path, _dir) = settings("psk");
         let before = settings.saved().psk;
         let after = rxa_proto::psk::generate();
         let mut next = settings.saved();
@@ -177,7 +175,7 @@ mod tests {
     // so nothing here may be half-kept.
     #[test]
     fn a_rejected_edit_changes_nothing() {
-        let (settings, path) = settings("reject");
+        let (settings, path, _dir) = settings("reject");
         let before = settings.saved();
 
         let mut bad = before.clone();
@@ -199,7 +197,7 @@ mod tests {
     // the file and the running agent actually disagree.
     #[test]
     fn putting_a_value_back_clears_the_pending_restart() {
-        let (settings, _) = settings("revert");
+        let (settings, _, _dir) = settings("revert");
         let original = settings.saved();
         let mut next = original.clone();
         next.listen = "127.0.0.1:9003".to_owned();
@@ -213,7 +211,7 @@ mod tests {
     // an untrimmed key would be stored as one the config parser barely accepts.
     #[test]
     fn pasted_values_are_trimmed() {
-        let (settings, _) = settings("trim");
+        let (settings, _, _dir) = settings("trim");
         let psk = rxa_proto::psk::generate();
         let next = Config {
             listen: "  127.0.0.1:9002\n".to_owned(),

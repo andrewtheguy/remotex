@@ -148,9 +148,13 @@ process keeps being refused, so the warning stays until you **Quit** and open th
 agent again — which is also what macOS's own "quit and reopen" prompt is telling
 you.
 
-macOS provides no way to grant these programmatically. Because the bundle is
-code-signed with a stable identifier, you only grant them once; they survive
-upgrades.
+macOS provides no way to grant these programmatically, and whether a grant
+survives an upgrade depends on the signature. The grants are keyed to the signed
+code identity: an ad-hoc signature — what the released image and a plain local
+build carry — mints a new identity on every build, so both permissions have to be
+approved again after each upgrade. A build signed with a stable **Developer ID
+Application** identity keeps the same one, so there you grant them once and they
+survive upgrades.
 
 The menu bar is also the only place worth *reading* them from. Both permissions
 are attributed to whatever launched the process, so the binary run from a terminal

@@ -261,7 +261,13 @@ define_class!(
 
         #[unsafe(method(copyPsk:))]
         fn copy_psk(&self, _sender: Option<&AnyObject>) {
-            self.copy_to_clipboard(&self.ivars().settings.saved().psk);
+            // The key this process is authenticating with, not the one in the
+            // file — the same reason the "Listening on" line reads `running()`.
+            // Saving a key normally re-execs straight into it, so the two agree;
+            // when they do not (a re-exec that failed, a hand-edited file) the
+            // file's key is the one nothing will accept, and pasting it into the
+            // gateway would look like the agent had gone deaf.
+            self.copy_to_clipboard(&self.ivars().settings.running().psk);
         }
 
         /// Show the config file in the Finder.
@@ -514,7 +520,19 @@ impl Controller {
         // Outside the dialog, because it is not an edit: copying the key onto the
         // gateway is the one thing anybody does with it, and it should not need a
         // dialog and a Cancel every time.
-        menu.addItem(&self.action("Copy Pre-Shared Key", sel!(copyPsk:), mtm));
+        let item = self.action("Copy Pre-Shared Key", sel!(copyPsk:), mtm);
+        // Not a state a save can leave behind: saving a key re-execs into it, so
+        // the two agree. The keys differ only when that did not happen — a
+        // re-exec that failed, or a config edited by hand — and then which key
+        // this copies is the difference between a gateway that connects and one
+        // that is refused.
+        if saved.psk != settings.running().psk {
+            item.setToolTip(Some(&NSString::from_str(
+                "Copies the key in force right now. The config file holds a different one that \
+                 never took effect — quit remotex-agent and open it again to switch to it.",
+            )));
+        }
+        menu.addItem(&item);
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let item = self.action("Settings…", sel!(openSettings:), mtm);
@@ -790,8 +808,8 @@ mod tests {
     // A missing SF Symbol falls back to a text title, but silently — so pin the
     // names here rather than discovering it on a user's menu bar.
     #[test]
-    fn both_status_icons_exist_in_sf_symbols() {
-        let looked_up: Vec<_> = [ICON_IDLE, ICON_CONNECTED]
+    fn every_status_icon_exists_in_sf_symbols() {
+        let looked_up: Vec<_> = [ICON_BLOCKED, ICON_IDLE, ICON_CONNECTED]
             .into_iter()
             .map(|symbol| {
                 let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
@@ -801,8 +819,8 @@ mod tests {
                 (symbol, image)
             })
             .collect();
-        // *Both* nil is a session with no window server — over SSH, or in CI —
-        // where AppKit answers nothing at all, not two simultaneous typos. Skip
+        // *All* nil is a session with no window server — over SSH, or in CI —
+        // where AppKit answers nothing at all, not three simultaneous typos. Skip
         // there, the same way the cursor test does; one nil still fails, which
         // is the typo this test exists to catch.
         if looked_up.iter().all(|(_, image)| image.is_none()) {

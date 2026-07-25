@@ -210,29 +210,31 @@ display = {display}
     )
 }
 
+/// A scratch directory that cleans itself up, so a failing assertion does not
+/// leave the next run to trip over the leftovers.
+///
+/// Outside `mod tests` so [`crate::settings`]'s tests can use the same one —
+/// they write configs (and generated keys) that need the same removal.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod scratch {
+    use std::path::{Path, PathBuf};
 
-    fn with_psk(extra: &str) -> String {
-        format!("psk = \"{}\"\n{extra}", rxa_proto::psk::generate())
-    }
-
-    /// A scratch directory that cleans itself up, so a failing assertion does
-    /// not leave the next run to trip over the leftovers.
-    struct TempDir(PathBuf);
+    pub(crate) struct TempDir(PathBuf);
 
     impl TempDir {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("rxa-agent-{tag}-{}", std::process::id()));
+        pub(crate) fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("rxa-agent-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
 
-        fn join(&self, name: &str) -> PathBuf {
+        pub(crate) fn join(&self, name: &str) -> PathBuf {
             self.0.join(name)
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
         }
     }
 
@@ -240,6 +242,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scratch::TempDir;
+    use super::*;
+
+    fn with_psk(extra: &str) -> String {
+        format!("psk = \"{}\"\n{extra}", rxa_proto::psk::generate())
     }
 
     fn sample() -> Config {
@@ -361,7 +373,7 @@ mod tests {
 
         // And the temporary file it renamed from is not left lying about with a
         // copy of the key in it.
-        let strays: Vec<_> = std::fs::read_dir(&dir.0)
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name != "config.toml")

@@ -653,9 +653,12 @@ someone believing a target was authenticated by a key it never uses.
   the Noise chunk boundary, per-variant message roundtrips, keycodes), all of
   which runs on Linux — deliberately, since the agent crate never builds there.
 - **The agent** can only be tested on macOS, and its capture and injection
-  paths additionally need the two TCC grants, so they are verified by hand (the
-  menu bar item ticks both, read live from the running agent — the only thing
-  that can answer, since macOS credits a permission to whatever launched the
-  process). Its GUI is hand-verified for the same kind of reason: `NSAlert` and
-  `NSStatusItem` need a window server, so nothing under `cargo test` can open a
-  menu.
+  paths additionally need the two TCC grants, so they are verified by hand from
+  the running agent — the only thing that can answer, since macOS credits a
+  permission to whatever launched the process. The menu bar item is where that
+  answer shows up, by *absence*: an **Enable …** row appears only while a grant
+  is missing and nothing about them appears once both are granted (Accessibility
+  polled once a second until it is on, Screen Recording read once at startup —
+  see the rxa section above). Its GUI is hand-verified for the same kind of
+  reason: `NSAlert` and `NSStatusItem` need a window server, so nothing under
+  `cargo test` can open a menu.

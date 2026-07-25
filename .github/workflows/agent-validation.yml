@@ -86,7 +86,9 @@ jobs:
           mnt="$RUNNER_TEMP/dmg-mount"
           mkdir -p "$mnt" "$RUNNER_TEMP/installed"
           hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
-          [ -L "$mnt/Applications" ] || {
+          # Pointing at /Applications specifically: a symlink to anything else
+          # would pass a bare -L check and still drop the bundle elsewhere.
+          [ "$(readlink "$mnt/Applications")" = "/Applications" ] || {
             echo "::error::the image has no /Applications symlink"
             exit 1
           }
