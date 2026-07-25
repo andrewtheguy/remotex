@@ -149,11 +149,14 @@ mod tests {
 
     #[test]
     fn the_summary_names_the_peer_without_its_ephemeral_port() {
-        let now = Instant::now();
+        // Built forwards from `since`: subtracting from a fresh `Instant` panics
+        // on a machine that booted less than 125s ago.
+        let since = Instant::now();
+        let now = since + Duration::from_secs(125);
         let connection = Connection {
             id: 1,
             peer: peer("192.168.1.10:52344"),
-            since: now - Duration::from_secs(125),
+            since,
         };
         let text = describe(Some(&connection), now);
         assert!(text.contains("192.168.1.10"), "{text}");
