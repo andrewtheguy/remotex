@@ -1,5 +1,10 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import FloatingMenu from "./FloatingMenu.tsx";
+import {
+  type NativeCommand,
+  postNativeHostEvent,
+  setNativeCommandHandler,
+} from "./nativeHost.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
   CAN_PINCH_ZOOM,
@@ -17,11 +22,14 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 
 export default function RemoteDesktop({
   branding,
+  nativeHost,
   onLogout,
   onUnauthorized,
 }: {
   /** Deployment display name shown on the interstitials. */
   branding: string;
+  /** True only after the macOS viewer and this frontend agree on the bridge. */
+  nativeHost: boolean;
   onLogout: () => void;
   onUnauthorized: () => void;
 }) {
@@ -31,6 +39,7 @@ export default function RemoteDesktop({
   const {
     status,
     mode,
+    connectedTarget,
     connectError,
     pendingTarget,
     size,
@@ -42,15 +51,112 @@ export default function RemoteDesktop({
     switchTarget,
     resizeToWindow,
     sendKeyCombo,
+    sendNativeKey,
+    releaseNativeKeys,
     requestClipboard,
     sendClipboard,
     setBottomInset,
-  } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
+  } = useRemoteDesktop(
+    canvasRef,
+    overlayRef,
+    pointerRef,
+    onUnauthorized,
+    nativeHost,
+  );
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
   // gap before the first frame. The picker owns the screen once connected.
   const showStatus = status !== "connected" || (mode === "desktop" && !size);
+
+  useEffect(() => {
+    if (!nativeHost) {
+      return;
+    }
+    postNativeHostEvent({
+      type: "state",
+      state: {
+        screen: mode,
+        connectionStatus: status,
+        connectedTarget,
+        canResize,
+        canClipboard,
+        canCaptureKeyboard: status === "connected" && mode === "desktop",
+      },
+    });
+  }, [canClipboard, canResize, connectedTarget, mode, nativeHost, status]);
+
+  useEffect(() => {
+    if (!nativeHost || !remoteClipboard) {
+      return;
+    }
+    postNativeHostEvent({
+      type: "remoteClipboard",
+      text: remoteClipboard.text,
+      seq: remoteClipboard.seq,
+    });
+  }, [nativeHost, remoteClipboard]);
+
+  useEffect(() => {
+    if (!nativeHost) {
+      return;
+    }
+    return setNativeCommandHandler((command: NativeCommand) => {
+      switch (command.type) {
+        case "key":
+          sendNativeKey(command.code, command.pressed, command.caps);
+          return { ok: true };
+        case "releaseKeys":
+          releaseNativeKeys();
+          return { ok: true };
+        case "clipboard":
+          if (!canClipboard) {
+            return {
+              ok: false,
+              error: "clipboard is disabled for this target",
+            };
+          }
+          sendClipboard(command.text);
+          return { ok: true };
+        case "clipboardRequest":
+          if (!canClipboard) {
+            return {
+              ok: false,
+              error: "clipboard is disabled for this target",
+            };
+          }
+          void requestClipboard();
+          return { ok: true };
+        case "resize":
+          if (!canResize) {
+            return { ok: false, error: "resize is unavailable" };
+          }
+          resizeToWindow();
+          return { ok: true };
+        case "switchTarget":
+          switchTarget();
+          return { ok: true };
+        case "logout":
+          onLogout();
+          return { ok: true };
+        case "takeOver":
+          takeOver();
+          return { ok: true };
+      }
+    });
+  }, [
+    canClipboard,
+    canResize,
+    nativeHost,
+    onLogout,
+    releaseNativeKeys,
+    requestClipboard,
+    resizeToWindow,
+    sendClipboard,
+    sendNativeKey,
+    switchTarget,
+    takeOver,
+  ]);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -82,7 +188,7 @@ export default function RemoteDesktop({
 
       {/* The floating menu is desktop-only; its Switch target button returns to
           the picker (see FloatingMenu.tsx), and Log out ends the login. */}
-      {mode === "desktop" && (
+      {mode === "desktop" && !nativeHost && (
         <FloatingMenu
           onLogout={onLogout}
           onSwitchTarget={switchTarget}
