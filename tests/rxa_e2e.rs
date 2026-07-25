@@ -46,6 +46,10 @@ use tokio_tungstenite::tungstenite::Message;
 const AGENT_W: u16 = 320;
 const AGENT_H: u16 = 240;
 
+/// The resolutions a resizable fake agent offers, largest first — the shape a
+/// real virtual display's list has (see `crates/rxa-agent/src/displaymode.rs`).
+const AGENT_MODES: [(u16, u16); 3] = [(AGENT_W, AGENT_H), (240, 180), (160, 120)];
+
 /// Cursor hotspot, chosen asymmetric so a transposition would show up.
 const HOTSPOT: (u16, u16) = (4, 7);
 
@@ -86,6 +90,21 @@ async fn spawn_fake_agent(
     Arc<AtomicUsize>,
     mpsc::UnboundedReceiver<GatewayMsg>,
 ) {
+    spawn_fake_agent_with_resize(psk, hang_up_first, false).await
+}
+
+/// As [`spawn_fake_agent`], with the agent reporting a resizable display (what
+/// a Mac sharing a virtual display says) and offering [`AGENT_MODES`].
+async fn spawn_fake_agent_with_resize(
+    psk: [u8; 32],
+    hang_up_first: bool,
+    resizable: bool,
+) -> (
+    u16,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    mpsc::UnboundedReceiver<GatewayMsg>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -101,7 +120,7 @@ async fn spawn_fake_agent(
             let active = Arc::clone(&active_connections);
             tokio::spawn(async move {
                 active.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = serve_fake_agent(stream, psk, hang_up, input_tx).await {
+                if let Err(e) = serve_fake_agent(stream, psk, hang_up, resizable, input_tx).await {
                     // Expected on the hang-up path and at test teardown.
                     eprintln!("fake agent connection ended: {e}");
                 }
@@ -116,6 +135,7 @@ async fn serve_fake_agent(
     mut stream: TcpStream,
     psk: [u8; 32],
     hang_up: bool,
+    resizable: bool,
     input_tx: mpsc::UnboundedSender<GatewayMsg>,
 ) -> anyhow::Result<()> {
     let transport = rxa_proto::noise::respond(&mut stream, &psk).await?;
@@ -130,6 +150,7 @@ async fn serve_fake_agent(
                 agent_version: "fake-agent".to_owned(),
                 w: AGENT_W,
                 h: AGENT_H,
+                resizable,
             }
             .encode(),
         )
@@ -139,6 +160,19 @@ async fn serve_fake_agent(
     match GatewayMsg::decode(&reader.recv().await?)? {
         GatewayMsg::Attach => {}
         other => anyhow::bail!("expected Attach as the gateway's first message, got {other:?}"),
+    }
+
+    // The real agent sends its menu right after Attach, and only when the
+    // display it shares is one it can resize.
+    if resizable {
+        writer
+            .send(
+                &AgentMsg::DisplayModes {
+                    modes: AGENT_MODES.to_vec(),
+                }
+                .encode(),
+            )
+            .await?;
     }
 
     paint(&mut writer).await?;
@@ -190,6 +224,22 @@ async fn serve_fake_agent(
                 pasteboard = text.clone();
                 let _ = input_tx.send(GatewayMsg::Clipboard { text });
             }
+            // A real agent switches the display's mode and says nothing; the
+            // new size then arrives on its own from the capture stream. This
+            // one records the request and reports the size straight back, which
+            // is the same thing from the gateway's side.
+            GatewayMsg::SetDisplaySize { w, h } => {
+                let _ = input_tx.send(GatewayMsg::SetDisplaySize { w, h });
+                writer.send(&AgentMsg::DisplaySize { w, h }.encode()).await?;
+                writer
+                    .send(
+                        &AgentMsg::DisplayModes {
+                            modes: AGENT_MODES.to_vec(),
+                        }
+                        .encode(),
+                    )
+                    .await?;
+            }
             // Everything else is browser input on its way to the Mac. The real
             // agent injects it; here it is recorded so a test can assert on what
             // actually crossed the wire.
@@ -237,11 +287,21 @@ where
 
 /// Start the real axum server with a single `rxa` target pointed at `port`.
 async fn spawn_app(port: u16, psk: &str) -> SocketAddr {
-    spawn_app_with_clipboard(port, psk, false).await
+    spawn_app_with(port, psk, false, false).await
 }
 
 /// As [`spawn_app`], with the target's clipboard bridge opted in or out.
 async fn spawn_app_with_clipboard(port: u16, psk: &str, clipboard: bool) -> SocketAddr {
+    spawn_app_with(port, psk, clipboard, false).await
+}
+
+/// As [`spawn_app`], with the target's `resize` opt-in — which is only half of
+/// what the resolution menu needs; the agent's `Hello` is the other half.
+async fn spawn_app_with_resize(port: u16, psk: &str, resize: bool) -> SocketAddr {
+    spawn_app_with(port, psk, false, resize).await
+}
+
+async fn spawn_app_with(port: u16, psk: &str, clipboard: bool, resize: bool) -> SocketAddr {
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,
@@ -257,7 +317,7 @@ async fn spawn_app_with_clipboard(port: u16, psk: &str, clipboard: bool) -> Sock
             width: 1280,
             height: 800,
             security: Security::Auto,
-            resize: false,
+            resize,
             clipboard,
             psk: psk.to_owned(),
         }],
@@ -290,6 +350,9 @@ struct Paint {
     resize: Option<String>,
     tile: Vec<u8>,
     cursor: String,
+    /// The resolution menu, if one was offered before the pixels — it is sent
+    /// as soon as the stream attaches, so it arrives inside this same drain.
+    modes: Option<Vec<(u16, u16)>>,
 }
 
 /// Drain the socket until a tile and a cursor have arrived, keeping any resize
@@ -302,6 +365,7 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
     let mut resize = None;
     let mut tile = None;
     let mut cursor = None;
+    let mut modes = None;
     let mut live = false;
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -323,6 +387,8 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
                         resize = Some(text.to_string());
                     } else if text.contains(r#""type":"cursor""#) {
                         cursor = Some(text.to_string());
+                    } else if text.contains(r#""type":"displayModes""#) {
+                        modes = Some(parse_modes(&text));
                     }
                 }
                 Message::Binary(frame) => tile = Some(frame.to_vec()),
@@ -334,6 +400,7 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
                     resize: resize.clone(),
                     tile: tile.clone(),
                     cursor: cursor.clone(),
+                    modes: modes.clone(),
                 };
             }
         }
@@ -467,6 +534,46 @@ async fn expect_clipboard(ws: &mut Ws) -> String {
     .expect("timed out waiting for clipboard")
 }
 
+/// Drain the socket until a control frame of `kind` arrives; returns it parsed.
+/// Fails on an error or a close, like the paint helper.
+async fn expect_control(ws: &mut Ws, kind: &str) -> serde_json::Value {
+    let tag = format!(r#""type":"{kind}""#);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                    if text.contains(&tag) {
+                        return serde_json::from_str(&text).unwrap();
+                    }
+                }
+                Message::Close(frame) => panic!("session closed: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for {kind}");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {kind}"))
+}
+
+/// The resolutions the browser was offered, in order.
+async fn expect_display_modes(ws: &mut Ws) -> Vec<(u16, u16)> {
+    let frame = expect_control(ws, "displayModes").await;
+    parse_modes(&frame.to_string())
+}
+
+/// The `modes` array of a `displayModes` frame, as pairs.
+fn parse_modes(text: &str) -> Vec<(u16, u16)> {
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    parsed["modes"]
+        .as_array()
+        .expect("modes should be an array")
+        .iter()
+        .map(|m| (m["w"].as_u64().unwrap() as u16, m["h"].as_u64().unwrap() as u16))
+        .collect()
+}
+
 /// How long [`assert_quiet`] listens before deciding nothing is coming. Short
 /// because it is spent on every pass, and it only has to cover the hop from the
 /// engine to the WebSocket writer task — the fence in the caller has already
@@ -488,6 +595,10 @@ async fn assert_quiet(ws: &mut Ws) {
                     assert!(
                         !text.contains(r#""type":"clipboard""#),
                         "a clipboard frame reached a browser that never opted in: {text}"
+                    );
+                    assert!(
+                        !text.contains(r#""type":"displayModes""#),
+                        "a resolution menu reached a browser that never opted in: {text}"
                     );
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                 }
@@ -648,6 +759,111 @@ async fn clipboard_is_inert_when_the_rxa_target_did_not_opt_in() {
     // agent push for a target that said no, and the browser writes an incoming
     // one straight into the real OS clipboard) and not an `error`, since a
     // clipboard message the target didn't opt into is ignored, not a failure.
+    assert_quiet(&mut ws).await;
+}
+
+// The resize path end to end: the Mac's list reaches the browser, the browser's
+// pick reaches the Mac, and the size that comes back updates the canvas.
+#[tokio::test]
+async fn the_resolution_menu_reaches_the_browser_and_a_pick_reaches_the_agent() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) =
+        spawn_fake_agent_with_resize(psk, false, true).await;
+    let addr = spawn_app_with_resize(port, &psk_text, true).await;
+
+    let mut ws = open_session(addr).await;
+    // The menu is offered before the first paint — the agent sends it as soon
+    // as the stream is attached, so the control is there from the start.
+    let paint = expect_paint(&mut ws).await;
+    assert_first_paint(&paint);
+    assert_eq!(paint.modes, Some(AGENT_MODES.to_vec()));
+
+    // The user picks a size off that menu.
+    ws.send(Message::text(r#"{"type":"setResolution","w":240,"h":180}"#))
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::SetDisplaySize { w: 240, h: 180 }
+    );
+
+    // The Mac's new size comes back as an ordinary resize — the browser learns
+    // it the same way it learns about a resize nothing asked for.
+    let resized = expect_control(&mut ws, "resize").await;
+    assert_eq!((resized["w"].as_u64(), resized["h"].as_u64()), (Some(240), Some(180)));
+    // And the menu is re-sent, because a reconfigure regenerates the Mac's list.
+    assert_eq!(expect_display_modes(&mut ws).await, AGENT_MODES.to_vec());
+}
+
+// Both halves are required. A target that did not opt in gets no menu and its
+// picks are dropped, even though this agent would happily resize.
+#[tokio::test]
+async fn the_resolution_menu_is_inert_when_the_rxa_target_did_not_opt_in() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) =
+        spawn_fake_agent_with_resize(psk, false, true).await;
+    let addr = spawn_app(port, &psk_text).await; // resize defaults to off
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    ws.send(Message::text(r#"{"type":"setResolution","w":240,"h":180}"#))
+        .await
+        .unwrap();
+    // The same fence as the clipboard opt-out test: a key press behind the pick
+    // can only arrive after the pick was handled, so seeing it first proves the
+    // pick was dropped rather than delayed.
+    ws.send(Message::text(
+        r#"{"type":"key","code":"KeyA","pressed":true,"caps":false}"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::Key {
+            code: "KeyA".to_owned(),
+            pressed: true,
+            caps: false,
+        }
+    );
+    // No menu may have reached the browser either — the agent offered one, and
+    // the engine has to swallow it for a target that said no.
+    assert_quiet(&mut ws).await;
+}
+
+// The other half: the target opted in but the Mac shares a physical display, so
+// the agent reports itself unresizable and there must be no menu. This is the
+// case that protects a real monitor from being rearranged from a browser.
+#[tokio::test]
+async fn no_resolution_menu_when_the_agent_says_the_display_is_not_resizable() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) =
+        spawn_fake_agent_with_resize(psk, false, false).await;
+    let addr = spawn_app_with_resize(port, &psk_text, true).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    ws.send(Message::text(r#"{"type":"setResolution","w":240,"h":180}"#))
+        .await
+        .unwrap();
+    ws.send(Message::text(
+        r#"{"type":"key","code":"KeyA","pressed":true,"caps":false}"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::Key {
+            code: "KeyA".to_owned(),
+            pressed: true,
+            caps: false,
+        },
+        "a pick must not reach an agent that said its display cannot be resized"
+    );
     assert_quiet(&mut ws).await;
 }
 

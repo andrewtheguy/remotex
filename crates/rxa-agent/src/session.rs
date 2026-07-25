@@ -38,6 +38,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::capture::{self, Capture, FrameSink, RawTile};
 use crate::cursor;
+use crate::displaymode;
 use crate::encode;
 use crate::input::Injector;
 use crate::pasteboard;
@@ -51,6 +52,11 @@ const OUT_BACKLOG: usize = 64;
 
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
+
+/// How long a mode switch may run before it is written off as wedged. Generous:
+/// a healthy switch settles in about a second, and the only thing this bound
+/// buys is a log line — the work itself cannot be cancelled.
+const RESIZE_TIMEOUT_SECS: u64 = 10;
 
 /// Drop the connection if the gateway says nothing at all for this long. It
 /// pings every 5s, so this is a wide margin — it exists to reap a half-open TCP
@@ -147,6 +153,11 @@ pub async fn serve(
         }
     };
 
+    // Decided once, from the display the session is actually going to share:
+    // re-deciding later could disagree with itself if the config's display
+    // index resolved differently, and the gateway has already told the browser.
+    let resizable = displaymode::resizable(geometry.id);
+
     writer
         .send(
             &AgentMsg::Hello {
@@ -154,12 +165,13 @@ pub async fn serve(
                 agent_version: env!("CARGO_PKG_VERSION").to_owned(),
                 w: geometry.width,
                 h: geometry.height,
+                resizable,
             }
             .encode(),
         )
         .await?;
 
-    pump(reader, writer, geometry, display, cursor_tracker).await
+    pump(reader, writer, geometry, display, resizable, cursor_tracker).await
 }
 
 async fn pump(
@@ -167,6 +179,7 @@ async fn pump(
     mut writer: FrameWriter<OwnedWriteHalf>,
     geometry: capture::Geometry,
     display: usize,
+    resizable: bool,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
     // `FrameReader::recv` is not cancel-safe, so it gets its own task.
@@ -175,6 +188,10 @@ async fn pump(
     let _abort = AbortOnDrop(read_task);
 
     let mut injector = Injector::new(geometry.scale, geometry.origin);
+    // The display the stream is on, re-read from the live geometry at `Attach`:
+    // the config's index is resolved inside `capture`, and a mode switch must
+    // address the display being captured rather than re-resolving the index.
+    let mut display_id = geometry.id;
     let full_repaint = Arc::new(AtomicBool::new(true));
     // All three appear together when `Attach` starts the pipeline, and are torn
     // down together when the session ends.
@@ -224,6 +241,13 @@ async fn pump(
                     Out::Resized(w, h) => {
                         info!("session: display reconfigured to {w}x{h}");
                         writer.send(&AgentMsg::DisplaySize { w, h }.encode()).await?;
+                        // The mode list is regenerated around whatever size the
+                        // host just pushed, so the browser's menu is stale from
+                        // this moment — including after a resize this session
+                        // asked for, which can move the list's ceiling.
+                        if resizable {
+                            send_modes(&mut writer, display_id).await?;
+                        }
                     }
                     Out::Failed(message) => {
                         warn!("session: capture failed: {message}");
@@ -261,6 +285,7 @@ async fn pump(
                                         }.encode()).await?;
                                     }
                                     injector = Injector::new(live.scale, live.origin);
+                                    display_id = live.id;
                                     // The pointer is drawn onto a canvas in
                                     // captured pixels, so it must be sized by
                                     // the capture's scale, not the main
@@ -281,6 +306,12 @@ async fn pump(
                         // Re-send the cached pointer shape: a browser attaching
                         // now would otherwise have none until it changed.
                         cursor_seen = cursor::UNSEEN;
+                        // Sent on every Attach, not just the first: a browser
+                        // that reattaches to a running session has no menu
+                        // otherwise.
+                        if resizable {
+                            send_modes(&mut writer, display_id).await?;
+                        }
                     }
                     GatewayMsg::Refresh => {
                         full_repaint.store(true, Ordering::Relaxed);
@@ -336,6 +367,44 @@ async fn pump(
                     // happened to be on the pasteboard when the browser
                     // connected. That also matches VNC, where ServerCutText
                     // only arrives on a change.
+                    // Never fatal when refused: AgentMsg::Error tears the
+                    // session down at the gateway, which is far too blunt for a
+                    // resize the agent simply will not do. A physical display
+                    // lands here only if the gateway ignored `Hello`.
+                    GatewayMsg::SetDisplaySize { w, h } => {
+                        if !resizable {
+                            warn!(
+                                "session: refusing to resize display {display_id} to {w}x{h} — \
+                                 not a virtual display"
+                            );
+                        } else {
+                            // On a blocking thread with a deadline:
+                            // CGCompleteDisplayConfiguration can hang forever
+                            // once a VM's display stack wedges, and this task
+                            // also carries tiles, input and the keepalive.
+                            // Nothing here awaits the answer — the capture
+                            // stream reports the new size on its own — so a
+                            // hung switch costs one thread, not the session.
+                            let deadline = Duration::from_secs(RESIZE_TIMEOUT_SECS);
+                            let id = display_id;
+                            tokio::spawn(async move {
+                                let switch = tokio::task::spawn_blocking(move || {
+                                    displaymode::apply(id, w, h)
+                                });
+                                match tokio::time::timeout(deadline, switch).await {
+                                    Ok(Ok(Ok(_))) => {}
+                                    Ok(Ok(Err(e))) => {
+                                        warn!("session: resize to {w}x{h} failed: {e:#}");
+                                    }
+                                    Ok(Err(e)) => warn!("session: resize task died: {e}"),
+                                    Err(_) => warn!(
+                                        "session: resize to {w}x{h} is still running after \
+                                         {RESIZE_TIMEOUT_SECS}s; the display stack may be wedged"
+                                    ),
+                                }
+                            });
+                        }
+                    }
                     GatewayMsg::ClipboardWatch { enabled } => {
                         clipboard_seen = enabled.then(pasteboard::change_count);
                         info!(
@@ -399,6 +468,24 @@ async fn pump(
         let _ = thread.join();
     }
     result
+}
+
+/// Send the display's current resolution menu.
+///
+/// Read fresh every time rather than cached: the list is regenerated whenever
+/// the host resizes a virtual display, so the only correct list is the one read
+/// at the moment it is sent.
+async fn send_modes(
+    writer: &mut FrameWriter<OwnedWriteHalf>,
+    display_id: u32,
+) -> anyhow::Result<()> {
+    let modes: Vec<(u16, u16)> = displaymode::modes(display_id)
+        .into_iter()
+        .map(|m| (m.width, m.height))
+        .collect();
+    debug!("session: display {display_id} offers {} resolutions", modes.len());
+    writer.send(&AgentMsg::DisplayModes { modes }.encode()).await?;
+    Ok(())
 }
 
 /// Wire up capture → encoder → pump for an attached session.

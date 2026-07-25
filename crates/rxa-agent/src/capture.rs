@@ -77,6 +77,12 @@ pub trait FrameSink: Send + Sync + 'static {
 /// the size to announce in `Hello`, and the two numbers input conversion needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Geometry {
+    /// The CoreGraphics display this was measured from. Carried along because
+    /// the display index the config names is resolved here (see [`pick`]), and
+    /// [`crate::displaymode`] addresses displays by id — without this, a caller
+    /// wanting to change the shared display's mode would have to re-resolve the
+    /// index and could pick a different display than the one being captured.
+    pub id: u32,
     /// Captured surface size in pixels.
     pub width: u16,
     pub height: u16,
@@ -134,8 +140,8 @@ pub fn probe(display: usize) -> anyhow::Result<Geometry> {
 pub struct DisplayInfo {
     /// Index into the list, which is what `display` in the config means.
     pub index: usize,
-    /// CoreGraphics display id, so two identical panels are still tellable apart.
-    pub id: u32,
+    /// The CoreGraphics display id lives in [`Geometry::id`], so two identical
+    /// panels are still tellable apart.
     pub geometry: Geometry,
 }
 
@@ -154,7 +160,6 @@ pub fn displays() -> anyhow::Result<Vec<DisplayInfo>> {
         .enumerate()
         .map(|(index, display)| DisplayInfo {
             index,
-            id: display.display_id(),
             geometry: geometry(display),
         })
         .collect())
@@ -305,6 +310,7 @@ fn geometry(display: &SCDisplay) -> Geometry {
     let scale = backing_scale(display);
     let frame = display.frame();
     Geometry {
+        id: display.display_id(),
         width: clamp_u16(((display.width() as f64) * scale).round() as u32),
         height: clamp_u16(((display.height() as f64) * scale).round() as u32),
         scale,

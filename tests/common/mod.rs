@@ -129,20 +129,34 @@ pub async fn connect_target(ws: &mut Ws, target: &str) {
     .unwrap();
 }
 
-/// Locate a container runtime. These tests are ignored by default, so an
-/// explicitly opted-in run fails loudly when its required runtime is missing.
+/// Locate a *working* container runtime. These tests are ignored by default, so
+/// an explicitly opted-in run fails loudly when neither runtime can be reached.
+///
+/// `info` rather than `--version`: on a machine with both installed, the first
+/// one on PATH is often not the one that is actually running — a `podman`
+/// binary with no `podman machine` started answers `--version` happily and then
+/// fails every real command. Only `info` talks to the engine.
+///
+/// `REMOTEX_TEST_CONTAINER_RUNTIME` forces the choice when both work.
 #[allow(dead_code)]
 pub fn container_runtime() -> &'static str {
-    for runtime in ["podman", "docker"] {
-        if Command::new(runtime)
-            .arg("--version")
+    let usable = |runtime: &str| {
+        Command::new(runtime)
+            .arg("info")
             .output()
             .is_ok_and(|out| out.status.success())
-        {
+    };
+    if let Ok(forced) = std::env::var("REMOTEX_TEST_CONTAINER_RUNTIME") {
+        let forced: &'static str = Box::leak(forced.into_boxed_str());
+        assert!(usable(forced), "REMOTEX_TEST_CONTAINER_RUNTIME={forced} cannot be reached");
+        return forced;
+    }
+    for runtime in ["podman", "docker"] {
+        if usable(runtime) {
             return runtime;
         }
     }
-    panic!("this e2e test needs podman or docker to start the dummy server");
+    panic!("this e2e test needs a running podman or docker to start the dummy server");
 }
 
 /// Kills the container on drop so a failed test doesn't leak it
@@ -191,8 +205,13 @@ pub fn start_dummy_server(
     let context_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(context);
     // With a remote engine the build context is sent over the connection, so a
     // local path still works.
+    //
+    // `-f` is spelled out because the file is a `Containerfile`: podman looks
+    // for that name by default, docker only for `Dockerfile`, and both accept
+    // the explicit flag.
     let build = Command::new(runtime)
-        .args(["build", "-t", image])
+        .args(["build", "-t", image, "-f"])
+        .arg(context_dir.join("Containerfile"))
         .arg(&context_dir)
         .output()
         .expect("run container build");

@@ -82,6 +82,7 @@ compile_error!(
 mod capture;
 mod config;
 mod cursor;
+mod displaymode;
 mod encode;
 mod input;
 mod loginitem;

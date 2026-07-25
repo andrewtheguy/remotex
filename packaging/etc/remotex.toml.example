@@ -50,7 +50,8 @@ password = "change-me"
 # viewport. VNC follows the window automatically (only on servers that accept
 # SetDesktopSize — the TigerVNC family). RDP resizes only when you ask, via the
 # floating menu's "Resize to window" (RDP reactivation is heavier than VNC's
-# resize). Otherwise — and by default — the desktop keeps its connect-time size
+# resize). For rxa it means something narrower — see the rxa target below.
+# Otherwise — and by default — the desktop keeps its connect-time size
 # and the browser shows scrollbars.
 #resize = false
 
@@ -90,9 +91,13 @@ password = "change-me"
 # in System Settings -> Privacy & Security: Screen Recording and Accessibility.
 # It cannot run at the login window, so nobody logged in means nothing to reach.
 #
-# username/password/domain/width/height/security are all ignored here, and
-# `resize` is rejected — the agent captures the Mac's own resolution.
+# username/password/domain/width/height/security are all ignored here.
 # `clipboard` is supported: the agent reads and writes the Mac's pasteboard.
+#
+# `resize` does not follow the browser window here. It offers the floating
+# menu a list of the resolutions the Mac's display advertises, and only when
+# that display is a virtual one in a VM — a physical Mac display is never
+# changed from the browser, and the menu simply does not appear.
 # [[targets]]
 # name = "mac"
 # protocol = "rxa"

@@ -62,6 +62,18 @@ pub enum ClientMsg {
     /// size act on it (VNC `SetDesktopSize`); the rest ignore it and the
     /// frontend keeps its scrollbars.
     Viewport { w: u16, h: u16 },
+    /// Set the remote desktop to one of the resolutions the engine offered in
+    /// [`ServerMsg::DisplayModes`] — the user's pick from a menu, not a
+    /// viewport report. Only the rxa engine offers such a menu; the others
+    /// ignore this.
+    ///
+    /// Distinct from [`ClientMsg::Viewport`] because the two mean different
+    /// things: a viewport is "this is how much room I have, do what you can
+    /// with it", while this is "the user chose this size". A Mac's virtual
+    /// display only accepts sizes off a fixed list, so following the viewport
+    /// would mean a mode switch on every window drag, each landing on a
+    /// neighbouring size the user never asked for.
+    SetResolution { w: u16, h: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a browser (re)attaches to
     /// a running engine; a browser may also send it to recover from a
@@ -257,6 +269,16 @@ pub enum ServerMsg {
     /// [`ClientMsg::ClipboardRequest`]. Only ever sent when asked: the browser
     /// is never pushed clipboard contents it did not request.
     Clipboard { text: String },
+    /// The resolutions the remote display will accept, largest first — the menu
+    /// behind the floating menu's Resolution section, answered with
+    /// [`ClientMsg::SetResolution`].
+    ///
+    /// Only the rxa engine sends this, and only for a target with
+    /// `resize = true` whose Mac shares a virtual display. Re-sent whenever the
+    /// list changes, which it does on every reconfigure — so the browser
+    /// replaces its menu rather than merging into it. An empty list means there
+    /// is nothing to offer and the menu should disappear.
+    DisplayModes { modes: Vec<(u16, u16)> },
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -289,6 +311,15 @@ enum ControlMsg<'a> {
         clipboard: bool,
     },
     Clipboard { text: &'a str },
+    DisplayModes { modes: Vec<Resolution> },
+}
+
+/// One entry in [`ControlMsg::DisplayModes`], named so the JSON reads
+/// `{"w":1280,"h":800}` rather than a bare pair.
+#[derive(Serialize)]
+pub struct Resolution {
+    w: u16,
+    h: u16,
 }
 
 impl ServerMsg {
@@ -330,6 +361,9 @@ impl ServerMsg {
             // unbounded string on the browser link.
             ServerMsg::Clipboard { text } => WireFrame::Text(control(&ControlMsg::Clipboard {
                 text: clamp_clipboard(text),
+            })),
+            ServerMsg::DisplayModes { modes } => WireFrame::Text(control(&ControlMsg::DisplayModes {
+                modes: modes.iter().map(|&(w, h)| Resolution { w, h }).collect(),
             })),
         }
     }
@@ -400,6 +434,11 @@ mod tests {
             ClientMsg::Clipboard { text } => assert_eq!(text, "héllo"),
             other => panic!("unexpected: {other:?}"),
         }
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"setResolution","w":1280,"h":800}"#)
+                .unwrap(),
+            ClientMsg::SetResolution { w: 1280, h: 800 }
+        ));
     }
 
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.
@@ -432,6 +471,23 @@ mod tests {
                 assert_eq!(json, r#"{"type":"clipboard","text":"hi \"there\""}"#);
             }
             other => panic!("clipboard should be a text frame: {other:?}"),
+        }
+        match (ServerMsg::DisplayModes {
+            modes: vec![(1290, 830), (1024, 768)],
+        })
+        .encode()
+        {
+            WireFrame::Text(json) => assert_eq!(
+                json,
+                r#"{"type":"displayModes","modes":[{"w":1290,"h":830},{"w":1024,"h":768}]}"#
+            ),
+            other => panic!("displayModes should be a text frame: {other:?}"),
+        }
+        // An empty list is how "there is nothing to offer" travels, so it must
+        // encode as an empty array rather than being dropped.
+        match (ServerMsg::DisplayModes { modes: Vec::new() }).encode() {
+            WireFrame::Text(json) => assert_eq!(json, r#"{"type":"displayModes","modes":[]}"#),
+            other => panic!("displayModes should be a text frame: {other:?}"),
         }
     }
 

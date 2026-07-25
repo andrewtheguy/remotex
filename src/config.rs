@@ -258,17 +258,14 @@ impl ConfigFile {
                 );
                 rxa_proto::psk::parse(psk)
                     .map_err(|e| anyhow::anyhow!("target {:?} has an invalid psk: {e}", target.name))?;
-                // The agent captures the Mac's own resolution and ignores
-                // viewport reports; accepting `resize = true` would light up the
-                // browser's "Resize to window" control for a no-op. Not a v1
-                // gap: a Mac has one console session, so the only thing to
-                // resize is the physical display, which would rearrange the
-                // screen of whoever is sitting at it. See docs/roadmap.md.
-                anyhow::ensure!(
-                    !target.resize,
-                    "target {:?} sets resize, which the rxa agent does not support",
-                    target.name
-                );
+                // `resize` is accepted here but means something narrower than it
+                // does for RDP/VNC, and the agent — not this file — is what
+                // enforces it: the browser gets a menu of the resolutions the
+                // Mac's display advertises, and only when that display is a
+                // virtual one. On a physical Mac the agent reports itself
+                // unresizable and the menu never appears, because changing a
+                // real panel's mode rearranges the screen of whoever is sitting
+                // at it.
             } else {
                 anyhow::ensure!(
                     target.psk.is_empty(),
@@ -681,7 +678,7 @@ mod tests {
         // Adjacent to the web server's 52380, and not 3389 or 5900.
         assert_eq!(target.port, 52381);
         assert_eq!(target.psk, psk);
-        assert!(!target.resize, "the rxa agent has no dynamic resize");
+        assert!(!target.resize, "resize is opt-in for rxa too");
 
         // An explicit port still wins.
         let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nport = 52999")))
@@ -730,12 +727,17 @@ mod tests {
         assert!(msg.contains("psk") && msg.contains("rxa"), "{msg}");
     }
 
+    // Whether a resize can actually happen is the agent's call (a virtual
+    // display, in a VM), so the config layer takes the opt-in at face value
+    // rather than second-guessing a Mac it cannot see.
     #[test]
-    fn resize_on_an_rxa_target_is_rejected() {
+    fn resize_is_accepted_on_an_rxa_target() {
         let psk = rxa_proto::psk::generate();
-        let err = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("resize"), "{err:#}");
+        let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(config.targets[0].resize);
     }
 
     #[test]

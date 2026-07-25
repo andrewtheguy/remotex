@@ -88,10 +88,60 @@ function readViewport(): Viewport {
   };
 }
 
+// The remote's resolution menu: one button per size the display advertises.
+//
+// Only a Mac (rxa) target sharing a virtual display offers any, so this renders
+// nothing for every other target — and nothing for a Mac on a physical display
+// either, which is the point: a real monitor is never rearranged from here.
+// Such a display also cannot take an arbitrary size, which is why this is a
+// menu rather than the "Resize to window" button RDP gets.
+function ResolutionSection({
+  modes,
+  current,
+  onPick,
+}: {
+  modes: { w: number; h: number }[];
+  current: { w: number; h: number } | null;
+  onPick: (w: number, h: number) => void;
+}) {
+  if (modes.length === 0) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Resolution</span>
+      <div className="toolbar-keys">
+        {modes.map((mode) => {
+          const active = current?.w === mode.w && current?.h === mode.h;
+          return (
+            <button
+              key={`${mode.w}x${mode.h}`}
+              type="button"
+              className="toolbar-btn toolbar-btn-key"
+              onClick={() => onPick(mode.w, mode.h)}
+              aria-pressed={active}
+              title={
+                active
+                  ? `The remote is already ${mode.w}×${mode.h}`
+                  : `Set the remote display to ${mode.w}×${mode.h}`
+              }
+            >
+              {mode.w}×{mode.h}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
   onResizeToWindow,
+  displayModes,
+  remoteSize,
+  onSetResolution,
   sendKeyCombo,
   onKeyboardInset,
   canClipboard,
@@ -107,6 +157,16 @@ export default function FloatingMenu({
   // target supports on-request resize (RDP with resize enabled); VNC follows
   // the viewport automatically and needs no button. See useRemoteDesktop.
   onResizeToWindow?: () => void;
+  // The resolutions the remote will accept, largest first. Non-empty only for
+  // a Mac (rxa) target sharing a virtual display with `resize = true`: such a
+  // display takes sizes off a fixed list rather than following the window, so
+  // it gets a menu instead of onResizeToWindow's button. Empty hides the
+  // section entirely.
+  displayModes: { w: number; h: number }[];
+  // The remote's current size, so the menu can mark which entry is in effect.
+  // Null before the first frame.
+  remoteSize: { w: number; h: number } | null;
+  onSetResolution: (w: number, h: number) => void;
   sendKeyCombo: (codes: string[]) => void;
   // Reports the docked soft keyboard's height so the touch canvas can inset
   // above it (0 when the panel closes or floats). See useRemoteDesktop. The
@@ -341,6 +401,16 @@ export default function FloatingMenu({
     setOpen(false);
   }, [onResizeToWindow]);
 
+  // Same for picking a resolution off the menu: the point of the click is to
+  // look at the resized desktop.
+  const onPickResolution = useCallback(
+    (w: number, h: number) => {
+      onSetResolution(w, h);
+      setOpen(false);
+    },
+    [onSetResolution],
+  );
+
   // The drawer anchors to the FAB: right-aligned to it, placed below unless the
   // FAB sits too low, in which case it flips above.
   const toolbarStyle = useMemo(() => {
@@ -453,6 +523,12 @@ export default function FloatingMenu({
               ))}
             </div>
           </div>
+
+          <ResolutionSection
+            modes={displayModes}
+            current={remoteSize}
+            onPick={onPickResolution}
+          />
 
           <div className="toolbar-section toolbar-actions">
             {onResizeToWindow && (

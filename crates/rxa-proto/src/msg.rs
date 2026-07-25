@@ -88,6 +88,13 @@ pub enum AgentMsg {
         agent_version: String,
         w: u16,
         h: u16,
+        /// Whether the shared display's resolution may be changed on request.
+        /// True only for a paravirtual display in a VM guest — a physical panel
+        /// belongs to whoever is sitting at it, and rearranging it from a
+        /// browser is never wanted. The gateway needs this before `Attach`, so
+        /// it rides along here rather than waiting for
+        /// [`AgentMsg::DisplayModes`].
+        resizable: bool,
     },
     /// A dirty rectangle, already encoded as PNG or JPEG (see [`format`]).
     Tile {
@@ -102,6 +109,15 @@ pub enum AgentMsg {
     Cursor(Option<CursorImage>),
     /// The display was reconfigured on the Mac.
     DisplaySize { w: u16, h: u16 },
+    /// The resolutions the shared display will accept, in captured pixels,
+    /// largest first — the menu the browser offers for
+    /// [`GatewayMsg::SetDisplaySize`].
+    ///
+    /// Sent after `Attach` and again after every reconfigure: a host-driven
+    /// resize (UTM's dynamic resolution) regenerates the display's mode list, so
+    /// a list cached from `Attach` goes stale the moment the VM window is
+    /// dragged. Never sent at all when `Hello` said `resizable: false`.
+    DisplayModes { modes: Vec<(u16, u16)> },
     Pong { nonce: u64 },
     /// Something the user has to act on — most often a missing TCC grant.
     /// Surfaced in the browser rather than dying quietly in a log.
@@ -122,6 +138,7 @@ impl AgentMsg {
     const T_PONG: u8 = 0x05;
     const T_ERROR: u8 = 0x06;
     const T_CLIPBOARD: u8 = 0x07;
+    const T_DISPLAY_MODES: u8 = 0x08;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -131,12 +148,14 @@ impl AgentMsg {
                 agent_version,
                 w,
                 h,
+                resizable,
             } => {
                 out.push(Self::T_HELLO);
                 put_u16(&mut out, *version);
                 put_str(&mut out, agent_version);
                 put_u16(&mut out, *w);
                 put_u16(&mut out, *h);
+                out.push(u8::from(*resizable));
             }
             AgentMsg::Tile {
                 format,
@@ -174,6 +193,18 @@ impl AgentMsg {
                 put_u16(&mut out, *w);
                 put_u16(&mut out, *h);
             }
+            AgentMsg::DisplayModes { modes } => {
+                out.push(Self::T_DISPLAY_MODES);
+                // A display advertises a handful of modes, so the count cannot
+                // approach the ceiling; truncating a pathological one keeps the
+                // encoder infallible, as put_str does.
+                let count = modes.len().min(usize::from(u16::MAX));
+                put_u16(&mut out, count as u16);
+                for (w, h) in &modes[..count] {
+                    put_u16(&mut out, *w);
+                    put_u16(&mut out, *h);
+                }
+            }
             AgentMsg::Pong { nonce } => {
                 out.push(Self::T_PONG);
                 out.extend_from_slice(&nonce.to_le_bytes());
@@ -199,6 +230,7 @@ impl AgentMsg {
                 agent_version: r.string()?,
                 w: r.u16()?,
                 h: r.u16()?,
+                resizable: r.bool()?,
             },
             Self::T_TILE => AgentMsg::Tile {
                 format: r.u8()?,
@@ -223,6 +255,14 @@ impl AgentMsg {
                 w: r.u16()?,
                 h: r.u16()?,
             },
+            Self::T_DISPLAY_MODES => {
+                let count = usize::from(r.u16()?);
+                let mut modes = Vec::with_capacity(count.min(64));
+                for _ in 0..count {
+                    modes.push((r.u16()?, r.u16()?));
+                }
+                AgentMsg::DisplayModes { modes }
+            }
             Self::T_PONG => AgentMsg::Pong { nonce: r.u64()? },
             Self::T_ERROR => AgentMsg::Error {
                 message: r.string()?,
@@ -271,6 +311,16 @@ pub enum GatewayMsg {
     /// never sends this, and the agent then never reads the pasteboard
     /// unprompted.
     ClipboardWatch { enabled: bool },
+    /// Switch the shared display to this resolution, in captured pixels — the
+    /// browser's pick from the last [`AgentMsg::DisplayModes`].
+    ///
+    /// Only ever sent for a target with `resize = true`, and refused by an agent
+    /// whose display is not resizable. The agent answers with the
+    /// [`AgentMsg::DisplaySize`] its capture stream reports, not with an ack: a
+    /// mode switch that lands on a neighbouring size (the list moved underneath
+    /// the browser) has to correct the browser anyway, so there is one path for
+    /// both cases.
+    SetDisplaySize { w: u16, h: u16 },
 }
 
 impl GatewayMsg {
@@ -284,6 +334,7 @@ impl GatewayMsg {
     const T_CLIPBOARD_REQUEST: u8 = 0x08;
     const T_CLIPBOARD: u8 = 0x09;
     const T_CLIPBOARD_WATCH: u8 = 0x0a;
+    const T_SET_DISPLAY_SIZE: u8 = 0x0b;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -328,6 +379,11 @@ impl GatewayMsg {
                 out.push(Self::T_CLIPBOARD_WATCH);
                 out.push(u8::from(*enabled));
             }
+            GatewayMsg::SetDisplaySize { w, h } => {
+                out.push(Self::T_SET_DISPLAY_SIZE);
+                put_u16(&mut out, *w);
+                put_u16(&mut out, *h);
+            }
         }
         out
     }
@@ -360,6 +416,10 @@ impl GatewayMsg {
             Self::T_CLIPBOARD => GatewayMsg::Clipboard { text: r.text()? },
             Self::T_CLIPBOARD_WATCH => GatewayMsg::ClipboardWatch {
                 enabled: r.bool()?,
+            },
+            Self::T_SET_DISPLAY_SIZE => GatewayMsg::SetDisplaySize {
+                w: r.u16()?,
+                h: r.u16()?,
             },
             other => return Err(MsgError::UnknownType(other)),
         };
@@ -489,6 +549,7 @@ mod tests {
                 agent_version: "0.0.19".to_owned(),
                 w: 3456,
                 h: 2234,
+                resizable: false,
             },
             // An empty version string and a zero-size display still roundtrip.
             AgentMsg::Hello {
@@ -496,6 +557,7 @@ mod tests {
                 agent_version: String::new(),
                 w: 0,
                 h: 0,
+                resizable: true,
             },
             AgentMsg::Tile {
                 format: format::JPEG,
@@ -522,6 +584,13 @@ mod tests {
             })),
             AgentMsg::Cursor(None),
             AgentMsg::DisplaySize { w: 1920, h: 1080 },
+            AgentMsg::DisplayModes {
+                modes: vec![(1290, 830), (1280, 960), (1024, 768), (800, 514)],
+            },
+            // "Resizable, but nothing to offer right now" is a real state — the
+            // mode list is re-read on every reconfigure and could come back
+            // empty — and must not be confused with a truncated body.
+            AgentMsg::DisplayModes { modes: Vec::new() },
             AgentMsg::Pong { nonce: u64::MAX },
             AgentMsg::Error {
                 message: "Screen Recording permission not granted".to_owned(),
@@ -582,6 +651,7 @@ mod tests {
             },
             GatewayMsg::ClipboardWatch { enabled: true },
             GatewayMsg::ClipboardWatch { enabled: false },
+            GatewayMsg::SetDisplaySize { w: 1280, h: 800 },
         ]
     }
 
@@ -609,12 +679,12 @@ mod tests {
         let mut agent: Vec<u8> = agent_variants().iter().map(|m| m.encode()[0]).collect();
         agent.sort_unstable();
         agent.dedup();
-        assert_eq!(agent.len(), 7, "seven agent message types");
+        assert_eq!(agent.len(), 8, "eight agent message types");
 
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 10, "ten gateway message types");
+        assert_eq!(gateway.len(), 11, "eleven gateway message types");
     }
 
     // Clipboard text uses u32 framing, not the u16 `put_str` every other string
@@ -650,6 +720,18 @@ mod tests {
         let mut bytes = vec![AgentMsg::T_CLIPBOARD];
         bytes.extend_from_slice(&9u32.to_le_bytes());
         bytes.extend_from_slice(b"short");
+        assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Truncated));
+    }
+
+    // The mode count is attacker-controlled in the sense that any peer can send
+    // it, so decoding must reject the overrun rather than reserve for a count
+    // the body cannot back.
+    #[test]
+    fn a_display_mode_count_that_overruns_the_body_is_rejected() {
+        let mut bytes = vec![AgentMsg::T_DISPLAY_MODES];
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        bytes.extend_from_slice(&1280u16.to_le_bytes());
+        bytes.extend_from_slice(&800u16.to_le_bytes());
         assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Truncated));
     }
 

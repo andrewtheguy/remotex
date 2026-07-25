@@ -44,9 +44,11 @@ endpoints and includes a checksum to catch transcription errors.
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
 - agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, pasteboard text
-  (on request or when the watched pasteboard changes), and heartbeat pongs;
+  (on request or when the watched pasteboard changes), the offered display
+  resolutions, and heartbeat pongs;
 - gateway to agent: mouse, wheel, and keyboard input, session control, clipboard
-  read requests, writes and the watch toggle, and heartbeat pings.
+  read requests, writes and the watch toggle, a display-resolution request, and
+  heartbeat pings.
 
 The gateway translates these into the same browser protocol used by RDP and
 VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
@@ -67,6 +69,33 @@ Desktop-size changes are ordered with tiles for the same reason.
 Cursor shapes are read separately from the framebuffer and sent with their
 hotspot. The representation closest to the capture display's backing scale is
 used.
+
+## Resolution
+
+With `resize = true` on the target, the browser may set the shared display to
+one of the resolutions it advertises — a menu in the floating toolbar, not a
+viewport report. A display of this kind accepts only the sizes on its own list;
+a request that is not on it lands on the largest listed size that fits.
+
+The agent decides whether that is allowed at all, and only permits it for a
+**virtual display in a virtual machine**: `CGDisplayVendorNumber` and
+`CGDisplayModelNumber` both zero with `CGDisplayIsBuiltin` false (a
+paravirtual framebuffer has no EDID to read an identity from), and `hw.model`
+starting with `VirtualMac` or `kern.hv_vmm_present` set. The verdict travels in
+the agent's `Hello`, and the gateway offers the browser a menu only when the
+target opted in *and* the agent agreed. On a physical Mac there is no menu and a
+request is refused: changing a real panel's mode rearranges the screen of
+whoever is sitting at it, with no undo.
+
+This does not depend on any host-side "dynamic resolution" setting — it is
+`CGDisplaySetDisplayMode` inside the guest. Such a setting is a different
+mechanism, host to guest: it pushes arbitrary sizes the guest cannot request,
+and it regenerates the advertised list when it does. The list is therefore
+re-read and re-sent on every reconfigure rather than cached.
+
+A mode switch runs on a blocking thread under a deadline. Once a VM's display
+stack wedges, `CGCompleteDisplayConfiguration` never returns, and the session
+must keep carrying tiles and input regardless.
 
 ## Input
 
@@ -105,8 +134,9 @@ launchd.
 
 ## Constraints
 
-- The agent mirrors a physical display and does not resize it from browser
-  viewport reports.
+- The agent mirrors a whole display and never follows browser viewport reports.
+  A physical display is never resized at all; a virtual one can only be set to a
+  size it already advertises (see Resolution above).
 - It runs only in a logged-in GUI session. It does not support the macOS login
   window or an unattended service mode.
 - Screen Recording and Accessibility grants are tied to the app's signing

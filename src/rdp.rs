@@ -669,6 +669,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // Handled by the active loop (client-initiated resize) before
         // translation, so this arm is unreachable in practice.
         ClientMsg::Viewport { .. } => Vec::new(),
+        // Only the Mac agent offers a menu of fixed resolutions; RDP resizes to
+        // the viewport instead, so the browser never sends this here.
+        ClientMsg::SetResolution { .. } => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Handled by the active loop (MS-RDPECLIP, a static virtual channel)
