@@ -155,6 +155,15 @@ struct State {
     next_generation: u64,
 }
 
+impl State {
+    fn bump_epoch_for_detach(&mut self) -> Option<(u64, u64)> {
+        self.attachment_epoch = self.attachment_epoch.wrapping_add(1);
+        self.engine
+            .as_ref()
+            .map(|engine| (engine.generation, self.attachment_epoch))
+    }
+}
+
 /// The single session slot: owns the engine lifecycle and routes its frames
 /// to whichever browser currently holds the attachment.
 pub struct SessionManager {
@@ -208,10 +217,7 @@ impl SessionManager {
             st.claim = Some(id.clone());
             let evicted = st.client.take();
             let expiry = if evicted.is_some() {
-                st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
-                st.engine
-                    .as_ref()
-                    .map(|engine| (engine.generation, st.attachment_epoch))
+                st.bump_epoch_for_detach()
             } else {
                 None
             };
@@ -396,10 +402,7 @@ impl SessionManager {
                 return;
             }
             st.client = None;
-            st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
-            st.engine
-                .as_ref()
-                .map(|engine| (engine.generation, st.attachment_epoch))
+            st.bump_epoch_for_detach()
         };
         if let Some((generation, attachment_epoch)) = expiry {
             info!(
