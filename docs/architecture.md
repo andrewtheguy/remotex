@@ -456,6 +456,15 @@ most worth warning about — a panel asks for the missing one once per launch an
 offers to open the pane, and the menu grows an **Enable …** row only while one is
 missing. Nothing about them appears when both are granted.
 
+The two are read on deliberately different schedules, because they take effect
+differently. Accessibility applies the moment it is ticked — `CGEventPost` starts
+landing with no restart — so it is polled once a second until it is granted and
+then left alone. Screen Recording is granted to a *launch*: the TCC state flips
+immediately but ScreenCaptureKit goes on refusing the running process, which is
+why macOS itself offers to quit and reopen the app. So it is read once at startup
+and believed for the rest of the run; re-reading it would report "granted" over a
+session that cannot capture a pixel.
+
 Quit is why the embedded LaunchAgent sets `KeepAlive` to `SuccessfulExit: false`
 rather than `true` — under a plain `true` launchd would restart the agent seconds
 after the user asked it to stop, while the narrower form still recovers from a

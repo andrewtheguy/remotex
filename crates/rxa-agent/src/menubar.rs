@@ -23,9 +23,15 @@
 //! ## Permissions are health, not settings
 //!
 //! Screen Recording and Accessibility are not options with a checkbox each: the
-//! agent is useless without either. So they are read on a timer, reported by the
-//! icon, prompted for once per launch, and given a menu row *only* while one is
-//! missing — see [`Permissions`] and [`Health`].
+//! agent is useless without either. So they are reported by the icon, prompted for
+//! once per launch, and given a menu row *only* while one is missing — see
+//! [`Permissions`] and [`Health`].
+//!
+//! They are also read on different schedules, because they *behave* differently:
+//! Accessibility applies the instant it is granted, so it is polled until it is;
+//! Screen Recording only reaches a fresh launch, so it is read once at startup and
+//! believed for the rest of the run. [`Controller::refresh_permissions`] has the
+//! reasoning.
 //!
 //! ## Quit has to defeat launchd
 //!
@@ -69,11 +75,12 @@ use crate::{capture, config, cursor, input, loginitem, panels, settings, state};
 /// window edge.
 const TICK: f64 = 0.1;
 
-/// Re-read the two TCC grants every tenth tick, so once a second.
+/// Re-read Accessibility every tenth tick, so once a second, until it is granted.
 ///
-/// They have to be polled at all because they change in System Settings, outside
-/// this process, with no notification to subscribe to. They do not have to be
-/// polled ten times a second.
+/// It has to be polled at all because it is granted in System Settings, outside
+/// this process, with no notification to subscribe to. It does not have to be
+/// polled ten times a second, and it does not have to be polled once it is on —
+/// see [`Controller::refresh_permissions`].
 const PERMISSION_EVERY: u32 = 10;
 
 /// The status item: blocked, idle, and with a gateway attached.
@@ -99,7 +106,7 @@ const URL_ACCESSIBILITY: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 const URL_LOGIN_ITEMS: &str = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
 
-/// The two TCC grants, as of the last time they were read.
+/// The two TCC grants, as they stand for *this* run of the agent.
 ///
 /// Neither is optional — without Screen Recording the screen never paints, and
 /// without Accessibility every click and keystroke is silently dropped — so they
@@ -107,11 +114,14 @@ const URL_LOGIN_ITEMS: &str = "x-apple.systempreferences:com.apple.LoginItems-Se
 /// reports and a panel offers to fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Permissions {
+    /// Read once, at startup, and never again — see
+    /// [`Controller::refresh_permissions`].
     screen: bool,
     accessibility: bool,
 }
 
 impl Permissions {
+    /// Read both grants. Correct exactly once, at startup.
     fn read() -> Self {
         Self {
             screen: capture::screen_recording_granted(),
@@ -189,7 +199,7 @@ define_class!(
             let ticks = self.ivars().ticks.get();
             self.ivars().ticks.set(ticks.wrapping_add(1));
             if ticks.is_multiple_of(PERMISSION_EVERY) {
-                self.ivars().permissions.set(Permissions::read());
+                self.refresh_permissions();
             }
 
             self.refresh_icon();
@@ -384,6 +394,33 @@ impl Controller {
         self.ivars().icon.set(Some(health));
     }
 
+    /// Re-read what can still change, and answer with where both grants stand.
+    ///
+    /// Only Accessibility is ever re-read, and only until it is granted:
+    ///
+    /// - **Screen Recording** is read once, at startup, because that is the only
+    ///   answer true of this process. macOS grants it to a *launch*: the TCC state
+    ///   flips the moment the user ticks the box, and ScreenCaptureKit goes on
+    ///   refusing this already-running process until the app is started again —
+    ///   which is why macOS itself offers to quit and reopen the app. Re-reading it
+    ///   would report "granted" over a session that cannot capture a pixel.
+    /// - **Accessibility** takes effect immediately: `CGEventPost` starts landing
+    ///   as soon as the box is ticked, no restart involved. So it is polled until
+    ///   it is on, and then left alone.
+    ///
+    /// What stopping costs is a *revocation* mid-session going unnoticed until the
+    /// next launch. That buys not making two IPC calls a second for the rest of the
+    /// login session to watch for something that essentially never happens, and the
+    /// agent is in the same position either way — input silently stops working.
+    fn refresh_permissions(&self) -> Permissions {
+        let mut permissions = self.ivars().permissions.get();
+        if !permissions.accessibility {
+            permissions.accessibility = input::accessibility_granted();
+            self.ivars().permissions.set(permissions);
+        }
+        permissions
+    }
+
     fn health(&self) -> Health {
         if !self.ivars().permissions.get().complete() {
             Health::Blocked
@@ -418,18 +455,18 @@ impl Controller {
         let mtm = MainThreadMarker::from(self);
         let mut body = String::from("remotex cannot use this Mac until you enable it:\n");
         if !permissions.screen {
-            body.push_str("\n• Screen Recording — without it the screen never paints.");
+            body.push_str(
+                "\n• Screen Recording — without it the screen never paints. macOS only \
+                 hands this to a fresh launch, so restart the agent after granting it.",
+            );
         }
         if !permissions.accessibility {
             body.push_str(
                 "\n• Accessibility — without it the picture works and every click and \
-                 keystroke is silently ignored.",
+                 keystroke is silently ignored. This one applies the moment you grant it.",
             );
         }
-        body.push_str(
-            "\n\nEnable remotex-agent under Privacy & Security. The menu bar icon keeps \
-             warning until both are on.",
-        );
+        body.push_str("\n\nEnable remotex-agent under Privacy & Security.");
 
         if panels::confirm(
             mtm,
@@ -492,12 +529,12 @@ impl Controller {
             menu.addItem(&self.action("Open Log", sel!(openLog:), mtm));
         }
 
-        // Read live: the user may well have just granted one in System Settings
-        // and come straight back here to check. Nothing appears when both are
-        // granted — they are requirements, and a requirement that is met is not
+        // Accessibility is re-read here — the user may well have just granted it
+        // and come straight back to check — and Screen Recording is whatever this
+        // process was launched with, for the reasons in `refresh_permissions`.
+        // Nothing appears when both are granted: a requirement that is met is not
         // something to offer the user a row about.
-        let permissions = Permissions::read();
-        ivars.permissions.set(permissions);
+        let permissions = self.refresh_permissions();
         if !permissions.complete() {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             menu.addItem(&self.info("⚠︎ Not usable until permissions are granted", mtm));
@@ -508,7 +545,8 @@ impl Controller {
                     mtm,
                 );
                 item.setToolTip(Some(&NSString::from_str(
-                    "Not granted — the screen never paints. Click to open System Settings.",
+                    "Not granted — the screen never paints. Click to open System Settings; \
+                     this one only takes effect once the agent is restarted.",
                 )));
                 menu.addItem(&item);
             }

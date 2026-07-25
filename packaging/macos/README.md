@@ -105,10 +105,10 @@ psk = "rxa..."
 Both permissions are needed in **System Settings → Privacy & Security**, under
 `remotex-agent`:
 
-| Permission | Without it |
-|---|---|
-| Screen Recording | the screen never paints; the gateway reports the reason |
-| Accessibility | the session looks perfectly healthy and silently ignores every click and keystroke |
+| Permission | Without it | Once granted |
+|---|---|---|
+| Screen Recording | the screen never paints; the gateway reports the reason | **restart the agent** — macOS only gives this to a fresh launch |
+| Accessibility | the session looks perfectly healthy and silently ignores every click and keystroke | works immediately |
 
 The second is the one that wastes an afternoon — with only Screen Recording
 granted, everything appears to work except that nothing responds. So neither is
@@ -116,6 +116,12 @@ treated as an option: the agent asks for the missing one at startup and offers t
 open the right pane, the menu bar icon shows ⚠️ until both are on, and the menu
 carries an **Enable …** item for whichever is missing. When both are granted,
 none of that appears.
+
+Note the third column. Ticking Accessibility fixes a running agent on the spot,
+and the ⚠️ clears within a second. Ticking Screen Recording does not: the running
+process keeps being refused, so the warning stays until you **Quit** and open the
+agent again — which is also what macOS's own "quit and reopen" prompt is telling
+you.
 
 macOS provides no way to grant these programmatically. Because the bundle is
 code-signed with a stable identifier, you only grant them once; they survive
