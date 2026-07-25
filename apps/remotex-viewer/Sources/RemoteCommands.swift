@@ -28,6 +28,24 @@ struct RemoteCommands: Commands {
             }
             .disabled(!model.session.canResize)
 
+            // The web floating menu is hidden while the viewer is attached, so
+            // without this a target whose only resize path is a fixed list
+            // (the Mac agent on a virtual display) could not be resized at all.
+            Menu("Resolution") {
+                ForEach(model.session.displayModes) { mode in
+                    Button {
+                        model.setResolution(mode)
+                    } label: {
+                        if mode == model.session.remoteSize {
+                            Label(mode.label, systemImage: "checkmark")
+                        } else {
+                            Text(mode.label)
+                        }
+                    }
+                }
+            }
+            .disabled(model.session.displayModes.isEmpty)
+
             Button("Switch Target") {
                 model.switchTarget()
             }

@@ -46,6 +46,8 @@ export default function App() {
         connectionStatus: null,
         connectedTarget: null,
         remoteIsMac: false,
+        displayModes: [],
+        remoteSize: null,
         canResize: false,
         canClipboard: false,
         canCaptureKeyboard: false,

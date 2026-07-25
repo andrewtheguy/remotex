@@ -15,6 +15,15 @@ enum ViewerConnectionStatus: String {
     case takenOver
 }
 
+/// One entry of the remote's resolution menu, in device pixels.
+struct DisplayMode: Equatable, Identifiable, Hashable {
+    var w: Int
+    var h: Int
+
+    var id: String { "\(w)x\(h)" }
+    var label: String { "\(w) × \(h)" }
+}
+
 struct ViewerSessionState: Equatable {
     var screen = ViewerScreen.checking
     var connectionStatus: ViewerConnectionStatus?
@@ -23,6 +32,11 @@ struct ViewerSessionState: Equatable {
     /// Decides only whether a local Command shortcut stays Command or becomes
     /// remote Control.
     var remoteIsMac = false
+    /// The resolutions the remote offers. Empty for every target without a
+    /// menu — only a Mac agent on a virtual display fills this in.
+    var displayModes: [DisplayMode] = []
+    /// The remote's current size, so the menu can mark the entry in use.
+    var remoteSize: DisplayMode?
     var canResize = false
     var canClipboard = false
     var canCaptureKeyboard = false

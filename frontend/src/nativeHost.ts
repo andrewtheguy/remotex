@@ -18,12 +18,21 @@ interface NativeCommandResult {
   error?: string;
 }
 
+/// One entry of the remote's resolution menu, in device pixels.
+export interface NativeDisplayMode {
+  w: number;
+  h: number;
+}
+
 export type NativeCommand =
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
   | { type: "releaseKeys" }
   | { type: "clipboard"; text: string }
   | { type: "clipboardRequest" }
   | { type: "resize" }
+  // A pick from `displayModes`, not a viewport report — see ClientMsg in
+  // src/protocol.rs for why the two are separate.
+  | { type: "setResolution"; w: number; h: number }
   | { type: "switchTarget" }
   | { type: "logout" }
   | { type: "takeOver" };
@@ -39,6 +48,12 @@ export interface NativeHostState {
     | null;
   connectedTarget: string | null;
   remoteIsMac: boolean;
+  // The resolutions the remote offers, empty for every target that offers no
+  // menu. The native viewer hides the web floating menu, so without these the
+  // resolution list would be unreachable there.
+  displayModes: NativeDisplayMode[];
+  // The remote's current size, so the menu can mark the entry already in use.
+  remoteSize: NativeDisplayMode | null;
   canResize: boolean;
   canClipboard: boolean;
   canCaptureKeyboard: boolean;
@@ -98,6 +113,10 @@ function parseCommand(value: unknown): NativeCommand | null {
     case "clipboard":
       return typeof command.text === "string"
         ? { type: "clipboard", text: command.text }
+        : null;
+    case "setResolution":
+      return typeof command.w === "number" && typeof command.h === "number"
+        ? { type: "setResolution", w: command.w, h: command.h }
         : null;
     case "releaseKeys":
     case "clipboardRequest":

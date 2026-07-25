@@ -45,7 +45,14 @@ Native-to-frontend commands cover:
 
 - key press/release and release-all;
 - clipboard send/request;
-- resize, switch target, takeover, and logout.
+- resize, resolution pick, switch target, takeover, and logout.
+
+`resize` and `setResolution` are not two spellings of one thing. `resize` asks
+the remote to follow the window and is RDP-only; `setResolution` applies one
+entry from the `displayModes` list the state payload carries, which is how a
+Mac agent on a virtual display resizes. The viewer hides the web floating menu,
+so the **Resolution** submenu in the **Remote** menu is the only way to reach
+that list while it is attached.
 
 Native commands call the functions owned by `useRemoteDesktop`; the viewer does
 not open a second session WebSocket.

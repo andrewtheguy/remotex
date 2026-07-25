@@ -12,6 +12,29 @@ import {
   useRemoteDesktop,
 } from "./useRemoteDesktop.ts";
 
+// Why a native command cannot run right now, or null when it can. Kept apart
+// from the dispatch below so each stays readable: this is the only place a
+// native command is refused, and the switch there is then a plain mapping.
+//
+// The viewer disables the matching menu items from the same state, so a refusal
+// means its picture of the session went stale — a target switch mid-menu, say.
+function unavailable(
+  command: NativeCommand,
+  caps: { canClipboard: boolean; canResize: boolean; hasModes: boolean },
+): string | null {
+  switch (command.type) {
+    case "clipboard":
+    case "clipboardRequest":
+      return caps.canClipboard ? null : "clipboard is disabled for this target";
+    case "resize":
+      return caps.canResize ? null : "resize is unavailable";
+    case "setResolution":
+      return caps.hasModes ? null : "this target offers no resolution menu";
+    default:
+      return null;
+  }
+}
+
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connecting: "Connecting…",
   connected: "Connected",
@@ -83,6 +106,8 @@ export default function RemoteDesktop({
         connectionStatus: status,
         connectedTarget,
         remoteIsMac,
+        displayModes,
+        remoteSize: size,
         canResize,
         canClipboard,
         canCaptureKeyboard: status === "connected" && mode === "desktop",
@@ -92,9 +117,11 @@ export default function RemoteDesktop({
     canClipboard,
     canResize,
     connectedTarget,
-    remoteIsMac,
+    displayModes,
     mode,
     nativeHost,
+    remoteIsMac,
+    size,
     status,
   ]);
 
@@ -114,6 +141,14 @@ export default function RemoteDesktop({
       return;
     }
     return setNativeCommandHandler((command: NativeCommand) => {
+      const refusal = unavailable(command, {
+        canClipboard,
+        canResize,
+        hasModes: displayModes.length > 0,
+      });
+      if (refusal) {
+        return { ok: false, error: refusal };
+      }
       switch (command.type) {
         case "key":
           sendNativeKey(command.code, command.pressed, command.caps);
@@ -122,28 +157,16 @@ export default function RemoteDesktop({
           releaseNativeKeys();
           return { ok: true };
         case "clipboard":
-          if (!canClipboard) {
-            return {
-              ok: false,
-              error: "clipboard is disabled for this target",
-            };
-          }
           sendClipboard(command.text);
           return { ok: true };
         case "clipboardRequest":
-          if (!canClipboard) {
-            return {
-              ok: false,
-              error: "clipboard is disabled for this target",
-            };
-          }
           void requestClipboard();
           return { ok: true };
         case "resize":
-          if (!canResize) {
-            return { ok: false, error: "resize is unavailable" };
-          }
           resizeToWindow();
+          return { ok: true };
+        case "setResolution":
+          setResolution(command.w, command.h);
           return { ok: true };
         case "switchTarget":
           switchTarget();
@@ -159,6 +182,7 @@ export default function RemoteDesktop({
   }, [
     canClipboard,
     canResize,
+    displayModes,
     nativeHost,
     onLogout,
     releaseNativeKeys,
@@ -166,6 +190,7 @@ export default function RemoteDesktop({
     resizeToWindow,
     sendClipboard,
     sendNativeKey,
+    setResolution,
     switchTarget,
     takeOver,
   ]);

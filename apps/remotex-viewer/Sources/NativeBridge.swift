@@ -106,7 +106,27 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
         model?.navigationFailed(error)
     }
 
-    private static func decodeState(_ value: [String: Any]) -> ViewerSessionState? {
+    static func decodeMode(_ value: Any?) -> DisplayMode? {
+        guard let mode = value as? [String: Any],
+              let w = mode["w"] as? Int,
+              let h = mode["h"] as? Int
+        else {
+            return nil
+        }
+        return DisplayMode(w: w, h: h)
+    }
+
+    /// Anything malformed is dropped rather than failing the whole state
+    /// update: a missing menu entry costs one item, a rejected state costs the
+    /// viewer every capability it carries.
+    static func decodeModes(_ value: Any?) -> [DisplayMode] {
+        guard let list = value as? [Any] else {
+            return []
+        }
+        return list.compactMap(decodeMode)
+    }
+
+    static func decodeState(_ value: [String: Any]) -> ViewerSessionState? {
         guard let screenName = value["screen"] as? String,
               let screen = ViewerScreen(rawValue: screenName),
               let remoteIsMac = value["remoteIsMac"] as? Bool,
@@ -123,6 +143,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
             connectionStatus: status,
             connectedTarget: value["connectedTarget"] as? String,
             remoteIsMac: remoteIsMac,
+            displayModes: decodeModes(value["displayModes"]),
+            remoteSize: decodeMode(value["remoteSize"]),
             canResize: canResize,
             canClipboard: canClipboard,
             canCaptureKeyboard: canCaptureKeyboard

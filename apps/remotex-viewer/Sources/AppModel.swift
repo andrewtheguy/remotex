@@ -189,6 +189,17 @@ final class AppModel {
         enqueue(["type": "resize"])
     }
 
+    /// Apply one of the resolutions the remote offered. Unlike `resizeToWindow`
+    /// this is a pick off a fixed list — a Mac's virtual display takes nothing
+    /// else — so an entry the gateway no longer offers is dropped here rather
+    /// than sent and refused.
+    func setResolution(_ mode: DisplayMode) {
+        guard session.displayModes.contains(mode) else {
+            return
+        }
+        enqueue(["type": "setResolution", "w": mode.w, "h": mode.h])
+    }
+
     func switchTarget() {
         guard session.screen == .desktop else {
             return

@@ -8,11 +8,11 @@ The native shell replaces the floating web menu after an exact bridge
 handshake. It provides:
 
 - application-level keyboard capture before WebKit or menu shortcuts;
-- target-OS-aware Command translation (Control shortcuts for Windows/Linux,
-  unchanged Command shortcuts for macOS);
+- Command translation that follows the remote (Control shortcuts for a non-Mac,
+  unchanged Command shortcuts for a Mac);
 - native `NSPasteboard` synchronization;
-- native Remote menu commands for resize, clipboard sync, target switching,
-  takeover, and logout.
+- native Remote menu commands for resize, resolution, clipboard sync, target
+  switching, takeover, and logout.
 
 The viewer and gateway frontend must have exactly the same product and bridge
 versions. They are released together intentionally; compatibility shims are not
