@@ -286,10 +286,10 @@ impl Injector {
         for button in std::mem::take(&mut self.buttons) {
             self.pointer_button(button, false);
         }
+        // Taking the set empties it before the first release is posted, so no
+        // release event carries its own flag — a Shift-up flagged with Shift is
+        // what leaves an app believing the modifier is still down.
         for code in std::mem::take(&mut self.held) {
-            // Drop it from the set first so the release event does not carry its
-            // own flag.
-            self.held.remove(&code);
             self.key(&code, false, self.caps);
         }
         self.caps = false;

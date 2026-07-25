@@ -75,8 +75,10 @@ fn is_photographic(w: u16, h: u16, rgb: &[u8]) -> bool {
     if pixels < MIN_JPEG_PIXELS {
         return false;
     }
-    // 15-bit quantised colour: 32768 possible values, one bit each.
-    let mut seen = vec![0u64; 32768 / 64];
+    // 15-bit quantised colour: 32768 possible values, one bit each. On the
+    // stack — this runs on every tile of every frame, and 4KiB of zeroing beats
+    // an allocation per tile.
+    let mut seen = [0u64; 32768 / 64];
     let mut distinct = 0usize;
     let step = (pixels / CLASSIFY_SAMPLES).max(1);
     for i in (0..pixels).step_by(step) {
