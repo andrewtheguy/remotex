@@ -10,10 +10,12 @@ over a common WebSocket protocol.
   Sharing.
 - The optional macOS companion `remotex-agent` provides a dedicated-agent
   alternative over the encrypted `rxa` protocol.
+- The optional macOS 26 `remotex-viewer` hosts the same web client with native
+  keyboard capture, Command shortcut translation, menus, and clipboard access.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/mac-agent-architecture.md`](docs/mac-agent-architecture.md) for the
-macOS agent.
+macOS agent, and [`docs/macos-viewer.md`](docs/macos-viewer.md) for the viewer.
 
 ## Install
 
@@ -91,6 +93,7 @@ The main directories are:
 |---|---|
 | `src/` | gateway, session management, and RDP/VNC/`rxa` engines |
 | `frontend/` | React SPA |
+| `apps/remotex-viewer/` | macOS 26 SwiftUI/WKWebView viewer |
 | `crates/rxa-proto/` | protocol shared by gateway and macOS agent |
 | `crates/rxa-agent/` | macOS agent |
 | `tests/` | protocol and engine end-to-end tests |
@@ -108,6 +111,7 @@ site_passwd = "admin:$2b$..."
 [[targets]]
 name = "workstation"
 protocol = "rdp" # rdp, vnc, or rxa
+os = "windows"   # windows, macos, or linux
 host = "192.0.2.10"
 username = "Administrator"
 password = "change-me"
@@ -128,6 +132,8 @@ cargo test
 
 cd frontend
 bun run check
+
+swift test --package-path apps/remotex-viewer
 ```
 
 The container-backed RDP and VNC tests use Docker or Podman and do not start a
@@ -161,4 +167,5 @@ bash packaging/build-tarball.sh
 ```
 
 The tarball contains the gateway binary and built frontend. The macOS agent is
-a separate DMG built by `packaging/macos/build-agent-app.sh`.
+a separate DMG built by `packaging/macos/build-agent-app.sh`. The foreground
+macOS viewer is built by `packaging/macos-viewer/build-viewer-app.sh`.

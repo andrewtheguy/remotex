@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::config::{AppConfig, GuestOs, Protocol, Security, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -71,6 +71,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
         targets: vec![TargetConfig {
             name: "xrdp-dummy".to_owned(),
             protocol: Protocol::Rdp,
+            os: GuestOs::Linux,
             host: common::container_host(),
             port: rdp_port,
             username: "dummy".to_owned(),

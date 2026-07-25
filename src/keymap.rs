@@ -261,6 +261,112 @@ pub fn keysym(code: &str, shift: bool) -> Option<u32> {
 mod tests {
     use super::{keysym, scancode};
 
+    // Every DOM code the native macOS viewer can emit. Browser and native input
+    // share ClientMsg::Key, so recognizing a code in only one engine is a
+    // backend conformance bug rather than a viewer capability difference.
+    const NATIVE_VIEWER_CODES: &[&str] = &[
+        "Escape",
+        "F1",
+        "F2",
+        "F3",
+        "F4",
+        "F5",
+        "F6",
+        "F7",
+        "F8",
+        "F9",
+        "F10",
+        "F11",
+        "F12",
+        "Backquote",
+        "Digit1",
+        "Digit2",
+        "Digit3",
+        "Digit4",
+        "Digit5",
+        "Digit6",
+        "Digit7",
+        "Digit8",
+        "Digit9",
+        "Digit0",
+        "Minus",
+        "Equal",
+        "Backspace",
+        "Tab",
+        "KeyQ",
+        "KeyW",
+        "KeyE",
+        "KeyR",
+        "KeyT",
+        "KeyY",
+        "KeyU",
+        "KeyI",
+        "KeyO",
+        "KeyP",
+        "BracketLeft",
+        "BracketRight",
+        "Backslash",
+        "CapsLock",
+        "KeyA",
+        "KeyS",
+        "KeyD",
+        "KeyF",
+        "KeyG",
+        "KeyH",
+        "KeyJ",
+        "KeyK",
+        "KeyL",
+        "Semicolon",
+        "Quote",
+        "Enter",
+        "ShiftLeft",
+        "KeyZ",
+        "KeyX",
+        "KeyC",
+        "KeyV",
+        "KeyB",
+        "KeyN",
+        "KeyM",
+        "Comma",
+        "Period",
+        "Slash",
+        "ShiftRight",
+        "ControlLeft",
+        "AltLeft",
+        "Space",
+        "AltRight",
+        "ControlRight",
+        "MetaLeft",
+        "MetaRight",
+        "Insert",
+        "Delete",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "NumLock",
+        "NumpadDivide",
+        "NumpadMultiply",
+        "NumpadSubtract",
+        "NumpadAdd",
+        "NumpadEnter",
+        "NumpadDecimal",
+        "Numpad0",
+        "Numpad1",
+        "Numpad2",
+        "Numpad3",
+        "Numpad4",
+        "Numpad5",
+        "Numpad6",
+        "Numpad7",
+        "Numpad8",
+        "Numpad9",
+    ];
+
     #[test]
     fn maps_common_letters() {
         assert_eq!(scancode("KeyA"), Some((0x1E, false)));
@@ -290,6 +396,18 @@ mod tests {
         assert_eq!(scancode("MediaPlayPause"), None);
         assert_eq!(scancode("F13"), None);
         assert_eq!(scancode(""), None);
+    }
+
+    #[test]
+    fn native_viewer_keys_are_supported_by_every_backend() {
+        for code in NATIVE_VIEWER_CODES {
+            assert!(scancode(code).is_some(), "RDP does not map {code}");
+            assert!(keysym(code, false).is_some(), "VNC does not map {code}");
+            assert!(
+                rxa_proto::keymap::mac_keycode(code).is_some(),
+                "RXA does not map {code}"
+            );
+        }
     }
 
     #[test]

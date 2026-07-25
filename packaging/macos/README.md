@@ -34,6 +34,7 @@ the gateway config:
 [[targets]]
 name = "mac"
 protocol = "rxa"
+os = "macos"
 host = "mac.local"
 psk = "rxa..."
 ```

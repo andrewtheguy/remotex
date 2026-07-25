@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::config::{AppConfig, GuestOs, Protocol, Security, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -63,6 +63,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         targets: vec![TargetConfig {
             name: "tigervnc-dummy".to_owned(),
             protocol: Protocol::Vnc,
+            os: GuestOs::Linux,
             host: common::container_host(),
             port: vnc_port,
             username: String::new(),

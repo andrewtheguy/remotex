@@ -270,6 +270,7 @@ impl SessionManager {
                 ServerMsg::Connected {
                     name: target.name.clone(),
                     protocol: target.protocol.name(),
+                    os: target.os.name(),
                     resize: target.resize,
                     clipboard: target.clipboard,
                 }
@@ -340,6 +341,7 @@ impl SessionManager {
 
         let name = target.name.clone();
         let protocol = target.protocol.name();
+        let os = target.os.name();
         let resize = target.resize;
         let clipboard = target.clipboard;
         st.selected = Some(target);
@@ -351,6 +353,7 @@ impl SessionManager {
             let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected {
                 name,
                 protocol,
+                os,
                 resize,
                 clipboard,
             }));
@@ -545,7 +548,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::Security;
+    use crate::config::{GuestOs, Security};
 
     /// A scripted engine: each spawn hands its channel ends to the test, which
     /// plays the engine role directly (no task, no sockets).
@@ -561,9 +564,15 @@ mod tests {
         resize: bool,
         clipboard: bool,
     ) -> TargetConfig {
+        let os = if protocol == Protocol::Rxa {
+            GuestOs::Macos
+        } else {
+            GuestOs::Linux
+        };
         TargetConfig {
             name: name.to_owned(),
             protocol,
+            os,
             host: "127.0.0.1".to_owned(),
             port: 1,
             username: String::new(),
@@ -613,11 +622,12 @@ mod tests {
     }
 
     /// Assert the next event is the connected status for `name`, carrying the
-    /// expected protocol/resize/clipboard metadata.
+    /// expected protocol/OS/resize/clipboard metadata.
     async fn expect_connected_meta(
         events: &mut mpsc::Receiver<AttachEvent>,
         name: &str,
         protocol: &str,
+        os: &str,
         resize: bool,
         clipboard: bool,
     ) {
@@ -625,11 +635,13 @@ mod tests {
             AttachEvent::Msg(ServerMsg::Connected {
                 name: got,
                 protocol: got_protocol,
+                os: got_os,
                 resize: got_resize,
                 clipboard: got_clipboard,
             }) => {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, protocol, "protocol metadata for {name}");
+                assert_eq!(got_os, os, "guest OS metadata for {name}");
                 assert_eq!(got_resize, resize, "resize metadata for {name}");
                 assert_eq!(got_clipboard, clipboard, "clipboard metadata for {name}");
             }
@@ -641,7 +653,7 @@ mod tests {
     /// targets are VNC with resize and clipboard off, so the metadata is
     /// checked against that.
     async fn expect_connected(events: &mut mpsc::Receiver<AttachEvent>, name: &str) {
-        expect_connected_meta(events, name, "vnc", false, false).await;
+        expect_connected_meta(events, name, "vnc", "linux", false, false).await;
     }
 
     #[tokio::test]
@@ -704,7 +716,15 @@ mod tests {
         // UI off them). The VNC/no-resize case is covered by every other test's
         // expect_connected.
         mgr.connect(att.id, "rdp-resize").unwrap();
-        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true, false).await;
+        expect_connected_meta(
+            &mut att.events,
+            "rdp-resize",
+            "rdp",
+            "linux",
+            true,
+            false,
+        )
+        .await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
         let (_input_rx, _frame_tx) = hooks.try_recv().expect("engine spawned on connect");
@@ -713,7 +733,15 @@ mod tests {
         mgr.detach(att.id);
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
-        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true, false).await;
+        expect_connected_meta(
+            &mut att.events,
+            "rdp-resize",
+            "rdp",
+            "linux",
+            true,
+            false,
+        )
+        .await;
 
         // The clipboard flag travels the same way, and independently of resize:
         // the rxa fake target has clipboard on and resize off.
@@ -722,7 +750,7 @@ mod tests {
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rxa").unwrap();
-        expect_connected_meta(&mut att.events, "rxa", "rxa", false, true).await;
+        expect_connected_meta(&mut att.events, "rxa", "rxa", "macos", false, true).await;
     }
 
     #[tokio::test]
@@ -785,17 +813,17 @@ mod tests {
     #[tokio::test]
     async fn detached_engine_expires_after_the_grace_period_for_every_protocol() {
         tokio::time::pause();
-        for (target, protocol, resize, clipboard) in [
-            ("rdp-resize", "rdp", true, false),
-            ("vnc-resize", "vnc", true, false),
-            ("rxa", "rxa", false, true),
+        for (target, protocol, os, resize, clipboard) in [
+            ("rdp-resize", "rdp", "linux", true, false),
+            ("vnc-resize", "vnc", "linux", true, false),
+            ("rxa", "rxa", "macos", false, true),
         ] {
             let (mgr, hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, target).unwrap();
-            expect_connected_meta(&mut att.events, target, protocol, resize, clipboard).await;
+            expect_connected_meta(&mut att.events, target, protocol, os, resize, clipboard).await;
             let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
 
             mgr.detach(att.id);

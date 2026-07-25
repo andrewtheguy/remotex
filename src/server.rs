@@ -209,6 +209,7 @@ async fn status_handler(State(state): State<AppState>, headers: HeaderMap) -> Js
 struct TargetInfo {
     name: String,
     protocol: &'static str,
+    os: &'static str,
     host: String,
     port: u16,
 }
@@ -223,6 +224,7 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
         .map(|t| TargetInfo {
             name: t.name.clone(),
             protocol: t.protocol.name(),
+            os: t.os.name(),
             host: t.host.clone(),
             port: t.port,
         })

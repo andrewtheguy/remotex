@@ -28,6 +28,7 @@ site_passwd = ""
 [[targets]]
 name = "example"
 protocol = "rdp"           # required: "rdp", "vnc" or "rxa"
+os = "windows"             # required: "windows", "macos" or "linux"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc, 52381 rxa).
 #port = 3389
@@ -73,6 +74,7 @@ password = "change-me"
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
+# os = "macos"
 # host = "10.0.0.2"
 # password = "change-me"
 
@@ -101,5 +103,6 @@ password = "change-me"
 # [[targets]]
 # name = "mac"
 # protocol = "rxa"
+# os = "macos"
 # host = "mac.local"
 # psk = "rxa..."
