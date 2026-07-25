@@ -53,6 +53,20 @@ const OUT_BACKLOG: usize = 64;
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
 
+/// Waits before each attempt to restart a capture stream that died, and with
+/// their length, the number of attempts.
+///
+/// A display being reconfigured is briefly absent from the shareable-content
+/// list altogether, so the first attempt is expected to fail and the total has
+/// to cover a mode switch settling — about a second on the VMs this was measured
+/// on. Beyond that the display really is gone and the session says so.
+const CAPTURE_RESTART_BACKOFF: &[Duration] = &[
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(1000),
+    Duration::from_millis(2000),
+];
+
 /// How long a mode switch may run before it is written off as wedged. Generous:
 /// a healthy switch settles in about a second, and the only thing this bound
 /// buys is a log line — the work itself cannot be cancelled.
@@ -250,9 +264,64 @@ async fn pump(
                         }
                     }
                     Out::Failed(message) => {
+                        // Most often a host-driven display reconfigure: dragging
+                        // a VM's window with dynamic resolution on does not
+                        // resize the stream, it *kills* it — ScreenCaptureKit
+                        // loses the display the filter names and reports "no
+                        // capture source provided". The display is back a moment
+                        // later in a new mode, so this is a pause rather than
+                        // the end of the session. Reporting it as fatal would
+                        // bounce the browser to the picker every time someone
+                        // resized the VM window.
                         warn!("session: capture failed: {message}");
-                        writer.send(&AgentMsg::Error { message }.encode()).await?;
-                        break Ok(());
+                        // The dead pipeline first: dropping the receiver is what
+                        // lets the encoder thread finish (see the teardown at
+                        // the end of this function, which does the same dance).
+                        capture = None;
+                        out_rx = None;
+                        if let Some(thread) = encoder_thread.take() {
+                            let _ = thread.join();
+                        }
+
+                        let mut restarted = None;
+                        for delay in CAPTURE_RESTART_BACKOFF {
+                            tokio::time::sleep(*delay).await;
+                            match start_pipeline(display, Arc::clone(&full_repaint)) {
+                                Ok(started) => {
+                                    restarted = Some(started);
+                                    break;
+                                }
+                                // Expected while the display is mid-reconfigure:
+                                // it briefly is not in the shareable list at all.
+                                Err(e) => debug!("session: capture restart: {e:#}"),
+                            }
+                        }
+                        let Some((started, rx, thread)) = restarted else {
+                            let message = format!("{message} (and it did not come back)");
+                            warn!("session: {message}");
+                            writer.send(&AgentMsg::Error { message }.encode()).await?;
+                            break Ok(());
+                        };
+
+                        let live = started.geometry;
+                        info!("session: capture restarted at {}x{}", live.width, live.height);
+                        injector = Injector::new(live.scale, live.origin);
+                        cursor_tracker.set_scale(live.scale);
+                        display_id = live.id;
+                        capture = Some(started);
+                        out_rx = Some(rx);
+                        encoder_thread = Some(thread);
+                        // Unconditionally, unlike `Attach`: the browser's canvas
+                        // is stale whatever the size came back as, and a full
+                        // repaint is coming regardless.
+                        writer.send(&AgentMsg::DisplaySize {
+                            w: live.width,
+                            h: live.height,
+                        }.encode()).await?;
+                        if resizable {
+                            send_modes(&mut writer, display_id).await?;
+                        }
+                        cursor_seen = cursor::UNSEEN;
                     }
                 }
             }
