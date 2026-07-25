@@ -22,7 +22,7 @@
 //!   frames — so an older tile could land on top of a newer one and leave stale
 //!   pixels on screen until something else redraws them. Ordering is worth more
 //!   than the parallelism until measurement says otherwise; the fallback ladder
-//!   in docs/mac-agent-plan.md starts with downscaling instead.
+//!   in docs/roadmap.md starts with downscaling instead.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +62,7 @@ const GATEWAY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 // Keeping it alive across sessions means hoisting it into agent-level shared
 // state, and it only pays off for outages shorter than the gateway's own 1s
 // minimum reconnect backoff — restarting the stream costs about as much. Left as
-// a measured optimisation rather than a guess.
+// a measured optimisation rather than a guess; see docs/roadmap.md.
 
 /// What the encoder sends to the pump, in capture order.
 enum Out {

@@ -21,8 +21,10 @@ toml = "1"
 
 # Screen capture. Chosen over objc2-screen-capture-kit because it exposes the
 # `SCStreamFrameInfo.dirtyRects` attachment directly (`CMSampleBuffer::
-# dirty_rects`), which the whole design leans on — see docs/mac-agent-plan.md.
-# It builds a small Swift bridge, hence build.rs's Swift runtime rpath.
+# dirty_rects`), which the whole design leans on — see docs/architecture.md.
+# It builds a small Swift bridge, which is why .cargo/config.toml pins
+# MACOSX_DEPLOYMENT_TARGET: without it Swift links the back-deployment
+# concurrency runtime and the agent dies at startup.
 screencapturekit = "8"
 
 # Tile codecs. Same `png` version and Fast compression the gateway uses, so a

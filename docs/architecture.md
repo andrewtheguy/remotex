@@ -332,6 +332,21 @@ ephemeral DH on top, so a recorded session stays unreadable even if the PSK
 later leaks. Everything both sides must agree on lives in `crates/rxa-proto`,
 in the same repo, so the two halves cannot drift.
 
+The PSK carries a **CRC**, so a mistyped key is a config-parse error naming the
+checksum rather than a handshake that mysteriously never completes once the
+gateway starts dialling.
+
+**Framing treats Noise as a byte stream.** A Noise transport message caps at
+65535 bytes and a full-screen keyframe is far larger, so rather than inventing a
+chunking flag, `frame.rs` splits transparently into ≤65519-byte Noise messages
+and application framing sits on top as plain `u32 LE length + u8 type + body`.
+Chunking never reaches the message definitions, and the whole layer is testable
+against an in-memory duplex. One consequence is load-bearing: the read and write
+halves each need their own nonce counter, so the framing holds a
+`snow::StatelessTransportState` rather than the stateful transport. With the
+stateful one, a reader blocked waiting for a tile would block the writer trying
+to send input.
+
 **Pixels pass through.** The agent captures with ScreenCaptureKit, takes the
 **native dirty rects** macOS reports, and encodes each tile as PNG or JPEG
 *on the Mac*, choosing per tile — PNG for flat UI and text (smaller *and*
@@ -339,6 +354,62 @@ sharper), JPEG for photographic content. The gateway relays those bytes into
 `Tile::encoded` without decoding a pixel, which is why `Tile` carries a
 `format` byte. Nothing new lands in the browser: `createImageBitmap` decodes
 JPEG natively.
+
+The classifier has to run on every tile, so it samples a strided subset and
+counts distinct colours quantised to 5 bits per channel: few colours means UI,
+many means photo. On a real desktop that lands where you would expect — text and
+window chrome as PNG, wallpaper gradients as JPEG. Dirty rects are split at
+`STRIP_ROWS = 64`, the same as the other engines, so a full repaint does not
+become one enormous message and the browser can start painting early.
+
+Two capture details are the classic ways to get this wrong, and both are
+handled explicitly. `CVPixelBuffer`'s **`bytesPerRow` is not `width * 4`** —
+rows are read at the reported stride, or the image shears. And a Retina display
+**captures at pixel dimensions that differ from the point dimensions**
+`CGEventPost` wants, so both are kept and converted at the input boundary.
+
+**The pipeline is bounded and coalescing, with one encoder thread.**
+
+```
+SCStream callback ──▶ raw tiles ──▶ encoder ──▶ out ──▶ pump ──▶ socket
+  (dispatch queue)     (bounded)    (thread)   (bounded)  (tokio)
+```
+
+The capture callback never encodes and never blocks — blocking
+ScreenCaptureKit's dispatch queue stalls capture itself. When the link cannot
+keep up the sink drops the frame and sets the full-repaint flag, so falling
+behind degrades into one later, coarser repaint instead of a queue of stale
+tiles. And there is deliberately **one** encoder thread rather than a pool: a
+pool lets two frames' tiles finish out of order, and the same region is commonly
+dirty in consecutive frames, so an older tile could land on top of a newer one
+and leave stale pixels until something else redraws them. Ordering is worth more
+than the parallelism until measurement says otherwise.
+
+**Input** is `CGEvent*` + `CGEventPost`. Keys go through
+`rxa_proto::keymap::mac_keycode` with modifier flags tracked from what the
+browser reports; remotex sends `caps` as an authoritative flag on every key
+event, so the agent never has to infer lock state. Pointer coordinates arrive as
+framebuffer pixels and must become global display points — divide by the
+capture's backing scale, offset by the display origin. That conversion is the
+most likely "clicks land in the wrong place" bug in the agent, so it is a pure
+function tested at 1×, 2× and offset corners.
+
+**Two TCC permissions, and neither can be obtained by simply using the API.**
+Screen Recording for `SCStream`, Accessibility for `CGEventPost`. Asking is not
+politeness: `SCShareableContent` fails with something that reads like a refusal
+but also happens when the question was never asked — and until it *is* asked the
+agent does not appear in the Screen Recording list at all, so there is nothing
+for the user to switch on. `CGEventPost` is worse; it never fails. Without
+Accessibility the screen paints, the session looks perfectly healthy, and every
+click and keystroke is silently discarded. So the agent calls
+`CGRequestScreenCaptureAccess` and `AXIsProcessTrustedWithOptions` explicitly at
+startup, and reports where both stand.
+
+Both grants are keyed to the **signed code identity**, which is why signing is
+not optional: an ad-hoc signature has no stable identity, so every rebuild
+re-prompts. Both also require a window server connection, which exists only
+inside the user's GUI session — hence a LaunchAgent, never a LaunchDaemon, and
+hence no login-window support (see [`roadmap.md`](roadmap.md)).
 
 **Reconnect is the point.** This engine deliberately differs from RDP and VNC
 in one way:
@@ -375,10 +446,12 @@ software of this kind is not a nicety. It also means AppKit owns the main
 thread: `menubar::run` takes it, and the cursor poll that used to be a sleep
 loop there is now a timer on the run loop.
 
-For the agent itself — ScreenCaptureKit capture, `CGEvent` injection, the two
-TCC permissions, and why it cannot run at the login window — see
-[`packaging/macos/README.md`](../packaging/macos/README.md) and the module docs
-in `crates/rxa-agent/src/`.
+Installing, signing and the permission grants are covered in
+[`packaging/macos/README.md`](../packaging/macos/README.md). Why the design is
+shaped this way, and what the machine disagreed with, is in
+[`mac-agent-plan.md`](mac-agent-plan.md); what it would take to reach a
+logged-out Mac, and why that is not planned, is in
+[`roadmap.md`](roadmap.md).
 
 ## Frontend
 

@@ -5,7 +5,7 @@ edition = "2024"
 
 # Deliberately platform-independent and dependency-light: this crate is the one
 # place the gateway and the macOS agent agree on the wire, and it must build and
-# unit-test on Linux (the agent crate never does). See docs/mac-agent-plan.md.
+# unit-test on Linux (the agent crate never does). See docs/architecture.md.
 [dependencies]
 # Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s. The default resolver is pure Rust
 # (x25519-dalek / chacha20poly1305 / blake2), so there is no C toolchain.
