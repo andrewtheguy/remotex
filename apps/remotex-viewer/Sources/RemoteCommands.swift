@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RemoteCommands: Commands {
-    let model: AppModel
+    @Bindable var model: AppModel
 
     var body: some Commands {
         CommandMenu("Remote") {
@@ -10,6 +10,11 @@ struct RemoteCommands: Commands {
             }
             .keyboardShortcut(.escape, modifiers: [.control, .option, .command])
             .disabled(!model.session.canCaptureKeyboard)
+
+            Toggle(
+                "Enable macOS Keyboard Overrides",
+                isOn: $model.macOSKeyboardOverridesEnabled
+            )
 
             Divider()
 
