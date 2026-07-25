@@ -1,4 +1,4 @@
-name: Release
+name: Release remotex
 
 on:
   workflow_dispatch:
@@ -131,8 +131,74 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # The macOS agent, shipped in the same release as the gateway rather than as a
+  # stream of its own: install.sh resolves GitHub's "Latest" release and strips a
+  # leading `v` to get the version, so a separately-tagged release becoming
+  # Latest would break `curl … | bash` for everyone.
+  #
+  # Ad-hoc signed, and the asset name says so. A Developer ID signature plus
+  # notarization is what a bundle needs to run on someone else's Mac without a
+  # quarantine dance — build-agent-app.sh already takes --notary-profile, so
+  # wiring it up here is adding the secrets, not writing code.
+  mac-agent:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build remotex-agent.app
+        # `-` pins the ad-hoc path rather than searching the runner's keychain, so
+        # a signing identity appearing in a future runner image cannot change what
+        # ships. Xcode is preinstalled, which the capture bindings' Swift bridge
+        # needs.
+        env:
+          CODESIGN_IDENTITY: "-"
+        run: bash packaging/macos/build-agent-app.sh
+
+      - name: Archive the bundle
+        # ditto, not zip: an .app is a directory tree whose executable bits have
+        # to survive. --sequesterRsrc is not cosmetic — without it ditto writes
+        # AppleDouble `._*` entries *inside* the bundle, and extracting with plain
+        # unzip leaves them as files the signature does not seal, so
+        # `codesign --verify --strict` fails and TCC will not grant Screen
+        # Recording or Accessibility to it. Sequestered, they go to __MACOSX/.
+        run: |
+          mkdir -p dist/upload
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent dist/remotex-agent.app \
+            "dist/upload/remotex-agent-${{ needs.prepare.outputs.version }}-macos-arm64-unsigned.zip"
+
+      - name: Verify the archived bundle
+        # Unpacked exactly as a user will, so the signature is checked where it
+        # can actually be broken rather than in the build directory. `--version`
+        # parses argv and exits before any config, capture or launchd work, so it
+        # needs no GUI session and neither TCC grant — and it is where a
+        # Swift-runtime link error surfaces, the failure
+        # MACOSX_DEPLOYMENT_TARGET exists to prevent (see .cargo/config.toml),
+        # which builds clean and only dies on launch.
+        run: |
+          mkdir -p dist/check
+          unzip -q "dist/upload/remotex-agent-${{ needs.prepare.outputs.version }}-macos-arm64-unsigned.zip" \
+            -d dist/check
+          codesign --verify --deep --strict --verbose=2 dist/check/remotex-agent.app
+          got=$(dist/check/remotex-agent.app/Contents/MacOS/remotex-agent --version)
+          echo "bundle reports: ${got}"
+          [ "$got" = "remotex-agent ${{ needs.prepare.outputs.version }}" ] || {
+            echo "::error::expected 'remotex-agent ${{ needs.prepare.outputs.version }}'"
+            exit 1
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remotex-agent-macos-arm64
+          path: dist/upload/*.zip
+          if-no-files-found: error
+
   release:
-    needs: [prepare, build]
+    needs: [prepare, build, mac-agent]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -148,7 +214,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "${{ needs.prepare.outputs.tag }}" artifacts/*.tar.gz --clobber
+        # Both globs, not `artifacts/*`: `merge-multiple` also drops the
+        # frontend-dist artifact's files in here, and those are build input, not
+        # release assets. The zip is the macOS agent bundle.
+        run: |
+          gh release upload "${{ needs.prepare.outputs.tag }}" \
+            artifacts/*.tar.gz artifacts/*.zip --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:
@@ -169,6 +240,11 @@ jobs:
   # These runners need no pinning (unlike the tarball builds above): the runner
   # only unpacks a tarball and drives docker, so all that matters is its arch —
   # the glibc that has to line up is the *base image*'s against the binary's.
+  #
+  # The image is the gateway alone. Nothing from `mac-agent` goes into it: the
+  # agent needs ScreenCaptureKit, a window server and a logged-in GUI session, so
+  # it runs on a Mac and never in a container. Its only relation to this job is
+  # that both hang off the same published release.
   docker:
     needs: [prepare, release]
     strategy:

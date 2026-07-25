@@ -9,10 +9,22 @@ Requires **macOS 14 or later**.
 
 ## Install
 
+Take `remotex-agent-<version>-macos-arm64-unsigned.zip` from the
+[latest release](https://github.com/andrewtheguy/remotex/releases) — it ships
+alongside the gateway tarballs, built from the same commit — then:
+
 ```sh
+unzip remotex-agent-*-macos-arm64-unsigned.zip
+xattr -dr com.apple.quarantine remotex-agent.app   # ad-hoc signed, so quarantined
 cp -R remotex-agent.app /Applications/
 open /Applications/remotex-agent.app
 ```
+
+The `xattr` line is Gatekeeper, not paranoia: a downloaded bundle without a
+Developer ID signature is refused until the quarantine attribute is gone. The
+same ad-hoc signature is why the two permissions below are asked for again after
+an upgrade — the grants are keyed to the code identity, and it changes with every
+build.
 
 That single open does everything an install script would have:
 
@@ -155,11 +167,10 @@ packaging/macos/build-agent-app.sh          # -> dist/remotex-agent.app
 
 Needs Xcode — the capture bindings build a small Swift bridge.
 
-Without a Mac to build on, the **Mac Agent (unsigned)** workflow
-(`.github/workflows/mac-agent.yml`) runs the same script on a GitHub runner and
-uploads the bundle as an artifact — arm64, ad-hoc signed. For testing only: the
-download is quarantined (`xattr -dr com.apple.quarantine remotex-agent.app`) and
-an ad-hoc identity asks for both permissions again on every install.
+You do not have to, though: every release carries the built bundle as
+`remotex-agent-<version>-macos-arm64-unsigned.zip` (see **Install** above). The
+release workflow runs this same script on a macOS runner, so a release bundle and
+a local one differ only in the signature.
 
 Signing prefers `$CODESIGN_IDENTITY`, then a `Developer ID Application`
 identity, then `Apple Development`, then ad-hoc. Prefer a real identity: the

@@ -49,6 +49,23 @@ See [`docs/install.md`](docs/install.md) for options, custom locations, and the
 upgrade/rollback model, and [`packaging/`](packaging/) for the on-disk layout and
 building tarballs.
 
+### What's in a release
+
+Every [release](https://github.com/andrewtheguy/remotex/releases) carries both
+halves, built from the same commit and the same version:
+
+| Asset | What it is |
+|---|---|
+| `remotex-<version>-linux-x86_64.tar.gz` | the gateway — what the installer above fetches |
+| `remotex-<version>-linux-arm64.tar.gz` | " |
+| `remotex-<version>-macos-arm64.tar.gz` | " |
+| `remotex-agent-<version>-macos-arm64-unsigned.zip` | the **Mac agent**, for a Mac you want to *connect to* |
+
+The gateway also ships as a container image (below). The agent is only needed on
+a Mac you intend to reach with `protocol = "rxa"`; it is ad-hoc signed, so
+unzipping it needs one `xattr` command — see
+[`packaging/macos/README.md`](packaging/macos/README.md).
+
 ## Container image (Linux amd64/arm64)
 
 ```bash
