@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::time::Duration;
 
 /// The web-login credentials every test server is configured with.
 #[allow(dead_code)]
@@ -137,15 +138,15 @@ pub async fn connect_target(ws: &mut Ws, target: &str) {
 /// binary with no `podman machine` started answers `--version` happily and then
 /// fails every real command. Only `info` talks to the engine.
 ///
+/// The probe is bounded: a daemon can be *wedged* rather than absent — a hung
+/// Docker Desktop answers the socket and then never replies — and an unbounded
+/// `info` would hang the test run with no output instead of moving on to the
+/// other runtime.
+///
 /// `REMOTEX_TEST_CONTAINER_RUNTIME` forces the choice when both work.
 #[allow(dead_code)]
 pub fn container_runtime() -> &'static str {
-    let usable = |runtime: &str| {
-        Command::new(runtime)
-            .arg("info")
-            .output()
-            .is_ok_and(|out| out.status.success())
-    };
+    let usable = |runtime: &str| runtime_responds(runtime, Duration::from_secs(10));
     if let Ok(forced) = std::env::var("REMOTEX_TEST_CONTAINER_RUNTIME") {
         let forced: &'static str = Box::leak(forced.into_boxed_str());
         assert!(usable(forced), "REMOTEX_TEST_CONTAINER_RUNTIME={forced} cannot be reached");
@@ -157,6 +158,40 @@ pub fn container_runtime() -> &'static str {
         }
     }
     panic!("this e2e test needs a running podman or docker to start the dummy server");
+}
+
+/// Whether `<runtime> info` succeeds within `budget`.
+///
+/// `Command::output()` would wait forever, so this spawns and polls instead.
+/// Output is discarded rather than captured: nothing reads it, and a killed
+/// child's pipes are one more thing to get wrong.
+#[allow(dead_code)]
+fn runtime_responds(runtime: &str, budget: Duration) -> bool {
+    use std::process::Stdio;
+
+    let Ok(mut child) = Command::new(runtime)
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false; // not installed
+    };
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // Wedged, or unwaitable. Reap it so the run leaves nothing behind.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// Kills the container on drop so a failed test doesn't leak it

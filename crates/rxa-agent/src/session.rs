@@ -167,9 +167,10 @@ pub async fn serve(
         }
     };
 
-    // Decided once, from the display the session is actually going to share:
-    // re-deciding later could disagree with itself if the config's display
-    // index resolved differently, and the gateway has already told the browser.
+    // What `Hello` claims is decided once, from the display the session is about
+    // to share. The *guard* inside the pump is re-decided whenever the display
+    // being captured turns out to be a different one (see there): this value
+    // only has to be right about the display the gateway was told about.
     let resizable = displaymode::resizable(geometry.id);
 
     writer
@@ -193,7 +194,7 @@ async fn pump(
     mut writer: FrameWriter<OwnedWriteHalf>,
     geometry: capture::Geometry,
     display: usize,
-    resizable: bool,
+    mut resizable: bool,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
     // `FrameReader::recv` is not cancel-safe, so it gets its own task.
@@ -206,6 +207,11 @@ async fn pump(
     // the config's index is resolved inside `capture`, and a mode switch must
     // address the display being captured rather than re-resolving the index.
     let mut display_id = geometry.id;
+    // A resize the browser asks for is already in flight, if any. One at a time:
+    // two concurrent CoreGraphics display configurations on the same display is
+    // not something to find out about the hard way, and a wedged one would
+    // otherwise let a click-happy browser pile up blocked threads.
+    let mut resize_task: Option<tokio::task::JoinHandle<()>> = None;
     let full_repaint = Arc::new(AtomicBool::new(true));
     // All three appear together when `Attach` starts the pipeline, and are torn
     // down together when the session ends.
@@ -307,6 +313,15 @@ async fn pump(
                         info!("session: capture restarted at {}x{}", live.width, live.height);
                         injector = Injector::new(live.scale, live.origin);
                         cursor_tracker.set_scale(live.scale);
+                        // A restart re-resolves the config's display index, which
+                        // can land on a *different* display — the one that just
+                        // died may be the one that went away. Re-decide the guard
+                        // for whatever is being captured now: `displaymode::apply`
+                        // trusts it, and it is the only thing between a browser
+                        // and a physical monitor's mode.
+                        if live.id != display_id {
+                            resizable = displaymode::resizable(live.id);
+                        }
                         display_id = live.id;
                         capture = Some(started);
                         out_rx = Some(rx);
@@ -354,6 +369,13 @@ async fn pump(
                                         }.encode()).await?;
                                     }
                                     injector = Injector::new(live.scale, live.origin);
+                                    // Same reason as the restart path: the index
+                                    // resolves at stream start, so the display
+                                    // captured here need not be the one `Hello`
+                                    // measured, and the guard has to follow it.
+                                    if live.id != display_id {
+                                        resizable = displaymode::resizable(live.id);
+                                    }
                                     display_id = live.id;
                                     // The pointer is drawn onto a canvas in
                                     // captured pixels, so it must be sized by
@@ -431,11 +453,6 @@ async fn pump(
                             clipboard_seen = Some(pasteboard::change_count());
                         }
                     }
-                    // Baseline the counter without reading anything: the first
-                    // push should be the user's next copy, not whatever
-                    // happened to be on the pasteboard when the browser
-                    // connected. That also matches VNC, where ServerCutText
-                    // only arrives on a change.
                     // Never fatal when refused: AgentMsg::Error tears the
                     // session down at the gateway, which is far too blunt for a
                     // resize the agent simply will not do. A physical display
@@ -445,6 +462,19 @@ async fn pump(
                             warn!(
                                 "session: refusing to resize display {display_id} to {w}x{h} — \
                                  not a virtual display"
+                            );
+                        } else if resize_task.as_ref().is_some_and(|t| !t.is_finished()) {
+                            // One at a time. Picking three sizes in three
+                            // seconds is an ordinary thing to do in a menu, and
+                            // each switch takes about a second — overlapping
+                            // them would have two display configurations open on
+                            // one display. Dropping the newer request is right
+                            // rather than queueing it: by the time the running
+                            // one lands, the queued size is what the user has
+                            // already changed their mind about, and the menu is
+                            // still there to click again.
+                            warn!(
+                                "session: ignoring a resize to {w}x{h} — one is still in flight"
                             );
                         } else {
                             // On a blocking thread with a deadline:
@@ -456,7 +486,7 @@ async fn pump(
                             // hung switch costs one thread, not the session.
                             let deadline = Duration::from_secs(RESIZE_TIMEOUT_SECS);
                             let id = display_id;
-                            tokio::spawn(async move {
+                            resize_task = Some(tokio::spawn(async move {
                                 let switch = tokio::task::spawn_blocking(move || {
                                     displaymode::apply(id, w, h)
                                 });
@@ -466,14 +496,23 @@ async fn pump(
                                         warn!("session: resize to {w}x{h} failed: {e:#}");
                                     }
                                     Ok(Err(e)) => warn!("session: resize task died: {e}"),
+                                    // The task ends here even though the blocking
+                                    // one behind it cannot be cancelled, so a
+                                    // wedged switch blocks further requests for
+                                    // the timeout and no longer.
                                     Err(_) => warn!(
                                         "session: resize to {w}x{h} is still running after \
                                          {RESIZE_TIMEOUT_SECS}s; the display stack may be wedged"
                                     ),
                                 }
-                            });
+                            }));
                         }
                     }
+                    // Baseline the counter without reading anything: the first
+                    // push should be the user's next copy, not whatever
+                    // happened to be on the pasteboard when the browser
+                    // connected. That also matches VNC, where ServerCutText
+                    // only arrives on a change.
                     GatewayMsg::ClipboardWatch { enabled } => {
                         clipboard_seen = enabled.then(pasteboard::change_count);
                         info!(

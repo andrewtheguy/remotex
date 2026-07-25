@@ -288,11 +288,19 @@ impl Capture {
     /// then arrives at the new size, which is what makes the handler's existing
     /// resize path fire — one announcement path for every cause.
     ///
-    /// Returns the geometry now being captured, or `None` when the display has
-    /// not in fact changed and nothing was done.
+    /// Returns the geometry now being captured, or `None` when nothing was done
+    /// — either the display has not in fact changed, or it is mid-reconfigure
+    /// and momentarily has no mode to read. The second is not an error: it is
+    /// the normal state for a few polls around a resize, and reporting it as one
+    /// would log a warning every 100ms through exactly the event this exists to
+    /// handle. The poll after it sees the new mode.
     pub fn follow_display(&mut self) -> anyhow::Result<Option<Geometry>> {
         let Some(live) = geometry_for_id(self.geometry.id) else {
-            anyhow::bail!("display {} reports no mode", self.geometry.id);
+            debug!(
+                "capture: display {} reports no mode; mid-reconfigure",
+                self.geometry.id
+            );
+            return Ok(None);
         };
         if (live.width, live.height) == (self.geometry.width, self.geometry.height) {
             return Ok(None);
