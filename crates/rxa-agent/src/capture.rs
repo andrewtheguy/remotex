@@ -369,13 +369,22 @@ impl Handler {
 
         // A mode switch changes the surface under us; tell the session so it can
         // re-announce the size before any tile with new coordinates arrives.
-        {
+        //
+        // The notification happens *outside* the lock: `resized` is the one sink
+        // call that may block (a resize must not be dropped, so it does a
+        // blocking send), and holding `last_size` across it would park every
+        // other dispatch-queue callback on the mutex behind it.
+        let resized = {
             let mut last = self.0.last_size.lock().unwrap();
-            if *last != (surface_w, surface_h) {
+            let changed = *last != (surface_w, surface_h);
+            if changed {
                 *last = (surface_w, surface_h);
                 self.0.full_repaint.store(true, Ordering::Relaxed);
-                self.0.sink.resized(surface_w, surface_h);
             }
+            changed
+        };
+        if resized {
+            self.0.sink.resized(surface_w, surface_h);
         }
 
         // `swap` so a concurrent callback doesn't also do the full frame.
