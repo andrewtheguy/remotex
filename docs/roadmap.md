@@ -64,43 +64,49 @@
   planned unless macOS grows a supported way to present a display that the
   person at the keyboard does not share.
 
-- **Service mode for `rxa` — reaching a Mac nobody is logged into**, the way
-  RealVNC and RustDesk can. The agent is a LaunchAgent living in the user's GUI
-  session, because that is the only place its two TCC grants exist. Closing the
-  gap is not a feature so much as a second deployment shape, and it costs the
-  current packaging story — drag the app in, open it once, uninstall by dragging
-  to the Trash — because the plist would have to be installed as root.
+- **Service mode for `rxa` — reaching a Mac nobody is logged into.** The agent
+  is a LaunchAgent living in the user's GUI session, because that is the only
+  place its two TCC grants exist. Closing the gap is not a feature so much as a
+  second deployment shape, and it costs the current packaging story — drag the
+  app in, open it once, uninstall by dragging to the Trash — because the plist
+  would have to be installed as root.
 
-  Worth separating two states that get conflated, because only one is hard.
-  **Logged in with the screen locked** is a session the agent is already running
-  in; whether ScreenCaptureKit still yields pixels over the lock screen is
-  untested, and if it does, that case already works and the remote can type the
-  password to unlock. **Logged out at the login window** is the RealVNC-style
-  capability, and it needs all of the following, in increasing order of
-  difficulty:
+  **Nobody else has really solved this on current macOS either**, which is the
+  main reason not to chase it. RustDesk ships exactly the architecture sketched
+  below — a `com.carriez.RustDesk_service` daemon plus an agent loaded for both
+  `Aqua` and `LoginWindow` — and still carries open reports of a black screen at
+  the login window, no control while a Mac sits there, and keystrokes that never
+  reach the lock-screen password field. RealVNC officially supports login-screen
+  connections and its own forums carry the same black-screen-after-logout
+  reports on Sonoma and Sequoia. Adopting somebody else's agent to get this
+  would be adopting an unfinished feature.
 
-  1. A second launchd job with `LimitLoadToSessionType = LoginWindow`, the key
-     that gets a process into the loginwindow context. `SMAppService` cannot
-     express it, so it needs a signed and notarized installer package writing
-     into `/Library/LaunchAgents`.
-  2. That job runs as root with no user, so the config and the pre-shared key
-     move out of `~/Library/Application Support` to a system path.
+  Two states get conflated, and only one is hard. **Logged in with the screen
+  locked** is a session the agent is already running in, so it may already work;
+  untested here, and RustDesk's lock-screen input bug suggests testing it rather
+  than assuming. **Logged out at the login window** needs all of:
+
+  1. A second launchd job with `LimitLoadToSessionType` set to both `Aqua` and
+     `LoginWindow`. `SMAppService` cannot express it, so it needs a signed and
+     notarized installer package writing into `/Library/LaunchAgents`. It must
+     be a LaunchAgent — a LaunchDaemon runs in the global session with no GUI
+     context, which is exactly why screen capture there returns nothing.
+  2. That job runs with no user, so the config and the pre-shared key move out
+     of `~/Library/Application Support` to a system path.
   3. Session hand-off. At login the login-window job unloads and the Aqua one
      loads, and back again at logout; two processes want port 52381, so either
      the listener migrates or a privileged daemon owns the socket and brokers to
      whichever agent currently has a window server. The engine's silent
      reconnect would cover the gap, which is a real advantage of the design.
-  4. **TCC, which is the wall.** Both grants are per-user and there is no user
-     at the login window, so the SIP-protected system database governs and
-     cannot be edited by hand. The supported route is an MDM Privacy Preferences
-     Policy Control payload — i.e. enrolling the Mac in an MDM.
+  4. **TCC.** Both grants are per-user and there is no user at the login window,
+     so the SIP-protected system database governs and cannot be edited by hand.
+     Whether Screen Recording can be *allowed* through an MDM PPPC payload, as
+     opposed to only denied, is the open question — and MDM enrolment is a heavy
+     ask for a personal Mac regardless.
 
-  **Two things to settle before any of that would be worth starting**, both
-  unverified: whether Screen Recording can be *allowed* through a PPPC payload
-  at all as opposed to only denied, and whether ScreenCaptureKit even functions
-  in the loginwindow session (Apple's own `screensharingd` predates it and uses
-  different plumbing). If the first answer is no, the other four items are
-  wasted work.
+  ScreenCaptureKit itself is **not** the blocker: Apple DTS confirms it works in
+  the LoginWindow session on macOS 14.4+ (it needed a bug fix), given the
+  LaunchAgent above. That was previously listed here as unverified.
 
   And a floor none of it gets under: **with FileVault on, nothing runs until
   someone unlocks the disk at pre-boot.** No volume, no agent, no login window.
@@ -111,4 +117,7 @@
   the agent with it — comes up straight after, and the Mac is reachable from
   boot. What stays uncovered is only a deliberate logout, which on a
   single-user machine is thin justification for a privileged system service.
-  That is why this is not planned rather than merely deferred.
+  And for that rare case remotex still has a VNC engine: a second target
+  pointing at Apple's own Screen Sharing, which does serve the login window,
+  costs no new code. The re-login complaint that motivated `rxa` does not apply
+  there, because logging in is the whole point of that connection.
