@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 // The viewer and the served frontend ship in lockstep. Increment this whenever
 // either side changes the shape or semantics of a native-host message.
-export const NATIVE_HOST_BRIDGE_VERSION = 2;
+export const NATIVE_HOST_BRIDGE_VERSION = 3;
 
 interface NativeHostDescriptor {
   bridgeVersion: number;
@@ -120,6 +120,12 @@ window.__remotexNativeDispatch = (value: unknown): NativeCommandResult => {
     return { ok: false, error: "invalid native command" };
   }
   if (!commandHandler) {
+    // Release-all is deliberately idempotent. The native host can race a
+    // desktop unmount while reacting to focus loss or navigation; the hook's
+    // own cleanup has already released its tracked keys in that case.
+    if (command.type === "releaseKeys") {
+      return { ok: true };
+    }
     return { ok: false, error: "command is unavailable on this screen" };
   }
   return commandHandler(command);

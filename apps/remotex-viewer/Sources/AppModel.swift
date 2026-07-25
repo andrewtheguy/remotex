@@ -30,6 +30,8 @@ final class AppModel {
     private var drainingCommands = false
     @ObservationIgnored
     private var bridgeDeadline: Task<Void, Never>?
+    @ObservationIgnored
+    private var pressedNativeKeys = NativePressedKeys()
 
     init() {
         let commandLineGateway = Self.commandLineGateway()
@@ -68,22 +70,22 @@ final class AppModel {
     }
 
     func detach(webView: WKWebView) {
+        releaseNativeKeys()
         if self.webView === webView {
             self.webView = nil
         }
         bridgeDeadline?.cancel()
         bridgeDeadline = nil
         bridgeStatus = .loading
-        releaseNativeKeys()
         clipboard.update(enabled: false)
     }
 
     func navigationStarted() {
+        releaseNativeKeys()
         bridgeDeadline?.cancel()
         bridgeStatus = .loading
         navigationError = nil
         session = ViewerSessionState()
-        releaseNativeKeys()
         clipboard.update(enabled: false)
     }
 
@@ -101,10 +103,10 @@ final class AppModel {
     }
 
     func navigationFailed(_ error: Error) {
+        releaseNativeKeys()
         bridgeDeadline?.cancel()
         bridgeStatus = .failed(error.localizedDescription)
         navigationError = error.localizedDescription
-        releaseNativeKeys()
         clipboard.update(enabled: false)
     }
 
@@ -128,10 +130,10 @@ final class AppModel {
     func apply(session next: ViewerSessionState) {
         let wasCapturing = session.canCaptureKeyboard
         let guestChanged = session.guestOS != next.guestOS
-        session = next
         if wasCapturing && (!next.canCaptureKeyboard || guestChanged) {
             releaseNativeKeys()
         }
+        session = next
         clipboard.update(
             enabled: bridgeStatus == .ready
                 && next.screen == .desktop
@@ -191,6 +193,7 @@ final class AppModel {
     }
 
     func sendKey(code: String, pressed: Bool, caps: Bool) {
+        pressedNativeKeys.record(code: code, pressed: pressed)
         enqueue([
             "type": "key",
             "code": code,
@@ -200,6 +203,9 @@ final class AppModel {
     }
 
     func releaseNativeKeys() {
+        guard pressedNativeKeys.takeForRelease() else {
+            return
+        }
         enqueue(["type": "releaseKeys"])
     }
 

@@ -1,7 +1,7 @@
 import Foundation
 
 enum ProductInfo {
-    static let bridgeVersion = 2
+    static let bridgeVersion = 3
     static let developmentVersion = "0.0.26"
 
     static var version: String {
