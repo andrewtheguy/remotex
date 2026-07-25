@@ -50,7 +50,5 @@
 	<!-- Shown in the permission prompts, so it should say why. -->
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>remotex agent shares this Mac's screen with your remotex gateway.</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>remotex agent delivers your keyboard and mouse input to this Mac.</string>
 </dict>
 </plist>

@@ -70,8 +70,15 @@ with open("crates/rxa-agent/Cargo.toml", "rb") as f:
 
 # ── Optional: a throwaway keychain holding an imported .p12 ─────────────────
 temp_keychain=""
+temp_dir=""
 cleanup() {
-  [ -n "$temp_keychain" ] && security delete-keychain "$temp_keychain" 2>/dev/null || true
+  if [ -n "$temp_keychain" ]; then
+    security delete-keychain "$temp_keychain" 2>/dev/null || true
+  fi
+  # Holds the decoded .p12, so it must go even when a step below fails.
+  if [ -n "$temp_dir" ]; then
+    rm -rf "$temp_dir"
+  fi
 }
 trap cleanup EXIT
 
@@ -79,9 +86,11 @@ if [ -n "${MACOS_CERT_P12:-}" ]; then
   : "${MACOS_CERT_PASSWORD:?MACOS_CERT_P12 is set but MACOS_CERT_PASSWORD is not}"
   : "${MACOS_KEYCHAIN_PASSWORD:?MACOS_CERT_P12 is set but MACOS_KEYCHAIN_PASSWORD is not}"
   echo ">> importing the signing certificate into a temporary keychain"
-  temp_keychain="${TMPDIR:-/tmp}/remotex-agent-signing.keychain-db"
-  cert_path="${TMPDIR:-/tmp}/remotex-agent-cert.p12"
-  security delete-keychain "$temp_keychain" 2>/dev/null || true
+  # A private key must never land on a path another process could predict (or
+  # pre-create): mktemp -d owns both files, and the trap above removes it.
+  temp_dir="$(mktemp -d)"
+  temp_keychain="$temp_dir/remotex-agent-signing.keychain-db"
+  cert_path="$temp_dir/cert.p12"
   printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$cert_path"
   security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$temp_keychain"
   security set-keychain-settings -lut 21600 "$temp_keychain"
@@ -89,9 +98,19 @@ if [ -n "${MACOS_CERT_P12:-}" ]; then
   security import "$cert_path" -P "$MACOS_CERT_PASSWORD" -f pkcs12 \
     -k "$temp_keychain" -T /usr/bin/codesign
   rm -f "$cert_path"
-  # Prepend ours to the search list, preserving the existing keychains.
-  security list-keychains -d user -s "$temp_keychain" \
-    $(security list-keychains -d user | sed 's/"//g')
+  # Prepend ours to the search list, preserving the existing keychains. Each
+  # existing path stays one argument — `security` prints them indented and
+  # quoted, and a home directory with a space in it would otherwise be split
+  # into two nonexistent keychains, silently dropping the login keychain.
+  set_keychains=(list-keychains -d user -s "$temp_keychain")
+  while IFS= read -r keychain; do
+    keychain="${keychain%\"}"   # trailing quote
+    keychain="${keychain#*\"}"  # leading indent and opening quote
+    if [ -n "$keychain" ]; then
+      set_keychains+=("$keychain")
+    fi
+  done < <(security list-keychains -d user)
+  security "${set_keychains[@]}"
   # The step that actually makes non-interactive signing work.
   security set-key-partition-list -S apple-tool:,apple:,codesign: \
     -s -k "$MACOS_KEYCHAIN_PASSWORD" "$temp_keychain" >/dev/null
@@ -199,5 +218,10 @@ agent in System Settings > General > Login Items. Then:
 
 for the key to paste into the gateway's rxa target, and grant "remotex-agent"
 BOTH Screen Recording and Accessibility in System Settings > Privacy & Security.
-Check everything with --status.
+
+Read where those two grants stand from the menu bar item, or from the agent's
+own log — macOS credits the permissions to whatever launched the process, so a
+shell asking on the agent's behalf answers for the shell:
+
+    grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
 NOTES
