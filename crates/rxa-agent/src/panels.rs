@@ -1,11 +1,10 @@
 //! The agent's modal panels: everything the GUI needs beyond a menu item.
 //!
 //! [`config`] is the settings dialog — one panel holding every setting the agent
-//! has. [`error`] and [`confirm`] are the two answers a menu cannot give on its
-//! own: report a failure, and ask before doing something the user would rather
-//! have been asked about. [`startup_failure`] is [`error`] from before there is a
-//! menu at all, which is the only thing standing between a failed launch and an
-//! app that appears to do nothing when opened.
+//! has. [`error`] reports the failures a menu cannot show on its own.
+//! [`startup_failure`] is [`error`] from before there is a menu at all, which is
+//! the only thing standing between a failed launch and an app that appears to do
+//! nothing when opened.
 //!
 //! It is deliberately `NSAlert` and nothing more. A settings *window* would be a
 //! window controller, a nib, and a Dock icon's worth of behaviour the agent has
@@ -207,20 +206,6 @@ pub fn error(mtm: MainThreadMarker, title: &str, body: &str) {
     let alert = alert(mtm, title, body, NSAlertStyle::Critical);
     alert.addButtonWithTitle(&NSString::from_str("OK"));
     alert.runModal();
-}
-
-/// Ask before doing something the user cannot undo.
-///
-/// `confirm_label` names the action rather than saying "OK", because a button
-/// that says what it does is the difference between reading the dialog and
-/// dismissing it.
-pub fn confirm(mtm: MainThreadMarker, title: &str, body: &str, confirm_label: &str) -> bool {
-    let alert = alert(mtm, title, body, NSAlertStyle::Warning);
-    alert.addButtonWithTitle(&NSString::from_str(confirm_label));
-    // Second, so Escape and the default Return both land on Cancel's side of a
-    // decision the user may not have meant to make.
-    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-    alert.runModal() == NSAlertFirstButtonReturn
 }
 
 /// The **Regenerate** button's target: puts a fresh key in the field it holds.

@@ -42,7 +42,7 @@
 //! Both are one-time grants in System Settings → Privacy & Security, both are
 //! attached to this bundle's signed identity, and macOS provides no way to grant
 //! them programmatically. Neither is optional, so neither is a setting: the menu
-//! bar treats them as health, warns in its icon and asks for the missing one (see
+//! bar treats them as health, warns in its icon and links to the missing one (see
 //! [`menubar`]). Accessibility is the one that bites — without it the screen
 //! paints, the session looks perfectly healthy, and every click and keystroke is
 //! silently discarded.
@@ -428,9 +428,8 @@ async fn serve(
 ///   and keystroke vanishes.
 ///
 /// macOS remembers the answer, so a granted (or firmly refused) permission does
-/// not re-prompt on later launches — which is exactly why the menu bar asks again
-/// in its own words once the run loop is up (see [`menubar`]). This function is
-/// the system prompt and the log line; that one is the explanation.
+/// not re-prompt on later launches. The menu bar keeps missing grants visible and
+/// links to their System Settings panes without showing a second dialog.
 fn report_permissions() {
     if capture::screen_recording_granted() {
         info!("permissions: Screen Recording granted");

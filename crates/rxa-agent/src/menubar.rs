@@ -23,9 +23,9 @@
 //! ## Permissions are health, not settings
 //!
 //! Screen Recording and Accessibility are not options with a checkbox each: the
-//! agent is useless without either. So they are reported by the icon, prompted for
-//! once per launch, and given a menu row *only* while one is missing — see
-//! [`Permissions`] and [`Health`].
+//! agent is useless without either. So they are reported by the icon and given a
+//! menu row *only* while one is missing — see [`Permissions`] and [`Health`]. The
+//! native permission requests happen at startup in [`crate::report_permissions`].
 //!
 //! They are also read on different schedules, because they *behave* differently:
 //! Accessibility applies the instant it is granted, so it is polled until it is;
@@ -160,9 +160,6 @@ struct Ivars {
     ticks: Cell<u32>,
     /// The last permissions read, shared between the icon and the menu.
     permissions: Cell<Permissions>,
-    /// Whether the missing-permission panel has been shown this launch. Once is
-    /// the right number: it is a prompt, not a nag.
-    prompted: Cell<bool>,
 }
 
 define_class!(
@@ -203,7 +200,6 @@ define_class!(
             }
 
             self.refresh_icon();
-            self.prompt_for_permissions();
         }
 
         /// The settings dialog: every setting the agent has, in one panel.
@@ -444,59 +440,6 @@ impl Controller {
         }
     }
 
-    /// Ask for a missing permission, once, with a way to go and grant it.
-    ///
-    /// The system's own prompt (`report_permissions` at startup) appears at most
-    /// once ever per grant — macOS remembers a refusal — and says nothing about
-    /// what breaks. This one explains, and opens the pane the user would otherwise
-    /// have to find four levels down a settings tree.
-    ///
-    /// Fires from the cursor timer rather than before `NSApplication::run`, so the
-    /// app is fully up before anything modal happens. Once per launch, including
-    /// the case where a permission is *revoked* while the agent runs — which
-    /// breaks it just as thoroughly as never having been granted.
-    fn prompt_for_permissions(&self) {
-        let permissions = self.ivars().permissions.get();
-        if permissions.complete() || self.ivars().prompted.get() {
-            return;
-        }
-        // Set before the modal, not after: the timer keeps firing underneath it
-        // (the timer is in NSRunLoopCommonModes), and a second panel behind the
-        // first is not recoverable from a menu bar item.
-        self.ivars().prompted.set(true);
-
-        let mtm = MainThreadMarker::from(self);
-        let mut body = String::from("remotex cannot use this Mac until you enable it:\n");
-        if !permissions.screen {
-            body.push_str(
-                "\n• Screen Recording — without it the screen never paints. macOS only \
-                 hands this to a fresh launch, so restart the agent after granting it.",
-            );
-        }
-        if !permissions.accessibility {
-            body.push_str(
-                "\n• Accessibility — without it the picture works and every click and \
-                 keystroke is silently ignored. This one applies the moment you grant it.",
-            );
-        }
-        body.push_str("\n\nEnable remotex-agent under Privacy & Security.");
-
-        if panels::confirm(
-            mtm,
-            "remotex-agent needs permission",
-            &body,
-            "Open System Settings",
-        ) {
-            // The first missing one; the menu carries the other, and two settings
-            // URLs in a row would only land on the second anyway.
-            open_pane(if permissions.screen {
-                URL_ACCESSIBILITY
-            } else {
-                URL_SCREEN_RECORDING
-            });
-        }
-    }
-
     /// Fill the menu in from scratch. See `menuNeedsUpdate:` for why nothing is
     /// cached between openings.
     fn rebuild(&self, menu: &NSMenu) {
@@ -689,7 +632,6 @@ pub fn run(
             // the timer has ever fired, and it must not claim health it has not
             // checked.
             permissions: Cell::new(Permissions::read()),
-            prompted: Cell::new(false),
         },
     );
 
