@@ -1,7 +1,10 @@
 # remotex-agent for macOS
 
-`remotex-agent` shares the logged-in user's Mac with a remotex gateway over the
-encrypted `rxa` protocol. It requires macOS 14 or later.
+`remotex-agent` is an optional, RealVNC-like dedicated-agent alternative to
+using macOS Screen Sharing as a VNC target. Its PSK authenticates reconnects
+directly instead of returning to Screen Sharing's login gate. It shares the
+logged-in user's Mac with a remotex gateway over the encrypted `rxa` protocol
+and requires macOS 14 or later.
 
 ## Install
 

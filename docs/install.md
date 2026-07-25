@@ -22,6 +22,12 @@ The full config template is at
 `/opt/remotex/current/share/doc/remotex/remotex.toml.example`. Keep the live
 config readable only by the service user because it contains credentials.
 
+For a Mac target, the gateway can connect directly to macOS Screen Sharing over
+VNC; no companion software is required. The optional `remotex-agent` DMG offers
+a dedicated-agent alternative whose PSK authenticates reconnects without
+returning to Screen Sharing's login gate. See
+[`packaging/macos/README.md`](../packaging/macos/README.md).
+
 ## Installer options
 
 Use `PREFIX` and `BINDIR` to change the install location:
@@ -77,8 +83,8 @@ From a checkout:
 PREFIX=/opt/remotex BINDIR=/usr/local/bin bash packaging/uninstall.sh
 ```
 
-The script removes the installation, launcher, and config. The macOS companion
-agent has a separate uninstall procedure in
+The script removes the installation, launcher, and config. The optional macOS
+companion agent has a separate uninstall procedure in
 [`packaging/macos/README.md`](../packaging/macos/README.md).
 
 ## Build a tarball

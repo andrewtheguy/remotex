@@ -1,9 +1,12 @@
 # macOS agent architecture
 
-`remotex-agent` is the macOS endpoint for `protocol = "rxa"`. It captures the
-logged-in user's display, encodes changed regions, and accepts input from the
-remotex gateway. The agent and gateway share the protocol crate so their wire
-types and key handling stay in sync.
+`remotex-agent` is the optional macOS endpoint for `protocol = "rxa"`, offered
+as a dedicated-agent alternative to connecting the gateway directly to macOS
+Screen Sharing over VNC. Its PSK authenticates reconnects directly instead of
+returning to Screen Sharing's login gate. It captures the logged-in user's
+display, encodes changed regions, and accepts input from the remotex gateway.
+The agent and gateway share the protocol crate so their wire types and key
+handling stay in sync.
 
 Installation and operation are documented in
 [`packaging/macos/README.md`](../packaging/macos/README.md).

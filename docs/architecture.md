@@ -1,8 +1,9 @@
 # Architecture
 
-remotex is a single-user web gateway for RDP, VNC, and macOS desktops. A Rust
-backend owns the remote protocol session and exposes one browser protocol to a
-React SPA.
+remotex is a single-user web gateway for RDP and VNC desktops. Macs can use
+their built-in Screen Sharing service as VNC targets or the optional
+`remotex-agent` companion over `rxa`. A Rust backend owns the remote protocol
+session and exposes one browser protocol to a React SPA.
 
 ## Data path
 
@@ -14,12 +15,13 @@ React SPA
 axum server ── session slot ── protocol engine
                                   ├─ RDP via IronRDP
                                   ├─ VNC via built-in RFB client
-                                  └─ rxa via remotex-agent on macOS
+                                  │    └─ includes macOS Screen Sharing
+                                  └─ rxa via optional remotex-agent on macOS
 ```
 
-RDP and VNC are decoded in the gateway, then emitted as PNG tiles. The macOS
-agent already emits browser-ready PNG/JPEG tiles, so the gateway relays them
-without re-encoding.
+RDP and VNC are decoded in the gateway, then emitted as PNG tiles. The optional
+macOS agent already emits browser-ready PNG/JPEG tiles, so the gateway relays
+them without re-encoding.
 
 ## Constraints
 
@@ -116,7 +118,8 @@ width and height remain fixed.
 
 The built-in client speaks RFB 3.8 with None or classic VncAuth security. It
 requests raw 32-bit true-colour pixels, converts them to RGB, and supports the
-Cursor pseudo-encoding.
+Cursor pseudo-encoding. This path can connect directly to macOS Screen Sharing;
+the companion agent is not required for Mac targets.
 
 With `resize = true`, it advertises DesktopSize/ExtendedDesktopSize and sends
 `SetDesktopSize` after the server confirms support. Clipboard and non-raw
@@ -129,12 +132,15 @@ it only when it changes.
 
 ### rxa
 
-The gateway connects to `remotex-agent` with a pre-shared-key Noise session.
-The agent captures and encodes the Mac display, and the gateway relays its
-tiles. Established connections retry with capped backoff after transient
-failures and request a repaint on recovery. Input generated while disconnected
-is discarded. Initial connection and authentication failures return to the
-picker instead of retrying indefinitely.
+As an alternative to macOS Screen Sharing over VNC, the gateway can connect to
+the optional `remotex-agent` with a pre-shared-key Noise session. This provides
+RealVNC-like reconnect behavior: the PSK is the connection credential, so a
+reconnect does not return to Screen Sharing's login gate. The agent captures
+and encodes the Mac display, and the gateway relays its tiles. Established
+connections retry with capped backoff after transient failures and request a
+repaint on recovery. Input generated while disconnected is discarded. Initial
+connection and authentication failures return to the picker instead of
+retrying indefinitely.
 
 See [`mac-agent-architecture.md`](mac-agent-architecture.md) for the agent,
 capture pipeline, protocol, and lifecycle.
