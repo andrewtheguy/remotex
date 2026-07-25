@@ -187,6 +187,12 @@ async fn pump(
     cursor_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heard = Instant::now();
 
+    // Pasteboard watch state. `None` means not watching, and the gateway only
+    // turns it on for a target that opted in — so the default costs nothing and
+    // reads nothing. `Some(count)` is the last change counter this session has
+    // accounted for; contents are read only when the live counter differs.
+    let mut clipboard_seen: Option<isize> = None;
+
     let result = loop {
         // `out_rx` only exists once the stream is attached; before that, park
         // that branch on a future that never completes.
@@ -308,6 +314,27 @@ async fn pump(
                     }
                     GatewayMsg::Clipboard { text } => {
                         pasteboard::write(clamp_clipboard(&text));
+                        // Our own write bumps the counter. Without this the
+                        // watcher would read it straight back and push it to
+                        // the browser that just sent it.
+                        if clipboard_seen.is_some() {
+                            clipboard_seen = Some(pasteboard::change_count());
+                        }
+                    }
+                    // Baseline the counter without reading anything: the first
+                    // push should be the user's next copy, not whatever
+                    // happened to be on the pasteboard when the browser
+                    // connected. That also matches VNC, where ServerCutText
+                    // only arrives on a change.
+                    GatewayMsg::ClipboardWatch { enabled } => {
+                        clipboard_seen = enabled.then(pasteboard::change_count);
+                        info!(
+                            "session: pasteboard watch {}",
+                            if enabled { "on" } else { "off" }
+                        );
+                        if enabled && let Some(warning) = pasteboard::access_warning() {
+                            warn!("session: {warning}");
+                        }
                     }
                 }
             }
@@ -322,6 +349,24 @@ async fn pump(
                 if let Some((generation, shape)) = cursor_tracker.changed_since(cursor_seen) {
                     cursor_seen = generation;
                     writer.send(&AgentMsg::Cursor(shape).encode()).await?;
+                }
+                // Riding the cursor tick rather than a timer of its own: both
+                // want the same "has anything changed" cadence, and a counter
+                // compare is far cheaper than the cursor poll already here.
+                if let Some(seen) = clipboard_seen {
+                    let now = pasteboard::change_count();
+                    if now != seen {
+                        clipboard_seen = Some(now);
+                        // The one content read, and only because the counter
+                        // moved. An empty string covers a pasteboard holding
+                        // an image or a file — the browser wants text.
+                        let text = pasteboard::read().unwrap_or_default();
+                        let text = clamp_clipboard(&text);
+                        debug!("session: pasteboard changed, pushing {} bytes", text.len());
+                        writer
+                            .send(&AgentMsg::Clipboard { text: text.to_owned() }.encode())
+                            .await?;
+                    }
                 }
             }
         }

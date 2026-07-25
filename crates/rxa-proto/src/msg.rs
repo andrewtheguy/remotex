@@ -106,9 +106,11 @@ pub enum AgentMsg {
     /// Something the user has to act on — most often a missing TCC grant.
     /// Surfaced in the browser rather than dying quietly in a log.
     Error { message: String },
-    /// The Mac's pasteboard text, read in reply to a
-    /// [`GatewayMsg::ClipboardRequest`]. Only ever sent when asked: the agent
-    /// does not watch the pasteboard, so nothing leaves the Mac unprompted.
+    /// The Mac's pasteboard text. Sent either in reply to a
+    /// [`GatewayMsg::ClipboardRequest`], or unprompted after
+    /// [`GatewayMsg::ClipboardWatch`] turned the watcher on and the pasteboard
+    /// changed. Never sent otherwise: with the watch off the agent does not
+    /// look at the pasteboard at all.
     Clipboard { text: String },
 }
 
@@ -255,12 +257,20 @@ pub enum GatewayMsg {
     },
     Ping { nonce: u64 },
     /// Read the Mac's pasteboard and reply with [`AgentMsg::Clipboard`].
-    /// Sent when the browser presses Fetch, never on a timer — a poller would
-    /// have to read the pasteboard *contents* repeatedly, which recent macOS
-    /// reports to the user as a paste.
+    /// Sent when the browser presses Fetch.
     ClipboardRequest,
     /// Put `text` on the Mac's pasteboard.
     Clipboard { text: String },
+    /// Start or stop watching the pasteboard for changes. While on, the agent
+    /// pushes [`AgentMsg::Clipboard`] whenever the Mac's pasteboard changes,
+    /// so a copy on the Mac reaches the browser without a Fetch.
+    ///
+    /// Gated by the gateway's per-target `clipboard` flag, and load-bearing:
+    /// watching costs one pasteboard *content* read per change, which recent
+    /// macOS may report to the user as a paste. A target that did not opt in
+    /// never sends this, and the agent then never reads the pasteboard
+    /// unprompted.
+    ClipboardWatch { enabled: bool },
 }
 
 impl GatewayMsg {
@@ -273,6 +283,7 @@ impl GatewayMsg {
     const T_PING: u8 = 0x07;
     const T_CLIPBOARD_REQUEST: u8 = 0x08;
     const T_CLIPBOARD: u8 = 0x09;
+    const T_CLIPBOARD_WATCH: u8 = 0x0a;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -313,6 +324,10 @@ impl GatewayMsg {
                 out.push(Self::T_CLIPBOARD);
                 put_text(&mut out, text);
             }
+            GatewayMsg::ClipboardWatch { enabled } => {
+                out.push(Self::T_CLIPBOARD_WATCH);
+                out.push(u8::from(*enabled));
+            }
         }
         out
     }
@@ -343,6 +358,9 @@ impl GatewayMsg {
             Self::T_PING => GatewayMsg::Ping { nonce: r.u64()? },
             Self::T_CLIPBOARD_REQUEST => GatewayMsg::ClipboardRequest,
             Self::T_CLIPBOARD => GatewayMsg::Clipboard { text: r.text()? },
+            Self::T_CLIPBOARD_WATCH => GatewayMsg::ClipboardWatch {
+                enabled: r.bool()?,
+            },
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -562,6 +580,8 @@ mod tests {
             GatewayMsg::Clipboard {
                 text: String::new(),
             },
+            GatewayMsg::ClipboardWatch { enabled: true },
+            GatewayMsg::ClipboardWatch { enabled: false },
         ]
     }
 
@@ -594,7 +614,7 @@ mod tests {
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 9, "nine gateway message types");
+        assert_eq!(gateway.len(), 10, "ten gateway message types");
     }
 
     // Clipboard text uses u32 framing, not the u16 `put_str` every other string

@@ -238,6 +238,15 @@ async fn pump(
 
     writer.send(&GatewayMsg::Attach.encode()).await?;
 
+    // Sent per attach, not once per process: this runs again after every
+    // reconnect, and the agent's watch state died with the old session. Only
+    // for an opted-in target — the agent reads nothing unprompted otherwise.
+    if clipboard {
+        writer
+            .send(&GatewayMsg::ClipboardWatch { enabled: true }.encode())
+            .await?;
+    }
+
     let mut ping = interval(PING_INTERVAL);
     // A blocked browser must not cause a burst of catch-up pings.
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -288,8 +297,10 @@ async fn pump(
                         }
                     }
                     AgentMsg::Pong { .. } => {}
-                    // Only ever a reply to a ClipboardRequest this pump sent,
-                    // so it goes straight to the browser that asked.
+                    // Either a reply to a ClipboardRequest this pump sent, or
+                    // an unprompted push from the agent's pasteboard watcher.
+                    // Identical to the browser either way, which is what lets
+                    // the panel and the automatic sync share one path.
                     AgentMsg::Clipboard { text } => {
                         if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
                             return Ok(());

@@ -493,6 +493,18 @@ impl Controller {
         if settings.restart_pending() {
             menu.addItem(&self.info("⚠︎ Saved changes apply after a restart", mtm));
         }
+        // Only ever non-empty once a pasteboard read has actually tripped an
+        // alert, which needs the clipboard bridge to have run — so this stays
+        // invisible for anyone not using it, and appears exactly when it
+        // explains the prompts they are seeing.
+        if let Some(warning) = pasteboard::access_warning() {
+            let item = self.info(&format!("⚠︎ {warning}"), mtm);
+            item.setToolTip(Some(&NSString::from_str(
+                "System Settings › Privacy & Security › Paste from Other Apps. Clipboard sync \
+                 reads the pasteboard once per copy while a gateway is connected.",
+            )));
+            menu.addItem(&item);
+        }
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         // Outside the dialog, because it is not an edit: copying the key onto the

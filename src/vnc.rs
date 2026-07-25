@@ -119,10 +119,13 @@ type SharedCursor = Arc<std::sync::Mutex<CursorState>>;
 /// The remote's clipboard, as last announced by the server.
 ///
 /// RFB has no "read the clipboard" request — the server pushes `ServerCutText`
-/// whenever the remote clipboard changes — so the latest text is kept here for
-/// the browser to fetch on demand ([`ClientMsg::ClipboardRequest`]). Shared
-/// between the read loop (which fills it) and the input side (which answers
-/// from it); `None` means the remote has not copied anything this session.
+/// whenever the remote clipboard changes — so the latest text is kept here to
+/// answer [`ClientMsg::ClipboardRequest`]. The push is also forwarded live, but
+/// that is not enough on its own: a browser that attaches mid-session, or
+/// reattaches after a drop, has missed every push so far and would see an empty
+/// panel with no way to ask. Shared between the read loop (which fills it) and
+/// the input side (which answers from it); `None` means the remote has not
+/// copied anything this session.
 type SharedClipboard = Arc<std::sync::Mutex<Option<String>>>;
 
 /// Connect to the VNC host, then drive the session until it ends.
@@ -478,9 +481,11 @@ async fn read_loop(
             }
             // Bell — nothing to ring in the browser (yet).
             2 => {}
-            // ServerCutText — the remote's clipboard changed. Stashed for the
-            // browser to fetch; never pushed at it (see [`SharedClipboard`]).
-            // Drained and dropped when the target didn't opt in.
+            // ServerCutText — the remote's clipboard changed. Pushed to the
+            // browser as it arrives *and* stashed, because the two serve
+            // different readers: the push drives automatic sync, the stash
+            // answers a Fetch from a browser that attached later and so never
+            // saw the push. Drained and dropped when the target didn't opt in.
             3 => {
                 let mut padding = [0u8; 3];
                 reader.read_exact(&mut padding).await?;
@@ -500,7 +505,10 @@ async fn read_loop(
                 }
                 let text = latin1_to_string(&bytes);
                 debug!("vnc: remote clipboard updated, {} bytes", bytes.len());
-                *clipboard.lock().unwrap() = Some(text);
+                *clipboard.lock().unwrap() = Some(text.clone());
+                if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                    return Ok(()); // browser link gone; the session layer handles it
+                }
             }
             other => anyhow::bail!("unknown server message type {other}"),
         }

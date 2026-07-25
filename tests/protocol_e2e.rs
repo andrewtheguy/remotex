@@ -558,11 +558,17 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    // The tile is written after the ServerCutText, so by now the engine has it.
+
+    // Remote → browser, unprompted: ServerCutText is forwarded as it arrives,
+    // which is what drives automatic sync. Deterministic because the fake
+    // writes the cut text ahead of the framebuffer update, so it cannot be
+    // racing the tile below. The engine decodes latin-1, so the é the server
+    // sent as one byte arrives as one character.
+    assert_eq!(expect_clipboard(&mut ws).await, "copied on café");
     expect_tile(&mut ws).await;
 
-    // Remote → browser, on request. The engine decodes latin-1, so the é the
-    // server sent as one byte arrives as one character.
+    // And the same text is still there to be fetched: a browser that attached
+    // after the push — or reattached — has to be able to ask.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
     assert_eq!(expect_clipboard(&mut ws).await, "copied on café");
 

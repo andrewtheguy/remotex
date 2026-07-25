@@ -4,7 +4,7 @@
 using macOS Screen Sharing as a VNC target. Its PSK authenticates reconnects
 directly instead of returning to Screen Sharing's login gate. It shares the
 logged-in user's Mac with a remotex gateway over the encrypted `rxa` protocol
-and requires macOS 14 or later.
+and requires macOS 15.4 or later.
 
 ## Install
 
@@ -60,6 +60,13 @@ needs no restart.
 Permissions are tied to the app's signing identity. The ad-hoc-signed release
 may need both grants again after an upgrade. A stable Developer ID signature
 preserves the identity.
+
+A third permission appears only if you use the clipboard bridge (`clipboard =
+true` on the gateway's target). macOS asks before letting the agent read the
+pasteboard, and after the first prompt the app is listed under **Paste from
+Other Apps**, where **Allow** stops it asking again. Until then, expect a prompt
+each time something is copied on the Mac while a session is connected. The menu
+bar reports the current setting once macOS has one to report.
 
 ## Menu and settings
 

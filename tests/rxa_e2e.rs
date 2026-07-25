@@ -156,7 +156,26 @@ async fn serve_fake_agent(
                 writer.send(&AgentMsg::Pong { nonce }.encode()).await?;
             }
             GatewayMsg::Refresh => paint(&mut writer).await?,
-            // Read on request, never on a timer — same as the real agent.
+            // The real agent baselines its NSPasteboard change counter here and
+            // pushes only when the counter later moves. This one pushes once,
+            // immediately, standing in for a copy on the Mac — the gateway
+            // behaviour under test (forward an unprompted Clipboard to the
+            // browser) is the same, and it gives the test a deterministic
+            // arrival instead of a race against a real pasteboard.
+            GatewayMsg::ClipboardWatch { enabled } => {
+                let _ = input_tx.send(GatewayMsg::ClipboardWatch { enabled });
+                if enabled {
+                    writer
+                        .send(
+                            &AgentMsg::Clipboard {
+                                text: pasteboard.clone(),
+                            }
+                            .encode(),
+                        )
+                        .await?;
+                }
+            }
+            // Read on request too, for an explicit Fetch.
             GatewayMsg::ClipboardRequest => {
                 writer
                     .send(
@@ -523,6 +542,14 @@ async fn clipboard_round_trips_through_the_agent_in_utf8() {
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
 
+    // Attaching turns the agent's pasteboard watcher on, and the push that
+    // follows reaches the browser with nothing having asked for it.
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::ClipboardWatch { enabled: true }
+    );
+    assert_eq!(expect_clipboard(&mut ws).await, FAKE_PASTEBOARD);
+
     // Mac → browser: the agent reads its pasteboard when asked.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
     assert_eq!(expect_clipboard(&mut ws).await, FAKE_PASTEBOARD);
@@ -565,7 +592,9 @@ async fn clipboard_is_inert_when_the_rxa_target_did_not_opt_in() {
         .unwrap();
     // A key press behind them is the fence: it can only reach the agent after
     // both clipboard messages were handled, so if it arrives first, they were
-    // dropped rather than merely slow.
+    // dropped rather than merely slow. It also proves no ClipboardWatch was
+    // sent at attach — that would have been recorded ahead of the key, and the
+    // agent would be reading the Mac's pasteboard for a target that said no.
     ws.send(Message::text(
         r#"{"type":"key","code":"KeyA","pressed":true,"caps":false}"#,
     ))

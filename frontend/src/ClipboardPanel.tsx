@@ -2,16 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_CLIPBOARD_BYTES } from "./protocol.ts";
 import { useIsDesktop } from "./SoftKeyboardPanel.tsx";
 
-// The clipboard bridge's whole interface: a text box with Fetch and Send.
+// The clipboard bridge's manual half: a text box with Fetch and Send.
 //
-// Deliberately manual in both directions. The server owns the clipboard data —
-// the VNC engine buffers what the remote last copied, the Mac agent reads its
-// pasteboard when asked — so this panel holds nothing that isn't on screen, and
-// there is no background sync to reason about. It also never touches the
-// *local* OS clipboard: navigator.clipboard needs a permission and a secure
-// context (this server is usually plain HTTP on a LAN), and silently reading
-// what you copied in another tab is a worse deal than pressing Ctrl+V into a
-// text box yourself.
+// The automatic path (useRemoteDesktop) mirrors the clipboard both ways on its
+// own where the browser allows it. This panel is what makes the feature work
+// anyway when it doesn't — a non-secure origin has no `navigator.clipboard` at
+// all, and Safari will not read the clipboard without a paste gesture. It is
+// also the only way to see what the remote sent without it landing in your
+// local clipboard.
+//
+// The server owns the data (the VNC engine buffers what the remote last cut,
+// the Mac agent reads its pasteboard), so this panel holds nothing that isn't
+// on screen.
 //
 // Shown only for targets that opted in (`clipboard = true`); FloatingMenu keeps
 // the button disabled otherwise.
@@ -56,8 +58,14 @@ export function ClipboardPanel({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isDesktop = useIsDesktop();
 
-  // Adopt each reply. Keyed on seq, so fetching the same text twice still
-  // replaces the box (and re-shows the notice).
+  // Set once the user types, cleared whenever the box is filled from the
+  // remote. Guards unsent work: pushes now arrive unprompted, and silently
+  // replacing half-typed text with someone's copy on the remote would be an
+  // unrecoverable loss.
+  const dirtyRef = useRef(false);
+
+  // Adopt each reply or push. Keyed on seq, so the same text arriving twice
+  // still registers (and re-shows the notice).
   const seq = remoteClipboard?.seq;
   const lastSeqRef = useRef<number | undefined>(remoteClipboard?.seq);
   useEffect(() => {
@@ -65,14 +73,23 @@ export function ClipboardPanel({
       return;
     }
     lastSeqRef.current = seq;
-    setText(remoteClipboard?.text ?? "");
+    const text = remoteClipboard?.text ?? "";
+    // An explicit Fetch always wins — the user asked for exactly this.
+    if (!awaitingFetch && dirtyRef.current) {
+      setNotice("Remote clipboard changed — Fetch to load it");
+      return;
+    }
+    dirtyRef.current = false;
+    setText(text);
     setAwaitingFetch(false);
     setNotice(
-      remoteClipboard?.text
-        ? "Fetched from remote"
+      text
+        ? awaitingFetch
+          ? "Fetched from remote"
+          : "Updated from remote"
         : "Remote clipboard is empty",
     );
-  }, [seq, remoteClipboard?.text]);
+  }, [seq, remoteClipboard?.text, awaitingFetch]);
 
   // Clear the notice a moment after it appears (and on unmount).
   useEffect(() => {
@@ -122,6 +139,8 @@ export function ClipboardPanel({
 
   const handleSend = useCallback(() => {
     onSend(text);
+    // Sent, so it is no longer unsaved work an incoming push would destroy.
+    dirtyRef.current = false;
     setNotice("Sent to remote");
   }, [onSend, text]);
 
@@ -148,7 +167,10 @@ export function ClipboardPanel({
         ref={textareaRef}
         className="cb-text"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          dirtyRef.current = true;
+          setText(e.target.value);
+        }}
         placeholder="Fetch the remote's clipboard, or paste here and send."
         aria-label="Clipboard text"
         spellCheck={false}

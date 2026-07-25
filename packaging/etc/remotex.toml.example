@@ -54,12 +54,15 @@ password = "change-me"
 # and the browser shows scrollbars.
 #resize = false
 
-# Clipboard bridge (opt-in): lets the floating menu's Clipboard panel read and
-# write this target's clipboard. Nothing is synced in the background — the
-# browser only fetches or sends when you press the button, and keeps no copy.
+# Clipboard bridge (opt-in): shares this target's clipboard with the browser.
+# Copying on the remote pushes the text out, and your local clipboard is sent
+# back whenever the tab regains focus — where the browser permits it, which
+# needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
+# all. The floating menu's Clipboard panel always works regardless, and is the
+# way to move text when automatic sync cannot run.
 # VNC carries latin-1 text (the RFB cut-text messages); the Mac agent ("rxa")
-# reads its pasteboard on request and carries full UTF-8. Rejected for RDP,
-# which has no clipboard channel yet.
+# carries full UTF-8 and watches its pasteboard while connected. Rejected for
+# RDP, which has no clipboard channel yet.
 #clipboard = false
 
 # A VNC target only needs host and (usually) a password; username, domain,

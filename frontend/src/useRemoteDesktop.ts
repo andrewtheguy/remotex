@@ -342,6 +342,12 @@ export function useRemoteDesktop(
     text: string;
     seq: number;
   } | null>(null);
+  // The two halves of the automatic sync's echo guard: text last received from
+  // the remote (so it is never sent straight back), and text last sent to the
+  // remote (so a server that echoes a cut back at us does not bounce forever).
+  // Refs, not state — they gate effects and must not re-run them.
+  const lastFromRemoteRef = useRef<string | null>(null);
+  const lastToRemoteRef = useRef<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -673,15 +679,24 @@ export function useRemoteDesktop(
           sendViewport();
           break;
         }
-        case "clipboard":
-          // The remote's clipboard, in reply to a fetch this browser asked
-          // for. Nothing is written to the local OS clipboard here: the panel
-          // shows it, and copying out of there stays the user's move.
+        case "clipboard": {
+          // Either a reply to this browser's Fetch or an unprompted push
+          // (VNC's ServerCutText, the Mac agent's pasteboard watcher). The
+          // panel shows it either way.
+          const { text } = msg;
           setRemoteClipboard((prev) => ({
-            text: msg.text,
+            text,
             seq: (prev?.seq ?? 0) + 1,
           }));
+          // And mirror it into the local OS clipboard, so a copy on the remote
+          // is immediately pastable here. Best effort by design: `writeText`
+          // is absent on a non-secure origin (plain HTTP on a LAN — the usual
+          // deployment) and rejects when the tab is unfocused. The panel is
+          // the fallback in both cases, so a failure is not worth reporting.
+          lastFromRemoteRef.current = text;
+          void navigator.clipboard?.writeText?.(text).catch(() => {});
           break;
+        }
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
@@ -693,6 +708,8 @@ export function useRemoteDesktop(
           setCanResize(false);
           setCanClipboard(false);
           setRemoteClipboard(null);
+          lastFromRemoteRef.current = null;
+          lastToRemoteRef.current = null;
           clearDesktop();
           break;
       }
@@ -824,8 +841,58 @@ export function useRemoteDesktop(
   // ClientCutText nor the agent's pasteboard write is acknowledged, so there is
   // nothing to await.
   const sendClipboard = useCallback((text: string) => {
+    // Recorded even for a manual Send from the panel: some VNC servers echo a
+    // cut straight back as ServerCutText, and without this the round trip
+    // would overwrite the local clipboard with what we just sent.
+    lastToRemoteRef.current = text;
     sendRef.current({ type: "clipboard", text });
   }, []);
+
+  // Push the local clipboard to the remote whenever this tab becomes active,
+  // so a paste inside the remote desktop — context menu, middle click, or a
+  // Ctrl+V the remote app handles itself — sees what was last copied here.
+  //
+  // Focus is the trigger because reading the clipboard is only permitted for a
+  // focused document, and it is also the moment the user has plausibly just
+  // copied something elsewhere. Everything here is best effort: `readText` is
+  // absent on a non-secure origin, and Safari refuses it outright without a
+  // paste gesture. The panel's Send covers those.
+  useEffect(() => {
+    if (mode !== "desktop" || !canClipboard) {
+      return;
+    }
+    const pushLocalClipboard = () => {
+      if (document.hidden || !document.hasFocus()) {
+        return;
+      }
+      void (async () => {
+        let text: string;
+        try {
+          text = (await navigator.clipboard?.readText?.()) ?? "";
+        } catch {
+          return; // no permission, no secure context, or the user declined
+        }
+        if (
+          text === "" ||
+          // Came from the remote a moment ago; sending it back is a loop.
+          text === lastFromRemoteRef.current ||
+          text === lastToRemoteRef.current
+        ) {
+          return;
+        }
+        lastToRemoteRef.current = text;
+        sendRef.current({ type: "clipboard", text });
+      })();
+    };
+    window.addEventListener("focus", pushLocalClipboard);
+    document.addEventListener("visibilitychange", pushLocalClipboard);
+    // Also once now: the tab may already be focused when the session starts.
+    pushLocalClipboard();
+    return () => {
+      window.removeEventListener("focus", pushLocalClipboard);
+      document.removeEventListener("visibilitychange", pushLocalClipboard);
+    };
+  }, [mode, canClipboard]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
