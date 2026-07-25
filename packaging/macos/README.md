@@ -21,7 +21,34 @@ That single open does everything an install script would have:
 - registers itself with `SMAppService`, so it starts now and at every login and
   appears in **System Settings → General → Login Items**.
 
-There is no dock icon and no window — it is a background agent.
+There is no Dock icon and no window — it is a background agent. What it does
+have is a **menu bar item**, which is where everything below can also be done
+without a terminal.
+
+## The menu bar item
+
+| | |
+|---|---|
+| 🖥 | idle — running, nobody connected |
+| 👁 | a gateway is connected and watching this screen |
+
+Opening it shows the connected gateway's address and how long it has been
+attached, and offers:
+
+- **Copy Pre-Shared Key** — the same value as `--show-psk`
+- **Open Log**
+- **Screen Recording** / **Accessibility** — ticked when granted, and each opens
+  the right Privacy pane, which is otherwise four levels down a settings tree
+- **Start at Login** — the `SMAppService` registration, as a toggle
+- **Quit remotex-agent**
+
+Quit really quits: the embedded LaunchAgent uses `KeepAlive` /
+`SuccessfulExit: false`, so a deliberate exit stays exited while a crash is
+still restarted. The agent comes back at your next login, or whenever you open
+it from `/Applications` again.
+
+Over SSH there is no window server to put a status item in; pass `--no-menu`
+there.
 
 ## Then two permissions, and one key
 
@@ -83,6 +110,25 @@ Trash leaves a dangling entry there. The config file is left behind, since it
 holds the key — delete
 `~/Library/Application Support/remotex-agent` to remove that too, and clear
 `remotex-agent` from the two Privacy & Security lists by hand.
+
+## Reinstalling over an existing copy
+
+Replace the bundle by **opening the new one**, not just copying it into place.
+The Login Items registration is a Background Task Management record that points
+at the bundle it was made from; delete that bundle and drop a new one at the
+same path and the record goes stale, launchd fails to spawn with `EX_CONFIG`,
+and nothing appears in the log because the binary never runs. `--status` still
+cheerfully reports the login item as enabled, because launchd's registration is
+intact — only the thing it points at is gone.
+
+The fix, and the way to avoid it:
+
+```sh
+cp -R remotex-agent.app /Applications/
+open /Applications/remotex-agent.app          # re-registers, repairing the record
+```
+
+If it is already broken, `--unregister` and then open the app again.
 
 ## No login-window support
 

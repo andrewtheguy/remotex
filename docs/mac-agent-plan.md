@@ -38,6 +38,16 @@ worth recording because each was a real discovery rather than a preference:
    in `src/engine.rs` — still not a `trait Engine`, and the duplication did not
    grow.
 
+One thing the plan **omitted entirely**: a menu bar item. The plan specified a
+headless background agent, and that is exactly what shipped — with the result
+that nothing on the Mac indicated the agent was running, nothing indicated when
+somebody was watching the screen, and stopping it meant `--unregister` plus
+`pkill` from a terminal. For software whose whole job is to let a remote machine
+see and drive this one, an invisible process with no off switch is the wrong
+default. `menubar.rs` adds the status item; it also forced the LaunchAgent's
+`KeepAlive` from `true` to `SuccessfulExit: false`, since under a plain `true`
+launchd resurrects the agent seconds after Quit and the menu item is a lie.
+
 Two items from §3.6 were **not** implemented, deliberately: the post-disconnect
 stream linger (it only pays for outages shorter than the gateway's own 1 s
 minimum backoff, and restarting the stream costs about as much — noted in

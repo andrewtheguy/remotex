@@ -363,6 +363,18 @@ replayed: a mouse position from eight seconds ago is worse than no event.
 (the agent captures the Mac's own resolution, and `resize = true` is rejected
 on an `rxa` target), clipboard, and audio.
 
+**The agent has a menu bar item** and nothing else: no Dock tile, no windows.
+It reports whether a gateway is attached and to which address, copies the
+pre-shared key, links to the two Privacy panes, toggles the login item, and
+quits. That last one is why the embedded LaunchAgent sets `KeepAlive` to
+`SuccessfulExit: false` rather than `true` — under a plain `true` launchd would
+restart the agent seconds after the user asked it to stop, while the narrower
+form still recovers from a crash. Having the item at all is what makes the
+agent's state observable to the person whose screen is being shared, which for
+software of this kind is not a nicety. It also means AppKit owns the main
+thread: `menubar::run` takes it, and the cursor poll that used to be a sleep
+loop there is now a timer on the run loop.
+
 For the agent itself — ScreenCaptureKit capture, `CGEvent` injection, the two
 TCC permissions, and why it cannot run at the login window — see
 [`packaging/macos/README.md`](../packaging/macos/README.md) and the module docs
