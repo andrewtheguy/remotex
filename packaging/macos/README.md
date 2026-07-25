@@ -110,9 +110,15 @@ Unregister before removing the app to avoid leaving a stale Login Items entry.
 
 ## Limitations
 
-The agent runs in the logged-in user's GUI session. It cannot share the macOS
-login window or run when no user is logged in. It mirrors the selected physical
-display and does not resize it to the browser viewport.
+The agent is available only while a user is signed in to the Mac. It stops at
+logout and cannot be used to sign in from the macOS login screen.
+This is a limitation of remotex's current per-user installation, not of macOS
+remote access generally. RealVNC Service Mode and RustDesk's installed service
+support the login screen by adding system-level launch components. Equivalent
+login-screen support is planned for remotex.
+
+The agent mirrors the selected physical display and does not resize it to the
+browser viewport.
 
 See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
 for the capture, transport, and lifecycle design.

@@ -17,9 +17,24 @@ macOS agent.
 
 ## Install
 
+Install the latest release:
+
 ```sh
 curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
-$EDITOR /opt/remotex/etc/remotex.toml
+```
+
+Generate a web-login credential, then edit the installed config:
+
+```sh
+remotex gen-passwd admin
+${EDITOR:-vi} /opt/remotex/etc/remotex.toml
+```
+
+Paste the generated `admin:$2b$...` value into `[server].site_passwd` and
+replace the example `[[targets]]` entry with the remote desktop you want to
+reach. Then start the server in the foreground:
+
+```sh
 remotex serve
 ```
 

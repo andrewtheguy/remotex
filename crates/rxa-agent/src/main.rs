@@ -47,10 +47,11 @@
 //! paints, the session looks perfectly healthy, and every click and keystroke is
 //! silently discarded.
 //!
-//! Both also require the process to live in the user's GUI (Aqua) session, which
-//! is why the embedded plist is a LaunchAgent and not a LaunchDaemon. The honest
-//! consequence: the agent is **not running at the login window** and cannot be.
-//! If nobody is logged in on the Mac, there is nothing to connect to.
+//! Both also require the capture process to live in a GUI session, which is why
+//! the embedded plist is a LaunchAgent and not a LaunchDaemon. The current
+//! per-user `SMAppService` registration runs only in the user's Aqua session. A
+//! system-installed LaunchAgent could also target `LoginWindow`, but this app
+//! does not install that privileged system-wide mode (see `docs/roadmap.md`).
 //!
 //! ## Threading
 //!

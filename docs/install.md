@@ -10,11 +10,18 @@ The installer selects the current OS and architecture, verifies the release
 SHA-256 digest, and installs under `/opt/remotex`. It may use `sudo` for the
 prefix and `/usr/local/bin/remotex` link.
 
-Then configure and start the gateway:
+Generate a web-login credential, then open the installed config:
 
 ```sh
 remotex gen-passwd admin
-$EDITOR /opt/remotex/etc/remotex.toml
+${EDITOR:-vi} /opt/remotex/etc/remotex.toml
+```
+
+Paste the generated `admin:$2b$...` value into `[server].site_passwd` and
+replace the example `[[targets]]` entry with the remote desktop you want to
+reach. Then start the gateway in the foreground:
+
+```sh
 remotex serve
 ```
 

@@ -16,11 +16,12 @@
   extension to launchd's schema. It is what lets the user move the app after
   registering without breaking it; an absolute `Program` would not survive that.
 
-  A LaunchAgent, never a LaunchDaemon: both TCC grants the agent needs require a
-  window server connection, which exists only inside the user's GUI (Aqua)
-  session. A daemon has none and both capture and event injection fail outright.
-  The honest consequence is that the agent does not run at the login window and
-  cannot — if nobody is logged in, there is nothing for the gateway to reach.
+	The capture process belongs in a LaunchAgent, not a LaunchDaemon: both TCC
+	grants require a GUI session with a window server. This embedded agent is
+	registered per user through SMAppService and runs only in that user's Aqua
+	session. Login-window support would instead require privileged installation
+	of a system-wide LaunchAgent targeting both LoginWindow and Aqua; see
+	docs/roadmap.md.
 
   ProcessType Interactive keeps the agent off the throttled background tier, so
   macOS does not slow its capture and encode work down.

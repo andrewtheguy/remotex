@@ -12,6 +12,54 @@ Remote updates (`ServerCutText` for VNC and the RDP clipboard channel) update
 that buffer and are pushed to the browser; browser updates travel in the other
 direction. `rxa` needs corresponding protocol messages.
 
+### macOS login-window service
+
+The current `SMAppService` LaunchAgent runs only in the signed-in user's Aqua
+session. Login-window access is nevertheless an established macOS deployment
+mode: RealVNC provides it in
+[Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes),
+and RustDesk ships it in its installed-service mode.
+
+RustDesk's minimum design is comparatively small. A root LaunchDaemon runs its
+system service at boot, while one root-installed
+[LaunchAgent](https://github.com/rustdesk/rustdesk/blob/master/src/platform/privileges_scripts/agent.plist)
+declares both `LoginWindow` and `Aqua` session types and runs the same
+`--server` executable in each. Its
+[install script](https://github.com/rustdesk/rustdesk/blob/master/src/platform/privileges_scripts/install.scpt)
+writes both launchd plists and copies the user's config into `/var/root` for the
+login-window process. launchd handles the normal session transition; RustDesk
+reconnects after login rather than transferring a live connection between
+processes. The much larger multi-user and update code in RustDesk is hardening,
+not a prerequisite for basic login-window capture and input.
+
+For remotex, launchd may briefly overlap the `LoginWindow` and `Aqua` agents
+during login, and fast user switching can leave more than one Aqua agent alive.
+The direct listener still does not require a broker: treat ownership of
+`/dev/console` as a lease. Only UID 0 at the login window, or the user who
+currently owns the console, may bind port 52381. Inactive agents wait without a
+listener; the newly active agent retries until the previous owner releases the
+port. This preserves the one-active-session model without `SO_REUSEPORT` or
+simultaneous sharing.
+
+Implementation requires:
+
+1. a one-time administrator action that secures the app bundle and installs a
+   LaunchAgent for both `LoginWindow` and `Aqua`, instead of relying only on
+   per-user `SMAppService`;
+2. config and PSK storage readable by both the configured user and the UID 0
+   login-window process;
+3. active-console listener acquisition, release, and retry around the existing
+   agent server;
+4. validation of Screen Recording and Accessibility for the signed app in the
+   `LoginWindow` session, plus boot, login, logout, lock, and fast-user-switch
+   lifecycle tests.
+
+This does not inherently require a package installer, root broker, new
+capture/input implementation, or seamless process handoff. Stable Developer ID
+signing would make TCC identity reliable across upgrades. FileVault remains the
+unavoidable boundary: no remote-access process can run before pre-boot disk
+unlock.
+
 ## Deferred pending measurements
 
 ### Retina performance for `rxa`
@@ -59,41 +107,6 @@ An isolated, session-sized desktop would require a virtual display. macOS has
 no suitable public API; DriverKit or private `CGVirtualDisplay` integration
 would also change `rxa` from screen sharing into a separate desktop. Therefore
 `resize = true` is rejected for `rxa` targets.
-
-### macOS login-window service
-
-The agent is a LaunchAgent in the logged-in user's GUI session, where its
-Screen Recording and Accessibility grants apply. Root privilege does not
-bypass TCC, and the login window has no user whose grants the agent can use.
-
-This is not a solved baseline among mature remote-desktop products. RustDesk
-uses a privileged service plus an agent in the `LoginWindow` session; its
-[boot/login-window setup](https://github.com/rustdesk/rustdesk/discussions/7762)
-requires extra launchd and MDM work beyond a normal install. RealVNC advertises
-login-screen access in
-[Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes),
-but still has reports of a
-[black login screen after logout](https://help.realvnc.com/hc/en-us/community/posts/17967170655133-Black-screen-only-on-MacOS-login)
-and has acknowledged macOS Sonoma login-screen input failures in its
-[release notes](https://help.realvnc.com/hc/en-us/articles/360002253138-Release-Notes-v7-7-13-1-and-earlier).
-Their experience shows that adding a service process does not remove the
-capture, input, and session-transition problems.
-
-Supporting the login window would require a different deployment:
-
-1. a root-installed LaunchAgent supporting both `Aqua` and `LoginWindow`
-   sessions, since `SMAppService` cannot express this;
-2. system-level config and PSK storage;
-3. handoff between login-window and user agents without both owning port 52381;
-4. a supported way to authorize capture and input at the login window.
-
-That would replace the current drag-to-Applications install with a privileged,
-signed, notarized installer and still leave the TCC question unresolved.
-FileVault also prevents any agent from running before pre-boot disk unlock.
-
-The practical alternatives are automatic login after FileVault unlock, or a
-separate VNC target using macOS Screen Sharing when access specifically to the
-login window is required.
 
 ### Multiple sessions
 
