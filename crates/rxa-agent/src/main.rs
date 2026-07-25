@@ -175,11 +175,10 @@ fn main() -> anyhow::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             report_startup_failure(
                 &args,
-                "remotex-agent is already running",
+                "remotex-agent cannot listen",
                 &format!(
-                    "Another copy is serving on {}.\n\nIts icon is in the menu bar at the \
-                     top of the screen — that is the agent's whole interface. Opening the \
-                     app again does nothing else.",
+                    "{} is already in use by another process.\n\nIf that process is another copy \
+                     of remotex-agent, its icon is in the menu bar at the top of the screen.",
                     config.listen
                 ),
             );
@@ -201,7 +200,14 @@ fn main() -> anyhow::Result<()> {
     info!("agent: listening on {}", config.listen);
     // tokio adopts it below, and only a non-blocking socket can be driven by a
     // reactor.
-    listener.set_nonblocking(true)?;
+    if let Err(e) = listener.set_nonblocking(true) {
+        report_startup_failure(
+            &args,
+            "remotex-agent cannot listen",
+            &format!("{} could not be made non-blocking: {e}", config.listen),
+        );
+        return Ok(());
+    }
 
     report_permissions();
 
