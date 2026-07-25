@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build, sign and optionally notarize remotex-agent.app, and wrap it in a .dmg.
 #
-# Produces dist/remotex-agent.app — a background-only, self-registering bundle
+# Builds dist/remotex-agent.app — a background-only, self-registering bundle
 # wrapping the `remotex-agent` binary. Two reasons it is a bundle at all:
 #
 #   * The TCC grants (Screen Recording, Accessibility) attach to a *stable signed
@@ -12,7 +12,9 @@
 #
 # It then produces dist/remotex-agent-<version>-macos-arm64[-unsigned].dmg, which
 # is what a user is meant to get: a disk image dragged to /Applications is the
-# standard way to install a Mac app, and it is the more robust one here.
+# standard way to install a Mac app, and it is the more robust one here. The
+# loose .app is removed once it is inside the image, so dist/ holds one artifact
+# and nobody installs the copy that is not the delivered one. --no-dmg keeps it.
 #
 # The concrete part of "more robust" is that an image is a filesystem, so the
 # bundle inside is the one that was signed, with no archive round-trip in the
@@ -74,7 +76,7 @@ while [ $# -gt 0 ]; do
     --debug) profile=debug; cargo_flags=(); shift ;;
     --no-dmg) make_dmg=0; shift ;;
     --notary-profile) notary_profile="${2:?--notary-profile needs a name}"; shift 2 ;;
-    -h|--help) sed -n '2,65p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unexpected argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -275,10 +277,16 @@ if [ "$make_dmg" = 1 ]; then
     xcrun stapler staple "$dmg"
     xcrun stapler validate "$dmg"
   fi
+
+  # The image now carries the bundle, so the loose one in dist/ is a second copy
+  # of the same thing — and the wrong one to install from, since it is the image
+  # that was notarized and stapled last. Drop it and leave dist/ unambiguous.
+  echo ">> removing $app (it is inside the image now)"
+  rm -rf "$app"
 fi
 
 if [ -n "$dmg" ]; then
-  wrote_dmg=">> wrote $dmg"
+  wrote=">> wrote $dmg"
   install_note="To install, open the image and drag remotex-agent.app onto Applications:
     open $dmg
 
@@ -286,7 +294,7 @@ Then open it once from /Applications, and eject the image. Opening it straight o
 the image would register a login item naming a mount point, which is gone the
 moment you eject."
 else
-  wrote_dmg=""
+  wrote=">> wrote $app"
   install_note="Built without an image (--no-dmg). To install this one by hand:
     cp -R $app /Applications/
     open /Applications/remotex-agent.app"
@@ -294,8 +302,7 @@ fi
 
 cat <<NOTES
 
->> wrote $app
-${wrote_dmg}
+${wrote}
 ${install_note}
 
 That first open writes the config with a fresh pre-shared key and registers the

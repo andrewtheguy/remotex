@@ -38,6 +38,7 @@ override. The tree can live anywhere via `PREFIX` / `BINDIR`.
 | `uninstall.sh` | Remove the whole prefix, or a single version (`uninstall.sh <version>`). |
 | `etc/remotex.toml.example` | Config template installed under the active version's `share/doc/remotex/` and seeded to the stable `etc/remotex.toml` on a fresh install. |
 | `Dockerfile` | Container image built from an **extracted release tarball** — it compiles nothing, it just lays the tarball out in the install layout above. |
+| `macos/build-agent-app.sh` | The **macOS screen agent**, a separate program with a separate install story: `dist/remotex-agent-<version>-macos-arm64[-unsigned].dmg`. Nothing else builds it — `build-tarball.sh` does not, so the mac tarball is the gateway only and needs no Xcode. See [`macos/README.md`](macos/README.md). |
 
 The repo-root `install.sh` is the network installer (`curl … | bash`): it
 downloads the right tarball, verifies its SHA-256 against GitHub's published
@@ -68,6 +69,11 @@ draft from a failed run), builds the three tarballs (linux x86_64, linux arm64,
 macOS arm64), uploads them to the draft, and only then publishes it — which is
 what creates the tag, so a failed build never leaves a tag or a half-populated
 release. `.github/workflows/pages.yml` serves `install.sh` from GitHub Pages.
+
+The macOS agent rides along in the same release, built by its own `mac-agent`
+job calling `packaging/macos/build-agent-app.sh` — the one place that builds it.
+It ships as a `.dmg` and is not in any tarball, so the mac tarball job stays a
+plain Rust build.
 
 The frontend is built once in its own job and handed to every tarball job as an
 artifact: the bundle is platform-agnostic, so rebuilding it per target would

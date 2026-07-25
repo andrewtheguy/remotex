@@ -210,9 +210,13 @@ for the gateway to reach. This is a property of the design, not a bug.
 ## Building from source
 
 ```sh
-packaging/macos/build-agent-app.sh   # -> dist/remotex-agent.app + a .dmg beside it
-packaging/macos/build-agent-app.sh --no-dmg   # just the .app, to run out of dist/
+packaging/macos/build-agent-app.sh   # -> dist/remotex-agent-<version>-...dmg
+packaging/macos/build-agent-app.sh --no-dmg   # -> dist/remotex-agent.app
 ```
+
+The first form leaves only the image: the bundle is built, signed and copied into
+it, then removed from `dist/`, so there is no second copy to install from by
+mistake. Use `--no-dmg` when you want the bundle itself.
 
 Needs Xcode — the capture bindings build a small Swift bridge.
 

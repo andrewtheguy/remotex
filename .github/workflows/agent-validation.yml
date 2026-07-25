@@ -68,37 +68,15 @@ jobs:
           CODESIGN_IDENTITY: "-"
         run: bash packaging/macos/build-agent-app.sh
 
-      - name: Verify the bundle
-        # `--version` parses argv and exits before any config, capture or launchd
-        # work, so it needs no GUI session and neither TCC grant — and it is
-        # where a Swift-runtime link error surfaces, the failure
-        # MACOSX_DEPLOYMENT_TARGET exists to prevent (see .cargo/config.toml),
-        # which builds clean and only dies on launch.
-        #
-        # The strict codesign verify then covers the bundle's own structure: a
-        # resource the signature does not seal fails here.
+      - name: Install from the disk image
+        # The image is what users install from, and the build leaves nothing else
+        # behind, so the bundle is obtained the way they obtain it: mount, copy it
+        # out, eject. Nothing is uploaded — shipping is release.yml's job — but a
+        # broken `hdiutil create` or a missing /Applications symlink should fail
+        # here rather than on a release.
         run: |
           # The agent inherits `version.workspace = true`, so the number is in the
           # workspace manifest; its own would only hold the inheritance marker.
-          version=$(python3 -c '
-          import tomllib
-          with open("Cargo.toml", "rb") as f:
-              print(tomllib.load(f)["workspace"]["package"]["version"])
-          ')
-          got=$(dist/remotex-agent.app/Contents/MacOS/remotex-agent --version)
-          echo "bundle reports: ${got}"
-          [ "$got" = "remotex-agent ${version}" ] || {
-            echo "::error::expected 'remotex-agent ${version}'"
-            exit 1
-          }
-          codesign --verify --deep --strict --verbose=2 dist/remotex-agent.app
-
-      - name: Verify the disk image
-        # The image is what users install from, so it is checked the way they use
-        # it: mount, copy the bundle out, verify the copy. Nothing is uploaded —
-        # shipping is release.yml's job — but a broken `hdiutil create` or a
-        # missing /Applications symlink should fail here rather than on a release.
-        run: |
           version=$(python3 -c '
           import tomllib
           with open("Cargo.toml", "rb") as f:
@@ -115,5 +93,28 @@ jobs:
           # ditto is what the Finder's drag amounts to.
           /usr/bin/ditto "$mnt/remotex-agent.app" "$RUNNER_TEMP/installed/remotex-agent.app"
           hdiutil detach "$mnt"
-          codesign --verify --deep --strict --verbose=2 \
-            "$RUNNER_TEMP/installed/remotex-agent.app"
+
+      - name: Verify the installed bundle
+        # `--version` parses argv and exits before any config, capture or launchd
+        # work, so it needs no GUI session and neither TCC grant — and it is
+        # where a Swift-runtime link error surfaces, the failure
+        # MACOSX_DEPLOYMENT_TARGET exists to prevent (see .cargo/config.toml),
+        # which builds clean and only dies on launch.
+        #
+        # The strict codesign verify then covers the bundle's own structure: a
+        # resource the signature does not seal fails here — including one the
+        # trip through the image added.
+        run: |
+          version=$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["workspace"]["package"]["version"])
+          ')
+          app="$RUNNER_TEMP/installed/remotex-agent.app"
+          got=$("$app/Contents/MacOS/remotex-agent" --version)
+          echo "bundle reports: ${got}"
+          [ "$got" = "remotex-agent ${version}" ] || {
+            echo "::error::expected 'remotex-agent ${version}'"
+            exit 1
+          }
+          codesign --verify --deep --strict --verbose=2 "$app"
