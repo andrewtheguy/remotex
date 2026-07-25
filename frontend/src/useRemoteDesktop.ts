@@ -332,6 +332,9 @@ export function useRemoteDesktop(
   // the last engine error to show against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
   const [connectedTarget, setConnectedTarget] = useState<string | null>(null);
+  const [guestOS, setGuestOS] = useState<"windows" | "macos" | "linux" | null>(
+    null,
+  );
   const [connectError, setConnectError] = useState<string | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
@@ -706,6 +709,7 @@ export function useRemoteDesktop(
           setConnectError(null);
           setPendingTarget(null);
           setConnectedTarget(msg.name);
+          setGuestOS(msg.os);
           setMode("desktop");
           // RDP resizes only on request (heavy reactivation); VNC follows the
           // viewport automatically. In manual mode the report below is
@@ -752,6 +756,7 @@ export function useRemoteDesktop(
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setConnectedTarget(null);
+          setGuestOS(null);
           setMode("picker");
           manualResizeRef.current = false;
           setCanResize(false);
@@ -1186,6 +1191,7 @@ export function useRemoteDesktop(
     status,
     mode,
     connectedTarget,
+    guestOS,
     connectError,
     pendingTarget,
     size,

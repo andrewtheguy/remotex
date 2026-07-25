@@ -127,8 +127,9 @@ final class AppModel {
 
     func apply(session next: ViewerSessionState) {
         let wasCapturing = session.canCaptureKeyboard
+        let guestChanged = session.guestOS != next.guestOS
         session = next
-        if wasCapturing && !next.canCaptureKeyboard {
+        if wasCapturing && (!next.canCaptureKeyboard || guestChanged) {
             releaseNativeKeys()
         }
         clipboard.update(

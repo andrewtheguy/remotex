@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 // The viewer and the served frontend ship in lockstep. Increment this whenever
 // either side changes the shape or semantics of a native-host message.
-export const NATIVE_HOST_BRIDGE_VERSION = 1;
+export const NATIVE_HOST_BRIDGE_VERSION = 2;
 
 interface NativeHostDescriptor {
   bridgeVersion: number;
@@ -38,6 +38,7 @@ export interface NativeHostState {
     | "takenOver"
     | null;
   connectedTarget: string | null;
+  guestOS: "windows" | "macos" | "linux" | null;
   canResize: boolean;
   canClipboard: boolean;
   canCaptureKeyboard: boolean;

@@ -241,15 +241,18 @@ pub enum ServerMsg {
     Picker,
     /// A target session is live: show the desktop. Sent on attach to a running
     /// engine and right after a [`ClientMsg::Connect`]. `name` is the target
-    /// profile the session is bound to; `protocol` (`"rdp"`/`"vnc"`) and
+    /// profile the session is bound to; `protocol` (`"rdp"`/`"vnc"`/`"rxa"`) and
     /// `resize` let the browser choose its resize behaviour — VNC resizes
     /// automatically with the viewport, RDP only on the user's request (the
-    /// floating menu's "Resize to window"). `clipboard` says whether this
-    /// target opted into the clipboard bridge, which is what enables the
-    /// floating menu's Clipboard button.
+    /// floating menu's "Resize to window"). `os` is the configured guest OS,
+    /// independent of transport, so a native host can choose its shortcut
+    /// convention. `clipboard` says whether this target opted into the
+    /// clipboard bridge, which is what enables the floating menu's Clipboard
+    /// button.
     Connected {
         name: String,
         protocol: &'static str,
+        os: &'static str,
         resize: bool,
         clipboard: bool,
     },
@@ -285,6 +288,7 @@ enum ControlMsg<'a> {
     Connected {
         name: &'a str,
         protocol: &'a str,
+        os: &'a str,
         resize: bool,
         clipboard: bool,
     },
@@ -318,11 +322,13 @@ impl ServerMsg {
             ServerMsg::Connected {
                 name,
                 protocol,
+                os,
                 resize,
                 clipboard,
             } => WireFrame::Text(control(&ControlMsg::Connected {
                 name,
                 protocol,
+                os,
                 resize: *resize,
                 clipboard: *clipboard,
             })),
@@ -416,6 +422,7 @@ mod tests {
         match (ServerMsg::Connected {
             name: "mac".to_owned(),
             protocol: "rxa",
+            os: "macos",
             resize: false,
             clipboard: true,
         })
@@ -423,7 +430,7 @@ mod tests {
         {
             WireFrame::Text(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true}"#
+                r#"{"type":"connected","name":"mac","protocol":"rxa","os":"macos","resize":false,"clipboard":true}"#
             ),
             other => panic!("connected should be a text frame: {other:?}"),
         }

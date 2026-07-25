@@ -65,6 +65,7 @@ export type ControlMsg =
       type: "connected";
       name: string;
       protocol: string;
+      os: "windows" | "macos" | "linux";
       resize: boolean;
       clipboard: boolean;
     }

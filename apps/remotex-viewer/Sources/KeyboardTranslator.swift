@@ -13,15 +13,32 @@ struct KeyboardTranslator {
     private var translatedCommandKeys = Set<UInt16>()
     private var syntheticControlHeld = false
 
-    mutating func translate(_ event: NSEvent) -> [TranslatedKeyEvent] {
+    mutating func translate(
+        _ event: NSEvent,
+        mapCommandToControl: Bool = true
+    ) -> [TranslatedKeyEvent] {
         let caps = event.modifierFlags.contains(.capsLock)
         switch event.type {
         case .flagsChanged:
-            return translateModifier(event, caps: caps)
+            return translateModifier(
+                event,
+                caps: caps,
+                mapCommandToControl: mapCommandToControl
+            )
         case .keyDown:
-            return translateKey(event, pressed: true, caps: caps)
+            return translateKey(
+                event,
+                pressed: true,
+                caps: caps,
+                mapCommandToControl: mapCommandToControl
+            )
         case .keyUp:
-            return translateKey(event, pressed: false, caps: caps)
+            return translateKey(
+                event,
+                pressed: false,
+                caps: caps,
+                mapCommandToControl: mapCommandToControl
+            )
         default:
             return []
         }
@@ -37,7 +54,8 @@ struct KeyboardTranslator {
 
     private mutating func translateModifier(
         _ event: NSEvent,
-        caps: Bool
+        caps: Bool,
+        mapCommandToControl: Bool
     ) -> [TranslatedKeyEvent] {
         guard let code = Self.domCode(for: event.keyCode) else {
             return []
@@ -49,6 +67,15 @@ struct KeyboardTranslator {
             ]
         }
         if code == "MetaLeft" || code == "MetaRight" {
+            if !mapCommandToControl {
+                return [
+                    TranslatedKeyEvent(
+                        code: code,
+                        pressed: event.modifierFlags.contains(.command),
+                        caps: caps
+                    ),
+                ]
+            }
             return translateCommandModifier(event, code: code, caps: caps)
         }
         guard let flag = Self.modifierFlag(for: code) else {
@@ -96,12 +123,17 @@ struct KeyboardTranslator {
     private mutating func translateKey(
         _ event: NSEvent,
         pressed: Bool,
-        caps: Bool
+        caps: Bool,
+        mapCommandToControl: Bool
     ) -> [TranslatedKeyEvent] {
         guard let code = Self.domCode(for: event.keyCode) else {
             return []
         }
-        if pressed, event.modifierFlags.contains(.command), Self.commandMapsToControl(code) {
+        if mapCommandToControl,
+           pressed,
+           event.modifierFlags.contains(.command),
+           Self.commandMapsToControl(code)
+        {
             commandWasUsed = true
             translatedCommandKeys.insert(event.keyCode)
             var translated: [TranslatedKeyEvent] = []
@@ -126,7 +158,7 @@ struct KeyboardTranslator {
         }
 
         var translated: [TranslatedKeyEvent] = []
-        if pressed, event.modifierFlags.contains(.command) {
+        if mapCommandToControl, pressed, event.modifierFlags.contains(.command) {
             commandWasUsed = true
             for keyCode in pendingCommandCodes.subtracting(forwardedCommandCodes) {
                 guard let commandCode = Self.domCode(for: keyCode) else {

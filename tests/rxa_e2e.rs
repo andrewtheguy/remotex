@@ -33,7 +33,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use common::{Ws, connect_ws};
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::config::{AppConfig, GuestOs, Protocol, Security, TargetConfig};
 use remotex::protocol::Tile;
 use remotex::server;
 use remotex::session::REATTACH_GRACE_PERIOD;
@@ -249,6 +249,7 @@ async fn spawn_app_with_clipboard(port: u16, psk: &str, clipboard: bool) -> Sock
         targets: vec![TargetConfig {
             name: "mac".to_owned(),
             protocol: Protocol::Rxa,
+            os: GuestOs::Macos,
             host: "127.0.0.1".to_owned(),
             port,
             username: String::new(),

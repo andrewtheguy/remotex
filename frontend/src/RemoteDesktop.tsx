@@ -40,6 +40,7 @@ export default function RemoteDesktop({
     status,
     mode,
     connectedTarget,
+    guestOS,
     connectError,
     pendingTarget,
     size,
@@ -79,12 +80,21 @@ export default function RemoteDesktop({
         screen: mode,
         connectionStatus: status,
         connectedTarget,
+        guestOS,
         canResize,
         canClipboard,
         canCaptureKeyboard: status === "connected" && mode === "desktop",
       },
     });
-  }, [canClipboard, canResize, connectedTarget, mode, nativeHost, status]);
+  }, [
+    canClipboard,
+    canResize,
+    connectedTarget,
+    guestOS,
+    mode,
+    nativeHost,
+    status,
+  ]);
 
   useEffect(() => {
     if (!nativeHost || !remoteClipboard) {

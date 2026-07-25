@@ -1,4 +1,4 @@
-name: Release remotex and mac agent
+name: Release remotex, mac agent, and mac viewer
 
 on:
   workflow_dispatch:
@@ -203,8 +203,51 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
 
+  mac-viewer:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the native viewer
+        run: swift test --package-path apps/remotex-viewer
+
+      - name: Build remotex-viewer.app and its disk image
+        env:
+          CODESIGN_IDENTITY: "-"
+        run: bash packaging/macos-viewer/build-viewer-app.sh
+
+      - name: Verify the disk image
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          dmg="dist/remotex-viewer-${version}-macos-arm64-unsigned.dmg"
+          mnt="$RUNNER_TEMP/viewer-dmg-mount"
+          mkdir -p "$mnt" "$RUNNER_TEMP/viewer-installed"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
+          [ "$(readlink "$mnt/Applications")" = "/Applications" ] || {
+            echo "::error::the viewer image has no /Applications symlink"
+            exit 1
+          }
+          /usr/bin/ditto "$mnt/remotex-viewer.app" \
+            "$RUNNER_TEMP/viewer-installed/remotex-viewer.app"
+          hdiutil detach "$mnt"
+          app="$RUNNER_TEMP/viewer-installed/remotex-viewer.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          got=$("$app/Contents/MacOS/remotex-viewer" --version)
+          [ "$got" = "remotex-viewer ${version}" ] || {
+            echo "::error::expected 'remotex-viewer ${version}', got '${got}'"
+            exit 1
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remotex-viewer-macos-arm64
+          path: dist/*.dmg
+          if-no-files-found: error
+
   release:
-    needs: [prepare, build, mac-agent]
+    needs: [prepare, build, mac-agent, mac-viewer]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

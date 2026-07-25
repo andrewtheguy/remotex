@@ -15,10 +15,17 @@ enum ViewerConnectionStatus: String {
     case takenOver
 }
 
+enum GuestOS: String {
+    case windows
+    case macos
+    case linux
+}
+
 struct ViewerSessionState: Equatable {
     var screen = ViewerScreen.checking
     var connectionStatus: ViewerConnectionStatus?
     var connectedTarget: String?
+    var guestOS: GuestOS?
     var canResize = false
     var canClipboard = false
     var canCaptureKeyboard = false

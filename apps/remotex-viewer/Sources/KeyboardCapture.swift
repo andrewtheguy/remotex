@@ -90,7 +90,10 @@ final class KeyboardCapture {
         {
             model.clipboard.pushLocalClipboard(force: true)
         }
-        for translated in translator.translate(event) {
+        for translated in translator.translate(
+            event,
+            mapCommandToControl: model.session.guestOS != .macos
+        ) {
             model.sendKey(
                 code: translated.code,
                 pressed: translated.pressed,

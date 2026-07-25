@@ -39,6 +39,47 @@ struct KeyboardTranslatorTests {
     }
 
     @Test
+    func commandVStaysCommandVForAMacGuest() {
+        var translator = KeyboardTranslator()
+        #expect(
+            translator.translate(
+                event(.flagsChanged, 0x37, [.command]),
+                mapCommandToControl: false
+            )
+                == [
+                    TranslatedKeyEvent(code: "MetaLeft", pressed: true, caps: false),
+                ]
+        )
+        #expect(
+            translator.translate(
+                event(.keyDown, 0x09, [.command]),
+                mapCommandToControl: false
+            )
+                == [
+                    TranslatedKeyEvent(code: "KeyV", pressed: true, caps: false),
+                ]
+        )
+        #expect(
+            translator.translate(
+                event(.keyUp, 0x09, [.command]),
+                mapCommandToControl: false
+            )
+                == [
+                    TranslatedKeyEvent(code: "KeyV", pressed: false, caps: false),
+                ]
+        )
+        #expect(
+            translator.translate(
+                event(.flagsChanged, 0x37, []),
+                mapCommandToControl: false
+            )
+                == [
+                    TranslatedKeyEvent(code: "MetaLeft", pressed: false, caps: false),
+                ]
+        )
+    }
+
+    @Test
     func bareCommandTapsTheRemoteWindowsKey() {
         var translator = KeyboardTranslator()
         #expect(translator.translate(event(.flagsChanged, 0x37, [.command])).isEmpty)

@@ -230,6 +230,18 @@ with pinch zoom, pan, a virtual cursor, and multi-finger gestures. View
 transforms affect presentation and input coordinate mapping, not framebuffer
 resolution.
 
+### Native macOS host
+
+The optional macOS 26 viewer hosts this entire SPA in `WKWebView`; it does not
+replace authentication, the session state machine, the WebSocket, or canvas
+rendering. An exact-version native-host bridge replaces only the floating menu,
+DOM keyboard path, and browser Clipboard API with native SwiftUI/AppKit
+integrations. Commands return to the same `ClientMsg` WebSocket path, so the
+viewer has no protocol-engine branches.
+
+See [`macos-viewer.md`](macos-viewer.md) for the bridge, keyboard, clipboard,
+navigation, and packaging design.
+
 ## Configuration and testing
 
 Configuration is one global TOML file with `[server]` and `[[targets]]`

@@ -4,6 +4,13 @@ import SwiftUI
 struct RemotexViewerApp: App {
     @State private var model = AppModel()
 
+    init() {
+        if CommandLine.arguments.contains("--version") {
+            print("remotex-viewer \(ProductInfo.version)")
+            Foundation.exit(EXIT_SUCCESS)
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(model: model)

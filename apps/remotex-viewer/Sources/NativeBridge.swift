@@ -120,10 +120,16 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
         }
         let status = (value["connectionStatus"] as? String)
             .flatMap(ViewerConnectionStatus.init(rawValue:))
+        let guestOS = (value["guestOS"] as? String)
+            .flatMap(GuestOS.init(rawValue:))
+        guard screen != .desktop || guestOS != nil else {
+            return nil
+        }
         return ViewerSessionState(
             screen: screen,
             connectionStatus: status,
             connectedTarget: value["connectedTarget"] as? String,
+            guestOS: guestOS,
             canResize: canResize,
             canClipboard: canClipboard,
             canCaptureKeyboard: canCaptureKeyboard

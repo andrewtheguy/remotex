@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use common::{Ws, connect_ws};
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
+use remotex::config::{AppConfig, GuestOs, Protocol, Security, TargetConfig};
 use remotex::server;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -211,6 +211,11 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
     TargetConfig {
         name: "test-target".to_owned(),
         protocol,
+        os: if protocol == Protocol::Rxa {
+            GuestOs::Macos
+        } else {
+            GuestOs::Linux
+        },
         host: "127.0.0.1".to_owned(),
         port,
         username: "tester".to_owned(),
@@ -339,6 +344,7 @@ async fn targets_endpoint_lists_targets_but_never_credentials() {
     let cookie = common::login(addr).await;
     let body = http_get(addr, "/api/targets", Some(&cookie)).await;
     assert!(body.contains("test-target"), "targets should list the name: {body}");
+    assert!(body.contains(r#""os":"linux""#), "targets should list the guest OS: {body}");
     assert!(body.contains("127.0.0.1"), "targets should report the host: {body}");
     // Credentials must never be serialized to the browser.
     assert!(
