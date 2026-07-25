@@ -6,8 +6,21 @@ import WebKit
 @Observable
 final class AppModel {
     private static let gatewayDefaultsKey = "gatewayAddress"
+    private static let keyboardOverridesDefaultsKey = "macOSKeyboardOverridesEnabled"
 
     var gatewayAddress: String
+    var macOSKeyboardOverridesEnabled: Bool {
+        didSet {
+            guard macOSKeyboardOverridesEnabled != oldValue else {
+                return
+            }
+            defaults.set(
+                macOSKeyboardOverridesEnabled,
+                forKey: Self.keyboardOverridesDefaultsKey
+            )
+            releaseNativeKeys()
+        }
+    }
     private(set) var gateway: GatewayLocation
     private(set) var session = ViewerSessionState()
     private(set) var bridgeStatus = BridgeStatus.loading
@@ -25,6 +38,8 @@ final class AppModel {
     @ObservationIgnored
     private weak var webView: WKWebView?
     @ObservationIgnored
+    private let defaults: UserDefaults
+    @ObservationIgnored
     private var commandQueue: [[String: Any]] = []
     @ObservationIgnored
     private var drainingCommands = false
@@ -33,13 +48,16 @@ final class AppModel {
     @ObservationIgnored
     private var pressedNativeKeys = NativePressedKeys()
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         let commandLineGateway = Self.commandLineGateway()
-        let stored = UserDefaults.standard.string(forKey: Self.gatewayDefaultsKey)
+        let stored = defaults.string(forKey: Self.gatewayDefaultsKey)
         let initial = commandLineGateway ?? stored ?? "http://127.0.0.1:52380"
         let parsed = (try? GatewayLocation.parse(initial))
             ?? (try! GatewayLocation.parse("http://127.0.0.1:52380"))
         gatewayAddress = parsed.url.absoluteString
+        macOSKeyboardOverridesEnabled =
+            defaults.object(forKey: Self.keyboardOverridesDefaultsKey) as? Bool ?? true
         gateway = parsed
         clipboard = ClipboardSynchronizer()
         clipboard.sendCommand = { [weak self] command in
@@ -147,7 +165,7 @@ final class AppModel {
             let next = try GatewayLocation.parse(gatewayAddress)
             gatewayAddress = next.url.absoluteString
             gateway = next
-            UserDefaults.standard.set(gatewayAddress, forKey: Self.gatewayDefaultsKey)
+            defaults.set(gatewayAddress, forKey: Self.gatewayDefaultsKey)
             loadGateway()
         } catch {
             navigationError = error.localizedDescription

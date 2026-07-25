@@ -57,8 +57,11 @@ For Windows and Linux guests, standard Mac Command shortcuts map to remote
 Control shortcuts. A bare Command taps remote Meta, and other Command chords
 are sent as remote Meta chords. For a macOS guest, Command remains Meta for
 every chord, so Command-V arrives as Command-V rather than Control-V. This is
-selected by target OS, not by backend. **Control-Option-Command-Escape**
-releases capture; the Remote menu captures it again.
+selected by target OS, not by backend. The default-on **Enable macOS keyboard
+overrides** checkbox under **remotex → Settings** can disable Command shortcut
+translation globally; when disabled, Command is always sent as remote Meta.
+**Control-Option-Command-Escape** releases capture; the Remote menu captures it
+again.
 
 Focus loss, takeover, navigation, target switching, and capture release all
 send the protocol's release-all command. macOS-global shortcuts that never

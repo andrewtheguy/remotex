@@ -84,15 +84,18 @@ final class KeyboardCapture {
             return false
         }
 
+        let mapCommandToControl =
+            model.macOSKeyboardOverridesEnabled && model.session.guestOS != .macos
         if event.type == .keyDown,
            KeyboardTranslator.domCode(for: event.keyCode) == "KeyV",
-           event.modifierFlags.contains(.command)
+           event.modifierFlags.contains(.command),
+           mapCommandToControl || model.session.guestOS == .macos
         {
             model.clipboard.pushLocalClipboard(force: true)
         }
         for translated in translator.translate(
             event,
-            mapCommandToControl: model.session.guestOS != .macos
+            mapCommandToControl: mapCommandToControl
         ) {
             model.sendKey(
                 code: translated.code,

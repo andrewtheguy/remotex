@@ -17,6 +17,21 @@ struct SettingsView: View {
                 }
                 .keyboardShortcut(.defaultAction)
             }
+
+            Divider()
+
+            Toggle(
+                "Enable macOS keyboard overrides",
+                isOn: $model.macOSKeyboardOverridesEnabled
+            )
+            .toggleStyle(.checkbox)
+
+            Text(
+                "Maps standard Command shortcuts to Control for Windows and Linux guests. "
+                    + "Command keys are sent unchanged when disabled."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
         .padding(20)
         .frame(width: 480)

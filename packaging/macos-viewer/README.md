@@ -53,6 +53,11 @@ Application-delivered shortcuts such as Command-W, Command-R, F5, and F11 can
 therefore reach the remote. macOS-global shortcuts such as Command-Tab and
 Command-Space remain owned by the operating system.
 
+The default-on **Enable macOS keyboard overrides** checkbox under
+**remotex → Settings** maps standard Command shortcuts to remote Control for
+Windows and Linux guests. Uncheck it to send Command unchanged as remote Meta.
+The preference persists across launches.
+
 ## Clipboard permission
 
 Programmatic reads of the general pasteboard can produce the macOS

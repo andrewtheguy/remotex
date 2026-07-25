@@ -80,6 +80,29 @@ struct KeyboardTranslatorTests {
     }
 
     @Test
+    func commandVStaysCommandVWhenKeyboardOverridesAreDisabled() {
+        var translator = KeyboardTranslator()
+        #expect(
+            translator.translate(
+                event(.flagsChanged, 0x37, [.command]),
+                mapCommandToControl: false
+            )
+                == [
+                    TranslatedKeyEvent(code: "MetaLeft", pressed: true, caps: false),
+                ]
+        )
+        #expect(
+            translator.translate(
+                event(.keyDown, 0x09, [.command]),
+                mapCommandToControl: false
+            )
+                == [
+                    TranslatedKeyEvent(code: "KeyV", pressed: true, caps: false),
+                ]
+        )
+    }
+
+    @Test
     func bareCommandTapsTheRemoteWindowsKey() {
         var translator = KeyboardTranslator()
         #expect(translator.translate(event(.flagsChanged, 0x37, [.command])).isEmpty)
