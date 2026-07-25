@@ -684,6 +684,15 @@ mod tests {
     }
 
     #[test]
+    fn rxa_target_requires_macos_guest_os() {
+        let psk = rxa_proto::psk::generate();
+        let toml = rxa_toml(&format!("psk = \"{psk}\""))
+            .replace("os = \"macos\"", "os = \"windows\"");
+        let err = ConfigFile::parse(&toml).unwrap_err();
+        assert!(format!("{err:#}").contains("macos"), "{err:#}");
+    }
+
+    #[test]
     fn vnc_target_gets_the_vnc_default_port() {
         let config = ConfigFile::parse(&format!(
             r#"

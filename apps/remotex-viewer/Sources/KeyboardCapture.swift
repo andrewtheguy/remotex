@@ -116,7 +116,7 @@ final class KeyboardCapture {
             return false
         }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        return event.keyCode == 0x35
+        return KeyboardTranslator.domCode(for: event.keyCode) == "Escape"
             && modifiers.contains([.control, .option, .command])
     }
 }

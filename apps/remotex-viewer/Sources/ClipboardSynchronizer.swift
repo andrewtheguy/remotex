@@ -20,12 +20,14 @@ final class ClipboardSynchronizer {
             observedChangeCount = pasteboard.changeCount
             sendCommand?(["type": "clipboardRequest"])
             pushLocalClipboard(force: false)
-            timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) {
+            let timer = Timer(timeInterval: 0.4, repeats: true) {
                 [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.poll()
                 }
             }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
         } else {
             timer?.invalidate()
             timer = nil
