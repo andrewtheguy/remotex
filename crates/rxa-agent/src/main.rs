@@ -95,11 +95,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use file_rotate::{
+    ContentLimit, FileRotate, compression::Compression, suffix::AppendCount,
+};
 use log::{info, warn};
 
 /// How often the main thread re-reads the system cursor when `--no-menu` has
 /// taken the run loop away. The menu bar polls at the same rate from a timer.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
+const LOG_FILE_BYTES: usize = 5 * 1024 * 1024;
+const LOG_FILE_BACKUPS: usize = 3;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
@@ -315,8 +320,8 @@ fn restart() -> anyhow::Error {
     anyhow::anyhow!("cannot restart {}: {error}", exe.display())
 }
 
-/// Log to stderr on a terminal, and to `~/Library/Logs/remotex-agent.log`
-/// otherwise.
+/// Log to stderr on a terminal, and to a bounded set of files rooted at
+/// `~/Library/Logs/remotex-agent.log` otherwise.
 ///
 /// launchd does not expand `~`, so the embedded plist cannot name a per-user log
 /// path and sets no `StandardErrorPath` at all — output would go nowhere. The
@@ -339,17 +344,19 @@ fn init_logging() -> Option<PathBuf> {
     path
 }
 
-fn log_file() -> Option<(std::fs::File, PathBuf)> {
+fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
     let home = std::env::var_os("HOME")?;
     let dir = Path::new(&home).join("Library/Logs");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("remotex-agent.log");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .ok()?;
-    Some((file, path))
+    let writer = FileRotate::new(
+        path.clone(),
+        AppendCount::new(LOG_FILE_BACKUPS),
+        ContentLimit::BytesSurpassed(LOG_FILE_BYTES),
+        Compression::None,
+        None,
+    );
+    Some((writer, path))
 }
 
 /// Accept gateway connections, one at a time.
