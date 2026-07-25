@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 /// The web-login credentials every test server is configured with.
 #[allow(dead_code)]
@@ -202,27 +203,29 @@ pub fn start_dummy_server(
         String::from_utf8_lossy(&build.stderr)
     );
 
-    // Grab a free port; the tiny window before the container binds it is fine.
-    // Against a remote engine this only proves the port is free *locally*, which
-    // is a reasonable proxy — a collision shows up as a container that fails to
-    // start rather than as a silent wrong answer.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-
+    // The engine picks the host port, not this process. The bind happens on the
+    // *engine's* host, so a port a local `TcpListener` found free says nothing
+    // about a remote engine — and an ephemeral port with no address before the
+    // colon is the one form both podman and docker read as "choose one".
+    //
+    // A remote engine also has to publish on all interfaces for this machine to
+    // reach it; a local one stays on loopback so a test never exposes a service
+    // to the network.
     let host = container_host();
-    // A remote engine has to publish on all interfaces for this machine to reach
-    // it; a local one stays on loopback so a test never exposes a service to the
-    // network.
     let publish = if host == "127.0.0.1" || host == "localhost" {
-        format!("127.0.0.1:{port}:{internal_port}")
+        format!("127.0.0.1::{internal_port}")
     } else {
-        format!("0.0.0.0:{port}:{internal_port}")
+        format!("0.0.0.0::{internal_port}")
     };
 
-    let name = format!("{image}-{port}");
+    // Unique without a port to name it after: pid plus a counter, so two tests
+    // in one binary never collide.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = format!(
+        "{image}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, AtomicOrdering::Relaxed)
+    );
     let container = Container { runtime, name: name.clone() };
     let run = Command::new(runtime)
         .args([
@@ -235,5 +238,28 @@ pub fn start_dummy_server(
         "container start failed:\n{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    (container, port)
+    (container, published_port(runtime, &name, internal_port))
+}
+
+/// Ask the engine which host port it published `internal_port` on.
+///
+/// `<runtime> port <name> <port>/tcp` prints one `address:port` line per
+/// binding — podman adds an IPv6 one — and every line carries the same host
+/// port, so the first parseable one is the answer.
+#[allow(dead_code)]
+fn published_port(runtime: &'static str, name: &str, internal_port: u16) -> u16 {
+    let out = Command::new(runtime)
+        .args(["port", name, &format!("{internal_port}/tcp")])
+        .output()
+        .expect("query the container's published port");
+    assert!(
+        out.status.success(),
+        "could not read the published port:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter_map(|line| line.trim().rsplit_once(':')?.1.parse::<u16>().ok())
+        .find(|port| *port != 0)
+        .unwrap_or_else(|| panic!("no published port in {runtime} port output: {text:?}"))
 }
