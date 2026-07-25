@@ -52,7 +52,10 @@ Security**:
 | Accessibility | inject mouse and keyboard input | effective immediately |
 
 The menu bar shows a warning and links to the relevant settings pane while a
-permission is missing.
+permission is missing. Screen Recording is checked again when the menu opens;
+after you enable it, the menu offers to quit the agent and tells you to reopen it
+from Applications. Accessibility is detected while the agent remains open and
+needs no restart.
 
 Permissions are tied to the app's signing identity. The ad-hoc-signed release
 may need both grants again after an upgrade. A stable Developer ID signature
@@ -133,6 +136,9 @@ packaging/macos/build-agent-app.sh --no-dmg
 ```
 
 The first command creates the DMG; the second keeps the `.app` in `dist/`.
+Both default to the same ad-hoc signing used by the release workflow, so local
+and downloaded builds have the same code identity class. The DMG is named with
+the `-unsigned` suffix.
 
 `icon.svg` is the source for the committed `AppIcon.icns`. Regenerate it after
 changing the SVG:
@@ -142,8 +148,9 @@ brew install librsvg
 packaging/macos/make-icon.sh
 ```
 
-Signing selection is: `CODESIGN_IDENTITY`, a Developer ID Application identity,
-an Apple Development identity, then ad-hoc signing.
+Signing is opt-in. Set `CODESIGN_IDENTITY` explicitly when a signed package is
+required; otherwise the script does not search the local keychain and uses
+ad-hoc signing.
 
 ### Notarization
 
@@ -153,13 +160,15 @@ Store a notarytool profile, then pass it to the build:
 xcrun notarytool store-credentials remotex-notary \
   --key AuthKey_XXXX.p8 --key-id <KEY_ID> --issuer <ISSUER_UUID>
 
-packaging/macos/build-agent-app.sh --notary-profile remotex-notary
+CODESIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
+   packaging/macos/build-agent-app.sh --notary-profile remotex-notary
 ```
 
 For non-interactive signing, the build script accepts:
 
 | Variable | Value |
 |---|---|
+| `CODESIGN_IDENTITY` | name of the imported Developer ID identity |
 | `MACOS_CERT_P12` | base64-encoded `.p12` containing the private key |
 | `MACOS_CERT_PASSWORD` | export password |
 | `MACOS_KEYCHAIN_PASSWORD` | password for the temporary keychain |

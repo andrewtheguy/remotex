@@ -244,8 +244,6 @@ mod tests {
 
     #[tokio::test]
     async fn unanswered_websocket_pings_expire_the_session_engine() {
-        tokio::time::pause();
-
         let target = TargetConfig {
             name: "fake".to_owned(),
             protocol: Protocol::Vnc,
@@ -292,11 +290,23 @@ mod tests {
         let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
             .await
             .unwrap();
+        // Establish the OS-backed WebSocket under real time. Pausing before the
+        // handshake lets Tokio auto-advance idle time through heartbeat ticks
+        // while the runtime waits for socket I/O, which can expire the session
+        // before this test reaches its first assertion under a busy test suite.
+        client
+            .send(ClientFrame::Pong(Vec::new().into()))
+            .await
+            .unwrap();
         client
             .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
             .await
             .unwrap();
         let (input_rx, _frame_tx) = engine_rx.recv().await.unwrap();
+        // WebSocket frames are processed in order, so engine creation proves
+        // the preceding Pong reset the heartbeat baseline. Freeze only the
+        // timeout window that the assertions below control.
+        tokio::time::pause();
 
         // Never poll `client`: its protocol stack cannot read Ping frames and
         // therefore cannot enqueue automatic Pong replies.

@@ -42,7 +42,7 @@
 //! Both are one-time grants in System Settings → Privacy & Security, both are
 //! attached to this bundle's signed identity, and macOS provides no way to grant
 //! them programmatically. Neither is optional, so neither is a setting: the menu
-//! bar treats them as health, warns in its icon and asks for the missing one (see
+//! bar treats them as health, warns in its icon and links to the missing one (see
 //! [`menubar`]). Accessibility is the one that bites — without it the screen
 //! paints, the session looks perfectly healthy, and every click and keystroke is
 //! silently discarded.
@@ -215,7 +215,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    report_permissions();
+    // Keep the pre-request Screen Recording state: granting it in the system
+    // prompt below changes TCC immediately, but capture only works after this
+    // process is relaunched. The menu must not mistake that new TCC value
+    // for a permission effective in this launch.
+    let screen_recording_at_launch = report_permissions();
 
     let tracker = Arc::new(cursor::Tracker::new());
     let state = Arc::new(state::AgentState::new());
@@ -260,7 +264,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Hands the main thread to AppKit and never returns.
-    menubar::run(state, tracker, settings, log_path)
+    menubar::run(
+        state,
+        tracker,
+        settings,
+        log_path,
+        screen_recording_at_launch,
+    )
 }
 
 /// Say why the agent is about to give up, on screen as well as in the log.
@@ -428,17 +438,20 @@ async fn serve(
 ///   and keystroke vanishes.
 ///
 /// macOS remembers the answer, so a granted (or firmly refused) permission does
-/// not re-prompt on later launches — which is exactly why the menu bar asks again
-/// in its own words once the run loop is up (see [`menubar`]). This function is
-/// the system prompt and the log line; that one is the explanation.
-fn report_permissions() {
-    if capture::screen_recording_granted() {
+/// not re-prompt on later launches. The menu bar keeps missing grants visible and
+/// links to their System Settings panes without showing a second dialog.
+///
+/// Returns whether Screen Recording was already granted before requesting it.
+/// A grant made by the request belongs to a newly launched process.
+fn report_permissions() -> bool {
+    let screen_recording_at_launch = capture::screen_recording_granted();
+    if screen_recording_at_launch {
         info!("permissions: Screen Recording granted");
     } else {
         warn!(
             "permissions: Screen Recording NOT granted — requesting it. Enable \
              remotex-agent in System Settings > Privacy & Security > Screen \
-             Recording, then restart the agent."
+             Recording, then quit and reopen the agent."
         );
         capture::request_screen_recording();
     }
@@ -453,6 +466,8 @@ fn report_permissions() {
         );
         input::request_accessibility();
     }
+
+    screen_recording_at_launch
 }
 
 fn print_first_run(path: &Path) {
