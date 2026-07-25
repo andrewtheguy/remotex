@@ -28,10 +28,10 @@
 //! native permission requests happen at startup in [`crate::report_permissions`].
 //!
 //! They are also read on different schedules, because they *behave* differently:
-//! Accessibility applies the instant it is granted, so it is polled until it is;
-//! Screen Recording only reaches a fresh launch, so it is read once at startup and
-//! believed for the rest of the run. [`Controller::refresh_permissions`] has the
-//! reasoning.
+//! Accessibility applies the instant it is granted, so it is polled until it is.
+//! Screen Recording only reaches a fresh launch, so its effective state is fixed
+//! at startup; a non-polling recheck when the menu opens can offer the required
+//! quit and reopen without falsely reporting the current process healthy.
 //!
 //! ## Quit has to defeat launchd
 //!
@@ -80,7 +80,7 @@ const TICK: f64 = 0.1;
 /// It has to be polled at all because it is granted in System Settings, outside
 /// this process, with no notification to subscribe to. It does not have to be
 /// polled ten times a second, and it does not have to be polled once it is on —
-/// see [`Controller::refresh_permissions`].
+/// see [`Controller::refresh_accessibility`].
 const PERMISSION_EVERY: u32 = 10;
 
 /// The status item: blocked, idle, and with a gateway attached.
@@ -106,6 +106,34 @@ const URL_ACCESSIBILITY: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 const URL_LOGIN_ITEMS: &str = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
 
+/// Whether Screen Recording is effective for this process launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenRecording {
+    Missing,
+    /// TCC is enabled, but this process was launched before the grant.
+    RelaunchRequired,
+    Granted,
+}
+
+impl ScreenRecording {
+    fn at_launch(granted: bool) -> Self {
+        if granted { Self::Granted } else { Self::Missing }
+    }
+
+    /// Observe TCC without treating a post-launch grant as effective.
+    fn observe(self, granted: bool) -> Self {
+        match (self, granted) {
+            (Self::Granted, true) => Self::Granted,
+            (Self::Missing | Self::RelaunchRequired, true) => Self::RelaunchRequired,
+            (_, false) => Self::Missing,
+        }
+    }
+
+    fn effective(self) -> bool {
+        self == Self::Granted
+    }
+}
+
 /// The two TCC grants, as they stand for *this* run of the agent.
 ///
 /// Neither is optional — without Screen Recording the screen never paints, and
@@ -114,23 +142,20 @@ const URL_LOGIN_ITEMS: &str = "x-apple.systempreferences:com.apple.LoginItems-Se
 /// reports and a panel offers to fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Permissions {
-    /// Read once, at startup, and never again — see
-    /// [`Controller::refresh_permissions`].
-    screen: bool,
+    screen: ScreenRecording,
     accessibility: bool,
 }
 
 impl Permissions {
-    /// Read both grants. Correct exactly once, at startup.
-    fn read() -> Self {
+    fn read(screen_recording_at_launch: bool) -> Self {
         Self {
-            screen: capture::screen_recording_granted(),
+            screen: ScreenRecording::at_launch(screen_recording_at_launch),
             accessibility: input::accessibility_granted(),
         }
     }
 
     fn complete(self) -> bool {
-        self.screen && self.accessibility
+        self.screen.effective() && self.accessibility
     }
 }
 
@@ -196,7 +221,7 @@ define_class!(
             let ticks = self.ivars().ticks.get();
             self.ivars().ticks.set(ticks.wrapping_add(1));
             if ticks.is_multiple_of(PERMISSION_EVERY) {
-                self.refresh_permissions();
+                self.refresh_accessibility();
             }
 
             self.refresh_icon();
@@ -403,30 +428,33 @@ impl Controller {
         self.ivars().icon.set(Some(health));
     }
 
-    /// Re-read what can still change, and answer with where both grants stand.
+    /// Re-read Accessibility while it is missing.
     ///
-    /// Only Accessibility is ever re-read, and only until it is granted:
-    ///
-    /// - **Screen Recording** is read once, at startup, because that is the only
-    ///   answer true of this process. macOS grants it to a *launch*: the TCC state
-    ///   flips the moment the user ticks the box, and ScreenCaptureKit goes on
-    ///   refusing this already-running process until the app is started again —
-    ///   which is why macOS itself offers to quit and reopen the app. Re-reading it
-    ///   would report "granted" over a session that cannot capture a pixel.
-    /// - **Accessibility** takes effect immediately: `CGEventPost` starts landing
-    ///   as soon as the box is ticked, no restart involved. So it is polled until
-    ///   it is on, and then left alone.
-    ///
-    /// What stopping costs is a *revocation* mid-session going unnoticed until the
-    /// next launch. That buys not making two IPC calls a second for the rest of the
-    /// login session to watch for something that essentially never happens, and the
-    /// agent is in the same position either way — input silently stops working.
-    fn refresh_permissions(&self) -> Permissions {
+    /// Accessibility takes effect immediately, so polling once a second while it
+    /// is absent lets the status icon recover without a restart. Once granted it
+    /// is rechecked only when the menu opens, where revocation matters to the UI.
+    fn refresh_accessibility(&self) {
         let mut permissions = self.ivars().permissions.get();
         if !permissions.accessibility {
             permissions.accessibility = input::accessibility_granted();
             self.ivars().permissions.set(permissions);
         }
+    }
+
+    /// Refresh both TCC values for a user-driven menu update.
+    ///
+    /// Screen Recording is deliberately not polled. A post-launch grant becomes
+    /// `RelaunchRequired`, never `Granted`; opening the menu is enough to discover
+    /// it and explain the required quit and reopen. This also notices revocation
+    /// without a permanent background IPC loop.
+    fn refresh_permissions_for_menu(&self) -> Permissions {
+        let mut permissions = self.ivars().permissions.get();
+        permissions.screen = permissions
+            .screen
+            .observe(capture::screen_recording_granted());
+        permissions.accessibility = input::accessibility_granted();
+        self.ivars().permissions.set(permissions);
+        self.refresh_icon();
         permissions
     }
 
@@ -497,26 +525,42 @@ impl Controller {
             menu.addItem(&self.action("Open Log", sel!(openLog:), mtm));
         }
 
-        // Accessibility is re-read here — the user may well have just granted it
-        // and come straight back to check — and Screen Recording is whatever this
-        // process was launched with, for the reasons in `refresh_permissions`.
-        // Nothing appears when both are granted: a requirement that is met is not
-        // something to offer the user a row about.
-        let permissions = self.refresh_permissions();
+        // Re-read on this user-driven event so revocations are visible and a
+        // post-launch Screen Recording grant can require an explicit relaunch.
+        let permissions = self.refresh_permissions_for_menu();
         if !permissions.complete() {
             menu.addItem(&NSMenuItem::separatorItem(mtm));
-            menu.addItem(&self.info("⚠︎ Not usable until permissions are granted", mtm));
-            if !permissions.screen {
-                let item = self.action(
-                    "Enable Screen Recording…",
-                    sel!(openScreenRecordingSettings:),
-                    mtm,
-                );
-                item.setToolTip(Some(&NSString::from_str(
-                    "Not granted — the screen never paints. Click to open System Settings; \
-                     this one only takes effect once the agent is restarted.",
-                )));
-                menu.addItem(&item);
+            let status = if permissions.screen == ScreenRecording::RelaunchRequired {
+                "⚠︎ Quit and reopen to enable Screen Recording"
+            } else {
+                "⚠︎ Not usable until permissions are granted"
+            };
+            menu.addItem(&self.info(status, mtm));
+            match permissions.screen {
+                ScreenRecording::Missing => {
+                    let item = self.action(
+                        "Enable Screen Recording…",
+                        sel!(openScreenRecordingSettings:),
+                        mtm,
+                    );
+                    item.setToolTip(Some(&NSString::from_str(
+                        "Not granted — the screen never paints. Click to open System Settings.",
+                    )));
+                    menu.addItem(&item);
+                }
+                ScreenRecording::RelaunchRequired => {
+                    let item = self.action(
+                        "Quit Agent to Apply Screen Recording",
+                        sel!(quit:),
+                        mtm,
+                    );
+                    item.setToolTip(Some(&NSString::from_str(
+                        "Screen Recording is enabled in System Settings. Quit, then reopen \
+                         remotex-agent from Applications to apply it to a new process.",
+                    )));
+                    menu.addItem(&item);
+                }
+                ScreenRecording::Granted => {}
             }
             if !permissions.accessibility {
                 let item = self.action("Enable Accessibility…", sel!(openAccessibilitySettings:), mtm);
@@ -608,6 +652,7 @@ pub fn run(
     tracker: Arc<cursor::Tracker>,
     settings: Arc<settings::Settings>,
     log_path: Option<PathBuf>,
+    screen_recording_at_launch: bool,
 ) -> ! {
     let mtm = MainThreadMarker::new().expect("menubar::run must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -631,7 +676,7 @@ pub fn run(
             // Read here rather than left blank: the first icon is painted before
             // the timer has ever fired, and it must not claim health it has not
             // checked.
-            permissions: Cell::new(Permissions::read()),
+            permissions: Cell::new(Permissions::read(screen_recording_at_launch)),
         },
     );
 
@@ -787,23 +832,40 @@ mod tests {
     #[test]
     fn a_missing_permission_outranks_being_connected() {
         let blocked = Permissions {
-            screen: false,
+            screen: ScreenRecording::Missing,
             accessibility: true,
         };
         assert!(!blocked.complete());
         assert!(
             !Permissions {
-                screen: true,
+                screen: ScreenRecording::Granted,
                 accessibility: false,
             }
             .complete()
         );
         assert!(
             Permissions {
-                screen: true,
+                screen: ScreenRecording::Granted,
                 accessibility: true,
             }
             .complete()
         );
+    }
+
+    #[test]
+    fn screen_recording_grants_after_launch_require_relaunch() {
+        assert_eq!(
+            ScreenRecording::at_launch(false).observe(true),
+            ScreenRecording::RelaunchRequired
+        );
+        assert!(!ScreenRecording::RelaunchRequired.effective());
+        assert!(ScreenRecording::at_launch(true).effective());
+    }
+
+    #[test]
+    fn screen_recording_revocation_cannot_be_regranted_in_place() {
+        let revoked = ScreenRecording::Granted.observe(false);
+        assert_eq!(revoked, ScreenRecording::Missing);
+        assert_eq!(revoked.observe(true), ScreenRecording::RelaunchRequired);
     }
 }

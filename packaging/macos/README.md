@@ -52,7 +52,10 @@ Security**:
 | Accessibility | inject mouse and keyboard input | effective immediately |
 
 The menu bar shows a warning and links to the relevant settings pane while a
-permission is missing.
+permission is missing. Screen Recording is checked again when the menu opens;
+after you enable it, the menu offers to quit the agent and tells you to reopen it
+from Applications. Accessibility is detected while the agent remains open and
+needs no restart.
 
 Permissions are tied to the app's signing identity. The ad-hoc-signed release
 may need both grants again after an upgrade. A stable Developer ID signature
