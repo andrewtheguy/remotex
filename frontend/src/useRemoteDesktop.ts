@@ -573,6 +573,10 @@ export function useRemoteDesktop(
         }
         ws = null;
         wsRef.current = null;
+        // Before either branch below: the link that owed us a clipboard reply
+        // is gone, so fail any fetch now rather than leaving the button on
+        // "Fetching…" until its timeout expires for an answer that cannot come.
+        settleClipboardWaiters(null);
         if (ev.code === CLOSE_EVICTED) {
           clearDesktop();
           setStatus("takenOver");
