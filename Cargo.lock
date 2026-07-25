@@ -1789,6 +1789,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f910b8dc8e7b8e001c61fd742be442e8604fb2499ded713cadf911e7645ade4"
 dependencies = [
+ "ironrdp-cliprdr",
  "ironrdp-connector",
  "ironrdp-core",
  "ironrdp-displaycontrol",
@@ -1817,6 +1818,19 @@ name = "ironrdp-bulk"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e548d9fd162558a5a8aaed72e528556ce88e77773634e3722b8d01d6f170388"
+
+[[package]]
+name = "ironrdp-cliprdr"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb9050999a1e032f4313788ac5a6d06e897a4f672f1de2ed98683001fc1abf56"
+dependencies = [
+ "bitflags 2.13.1",
+ "ironrdp-core",
+ "ironrdp-pdu",
+ "ironrdp-svc",
+ "tracing",
+]
 
 [[package]]
 name = "ironrdp-connector"
@@ -2946,7 +2960,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.25"
+version = "0.0.26"
 dependencies = [
  "anyhow",
  "axum",
@@ -2955,6 +2969,7 @@ dependencies = [
  "clap",
  "des 0.8.1",
  "env_logger",
+ "flate2",
  "futures-util",
  "ironrdp",
  "ironrdp-tls",
@@ -3185,7 +3200,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rxa-agent"
-version = "0.0.25"
+version = "0.0.26"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3208,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "rxa-proto"
-version = "0.0.25"
+version = "0.0.26"
 dependencies = [
  "base64",
  "getrandom 0.3.4",

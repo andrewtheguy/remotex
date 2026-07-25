@@ -81,6 +81,13 @@ function touchFitScale(size: RemoteSize): number {
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
 
+// How long `requestClipboard` waits for the server's answer before giving up.
+// Generous because it is not all local: a VNC or RDP target answers from an
+// engine-side buffer immediately, but an `rxa` target is a real round trip to
+// the Mac, and one made during an agent reconnect is discarded outright and
+// never answered at all.
+const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
+
 // Full-screen canvas: display the framebuffer at 1:1 device pixels —
 // CSS size = remote pixels / devicePixelRatio. No scaling, no letterboxing;
 // when the remote desktop is larger than the viewport the canvas overflows and
@@ -348,6 +355,21 @@ export function useRemoteDesktop(
   // Refs, not state — they gate effects and must not re-run them.
   const lastFromRemoteRef = useRef<string | null>(null);
   const lastToRemoteRef = useRef<string | null>(null);
+  // Callers of `requestClipboard` waiting on the server's answer. The reply is
+  // an ordinary out-of-band control message with nothing tying it to a request,
+  // so every pending caller is settled by the next `clipboard` message that
+  // arrives, whether it answers a fetch or is an unprompted push — either way
+  // it is the freshest text the remote has.
+  const clipboardWaitersRef = useRef<((text: string | null) => void)[]>([]);
+
+  // Settle everyone waiting on a fetch. `null` means "no answer came".
+  const settleClipboardWaiters = useCallback((text: string | null) => {
+    const waiters = clipboardWaitersRef.current;
+    clipboardWaitersRef.current = [];
+    for (const settle of waiters) {
+      settle(text);
+    }
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -551,6 +573,10 @@ export function useRemoteDesktop(
         }
         ws = null;
         wsRef.current = null;
+        // Before either branch below: the link that owed us a clipboard reply
+        // is gone, so fail any fetch now rather than leaving the button on
+        // "Fetching…" until its timeout expires for an answer that cannot come.
+        settleClipboardWaiters(null);
         if (ev.code === CLOSE_EVICTED) {
           clearDesktop();
           setStatus("takenOver");
@@ -688,6 +714,9 @@ export function useRemoteDesktop(
             text,
             seq: (prev?.seq ?? 0) + 1,
           }));
+          // Release anyone blocked on a fetch — the clipboard button waits on
+          // this before it will open the panel.
+          settleClipboardWaiters(text);
           // And mirror it into the local OS clipboard, so a copy on the remote
           // is immediately pastable here. Best effort by design: `writeText`
           // is absent on a non-secure origin (plain HTTP on a LAN — the usual
@@ -717,6 +746,8 @@ export function useRemoteDesktop(
           setRemoteClipboard(null);
           lastFromRemoteRef.current = null;
           lastToRemoteRef.current = null;
+          // No engine left to answer a fetch that is still in flight.
+          settleClipboardWaiters(null);
           clearDesktop();
           break;
       }
@@ -788,13 +819,15 @@ export function useRemoteDesktop(
       disposed = true;
       startRef.current = null;
       resizeToWindowRef.current = null;
+      // The socket is going away, so nothing will answer a pending fetch.
+      settleClipboardWaiters(null);
       clearTimeout(retryTimer);
       window.removeEventListener("resize", onViewportChange);
       clearTimeout(resizeTimer);
       dprQuery?.removeEventListener("change", onDprChange);
       ws?.close();
     };
-  }, [canvasRef, onUnauthorized, syncCursor]);
+  }, [canvasRef, onUnauthorized, syncCursor, settleClipboardWaiters]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
   // action after being evicted (takenOver).
@@ -837,11 +870,36 @@ export function useRemoteDesktop(
     }
   }, []);
 
-  // Ask the server for the remote's clipboard; the answer arrives as a
-  // `clipboard` control message and lands in `remoteClipboard`. A no-op while
-  // the socket is down — the panel says so rather than hanging on a reply.
-  const requestClipboard = useCallback(() => {
-    sendRef.current({ type: "clipboardRequest" });
+  // Ask the server for the remote's clipboard and wait for the answer, which
+  // also lands in `remoteClipboard` on its way past. Resolves with the text, or
+  // `null` when nothing came back — the socket was down, the session returned
+  // to the picker, or the engine never answered.
+  //
+  // Awaitable so the toolbar can hold the panel closed until there is something
+  // current to show, rather than opening on stale text that updates a moment
+  // later. Every engine answers exactly one `clipboard` message per request
+  // (from a buffer for VNC and RDP, from a live pasteboard read for `rxa`), so
+  // this behaves the same on all three.
+  const requestClipboard = useCallback((): Promise<string | null> => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.resolve(null);
+    }
+    ws.send(JSON.stringify({ type: "clipboardRequest" } satisfies ClientMsg));
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const waiter = (text: string | null) => {
+        clearTimeout(timer);
+        resolve(text);
+      };
+      timer = setTimeout(() => {
+        clipboardWaitersRef.current = clipboardWaitersRef.current.filter(
+          (w) => w !== waiter,
+        );
+        resolve(null);
+      }, CLIPBOARD_FETCH_TIMEOUT_MS);
+      clipboardWaitersRef.current.push(waiter);
+    });
   }, []);
 
   // Put `text` on the remote's clipboard. Fire and forget: neither VNC's

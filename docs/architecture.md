@@ -106,12 +106,13 @@ the extension; `rxa` ignores viewport size.
 layer injects it after attaching to an existing engine so a new canvas does not
 depend on updates seen by the previous browser.
 
-The clipboard is per-target opt-in (`clipboard = true`, supported by VNC and
-`rxa`) and works two ways at once. The backend owns the data: the VNC engine
-forwards `ServerCutText` as it arrives and also buffers it, while the Mac agent
-watches its pasteboard and pushes changes. On top of that the browser can
-always request the current text, which is what a browser attaching mid-session
-does, having missed every push so far.
+The clipboard is per-target opt-in (`clipboard = true`, supported by every
+engine) and works two ways at once. The backend owns the data: the VNC engine
+forwards `ServerCutText` as it arrives and also buffers it, the RDP engine asks
+for the text as soon as the remote announces a copy, and the Mac agent watches
+its pasteboard and pushes changes. On top of that the browser can always
+request the current text, which is what a browser attaching mid-session does,
+having missed every push so far.
 
 In the browser those arrivals feed both the clipboard panel and, where the
 Clipboard API is available, the local OS clipboard. Automatic sync is best
@@ -141,6 +142,17 @@ With `resize = true`, the Display Control Virtual Channel resizes the remote
 desktop when requested from the browser. Otherwise the configured initial
 width and height remain fixed.
 
+With `clipboard = true`, the MS-RDPECLIP static virtual channel carries
+`CF_UNICODETEXT` in both directions. RDP uses delayed rendering: a copy
+announces only the available formats, and the text costs a second round trip.
+The engine hides that from the browser by requesting the text as soon as the
+remote announces it, so a remote copy arrives unprompted as it does for the
+other engines; in the other direction the browser's text is advertised and held
+until the remote actually pastes. Line endings are converted between CRLF and
+LF at the boundary. Images, HTML and file transfer are out of scope, and a
+server that never joins the channel leaves the clipboard inert rather than
+ending the session.
+
 ### VNC
 
 The built-in client speaks RFB 3.8 with None or classic VncAuth security. It
@@ -154,10 +166,17 @@ implemented.
 
 With `clipboard = true`, `ServerCutText` is forwarded to the browser as it
 arrives and also fills a per-session buffer that answers a later fetch, and a
-browser send becomes `ClientCutText`. The text is
-latin-1, as the baseline protocol defines it: characters outside latin-1 become
-`?` on the way out. The Extended Clipboard pseudo-encoding, which would carry
-UTF-8, is not negotiated.
+browser send becomes `ClientCutText`.
+
+Two encodings are possible, and which one applies is the server's choice. The
+Extended Clipboard pseudo-encoding (`0xc0a1e5ce`) carries UTF-8 and is
+advertised whenever the target opts in; a server that supports it answers with
+a capability message, and from then on text moves through the lazy
+notify/request/provide exchange, deflated, with CRLF line endings converted at
+the boundary. TigerVNC does this. A server that stays silent — TightVNC, for
+one — leaves the baseline latin-1 cut text in use, where anything outside
+latin-1 becomes `?` on the way out and cannot be represented on the way in.
+That limit is the server's, not the gateway's.
 
 Pointer button state is tracked across RFB pointer events. Keyboard input maps
 DOM codes to X11 keysyms using live Shift and browser-reported Caps Lock state.
@@ -218,8 +237,8 @@ sections. See [`install.md`](install.md) and
 [`packaging/etc/remotex.toml.example`](../packaging/etc/remotex.toml.example).
 
 Protocol-specific fields are validated during startup. In particular, `rxa`
-requires a checksum-valid PSK and rejects resize, and RDP rejects clipboard;
-incompatible fields are rejected rather than silently accepted.
+requires a checksum-valid PSK and rejects resize; incompatible fields are
+rejected rather than silently accepted.
 
 Unit tests cover protocol, config, authentication, key mapping, and engine
 helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and

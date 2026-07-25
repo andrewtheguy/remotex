@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.25"
+version = "0.0.26"
 
 [package]
 name = "remotex"
@@ -60,14 +60,20 @@ bcrypt = "0.19"
 rpassword = "7"
 # Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
 des = "0.8"
+# zlib for RFB's Extended Clipboard, whose Provide payload is deflated
+# (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no
+# new dependency.
+flate2 = "1"
 
 # The wire protocol shared with the macOS agent (src/rxa.rs, crates/rxa-agent).
 # In-repo so the two halves cannot drift — see docs/mac-agent-architecture.md.
 rxa-proto = { path = "crates/rxa-proto" }
 
 # Server-side RDP engine (see docs/architecture.md). `dvc`/`displaycontrol`/`svc`
-# expose the Display Control Virtual Channel used for client-driven resize.
-ironrdp = { version = "0.17", features = ["connector", "session", "graphics", "dvc", "displaycontrol", "svc"] }
+# expose the Display Control Virtual Channel used for client-driven resize;
+# `cliprdr` is the MS-RDPECLIP static channel behind the clipboard bridge
+# (see src/rdp_clipboard.rs).
+ironrdp = { version = "0.17", features = ["cliprdr", "connector", "session", "graphics", "dvc", "displaycontrol", "svc"] }
 ironrdp-tokio = { version = "0.10", features = ["reqwest-rustls-ring"] }
 ironrdp-tls = { version = "0.2", features = ["rustls-ring"] }
 # Direct dep so we can install the ring CryptoProvider as the process default

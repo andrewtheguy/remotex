@@ -60,9 +60,10 @@ password = "change-me"
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
 # all. The floating menu's Clipboard panel always works regardless, and is the
 # way to move text when automatic sync cannot run.
-# VNC carries latin-1 text (the RFB cut-text messages); the Mac agent ("rxa")
-# carries full UTF-8 and watches its pasteboard while connected. Rejected for
-# RDP, which has no clipboard channel yet.
+# Every protocol supports it. RDP (MS-RDPECLIP) and the Mac agent ("rxa")
+# always carry full UTF-8. VNC does too on servers implementing the Extended
+# Clipboard extension (TigerVNC does); on servers that do not (TightVNC), RFB
+# falls back to latin-1 and anything outside it becomes "?".
 #clipboard = false
 
 # A VNC target only needs host and (usually) a password; username, domain,

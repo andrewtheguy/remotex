@@ -48,7 +48,9 @@ use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS, ServerMsg, Tile,
+    clamp_clipboard,
 };
+use crate::vnc_clipboard;
 
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC_AUTH: u8 = 2;
@@ -116,17 +118,32 @@ enum CursorState {
 
 type SharedCursor = Arc<std::sync::Mutex<CursorState>>;
 
-/// The remote's clipboard, as last announced by the server.
+/// Both ends of the clipboard bridge, shared between the read loop (which
+/// fills `remote` and learns the server's capabilities) and the input side
+/// (which answers a Fetch from `remote` and records `local`).
 ///
-/// RFB has no "read the clipboard" request — the server pushes `ServerCutText`
-/// whenever the remote clipboard changes — so the latest text is kept here to
-/// answer [`ClientMsg::ClipboardRequest`]. The push is also forwarded live, but
-/// that is not enough on its own: a browser that attaches mid-session, or
-/// reattaches after a drop, has missed every push so far and would see an empty
-/// panel with no way to ask. Shared between the read loop (which fills it) and
-/// the input side (which answers from it); `None` means the remote has not
-/// copied anything this session.
-type SharedClipboard = Arc<std::sync::Mutex<Option<String>>>;
+/// RFB has no "read the clipboard" request — the server pushes whenever the
+/// remote clipboard changes — so `remote` keeps the latest text to answer
+/// [`ClientMsg::ClipboardRequest`]. Forwarding the push live is not enough on
+/// its own: a browser that attaches mid-session, or reattaches after a drop,
+/// has missed every push so far and would see an empty panel with no way to
+/// ask.
+#[derive(Debug, Default)]
+struct ClipboardState {
+    /// What the remote last sent. `None` means nothing has been copied there
+    /// this session.
+    remote: Option<String>,
+    /// What the browser last sent, held until the server asks for it. Only the
+    /// extended path defers like that; the latin-1 fallback writes immediately
+    /// and never reads this.
+    local: Option<String>,
+    /// What the server said it can do, from its Extended Clipboard caps.
+    /// `None` until caps arrive, which is also how "the server does not speak
+    /// the extension, use latin-1" is spelled — see [`crate::vnc_clipboard`].
+    server: Option<vnc_clipboard::Caps>,
+}
+
+type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 
 /// Connect to the VNC host, then drive the session until it ends.
 ///
@@ -270,17 +287,18 @@ async fn connect(
     // resize pseudo-encodings are advertised only when the target opts in
     // (`resize = true`); without them the server never announces support and
     // the desktop keeps its connect-time size.
-    let encodings: &[i32] = if config.resize {
-        &[
-            ENCODING_RAW,
-            ENCODING_CURSOR,
-            ENCODING_EXTENDED_DESKTOP_SIZE,
-            ENCODING_DESKTOP_SIZE,
-        ]
-    } else {
-        &[ENCODING_RAW, ENCODING_CURSOR]
-    };
-    writer.write_all(&set_encodings(encodings)).await?;
+    let mut encodings = vec![ENCODING_RAW, ENCODING_CURSOR];
+    if config.resize {
+        encodings.push(ENCODING_EXTENDED_DESKTOP_SIZE);
+        encodings.push(ENCODING_DESKTOP_SIZE);
+    }
+    if config.clipboard {
+        // Extended Clipboard, which is the only way RFB carries anything
+        // outside latin-1. Advertised on opt-in only; a server that ignores it
+        // simply never sends caps and the latin-1 path stays in use.
+        encodings.push(vnc_clipboard::ENCODING);
+    }
+    writer.write_all(&set_encodings(&encodings)).await?;
 
     Ok((reader, writer, width, height))
 }
@@ -304,7 +322,7 @@ async fn active_loop(
         pending: None,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
-    let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(None));
+    let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
 
     // Kick off the update cycle with one full (non-incremental) request.
     write_to(&writer, &update_request(false, size)).await?;
@@ -377,7 +395,7 @@ async fn active_loop(
                     // the remote copies something, which reads in the panel as
                     // "nothing has been copied over there yet".
                     if clipboard_enabled {
-                        let text = clipboard.lock().unwrap().clone().unwrap_or_default();
+                        let text = clipboard.lock().unwrap().remote.clone().unwrap_or_default();
                         if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
                             break Err(anyhow::anyhow!("frame channel closed"));
                         }
@@ -385,7 +403,23 @@ async fn active_loop(
                     Ok(())
                 } else if let ClientMsg::Clipboard { text } = &input {
                     if clipboard_enabled {
-                        write_to(&writer, &client_cut_text(text)).await
+                        // Extended when the server offered it, which is the
+                        // only path that carries anything outside latin-1.
+                        // Deferred by design: advertise now, hand the text over
+                        // when the remote actually pastes and asks for it.
+                        let extended = {
+                            let mut state = clipboard.lock().unwrap();
+                            state.local = Some(text.clone());
+                            state
+                                .server
+                                .is_some_and(|caps| caps.handles(vnc_clipboard::ACTION_NOTIFY))
+                        };
+                        if extended {
+                            let notify = vnc_clipboard::notify(vnc_clipboard::FORMAT_TEXT);
+                            write_to(&writer, &cut_text_extended(&notify)).await
+                        } else {
+                            write_to(&writer, &client_cut_text(text)).await
+                        }
                     } else {
                         Ok(())
                     }
@@ -489,7 +523,11 @@ async fn read_loop(
             3 => {
                 let mut padding = [0u8; 3];
                 reader.read_exact(&mut padding).await?;
-                let len = u64::from(reader.read_u32().await?);
+                // Signed: a negative length marks an Extended Clipboard
+                // message, whose body is a flags word and an action rather
+                // than latin-1 text.
+                let signed = reader.read_i32().await?;
+                let len = u64::from(signed.unsigned_abs());
                 if !clipboard_enabled {
                     discard(&mut reader, len).await?;
                     continue;
@@ -503,9 +541,17 @@ async fn read_loop(
                 if len > take {
                     warn!("vnc: clipboard from the remote truncated at {take} of {len} bytes");
                 }
+
+                if signed < 0 {
+                    if extended_cut_text(&bytes, &writer, &clipboard, &frame_tx).await? {
+                        return Ok(()); // browser link gone
+                    }
+                    continue;
+                }
+
                 let text = latin1_to_string(&bytes);
                 debug!("vnc: remote clipboard updated, {} bytes", bytes.len());
-                *clipboard.lock().unwrap() = Some(text.clone());
+                clipboard.lock().unwrap().remote = Some(text.clone());
                 if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
                     return Ok(()); // browser link gone; the session layer handles it
                 }
@@ -513,6 +559,96 @@ async fn read_loop(
             other => anyhow::bail!("unknown server message type {other}"),
         }
     }
+}
+
+/// Handle one Extended Clipboard message from the server.
+///
+/// Returns whether the browser link is gone, which is the caller's cue to stop.
+/// Everything here is a reply to the server, so it writes rather than returns.
+async fn extended_cut_text(
+    body: &[u8],
+    writer: &SharedWriter,
+    clipboard: &SharedClipboard,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+) -> anyhow::Result<bool> {
+    let message = match vnc_clipboard::parse(body) {
+        Ok(message) => message,
+        Err(e) => {
+            // One malformed clipboard message is not worth the session. The
+            // stream stayed in sync (the length told us how much to consume),
+            // so the next copy can still work.
+            warn!("vnc: unreadable extended clipboard message: {e:#}");
+            return Ok(false);
+        }
+    };
+
+    match message {
+        // The server's opening move. Record what it can do, then answer with
+        // ours — until this arrives the engine assumes latin-1.
+        vnc_clipboard::Incoming::Caps(caps) => {
+            debug!(
+                "vnc: extended clipboard available (actions {:#x}, formats {:#x})",
+                caps.actions, caps.formats
+            );
+            clipboard.lock().unwrap().server = Some(caps);
+            write_to(writer, &cut_text_extended(&vnc_clipboard::caps())).await?;
+        }
+        // The remote copied something. Ask for it, so the browser gets it
+        // without anyone pressing Fetch.
+        vnc_clipboard::Incoming::Notify(formats) => {
+            if formats & vnc_clipboard::FORMAT_TEXT != 0 {
+                let request = vnc_clipboard::request(vnc_clipboard::FORMAT_TEXT);
+                write_to(writer, &cut_text_extended(&request)).await?;
+            } else {
+                // An image or file copy, or `formats == 0` for a clipboard
+                // that was cleared. Either way the remote no longer holds the
+                // text we cached, so drop it — a later Fetch answering with it
+                // would be reporting a clipboard that has moved on.
+                //
+                // Not forwarded as an empty push: the browser would clear an
+                // open panel over what may be a screenshot copy. Leaving the
+                // panel as it is until something asks is the quieter half of
+                // the same truth, and Fetch now answers correctly.
+                debug!("vnc: remote copied a format the browser cannot hold");
+                clipboard.lock().unwrap().remote = None;
+            }
+        }
+        // The answer to that request.
+        vnc_clipboard::Incoming::Provide(Some(text)) => {
+            let text = clamp_clipboard(&text).to_owned();
+            debug!("vnc: remote clipboard updated, {} bytes (utf-8)", text.len());
+            clipboard.lock().unwrap().remote = Some(text.clone());
+            if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                return Ok(true);
+            }
+        }
+        vnc_clipboard::Incoming::Provide(None) => {}
+        // The server wants what the browser has. This is the deferred half of
+        // a browser copy: we advertised with a notify, it asks here.
+        vnc_clipboard::Incoming::Request(formats) => {
+            let text = clipboard.lock().unwrap().local.clone();
+            if let Some(text) = text
+                && formats & vnc_clipboard::FORMAT_TEXT != 0
+            {
+                debug!("vnc: handing {} bytes to the remote's paste", text.len());
+                let provide = vnc_clipboard::provide(&text)?;
+                write_to(writer, &cut_text_extended(&provide)).await?;
+            }
+        }
+        // "What do you have?" — answered with a notify either way, since
+        // silence would leave the server waiting.
+        vnc_clipboard::Incoming::Peek => {
+            let formats = match clipboard.lock().unwrap().local {
+                Some(_) => vnc_clipboard::FORMAT_TEXT,
+                None => 0,
+            };
+            write_to(writer, &cut_text_extended(&vnc_clipboard::notify(formats))).await?;
+        }
+        vnc_clipboard::Incoming::Unknown(action) => {
+            debug!("vnc: ignoring extended clipboard action {action:#x}");
+        }
+    }
+    Ok(false)
 }
 
 /// Read one FramebufferUpdate rectangle — raw pixels forwarded as PNG tiles
@@ -917,6 +1053,17 @@ fn client_cut_text(text: &str) -> Vec<u8> {
     let mut msg = vec![6u8, 0, 0, 0]; // message type + 3 padding
     msg.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     msg.extend_from_slice(&bytes);
+    msg
+}
+
+/// ClientCutText carrying an Extended Clipboard body.
+///
+/// Same message type as [`client_cut_text`]; the negative length is the whole
+/// signal that the payload is a flags word rather than latin-1 text.
+fn cut_text_extended(body: &[u8]) -> Vec<u8> {
+    let mut msg = vec![6u8, 0, 0, 0]; // message type + 3 padding
+    msg.extend_from_slice(&(-(body.len() as i32)).to_be_bytes());
+    msg.extend_from_slice(body);
     msg
 }
 

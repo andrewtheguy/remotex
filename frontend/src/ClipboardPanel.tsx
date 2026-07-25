@@ -21,17 +21,14 @@ import { useIsDesktop } from "./SoftKeyboardPanel.tsx";
 // How long the "Fetched"/"Sent" line stays up.
 const NOTICE_MS = 2000;
 
-// How long Fetch waits for a reply before giving up on it. The request is fire
-// and forget — the socket may be down, in which case the send is silently
-// dropped — so without this the button would say "Fetching…" forever.
-const FETCH_TIMEOUT_MS = 5000;
-
 const encoder = new TextEncoder();
 
 interface ClipboardPanelProps {
-  // Ask for the remote's clipboard. The reply arrives out of band, as a new
-  // `remoteClipboard` — hence the seq counter rather than a promise.
-  onFetch: () => void;
+  // Ask for the remote's clipboard, resolving with its text or null if nothing
+  // answered. The text also arrives out of band as a new `remoteClipboard`,
+  // which is what actually fills the box — the resolved value is only used to
+  // tell "no answer" apart from "answered, and it was empty".
+  onFetch: () => Promise<string | null>;
   onSend: (text: string) => void;
   // The last reply from the server. `seq` ticks on every reply so re-fetching
   // identical text still counts as an answer.
@@ -69,11 +66,15 @@ export function ClipboardPanel({
   // unrecoverable loss.
   const dirtyRef = useRef(false);
 
-  // The pending Fetch's giving-up timer, so a reply (or unmount) can cancel it.
-  const fetchTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
-  useEffect(() => () => clearTimeout(fetchTimerRef.current), []);
+  // Set while a Fetch is unanswered, so a reply that lands after the component
+  // is gone doesn't set state on it.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Adopt each reply or push. Keyed on seq, so the same text arriving twice
   // still registers (and re-shows the notice).
@@ -84,9 +85,6 @@ export function ClipboardPanel({
       return;
     }
     lastSeqRef.current = seq;
-    // Something came back, so nothing is outstanding — including when an
-    // unprompted push happens to land while a Fetch is in flight.
-    clearTimeout(fetchTimerRef.current);
     const text = remoteClipboard?.text ?? "";
     // An explicit Fetch always wins — the user asked for exactly this.
     if (!awaitingFetch && dirtyRef.current) {
@@ -145,15 +143,19 @@ export function ClipboardPanel({
     textareaRef.current?.focus();
   }, []);
 
+  // The reply fills the box through `remoteClipboard` (the effect above), so
+  // all this has to do is report the case that produces no reply at all —
+  // otherwise the button would sit on "Fetching…" indefinitely.
   const handleFetch = useCallback(() => {
     setAwaitingFetch(true);
     setNotice(null);
-    onFetch();
-    clearTimeout(fetchTimerRef.current);
-    fetchTimerRef.current = setTimeout(() => {
+    void onFetch().then((text) => {
+      if (!mountedRef.current || text !== null) {
+        return;
+      }
       setAwaitingFetch(false);
       setNotice("No reply from remote — is the session still up?");
-    }, FETCH_TIMEOUT_MS);
+    });
   }, [onFetch]);
 
   const handleSend = useCallback(() => {
