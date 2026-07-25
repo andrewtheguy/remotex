@@ -73,7 +73,10 @@ notary_profile=""
 make_dmg=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --debug) profile=debug; cargo_flags=(); shift ;;
+    # `--profile dev` rather than no flag at all: bash 3.2 (what macOS ships) is
+    # the version where expanding an *empty* array under `set -u` is an error, so
+    # an empty cargo_flags would take the build down instead of building debug.
+    --debug) profile=debug; cargo_flags=(--profile dev); shift ;;
     --no-dmg) make_dmg=0; shift ;;
     --notary-profile) notary_profile="${2:?--notary-profile needs a name}"; shift 2 ;;
     -h|--help) sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -150,9 +153,20 @@ cargo build -p rxa-agent "${cargo_flags[@]}"
 app="dist/remotex-agent.app"
 echo ">> assembling $app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Library/LaunchAgents"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Library/LaunchAgents" \
+  "$app/Contents/Resources"
 cp "target/$profile/remotex-agent" "$app/Contents/MacOS/remotex-agent"
 chmod +x "$app/Contents/MacOS/remotex-agent"
+
+# The icon, committed rather than rasterized here: this script runs on CI runners
+# with no SVG rasterizer, and what gets signed should be a fixed input. Regenerate
+# it from packaging/macos/icon.svg with make-icon.sh.
+[ -f packaging/macos/AppIcon.icns ] || {
+  echo "error: packaging/macos/AppIcon.icns is missing —" >&2
+  echo "       run packaging/macos/make-icon.sh (needs brew install librsvg)" >&2
+  exit 1
+}
+cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
 # Stamp the version into a copy of the template. CFBundleIdentifier is
 # deliberately left alone — changing it resets both TCC grants.

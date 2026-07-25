@@ -224,6 +224,23 @@ mistake. Use `--no-dmg` when you want the bundle itself.
 
 Needs Xcode — the capture bindings build a small Swift bridge.
 
+### The icon
+
+`icon.svg` is the master; `AppIcon.icns` is generated from it and committed, and
+the build only copies that into the bundle. To change the icon, edit the SVG and
+regenerate:
+
+```sh
+brew install librsvg          # once — for rsvg-convert
+packaging/macos/make-icon.sh  # icon.svg -> AppIcon.icns
+```
+
+Both files are committed on purpose: `build-agent-app.sh` runs on CI runners that
+have no SVG rasterizer, and what goes under the signature should be a fixed input
+rather than whatever the builder's librsvg produces. There is no Dock tile
+(`LSUIElement`), so the icon is what identifies the agent in the Finder, in Login
+Items, in the two Privacy & Security lists, and in the permission prompts.
+
 You do not have to, though: every release carries the built image as
 `remotex-agent-<version>-macos-arm64-unsigned.dmg` (see **Install** above). The
 release workflow runs this same script on a macOS runner, so a release bundle and

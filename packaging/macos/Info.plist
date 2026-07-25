@@ -29,6 +29,13 @@
 	<string>remotex agent</string>
 	<key>CFBundleExecutable</key>
 	<string>remotex-agent</string>
+	<!-- Contents/Resources/AppIcon.icns, rasterized from packaging/macos/icon.svg
+	     by make-icon.sh. LSUIElement means no Dock tile, so this icon is not for
+	     the Dock: it is how the agent is identified in the Finder, in Login
+	     Items, in the two Privacy & Security lists and in the TCC prompts — where
+	     an unrecognisable generic bundle is a thing users decline to trust. -->
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
