@@ -33,6 +33,7 @@ async fn spawn_app() -> SocketAddr {
             height: 800,
             security: Security::Auto,
             resize: false,
+            clipboard: false,
             psk: String::new(),
         }],
     };

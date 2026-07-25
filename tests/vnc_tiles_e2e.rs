@@ -73,6 +73,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             height: 800,
             security: Security::Auto, // RDP-only knob, ignored for VNC
             resize: true,             // exercise the dynamic resize path
+            clipboard: true,          // exercise the clipboard bridge
             psk: String::new(),
         }],
     };
@@ -328,4 +329,41 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     })
     .await
     .expect("timed out waiting for the reattach repaint and pointer replay");
+
+    // Clipboard, against a real RFB implementation. The point here is the wire
+    // layout: a malformed ClientCutText desyncs the stream, and the very next
+    // thing the engine reads would be misparsed — surfacing as an `error` or a
+    // closed session rather than the clipboard reply asserted below.
+    //
+    // What comes *back* isn't asserted: Xtigervnc serves a root window with no
+    // X client to own the selection, so whether it echoes a ServerCutText is
+    // its business. The in-process test (tests/protocol_e2e.rs) pins the
+    // contents round trip against a scripted server.
+    ws.send(Message::text(r#"{"type":"clipboard","text":"remotex e2e"}"#))
+        .await
+        .unwrap();
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(
+                        !text.contains(r#""type":"error""#),
+                        "the clipboard exchange broke the session: {text}"
+                    );
+                    if text.contains(r#""type":"clipboard""#) {
+                        return;
+                    }
+                }
+                Message::Close(frame) => {
+                    panic!("the clipboard exchange closed the session: {frame:?}")
+                }
+                _ => {}
+            }
+        }
+        panic!("websocket closed while waiting for the clipboard reply");
+    })
+    .await
+    .expect("timed out waiting for the clipboard reply");
 }

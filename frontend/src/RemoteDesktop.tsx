@@ -35,11 +35,15 @@ export default function RemoteDesktop({
     pendingTarget,
     size,
     canResize,
+    canClipboard,
+    remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
     sendKeyCombo,
+    requestClipboard,
+    sendClipboard,
     setBottomInset,
   } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
 
@@ -85,6 +89,10 @@ export default function RemoteDesktop({
           onResizeToWindow={canResize ? resizeToWindow : undefined}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}
+          canClipboard={canClipboard}
+          remoteClipboard={remoteClipboard}
+          onFetchClipboard={requestClipboard}
+          onSendClipboard={sendClipboard}
         />
       )}
 

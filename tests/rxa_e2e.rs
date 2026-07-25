@@ -49,6 +49,10 @@ const AGENT_H: u16 = 240;
 /// Cursor hotspot, chosen asymmetric so a transposition would show up.
 const HOTSPOT: (u16, u16) = (4, 7);
 
+/// What the fake agent's pasteboard starts out holding. Multi-byte on purpose:
+/// unlike VNC's latin-1 cut text, this path is UTF-8 end to end.
+const FAKE_PASTEBOARD: &str = "on the Mac — 画面 ☕";
+
 /// Stand-in for a JPEG the agent encoded. The gateway never decodes a tile
 /// payload — that is the point of the pass-through design — so these bytes only
 /// have to survive the trip unchanged. They start with a real JPEG SOI/APP0 so
@@ -144,12 +148,29 @@ async fn serve_fake_agent(
     }
 
     // Otherwise behave like the real agent: answer keepalives, repaint on ask.
+    // The pasteboard is a plain String here — the real one is NSPasteboard.
+    let mut pasteboard = FAKE_PASTEBOARD.to_owned();
     loop {
         match GatewayMsg::decode(&reader.recv().await?)? {
             GatewayMsg::Ping { nonce } => {
                 writer.send(&AgentMsg::Pong { nonce }.encode()).await?;
             }
             GatewayMsg::Refresh => paint(&mut writer).await?,
+            // Read on request, never on a timer — same as the real agent.
+            GatewayMsg::ClipboardRequest => {
+                writer
+                    .send(
+                        &AgentMsg::Clipboard {
+                            text: pasteboard.clone(),
+                        }
+                        .encode(),
+                    )
+                    .await?;
+            }
+            GatewayMsg::Clipboard { text } => {
+                pasteboard = text.clone();
+                let _ = input_tx.send(GatewayMsg::Clipboard { text });
+            }
             // Everything else is browser input on its way to the Mac. The real
             // agent injects it; here it is recorded so a test can assert on what
             // actually crossed the wire.
@@ -197,6 +218,11 @@ where
 
 /// Start the real axum server with a single `rxa` target pointed at `port`.
 async fn spawn_app(port: u16, psk: &str) -> SocketAddr {
+    spawn_app_with_clipboard(port, psk, false).await
+}
+
+/// As [`spawn_app`], with the target's clipboard bridge opted in or out.
+async fn spawn_app_with_clipboard(port: u16, psk: &str, clipboard: bool) -> SocketAddr {
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,
@@ -213,6 +239,7 @@ async fn spawn_app(port: u16, psk: &str) -> SocketAddr {
             height: 800,
             security: Security::Auto,
             resize: false,
+            clipboard,
             psk: psk.to_owned(),
         }],
         site_passwd: common::test_site_passwd(),
@@ -398,6 +425,29 @@ async fn expect_input(rx: &mut mpsc::UnboundedReceiver<GatewayMsg>) -> GatewayMs
         .expect("the fake agent's input channel closed")
 }
 
+/// Drain the socket until a `clipboard` control message arrives; returns its
+/// text. Fails on an error or a close, like the paint helper.
+async fn expect_clipboard(ws: &mut Ws) -> String {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                    if text.contains(r#""type":"clipboard""#) {
+                        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        return parsed["text"].as_str().unwrap().to_owned();
+                    }
+                }
+                Message::Close(frame) => panic!("session closed: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for clipboard");
+    })
+    .await
+    .expect("timed out waiting for clipboard")
+}
+
 // The other half of a session, and the half with nothing to look at afterwards:
 // a mistranslated click paints no evidence anywhere, so the browser looks fine
 // while the Mac does the wrong thing. This drives the real WebSocket with the
@@ -458,6 +508,77 @@ async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
     for want in expected {
         assert_eq!(expect_input(&mut input).await, want);
     }
+}
+
+// The clipboard round trip, which differs from VNC's in two ways worth pinning:
+// the fetch is a real request to the Mac rather than a cached push, and the text
+// is UTF-8 rather than latin-1.
+#[tokio::test]
+async fn clipboard_round_trips_through_the_agent_in_utf8() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
+    let addr = spawn_app_with_clipboard(port, &psk_text, true).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    // Mac → browser: the agent reads its pasteboard when asked.
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    assert_eq!(expect_clipboard(&mut ws).await, FAKE_PASTEBOARD);
+
+    // Browser → Mac. The é/画面/☕ that VNC would have flattened to '?' arrive
+    // intact here.
+    let sent = "typed in the browser — 画面 ☕";
+    ws.send(Message::text(
+        serde_json::json!({ "type": "clipboard", "text": sent }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::Clipboard {
+            text: sent.to_owned()
+        }
+    );
+
+    // And it stuck: fetching again returns what was just written.
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    assert_eq!(expect_clipboard(&mut ws).await, sent);
+}
+
+// A target that did not opt in gets no clipboard traffic in either direction,
+// even though the agent itself would happily answer.
+#[tokio::test]
+async fn clipboard_is_inert_when_the_rxa_target_did_not_opt_in() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
+    let addr = spawn_app(port, &psk_text).await; // clipboard defaults to off
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    ws.send(Message::text(r#"{"type":"clipboard","text":"leaked"}"#))
+        .await
+        .unwrap();
+    // A key press behind them is the fence: it can only reach the agent after
+    // both clipboard messages were handled, so if it arrives first, they were
+    // dropped rather than merely slow.
+    ws.send(Message::text(
+        r#"{"type":"key","code":"KeyA","pressed":true,"caps":false}"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::Key {
+            code: "KeyA".to_owned(),
+            pressed: true,
+            caps: false,
+        }
+    );
 }
 
 // The whole reason for this subsystem: an established session that drops comes

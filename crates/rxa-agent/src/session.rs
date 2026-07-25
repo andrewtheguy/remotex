@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
-use rxa_proto::msg::{AgentMsg, GatewayMsg};
+use rxa_proto::msg::{AgentMsg, GatewayMsg, clamp_clipboard};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
@@ -40,6 +40,7 @@ use crate::capture::{self, Capture, FrameSink, RawTile};
 use crate::cursor;
 use crate::encode;
 use crate::input::Injector;
+use crate::pasteboard;
 
 /// Frames of raw tiles buffered between the capture callback and the encoder.
 /// Small on purpose: see the coalescing note in the module docs.
@@ -292,6 +293,21 @@ async fn pump(
                     }
                     GatewayMsg::Ping { nonce } => {
                         writer.send(&AgentMsg::Pong { nonce }.encode()).await?;
+                    }
+                    // The gateway only asks when the browser presses Fetch, so
+                    // this is one read per click — see [`crate::pasteboard`].
+                    // An empty reply covers both "nothing copied" and "the
+                    // pasteboard holds an image": the browser wants text.
+                    GatewayMsg::ClipboardRequest => {
+                        let text = pasteboard::read().unwrap_or_default();
+                        let text = clamp_clipboard(&text);
+                        debug!("session: pasteboard read, {} bytes", text.len());
+                        writer
+                            .send(&AgentMsg::Clipboard { text: text.to_owned() }.encode())
+                            .await?;
+                    }
+                    GatewayMsg::Clipboard { text } => {
+                        pasteboard::write(clamp_clipboard(&text));
                     }
                 }
             }

@@ -54,6 +54,14 @@ password = "change-me"
 # and the browser shows scrollbars.
 #resize = false
 
+# Clipboard bridge (opt-in): lets the floating menu's Clipboard panel read and
+# write this target's clipboard. Nothing is synced in the background — the
+# browser only fetches or sends when you press the button, and keeps no copy.
+# VNC carries latin-1 text (the RFB cut-text messages); the Mac agent ("rxa")
+# reads its pasteboard on request and carries full UTF-8. Rejected for RDP,
+# which has no clipboard channel yet.
+#clipboard = false
+
 # A VNC target only needs host and (usually) a password; username, domain,
 # width/height, and security are ignored. A Mac can use its built-in Screen
 # Sharing service through this path without installing the companion agent.
@@ -80,6 +88,7 @@ password = "change-me"
 #
 # username/password/domain/width/height/security are all ignored here, and
 # `resize` is rejected — the agent captures the Mac's own resolution.
+# `clipboard` is supported: the agent reads and writes the Mac's pasteboard.
 # [[targets]]
 # name = "mac"
 # protocol = "rxa"

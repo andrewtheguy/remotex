@@ -331,6 +331,17 @@ export function useRemoteDesktop(
   // the floating menu shows a "Resize to window" button and automatic viewport
   // reports are suppressed. VNC resizes automatically, so it stays false.
   const [canResize, setCanResize] = useState(false);
+  // True when the connected target opted into the clipboard bridge, which is
+  // what enables the floating menu's Clipboard button.
+  const [canClipboard, setCanClipboard] = useState(false);
+  // The remote's clipboard text as last fetched, and a counter that ticks on
+  // every reply. The counter is what the panel watches: fetching the same text
+  // twice must still register as an answer, and a null-vs-string flag can't
+  // express that.
+  const [remoteClipboard, setRemoteClipboard] = useState<{
+    text: string;
+    seq: number;
+  } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -655,12 +666,22 @@ export function useRemoteDesktop(
           const manual = msg.protocol === "rdp" && msg.resize;
           manualResizeRef.current = manual;
           setCanResize(manual);
+          setCanClipboard(msg.clipboard);
           // A freshly-started engine needs the current viewport; the report is
           // sent here (once the protocol is known), undeduped.
           lastViewport = null;
           sendViewport();
           break;
         }
+        case "clipboard":
+          // The remote's clipboard, in reply to a fetch this browser asked
+          // for. Nothing is written to the local OS clipboard here: the panel
+          // shows it, and copying out of there stays the user's move.
+          setRemoteClipboard((prev) => ({
+            text: msg.text,
+            seq: (prev?.seq ?? 0) + 1,
+          }));
+          break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
@@ -670,6 +691,8 @@ export function useRemoteDesktop(
           setMode("picker");
           manualResizeRef.current = false;
           setCanResize(false);
+          setCanClipboard(false);
+          setRemoteClipboard(null);
           clearDesktop();
           break;
       }
@@ -788,6 +811,20 @@ export function useRemoteDesktop(
     for (let i = codes.length - 1; i >= 0; i -= 1) {
       send({ type: "key", code: codes[i], pressed: false, caps: false });
     }
+  }, []);
+
+  // Ask the server for the remote's clipboard; the answer arrives as a
+  // `clipboard` control message and lands in `remoteClipboard`. A no-op while
+  // the socket is down — the panel says so rather than hanging on a reply.
+  const requestClipboard = useCallback(() => {
+    sendRef.current({ type: "clipboardRequest" });
+  }, []);
+
+  // Put `text` on the remote's clipboard. Fire and forget: neither VNC's
+  // ClientCutText nor the agent's pasteboard write is acknowledged, so there is
+  // nothing to await.
+  const sendClipboard = useCallback((text: string) => {
+    sendRef.current({ type: "clipboard", text });
   }, []);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
@@ -975,11 +1012,15 @@ export function useRemoteDesktop(
     pendingTarget,
     size,
     canResize,
+    canClipboard,
+    remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
     sendKeyCombo,
+    requestClipboard,
+    sendClipboard,
     setBottomInset,
   };
 }

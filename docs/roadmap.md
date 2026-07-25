@@ -2,15 +2,29 @@
 
 ## Planned
 
-### Clipboard bridge
+### RDP clipboard
 
-Replace the frontend's Clipboard placeholder with bidirectional text clipboard
-sync for RDP, VNC, and `rxa`.
+The clipboard bridge is implemented for VNC and `rxa` (see
+[`architecture.md`](architecture.md)); RDP is the remaining engine, and
+`clipboard = true` is rejected for RDP targets until it lands.
 
-The backend owns one clipboard buffer, matching the one-active-session model.
-Remote updates (`ServerCutText` for VNC and the RDP clipboard channel) update
-that buffer and are pushed to the browser; browser updates travel in the other
-direction. `rxa` needs corresponding protocol messages.
+It is the largest of the three by some margin: MS-RDPECLIP is a static virtual
+channel with a capability exchange and a delayed-rendering handshake (Format
+List, then Format Data Request/Response per paste), against VNC's two cut-text
+messages. It needs the `cliprdr` feature of IronRDP, a second
+`with_static_channel` registration in `src/rdp.rs`, and a way to drive the SVC
+processor from `active_loop`.
+
+The browser side needs nothing: the wire protocol, the config flag, and the
+panel are already in place and engine-agnostic.
+
+### Unicode clipboard for VNC
+
+VNC clipboard text is latin-1, so anything outside it becomes `?` on the way to
+the remote. RFB's answer is the Extended Clipboard pseudo-encoding
+(`0xc0a1e5ce`): UTF-8, zlib-compressed, behind a capability handshake and a
+lazy Notify/Request/Provide exchange. Worth doing only if the `?` turns out to
+matter in practice — `rxa` targets already carry full UTF-8.
 
 ## Deferred pending measurements
 

@@ -43,10 +43,10 @@ endpoints and includes a checksum to catch transcription errors.
 
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
-- agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, and heartbeat
-  pongs;
-- gateway to agent: mouse, wheel, and keyboard input, session control, and
-  heartbeat pings.
+- agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, pasteboard text,
+  and heartbeat pongs;
+- gateway to agent: mouse, wheel, and keyboard input, session control, clipboard
+  read requests and writes, and heartbeat pings.
 
 The gateway translates these into the same browser protocol used by RDP and
 VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
@@ -112,4 +112,8 @@ launchd.
 - Screen Recording and Accessibility grants are tied to the app's signing
   identity. Ad-hoc-signed builds generally require approval again after an
   upgrade; stable Developer ID signing preserves identity.
-- Clipboard and audio are not part of the current protocol.
+- The clipboard is read and written only on request, never polled: watching the
+  pasteboard means reading its contents on a timer, which recent macOS reports
+  to the user as a paste. It is also opt-in per target on the gateway
+  (`clipboard = true`); without it the agent is never asked.
+- Audio is not part of the current protocol.

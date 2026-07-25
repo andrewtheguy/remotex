@@ -23,7 +23,19 @@ export type ClientMsg =
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it.
   | { type: "connect"; target: string }
-  | { type: "disconnect" };
+  | { type: "disconnect" }
+  // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
+  // text on the remote's clipboard, "clipboardRequest" asks for the remote's
+  // current text and is answered with a `clipboard` control message. Both are
+  // user-driven (the floating menu's Clipboard panel) — the browser never reads
+  // or writes the local OS clipboard on its own, and retains nothing.
+  | { type: "clipboard"; text: string }
+  | { type: "clipboardRequest" };
+
+// Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
+// src/protocol.rs. The backend clamps too; this is so the panel can say so
+// before the round trip.
+export const MAX_CLIPBOARD_BYTES = 65_536;
 
 // Server -> browser text frames: everything but screen tiles. `resize`/`error`
 // come from the engine; `picker`/`connected` are the session-slot status the
@@ -45,9 +57,18 @@ export type ControlMsg =
     }
   | { type: "error"; message: string }
   | { type: "picker" }
-  // `protocol` ("rdp"/"vnc") and `resize` tell the browser how to handle
+  // `protocol` ("rdp"/"vnc"/"rxa") and `resize` tell the browser how to handle
   // resize: VNC follows the viewport automatically, RDP only on request.
-  | { type: "connected"; name: string; protocol: string; resize: boolean };
+  // `clipboard` is whether this target opted into the clipboard bridge.
+  | {
+      type: "connected";
+      name: string;
+      protocol: string;
+      resize: boolean;
+      clipboard: boolean;
+    }
+  // The remote's clipboard text, only ever in reply to a "clipboardRequest".
+  | { type: "clipboard"; text: string };
 
 export interface TileMsg {
   x: number;

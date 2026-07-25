@@ -62,12 +62,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValue, NSControlStateValueOff,
-    NSControlStateValueOn, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSPasteboard,
-    NSPasteboardTypeString, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
+    NSControlStateValueOn, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength, NSWorkspace,
 };
 use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSURL};
 
-use crate::{capture, config, cursor, input, loginitem, panels, settings, state};
+use crate::{capture, config, cursor, input, loginitem, panels, pasteboard, settings, state};
 
 /// How often the run loop re-reads the system cursor and refreshes the icon.
 ///
@@ -589,12 +589,7 @@ impl Controller {
     }
 
     fn copy_to_clipboard(&self, psk: &str) {
-        let pasteboard = NSPasteboard::generalPasteboard();
-        pasteboard.clearContents();
-        let copied = unsafe {
-            pasteboard.setString_forType(&NSString::from_str(psk), NSPasteboardTypeString)
-        };
-        if copied {
+        if pasteboard::write(psk) {
             info!("menu: pre-shared key copied to the clipboard");
         } else {
             warn!("menu: the clipboard refused the pre-shared key");

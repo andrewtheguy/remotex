@@ -271,6 +271,7 @@ impl SessionManager {
                     name: target.name.clone(),
                     protocol: target.protocol.name(),
                     resize: target.resize,
+                    clipboard: target.clipboard,
                 }
             }
             // No engine (idle, or an engine that ended): the picker.
@@ -340,6 +341,7 @@ impl SessionManager {
         let name = target.name.clone();
         let protocol = target.protocol.name();
         let resize = target.resize;
+        let clipboard = target.clipboard;
         st.selected = Some(target);
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
@@ -350,6 +352,7 @@ impl SessionManager {
                 name,
                 protocol,
                 resize,
+                clipboard,
             }));
         }
         Ok(())
@@ -549,10 +552,15 @@ mod tests {
     type EngineEnds = (mpsc::UnboundedReceiver<ClientMsg>, mpsc::Sender<ServerMsg>);
 
     fn fake_target(name: &str) -> TargetConfig {
-        fake_target_with(name, Protocol::Vnc, false)
+        fake_target_with(name, Protocol::Vnc, false, false)
     }
 
-    fn fake_target_with(name: &str, protocol: Protocol, resize: bool) -> TargetConfig {
+    fn fake_target_with(
+        name: &str,
+        protocol: Protocol,
+        resize: bool,
+        clipboard: bool,
+    ) -> TargetConfig {
         TargetConfig {
             name: name.to_owned(),
             protocol,
@@ -565,6 +573,7 @@ mod tests {
             height: 1,
             security: Security::Auto,
             resize,
+            clipboard,
             psk: String::new(),
         }
     }
@@ -580,10 +589,10 @@ mod tests {
             fake_target("fake"),
             fake_target("other"),
             // Non-default metadata so the connected status can be checked to
-            // carry the target's protocol and resize flag verbatim.
-            fake_target_with("rdp-resize", Protocol::Rdp, true),
-            fake_target_with("vnc-resize", Protocol::Vnc, true),
-            fake_target_with("rxa", Protocol::Rxa, false),
+            // carry the target's protocol, resize and clipboard flags verbatim.
+            fake_target_with("rdp-resize", Protocol::Rdp, true, false),
+            fake_target_with("vnc-resize", Protocol::Vnc, true, false),
+            fake_target_with("rxa", Protocol::Rxa, false, true),
         ];
         (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
@@ -604,31 +613,35 @@ mod tests {
     }
 
     /// Assert the next event is the connected status for `name`, carrying the
-    /// expected protocol/resize metadata.
+    /// expected protocol/resize/clipboard metadata.
     async fn expect_connected_meta(
         events: &mut mpsc::Receiver<AttachEvent>,
         name: &str,
         protocol: &str,
         resize: bool,
+        clipboard: bool,
     ) {
         match recv(events).await {
             AttachEvent::Msg(ServerMsg::Connected {
                 name: got,
                 protocol: got_protocol,
                 resize: got_resize,
+                clipboard: got_clipboard,
             }) => {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, protocol, "protocol metadata for {name}");
                 assert_eq!(got_resize, resize, "resize metadata for {name}");
+                assert_eq!(got_clipboard, clipboard, "clipboard metadata for {name}");
             }
             other => panic!("expected connected({name}), got {other:?}"),
         }
     }
 
     /// Assert the next event is the connected status for `name`. The plain fake
-    /// targets are VNC with resize off, so the metadata is checked against that.
+    /// targets are VNC with resize and clipboard off, so the metadata is
+    /// checked against that.
     async fn expect_connected(events: &mut mpsc::Receiver<AttachEvent>, name: &str) {
-        expect_connected_meta(events, name, "vnc", false).await;
+        expect_connected_meta(events, name, "vnc", false, false).await;
     }
 
     #[tokio::test]
@@ -680,7 +693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connected_status_carries_protocol_and_resize_metadata() {
+    async fn connected_status_carries_protocol_resize_and_clipboard_metadata() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
@@ -691,7 +704,7 @@ mod tests {
         // UI off them). The VNC/no-resize case is covered by every other test's
         // expect_connected.
         mgr.connect(att.id, "rdp-resize").unwrap();
-        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true).await;
+        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true, false).await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
         let (_input_rx, _frame_tx) = hooks.try_recv().expect("engine spawned on connect");
@@ -700,7 +713,16 @@ mod tests {
         mgr.detach(att.id);
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
-        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true).await;
+        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true, false).await;
+
+        // The clipboard flag travels the same way, and independently of resize:
+        // the rxa fake target has clipboard on and resize off.
+        let (mgr, _hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "rxa").unwrap();
+        expect_connected_meta(&mut att.events, "rxa", "rxa", false, true).await;
     }
 
     #[tokio::test]
@@ -763,17 +785,17 @@ mod tests {
     #[tokio::test]
     async fn detached_engine_expires_after_the_grace_period_for_every_protocol() {
         tokio::time::pause();
-        for (target, protocol, resize) in [
-            ("rdp-resize", "rdp", true),
-            ("vnc-resize", "vnc", true),
-            ("rxa", "rxa", false),
+        for (target, protocol, resize, clipboard) in [
+            ("rdp-resize", "rdp", true, false),
+            ("vnc-resize", "vnc", true, false),
+            ("rxa", "rxa", false, true),
         ] {
             let (mgr, hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, target).unwrap();
-            expect_connected_meta(&mut att.events, target, protocol, resize).await;
+            expect_connected_meta(&mut att.events, target, protocol, resize, clipboard).await;
             let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
 
             mgr.detach(att.id);

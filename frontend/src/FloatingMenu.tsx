@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 
 // Phase 9: the floating chrome — a draggable ☰ button that toggles a toolbar
@@ -14,7 +15,8 @@ import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 // to the post-login picker, and the Log out affordance (ending the web login)
 // that used to live in the Ctrl+Alt+Shift+L chord and the below-canvas bar.
 // Phase 10 wired the drawer's Soft keyboard button to the on-screen keyboard
-// panel; Clipboard is still a placeholder until its phase lands.
+// panel; the Clipboard button opens the clipboard bridge's panel, and is
+// enabled only for targets that opted into it (see ClipboardPanel).
 const FAB_SIZE = 40;
 const FAB_MARGIN = 12;
 // Pointer travel (px) before a press becomes a drag rather than a click.
@@ -92,6 +94,10 @@ export default function FloatingMenu({
   onResizeToWindow,
   sendKeyCombo,
   onKeyboardInset,
+  canClipboard,
+  remoteClipboard,
+  onFetchClipboard,
+  onSendClipboard,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
@@ -103,12 +109,22 @@ export default function FloatingMenu({
   onResizeToWindow?: () => void;
   sendKeyCombo: (codes: string[]) => void;
   // Reports the docked soft keyboard's height so the touch canvas can inset
-  // above it (0 when the panel closes or floats). See useRemoteDesktop.
+  // above it (0 when the panel closes or floats). See useRemoteDesktop. The
+  // clipboard panel shares this channel — only one of the two is ever open.
   onKeyboardInset: (px: number) => void;
+  // Whether the connected target opted into the clipboard bridge
+  // (`clipboard = true`). False leaves the Clipboard button disabled.
+  canClipboard: boolean;
+  // The last clipboard reply from the server, and the fetch actions. See
+  // ClipboardPanel — the browser holds no clipboard state of its own.
+  remoteClipboard: { text: string; seq: number } | null;
+  onFetchClipboard: () => void;
+  onSendClipboard: (text: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [clipboardOpen, setClipboardOpen] = useState(false);
   // null = not yet moved; resolvedPosition falls back to the top-right corner.
   const [position, setPosition] = useState<Position | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -276,7 +292,25 @@ export default function FloatingMenu({
   // Open the on-screen keyboard and collapse the drawer so the panel has the
   // screen to itself; toggling the button again closes the panel.
   const onSoftKeyboard = useCallback(() => {
-    setKeyboardOpen((prev) => !prev);
+    setKeyboardOpen((prev) => {
+      if (!prev) {
+        setClipboardOpen(false);
+      }
+      return !prev;
+    });
+    setOpen(false);
+  }, []);
+
+  // Same deal for the clipboard panel: open it and get the drawer out of the
+  // way. The two panels are mutually exclusive — both dock to the bottom edge
+  // on mobile and both report an inset, so the second would sit on the first.
+  const onClipboard = useCallback(() => {
+    setClipboardOpen((prev) => {
+      if (!prev) {
+        setKeyboardOpen(false);
+      }
+      return !prev;
+    });
     setOpen(false);
   }, []);
 
@@ -343,16 +377,21 @@ export default function FloatingMenu({
         <div className="toolbar" style={toolbarStyle}>
           <div className="toolbar-section">
             <span className="toolbar-label">Clipboard</span>
-            {/* Stub: clipboard relay isn't in the wire protocol yet — the VNC
-                engine drains and drops ServerCutText. Disabled so it reads as
-                not-yet-live until a later phase wires it up. */}
+            {/* Enabled per target (`clipboard = true`); RDP has no clipboard
+                channel yet, so those targets can't opt in at all. */}
             <button
               type="button"
               className="toolbar-btn"
-              disabled
-              title="Clipboard sync — not implemented yet"
+              onClick={onClipboard}
+              disabled={!canClipboard}
+              aria-pressed={clipboardOpen}
+              title={
+                canClipboard
+                  ? "Read and write the remote's clipboard"
+                  : "Clipboard sync is not enabled for this target"
+              }
             >
-              Clipboard (soon)
+              {clipboardOpen ? "Hide clipboard" : "Clipboard"}
             </button>
           </div>
 
@@ -466,6 +505,16 @@ export default function FloatingMenu({
         <SoftKeyboardPanel
           sendKeyCombo={sendKeyCombo}
           onClose={() => setKeyboardOpen(false)}
+          onDockedHeightChange={onKeyboardInset}
+        />
+      )}
+
+      {clipboardOpen && (
+        <ClipboardPanel
+          onFetch={onFetchClipboard}
+          onSend={onSendClipboard}
+          remoteClipboard={remoteClipboard}
+          onClose={() => setClipboardOpen(false)}
           onDockedHeightChange={onKeyboardInset}
         />
       )}
