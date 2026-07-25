@@ -16,7 +16,7 @@
 //! 2. **Silent reconnect.** When the agent's connection drops mid-session the
 //!    engine reconnects and repaints instead of reporting an error and bouncing
 //!    the browser back to the picker. That behaviour is the reason this whole
-//!    subsystem exists (see docs/mac-agent-plan.md), so it gets a test.
+//!    subsystem exists (see docs/mac-agent-architecture.md), so it gets a test.
 //! 3. **Input.** The browser's JSON input arrives at the agent in order and
 //!    untranslated, and a `viewport` report is swallowed — the half of a session
 //!    that leaves no evidence on screen when it goes wrong.

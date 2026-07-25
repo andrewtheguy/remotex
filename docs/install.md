@@ -1,98 +1,91 @@
 # Installing remotex
 
-Pre-built binaries for **Linux** (x86_64, arm64) and **macOS** (Apple Silicon).
-Each release ships a self-contained tarball — the binary plus its frontend,
-served from disk.
+## Install
 
-## Quick install
-
-```bash
+```sh
 curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
 ```
 
-This:
+The installer selects the current OS and architecture, verifies the release
+SHA-256 digest, and installs under `/opt/remotex`. It may use `sudo` for the
+prefix and `/usr/local/bin/remotex` link.
 
-1. Detects your OS/arch and resolves the latest release.
-2. Downloads the matching tarball and **verifies its SHA-256** against the
-   digest GitHub publishes for the asset.
-3. Installs under `/opt/remotex` and links a `remotex` launcher onto your
-   `PATH` at `/usr/local/bin/remotex`. You may be prompted for `sudo` to write
-   under `/opt` and `/usr/local/bin`.
+Then configure and start the gateway:
 
-> Review the script before piping it to a shell:
-> <https://andrewtheguy.github.io/remotex/install.sh>
-
-## Configure and run
-
-```bash
-# set your RDP target + credentials (kept server-side, never sent to the browser)
+```sh
+remotex gen-passwd admin
 $EDITOR /opt/remotex/etc/remotex.toml
-
 remotex serve
 ```
 
-Then open the printed URL (default <http://127.0.0.1:52380>). The TOML config
-format is documented in the [README](../README.md#configuration); all
-configuration lives in that file (no environment variables). Pass
-`--config <path>` to use a different file. Every `[[targets]]` profile is
-served; you pick one from a picker in the browser after logging in.
+The full config template is at
+`/opt/remotex/current/share/doc/remotex/remotex.toml.example`. Keep the live
+config readable only by the service user because it contains credentials.
 
-## Options
+## Installer options
 
-Install a specific release:
+Use `PREFIX` and `BINDIR` to change the install location:
 
-```bash
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash -s -- v0.1.0
+| Variable | Default | Purpose |
+|---|---|---|
+| `PREFIX` | `/opt/remotex` | installation root |
+| `BINDIR` | `/usr/local/bin` | launcher directory |
+
+For example:
+
+```sh
+curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
+  PREFIX="$HOME/.local/opt/remotex" BINDIR="$HOME/.local/bin" bash
 ```
 
-Install to a custom, non-root location (no `sudo` needed):
+Pass a release tag as the first argument to install a specific version:
 
-```bash
-curl -fsSL https://andrewtheguy.github.io/remotex/install.sh \
-  | PREFIX="$HOME/.local/opt/remotex" BINDIR="$HOME/.local/bin" bash
+```sh
+curl -fsSL https://andrewtheguy.github.io/remotex/install.sh |
+  bash -s -- v0.1.0
 ```
 
-Make sure `BINDIR` is on your `PATH`.
+## Installed layout
 
-## Layout
+```text
+<prefix>/
+├── etc/remotex.toml
+├── versions/<version>/
+├── current -> versions/<version>
+└── .install.lock
 
+<bindir>/remotex -> <prefix>/current/bin/remotex
 ```
-/opt/remotex/
-├── etc/remotex.toml                       # stable user configuration
-├── versions/<version>/{bin,share}       # this version's files
-├── current -> versions/<version>        # active version
-└── /usr/local/bin/remotex -> /opt/remotex/current/bin/remotex
-```
 
-The example config is versioned at
-`current/share/doc/remotex/remotex.toml.example`. The binary resolves `share/`
-relative to its own real path and the stable config relative to the enclosing
-prefix, so the whole tree is relocatable via `PREFIX`/`BINDIR`.
+The config is shared across versions. Each install atomically switches
+`current` and retains the previous version.
 
-## Upgrades and rollback
+## Upgrade and rollback
 
-Re-running the installer stages the new version, flips the `current` symlink
-atomically, and keeps the **immediately previous** version for rollback. Your
-`etc/remotex.toml` remains untouched across upgrades and rollbacks.
+Run the installer again to upgrade. To roll back, point `current` to the
+retained version:
 
-Roll back by repointing `current` at the previous version:
-
-```bash
+```sh
 ln -sfn versions/<previous> /opt/remotex/current
-# e.g. ls /opt/remotex/versions  to see what's kept
 ```
 
 ## Uninstall
 
-```bash
-# whole install (all versions + config):
-curl -fsSL https://raw.githubusercontent.com/andrewtheguy/remotex/main/packaging/uninstall.sh | bash
+From a checkout:
 
-# or, from a checkout:
-sudo bash packaging/uninstall.sh            # remove everything
-sudo bash packaging/uninstall.sh 0.1.0      # remove a single version
+```sh
+PREFIX=/opt/remotex BINDIR=/usr/local/bin bash packaging/uninstall.sh
 ```
 
-## Building the tarball yourself
+The script removes the installation, launcher, and config. The macOS companion
+agent has a separate uninstall procedure in
+[`packaging/macos/README.md`](../packaging/macos/README.md).
 
-See [`packaging/README.md`](../packaging/README.md).
+## Build a tarball
+
+```sh
+bash packaging/build-tarball.sh
+```
+
+See [`packaging/README.md`](../packaging/README.md) for its contents and release
+workflow.

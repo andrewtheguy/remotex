@@ -5,7 +5,7 @@
 //! belongs to Apple's server, so there is nothing to fix on remotex's side of
 //! the RFB connection. This agent replaces that hop: one pre-shared key, a
 //! two-message Noise handshake, and no human in a reconnect ever. See
-//! `docs/mac-agent-plan.md`.
+//! `docs/mac-agent-architecture.md`.
 //!
 //! ## Installing is dragging it in and opening it
 //!

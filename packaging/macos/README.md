@@ -1,123 +1,31 @@
-# remotex-agent (macOS)
+# remotex-agent for macOS
 
-The screen agent remotex connects to when a target is `protocol = "rxa"`. It
-replaces reaching the Mac over Screen Sharing, whose credential prompt reappears
-on every disconnect. Here the pre-shared key *is* the credential, so a dropped
-connection reconnects silently and never asks for a login.
-
-Requires **macOS 14 or later**.
+`remotex-agent` shares the logged-in user's Mac with a remotex gateway over the
+encrypted `rxa` protocol. It requires macOS 14 or later.
 
 ## Install
 
-Take `remotex-agent-<version>-macos-arm64-unsigned.dmg` from the
-[latest release](https://github.com/andrewtheguy/remotex/releases) — it ships
-alongside the gateway tarballs, built from the same commit — then:
+Download `remotex-agent-<version>-macos-arm64-unsigned.dmg` from the
+[latest release](https://github.com/andrewtheguy/remotex/releases), then:
 
-1. Open the image.
-2. **Drag `remotex-agent.app` onto the `Applications` folder** beside it.
-3. Clear the quarantine flag, because the bundle is ad-hoc signed rather than
-   notarized:
+1. Drag `remotex-agent.app` to Applications.
+2. Clear quarantine because the public build is ad-hoc signed:
 
    ```sh
    xattr -dr com.apple.quarantine /Applications/remotex-agent.app
    ```
 
-4. Open it from `/Applications` — in the Finder, or `open
-   /Applications/remotex-agent.app`.
-5. Eject the image.
+3. Open `/Applications/remotex-agent.app`.
 
-Install it from `/Applications`, not from the mounted image: opening it off the
-image registers a login item pointing at a mount point, and that path is gone as
-soon as you eject (see **Reinstalling over an existing copy** for what a stale
-registration does).
+The first launch creates
+`~/Library/Application Support/remotex-agent/config.toml`, generates a
+pre-shared key, and registers the app as a login item. The agent has no Dock
+icon; use its menu bar item.
 
-The `xattr` line is Gatekeeper, not paranoia: a downloaded bundle without a
-Developer ID signature is refused until the quarantine attribute is gone. The
-same ad-hoc signature is why the two permissions below are asked for again after
-an upgrade — the grants are keyed to the code identity, and it changes with every
-build. A notarized build needs neither the `xattr` line nor the re-approval; the
-release just does not have the signing secrets yet.
+## Connect the gateway
 
-That first open does everything an install script would have:
-
-- writes `~/Library/Application Support/remotex-agent/config.toml` (mode 0600)
-  with a freshly generated pre-shared key, if it is not already there;
-- registers itself with `SMAppService`, so it starts now and at every login and
-  appears in **System Settings → General → Login Items**.
-
-There is no Dock icon and no window — it is a background agent. What it does
-have is a **menu bar item**, and that is the entire interface: there are no
-subcommands, and nothing below needs a terminal.
-
-## The menu bar item
-
-| | |
-|---|---|
-| 🖥 | idle — running, nobody connected |
-| 👁 | a gateway is connected and watching this screen |
-| ⚠️ | a required permission is missing; nothing will work until it is granted |
-
-Opening it shows the connected gateway's address, how long it has been attached,
-and the address the agent is listening on. Then:
-
-| | |
-|---|---|
-| **Copy Pre-Shared Key** | the key, straight to the clipboard |
-| **Settings…** | listen address, display and pre-shared key, in one dialog |
-| **Reveal Config in Finder** | where the config file is |
-| **Open Log** | `~/Library/Logs/remotex-agent.log` |
-| **Enable Screen Recording…** / **Enable Accessibility…** | only while one is missing; each opens the right Privacy pane, which is otherwise four levels down a settings tree |
-| **Start at Login** | the `SMAppService` registration, as a toggle |
-| **Quit remotex-agent** | really quits — see below |
-
-Quit really quits: the embedded LaunchAgent uses `KeepAlive` /
-`SuccessfulExit: false`, so a deliberate exit stays exited while a crash is
-still restarted. The agent comes back at your next login, or whenever you open
-it from `/Applications` again.
-
-### One settings dialog, and Save restarts
-
-**Settings…** holds all three settings at once:
-
-| | |
-|---|---|
-| Listen address | `address:port` to wait for the gateway on. `0.0.0.0` is every interface |
-| Display | which screen to share, when more than one is attached |
-| Pre-shared key | editable, so a key can be pasted in — plus **Regenerate**, which fills the field with a fresh one |
-
-Nothing is written until **Save**, so **Regenerate** followed by **Cancel**
-changes nothing. Saving a change **restarts the agent immediately** — that is
-how a new port, display or key takes effect — which drops any connection in
-progress. The gateway reconnects on its own.
-
-So a key change is two steps in either order, with a gap between them: put the
-new key in the gateway's `remotex.toml`, and save it here. Nothing can connect
-until both are done.
-
-### Opening it a second time
-
-Opening the app while a copy is already running puts up a panel saying so and
-pointing at the menu bar, then exits — the running agent keeps the port and the
-session. It is worth knowing that this is what "nothing happened" means, because a
-background app has no window to fail in: any startup problem it cannot get past
-(an unusable config file, a port it cannot bind) gets a panel of its own for the
-same reason.
-
-A second open still re-registers the login item on its way past, which is what
-makes the repair in **Reinstalling over an existing copy** work while the old copy
-is running.
-
-### Over SSH there is no interface
-
-A status item needs a window server, which an SSH session does not have. Pass
-`--no-menu` there — and note that with no menu there is nothing to read the key
-or change a setting with, which is why that flag is for development. The config
-file is plain TOML if you are stuck without a screen.
-
-## Then two permissions, and one key
-
-Open the menu bar item, choose **Copy Pre-Shared Key**, and paste it as `psk` on
-the matching `[[targets]]` entry in the gateway's `remotex.toml`:
+Choose **Copy Pre-Shared Key** from the menu bar item and add an `rxa` target to
+the gateway config:
 
 ```toml
 [[targets]]
@@ -127,135 +35,105 @@ host = "mac.local"
 psk = "rxa..."
 ```
 
-Both permissions are needed in **System Settings → Privacy & Security**, under
-`remotex-agent`:
+The agent listens on port 52381 by default. The PSK is the credential and must
+match exactly on both sides.
 
-| Permission | Without it | Once granted |
+## Permissions
+
+Grant `remotex-agent` both permissions under **System Settings → Privacy &
+Security**:
+
+| Permission | Purpose | After granting |
 |---|---|---|
-| Screen Recording | the screen never paints; the gateway reports the reason | **restart the agent** — macOS only gives this to a fresh launch |
-| Accessibility | the session looks perfectly healthy and silently ignores every click and keystroke | works immediately |
+| Screen Recording | capture the display | quit and reopen the agent |
+| Accessibility | inject mouse and keyboard input | effective immediately |
 
-The second is the one that wastes an afternoon — with only Screen Recording
-granted, everything appears to work except that nothing responds. So neither is
-treated as an option: the agent asks for the missing one at startup and offers to
-open the right pane, the menu bar icon shows ⚠️ until both are on, and the menu
-carries an **Enable …** item for whichever is missing. When both are granted,
-none of that appears.
+The menu bar shows a warning and links to the relevant settings pane while a
+permission is missing.
 
-Note the third column. Ticking Accessibility fixes a running agent on the spot,
-and the ⚠️ clears within a second. Ticking Screen Recording does not: the running
-process keeps being refused, so the warning stays until you **Quit** and open the
-agent again — which is also what macOS's own "quit and reopen" prompt is telling
-you.
+Permissions are tied to the app's signing identity. The ad-hoc-signed release
+may need both grants again after an upgrade. A stable Developer ID signature
+preserves the identity.
 
-macOS provides no way to grant these programmatically, and whether a grant
-survives an upgrade depends on the signature. The grants are keyed to the signed
-code identity: an ad-hoc signature — what the released image and a plain local
-build carry — mints a new identity on every build, so both permissions have to be
-approved again after each upgrade. A build signed with a stable **Developer ID
-Application** identity keeps the same one, so there you grant them once and they
-survive upgrades.
+## Menu and settings
 
-The menu bar is also the only place worth *reading* them from. Both permissions
-are attributed to whatever launched the process, so the binary run from a terminal
-reports your *terminal's* permissions — the same binary says "NOT granted" from a
-shell and "granted" a second later when macOS launches it as the app. The agent's
-own log is the other honest answer:
+The status icon distinguishes idle, connected, and missing-permission states.
+Its menu provides:
 
-```sh
-grep permissions: ~/Library/Logs/remotex-agent.log | tail -2
-```
+- connection and listen-address status;
+- PSK copy;
+- address, display, and PSK settings;
+- config and log shortcuts;
+- permission shortcuts;
+- the **Start at Login** toggle and **Quit**.
 
-## Where things are
+Saving settings restarts the agent, disconnecting the current gateway until it
+reconnects. A deliberate quit remains stopped until the app is opened again or
+the next login; crashes are restarted automatically.
 
-| | |
+Opening the app while it is already running keeps the existing process and
+points the user to the menu bar. Startup errors are shown in a panel.
+
+## Files
+
+| Item | Path |
 |---|---|
-| Config | `~/Library/Application Support/remotex-agent/config.toml` (**Reveal Config in Finder**) |
-| Log | `~/Library/Logs/remotex-agent.log` (**Open Log**) |
-| Port | 52381 by default (**Settings…**) |
+| App | `/Applications/remotex-agent.app` |
+| Config | `~/Library/Application Support/remotex-agent/config.toml` |
+| Log | `~/Library/Logs/remotex-agent.log` |
 
-The config is written by the menu, and rewritten whole on every change — so
-comments you add to it by hand will not survive the next one. It is mode 0600,
-because the key in it is the entire credential.
+The config is mode `0600` and is rewritten by the settings UI, so manual
+comments are not preserved.
+
+## Upgrade
+
+Replace the app in Applications, then open the new copy once. Opening it
+refreshes the login-item registration, which can otherwise continue pointing
+at the replaced bundle.
 
 ## Uninstall
 
-1. Switch **Start at Login** off in the menu bar item, then **Quit**.
-2. `rm -rf /Applications/remotex-agent.app`
+1. Turn off **Start at Login** and choose **Quit**.
+2. Move `/Applications/remotex-agent.app` to the Trash.
+3. Optionally remove its config directory and its entries under Privacy &
+   Security.
 
-Step 1 is the part that matters: trashing the bundle without unregistering
-leaves a dangling entry in Login Items. The config file is left behind either
-way, since it holds the key — delete
-`~/Library/Application Support/remotex-agent` to remove that too, and clear
-`remotex-agent` from the two Privacy & Security lists by hand.
+Unregister before removing the app to avoid leaving a stale Login Items entry.
 
-## Reinstalling over an existing copy
+## Limitations
 
-Replace the bundle by **opening the new one**, not just copying it into place.
-The Login Items registration is a Background Task Management record that points
-at the bundle it was made from; delete that bundle and drop a new one at the
-same path and the record goes stale, launchd fails to spawn with `EX_CONFIG`,
-and nothing appears in the log because the binary never runs. **Start at Login**
-still shows a tick, because launchd's registration is intact — only the thing it
-points at is gone.
+The agent runs in the logged-in user's GUI session. It cannot share the macOS
+login window or run when no user is logged in. It mirrors the selected physical
+display and does not resize it to the browser viewport.
 
-The fix, and the way to avoid it: replace the app from the new image (the Finder
-will offer to), then open `/Applications/remotex-agent.app` once — that
-re-registers it and repairs the record. If it is already broken, opening the new
-copy and switching **Start at Login** off and on again does the same.
+See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
+for the capture, transport, and lifecycle design.
 
-## No login-window support
+## Build from source
 
-The agent runs in your GUI session, because both permissions require a window
-server connection that a LaunchDaemon does not have. So it is not running at the
-login window and cannot be: if nobody is logged in on the Mac, there is nothing
-for the gateway to reach. This is a property of the design, not a bug.
-
-## Building from source
+Xcode is required for the ScreenCaptureKit Swift bridge.
 
 ```sh
-packaging/macos/build-agent-app.sh   # -> dist/remotex-agent-<version>-...dmg
-packaging/macos/build-agent-app.sh --no-dmg   # -> dist/remotex-agent.app
+packaging/macos/build-agent-app.sh
+packaging/macos/build-agent-app.sh --no-dmg
 ```
 
-The first form leaves only the image: the bundle is built, signed and copied into
-it, then removed from `dist/`, so there is no second copy to install from by
-mistake. Use `--no-dmg` when you want the bundle itself.
+The first command creates the DMG; the second keeps the `.app` in `dist/`.
 
-Needs Xcode — the capture bindings build a small Swift bridge.
-
-### The icon
-
-`icon.svg` is the master; `AppIcon.icns` is generated from it and committed, and
-the build only copies that into the bundle. To change the icon, edit the SVG and
-regenerate:
+`icon.svg` is the source for the committed `AppIcon.icns`. Regenerate it after
+changing the SVG:
 
 ```sh
-brew install librsvg          # once — for rsvg-convert
-packaging/macos/make-icon.sh  # icon.svg -> AppIcon.icns
+brew install librsvg
+packaging/macos/make-icon.sh
 ```
 
-Both files are committed on purpose: `build-agent-app.sh` runs on CI runners that
-have no SVG rasterizer, and what goes under the signature should be a fixed input
-rather than whatever the builder's librsvg produces. There is no Dock tile
-(`LSUIElement`), so the icon is what identifies the agent in the Finder, in Login
-Items, in the two Privacy & Security lists, and in the permission prompts.
+Signing selection is: `CODESIGN_IDENTITY`, a Developer ID Application identity,
+an Apple Development identity, then ad-hoc signing.
 
-You do not have to, though: every release carries the built image as
-`remotex-agent-<version>-macos-arm64-unsigned.dmg` (see **Install** above). The
-release workflow runs this same script on a macOS runner, so a release bundle and
-a local one differ only in the signature.
+### Notarization
 
-Signing prefers `$CODESIGN_IDENTITY`, then a `Developer ID Application`
-identity, then `Apple Development`, then ad-hoc. Prefer a real identity: the
-two TCC grants are keyed to the signed code identity, and ad-hoc changes it on
-every build, so macOS asks for both permissions again each time.
-
-### Notarizing for distribution
-
-A `.app` downloaded from a release is quarantined, and Gatekeeper will refuse
-it unless it is notarized. That needs a **Developer ID Application** certificate
-and a one-time notarytool profile:
+Store a notarytool profile, then pass it to the build:
 
 ```sh
 xcrun notarytool store-credentials remotex-notary \
@@ -264,22 +142,13 @@ xcrun notarytool store-credentials remotex-notary \
 packaging/macos/build-agent-app.sh --notary-profile remotex-notary
 ```
 
-The ticket is stapled into the bundle, so it validates offline.
+For non-interactive signing, the build script accepts:
 
-### Signing from CI or over SSH
-
-`codesign` needs the signing key's *partition list* to permit it. Keychain
-Access's "Allow all applications to access this item" does **not** set that, so
-from any session that cannot show UI — CI, or SSH / VS Code Remote into a Mac —
-signing fails with `errSecInternalComponent` however the keychain is unlocked.
-Either run the script at the Mac's own console, or import a `.p12` into a
-throwaway keychain by setting:
-
-| Variable | |
+| Variable | Value |
 |---|---|
-| `MACOS_CERT_P12` | base64 of a `.p12` exported **with its private key** |
-| `MACOS_CERT_PASSWORD` | that `.p12`'s export password |
-| `MACOS_KEYCHAIN_PASSWORD` | any string; scopes the temporary keychain |
+| `MACOS_CERT_P12` | base64-encoded `.p12` containing the private key |
+| `MACOS_CERT_PASSWORD` | export password |
+| `MACOS_KEYCHAIN_PASSWORD` | password for the temporary keychain |
 
-The script creates the keychain, imports, runs `security
-set-key-partition-list`, and deletes it again on exit.
+The script imports the certificate into a temporary keychain, configures the
+partition list for `codesign`, and removes the keychain on exit.

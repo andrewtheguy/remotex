@@ -4,7 +4,8 @@
 //! flaky and re-prompts for credentials on every reconnect. `rxa` replaces that
 //! hop with a purpose-built protocol: a PSK-authenticated Noise session over
 //! TCP carrying pre-encoded screen tiles, so a dropped connection costs a
-//! two-message handshake and never a login. See `docs/mac-agent-plan.md`.
+//! two-message handshake and never a login. See
+//! `docs/mac-agent-architecture.md`.
 //!
 //! Everything both sides must agree on lives here — framing, messages, the
 //! handshake, the PSK format, and the DOM-code → macOS-keycode table — so the

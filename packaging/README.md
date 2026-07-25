@@ -1,96 +1,54 @@
 # Packaging
 
-Distro-agnostic tarball packaging for Linux and macOS. remotex ships as a single
-binary plus its built frontend (served from disk, not embedded), laid out under
-a relocatable prefix.
+The gateway ships as a relocatable tarball containing the Rust binary, built
+frontend, config example, and version metadata.
 
-## Layout after install
+## Installed layout
 
-```
-/opt/remotex/
-├── etc/
-│   └── remotex.toml               # the global config (stable across versions)
-├── versions/
-│   └── <version>/
-│       ├── bin/remotex            # the binary
-│       ├── share/doc/remotex/
-│       │   └── remotex.toml.example # versioned config example
-│       ├── share/remotex/web/     # built frontend (index.html + assets)
-│       └── VERSION
-├── current -> versions/<version> # active version (atomic rename swap)
-└── .install.lock                 # present only while an install runs
-
-/usr/local/bin/remotex -> /opt/remotex/current/bin/remotex
+```text
+<prefix>/
+├── etc/remotex.toml
+├── versions/<version>/
+│   ├── bin/remotex
+│   ├── share/doc/remotex/remotex.toml.example
+│   ├── share/remotex/web/
+│   └── VERSION
+├── current -> versions/<version>
+└── .install.lock
 ```
 
-The binary resolves its versioned `share/` from its own real path
-(`current_exe()` canonicalized through the symlinks), then loads the global
-config from the enclosing prefix's `etc/remotex.toml`. Config is global-only —
-no per-user or working-directory files; `--config <path>` is the sole
-override. The tree can live anywhere via `PREFIX` / `BINDIR`.
+The launcher points to `<prefix>/current/bin/remotex`. The binary resolves its
+assets relative to its real path and loads the stable config from
+`<prefix>/etc/remotex.toml`.
 
-## Files
+## Scripts
 
-| File | Purpose |
-|------|---------|
-| `build-tarball.sh` | Build the frontend + release binary and assemble `dist/remotex-<version>-<os>-<arch>.tar.gz`. Run once per target platform (no cross-compile). |
-| `install.sh` | Lay an extracted tarball down under `PREFIX`: stage → atomic `current` swap → prune to (new + previous). Locked against concurrent runs. |
-| `uninstall.sh` | Remove the whole prefix, or a single version (`uninstall.sh <version>`). |
-| `etc/remotex.toml.example` | Config template installed under the active version's `share/doc/remotex/` and seeded to the stable `etc/remotex.toml` on a fresh install. |
-| `Dockerfile` | Container image built from an **extracted release tarball** — it compiles nothing, it just lays the tarball out in the install layout above. |
-| `macos/build-agent-app.sh` | The **macOS screen agent**, a separate program with a separate install story: `dist/remotex-agent-<version>-macos-arm64[-unsigned].dmg`. Nothing else builds it — `build-tarball.sh` does not, so the mac tarball is the gateway only and needs no Xcode. See [`macos/README.md`](macos/README.md). |
+| Path | Purpose |
+|---|---|
+| `build-tarball.sh` | build the gateway and assemble a platform tarball |
+| `install.sh` | stage a version, switch `current`, and retain one rollback |
+| `uninstall.sh` | remove an installation or one version |
+| `Dockerfile` | build an image from an extracted release tarball |
+| `macos/build-agent-app.sh` | build the separate macOS agent app/DMG |
 
-The repo-root `install.sh` is the network installer (`curl … | bash`): it
-downloads the right tarball, verifies its SHA-256 against GitHub's published
-digest, extracts, and invokes this `packaging/install.sh`.
+The repository-root `install.sh` downloads and verifies a release before
+calling `packaging/install.sh`.
 
-## Build locally
+## Local build
 
 ```sh
 cd frontend && bun install --frozen-lockfile && cd ..
 bash packaging/build-tarball.sh
-# -> dist/remotex-<version>-<os>-<arch>.tar.gz
 ```
 
-## Upgrades & rollback
+Output is written to `dist/remotex-<version>-<os>-<arch>.tar.gz`.
 
-Each install keeps the previous version. Roll back by repointing `current`:
+## Releases
 
-```sh
-ln -sfn versions/<previous> /opt/remotex/current
-```
+`.github/workflows/release.yml` creates a draft, builds gateway tarballs for
+Linux x86_64, Linux arm64, and macOS arm64, builds the macOS agent DMG, then
+publishes only after all assets succeed.
 
-## Releasing
-
-`.github/workflows/release.yml` (manual `workflow_dispatch`) is draft-first:
-it validates the Cargo.toml version (real TOML parse), aborts if the `v<version>`
-tag already exists, creates a **draft** release up front (replacing any stale
-draft from a failed run), builds the three tarballs (linux x86_64, linux arm64,
-macOS arm64), uploads them to the draft, and only then publishes it — which is
-what creates the tag, so a failed build never leaves a tag or a half-populated
-release. `.github/workflows/pages.yml` serves `install.sh` from GitHub Pages.
-
-The macOS agent rides along in the same release, built by its own `mac-agent`
-job calling `packaging/macos/build-agent-app.sh` — the one place that builds it.
-It ships as a `.dmg` and is not in any tarball, so the mac tarball job stays a
-plain Rust build.
-
-The frontend is built once in its own job and handed to every tarball job as an
-artifact: the bundle is platform-agnostic, so rebuilding it per target would
-only risk three subtly different bundles. `SKIP_FRONTEND_BUILD=1` is how
-`build-tarball.sh` consumes it.
-
-Container images (`ghcr.io/andrewtheguy/remotex`) are built *after* the release
-is published, so an image tag always maps to a real release — and they reuse the
-release artifacts rather than recompiling: each arch's published tarball is
-unpacked into the build context for `packaging/Dockerfile`, which means the image
-holds byte-identical copies of the binary users download and of the one frontend
-bundle. amd64 and arm64 build on their own native runners (no QEMU), get
-smoke-tested (`--version` must match the release; `index.html` must be where the
-server looks), and are pushed as `v<version>-amd64` / `v<version>-arm64`; a final
-job stitches those into the `v<version>` manifest, plus `latest` for non-prereleases.
-
-Linux tarball builds are pinned to `ubuntu-24.04` rather than `ubuntu-latest`:
-those binaries set the glibc floor for the tarballs *and* for the images (whose
-base is `debian:trixie-slim`, glibc 2.41 against the runner's 2.39), so the
-builder must not drift under us into something the base can no longer run.
+The frontend is built once and reused for every platform. Container images are
+assembled from the published Linux tarballs, so they contain the same binary
+and frontend as the release assets.

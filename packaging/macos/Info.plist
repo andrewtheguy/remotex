@@ -8,7 +8,7 @@
   CFBundleIdentifier keeps that identity constant across rebuilds and upgrades,
   so the two permissions are granted once. A bare unsigned binary's grant can be
   invalidated whenever the binary is replaced, which means re-approving in
-  System Settings on every single build — see docs/mac-agent-plan.md §3.5.
+  System Settings on every single build — see docs/mac-agent-architecture.md.
 
   CFBundleVersion is rewritten by build-agent-app.sh; everything else here is
   intentionally static, because changing CFBundleIdentifier resets the grants.
