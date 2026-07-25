@@ -13,8 +13,9 @@
 
 - **macOS agent (`rxa`).** Macs are reached over a purpose-built protocol
   instead of Apple's Screen Sharing, so a reconnect never asks for a login.
-  See [`architecture.md`](architecture.md#rxa-srcrxars); the implementation
-  plan it grew from is [`mac-agent-plan.md`](mac-agent-plan.md).
+  See [`architecture.md`](architecture.md#rxa-srcrxars); the design record,
+  including what it would take to run at the login window, is
+  [`mac-agent-plan.md`](mac-agent-plan.md).
 
 ## Deferred, with reasons
 
