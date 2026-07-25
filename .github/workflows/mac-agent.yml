@@ -1,0 +1,120 @@
+name: Mac Agent (unsigned)
+
+# Manual only, and deliberately not part of `release.yml`: what this produces is
+# a bundle for testing on a Mac you control, not a release asset. An ad-hoc
+# signature has no stable code identity, so macOS re-asks for Screen Recording
+# and Accessibility after every rebuild (see packaging/macos/Info.plist), and a
+# bundle downloaded from Actions is quarantined on top of that. Shipping one
+# needs a Developer ID signature plus notarization — secrets this workflow does
+# not take, so it cannot accidentally produce something that looks
+# distributable.
+on:
+  workflow_dispatch:
+
+# Nothing is published: the bundle leaves as a workflow artifact.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # macos-latest is Apple silicon, and the bundle is not universal, so what
+    # comes out of here runs on arm64 Macs.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Read the agent version
+        id: version
+        run: |
+          # Real TOML parse, like release.yml. The agent carries its own
+          # `version` key rather than inheriting one from the workspace.
+          VERSION=$(python3 -c '
+          import tomllib
+          with open("crates/rxa-agent/Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["package"]["version"])
+          ')
+          echo "Agent version: ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build remotex-agent.app
+        # `-` forces the script's ad-hoc path instead of letting it search the
+        # runner's keychain: a signing identity appearing in some future runner
+        # image must not quietly change what this workflow produces.
+        #
+        # Xcode is preinstalled on the macOS runners, which this needs — the
+        # capture bindings build a small Swift bridge.
+        env:
+          CODESIGN_IDENTITY: "-"
+        run: bash packaging/macos/build-agent-app.sh
+
+      - name: Smoke test the bundled binary
+        # `--version` is handled in argv parsing, before any config, capture or
+        # launchd work, so it needs neither TCC grant nor a GUI session. It is
+        # also where a Swift-runtime link error would surface — the failure mode
+        # MACOSX_DEPLOYMENT_TARGET exists to prevent (see .cargo/config.toml)
+        # builds clean and only dies on launch.
+        run: |
+          got=$(dist/remotex-agent.app/Contents/MacOS/remotex-agent --version)
+          echo "bundle reports: ${got}"
+          [ "$got" = "remotex-agent ${{ steps.version.outputs.version }}" ] || {
+            echo "::error::expected 'remotex-agent ${{ steps.version.outputs.version }}'"
+            exit 1
+          }
+
+      - name: Archive the bundle
+        # ditto, not zip: an .app is a directory tree, and its executable bits
+        # have to survive the round trip. upload-artifact zips whatever it is
+        # given without preserving them, so it gets one already-made archive.
+        #
+        # --sequesterRsrc is not cosmetic. Without it ditto stores extended
+        # attributes as AppleDouble `._*` entries *inside* the bundle, and
+        # extracting with plain `unzip` (what anyone will do) leaves them there
+        # as files the signature does not seal — `codesign --verify --strict`
+        # then fails, and TCC will not hand grants to a bundle whose signature
+        # is broken. Sequestered, they go to a sibling __MACOSX/ and the
+        # extracted bundle verifies.
+        run: |
+          mkdir -p dist/upload
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent dist/remotex-agent.app \
+            "dist/upload/remotex-agent-${{ steps.version.outputs.version }}-macos-arm64-unsigned.zip"
+
+      - name: Verify the archived bundle still validates
+        # The check that would have caught the AppleDouble problem above: unpack
+        # the artifact exactly as a user will and verify the signature there,
+        # not in the build directory where it trivially passes.
+        run: |
+          mkdir -p dist/check
+          unzip -q "dist/upload/remotex-agent-${{ steps.version.outputs.version }}-macos-arm64-unsigned.zip" \
+            -d dist/check
+          codesign --verify --deep --strict --verbose=2 dist/check/remotex-agent.app
+          dist/check/remotex-agent.app/Contents/MacOS/remotex-agent --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remotex-agent-macos-arm64-unsigned
+          path: dist/upload/*.zip
+          if-no-files-found: error
+
+      - name: How to run it
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'NOTES'
+          ### remotex-agent.app — unsigned (ad-hoc), arm64
+
+          Downloading from Actions quarantines it, so Gatekeeper will refuse it
+          until the attribute is cleared:
+
+          ```sh
+          unzip remotex-agent-*-macos-arm64-unsigned.zip
+          xattr -dr com.apple.quarantine remotex-agent.app
+          cp -R remotex-agent.app /Applications/
+          open /Applications/remotex-agent.app
+          ```
+
+          The code identity changes on every build, so macOS asks for Screen
+          Recording and Accessibility again after each install. For anything
+          past testing, build it signed and notarized instead — see
+          `packaging/macos/README.md`.
+          NOTES

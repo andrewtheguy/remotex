@@ -155,6 +155,12 @@ packaging/macos/build-agent-app.sh          # -> dist/remotex-agent.app
 
 Needs Xcode — the capture bindings build a small Swift bridge.
 
+Without a Mac to build on, the **Mac Agent (unsigned)** workflow
+(`.github/workflows/mac-agent.yml`) runs the same script on a GitHub runner and
+uploads the bundle as an artifact — arm64, ad-hoc signed. For testing only: the
+download is quarantined (`xattr -dr com.apple.quarantine remotex-agent.app`) and
+an ad-hoc identity asks for both permissions again on every install.
+
 Signing prefers `$CODESIGN_IDENTITY`, then a `Developer ID Application`
 identity, then `Apple Development`, then ad-hoc. Prefer a real identity: the
 two TCC grants are keyed to the signed code identity, and ad-hoc changes it on
