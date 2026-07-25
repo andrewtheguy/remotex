@@ -1,5 +1,8 @@
 # Roadmap
 
+Active defects and their required regression guards are tracked in
+[`known-issues.md`](known-issues.md).
+
 ## Planned
 
 ## Deferred pending measurements
@@ -88,17 +91,24 @@ unlock.
 
 ## Not planned
 
-### Dynamic resize for `rxa`
+### Viewport-following resize for `rxa`
 
-The agent mirrors a physical display. Resizing it to the browser viewport would
-change the Mac's actual display mode, rearrange local windows, and leave the
-machine altered after the browser disconnects. This differs from resizing an
-RDP virtual desktop or a virtual VNC server.
+`resize = true` on an `rxa` target offers the browser the resolutions the Mac's
+display advertises, and only when that display is a virtual one in a VM (see
+`docs/mac-agent-architecture.md`). What it will never do is follow the browser
+viewport the way RDP and VNC do.
 
-An isolated, session-sized desktop would require a virtual display. macOS has
-no suitable public API; DriverKit or private `CGVirtualDisplay` integration
-would also change `rxa` from screen sharing into a separate desktop. Therefore
-`resize = true` is rejected for `rxa` targets.
+Two reasons. On a **physical** display there is nothing to resize but the panel
+in front of a person: it would rearrange their windows and leave the machine
+altered after the browser disconnects. On a **virtual** display the guest cannot
+take an arbitrary size at all — it switches between the modes the host
+advertises, so following the viewport would mean a mode switch on every window
+drag, each landing on a neighbouring size nobody asked for, and each risking the
+display-stack wedge that only a VM reboot clears.
+
+An isolated, session-sized desktop would need a virtual display of our own.
+macOS has no suitable public API; DriverKit or private `CGVirtualDisplay`
+integration would also change `rxa` from screen sharing into a separate desktop.
 
 ### Multiple sessions
 

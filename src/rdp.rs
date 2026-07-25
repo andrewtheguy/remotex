@@ -89,6 +89,14 @@ pub async fn run(
     {
         return; // browser already gone
     }
+    // No RDP server ships for macOS, so a Mac never answers here.
+    if frame_tx
+        .send(ServerMsg::RemoteOs { macos: false })
+        .await
+        .is_err()
+    {
+        return; // browser already gone
+    }
 
     if let Err(e) = active_loop(
         connection_result,
@@ -270,6 +278,10 @@ async fn active_loop(
                 if matches!(input, ClientMsg::Refresh) {
                     frame_tx
                         .send(ServerMsg::Resize { w: desktop.width, h: desktop.height })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                    frame_tx
+                        .send(ServerMsg::RemoteOs { macos: false })
                         .await
                         .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                     send_tiles(
@@ -669,6 +681,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // Handled by the active loop (client-initiated resize) before
         // translation, so this arm is unreachable in practice.
         ClientMsg::Viewport { .. } => Vec::new(),
+        // Only the Mac agent offers a menu of fixed resolutions; RDP resizes to
+        // the viewport instead, so the browser never sends this here.
+        ClientMsg::SetResolution { .. } => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Handled by the active loop (MS-RDPECLIP, a static virtual channel)

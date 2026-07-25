@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
+import { ResolutionPanel } from "./ResolutionPanel.tsx";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 
 // Phase 9: the floating chrome — a draggable ☰ button that toggles a toolbar
@@ -16,7 +17,9 @@ import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 // that used to live in the Ctrl+Alt+Shift+L chord and the below-canvas bar.
 // Phase 10 wired the drawer's Soft keyboard button to the on-screen keyboard
 // panel; the Clipboard button opens the clipboard bridge's panel, and is
-// enabled only for targets that opted into it (see ClipboardPanel).
+// enabled only for targets that opted into it (see ClipboardPanel). The
+// Resolution button opens the third such panel, for targets that offer a list
+// of display modes (see ResolutionPanel).
 const FAB_SIZE = 40;
 const FAB_MARGIN = 12;
 // Pointer travel (px) before a press becomes a drag rather than a click.
@@ -88,10 +91,131 @@ function readViewport(): Viewport {
   };
 }
 
+// Which docked panel is open, if any.
+//
+// One state rather than a boolean each: all three dock to the bottom edge and
+// report the same canvas inset, so a second one open would sit on the first.
+// Three booleans made that a rule every call site had to remember — open this
+// one, clear the other two — and this makes it impossible to express.
+type Panel = "clipboard" | "keyboard" | "resolution";
+
+function usePanel() {
+  const [panel, setPanel] = useState<Panel | null>(null);
+  const closePanel = useCallback(() => setPanel(null), []);
+  const togglePanel = useCallback(
+    (next: Panel) => setPanel((prev) => (prev === next ? null : next)),
+    [],
+  );
+  return { panel, setPanel, closePanel, togglePanel };
+}
+
+// Whichever docked panel is open, or nothing. Rendering all three from one
+// place is what makes the shared inset channel safe: exactly one of them is
+// mounted, so exactly one is reporting a height.
+function DockedPanel({
+  panel,
+  onClose,
+  onDockedHeightChange,
+  sendKeyCombo,
+  modes,
+  remoteSize,
+  onPickResolution,
+  remoteClipboard,
+  onFetchClipboard,
+  onSendClipboard,
+}: {
+  panel: Panel | null;
+  onClose: () => void;
+  onDockedHeightChange: (px: number) => void;
+  sendKeyCombo: (codes: string[]) => void;
+  modes: { w: number; h: number }[];
+  remoteSize: { w: number; h: number } | null;
+  onPickResolution: (w: number, h: number) => void;
+  remoteClipboard: { text: string; seq: number } | null;
+  onFetchClipboard: () => Promise<string | null>;
+  onSendClipboard: (text: string) => void;
+}) {
+  switch (panel) {
+    case "keyboard":
+      return (
+        <SoftKeyboardPanel
+          sendKeyCombo={sendKeyCombo}
+          onClose={onClose}
+          onDockedHeightChange={onDockedHeightChange}
+        />
+      );
+    case "resolution":
+      return (
+        <ResolutionPanel
+          modes={modes}
+          current={remoteSize}
+          onPick={onPickResolution}
+          onClose={onClose}
+          onDockedHeightChange={onDockedHeightChange}
+        />
+      );
+    case "clipboard":
+      return (
+        <ClipboardPanel
+          onFetch={onFetchClipboard}
+          onSend={onSendClipboard}
+          remoteClipboard={remoteClipboard}
+          onClose={onClose}
+          onDockedHeightChange={onDockedHeightChange}
+        />
+      );
+    default:
+      return null;
+  }
+}
+
+// The drawer's way in to the resolution panel: one button, labelled with the
+// size the remote is at now.
+//
+// Only a Mac (rxa) target sharing a virtual display offers a list, so this
+// renders nothing for every other target — including a Mac on a physical
+// display, which is the point: a real monitor is never rearranged from here.
+function ResolutionButton({
+  modes,
+  current,
+  panelOpen,
+  onToggle,
+}: {
+  modes: { w: number; h: number }[];
+  current: { w: number; h: number } | null;
+  panelOpen: boolean;
+  onToggle: () => void;
+}) {
+  if (modes.length === 0) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Resolution</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={onToggle}
+        aria-pressed={panelOpen}
+        title="Set the remote display to one of its supported sizes"
+      >
+        {panelOpen
+          ? "Hide resolutions"
+          : current
+            ? `${current.w} × ${current.h}`
+            : "Resolution"}
+      </button>
+    </div>
+  );
+}
+
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
   onResizeToWindow,
+  displayModes,
+  remoteSize,
+  onSetResolution,
   sendKeyCombo,
   onKeyboardInset,
   canClipboard,
@@ -107,10 +231,20 @@ export default function FloatingMenu({
   // target supports on-request resize (RDP with resize enabled); VNC follows
   // the viewport automatically and needs no button. See useRemoteDesktop.
   onResizeToWindow?: () => void;
+  // The resolutions the remote will accept, largest first. Non-empty only for
+  // a Mac (rxa) target sharing a virtual display with `resize = true`: such a
+  // display takes sizes off a fixed list rather than following the window, so
+  // it gets a menu instead of onResizeToWindow's button. Empty hides the
+  // section entirely.
+  displayModes: { w: number; h: number }[];
+  // The remote's current size, so the menu can mark which entry is in effect.
+  // Null before the first frame.
+  remoteSize: { w: number; h: number } | null;
+  onSetResolution: (w: number, h: number) => void;
   sendKeyCombo: (codes: string[]) => void;
-  // Reports the docked soft keyboard's height so the touch canvas can inset
-  // above it (0 when the panel closes or floats). See useRemoteDesktop. The
-  // clipboard panel shares this channel — only one of the two is ever open.
+  // Reports the open docked panel's height so the touch canvas can inset above
+  // it (0 when the panel closes or floats). See useRemoteDesktop. All three
+  // panels share this channel, which is safe because only one is ever open.
   onKeyboardInset: (px: number) => void;
   // Whether the connected target opted into the clipboard bridge
   // (`clipboard = true`). False leaves the Clipboard button disabled.
@@ -125,8 +259,7 @@ export default function FloatingMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
-  const [clipboardOpen, setClipboardOpen] = useState(false);
+  const { panel, setPanel, closePanel, togglePanel } = usePanel();
   // True between pressing Clipboard and the remote's text arriving. The panel
   // stays closed for that moment so it never opens on stale text that visibly
   // rewrites itself a beat later.
@@ -298,41 +431,44 @@ export default function FloatingMenu({
   // Open the on-screen keyboard and collapse the drawer so the panel has the
   // screen to itself; toggling the button again closes the panel.
   const onSoftKeyboard = useCallback(() => {
-    setKeyboardOpen((prev) => {
-      if (!prev) {
-        setClipboardOpen(false);
-      }
-      return !prev;
-    });
+    togglePanel("keyboard");
     setOpen(false);
-  }, []);
+  }, [togglePanel]);
 
-  // Same deal for the clipboard panel: open it and get the drawer out of the
-  // way. The two panels are mutually exclusive — both dock to the bottom edge
-  // on mobile and both report an inset, so the second would sit on the first.
-  //
-  // Opening fetches first and waits for the answer, so the panel appears
-  // already showing what the remote holds right now. Without that it would open
-  // on whatever arrived last — which is nothing at all for a browser that
-  // attached mid-session, since it missed every push that came before it.
+  // Same deal for the clipboard panel, except it cannot open straight away: it
+  // fetches first and waits for the answer, so it appears already showing what
+  // the remote holds right now. Without that it would open on whatever arrived
+  // last — which is nothing at all for a browser that attached mid-session,
+  // since it missed every push that came before it.
   const onClipboard = useCallback(() => {
     setOpen(false);
-    if (clipboardOpen) {
-      setClipboardOpen(false);
+    if (panel === "clipboard") {
+      closePanel();
       return;
     }
     if (clipboardPending) {
       return; // a second press while the first is still in flight
     }
-    setKeyboardOpen(false);
+    const panelAtFetchStart = panel;
     setClipboardPending(true);
     void onFetchClipboard().finally(() => {
       setClipboardPending(false);
       // Opened even when nothing answered: the panel reports the empty result
       // and its own Fetch is right there to retry.
-      setClipboardOpen(true);
+      setPanel((current) =>
+        current === panelAtFetchStart ? "clipboard" : current,
+      );
     });
-  }, [clipboardOpen, clipboardPending, onFetchClipboard]);
+  }, [panel, clipboardPending, onFetchClipboard, closePanel, setPanel]);
+
+  // The resolution list opens as a panel rather than sitting in the drawer:
+  // it is per-display and can run to a dozen entries, which pushed everything
+  // below it out of reach. Same deal as the other two panels — get the drawer
+  // out of the way, and take the bottom edge for itself.
+  const onResolution = useCallback(() => {
+    setOpen(false);
+    togglePanel("resolution");
+  }, [togglePanel]);
 
   // Resize the remote desktop to the window, then collapse the drawer so the
   // resized desktop is visible.
@@ -340,6 +476,16 @@ export default function FloatingMenu({
     onResizeToWindow?.();
     setOpen(false);
   }, [onResizeToWindow]);
+
+  // Same for picking a resolution: the point of the click is to look at the
+  // resized desktop, which the panel would be sitting on top of.
+  const onPickResolution = useCallback(
+    (w: number, h: number) => {
+      onSetResolution(w, h);
+      closePanel();
+    },
+    [onSetResolution, closePanel],
+  );
 
   // The drawer anchors to the FAB: right-aligned to it, placed below unless the
   // FAB sits too low, in which case it flips above.
@@ -404,7 +550,7 @@ export default function FloatingMenu({
               className="toolbar-btn"
               onClick={onClipboard}
               disabled={!canClipboard || clipboardPending}
-              aria-pressed={clipboardOpen}
+              aria-pressed={panel === "clipboard"}
               aria-busy={clipboardPending}
               title={
                 canClipboard
@@ -414,7 +560,7 @@ export default function FloatingMenu({
             >
               {clipboardPending
                 ? "Fetching…"
-                : clipboardOpen
+                : panel === "clipboard"
                   ? "Hide clipboard"
                   : "Clipboard"}
             </button>
@@ -454,6 +600,13 @@ export default function FloatingMenu({
             </div>
           </div>
 
+          <ResolutionButton
+            modes={displayModes}
+            current={remoteSize}
+            panelOpen={panel === "resolution"}
+            onToggle={onResolution}
+          />
+
           <div className="toolbar-section toolbar-actions">
             {onResizeToWindow && (
               <button
@@ -476,9 +629,9 @@ export default function FloatingMenu({
               type="button"
               className="toolbar-btn"
               onClick={onSoftKeyboard}
-              aria-pressed={keyboardOpen}
+              aria-pressed={panel === "keyboard"}
             >
-              {keyboardOpen ? "Hide keyboard" : "Soft keyboard"}
+              {panel === "keyboard" ? "Hide keyboard" : "Soft keyboard"}
             </button>
             <button
               type="button"
@@ -526,23 +679,18 @@ export default function FloatingMenu({
         </div>
       )}
 
-      {keyboardOpen && (
-        <SoftKeyboardPanel
-          sendKeyCombo={sendKeyCombo}
-          onClose={() => setKeyboardOpen(false)}
-          onDockedHeightChange={onKeyboardInset}
-        />
-      )}
-
-      {clipboardOpen && (
-        <ClipboardPanel
-          onFetch={onFetchClipboard}
-          onSend={onSendClipboard}
-          remoteClipboard={remoteClipboard}
-          onClose={() => setClipboardOpen(false)}
-          onDockedHeightChange={onKeyboardInset}
-        />
-      )}
+      <DockedPanel
+        panel={panel}
+        onClose={closePanel}
+        onDockedHeightChange={onKeyboardInset}
+        sendKeyCombo={sendKeyCombo}
+        modes={displayModes}
+        remoteSize={remoteSize}
+        onPickResolution={onPickResolution}
+        remoteClipboard={remoteClipboard}
+        onFetchClipboard={onFetchClipboard}
+        onSendClipboard={onSendClipboard}
+      />
     </>
   );
 }

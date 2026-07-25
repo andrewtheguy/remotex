@@ -77,6 +77,12 @@ pub trait FrameSink: Send + Sync + 'static {
 /// the size to announce in `Hello`, and the two numbers input conversion needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Geometry {
+    /// The CoreGraphics display this was measured from. Carried along because
+    /// the display index the config names is resolved here (see [`pick`]), and
+    /// [`crate::displaymode`] addresses displays by id — without this, a caller
+    /// wanting to change the shared display's mode would have to re-resolve the
+    /// index and could pick a different display than the one being captured.
+    pub id: u32,
     /// Captured surface size in pixels.
     pub width: u16,
     pub height: u16,
@@ -134,8 +140,8 @@ pub fn probe(display: usize) -> anyhow::Result<Geometry> {
 pub struct DisplayInfo {
     /// Index into the list, which is what `display` in the config means.
     pub index: usize,
-    /// CoreGraphics display id, so two identical panels are still tellable apart.
-    pub id: u32,
+    /// The CoreGraphics display id lives in [`Geometry::id`], so two identical
+    /// panels are still tellable apart.
     pub geometry: Geometry,
 }
 
@@ -154,7 +160,6 @@ pub fn displays() -> anyhow::Result<Vec<DisplayInfo>> {
         .enumerate()
         .map(|(index, display)| DisplayInfo {
             index,
-            id: display.display_id(),
             geometry: geometry(display),
         })
         .collect())
@@ -229,19 +234,7 @@ impl Capture {
             .build();
 
         full_repaint.store(true, Ordering::Relaxed);
-        let config = SCStreamConfiguration::new()
-            .with_width(u32::from(geometry.width))
-            .with_height(u32::from(geometry.height))
-            .with_pixel_format(PixelFormat::BGRA)
-            // The pointer is sent as a shape instead (see crate::cursor), so it
-            // must not be burned into the framebuffer.
-            .with_shows_cursor(false)
-            // Cap the frame rate: past ~30fps the encoder is the bottleneck and
-            // the extra frames only add latency.
-            .with_minimum_frame_interval(&CMTime::new(1, 30))
-            // Shallow: a deep queue buys buffering we do not want. Falling
-            // behind should coalesce into a later, coarser repaint.
-            .with_queue_depth(3);
+        let config = stream_config(geometry.width, geometry.height);
 
         let shared = Arc::new(Shared {
             sink,
@@ -280,6 +273,52 @@ impl Capture {
         self.shared.full_repaint.store(true, Ordering::Relaxed);
     }
 
+    /// Re-measure the captured display and resize the stream's surface to match.
+    ///
+    /// A running stream's surface size is **fixed at the size it was configured
+    /// with**. When the display then changes mode, ScreenCaptureKit does not
+    /// resize the surface — it scales the new desktop into the old one. So the
+    /// frames keep arriving at the old dimensions, the handler never sees a size
+    /// change, and nothing tells the browser anything happened; what it shows is
+    /// a squashed picture of the new resolution. That holds however the mode
+    /// changed: a browser-requested switch (see [`crate::displaymode`]) or the
+    /// host resizing a VM's virtual display.
+    ///
+    /// This does not notify anyone. It resizes the surface, and the next frame
+    /// then arrives at the new size, which is what makes the handler's existing
+    /// resize path fire — one announcement path for every cause.
+    ///
+    /// Returns the geometry now being captured, or `None` when nothing was done
+    /// — either the display has not in fact changed, or it is mid-reconfigure
+    /// and momentarily has no mode to read. The second is not an error: it is
+    /// the normal state for a few polls around a resize, and reporting it as one
+    /// would log a warning every 100ms through exactly the event this exists to
+    /// handle. The poll after it sees the new mode.
+    pub fn follow_display(&mut self) -> anyhow::Result<Option<Geometry>> {
+        let Some(live) = geometry_for_id(self.geometry.id) else {
+            debug!(
+                "capture: display {} reports no mode; mid-reconfigure",
+                self.geometry.id
+            );
+            return Ok(None);
+        };
+        if (live.width, live.height) == (self.geometry.width, self.geometry.height) {
+            return Ok(None);
+        }
+        info!(
+            "capture: display {} is now {}x{} at {}x; resizing the capture surface",
+            live.id, live.width, live.height, live.scale
+        );
+        self.stream
+            .update_configuration(&stream_config(live.width, live.height))
+            .map_err(|e| anyhow::anyhow!("cannot resize the capture surface: {e}"))?;
+        self.geometry = live;
+        // The whole surface is new. Without this the first frame at the new size
+        // would carry only the rectangles that happened to change since.
+        self.shared.full_repaint.store(true, Ordering::Relaxed);
+        Ok(Some(live))
+    }
+
     /// Stop the stream. Also happens on drop; this exists so a session can stop
     /// capturing (battery, CPU) while keeping the object around.
     pub fn stop(&mut self) {
@@ -287,6 +326,60 @@ impl Capture {
             debug!("capture: stop_capture: {e}");
         }
     }
+}
+
+/// The stream settings, which are the same at start and after a resize — only
+/// the surface dimensions differ, so they are the parameters.
+fn stream_config(width: u16, height: u16) -> SCStreamConfiguration {
+    SCStreamConfiguration::new()
+        .with_width(u32::from(width))
+        .with_height(u32::from(height))
+        .with_pixel_format(PixelFormat::BGRA)
+        // The pointer is sent as a shape instead (see crate::cursor), so it
+        // must not be burned into the framebuffer.
+        .with_shows_cursor(false)
+        // Cap the frame rate: past ~30fps the encoder is the bottleneck and
+        // the extra frames only add latency.
+        .with_minimum_frame_interval(&CMTime::new(1, 30))
+        // Shallow: a deep queue buys buffering we do not want. Falling
+        // behind should coalesce into a later, coarser repaint.
+        .with_queue_depth(3)
+}
+
+/// Measure a display through CoreGraphics rather than ScreenCaptureKit.
+///
+/// [`geometry`] needs an `SCDisplay`, and getting one means `SCShareableContent`
+/// — a round trip to a system service, too heavy to run on a poll. Everything in
+/// [`Geometry`] is available from CoreGraphics by display id, so a live
+/// re-measure of a display already being captured comes from here.
+///
+/// `None` while the display has no mode at all, which is what CoreGraphics
+/// briefly reports mid-reconfigure.
+pub fn geometry_for_id(id: u32) -> Option<Geometry> {
+    use objc2_core_graphics::{CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode};
+
+    let mode = CGDisplayCopyDisplayMode(id)?;
+    let pixel_w = CGDisplayMode::pixel_width(Some(&mode));
+    let pixel_h = CGDisplayMode::pixel_height(Some(&mode));
+    let point_w = CGDisplayMode::width(Some(&mode));
+    if pixel_w == 0 || pixel_h == 0 {
+        return None;
+    }
+    // From the same mode rather than via `display_scale`, which would copy the
+    // mode a second time — this runs on a poll.
+    let scale = if point_w > 0 {
+        pixel_w as f64 / point_w as f64
+    } else {
+        1.0
+    };
+    let bounds = CGDisplayBounds(id);
+    Some(Geometry {
+        id,
+        width: clamp_u16(pixel_w as u32),
+        height: clamp_u16(pixel_h as u32),
+        scale,
+        origin: (bounds.origin.x, bounds.origin.y),
+    })
 }
 
 /// Pick a display by index, falling back to the main one rather than failing —
@@ -305,6 +398,7 @@ fn geometry(display: &SCDisplay) -> Geometry {
     let scale = backing_scale(display);
     let frame = display.frame();
     Geometry {
+        id: display.display_id(),
         width: clamp_u16(((display.width() as f64) * scale).round() as u32),
         height: clamp_u16(((display.height() as f64) * scale).round() as u32),
         scale,

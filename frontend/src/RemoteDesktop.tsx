@@ -1,11 +1,39 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import FloatingMenu from "./FloatingMenu.tsx";
+import {
+  type NativeCommand,
+  postNativeHostEvent,
+  setNativeCommandHandler,
+} from "./nativeHost.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
   CAN_PINCH_ZOOM,
   type ConnectionStatus,
   useRemoteDesktop,
 } from "./useRemoteDesktop.ts";
+
+// Why a native command cannot run right now, or null when it can. Kept apart
+// from the dispatch below so each stays readable: this is the only place a
+// native command is refused, and the switch there is then a plain mapping.
+//
+// The viewer disables the matching menu items from the same state, so a refusal
+// means its picture of the session went stale — a target switch mid-menu, say.
+function unavailable(
+  command: NativeCommand,
+  caps: { canClipboard: boolean; canResize: boolean; hasModes: boolean },
+): string | null {
+  switch (command.type) {
+    case "clipboard":
+    case "clipboardRequest":
+      return caps.canClipboard ? null : "clipboard is disabled for this target";
+    case "resize":
+      return caps.canResize ? null : "resize is unavailable";
+    case "setResolution":
+      return caps.hasModes ? null : "this target offers no resolution menu";
+    default:
+      return null;
+  }
+}
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connecting: "Connecting…",
@@ -17,11 +45,14 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 
 export default function RemoteDesktop({
   branding,
+  nativeHost,
   onLogout,
   onUnauthorized,
 }: {
   /** Deployment display name shown on the interstitials. */
   branding: string;
+  /** True only after the macOS viewer and this frontend agree on the bridge. */
+  nativeHost: boolean;
   onLogout: () => void;
   onUnauthorized: () => void;
 }) {
@@ -31,26 +62,138 @@ export default function RemoteDesktop({
   const {
     status,
     mode,
+    connectedTarget,
+    remoteIsMac,
     connectError,
     pendingTarget,
     size,
     canResize,
+    displayModes,
     canClipboard,
     remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
+    setResolution,
     sendKeyCombo,
+    sendNativeKey,
+    releaseNativeKeys,
     requestClipboard,
     sendClipboard,
     setBottomInset,
-  } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
+  } = useRemoteDesktop(
+    canvasRef,
+    overlayRef,
+    pointerRef,
+    onUnauthorized,
+    nativeHost,
+  );
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
   // gap before the first frame. The picker owns the screen once connected.
   const showStatus = status !== "connected" || (mode === "desktop" && !size);
+
+  useEffect(() => {
+    if (!nativeHost) {
+      return;
+    }
+    postNativeHostEvent({
+      type: "state",
+      state: {
+        screen: mode,
+        connectionStatus: status,
+        connectedTarget,
+        remoteIsMac,
+        displayModes,
+        remoteSize: size,
+        canResize,
+        canClipboard,
+        canCaptureKeyboard: status === "connected" && mode === "desktop",
+      },
+    });
+  }, [
+    canClipboard,
+    canResize,
+    connectedTarget,
+    displayModes,
+    mode,
+    nativeHost,
+    remoteIsMac,
+    size,
+    status,
+  ]);
+
+  useEffect(() => {
+    if (!nativeHost || !remoteClipboard) {
+      return;
+    }
+    postNativeHostEvent({
+      type: "remoteClipboard",
+      text: remoteClipboard.text,
+      seq: remoteClipboard.seq,
+    });
+  }, [nativeHost, remoteClipboard]);
+
+  useEffect(() => {
+    if (!nativeHost) {
+      return;
+    }
+    return setNativeCommandHandler((command: NativeCommand) => {
+      const refusal = unavailable(command, {
+        canClipboard,
+        canResize,
+        hasModes: displayModes.length > 0,
+      });
+      if (refusal) {
+        return { ok: false, error: refusal };
+      }
+      switch (command.type) {
+        case "key":
+          sendNativeKey(command.code, command.pressed, command.caps);
+          return { ok: true };
+        case "releaseKeys":
+          releaseNativeKeys();
+          return { ok: true };
+        case "clipboard":
+          sendClipboard(command.text);
+          return { ok: true };
+        case "clipboardRequest":
+          void requestClipboard();
+          return { ok: true };
+        case "resize":
+          resizeToWindow();
+          return { ok: true };
+        case "setResolution":
+          setResolution(command.w, command.h);
+          return { ok: true };
+        case "switchTarget":
+          switchTarget();
+          return { ok: true };
+        case "logout":
+          onLogout();
+          return { ok: true };
+        case "takeOver":
+          takeOver();
+          return { ok: true };
+      }
+    });
+  }, [
+    canClipboard,
+    canResize,
+    displayModes,
+    nativeHost,
+    onLogout,
+    releaseNativeKeys,
+    requestClipboard,
+    resizeToWindow,
+    sendClipboard,
+    sendNativeKey,
+    setResolution,
+    switchTarget,
+    takeOver,
+  ]);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -82,11 +225,14 @@ export default function RemoteDesktop({
 
       {/* The floating menu is desktop-only; its Switch target button returns to
           the picker (see FloatingMenu.tsx), and Log out ends the login. */}
-      {mode === "desktop" && (
+      {mode === "desktop" && !nativeHost && (
         <FloatingMenu
           onLogout={onLogout}
           onSwitchTarget={switchTarget}
           onResizeToWindow={canResize ? resizeToWindow : undefined}
+          displayModes={displayModes}
+          remoteSize={size}
+          onSetResolution={setResolution}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}
           canClipboard={canClipboard}

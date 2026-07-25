@@ -401,7 +401,7 @@ impl SessionManager {
     pub fn detach(self: &Arc<Self>, id: u64) {
         let expiry = {
             let mut st = self.state.lock().unwrap();
-            if !st.client.as_ref().is_some_and(|c| c.attach_id == id) {
+            if st.client.as_ref().is_none_or(|c| c.attach_id != id) {
                 return;
             }
             st.client = None;
@@ -421,7 +421,7 @@ impl SessionManager {
     /// reattach grace period while waiting for a pong.
     pub fn expire_attachment(&self, id: u64) {
         let mut st = self.state.lock().unwrap();
-        if !st.client.as_ref().is_some_and(|c| c.attach_id == id) {
+        if st.client.as_ref().is_none_or(|c| c.attach_id != id) {
             return;
         }
         st.client = None;
@@ -492,7 +492,7 @@ impl SessionManager {
         // picker rather than a dropped socket.
         let event_tx = {
             let mut st = mgr.state.lock().unwrap();
-            if !st.engine.as_ref().is_some_and(|e| e.generation == generation) {
+            if st.engine.as_ref().is_none_or(|e| e.generation != generation) {
                 return;
             }
             st.engine = None;
@@ -704,7 +704,14 @@ mod tests {
         // UI off them). The VNC/no-resize case is covered by every other test's
         // expect_connected.
         mgr.connect(att.id, "rdp-resize").unwrap();
-        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true, false).await;
+        expect_connected_meta(
+            &mut att.events,
+            "rdp-resize",
+            "rdp",
+            true,
+            false,
+        )
+        .await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
         let (_input_rx, _frame_tx) = hooks.try_recv().expect("engine spawned on connect");
@@ -713,7 +720,14 @@ mod tests {
         mgr.detach(att.id);
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
-        expect_connected_meta(&mut att.events, "rdp-resize", "rdp", true, false).await;
+        expect_connected_meta(
+            &mut att.events,
+            "rdp-resize",
+            "rdp",
+            true,
+            false,
+        )
+        .await;
 
         // The clipboard flag travels the same way, and independently of resize:
         // the rxa fake target has clipboard on and resize off.

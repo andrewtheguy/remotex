@@ -904,12 +904,13 @@ body {
   flex: 2.1;
 }
 
-/* ── Clipboard panel ─────────────────────────────────────────────────────── */
-/* Same docking model as the soft keyboard: full-width along the bottom edge on
-   mobile, a floating card on desktop. Only one of the two is ever open, so they
-   share the canvas inset channel. */
+/* ── Docked panels ───────────────────────────────────────────────────────── */
+/* Shared chrome for the clipboard and resolution panels: full-width along the
+   bottom edge on mobile, a floating card on desktop — the same docking model as
+   the soft keyboard. Only one panel is ever open, so they share the canvas
+   inset channel. */
 
-.cb-panel {
+.panel {
   position: fixed;
   bottom: 0;
   left: 0;
@@ -925,7 +926,7 @@ body {
 }
 
 @media (min-width: 800px) {
-  .cb-panel {
+  .panel {
     bottom: 16px;
     right: 16px;
     left: auto;
@@ -936,20 +937,20 @@ body {
   }
 }
 
-.cb-header {
+.panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-.cb-title {
+.panel-title {
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #8b949e;
 }
 
-.cb-close {
+.panel-close {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -963,9 +964,11 @@ body {
   cursor: pointer;
 }
 
-.cb-close:hover {
+.panel-close:hover {
   background: #30363d;
 }
+
+/* ── Clipboard panel ─────────────────────────────────────────────────────── */
 
 .cb-text {
   /* Tall enough for a paragraph, short enough to leave the desktop visible on
@@ -1038,4 +1041,38 @@ body {
 
 .cb-notice {
   color: #7ee787;
+}
+
+/* ── Resolution panel ────────────────────────────────────────────────────── */
+/* A wrapping grid rather than a column: the lists are short (a virtual Mac
+   display advertises a handful of modes) and every entry is the same shape. */
+
+.res-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.res-mode {
+  flex: 1 1 8.5rem;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: #e6edf3;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.res-mode:hover {
+  background: #30363d;
+}
+
+/* The size the remote is already at. Not disabled — re-picking it is harmless
+   and the agent short-circuits an unchanged mode. */
+.res-mode-active {
+  color: #7ee787;
+  border-color: #2ea043;
 }

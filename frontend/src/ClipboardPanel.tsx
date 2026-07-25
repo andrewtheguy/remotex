@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MAX_CLIPBOARD_BYTES } from "./protocol.ts";
-import { useIsDesktop } from "./SoftKeyboardPanel.tsx";
+import { useDockedHeight } from "./SoftKeyboardPanel.tsx";
 
 // The clipboard bridge's manual half: a text box with Fetch and Send.
 //
@@ -58,7 +58,6 @@ export function ClipboardPanel({
   const [awaitingFetch, setAwaitingFetch] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const isDesktop = useIsDesktop();
 
   // Set once the user types, cleared whenever the box is filled from the
   // remote. Guards unsent work: pushes now arrive unprompted, and silently
@@ -112,30 +111,7 @@ export function ClipboardPanel({
     return () => clearTimeout(timer);
   }, [notice]);
 
-  // Same docked-height contract as the soft keyboard: only the bottom-docked
-  // mobile panel covers the canvas, so the desktop one reports 0.
-  useEffect(() => {
-    const report = onDockedHeightChange;
-    if (!report) {
-      return;
-    }
-    if (isDesktop) {
-      report(0);
-      return;
-    }
-    const panel = panelRef.current;
-    if (!panel) {
-      return;
-    }
-    const measure = () => report(panel.getBoundingClientRect().height);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(panel);
-    return () => {
-      observer.disconnect();
-      report(0);
-    };
-  }, [isDesktop, onDockedHeightChange]);
+  useDockedHeight(panelRef, onDockedHeightChange);
 
   // Focus the box on open: the common move is paste-then-send, and the canvas
   // only takes keyboard focus back on a pointer press over it.
@@ -171,12 +147,12 @@ export function ClipboardPanel({
   const overCap = bytes > MAX_CLIPBOARD_BYTES;
 
   return (
-    <div className="cb-panel" ref={panelRef}>
-      <div className="cb-header">
-        <span className="cb-title">Clipboard</span>
+    <div className="panel" ref={panelRef}>
+      <div className="panel-header">
+        <span className="panel-title">Clipboard</span>
         <button
           type="button"
-          className="cb-close"
+          className="panel-close"
           aria-label="Close clipboard"
           onClick={onClose}
         >

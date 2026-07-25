@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isNativeHostConnected } from "./nativeHost.ts";
 import {
   type ClientMsg,
   type ControlMsg,
@@ -323,6 +324,7 @@ export function useRemoteDesktop(
   overlayRef: React.RefObject<HTMLElement | null>,
   pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
+  nativeHost: boolean,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
@@ -330,6 +332,10 @@ export function useRemoteDesktop(
   // the last engine error to show against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
   const [connectedTarget, setConnectedTarget] = useState<string | null>(null);
+  // Discovered by the engine at connect (`remoteOs`), not configured. False
+  // until it says otherwise, which is the right default for every remote the
+  // native viewer will not be translating Command shortcuts for.
+  const [remoteIsMac, setRemoteIsMac] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
@@ -338,6 +344,13 @@ export function useRemoteDesktop(
   // the floating menu shows a "Resize to window" button and automatic viewport
   // reports are suppressed. VNC resizes automatically, so it stays false.
   const [canResize, setCanResize] = useState(false);
+  // The resolutions the remote will accept, largest first. Non-empty only for
+  // an rxa target with `resize = true` whose Mac shares a virtual display —
+  // the agent decides that, so the browser learns it from `displayModes`
+  // rather than from the protocol name. Empty means no menu.
+  const [displayModes, setDisplayModes] = useState<{ w: number; h: number }[]>(
+    [],
+  );
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
@@ -422,6 +435,10 @@ export function useRemoteDesktop(
       ws.send(JSON.stringify(msg));
     }
   });
+  // Native input is tracked separately from DOM input. The AppKit host consumes
+  // captured events before WebKit sees them, and asks this set to release on
+  // focus loss so a remote modifier can never remain stuck.
+  const nativePressedKeysRef = useRef(new Set<string>());
 
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
@@ -649,6 +666,18 @@ export function useRemoteDesktop(
       syncCursor();
     };
 
+    const mirrorRemoteClipboard = (text: string) => {
+      if (text === "") {
+        return;
+      }
+      lastFromRemoteRef.current = text;
+      // The runtime getter is intentional: this effect does not depend on the
+      // nativeHost prop, whose captured value could therefore be stale.
+      if (!isNativeHostConnected()) {
+        void navigator.clipboard?.writeText?.(text).catch(() => {});
+      }
+    };
+
     const handleControlMsg = (msg: ControlMsg) => {
       // Any control message proves the socket attached to the slot, so reset
       // the reconnect backoff (an onopen-time reset would let a slot that
@@ -691,13 +720,21 @@ export function useRemoteDesktop(
           setPendingTarget(null);
           setConnectedTarget(msg.name);
           setMode("desktop");
-          // RDP resizes only on request (heavy reactivation); VNC follows the
-          // viewport automatically. In manual mode the report below is
-          // suppressed, so the desktop keeps its connect-time size until the
-          // user picks "Resize to window".
-          const manual = msg.protocol === "rdp" && msg.resize;
+          // Cleared for the new session; the engine announces it as it
+          // connects, and on a reattach the engine has already sent it.
+          setRemoteIsMac(false);
+          // RDP resizes only on request (heavy reactivation) and rxa only to a
+          // size off the Mac's own list; VNC follows the viewport
+          // automatically. In manual mode the report below is suppressed, so
+          // the desktop keeps its connect-time size until the user asks.
+          const manual =
+            (msg.protocol === "rdp" || msg.protocol === "rxa") && msg.resize;
           manualResizeRef.current = manual;
-          setCanResize(manual);
+          // Only RDP gets the "Resize to window" button: rxa cannot take an
+          // arbitrary size, so it offers a menu of resolutions instead, which
+          // arrives separately as `displayModes`.
+          setCanResize(msg.protocol === "rdp" && msg.resize);
+          setDisplayModes([]);
           setCanClipboard(msg.clipboard);
           // A freshly-started engine needs the current viewport; the report is
           // sent here (once the protocol is known), undeduped.
@@ -727,21 +764,29 @@ export function useRemoteDesktop(
           // clipboard holds no text at all (an image, or nothing yet) —
           // mirroring that would wipe the local clipboard on connect. The
           // panel still reports it as empty.
-          if (text !== "") {
-            lastFromRemoteRef.current = text;
-            void navigator.clipboard?.writeText?.(text).catch(() => {});
-          }
+          mirrorRemoteClipboard(text);
           break;
         }
+        case "remoteOs":
+          setRemoteIsMac(msg.macos);
+          break;
+        case "displayModes":
+          // The remote's resolution menu, replaced wholesale: the list is
+          // regenerated on the Mac whenever its display is reconfigured, so
+          // merging into the old one would keep sizes that no longer exist.
+          setDisplayModes(msg.modes);
+          break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setConnectedTarget(null);
+          setRemoteIsMac(false);
           setMode("picker");
           manualResizeRef.current = false;
           setCanResize(false);
+          setDisplayModes([]);
           setCanClipboard(false);
           setRemoteClipboard(null);
           lastFromRemoteRef.current = null;
@@ -854,6 +899,15 @@ export function useRemoteDesktop(
     resizeToWindowRef.current?.();
   }, []);
 
+  // Set the remote desktop to one of the resolutions `displayModes` offered
+  // (the floating menu's Resolution section). A no-op while the socket is down.
+  // The engine answers with a `resize` control message once the remote display
+  // has actually changed — which can be a neighbouring size if the list moved
+  // underneath the menu, so nothing here assumes the pick was honoured exactly.
+  const setResolution = useCallback((w: number, h: number) => {
+    sendRef.current({ type: "setResolution", w, h });
+  }, []);
+
   // Inject a key chord from the floating toolbar — keys the browser swallows
   // (F5, Ctrl+W, Alt+F4…) or a bare modifier tap. Each DOM `code` is pressed in
   // order then released in reverse; transient, so nothing joins the held-key
@@ -869,6 +923,35 @@ export function useRemoteDesktop(
       send({ type: "key", code: codes[i], pressed: false, caps: false });
     }
   }, []);
+
+  const sendNativeKey = useCallback(
+    (code: string, pressed: boolean, caps: boolean) => {
+      if (mode !== "desktop") {
+        return;
+      }
+      if (pressed) {
+        nativePressedKeysRef.current.add(code);
+      } else {
+        nativePressedKeysRef.current.delete(code);
+      }
+      sendRef.current({ type: "key", code, pressed, caps });
+    },
+    [mode],
+  );
+
+  const releaseNativeKeys = useCallback(() => {
+    for (const code of nativePressedKeysRef.current) {
+      sendRef.current({ type: "key", code, pressed: false, caps: false });
+    }
+    nativePressedKeysRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "desktop") {
+      releaseNativeKeys();
+    }
+    return releaseNativeKeys;
+  }, [mode, releaseNativeKeys]);
 
   // Ask the server for the remote's clipboard and wait for the answer, which
   // also lands in `remoteClipboard` on its way past. Resolves with the text, or
@@ -923,7 +1006,7 @@ export function useRemoteDesktop(
   // absent on a non-secure origin, and Safari refuses it outright without a
   // paste gesture. The panel's Send covers those.
   useEffect(() => {
-    if (mode !== "desktop" || !canClipboard) {
+    if (mode !== "desktop" || !canClipboard || nativeHost) {
       return;
     }
     const pushLocalClipboard = () => {
@@ -957,7 +1040,7 @@ export function useRemoteDesktop(
       window.removeEventListener("focus", pushLocalClipboard);
       document.removeEventListener("visibilitychange", pushLocalClipboard);
     };
-  }, [mode, canClipboard]);
+  }, [mode, canClipboard, nativeHost]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
@@ -1119,8 +1202,10 @@ export function useRemoteDesktop(
     el.addEventListener("contextmenu", onContextMenu);
     // Keyboard is scoped to the focused overlay (not window) so the remote
     // surface only grabs keys when the user is interacting with it.
-    el.addEventListener("keydown", onKeyDown);
-    el.addEventListener("keyup", onKeyUp);
+    if (!nativeHost) {
+      el.addEventListener("keydown", onKeyDown);
+      el.addEventListener("keyup", onKeyUp);
+    }
     el.addEventListener("blur", onBlur);
 
     return () => {
@@ -1130,27 +1215,34 @@ export function useRemoteDesktop(
       window.removeEventListener("mouseup", onMouseUp);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onContextMenu);
-      el.removeEventListener("keydown", onKeyDown);
-      el.removeEventListener("keyup", onKeyUp);
+      if (!nativeHost) {
+        el.removeEventListener("keydown", onKeyDown);
+        el.removeEventListener("keyup", onKeyUp);
+      }
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, syncCursor]);
+  }, [overlayRef, canvasRef, syncCursor, nativeHost]);
 
   return {
     status,
     mode,
     connectedTarget,
+    remoteIsMac,
     connectError,
     pendingTarget,
     size,
     canResize,
+    displayModes,
     canClipboard,
     remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
+    setResolution,
     sendKeyCombo,
+    sendNativeKey,
+    releaseNativeKeys,
     requestClipboard,
     sendClipboard,
     setBottomInset,
