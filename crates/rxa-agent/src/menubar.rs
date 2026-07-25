@@ -238,7 +238,14 @@ define_class!(
                     Ok(false) => return,
                     // Never returns unless the exec itself failed.
                     Ok(true) => {
+                        let status_item = self.ivars().status_item.get();
+                        if let Some(status_item) = status_item {
+                            status_item.setVisible(false);
+                        }
                         let e = crate::restart();
+                        if let Some(status_item) = status_item {
+                            status_item.setVisible(true);
+                        }
                         warn!("menu: {e:#}");
                         panels::error(
                             mtm,
