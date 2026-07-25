@@ -12,6 +12,41 @@ Remote updates (`ServerCutText` for VNC and the RDP clipboard channel) update
 that buffer and are pushed to the browser; browser updates travel in the other
 direction. `rxa` needs corresponding protocol messages.
 
+## Deferred pending measurements
+
+### Retina performance for `rxa`
+
+The current adaptive PNG/JPEG tile path has not been characterized on a Retina
+desktop. If it cannot keep up, optimize in this order:
+
+1. downscale through `SCStreamConfiguration`;
+2. use coarser tiles;
+3. move to VideoToolbox H.264 and browser WebCodecs.
+
+H.264 is last because it creates a second browser decode path and adds stream
+state that the current independent tile protocol avoids.
+
+### Capture-stream linger
+
+Keeping `SCStream` alive briefly after a gateway disconnect could avoid capture
+teardown during a network blip. It is worthwhile only if stream restart time is
+material relative to the gateway's one-second minimum reconnect backoff.
+Implementing it would move capture ownership from the session task to
+agent-level state.
+
+### Encoder parallelism
+
+A worker pool can complete tiles out of order. When consecutive frames update
+the same region, a late tile from the older frame could overwrite newer pixels.
+Keep ordered single-worker encoding unless measurements justify adding explicit
+ordering.
+
+### Audio
+
+No engine currently carries audio. Its transport, synchronization, and browser
+playback design remain unspecified.
+
+
 ### macOS login-window service
 
 The current `SMAppService` LaunchAgent runs only in the signed-in user's Aqua
@@ -60,39 +95,6 @@ signing would make TCC identity reliable across upgrades. FileVault remains the
 unavoidable boundary: no remote-access process can run before pre-boot disk
 unlock.
 
-## Deferred pending measurements
-
-### Retina performance for `rxa`
-
-The current adaptive PNG/JPEG tile path has not been characterized on a Retina
-desktop. If it cannot keep up, optimize in this order:
-
-1. downscale through `SCStreamConfiguration`;
-2. use coarser tiles;
-3. move to VideoToolbox H.264 and browser WebCodecs.
-
-H.264 is last because it creates a second browser decode path and adds stream
-state that the current independent tile protocol avoids.
-
-### Capture-stream linger
-
-Keeping `SCStream` alive briefly after a gateway disconnect could avoid capture
-teardown during a network blip. It is worthwhile only if stream restart time is
-material relative to the gateway's one-second minimum reconnect backoff.
-Implementing it would move capture ownership from the session task to
-agent-level state.
-
-### Encoder parallelism
-
-A worker pool can complete tiles out of order. When consecutive frames update
-the same region, a late tile from the older frame could overwrite newer pixels.
-Keep ordered single-worker encoding unless measurements justify adding explicit
-ordering.
-
-### Audio
-
-No engine currently carries audio. Its transport, synchronization, and browser
-playback design remain unspecified.
 
 ## Not planned
 
