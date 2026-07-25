@@ -1,12 +1,24 @@
+## General
+
 - strict no backward compatibility since it is a personal project
 - no cargo fmt
 - run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
 - run biome checks on frontend/ after JS/TS code changes
-- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then build and validate the viewer with `packaging/macos-viewer/build-viewer-app.sh`; a standalone `swift build` is compilation only and is not viewer packaging validation
-- after changes affecting the macOS agent or its packaging, build and validate it with `packaging/macos/build-agent-app.sh`; a standalone Cargo build is not agent packaging validation. Follow machine-local signing instructions in `CLAUDE.local.md` when present
-- use `--no-dmg` with either macOS build script only when the disk-image layer is explicitly out of scope. Otherwise build the DMG, mount it, copy the app out as a user would, verify it with `codesign --verify --deep --strict`, and run the bundled executable with `--version`
 - use tmp/ for temporary files and test config
 - for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
 - for e2e tests use tests/*, can start dummy RDP server or vnc server with docker or podman if needed, but never start headless browser because automated tests on browser is flaky
 - multi session is always out of scope (never planned, not merely deferred): this is a single-user program with one active session only, with session takeover logic (a new browser force-claims the single session slot and evicts the previous holder) — no concurrent sessions, session sharing, or session broker
+
+## macOS viewer
+
+- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then run `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and launch the packaged app with `open -n dist/remotex-viewer.app`
+- never validate the viewer with `swift run`, a standalone `swift build`, or the executable under `.build`; those bypass the `.app` bundle and can behave differently, including missing menus and `Info.plist` metadata
+- for routine viewer development, the disk-image layer is out of scope: use `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and work exclusively with `dist/remotex-viewer.app`
+- use the viewer script's default DMG build only for production/release validation, changes to the viewer's DMG packaging, or when the user explicitly asks for it
+
+## macOS remotex agent
+
+- after changes affecting the macOS `remotex-agent` or its packaging, build and validate it with `packaging/macos/build-agent-app.sh`; a standalone Cargo build is not agent packaging validation
+- follow machine-local signing instructions in `CLAUDE.local.md` when present
+- use `--no-dmg` only when the disk-image layer is explicitly out of scope; otherwise build the DMG, mount it, copy the app out as a user would, verify it with `codesign --verify --deep --strict`, and run the bundled executable with `--version`

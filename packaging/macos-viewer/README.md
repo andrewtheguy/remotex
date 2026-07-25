@@ -38,9 +38,15 @@ Gatekeeper launch path.
 For development against a specific gateway:
 
 ```sh
-swift run --package-path apps/remotex-viewer remotex-viewer \
+packaging/macos-viewer/build-viewer-app.sh --no-dmg
+open -n dist/remotex-viewer.app --args \
   --gateway http://127.0.0.1:52380
 ```
+
+Always launch the packaged `.app` during development. `swift run`, a standalone
+`swift build`, and directly launching the executable under `.build` bypass the
+application bundle and can behave differently, including missing menus and
+`Info.plist` metadata.
 
 The address can also be changed under **remotex → Settings**.
 
