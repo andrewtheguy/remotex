@@ -150,6 +150,7 @@ fn check_cursor_msg(text: &str) {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker or Podman"]
 async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let runtime = common::container_runtime();
     let (_container, vnc_port) =

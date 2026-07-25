@@ -46,18 +46,16 @@ jobs:
       - name: Test the shared protocol
         run: cargo test -p rxa-proto
 
-      # The gateway's own tests, minus the two container-backed ones, which are
-      # named out rather than left to fail: a macOS runner ships no container
-      # engine, and getting one means standing up a VM (colima / podman machine)
-      # first — doable, but a lot of moving parts for tests that have nothing to
-      # do with the agent. If rdp_tiles_e2e and vnc_tiles_e2e ever want CI, a
-      # Linux runner gives them a container engine for free.
+      # The gateway's container-backed tests are ignored by default: a macOS
+      # runner ships no container engine, and getting one means standing up a VM
+      # (colima / podman machine) first. They can run explicitly on a Linux
+      # runner with `-- --ignored` when that coverage is wanted in CI.
       #
       # rxa_e2e is the one that matters here anyway: it drives the real server
       # against a fake agent speaking the real Noise handshake, so it covers the
       # gateway half of this protocol, and it needs no container by design.
-      - name: Test the gateway (container-free targets)
-        run: cargo test -p remotex --lib --test protocol_e2e --test auth_e2e --test rxa_e2e
+      - name: Test the gateway
+        run: cargo test -p remotex
 
       - name: Build remotex-agent.app and its disk image
         # `-` pins the ad-hoc path rather than searching the runner's keychain,

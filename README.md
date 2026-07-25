@@ -109,14 +109,20 @@ bun run check
 ```
 
 The container-backed RDP and VNC tests use Docker or Podman and do not start a
-browser. `tests/rxa_e2e.rs` uses an in-process fake agent.
+browser. They are ignored by default; run them explicitly with:
+
+```sh
+cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
+```
+
+`tests/rxa_e2e.rs` uses an in-process fake agent and runs by default.
 
 For a remote Podman connection:
 
 ```sh
 CONTAINER_CONNECTION=linuxbox \
 REMOTEX_TEST_CONTAINER_HOST=host \
-cargo test
+cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
 ```
 
 ## Build
