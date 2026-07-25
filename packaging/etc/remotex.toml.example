@@ -55,17 +55,19 @@ password = "change-me"
 #resize = false
 
 # A VNC target only needs host and (usually) a password; username, domain,
-# width/height, and security are ignored.
+# width/height, and security are ignored. A Mac can use its built-in Screen
+# Sharing service through this path without installing the companion agent.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
 # host = "10.0.0.2"
 # password = "change-me"
 
-# A Mac running the remotex agent (protocol "rxa"). This is the preferred way
-# to reach a Mac: unlike Screen Sharing, a dropped connection reconnects
-# silently and never re-prompts for a login, because the pre-shared key below
-# *is* the credential — the Noise handshake authenticates both ends from it.
+# As an optional alternative, a Mac can run the remotex agent (protocol "rxa")
+# for RealVNC-like reconnect behavior. The pre-shared key below is the
+# connection credential, so reconnects authenticate directly instead of
+# returning to Screen Sharing's login gate. The Noise handshake authenticates
+# both ends from it.
 #
 # The same key goes in two places, and they must match exactly:
 #   1. `psk` here, and

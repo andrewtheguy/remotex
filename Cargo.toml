@@ -1,6 +1,6 @@
 # The gateway is the workspace root package; the macOS agent and the protocol
 # crate it shares with the gateway live under crates/ (see
-# docs/mac-agent-plan.md).
+# docs/mac-agent-architecture.md).
 #
 # `default-members` deliberately omits rxa-agent: it only compiles on macOS, so
 # a bare `cargo build` / `cargo clippy -- -D warnings` / `cargo test` on Linux
@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.20"
+version = "0.0.21"
 
 [package]
 name = "remotex"
@@ -62,7 +62,7 @@ rpassword = "7"
 des = "0.8"
 
 # The wire protocol shared with the macOS agent (src/rxa.rs, crates/rxa-agent).
-# In-repo so the two halves cannot drift — see docs/mac-agent-plan.md.
+# In-repo so the two halves cannot drift — see docs/mac-agent-architecture.md.
 rxa-proto = { path = "crates/rxa-proto" }
 
 # Server-side RDP engine (see docs/architecture.md). `dvc`/`displaycontrol`/`svc`

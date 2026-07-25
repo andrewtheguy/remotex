@@ -1,265 +1,144 @@
 # remotex
 
-A browser-based remote-desktop client: connect to an RDP, VNC or macOS host and
-drive it with mouse and keyboard from a web browser.
+A single-user, browser-based remote desktop gateway for RDP and VNC targets,
+including Macs using the built-in Screen Sharing service. The Rust backend owns
+each protocol session and streams image tiles to a React/TypeScript frontend
+over a common WebSocket protocol.
 
-- **Backend** — Rust, [axum](https://github.com/tokio-rs/axum) + tokio. The
-  protocol engines run server-side — RDP via
-  [IronRDP](https://crates.io/crates/ironrdp), VNC via a built-in minimal RFB
-  client, and Macs via `rxa` and a purpose-built agent — and the browser talks
-  to all three over the same WebSocket protocol.
-- **macOS agent** — a small companion app (`crates/rxa-agent`) that shares a
-  Mac's screen over a pre-shared key, so a dropped connection reconnects
-  silently instead of demanding a fresh login the way Screen Sharing does. See
-  [`packaging/macos/README.md`](packaging/macos/README.md).
-- **Frontend** — [Vite](https://vite.dev/) + React 19 + TypeScript, managed with
-  [Bun](https://bun.sh/). The built assets ship alongside the binary and are
-  served from disk (`share/remotex/web`), resolved relative to the executable.
+- RDP uses [IronRDP](https://crates.io/crates/ironrdp).
+- VNC uses a built-in RFB 3.8 client and can connect directly to macOS Screen
+  Sharing.
+- The optional macOS companion `remotex-agent` provides a dedicated-agent
+  alternative over the encrypted `rxa` protocol.
 
-> **Status: phases 1–4 done** (MVP; transport + VNC engine + TOML config;
-> full-screen canvas; VNC dynamic resize) **plus macOS over `rxa`**. Connects to
-> one RDP, VNC or macOS host, renders its screen in the browser
-> (dirty-rectangle tiles as binary WebSocket frames, PNG-compressed — or PNG and
-> JPEG relayed byte-for-byte from the Mac agent), and forwards mouse and
-> keyboard input. The canvas
-> fills the browser viewport at 1:1 device pixels; where the server supports
-> resizing (VNC targets with `resize = true`) the remote desktop follows the
-> window, otherwise a larger desktop scrolls, never scales. Credentials live
-> server-side and are never sent to the browser. See
-> [`docs/architecture.md`](docs/architecture.md) for the overall architecture
-> and [`docs/roadmap.md`](docs/roadmap.md) for the remaining phases.
+See [`docs/architecture.md`](docs/architecture.md) for the system design and
+[`docs/mac-agent-architecture.md`](docs/mac-agent-architecture.md) for the
+macOS agent.
 
-## Install (Linux & macOS)
+## Install
 
-```bash
+```sh
 curl -fsSL https://andrewtheguy.github.io/remotex/install.sh | bash
-```
-
-Downloads the release tarball for your platform, verifies its SHA-256 against
-the GitHub-published digest, and installs under `/opt/remotex` with a
-`remotex` launcher at `/usr/local/bin/remotex` on your `PATH` (may prompt for
-`sudo`). Then:
-
-```bash
-$EDITOR /opt/remotex/etc/remotex.toml   # set RDP target + creds
+$EDITOR /opt/remotex/etc/remotex.toml
 remotex serve
 ```
 
-See [`docs/install.md`](docs/install.md) for options, custom locations, and the
-upgrade/rollback model, and [`packaging/`](packaging/) for the on-disk layout and
-building tarballs.
+The installer verifies the release digest, installs versioned files under
+`/opt/remotex`, and links `remotex` into `/usr/local/bin`. See
+[`docs/install.md`](docs/install.md) for custom locations, upgrades, rollback,
+and uninstall.
 
-### What's in a release
-
-Every [release](https://github.com/andrewtheguy/remotex/releases) carries both
-halves, built from the same commit and the same version:
-
-| Asset | What it is |
-|---|---|
-| `remotex-<version>-linux-x86_64.tar.gz` | the gateway — what the installer above fetches |
-| `remotex-<version>-linux-arm64.tar.gz` | " |
-| `remotex-<version>-macos-arm64.tar.gz` | " |
-| `remotex-agent-<version>-macos-arm64-unsigned.zip` | the **Mac agent**, for a Mac you want to *connect to* |
-
-The gateway also ships as a container image (below). The agent is only needed on
-a Mac you intend to reach with `protocol = "rxa"`; it is ad-hoc signed, so
-unzipping it needs one `xattr` command — see
+Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
+no companion software. For RealVNC-like behavior where reconnects authenticate
+with a PSK instead of returning to Screen Sharing's login gate, install the
+optional agent DMG from the same release and use `protocol = "rxa"`. The agent
+mirrors a logged-in user's display and does not provide login-window access. See
 [`packaging/macos/README.md`](packaging/macos/README.md).
 
-## Container image (Linux amd64/arm64)
+## Container
 
-```bash
+```sh
 docker run -d --name remotex -p 52380:52380 \
   -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
   ghcr.io/andrewtheguy/remotex:latest
 ```
 
-The image mirrors the installed layout, so bare `serve` (the default command)
-picks up `/opt/remotex/etc/remotex.toml` — mount your config there read-only, and
-set `host = "0.0.0.0"` in `[server]` or nothing outside the container can reach
-it. A template ships at
-`/opt/remotex/current/share/doc/remotex/remotex.toml.example`, and the
-`gen-passwd` helper is the same binary:
+Set `[server].host = "0.0.0.0"` in the mounted config. Images are published for
+Linux amd64 and arm64 with `latest` and `v<version>` tags.
 
-```bash
+Generate the required web-login credential with:
+
+```sh
 docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
-```
-
-Tags are `v<version>` per release and `latest` for the newest stable one.
-The images carry the very binaries and frontend bundle attached to that
-release — nothing is recompiled for them (see [`packaging/`](packaging/)).
-
-## Layout
-
-```
-src/                 Rust backend (flat module layout)
-  main.rs            entry: CLI dispatch + serve
-  lib.rs             library surface (shared with the integration tests)
-  cli.rs             clap CLI (serve --config, gen-passwd, gen-psk)
-  config.rs          TOML config ([server] + [[targets]] profiles)
-  server.rs          axum router (/api/*, /ws, disk-served SPA + fallback)
-  ws.rs              WebSocket <-> protocol-engine bridge
-  session.rs         the session slot + engine seam: picker state, then
-                     spawns rdp::run, vnc::run or rxa::run for the target
-  rdp.rs             server-side RDP session (IronRDP): connect + active loop
-  vnc.rs             server-side VNC session (built-in RFB client, raw-only)
-  rxa.rs             macOS agent session (Noise + tile pass-through)
-  keymap.rs          DOM KeyboardEvent.code -> RDP scancode / X11 keysym
-  protocol.rs        wire messages (ClientMsg / ServerMsg)
-  error.rs           AppError
-frontend/            Vite + React + TS SPA
-  src/
-    protocol.ts      TS mirror of the wire protocol
-    useRemoteDesktop.ts  WebSocket + picker/desktop mode + tile rendering + input
-    TargetPicker.tsx     post-login target picker
-    RemoteDesktop.tsx    canvas + input overlay + floating menu
-tests/               end-to-end tests: protocol-level (protocol_e2e.rs) and
-                     container-backed happy paths (rdp_tiles_e2e.rs against a
-                     dummy xrdp, vnc_tiles_e2e.rs against a dummy TigerVNC)
-docs/architecture.md overall architecture: data path, protocol, engines
-docs/roadmap.md      remaining work
 ```
 
 ## Development
 
-Run the backend and frontend in two terminals. In dev, Vite (`:5173`) proxies
-`/api` and `/ws` to the Rust server (`:52380`).
+Run the backend and frontend separately; Vite proxies `/api` and `/ws` to the
+backend.
 
-```bash
-# Terminal 1 — backend. Put the RDP target + credentials in a remotex.toml
-# file (gitignored) and pass it explicitly — only an installed deployment has
-# a default config location.
-cargo run -- serve -c remotex.toml  # http://localhost:52380
+```sh
+# terminal 1
+cargo run -- serve -c remotex.toml
 
-# Terminal 2 — frontend (with hot reload)
+# terminal 2
 cd frontend
 bun install
-bun run dev                        # http://localhost:5173
+bun run dev
 ```
 
-Open http://localhost:5173. The remote desktop renders on the canvas; mouse and
-keyboard over it drive the session. Use `RUST_LOG=info` (or `debug`) for logs.
+Open <http://localhost:5173>. Use `RUST_LOG=info` or `RUST_LOG=debug` for
+backend logs.
+
+The main directories are:
+
+| Path | Contents |
+|---|---|
+| `src/` | gateway, session management, and RDP/VNC/`rxa` engines |
+| `frontend/` | React SPA |
+| `crates/rxa-proto/` | protocol shared by gateway and macOS agent |
+| `crates/rxa-agent/` | macOS agent |
+| `tests/` | protocol and engine end-to-end tests |
+| `packaging/` | release, install, container, and macOS bundle scripts |
 
 ## Configuration
 
-All configuration lives in one TOML file — no environment variables for server
-or target configuration, and no `.env` loading (env files silently shadowing
-the real environment caused subtle bugs). `RUST_LOG` only controls logging.
-The `serve` subcommand takes a single selector:
-
-- `--config <path>` — the config file. Defaults to the installed
-  `<prefix>/etc/remotex.toml`; config is global-only (no per-user or
-  working-directory files), so in a dev checkout this flag is required.
-
-Every `[[targets]]` profile is served; there is no `--target` selector. The
-browser picks a target from a picker after login — one pathway, so which target
-a session uses is a browser choice, not a launch flag.
+remotex reads one TOML file. Installed deployments default to
+`<prefix>/etc/remotex.toml`; a checkout should pass `--config`.
 
 ```toml
 [server]
-#host = "127.0.0.1"        # web UI bind address
-#port = 52380              # web UI port
-#static_dir = ""           # built frontend; defaults to the installed
-                           # share/remotex/web, else frontend/dist
+site_passwd = "admin:$2b$..."
 
 [[targets]]
-name = "example"           # unique profile name (shown in the login picker)
-protocol = "rdp"           # required: "rdp", "vnc" or "rxa"
+name = "workstation"
+protocol = "rdp" # rdp, vnc, or rxa
 host = "192.0.2.10"
-#port = 3389               # default: the protocol's standard port
-                           #  (3389 rdp, 5900 vnc, 52381 rxa)
 username = "Administrator"
 password = "change-me"
-#domain = ""               # optional; unset = local account   (RDP only)
-#width = 1280              # initial desktop size to request   (RDP only —
-#height = 800              #  a VNC server dictates its own size)
-#security = "auto"         # auto (TLS+NLA), nla (NLA only), tls (RDP only)
-#psk = "rxa..."            # pre-shared key                    (rxa only —
-                           #  `remotex gen-psk`, must match the Mac agent's)
 ```
 
-`security` is `auto` (advertise TLS + NLA/CredSSP, server picks), `nla`
-(require NLA), or `tls` (plain TLS, no NLA — the remote shows a graphical login).
-Self-signed server certificates are accepted. For VNC targets, `name` and `protocol = "vnc"` are still required. The
-connection-specific fields are `host`, optional `port` (default 5900), and
-optional `password`; `username`/`domain`/`width`/`height`/`security` are ignored.
+Generate `site_passwd` with `remotex gen-passwd <username>`. Generate an `rxa`
+key with `remotex gen-psk`. Keep the config mode `0600`; target credentials
+remain server-side but are stored in this file.
 
-For **macOS** targets (`protocol = "rxa"`) the only fields are `host`, optional
-`port` (default 52381) and `psk` — the pre-shared key is the entire credential.
-Generate one with `remotex gen-psk` and put the same key in the Mac agent's
-config; `resize` is rejected, since the agent captures the Mac's own
-resolution. Install the agent from
-[`packaging/macos/README.md`](packaging/macos/README.md).
+All fields and per-protocol examples are in
+[`packaging/etc/remotex.toml.example`](packaging/etc/remotex.toml.example).
 
-Credentials are used only server-side for the RDP/VNC handshake;
-`GET /api/targets` returns only the non-secret name/protocol/host/port of each
-profile for the picker.
+## Checks
 
-> **Password handling.** The config file holds credentials — keep it out of
-> version control (`remotex.toml` is gitignored here) and `chmod 600` it on real
-> hosts.
+```sh
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 
-## Tests
-
-```bash
-cargo test        # unit tests + protocol-level end-to-end tests
+cd frontend
+bun run check
 ```
 
-The end-to-end tests in `tests/protocol_e2e.rs` drive the real HTTP + WebSocket
-server without a browser or a real RDP server: the RDP target points at a socket
-that hangs up, so the session-failure path is reported back over `/ws` as a
-`ServerMsg::Error`.
+The container-backed RDP and VNC tests use Docker or Podman and do not start a
+browser. They are ignored by default; run them explicitly with:
 
-`tests/rdp_tiles_e2e.rs` and `tests/vnc_tiles_e2e.rs` cover the happy paths:
-each starts a dummy server in a container (plain xrdp from
-`tests/xrdp-dummy/`; TigerVNC with VncAuth from `tests/vnc-dummy/`) with
-podman or docker, connects through the real server, and validates the binary
-tile transport on the wire — resize as JSON text first, then binary frames
-with PNG payloads (the VNC test requires a full-desktop paint). They require a
-container runtime; no browser is involved (automated browser tests are flaky
-and deliberately avoided).
-
-To run them against a **remote** podman/docker over SSH — the only option on a
-Mac that cannot run a container engine locally (inside a VM there is no nested
-virtualization, so `podman machine` fails outright):
-
-```bash
-podman system connection add linuxbox \
-  ssh://user@host/run/user/1000/podman/podman.sock
-
-CONTAINER_CONNECTION=linuxbox REMOTEX_TEST_CONTAINER_HOST=host cargo test
+```sh
+cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
 ```
 
-`CONTAINER_CONNECTION` picks the connection (a local `podman machine`, even a
-dead one, otherwise takes precedence); `REMOTEX_TEST_CONTAINER_HOST` tells the
-tests where to reach the published port, since a remote engine publishes on its
-own loopback rather than yours.
+`tests/rxa_e2e.rs` uses an in-process fake agent and runs by default.
 
-`tests/rxa_e2e.rs` needs no container: it drives the real server against an
-in-process fake Mac agent that speaks the real Noise handshake, and checks that
-a JPEG tile survives the trip byte-for-byte, that a dropped agent link
-reconnects and repaints instead of erroring, and that a wrong pre-shared key is
-reported immediately.
+For a remote Podman connection:
 
-## Production build
+```sh
+CONTAINER_CONNECTION=linuxbox \
+REMOTEX_TEST_CONTAINER_HOST=host \
+cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
+```
 
-The frontend is served from disk (not embedded), so build it first. In a
-checkout the server defaults to `frontend/dist`; set `static_dir` under
-`[server]` in the config to serve it from elsewhere:
+## Build
 
-```bash
-cd frontend && bun install && bun run build   # -> frontend/dist/
-cd ..
+```sh
+cd frontend && bun install && bun run build && cd ..
 cargo build --release
-./target/release/remotex serve -c remotex.toml  # static_dir defaults to frontend/dist
+bash packaging/build-tarball.sh
 ```
 
-To produce a distributable, relocatable tarball (`bin` + `share`) that
-installs under `/opt/remotex`, use the packaging scripts:
-
-```bash
-bash packaging/build-tarball.sh               # -> dist/remotex-<version>-<os>-<arch>.tar.gz
-```
-
-See [`packaging/README.md`](packaging/README.md) for the full layout, the
-atomic-swap upgrade model, and rollback.
+The tarball contains the gateway binary and built frontend. The macOS agent is
+a separate DMG built by `packaging/macos/build-agent-app.sh`.

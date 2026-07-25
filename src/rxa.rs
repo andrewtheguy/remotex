@@ -1,5 +1,6 @@
 //! The `rxa` engine: the gateway half of the purpose-built macOS agent
-//! protocol (`crates/rxa-proto`, `crates/rxa-agent`, docs/mac-agent-plan.md).
+//! protocol (`crates/rxa-proto`, `crates/rxa-agent`,
+//! docs/mac-agent-architecture.md).
 //!
 //! Same seam as [`crate::rdp`] and [`crate::vnc`] — connect, announce the
 //! desktop size, then pump tiles out and [`ClientMsg`] input back in — with two

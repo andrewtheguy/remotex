@@ -5,7 +5,7 @@
 //! belongs to Apple's server, so there is nothing to fix on remotex's side of
 //! the RFB connection. This agent replaces that hop: one pre-shared key, a
 //! two-message Noise handshake, and no human in a reconnect ever. See
-//! `docs/mac-agent-plan.md`.
+//! `docs/mac-agent-architecture.md`.
 //!
 //! ## Installing is dragging it in and opening it
 //!
@@ -16,15 +16,23 @@
 //! 2. registers itself with `SMAppService` (see [`loginitem`]), which puts it in
 //!    **System Settings → General → Login Items** and starts it at every login.
 //!
-//! Uninstalling is moving the bundle to the Trash — or `--unregister` first, to
-//! take it out of Login Items cleanly.
+//! Uninstalling is switching **Start at Login** off in the menu and moving the
+//! bundle to the Trash. Trashing it without that leaves a dangling Login Items
+//! entry.
 //!
-//! ## It has a menu bar item
+//! ## Everything happens in the menu bar
 //!
-//! There are no windows, but there is a status item (see [`menubar`]): it says
-//! whether a gateway is connected, copies the pre-shared key, links to the two
-//! Privacy panes, and quits. Everything the agent can be asked to do is reachable
-//! from there without a terminal.
+//! There are no windows, but there is a status item (see [`menubar`]), and it is
+//! the entire interface: whether a gateway is connected, the pre-shared key and a
+//! button to mint a new one, the listen address, which display is shared, the
+//! config file, the log, the two Privacy panes, the login item, and Quit.
+//! Anything the agent can be asked to do is done there.
+//!
+//! The flags below are launch modes only — where to read the config, and whether
+//! to register or to put up a menu at all. No operation has a flag: a permission
+//! read from a terminal is the *terminal's* permission (see
+//! [`report_permissions`]), and a key printed to a terminal is a credential in
+//! somebody's shell history.
 //!
 //! ## Two permissions
 //!
@@ -33,10 +41,11 @@
 //!
 //! Both are one-time grants in System Settings → Privacy & Security, both are
 //! attached to this bundle's signed identity, and macOS provides no way to grant
-//! them programmatically. Accessibility is the one that bites: without it the
-//! screen paints, the session looks perfectly healthy, and every click and
-//! keystroke is silently discarded — so [`report_permissions`] says so at
-//! startup.
+//! them programmatically. Neither is optional, so neither is a setting: the menu
+//! bar treats them as health, warns in its icon and asks for the missing one (see
+//! [`menubar`]). Accessibility is the one that bites — without it the screen
+//! paints, the session looks perfectly healthy, and every click and keystroke is
+//! silently discarded.
 //!
 //! Both also require the process to live in the user's GUI (Aqua) session, which
 //! is why the embedded plist is a LaunchAgent and not a LaunchDaemon. The honest
@@ -76,7 +85,9 @@ mod encode;
 mod input;
 mod loginitem;
 mod menubar;
+mod panels;
 mod session;
+mod settings;
 mod state;
 
 use std::io::IsTerminal as _;
@@ -94,27 +105,20 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
     let log_path = init_logging();
 
-    // Subcommands that do one thing and exit, before any config is needed.
-    if args.gen_psk {
-        println!("{}", rxa_proto::psk::generate());
-        return Ok(());
-    }
-    if args.unregister {
-        loginitem::unregister()?;
-        println!("remotex-agent removed from Login Items.");
-        println!("Move remotex-agent.app to the Trash to finish uninstalling.");
-        return Ok(());
-    }
-
-    let (config, path, created) = config::load_or_create(args.config.as_deref())?;
-    if args.show_psk {
-        println!("{}", config.psk);
-        return Ok(());
-    }
-    if args.status {
-        print_status(&config, &path);
-        return Ok(());
-    }
+    let (config, path, created) = match config::load_or_create(args.config.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            // Exits 0 despite failing, so launchd's KeepAlive leaves it alone: no
+            // number of restarts fixes a config file, and each one would put this
+            // panel back on screen.
+            report_startup_failure(
+                &args,
+                "remotex-agent could not start",
+                &format!("{e:#}\n\nFix the config file, then open remotex-agent again."),
+            );
+            return Ok(());
+        }
+    };
 
     info!(
         "remotex-agent {} — rxa/{}, config {}",
@@ -139,25 +143,84 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Only worth printing where somebody can read it. Secrets stay out of the
-    // log files, so a terminal-less first launch (the usual case: the bundle was
-    // double-clicked) shows nothing here — the key comes from the menu bar's
-    // "Copy Pre-Shared Key" or from `--show-psk`. The config file is already
-    // 0600.
+    // Only worth printing where somebody can read it, and the key is not in it:
+    // secrets stay out of log files, out of shell history and out of a terminal
+    // somebody may be screen-sharing. Reading it is a menu item.
     if created && std::io::stdout().is_terminal() {
-        print_first_run(&config, &path);
+        print_first_run(&path);
+    }
+
+    // Bound on the main thread, and early — because "the port is taken" is the
+    // one startup failure a user actually meets, and it has to be answerable on
+    // screen. It happens whenever the app is opened while a copy is already
+    // running, which is the normal way to go looking for the menu bar item.
+    // Binding on the network thread instead left that thread calling `exit(0)`
+    // from under a main thread that had not put up a menu yet: the app bounced
+    // and vanished, and the only way to find out why was to run the binary in a
+    // terminal.
+    //
+    // After the login-item registration above, though, and deliberately: opening
+    // a freshly copied bundle while the old one still runs is how a stale launchd
+    // record gets repaired (see packaging/macos/README.md), and that has to keep
+    // working. Before `report_permissions`, equally deliberately: a duplicate
+    // launch has no business raising a TCC prompt.
+    // Infallible after the load above validated it, the same way `psk_bytes` is —
+    // and `?` here would be one more way for a launch to end with nothing on
+    // screen, which is the thing this whole block exists to stop.
+    let addr = config
+        .socket_addr()
+        .expect("listen validated in Config::validate");
+    let listener = match std::net::TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            report_startup_failure(
+                &args,
+                "remotex-agent cannot listen",
+                &format!(
+                    "{} is already in use by another process.\n\nIf that process is another copy \
+                     of remotex-agent, its icon is in the menu bar at the top of the screen.",
+                    config.listen
+                ),
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            report_startup_failure(
+                &args,
+                "remotex-agent cannot listen",
+                &format!(
+                    "{} could not be bound: {e}\n\nChange the listen address from the menu \
+                     bar item of the running agent, or in the config file.",
+                    config.listen
+                ),
+            );
+            return Ok(());
+        }
+    };
+    info!("agent: listening on {}", config.listen);
+    // tokio adopts it below, and only a non-blocking socket can be driven by a
+    // reactor.
+    if let Err(e) = listener.set_nonblocking(true) {
+        report_startup_failure(
+            &args,
+            "remotex-agent cannot listen",
+            &format!("{} could not be made non-blocking: {e}", config.listen),
+        );
+        return Ok(());
     }
 
     report_permissions();
 
     let tracker = Arc::new(cursor::Tracker::new());
     let state = Arc::new(state::AgentState::new());
+    // The GUI's view of the config: what this process is serving, and what the
+    // file says after any edits made from the menu (see `crate::settings`).
+    let settings = settings::Settings::new(config.clone(), path);
 
     // The socket runs on its own thread so the main thread stays free for
     // AppKit, which owns the menu bar and the pointer shape both.
     let serve_tracker = Arc::clone(&tracker);
     let serve_state = Arc::clone(&state);
-    let listen = config.listen.clone();
     let psk = config.psk_bytes();
     let display = config.display;
     std::thread::Builder::new()
@@ -172,7 +235,7 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            match runtime.block_on(serve(listen, psk, display, serve_tracker, serve_state)) {
+            match runtime.block_on(serve(listener, psk, display, serve_tracker, serve_state)) {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("remotex-agent: {e:#}");
@@ -191,7 +254,65 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Hands the main thread to AppKit and never returns.
-    menubar::run(state, tracker, config.psk, config.listen, log_path)
+    menubar::run(state, tracker, settings, log_path)
+}
+
+/// Say why the agent is about to give up, on screen as well as in the log.
+///
+/// Everything this reports happens before the menu bar exists, which is what
+/// makes it worth a function: the agent has no window, so a startup that fails
+/// silently is a double-click that does nothing at all — no icon, no error, and
+/// no way to find out short of running the binary in a terminal. That is not a
+/// diagnosis anyone should have to make.
+///
+/// `--no-menu` gets the log line only. There is no window server to put a panel
+/// in over SSH, and the caller is a terminal that can read the message.
+fn report_startup_failure(args: &Args, title: &str, body: &str) {
+    warn!("{title}: {body}");
+    if args.no_menu {
+        return;
+    }
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        // Startup failures are all reported from `main`, so this is unreachable —
+        // and a wrong-thread AppKit call is worse than a missing panel.
+        return;
+    };
+    panels::startup_failure(mtm, title, body);
+}
+
+/// Restart the agent in place, to run under a config that has just changed.
+///
+/// `exec`, not "quit and be relaunched", and not "spawn a copy and exit":
+///
+/// - The embedded LaunchAgent's `KeepAlive` is `SuccessfulExit: false` — that is
+///   what makes Quit mean Quit (see [`menubar`]) — so a clean exit would leave the
+///   agent stopped, not restarted.
+/// - Spawning a second copy first loses a race with its own listener: the new
+///   process binds before this one has let the port go, finds it in use, and
+///   exits cleanly (see [`serve`]), leaving nothing running.
+///
+/// Replacing the process image has neither problem. The PID, the launchd job and
+/// the code identity the two TCC grants are keyed to all survive, the listening
+/// socket closes on the way (Rust opens sockets `CLOEXEC`), and the new image
+/// re-reads the config from scratch. The gateway sees a dropped connection and
+/// reconnects, which it is already built to do.
+///
+/// Only returns if the exec failed, in which case nothing has changed and the
+/// caller still has a running agent to report to.
+fn restart() -> anyhow::Error {
+    use std::os::unix::process::CommandExt as _;
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return anyhow::anyhow!("cannot find my own executable: {e}"),
+    };
+    info!("restarting into {}", exe.display());
+    // Same arguments, so a `--config` path or a `--no-menu` session restarts as
+    // itself rather than as a default agent.
+    let error = std::process::Command::new(&exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    anyhow::anyhow!("cannot restart {}: {error}", exe.display())
 }
 
 /// Log to stderr on a terminal, and to `~/Library/Logs/remotex-agent.log`
@@ -232,25 +353,19 @@ fn log_file() -> Option<(std::fs::File, PathBuf)> {
 }
 
 /// Accept gateway connections, one at a time.
+///
+/// Takes an already-bound listener: binding is the main thread's job, so a port
+/// that is already taken can be reported on screen rather than from this thread
+/// (see `main`).
 async fn serve(
-    listen: String,
+    listener: std::net::TcpListener,
     psk: [u8; 32],
     display: usize,
     tracker: Arc<cursor::Tracker>,
     state: Arc<state::AgentState>,
 ) -> anyhow::Result<()> {
-    let listener = match tokio::net::TcpListener::bind(&listen).await {
-        Ok(listener) => listener,
-        // Almost always "another copy is already running" — launchd started one
-        // at login and the user then opened the bundle by hand. That is not an
-        // error worth a crash loop, so say so and exit cleanly.
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            info!("agent: {listen} is already in use — another remotex-agent is running; exiting");
-            return Ok(());
-        }
-        Err(e) => return Err(anyhow::anyhow!("cannot bind {listen}: {e}")),
-    };
-    info!("agent: listening on {listen}");
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|e| anyhow::anyhow!("cannot drive the listening socket: {e}"))?;
 
     // The single active session, so a new gateway evicts the previous one.
     let mut current: Option<tokio::task::JoinHandle<()>> = None;
@@ -305,7 +420,9 @@ async fn serve(
 ///   and keystroke vanishes.
 ///
 /// macOS remembers the answer, so a granted (or firmly refused) permission does
-/// not re-prompt on later launches.
+/// not re-prompt on later launches — which is exactly why the menu bar asks again
+/// in its own words once the run loop is up (see [`menubar`]). This function is
+/// the system prompt and the log line; that one is the explanation.
 fn report_permissions() {
     if capture::screen_recording_granted() {
         info!("permissions: Screen Recording granted");
@@ -330,71 +447,28 @@ fn report_permissions() {
     }
 }
 
-fn print_status(config: &config::Config, path: &Path) {
-    println!("remotex-agent {}", env!("CARGO_PKG_VERSION"));
-    println!("  config:        {}", path.display());
-    println!("  listen:        {}", config.listen);
-    println!("  display:       {}", config.display);
-    println!("  login item:    {}", loginitem::status());
-    println!(
-        "  Screen Recording: {}",
-        match capture::probe(config.display) {
-            Ok(geometry) => format!(
-                "granted ({}x{} at {}x)",
-                geometry.width, geometry.height, geometry.scale
-            ),
-            Err(e) => format!("NOT granted or unavailable — {e}"),
-        }
-    );
-    println!(
-        "  Accessibility:    {}",
-        if input::accessibility_granted() {
-            "granted"
-        } else {
-            "NOT granted (input will be silently ignored)"
-        }
-    );
-    // Both permissions are attributed to whatever launched the process, so run
-    // from a shell these two lines describe the *terminal*, not the agent — the
-    // same binary reports "NOT granted" here and "granted" a moment later when
-    // macOS launches it as the app. Saying so is the difference between a
-    // confusing afternoon and none: the two answers disagree and neither is
-    // obviously the wrong one. Printed unconditionally — `--status` output is
-    // for a human whether or not it went through a pipe on the way.
+fn print_first_run(path: &Path) {
     println!();
-    println!("Note: those last two lines describe whatever launched this command, not");
-    println!("the agent — macOS credits the permissions to the responsible process. Read");
-    println!("them from the menu bar, or from the agent's own log:");
-    println!("  grep permissions: ~/Library/Logs/remotex-agent.log | tail -2");
-}
-
-fn print_first_run(config: &config::Config, path: &Path) {
+    println!("Set up {}, with a fresh pre-shared key.", path.display());
     println!();
-    println!("Set up {}.", path.display());
+    println!("The rest is in the menu bar, under the remotex-agent icon:");
     println!();
-    println!("Put this on the gateway's rxa target:");
-    println!();
-    println!("    psk = \"{}\"", config.psk);
-    println!();
-    println!("Then grant two permissions in System Settings > Privacy & Security,");
-    println!("enabling \"remotex-agent\" under BOTH of:");
-    println!();
+    println!("    Pre-Shared Key     — the one credential; it goes on the gateway target");
     println!("    Screen Recording   — without it the screen never paints");
     println!("    Accessibility      — without it input is silently ignored");
     println!();
 }
 
-/// The agent's argument surface, kept deliberately tiny — `clap` would be a
-/// dependency for a handful of flags.
+/// The agent's argument surface: three launch modes and nothing else.
+///
+/// Every *operation* is a menu item (see [`menubar`]), so what is left here is
+/// only how to start — which config to read, and whether to register and put up a
+/// menu. `clap` would be a dependency for that.
 #[derive(Debug, Default)]
 struct Args {
     config: Option<PathBuf>,
-    gen_psk: bool,
-    show_psk: bool,
-    status: bool,
     no_register: bool,
     no_menu: bool,
-    unregister: bool,
 }
 
 impl Args {
@@ -409,12 +483,8 @@ impl Args {
                         .ok_or_else(|| anyhow::anyhow!("--config needs a path"))?;
                     parsed.config = Some(PathBuf::from(path));
                 }
-                "--gen-psk" => parsed.gen_psk = true,
-                "--show-psk" => parsed.show_psk = true,
-                "--status" => parsed.status = true,
                 "--no-register" => parsed.no_register = true,
                 "--no-menu" => parsed.no_menu = true,
-                "--unregister" => parsed.unregister = true,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -441,18 +511,17 @@ serve. Normally launched by macOS at login rather than by hand.
 Options:
   -c, --config <path>  Config file (default:
                        ~/Library/Application Support/remotex-agent/config.toml)
-      --show-psk       Print this agent's pre-shared key and exit
-      --gen-psk        Print a fresh pre-shared key and exit
-      --status         Show config, login-item and permission state, then exit
       --no-register    Serve without registering as a login item (for development)
       --no-menu        Serve without a menu bar item. Needed over SSH, where
-                       there is no window server to put one in
-      --unregister     Remove from Login Items and exit
+                       there is no window server to put one in — and with no menu
+                       there is no interface at all, so this is for development
   -h, --help           Show this help
   -V, --version        Show the version
 
-The key from --show-psk goes on the matching [[targets]] entry in the gateway's
-remotex.toml, as `psk`. It is the only credential either side uses.
+Everything else is in the menu bar: the pre-shared key (which goes on the
+matching [[targets]] entry in the gateway's remotex.toml, and is the only
+credential either side uses), the listen address, the display, the config file,
+the log, the two permissions, Start at Login, and Quit.
 ";
 
 #[cfg(test)]
@@ -467,13 +536,12 @@ mod tests {
     fn no_arguments_serves_with_the_default_config_path() {
         let args = parse(&[]).unwrap();
         assert!(args.config.is_none());
-        assert!(!args.gen_psk && !args.show_psk && !args.status);
         // Registering is the default: installing is meant to be "open it once".
         assert!(!args.no_register);
-        // So is the menu bar — an agent with no visible sign of itself and no
-        // way to quit is the thing --no-menu exists to opt *out* of.
+        // So is the menu bar, which is the agent's whole interface — an agent
+        // with no visible sign of itself, no way to read its key and no way to
+        // quit is what --no-menu opts *out* of.
         assert!(!args.no_menu);
-        assert!(!args.unregister);
     }
 
     #[test]
@@ -486,19 +554,15 @@ mod tests {
 
     #[test]
     fn every_flag_parses() {
-        assert!(parse(&["--gen-psk"]).unwrap().gen_psk);
-        assert!(parse(&["--show-psk"]).unwrap().show_psk);
-        assert!(parse(&["--status"]).unwrap().status);
         assert!(parse(&["--no-register"]).unwrap().no_register);
         assert!(parse(&["--no-menu"]).unwrap().no_menu);
-        assert!(parse(&["--unregister"]).unwrap().unregister);
     }
 
     #[test]
     fn flags_combine_with_a_config_path() {
-        let args = parse(&["--config", "/tmp/a.toml", "--status"]).unwrap();
+        let args = parse(&["--config", "/tmp/a.toml", "--no-menu"]).unwrap();
         assert_eq!(args.config, Some(PathBuf::from("/tmp/a.toml")));
-        assert!(args.status);
+        assert!(args.no_menu);
     }
 
     #[test]
@@ -519,17 +583,7 @@ mod tests {
     // it must mention every flag `parse` accepts.
     #[test]
     fn the_usage_text_documents_every_flag() {
-        for flag in [
-            "--config",
-            "--show-psk",
-            "--gen-psk",
-            "--status",
-            "--no-register",
-            "--no-menu",
-            "--unregister",
-            "--help",
-            "--version",
-        ] {
+        for flag in ["--config", "--no-register", "--no-menu", "--help", "--version"] {
             assert!(USAGE.contains(flag), "usage does not mention {flag}");
         }
     }

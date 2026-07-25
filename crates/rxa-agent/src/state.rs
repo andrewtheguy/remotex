@@ -61,7 +61,14 @@ impl AgentState {
     }
 }
 
-/// The one line the menu bar leads with: is anyone connected, and for how long.
+/// The one line the menu bar leads with: is anyone watching, and for how long.
+///
+/// Both halves answer the same question — "is somebody looking at my screen?" —
+/// and both make the *gateway* the subject, because a bare "Not connected" makes
+/// the agent the subject: as the top line of a menu that reads like an agent which
+/// has stopped, when the line under it says it is listening. "Gateway" rather than
+/// "client" to stay with the one word the logs, the docs and the config comments
+/// all already use for the thing that dials in.
 ///
 /// The port is left out deliberately — it is a different ephemeral number on
 /// every reconnect and tells the user nothing, whereas the address answers "is
@@ -73,7 +80,7 @@ pub fn describe(connection: Option<&Connection>, now: Instant) -> String {
             c.peer.ip(),
             human_duration(now.saturating_duration_since(c.since))
         ),
-        None => "Not connected".to_owned(),
+        None => "No gateway connected".to_owned(),
     }
 }
 
@@ -164,9 +171,19 @@ mod tests {
         assert!(text.contains("2m"), "{text}");
     }
 
+    // The idle line has to read as "running, and nobody is looking" rather than as
+    // a fault — it is the first thing in the menu, and a user who reads it as
+    // "stopped" goes looking for a way to start something that is already running.
     #[test]
-    fn the_summary_says_so_when_nothing_is_connected() {
-        assert_eq!(describe(None, Instant::now()), "Not connected");
+    fn the_idle_summary_does_not_read_as_a_stopped_agent() {
+        let text = describe(None, Instant::now());
+        assert_eq!(text, "No gateway connected");
+        // It has to name what is absent — the gateway — rather than describe this
+        // side as being in a state.
+        assert!(text.contains("gateway"), "{text}");
+        for alarming in ["not connected", "disconnected", "stopped", "error"] {
+            assert!(!text.to_lowercase().contains(alarming), "{text}");
+        }
     }
 
     // A clock that has gone backwards (or a connection recorded a hair after the

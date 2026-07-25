@@ -136,6 +136,10 @@ jobs:
   # leading `v` to get the version, so a separately-tagged release becoming
   # Latest would break `curl … | bash` for everyone.
   #
+  # Shipped as a .dmg: dragging an app out of a disk image is the standard macOS
+  # install, and an image carries the bundle exactly as it was signed rather than
+  # through an archive round-trip. See the header of build-agent-app.sh.
+  #
   # Ad-hoc signed, and the asset name says so. A Developer ID signature plus
   # notarization is what a bundle needs to run on someone else's Mac without a
   # quarantine dance — build-agent-app.sh already takes --notary-profile, so
@@ -149,7 +153,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build remotex-agent.app
+      - name: Build remotex-agent.app and its disk image
         # `-` pins the ad-hoc path rather than searching the runner's keychain, so
         # a signing identity appearing in a future runner image cannot change what
         # ships. Xcode is preinstalled, which the capture bindings' Swift bridge
@@ -158,35 +162,37 @@ jobs:
           CODESIGN_IDENTITY: "-"
         run: bash packaging/macos/build-agent-app.sh
 
-      - name: Archive the bundle
-        # ditto, not zip: an .app is a directory tree whose executable bits have
-        # to survive. --sequesterRsrc is not cosmetic — without it ditto writes
-        # AppleDouble `._*` entries *inside* the bundle, and extracting with plain
-        # unzip leaves them as files the signature does not seal, so
-        # `codesign --verify --strict` fails and TCC will not grant Screen
-        # Recording or Accessibility to it. Sequestered, they go to __MACOSX/.
-        run: |
-          mkdir -p dist/upload
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent dist/remotex-agent.app \
-            "dist/upload/remotex-agent-${{ needs.prepare.outputs.version }}-macos-arm64-unsigned.zip"
-
-      - name: Verify the archived bundle
-        # Unpacked exactly as a user will, so the signature is checked where it
-        # can actually be broken rather than in the build directory. `--version`
-        # parses argv and exits before any config, capture or launchd work, so it
-        # needs no GUI session and neither TCC grant — and it is where a
-        # Swift-runtime link error surfaces, the failure
+      - name: Verify the disk image
+        # Installed exactly as a user will — mount, copy the bundle out, run it —
+        # so the signature is checked where it can actually break rather than in
+        # the build directory. `--version` parses argv and exits before any config,
+        # capture or launchd work, so it needs no GUI session and neither TCC
+        # grant; it is also where a Swift-runtime link error surfaces, the failure
         # MACOSX_DEPLOYMENT_TARGET exists to prevent (see .cargo/config.toml),
         # which builds clean and only dies on launch.
         run: |
-          mkdir -p dist/check
-          unzip -q "dist/upload/remotex-agent-${{ needs.prepare.outputs.version }}-macos-arm64-unsigned.zip" \
-            -d dist/check
-          codesign --verify --deep --strict --verbose=2 dist/check/remotex-agent.app
-          got=$(dist/check/remotex-agent.app/Contents/MacOS/remotex-agent --version)
+          version="${{ needs.prepare.outputs.version }}"
+          dmg="dist/remotex-agent-${version}-macos-arm64-unsigned.dmg"
+          mnt="$RUNNER_TEMP/dmg-mount"
+          mkdir -p "$mnt" "$RUNNER_TEMP/installed"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
+          # The symlink is what gives the drag somewhere to go; without it the
+          # image is a puzzle rather than an install. It has to point at
+          # /Applications specifically — a symlink to anything else would pass a
+          # bare -L check and still drop the bundle somewhere nobody asked for.
+          [ "$(readlink "$mnt/Applications")" = "/Applications" ] || {
+            echo "::error::the image has no /Applications symlink"
+            exit 1
+          }
+          # ditto is what the Finder's copy amounts to.
+          /usr/bin/ditto "$mnt/remotex-agent.app" "$RUNNER_TEMP/installed/remotex-agent.app"
+          hdiutil detach "$mnt"
+          app="$RUNNER_TEMP/installed/remotex-agent.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          got=$("$app/Contents/MacOS/remotex-agent" --version)
           echo "bundle reports: ${got}"
-          [ "$got" = "remotex-agent ${{ needs.prepare.outputs.version }}" ] || {
-            echo "::error::expected 'remotex-agent ${{ needs.prepare.outputs.version }}'"
+          [ "$got" = "remotex-agent ${version}" ] || {
+            echo "::error::expected 'remotex-agent ${version}'"
             exit 1
           }
 
@@ -194,7 +200,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: remotex-agent-macos-arm64
-          path: dist/upload/*.zip
+          path: dist/*.dmg
           if-no-files-found: error
 
   release:
@@ -216,10 +222,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Both globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The zip is the macOS agent bundle.
+        # release assets. The .dmg is the macOS agent.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
-            artifacts/*.tar.gz artifacts/*.zip --clobber
+            artifacts/*.tar.gz artifacts/*.dmg --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:

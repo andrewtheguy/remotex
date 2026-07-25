@@ -129,6 +129,37 @@ pub fn probe(display: usize) -> anyhow::Result<Geometry> {
     Ok(geometry(pick(&displays, display)))
 }
 
+/// One entry in the shareable-display list, for the menu bar's display picker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplayInfo {
+    /// Index into the list, which is what `display` in the config means.
+    pub index: usize,
+    /// CoreGraphics display id, so two identical panels are still tellable apart.
+    pub id: u32,
+    pub geometry: Geometry,
+}
+
+/// The displays the agent could share, in the order [`probe`] indexes them.
+///
+/// Needs the Screen Recording grant like everything else in this module, so a
+/// caller that gets an error here should say so rather than showing an empty
+/// list — "no displays" and "not allowed to look" are very different problems.
+pub fn displays() -> anyhow::Result<Vec<DisplayInfo>> {
+    let content = SCShareableContent::get()
+        .map_err(|e| anyhow::anyhow!("cannot list shareable content: {e}"))?;
+    let displays = content.displays();
+    anyhow::ensure!(!displays.is_empty(), "no displays available to capture");
+    Ok(displays
+        .iter()
+        .enumerate()
+        .map(|(index, display)| DisplayInfo {
+            index,
+            id: display.display_id(),
+            geometry: geometry(display),
+        })
+        .collect())
+}
+
 /// A running capture stream. Dropping this stops the capture.
 pub struct Capture {
     stream: SCStream,
@@ -512,6 +543,27 @@ mod tests {
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    // The menu bar offers a display by the index this list reports, and a session
+    // resolves that index with `probe`. If the two ever disagreed, a user would
+    // tick one display and share another — so pin them against each other.
+    #[test]
+    fn the_display_list_indexes_the_same_way_probe_does() {
+        let Ok(displays) = displays() else {
+            // No Screen Recording grant (or no window server at all), which is
+            // the normal state for a `cargo test` run over SSH.
+            eprintln!("cannot list displays in this session; skipping");
+            return;
+        };
+        assert!(!displays.is_empty(), "the list is never empty on success");
+        for (i, display) in displays.iter().enumerate() {
+            assert_eq!(display.index, i, "indexes must be positions in the list");
+            assert_eq!(probe(i).unwrap(), display.geometry);
+        }
+        // Out of range degrades to the main display rather than failing, which is
+        // what makes a stale `display = 3` in the config survive unplugging.
+        assert_eq!(probe(displays.len() + 10).unwrap(), displays[0].geometry);
     }
 
     #[test]
