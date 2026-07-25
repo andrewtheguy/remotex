@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   DESKTOP_ARROW_ROW_1,
   DESKTOP_ARROW_ROW_2,
@@ -181,7 +187,7 @@ function SoftKeyButton({
 // ── Viewport detection ──
 
 // Wide viewports render a full PC keyboard grid; narrow ones the compact
-// mobile layout with a screen toggle. Exported because the clipboard panel
+// mobile layout with a screen toggle. Exported because every docking panel
 // makes the same docked-vs-floating call off the same breakpoint.
 export function useIsDesktop(breakpoint = 800): boolean {
   const [desktop, setDesktop] = useState(() => window.innerWidth >= breakpoint);
@@ -192,6 +198,40 @@ export function useIsDesktop(breakpoint = 800): boolean {
     return () => mql.removeEventListener("change", handler);
   }, [breakpoint]);
   return desktop;
+}
+
+// Report a bottom-docked panel's height so the touch canvas can inset above
+// it, and 0 whenever it isn't covering anything — floating on desktop, or
+// unmounted. Every panel that docks to the bottom edge shares one inset
+// channel, so they have to agree on this exactly; keeping it in one place is
+// what makes "only one panel is ever open" safe to rely on.
+export function useDockedHeight(
+  panelRef: RefObject<HTMLDivElement | null>,
+  onDockedHeightChange: ((px: number) => void) | undefined,
+) {
+  const isDesktop = useIsDesktop();
+  useEffect(() => {
+    const report = onDockedHeightChange;
+    if (!report) {
+      return;
+    }
+    if (isDesktop) {
+      report(0);
+      return;
+    }
+    const panel = panelRef.current;
+    if (!panel) {
+      return;
+    }
+    const measure = () => report(panel.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    return () => {
+      observer.disconnect();
+      report(0);
+    };
+  }, [isDesktop, onDockedHeightChange, panelRef]);
 }
 
 // ── Desktop modifier key definitions ──
@@ -405,28 +445,7 @@ export function SoftKeyboardPanel({
   // floats and is draggable, so it reports 0. A ResizeObserver keeps the inset
   // in sync as the panel reflows (screen toggle, rotation), and the cleanup
   // clears it when the panel closes or switches to floating.
-  useEffect(() => {
-    const report = onDockedHeightChange;
-    if (!report) {
-      return;
-    }
-    if (isDesktop) {
-      report(0);
-      return;
-    }
-    const panel = panelRef.current;
-    if (!panel) {
-      return;
-    }
-    const measure = () => report(panel.getBoundingClientRect().height);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(panel);
-    return () => {
-      observer.disconnect();
-      report(0);
-    };
-  }, [isDesktop, onDockedHeightChange]);
+  useDockedHeight(panelRef, onDockedHeightChange);
 
   // Fire a key with the sticky modifiers held around it, then clear them —
   // sticky modifiers are one-shot, like a physical Shift you tap-then-release.
