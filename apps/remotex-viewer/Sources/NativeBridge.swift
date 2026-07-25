@@ -74,9 +74,6 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
         guard let model, let url = navigationAction.request.url else {
             return .cancel
         }
-        if navigationAction.targetFrame?.isMainFrame == false {
-            return .allow
-        }
         if model.gateway.origin.contains(url) || url.absoluteString == "about:blank" {
             return .allow
         }
