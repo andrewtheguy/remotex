@@ -43,12 +43,15 @@ endpoints and includes a checksum to catch transcription errors.
 
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
-- agent to gateway: desktop size, PNG/JPEG tiles, and cursor shape;
-- gateway to agent: mouse, wheel, and keyboard input;
-- both directions: handshake, ping/pong, and session control.
+- agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, and heartbeat
+  pongs;
+- gateway to agent: mouse, wheel, and keyboard input, session control, and
+  heartbeat pings.
 
 The gateway translates these into the same browser protocol used by RDP and
-VNC. It passes tile payloads through byte-for-byte.
+VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
+checks the gateway-agent link; browser liveness is handled by the gateway's
+shared WebSocket/session layer.
 
 ## Capture and encoding
 
@@ -79,12 +82,22 @@ logged-in user's GUI session. Its menu bar item exposes status, settings, the
 PSK, permission shortcuts, logs, and the login-item toggle.
 
 Only one gateway may be connected. A new authenticated connection replaces the
-old one. When an established link drops, the gateway reconnects with capped
-backoff. Application ping/pong detects half-open connections faster than TCP
-keepalive. On recovery the gateway requests a full repaint and reports a resize
-only if the display dimensions changed. Input accumulated during an outage is
-discarded. An initial connection or authentication failure is reported
-immediately.
+old one. The shared browser heartbeat ends the engine under the same policy as
+RDP and VNC: a missing pong expires it after about 60 seconds, while an orderly
+WebSocket close allows 60 seconds for reattachment. Ending the RXA engine closes
+the agent connection, stops capture, and changes the menu from "Sharing this
+screen" to "No gateway connected."
+
+Separately, the gateway sends the agent an RXA ping every five seconds. The
+agent answers with an RXA pong; a silent agent link is reconnected after its
+15-second deadline. The agent has a longer idle timeout as a final guard against
+a silent gateway.
+
+When an established agent link drops while the browser remains live, the
+gateway reconnects with capped backoff. On recovery it requests a full repaint
+and reports a resize only if the display dimensions changed. Input accumulated
+during an outage is discarded. An initial connection or authentication failure
+is reported immediately.
 
 Saving settings restarts the agent so address, display, and key changes take
 effect together. A deliberate quit stays stopped; crashes are restarted by

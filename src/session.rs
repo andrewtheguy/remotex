@@ -34,15 +34,15 @@
 //!   running engine sends it [`ClientMsg::Refresh`] (re-announce the size and
 //!   repaint from the server-owned copy).
 //! - **Connect** ([`ClientMsg::Connect`]): the browser picks a target; the
-//!   engine is spawned for it and survives detach — closing the browser leaves
-//!   the remote session alive.
+//!   engine is spawned for it and survives a brief detach so the browser can
+//!   reattach. Every protocol ends after the same browser-absence grace period.
 //! - **Disconnect** ([`ClientMsg::Disconnect`], "switch target"): the engine is
 //!   torn down and the slot returns to the picker, without dropping the
 //!   WebSocket. An engine that ends on its own (remote hung up, connect
 //!   failure) returns the slot to the picker the same way.
-//! - **Detach**: the WebSocket went away. Frames keep flowing from the engine
-//!   and are dropped here; the engine's framebuffer stays current, so the
-//!   next attach starts from a full repaint, not a replay.
+//! - **Detach**: the WebSocket went away. Frames keep flowing from a live
+//!   engine and are dropped here during a short reattach grace period. If no
+//!   browser returns, the session layer drops the engine input channel.
 //!
 //! One slot, permanently: takeover replaces the attached browser, never adds
 //! one (see the tenet in docs/architecture.md).
@@ -60,6 +60,11 @@ use crate::{rdp, rxa, vnc};
 /// Capacity of the engine→client frame channels. Bounded so a slow browser
 /// link backpressures the engine instead of buffering unboundedly.
 const FRAME_BUFFER: usize = 64;
+
+/// How long an engine remains available for a browser to reattach after its
+/// WebSocket disappears. Applies equally to RDP, VNC, and RXA.
+pub const REATTACH_GRACE_PERIOD: std::time::Duration =
+    std::time::Duration::from_secs(60);
 
 /// What an attached WebSocket receives from the session.
 #[derive(Debug)]
@@ -137,13 +142,26 @@ struct State {
     /// The selected target: `None` is the picker state, `Some` is a live (or
     /// just-ended) desktop. Slot state, so a takeover inherits it.
     selected: Option<TargetConfig>,
-    /// The running engine, if any. Survives detach; cleared on disconnect or
-    /// when it dies.
+    /// The running engine, if any. Remains available after detach until the
+    /// reattach grace expires, a heartbeat expires, or an explicit disconnect.
     engine: Option<EngineSlot>,
     /// The attached WebSocket, if any.
     client: Option<ClientSlot>,
+    /// Changes whenever the browser attachment changes. Detached-engine timers
+    /// capture this value so a timer from an earlier detach cannot expire a
+    /// session that reattached and later detached again.
+    attachment_epoch: u64,
     next_attach_id: u64,
     next_generation: u64,
+}
+
+impl State {
+    fn bump_epoch_for_detach(&mut self) -> Option<(u64, u64)> {
+        self.attachment_epoch = self.attachment_epoch.wrapping_add(1);
+        self.engine
+            .as_ref()
+            .map(|engine| (engine.generation, self.attachment_epoch))
+    }
 }
 
 /// The single session slot: owns the engine lifecycle and routes its frames
@@ -170,12 +188,26 @@ impl SessionManager {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_spawner(
+        targets: Vec<TargetConfig>,
+        spawn_engine: impl Fn(
+            TargetConfig,
+            mpsc::UnboundedReceiver<ClientMsg>,
+            mpsc::Sender<ServerMsg>,
+        ) + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::with_spawner(targets, Box::new(spawn_engine))
+    }
+
     /// Claim the session slot, returning the new token: a live attachment
     /// blocks the claim unless `force` (takeover) or `token` is the current
     /// claim (the same browser reclaiming after a drop). Both
     /// evict the previous WebSocket; the engine keeps running either way.
-    pub fn claim(&self, force: bool, token: Option<&str>) -> Result<String, SessionBusy> {
-        let (id, evicted) = {
+    pub fn claim(self: &Arc<Self>, force: bool, token: Option<&str>) -> Result<String, SessionBusy> {
+        let (id, evicted, expiry) = {
             let mut st = self.state.lock().unwrap();
             let owns = token.is_some() && st.claim.as_deref() == token;
             if st.client.is_some() && !force && !owns {
@@ -183,7 +215,13 @@ impl SessionManager {
             }
             let id = Uuid::new_v4().to_string();
             st.claim = Some(id.clone());
-            (id, st.client.take())
+            let evicted = st.client.take();
+            let expiry = if evicted.is_some() {
+                st.bump_epoch_for_detach()
+            } else {
+                None
+            };
+            (id, evicted, expiry)
         };
         if let Some(client) = evicted {
             info!("session: evicting the attached browser (slot claimed anew)");
@@ -193,6 +231,9 @@ impl SessionManager {
             tokio::spawn(async move {
                 let _ = client.event_tx.send(AttachEvent::Evicted).await;
             });
+        }
+        if let Some((generation, attachment_epoch)) = expiry {
+            self.schedule_detached_engine_expiry(generation, attachment_epoch);
         }
         Ok(id)
     }
@@ -218,6 +259,7 @@ impl SessionManager {
         let (event_tx, events) = mpsc::channel(FRAME_BUFFER);
         st.next_attach_id += 1;
         let id = st.next_attach_id;
+        st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
 
         // Tell the freshly attached browser which post-login state it is in. The
         // channel is empty, so try_send always lands.
@@ -350,16 +392,69 @@ impl SessionManager {
         }
     }
 
-    /// The WebSocket for attachment `id` went away. The engine keeps running
-    /// (detached); its frames are dropped until the next attach.
-    pub fn detach(&self, id: u64) {
-        let mut st = self.state.lock().unwrap();
-        if st.client.as_ref().is_some_and(|c| c.attach_id == id) {
-            st.client = None;
-            if st.engine.is_some() {
-                info!("session: browser detached; engine keeps running");
+    /// The WebSocket for attachment `id` went away. The engine remains
+    /// available during [`REATTACH_GRACE_PERIOD`]; frames emitted while
+    /// detached are dropped. A reattach invalidates this detach's timer.
+    pub fn detach(self: &Arc<Self>, id: u64) {
+        let expiry = {
+            let mut st = self.state.lock().unwrap();
+            if !st.client.as_ref().is_some_and(|c| c.attach_id == id) {
+                return;
             }
+            st.client = None;
+            st.bump_epoch_for_detach()
+        };
+        if let Some((generation, attachment_epoch)) = expiry {
+            info!(
+                "session: browser detached; engine available for {}s reattach grace",
+                REATTACH_GRACE_PERIOD.as_secs()
+            );
+            self.schedule_detached_engine_expiry(generation, attachment_epoch);
         }
+    }
+
+    /// End the current engine immediately when the WebSocket heartbeat expires.
+    /// Unlike an orderly close, the heartbeat timeout has already consumed the
+    /// reattach grace period while waiting for a pong.
+    pub fn expire_attachment(&self, id: u64) {
+        let mut st = self.state.lock().unwrap();
+        if !st.client.as_ref().is_some_and(|c| c.attach_id == id) {
+            return;
+        }
+        st.client = None;
+        st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
+        let had_engine = st.engine.take().is_some();
+        st.selected = None;
+        if had_engine {
+            info!("session: browser heartbeat expired; engine stopped");
+        }
+    }
+
+    fn schedule_detached_engine_expiry(
+        self: &Arc<Self>,
+        generation: u64,
+        attachment_epoch: u64,
+    ) {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(REATTACH_GRACE_PERIOD).await;
+            let expired = {
+                let mut st = manager.state.lock().unwrap();
+                if st.client.is_none()
+                    && st.attachment_epoch == attachment_epoch
+                    && st.engine.as_ref().is_some_and(|engine| engine.generation == generation)
+                {
+                    st.engine = None;
+                    st.selected = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if expired {
+                info!("session: reattach grace expired; engine stopped");
+            }
+        });
     }
 
     /// Forward one engine's frames to whichever browser is attached, dropping
@@ -488,6 +583,7 @@ mod tests {
             // carry the target's protocol and resize flag verbatim.
             fake_target_with("rdp-resize", Protocol::Rdp, true),
             fake_target_with("vnc-resize", Protocol::Vnc, true),
+            fake_target_with("rxa", Protocol::Rxa, false),
         ];
         (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
@@ -662,6 +758,71 @@ mod tests {
             recv(&mut att.events).await,
             AttachEvent::Msg(ServerMsg::Resize { w: 30, h: 40 })
         ));
+    }
+
+    #[tokio::test]
+    async fn detached_engine_expires_after_the_grace_period_for_every_protocol() {
+        tokio::time::pause();
+        for (target, protocol, resize) in [
+            ("rdp-resize", "rdp", true),
+            ("vnc-resize", "vnc", true),
+            ("rxa", "rxa", false),
+        ] {
+            let (mgr, hooks) = manager_with_fake_engine();
+            let token = mgr.claim(false, None).unwrap();
+            let mut att = mgr.attach(&token).unwrap();
+            expect_picker(&mut att.events).await;
+            mgr.connect(att.id, target).unwrap();
+            expect_connected_meta(&mut att.events, target, protocol, resize).await;
+            let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+
+            mgr.detach(att.id);
+            tokio::task::yield_now().await;
+            tokio::time::advance(REATTACH_GRACE_PERIOD - Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            assert!(!input_rx.is_closed(), "{protocol} expired before the grace period");
+
+            tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+            assert!(input_rx.is_closed(), "{protocol} survived the grace period");
+        }
+    }
+
+    #[tokio::test]
+    async fn reattach_invalidates_the_previous_detach_timer() {
+        tokio::time::pause();
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (mut input_rx, _frame_tx) = hooks.try_recv().unwrap();
+
+        mgr.detach(att.id);
+        tokio::task::yield_now().await;
+        tokio::time::advance(REATTACH_GRACE_PERIOD / 2).await;
+        let mut att = mgr.attach(&token).unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
+
+        tokio::time::advance(REATTACH_GRACE_PERIOD).await;
+        tokio::task::yield_now().await;
+        assert!(!input_rx.is_closed(), "stale detach timer stopped the reattached engine");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_expiry_stops_the_engine_immediately() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+
+        mgr.expire_attachment(att.id);
+        assert!(input_rx.is_closed(), "heartbeat expiry left the engine running");
     }
 
     #[tokio::test]

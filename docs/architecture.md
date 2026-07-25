@@ -61,11 +61,14 @@ separately records which browser owns the desktop and which target is active.
    picker; an active slot reports the connected target and requests a repaint.
 4. `connect` starts the selected engine. `disconnect` stops it and returns to
    the picker.
-5. Losing the WebSocket detaches the browser but leaves the engine alive.
-   Frames are discarded until reattachment.
+5. Losing the WebSocket detaches the browser. The RDP, VNC, or `rxa` engine
+   remains available for a 60-second reattach grace period and discards frames
+   while detached. If no browser returns, the engine stops and the slot returns
+   to the picker.
 
-A forced takeover closes the previous WebSocket but preserves the engine and
-selected target. If an engine ends, the slot returns to the picker.
+A forced takeover closes the previous WebSocket and preserves the engine and
+selected target when the new browser attaches within the same grace period. If
+an engine ends, the slot returns to the picker.
 
 Login tokens are stored in memory with a sliding expiry and delivered through
 an `HttpOnly`, `SameSite=Strict` cookie. Session and target endpoints, including
@@ -101,6 +104,14 @@ the extension; `rxa` ignores viewport size.
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine so a new canvas does not
 depend on updates seen by the previous browser.
+
+The gateway sends a WebSocket protocol ping every five seconds. Browsers answer
+with a protocol pong in their networking stack, so background-tab JavaScript
+timer throttling does not affect liveness. A connection with no pong for about
+60 seconds is expired and its engine stops immediately because the missing-pong
+wait has already consumed the reattach grace period. An orderly WebSocket close
+starts a fresh 60-second reattach window. These frames are transport-level and
+do not appear in the JSON browser protocol.
 
 ## Engines
 
@@ -142,6 +153,12 @@ repaint on recovery. Input generated while disconnected is discarded. Initial
 connection and authentication failures return to the picker instead of
 retrying indefinitely.
 
+RXA has a separate application ping/pong between the gateway and agent to detect
+a half-open agent TCP connection quickly and reconnect it. Browser lifetime
+remains owned by the shared session layer under the same rules as RDP and VNC.
+When that layer ends an RXA engine, it closes the agent connection, stops
+capture, and clears the agent's sharing status.
+
 See [`mac-agent-architecture.md`](mac-agent-architecture.md) for the agent,
 capture pipeline, protocol, and lifecycle.
 
@@ -179,5 +196,7 @@ rejected rather than silently accepted.
 Unit tests cover protocol, config, authentication, key mapping, and engine
 helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and
 protocol engines; RDP and VNC happy paths use containerized dummy servers, while
-`rxa` uses an in-process fake agent. Browser automation is intentionally not
-used.
+`rxa` uses an in-process fake agent, including an end-to-end check that closing
+the browser releases the agent connection. Session-manager tests verify the
+same detach deadline for all three protocols. Browser automation is
+intentionally not used.

@@ -127,10 +127,15 @@ cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
 For a remote Podman connection:
 
 ```sh
-CONTAINER_CONNECTION=linuxbox \
-REMOTEX_TEST_CONTAINER_HOST=host \
+CONTAINER_CONNECTION=workstation-wsl \
+REMOTEX_TEST_CONTAINER_HOST=10.22.34.32 \
 cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
 ```
+
+`CONTAINER_CONNECTION` is the Podman system connection name.
+`REMOTEX_TEST_CONTAINER_HOST` is the engine host's IP address or DNS name as
+reachable from the machine running the tests; an SSH config alias is not
+resolved for the tests' direct RDP and VNC connections.
 
 ## Build
 
