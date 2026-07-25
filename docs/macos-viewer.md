@@ -14,9 +14,13 @@ booleans such as `canResize` and `canClipboard`. Once a native key becomes the
 existing `{ type: "key", code, pressed, caps }` message, differences belong to
 the engine adapters and are tested as backend conformance.
 
-Every target declares `os = "windows"`, `"macos"`, or `"linux"`. That metadata
-travels with the generic connected-session status; it is not inferred from
-RDP, VNC, or RXA.
+Whether the remote is a Mac is discovered, not configured. Each engine settles
+it as it connects and sends `{"type":"remoteOs","macos":…}`: `rxa` is macOS by
+construction, `rdp` never is, and `vnc` reads it off the RFB handshake (Apple's
+Screen Sharing announces protocol revision 003.889 and offers Apple's security
+types). The viewer acts on that one bit and nothing else — a third-party VNC
+server on a Mac reads as not-macOS, which costs a keyboard convention, not
+correctness.
 
 ## Host bridge
 

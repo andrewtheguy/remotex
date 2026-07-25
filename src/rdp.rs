@@ -89,6 +89,14 @@ pub async fn run(
     {
         return; // browser already gone
     }
+    // No RDP server ships for macOS, so a Mac never answers here.
+    if frame_tx
+        .send(ServerMsg::RemoteOs { macos: false })
+        .await
+        .is_err()
+    {
+        return; // browser already gone
+    }
 
     if let Err(e) = active_loop(
         connection_result,
@@ -270,6 +278,10 @@ async fn active_loop(
                 if matches!(input, ClientMsg::Refresh) {
                     frame_tx
                         .send(ServerMsg::Resize { w: desktop.width, h: desktop.height })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                    frame_tx
+                        .send(ServerMsg::RemoteOs { macos: false })
                         .await
                         .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                     send_tiles(

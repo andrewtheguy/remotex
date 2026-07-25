@@ -69,10 +69,13 @@ export type ControlMsg =
       type: "connected";
       name: string;
       protocol: string;
-      os: "windows" | "macos" | "linux";
       resize: boolean;
       clipboard: boolean;
     }
+  // Whether the remote runs macOS, discovered by the engine as it connects.
+  // Only the native viewer acts on it, to decide whether a local Command
+  // shortcut stays Command or becomes remote Control.
+  | { type: "remoteOs"; macos: boolean }
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
   // an unprompted push when the remote's clipboard changed.
   | { type: "clipboard"; text: string }

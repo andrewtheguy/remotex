@@ -15,17 +15,14 @@ enum ViewerConnectionStatus: String {
     case takenOver
 }
 
-enum GuestOS: String {
-    case windows
-    case macos
-    case linux
-}
-
 struct ViewerSessionState: Equatable {
     var screen = ViewerScreen.checking
     var connectionStatus: ViewerConnectionStatus?
     var connectedTarget: String?
-    var guestOS: GuestOS?
+    /// Whether the remote runs macOS, as the gateway's engine discovered it.
+    /// Decides only whether a local Command shortcut stays Command or becomes
+    /// remote Control.
+    var remoteIsMac = false
     var canResize = false
     var canClipboard = false
     var canCaptureKeyboard = false

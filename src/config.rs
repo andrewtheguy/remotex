@@ -78,31 +78,6 @@ impl Protocol {
     }
 }
 
-/// Operating system running on the remote target.
-///
-/// This is deliberately independent from [`Protocol`]: VNC and RDP can both
-/// front more than one guest OS, while the native viewer needs the guest's
-/// shortcut convention to decide whether local Command shortcuts should become
-/// remote Control shortcuts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GuestOs {
-    Windows,
-    Macos,
-    Linux,
-}
-
-impl GuestOs {
-    /// The lowercase name used by the wire protocol and frontend.
-    pub fn name(self) -> &'static str {
-        match self {
-            GuestOs::Windows => "windows",
-            GuestOs::Macos => "macos",
-            GuestOs::Linux => "linux",
-        }
-    }
-}
-
 /// One `[[targets]]` profile: a remote machine plus its credentials.
 ///
 /// Credentials live here (server-side) and are used during the RDP handshake.
@@ -116,10 +91,6 @@ pub struct TargetConfig {
     /// Remote-desktop protocol: `"rdp"`, `"vnc"` or `"rxa"`. Required — each
     /// target must say what it speaks.
     pub protocol: Protocol,
-    /// Remote operating system: `"windows"`, `"macos"`, or `"linux"`.
-    /// Required because the transport protocol does not reliably identify the
-    /// guest and native shortcut translation must remain backend-agnostic.
-    pub os: GuestOs,
     /// Target host.
     pub host: String,
     /// Target port. Omitted (or 0) means the protocol's standard port
@@ -278,11 +249,6 @@ impl ConfigFile {
         // as a handshake rejection the first time someone picks the target.
         for target in &config.targets {
             if target.protocol == Protocol::Rxa {
-                anyhow::ensure!(
-                    target.os == GuestOs::Macos,
-                    "target {:?} uses protocol \"rxa\", so os must be \"macos\"",
-                    target.name
-                );
                 let psk = target.psk.trim();
                 anyhow::ensure!(
                     !psk.is_empty(),
@@ -429,7 +395,6 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
-            os = "windows"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -446,7 +411,6 @@ mod tests {
         let t = &config.targets[0];
         assert_eq!(t.name, "one");
         assert_eq!(t.protocol, Protocol::Rdp);
-        assert_eq!(t.os, GuestOs::Windows);
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
         assert_eq!((t.width, t.height), (1280, 800));
         assert_eq!(t.security, Security::Auto);
@@ -471,7 +435,6 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
-            os = "windows"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -498,7 +461,6 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
-            os = "windows"
             host = "10.0.0.2"
             port = 3390
             username = "Administrator"
@@ -511,7 +473,6 @@ mod tests {
             [[targets]]
             name = "other"
             protocol = "vnc"
-            os = "linux"
             host = "10.0.0.3"
             "#,
             site_passwd_line()
@@ -541,7 +502,6 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
-            os = "windows"
             host = "192.0.2.10"
         "#;
         let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
@@ -563,7 +523,6 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "rdp"
-            os = "windows"
             host = "192.0.2.10"
         "#;
         let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
@@ -582,12 +541,10 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
-            os = "windows"
             host = "h1"
             [[targets]]
             name = "a"
             protocol = "rdp"
-            os = "windows"
             host = "h2"
             "#,
         )
@@ -603,7 +560,6 @@ mod tests {
             [[targets]]
             name = "a"
             protocol = "rdp"
-            os = "windows"
             host = "h"
             passwd = "oops"
             "#,
@@ -625,7 +581,6 @@ mod tests {
             r#"
             [[targets]]
             name = "a"
-            os = "windows"
             host = "h"
             "#,
         )
@@ -641,7 +596,6 @@ mod tests {
             name = "a"
             host = "h"
             protocol = "telnet"
-            os = "linux"
             "#,
         )
         .unwrap_err();
@@ -650,43 +604,22 @@ mod tests {
         assert!(msg.contains("rdp") && msg.contains("vnc"), "{msg}");
     }
 
+    // Nothing in a target says what the remote runs. The engines discover it
+    // (src/vnc.rs asks the RFB greeting; rxa is macOS by construction), so a
+    // config that tried to declare it is a typo, not a supported knob.
     #[test]
-    fn missing_or_unknown_guest_os_is_rejected() {
+    fn a_target_cannot_declare_the_remote_os() {
         let err = ConfigFile::parse(
             r#"
             [[targets]]
             name = "a"
             protocol = "vnc"
+            os = "windows"
             host = "h"
             "#,
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("os"), "{err:#}");
-
-        let err = ConfigFile::parse(
-            r#"
-            [[targets]]
-            name = "a"
-            protocol = "vnc"
-            os = "android"
-            host = "h"
-            "#,
-        )
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("windows") && msg.contains("macos") && msg.contains("linux"),
-            "{msg}"
-        );
-    }
-
-    #[test]
-    fn rxa_target_requires_macos_guest_os() {
-        let psk = rxa_proto::psk::generate();
-        let toml = rxa_toml(&format!("psk = \"{psk}\""))
-            .replace("os = \"macos\"", "os = \"windows\"");
-        let err = ConfigFile::parse(&toml).unwrap_err();
-        assert!(format!("{err:#}").contains("macos"), "{err:#}");
     }
 
     #[test]
@@ -699,7 +632,6 @@ mod tests {
             [[targets]]
             name = "mac"
             protocol = "vnc"
-            os = "macos"
             host = "10.0.0.4"
             password = "hunter2"
             resize = true
@@ -722,7 +654,6 @@ mod tests {
             [[targets]]
             name = "mac"
             protocol = "vnc"
-            os = "macos"
             host = "10.0.0.4"
             port = 5901
             "#,
@@ -745,7 +676,6 @@ mod tests {
             [[targets]]
             name = "mac"
             protocol = "rxa"
-            os = "macos"
             host = "mac.local"
             {extra}
             "#,
@@ -806,7 +736,6 @@ mod tests {
             [[targets]]
             name = "one"
             protocol = "vnc"
-            os = "linux"
             host = "h"
             psk = "{psk}"
             "#
@@ -846,7 +775,6 @@ mod tests {
             [[targets]]
             name = "box"
             protocol = "vnc"
-            os = "linux"
             host = "10.0.0.4"
             clipboard = true
             "#,
@@ -867,7 +795,6 @@ mod tests {
             [[targets]]
             name = "win"
             protocol = "rdp"
-            os = "windows"
             host = "10.0.0.5"
             clipboard = true
             "#,

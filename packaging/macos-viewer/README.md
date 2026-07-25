@@ -18,8 +18,9 @@ The viewer and gateway frontend must have exactly the same product and bridge
 versions. They are released together intentionally; compatibility shims are not
 maintained.
 
-Set `os = "windows"`, `"macos"`, or `"linux"` on every gateway target. The
-viewer uses that explicit metadata instead of guessing from RDP, VNC, or RXA.
+Nothing to configure per target: the gateway's engine discovers whether the
+remote is a Mac while connecting and tells the frontend, which passes the one
+bit to the viewer.
 
 ## Build
 

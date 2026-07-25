@@ -233,6 +233,16 @@ async fn pump(
     // exists for the desktop size.
     let mut modes: Vec<(u16, u16)> = Vec::new();
 
+    // Nothing to discover: the agent only builds for macOS, so reaching one at
+    // all settles it.
+    if frame_tx
+        .send(ServerMsg::RemoteOs { macos: true })
+        .await
+        .is_err()
+    {
+        return Ok(()); // browser link already gone
+    }
+
     // On the initial connect, and afterwards only when the Mac came back a
     // different size. Unchanged, the browser keeps the canvas it already has and
     // the reconnect stays invisible beyond a pause in frames.
@@ -368,10 +378,14 @@ async fn pump(
                 let Some(msg) = input else {
                     return Ok(()); // the session layer tore this engine down
                 };
-                // A reattaching browser has a blank canvas and an empty menu:
-                // re-announce both before asking the agent to repaint.
+                // A reattaching browser has a blank canvas, an empty menu and
+                // no idea what the remote runs: re-announce all three before
+                // asking the agent to repaint.
                 if matches!(msg, ClientMsg::Refresh) {
                     if frame_tx.send(ServerMsg::Resize { w: width, h: height }).await.is_err() {
+                        return Ok(());
+                    }
+                    if frame_tx.send(ServerMsg::RemoteOs { macos: true }).await.is_err() {
                         return Ok(());
                     }
                     if !modes.is_empty()

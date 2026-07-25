@@ -45,7 +45,7 @@ export default function App() {
         screen: authState === "checking" ? "checking" : "login",
         connectionStatus: null,
         connectedTarget: null,
-        guestOS: null,
+        remoteIsMac: false,
         canResize: false,
         canClipboard: false,
         canCaptureKeyboard: false,

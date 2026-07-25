@@ -111,7 +111,6 @@ site_passwd = "admin:$2b$..."
 [[targets]]
 name = "workstation"
 protocol = "rdp" # rdp, vnc, or rxa
-os = "windows"   # windows, macos, or linux
 host = "192.0.2.10"
 username = "Administrator"
 password = "change-me"

@@ -238,7 +238,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message as ClientFrame;
 
     use super::*;
-    use crate::config::{GuestOs, Protocol, Security, TargetConfig};
+    use crate::config::{Protocol, Security, TargetConfig};
     use crate::protocol::ServerMsg;
     use crate::session::SessionManager;
 
@@ -247,7 +247,6 @@ mod tests {
         let target = TargetConfig {
             name: "fake".to_owned(),
             protocol: Protocol::Vnc,
-            os: GuestOs::Linux,
             host: "127.0.0.1".to_owned(),
             port: 1,
             username: String::new(),

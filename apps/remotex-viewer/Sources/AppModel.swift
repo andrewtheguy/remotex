@@ -147,7 +147,7 @@ final class AppModel {
 
     func apply(session next: ViewerSessionState) {
         let wasCapturing = session.canCaptureKeyboard
-        let guestChanged = session.guestOS != next.guestOS
+        let guestChanged = session.remoteIsMac != next.remoteIsMac
         if wasCapturing && (!next.canCaptureKeyboard || guestChanged) {
             releaseNativeKeys()
         }

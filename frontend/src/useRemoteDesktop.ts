@@ -332,9 +332,10 @@ export function useRemoteDesktop(
   // the last engine error to show against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
   const [connectedTarget, setConnectedTarget] = useState<string | null>(null);
-  const [guestOS, setGuestOS] = useState<"windows" | "macos" | "linux" | null>(
-    null,
-  );
+  // Discovered by the engine at connect (`remoteOs`), not configured. False
+  // until it says otherwise, which is the right default for every remote the
+  // native viewer will not be translating Command shortcuts for.
+  const [remoteIsMac, setRemoteIsMac] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
@@ -716,8 +717,10 @@ export function useRemoteDesktop(
           setConnectError(null);
           setPendingTarget(null);
           setConnectedTarget(msg.name);
-          setGuestOS(msg.os);
           setMode("desktop");
+          // Cleared for the new session; the engine announces it as it
+          // connects, and on a reattach the engine has already sent it.
+          setRemoteIsMac(false);
           // RDP resizes only on request (heavy reactivation) and rxa only to a
           // size off the Mac's own list; VNC follows the viewport
           // automatically. In manual mode the report below is suppressed, so
@@ -762,6 +765,9 @@ export function useRemoteDesktop(
           mirrorRemoteClipboard(text);
           break;
         }
+        case "remoteOs":
+          setRemoteIsMac(msg.macos);
+          break;
         case "displayModes":
           // The remote's resolution menu, replaced wholesale: the list is
           // regenerated on the Mac whenever its display is reconfigured, so
@@ -774,7 +780,7 @@ export function useRemoteDesktop(
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setConnectedTarget(null);
-          setGuestOS(null);
+          setRemoteIsMac(false);
           setMode("picker");
           manualResizeRef.current = false;
           setCanResize(false);
@@ -1219,7 +1225,7 @@ export function useRemoteDesktop(
     status,
     mode,
     connectedTarget,
-    guestOS,
+    remoteIsMac,
     connectError,
     pendingTarget,
     size,

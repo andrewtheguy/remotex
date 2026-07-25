@@ -8,7 +8,7 @@ mod common;
 
 use std::net::SocketAddr;
 
-use remotex::config::{AppConfig, GuestOs, Protocol, Security, TargetConfig};
+use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
 use remotex::server;
 use tokio::net::TcpListener;
 
@@ -24,7 +24,6 @@ async fn spawn_app() -> SocketAddr {
         targets: vec![TargetConfig {
             name: "unreachable".to_owned(),
             protocol: Protocol::Vnc,
-            os: GuestOs::Linux,
             host: "127.0.0.1".to_owned(),
             port: 9, // discard; never connected
             username: String::new(),

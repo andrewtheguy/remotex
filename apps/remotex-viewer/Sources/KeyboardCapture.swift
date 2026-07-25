@@ -85,11 +85,11 @@ final class KeyboardCapture {
         }
 
         let mapCommandToControl =
-            model.macOSKeyboardOverridesEnabled && model.session.guestOS != .macos
+            model.macOSKeyboardOverridesEnabled && !model.session.remoteIsMac
         if event.type == .keyDown,
            KeyboardTranslator.domCode(for: event.keyCode) == "KeyV",
            event.modifierFlags.contains(.command),
-           mapCommandToControl || model.session.guestOS == .macos
+           mapCommandToControl || model.session.remoteIsMac
         {
             model.clipboard.pushLocalClipboard(force: true)
         }

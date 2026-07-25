@@ -109,6 +109,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
     private static func decodeState(_ value: [String: Any]) -> ViewerSessionState? {
         guard let screenName = value["screen"] as? String,
               let screen = ViewerScreen(rawValue: screenName),
+              let remoteIsMac = value["remoteIsMac"] as? Bool,
               let canResize = value["canResize"] as? Bool,
               let canClipboard = value["canClipboard"] as? Bool,
               let canCaptureKeyboard = value["canCaptureKeyboard"] as? Bool
@@ -117,16 +118,11 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
         }
         let status = (value["connectionStatus"] as? String)
             .flatMap(ViewerConnectionStatus.init(rawValue:))
-        let guestOS = (value["guestOS"] as? String)
-            .flatMap(GuestOS.init(rawValue:))
-        guard screen != .desktop || guestOS != nil else {
-            return nil
-        }
         return ViewerSessionState(
             screen: screen,
             connectionStatus: status,
             connectedTarget: value["connectedTarget"] as? String,
-            guestOS: guestOS,
+            remoteIsMac: remoteIsMac,
             canResize: canResize,
             canClipboard: canClipboard,
             canCaptureKeyboard: canCaptureKeyboard

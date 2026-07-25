@@ -154,7 +154,7 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    let (reader, writer, width, height) = match connect(&config).await {
+    let connected = match connect(&config).await {
         Ok(v) => v,
         Err(e) => {
             warn!("vnc: connect failed: {e:#}");
@@ -167,7 +167,8 @@ pub async fn run(
         }
     };
 
-    info!("vnc: connected, desktop {width}x{height}");
+    let Connected { reader, writer, width, height, macos } = connected;
+    info!("vnc: connected, desktop {width}x{height} (macos={macos})");
     if frame_tx
         .send(ServerMsg::Resize {
             w: width,
@@ -178,13 +179,15 @@ pub async fn run(
     {
         return; // browser already gone
     }
+    if frame_tx.send(ServerMsg::RemoteOs { macos }).await.is_err() {
+        return; // browser already gone
+    }
 
     if let Err(e) = active_loop(
         reader,
         writer,
         (width, height),
-        config.resize,
-        config.clipboard,
+        Flags { macos, resize: config.resize, clipboard: config.clipboard },
         input_rx,
         frame_tx.clone(),
     )
@@ -200,12 +203,30 @@ pub async fn run(
     info!("vnc: session terminated");
 }
 
+/// The per-session switches [`active_loop`] needs: one discovered from the
+/// handshake, two opted into by the target profile.
+struct Flags {
+    macos: bool,
+    resize: bool,
+    clipboard: bool,
+}
+
+/// An established, handshaken RFB link, plus what the handshake revealed about
+/// the far side. Mirrors [`crate::rxa::Session`] rather than returning a tuple
+/// nobody can read at the call site.
+struct Connected {
+    reader: Reader,
+    writer: OwnedWriteHalf,
+    width: u16,
+    height: u16,
+    /// Whether the server is macOS Screen Sharing — see [`is_macos_server`].
+    macos: bool,
+}
+
 /// TCP connect → RFB version/security handshake → ClientInit/ServerInit →
 /// force our pixel format and the encoding set (raw + the resize
 /// pseudo-encodings).
-async fn connect(
-    config: &TargetConfig,
-) -> anyhow::Result<(Reader, OwnedWriteHalf, u16, u16)> {
+async fn connect(config: &TargetConfig) -> anyhow::Result<Connected> {
     let dest = host_port(&config.host, config.port);
     let stream = TcpStream::connect(&dest)
         .await
@@ -237,6 +258,7 @@ async fn connect(
     }
     let mut types = vec![0u8; usize::from(type_count)];
     reader.read_exact(&mut types).await?;
+    let macos = is_macos_server(minor, &types);
 
     let chosen = if !config.password.is_empty() && types.contains(&SECURITY_VNC_AUTH) {
         SECURITY_VNC_AUTH
@@ -300,7 +322,13 @@ async fn connect(
     }
     writer.write_all(&set_encodings(&encodings)).await?;
 
-    Ok((reader, writer, width, height))
+    Ok(Connected {
+        reader,
+        writer,
+        width,
+        height,
+        macos,
+    })
 }
 
 /// Drive the active session: framebuffer updates out, browser input in.
@@ -308,11 +336,11 @@ async fn active_loop(
     reader: Reader,
     writer: OwnedWriteHalf,
     size: (u16, u16),
-    resize: bool,
-    clipboard_enabled: bool,
+    flags: Flags,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
+    let Flags { macos, resize, clipboard: clipboard_enabled } = flags;
     // The writer is shared: the read loop sends the next update request after
     // each update, the input side sends pointer/key/resize messages.
     let writer: SharedWriter = Arc::new(Mutex::new(writer));
@@ -378,6 +406,9 @@ async fn active_loop(
                         .await
                         .is_err()
                     {
+                        break Err(anyhow::anyhow!("frame channel closed"));
+                    }
+                    if frame_tx.send(ServerMsg::RemoteOs { macos }).await.is_err() {
                         break Err(anyhow::anyhow!("frame channel closed"));
                     }
                     // The pointer shape is not part of a repaint — the server
@@ -1127,6 +1158,19 @@ fn parse_version(greeting: &[u8; 12]) -> Option<(u32, u32)> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
+/// Whether the far end is macOS Screen Sharing, from what it said during the
+/// handshake. Apple's server announces its own protocol revision, RFB 003.889,
+/// and offers Apple's security types (30 = ARD, 35 = Mac authentication)
+/// alongside the standard ones — no other server does either.
+///
+/// A third-party VNC server running on a Mac looks like any other server here
+/// and is reported as not-macOS. What that costs is the native viewer's
+/// keyboard convention, not correctness, which is why guessing from a desktop
+/// name is not worth it.
+fn is_macos_server(minor: u32, security_types: &[u8]) -> bool {
+    minor == 889 || security_types.iter().any(|t| matches!(t, 30 | 35))
+}
+
 /// Repack BGRX pixels (our forced format on the wire) into packed RGB888.
 fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(bgrx.len() / BPP * 3);
@@ -1234,6 +1278,22 @@ mod tests {
         assert_eq!(parse_version(b"RFB 004.001\n"), Some((4, 1))); // RealVNC
         assert_eq!(parse_version(b"HTTP/1.1 200"), None);
         assert_eq!(parse_version(b"RFB 03.008\n\n"), None);
+    }
+
+    #[test]
+    fn a_mac_is_recognized_from_its_handshake() {
+        // macOS Screen Sharing, exactly as macOS 26 answered on the test VM:
+        // Apple's revision, and Apple's security types around the standard
+        // one. Either signal alone is enough.
+        assert!(is_macos_server(889, &[30, 33, 36, 2, 35]));
+        assert!(is_macos_server(889, &[2]));
+        assert!(is_macos_server(8, &[30, 2]));
+        assert!(is_macos_server(8, &[35]));
+
+        // Everyone else — the first line is what the test Linux box answered.
+        assert!(!is_macos_server(8, &[2]));
+        assert!(!is_macos_server(8, &[1, 2, 16, 18]));
+        assert!(!is_macos_server(1, &[1]));
     }
 
     #[test]
