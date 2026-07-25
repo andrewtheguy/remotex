@@ -60,6 +60,10 @@ bcrypt = "0.19"
 rpassword = "7"
 # Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
 des = "0.8"
+# zlib for RFB's Extended Clipboard, whose Provide payload is deflated
+# (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no
+# new dependency.
+flate2 = "1"
 
 # The wire protocol shared with the macOS agent (src/rxa.rs, crates/rxa-agent).
 # In-repo so the two halves cannot drift — see docs/mac-agent-architecture.md.

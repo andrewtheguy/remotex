@@ -2,14 +2,6 @@
 
 ## Planned
 
-### Unicode clipboard for VNC
-
-VNC clipboard text is latin-1, so anything outside it becomes `?` on the way to
-the remote. RFB's answer is the Extended Clipboard pseudo-encoding
-(`0xc0a1e5ce`): UTF-8, zlib-compressed, behind a capability handshake and a
-lazy Notify/Request/Provide exchange. Worth doing only if the `?` turns out to
-matter in practice — `rxa` targets already carry full UTF-8.
-
 ## Deferred pending measurements
 
 ### Retina performance for `rxa`

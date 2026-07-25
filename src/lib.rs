@@ -16,4 +16,5 @@ pub mod rxa;
 pub mod server;
 pub mod session;
 pub mod vnc;
+pub mod vnc_clipboard;
 pub mod ws;

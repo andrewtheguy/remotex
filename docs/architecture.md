@@ -166,10 +166,17 @@ implemented.
 
 With `clipboard = true`, `ServerCutText` is forwarded to the browser as it
 arrives and also fills a per-session buffer that answers a later fetch, and a
-browser send becomes `ClientCutText`. The text is
-latin-1, as the baseline protocol defines it: characters outside latin-1 become
-`?` on the way out. The Extended Clipboard pseudo-encoding, which would carry
-UTF-8, is not negotiated.
+browser send becomes `ClientCutText`.
+
+Two encodings are possible, and which one applies is the server's choice. The
+Extended Clipboard pseudo-encoding (`0xc0a1e5ce`) carries UTF-8 and is
+advertised whenever the target opts in; a server that supports it answers with
+a capability message, and from then on text moves through the lazy
+notify/request/provide exchange, deflated, with CRLF line endings converted at
+the boundary. TigerVNC does this. A server that stays silent — TightVNC, for
+one — leaves the baseline latin-1 cut text in use, where anything outside
+latin-1 becomes `?` on the way out and cannot be represented on the way in.
+That limit is the server's, not the gateway's.
 
 Pointer button state is tracked across RFB pointer events. Keyboard input maps
 DOM codes to X11 keysyms using live Shift and browser-reported Caps Lock state.
