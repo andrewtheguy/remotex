@@ -59,11 +59,12 @@ halves, built from the same commit and the same version:
 | `remotex-<version>-linux-x86_64.tar.gz` | the gateway — what the installer above fetches |
 | `remotex-<version>-linux-arm64.tar.gz` | " |
 | `remotex-<version>-macos-arm64.tar.gz` | " |
-| `remotex-agent-<version>-macos-arm64-unsigned.zip` | the **Mac agent**, for a Mac you want to *connect to* |
+| `remotex-agent-<version>-macos-arm64-unsigned.dmg` | the **Mac agent**, for a Mac you want to *connect to* |
 
 The gateway also ships as a container image (below). The agent is only needed on
-a Mac you intend to reach with `protocol = "rxa"`; it is ad-hoc signed, so
-unzipping it needs one `xattr` command — see
+a Mac you intend to reach with `protocol = "rxa"`: open the image, drag the app
+to Applications, and — because it is ad-hoc signed rather than notarized — clear
+its quarantine flag with one `xattr` command. See
 [`packaging/macos/README.md`](packaging/macos/README.md).
 
 ## Container image (Linux amd64/arm64)

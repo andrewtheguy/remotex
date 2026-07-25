@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, sign and optionally notarize remotex-agent.app.
+# Build, sign and optionally notarize remotex-agent.app, and wrap it in a .dmg.
 #
 # Produces dist/remotex-agent.app — a background-only, self-registering bundle
 # wrapping the `remotex-agent` binary. Two reasons it is a bundle at all:
@@ -10,12 +10,27 @@
 #     when the agent registers itself. There is no install script: drag the
 #     bundle to /Applications and open it once.
 #
+# It then produces dist/remotex-agent-<version>-macos-arm64[-unsigned].dmg, which
+# is what a user is meant to get: a disk image dragged to /Applications is the
+# standard way to install a Mac app, and it is the more robust one here.
+#
+# The concrete part of "more robust" is that an image is a filesystem, so the
+# bundle inside is the one that was signed, with no archive round-trip in the
+# middle. An archive can damage a bundle: `ditto -c -k` *without*
+# `--sequesterRsrc`, unpacked with plain `unzip`, leaves AppleDouble `._*` files
+# inside the bundle, which the signature does not seal and
+# `codesign --verify --strict` then rejects. An image cannot do that, and it
+# carries an /Applications symlink so the drag has somewhere to go.
+#
 # Usage:
 #   packaging/macos/build-agent-app.sh [options]
 #
 #   --debug                  Build the debug profile instead of release.
-#   --notary-profile NAME    Notarize and staple after signing. NAME is a
-#                            notarytool keychain profile created once with:
+#   --no-dmg                 Stop after the .app. For a local build being run
+#                            straight out of dist/.
+#   --notary-profile NAME    Notarize and staple after signing — the .app and the
+#                            .dmg both. NAME is a notarytool keychain profile
+#                            created once with:
 #                              xcrun notarytool store-credentials NAME \
 #                                --key AuthKey_XXXX.p8 --key-id <ID> \
 #                                --issuer <UUID>
@@ -53,11 +68,13 @@ cd "$repo_root"
 profile=release
 cargo_flags=(--release)
 notary_profile=""
+make_dmg=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --debug) profile=debug; cargo_flags=(); shift ;;
+    --no-dmg) make_dmg=0; shift ;;
     --notary-profile) notary_profile="${2:?--notary-profile needs a name}"; shift 2 ;;
-    -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,65p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unexpected argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -206,13 +223,80 @@ if [ -n "$notary_profile" ]; then
   spctl --assess --type execute --verbose=2 "$app" || true
 fi
 
+# ── Wrap it in a disk image ─────────────────────────────────────────────────
+# The delivered artifact. See the header for why an image rather than an archive.
+dmg=""
+if [ "$make_dmg" = 1 ]; then
+  suffix=""
+  # The filename tells the truth about what is inside it. An ad-hoc bundle runs
+  # on this Mac and nowhere else without a quarantine dance, and a user who
+  # downloads one should be able to see that before they mount it.
+  [ "$identity" = "-" ] && suffix="-unsigned"
+  [ "$profile" = debug ] && suffix="${suffix}-debug"
+  dmg="dist/remotex-agent-${version}-macos-arm64${suffix}.dmg"
+
+  echo ">> building $dmg"
+  staging="dist/dmg-root"
+  rm -rf "$staging" "$dmg"
+  mkdir -p "$staging"
+  # ditto, not cp: it is the copy that reproduces a bundle exactly — extended
+  # attributes, symlinks, permissions — and this one is under the signature.
+  /usr/bin/ditto "$app" "$staging/remotex-agent.app"
+  # Where the drag goes, so installing is one window and one gesture.
+  ln -s /Applications "$staging/Applications"
+  # UDZO: compressed and read-only, the ordinary format for a distributed image.
+  # It does not stop anyone launching the agent straight off the mounted image;
+  # what makes that a bad idea is the login item, which records the bundle it was
+  # registered from — and a mount point does not survive an eject (the stale-path
+  # failure is written up in packaging/macos/README.md). Hence "drag it first".
+  #
+  # No background picture and no arranged icon positions: setting those means
+  # driving Finder over AppleScript, which needs a GUI session and would take
+  # this script out of CI. A plain image with the app and the symlink in it is
+  # the install every Mac user already knows.
+  hdiutil create -volname "remotex-agent $version" -srcfolder "$staging" \
+    -fs HFS+ -format UDZO -ov -quiet "$dmg"
+  rm -rf "$staging"
+
+  # Signed for the same reason the bundle is: the image is what gets downloaded,
+  # and Gatekeeper checks it first. Ad-hoc adds nothing here, so it is skipped.
+  if [ "$identity" != "-" ]; then
+    echo ">> signing the disk image"
+    codesign --force --sign "$identity" "${timestamp_flag[@]}" "$dmg"
+  fi
+
+  # Notarized separately from the bundle, and both are worth doing: the stapled
+  # ticket on the image is what Gatekeeper reads when the download is opened,
+  # and the one inside the bundle is what validates the copy in /Applications
+  # afterwards, offline.
+  if [ -n "$notary_profile" ]; then
+    echo ">> notarizing the disk image"
+    xcrun notarytool submit "$dmg" --keychain-profile "$notary_profile" --wait
+    xcrun stapler staple "$dmg"
+    xcrun stapler validate "$dmg"
+  fi
+fi
+
+if [ -n "$dmg" ]; then
+  wrote_dmg=">> wrote $dmg"
+  install_note="To install, open the image and drag remotex-agent.app onto Applications:
+    open $dmg
+
+Then open it once from /Applications, and eject the image. Opening it straight off
+the image would register a login item naming a mount point, which is gone the
+moment you eject."
+else
+  wrote_dmg=""
+  install_note="Built without an image (--no-dmg). To install this one by hand:
+    cp -R $app /Applications/
+    open /Applications/remotex-agent.app"
+fi
+
 cat <<NOTES
 
 >> wrote $app
-
-To install:
-    cp -R $app /Applications/
-    open /Applications/remotex-agent.app
+${wrote_dmg}
+${install_note}
 
 That first open writes the config with a fresh pre-shared key and registers the
 agent in System Settings > General > Login Items.

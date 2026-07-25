@@ -9,24 +9,36 @@ Requires **macOS 14 or later**.
 
 ## Install
 
-Take `remotex-agent-<version>-macos-arm64-unsigned.zip` from the
+Take `remotex-agent-<version>-macos-arm64-unsigned.dmg` from the
 [latest release](https://github.com/andrewtheguy/remotex/releases) — it ships
 alongside the gateway tarballs, built from the same commit — then:
 
-```sh
-unzip remotex-agent-*-macos-arm64-unsigned.zip
-xattr -dr com.apple.quarantine remotex-agent.app   # ad-hoc signed, so quarantined
-cp -R remotex-agent.app /Applications/
-open /Applications/remotex-agent.app
-```
+1. Open the image.
+2. **Drag `remotex-agent.app` onto the `Applications` folder** beside it.
+3. Clear the quarantine flag, because the bundle is ad-hoc signed rather than
+   notarized:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/remotex-agent.app
+   ```
+
+4. Open it from `/Applications` — in the Finder, or `open
+   /Applications/remotex-agent.app`.
+5. Eject the image.
+
+Install it from `/Applications`, not from the mounted image: opening it off the
+image registers a login item pointing at a mount point, and that path is gone as
+soon as you eject (see **Reinstalling over an existing copy** for what a stale
+registration does).
 
 The `xattr` line is Gatekeeper, not paranoia: a downloaded bundle without a
 Developer ID signature is refused until the quarantine attribute is gone. The
 same ad-hoc signature is why the two permissions below are asked for again after
 an upgrade — the grants are keyed to the code identity, and it changes with every
-build.
+build. A notarized build needs neither the `xattr` line nor the re-approval; the
+release just does not have the signing secrets yet.
 
-That single open does everything an install script would have:
+That first open does everything an install script would have:
 
 - writes `~/Library/Application Support/remotex-agent/config.toml` (mode 0600)
   with a freshly generated pre-shared key, if it is not already there;
@@ -170,15 +182,10 @@ and nothing appears in the log because the binary never runs. **Start at Login**
 still shows a tick, because launchd's registration is intact — only the thing it
 points at is gone.
 
-The fix, and the way to avoid it:
-
-```sh
-cp -R remotex-agent.app /Applications/
-open /Applications/remotex-agent.app          # re-registers, repairing the record
-```
-
-If it is already broken, open the new bundle and switch **Start at Login** off
-and on again.
+The fix, and the way to avoid it: replace the app from the new image (the Finder
+will offer to), then open `/Applications/remotex-agent.app` once — that
+re-registers it and repairs the record. If it is already broken, opening the new
+copy and switching **Start at Login** off and on again does the same.
 
 ## No login-window support
 
@@ -190,13 +197,14 @@ for the gateway to reach. This is a property of the design, not a bug.
 ## Building from source
 
 ```sh
-packaging/macos/build-agent-app.sh          # -> dist/remotex-agent.app
+packaging/macos/build-agent-app.sh   # -> dist/remotex-agent.app + a .dmg beside it
+packaging/macos/build-agent-app.sh --no-dmg   # just the .app, to run out of dist/
 ```
 
 Needs Xcode — the capture bindings build a small Swift bridge.
 
-You do not have to, though: every release carries the built bundle as
-`remotex-agent-<version>-macos-arm64-unsigned.zip` (see **Install** above). The
+You do not have to, though: every release carries the built image as
+`remotex-agent-<version>-macos-arm64-unsigned.dmg` (see **Install** above). The
 release workflow runs this same script on a macOS runner, so a release bundle and
 a local one differ only in the signature.
 

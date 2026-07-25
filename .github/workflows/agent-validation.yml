@@ -59,7 +59,7 @@ jobs:
       - name: Test the gateway (container-free targets)
         run: cargo test -p remotex --lib --test protocol_e2e --test auth_e2e --test rxa_e2e
 
-      - name: Build remotex-agent.app
+      - name: Build remotex-agent.app and its disk image
         # `-` pins the ad-hoc path rather than searching the runner's keychain,
         # so a signing identity appearing in a future runner image cannot change
         # what this validates. Xcode is preinstalled, which the Swift bridge in
@@ -92,3 +92,28 @@ jobs:
             exit 1
           }
           codesign --verify --deep --strict --verbose=2 dist/remotex-agent.app
+
+      - name: Verify the disk image
+        # The image is what users install from, so it is checked the way they use
+        # it: mount, copy the bundle out, verify the copy. Nothing is uploaded —
+        # shipping is release.yml's job — but a broken `hdiutil create` or a
+        # missing /Applications symlink should fail here rather than on a release.
+        run: |
+          version=$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["workspace"]["package"]["version"])
+          ')
+          dmg="dist/remotex-agent-${version}-macos-arm64-unsigned.dmg"
+          mnt="$RUNNER_TEMP/dmg-mount"
+          mkdir -p "$mnt" "$RUNNER_TEMP/installed"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
+          [ -L "$mnt/Applications" ] || {
+            echo "::error::the image has no /Applications symlink"
+            exit 1
+          }
+          # ditto is what the Finder's drag amounts to.
+          /usr/bin/ditto "$mnt/remotex-agent.app" "$RUNNER_TEMP/installed/remotex-agent.app"
+          hdiutil detach "$mnt"
+          codesign --verify --deep --strict --verbose=2 \
+            "$RUNNER_TEMP/installed/remotex-agent.app"
