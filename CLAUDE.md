@@ -2,6 +2,9 @@
 - no cargo fmt
 - run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
 - run biome checks on frontend/ after JS/TS code changes
+- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then build and validate the viewer with `packaging/macos-viewer/build-viewer-app.sh`; a standalone `swift build` is compilation only and is not viewer packaging validation
+- after changes affecting the macOS agent or its packaging, build and validate it with `packaging/macos/build-agent-app.sh`; a standalone Cargo build is not agent packaging validation. Follow machine-local signing instructions in `CLAUDE.local.md` when present
+- use `--no-dmg` with either macOS build script only when the disk-image layer is explicitly out of scope. Otherwise build the DMG, mount it, copy the app out as a user would, verify it with `codesign --verify --deep --strict`, and run the bundled executable with `--version`
 - use tmp/ for temporary files and test config
 - for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
