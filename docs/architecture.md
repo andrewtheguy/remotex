@@ -591,7 +591,9 @@ someone believing a target was authenticated by a key it never uses.
   the real server against an in-process fake agent speaking the real Noise
   handshake: a JPEG tile arrives byte-for-byte as `format = 2`, the cursor
   lands on the control channel, a dropped link reconnects and repaints without
-  an error or a picker bounce, and a wrong PSK is reported rather than retried.
+  an error or a picker bounce (and without resizing an unchanged canvas), a
+  wrong PSK is reported rather than retried, and browser input reaches the agent
+  in order and untranslated with `viewport` swallowed.
   `rxa-proto` carries the protocol's own suite (PSK, handshake, framing across
   the Noise chunk boundary, per-variant message roundtrips, keycodes), all of
   which runs on Linux — deliberately, since the agent crate never builds there.
