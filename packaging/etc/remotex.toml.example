@@ -46,21 +46,22 @@ password = "change-me"
 # RDP only — VNC negotiates VncAuth (password set) or None per the handshake.
 #security = "auto"
 
-# Dynamic resize (opt-in): drive the remote desktop size from the browser
-# viewport. VNC follows the window automatically (only on servers that accept
-# SetDesktopSize — the TigerVNC family). RDP resizes only when you ask, via the
-# floating menu's "Resize to window" (RDP reactivation is heavier than VNC's
-# resize). For rxa it means something narrower — see the rxa target below.
+# Dynamic resize (opt-in): drive the remote desktop size from the client's
+# window. VNC follows the window automatically (only on servers that accept
+# SetDesktopSize — the TigerVNC family). RDP resizes only when you ask, via
+# "Resize to window" (RDP reactivation is heavier than VNC's resize). For rxa it
+# means something narrower — see the rxa target below.
 # Otherwise — and by default — the desktop keeps its connect-time size
-# and the browser shows scrollbars.
+# and the client shows scrollbars.
 #resize = false
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
-# all. The floating menu's Clipboard panel always works regardless, and is the
-# way to move text when automatic sync cannot run.
+# all. (The macOS viewer has no such restriction: it reads NSPasteboard
+# directly.) The Clipboard panel always works regardless, and is the way to move
+# text when automatic sync cannot run.
 # Every protocol supports it. RDP (MS-RDPECLIP) and the Mac agent ("rxa")
 # always carry full UTF-8. VNC does too on servers implementing the Extended
 # Clipboard extension (TigerVNC does); on servers that do not (TightVNC), RFB
@@ -94,7 +95,7 @@ password = "change-me"
 # username/password/domain/width/height/security are all ignored here.
 # `clipboard` is supported: the agent reads and writes the Mac's pasteboard.
 #
-# `resize` does not follow the browser window here. The floating menu requires
+# `resize` does not follow the client's window here. The resolution menu requires
 # both target opt-in (`resize = true`) and agent agreement that the display is
 # resizable. It then lists the modes of a virtual display in a VM — a physical
 # Mac display is never changed from the browser, and the menu simply does not

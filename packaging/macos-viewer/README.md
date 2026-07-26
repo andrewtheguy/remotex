@@ -1,26 +1,28 @@
 # remotex viewer for macOS
 
-`remotex-viewer.app` is the foreground macOS 26 client. It hosts the ordinary
-remotex SPA in `WKWebView`; the SPA continues to own login, target selection,
-session takeover, reconnects, the WebSocket, and canvas rendering.
+`remotex-viewer.app` is the foreground macOS 26 client. It speaks the gateway's
+HTTP and WebSocket protocol directly — there is no embedded web view — and owns:
 
-The native shell replaces the floating web menu after an exact bridge
-handshake. It provides:
-
-- application-level keyboard capture before WebKit or menu shortcuts;
+- login and target selection, with the gateway address on the login screen;
+- the session socket, including reconnects, takeover, and the single-slot claim;
+- Metal framebuffer rendering at one texel per device pixel;
+- pointer and keyboard input, plus the remote pointer shape;
+- application-level keyboard capture ahead of menu shortcuts;
 - Command translation that follows the remote (Control shortcuts for a non-Mac,
   unchanged Command shortcuts for a Mac);
 - native `NSPasteboard` synchronization;
-- native Remote menu commands for resize, resolution, clipboard sync, target
+- Remote menu commands for refresh, resize, resolution, clipboard, target
   switching, takeover, and logout.
 
-The viewer and gateway frontend must have exactly the same product and bridge
-versions. They are released together intentionally; compatibility shims are not
-maintained.
+The viewer and the gateway are separate artifacts and do not have to be released
+together. `GET /api/config` carries a `protocolVersion` the viewer checks before
+opening a session; a mismatch is refused with the reason shown on the login
+screen. See [`../../docs/macos-viewer.md`](../../docs/macos-viewer.md) for the
+protocol details.
 
 Nothing to configure per target: the gateway's engine discovers whether the
-remote is a Mac while connecting and tells the frontend, which passes the one
-bit to the viewer.
+remote is a Mac while connecting and sends the one bit that decides the keyboard
+convention.
 
 ## Build
 
@@ -43,20 +45,22 @@ open -n dist/remotex-viewer.app --args \
   --gateway http://127.0.0.1:52380
 ```
 
+`--gateway` only prefills the login screen's **Server** field; the address is
+editable there and the last one that answered is remembered. There is no Settings
+window.
+
 Always launch the packaged `.app` during development. `swift run`, a standalone
 `swift build`, and directly launching the executable under `.build` bypass the
-application bundle and can behave differently, including missing menus and
-`Info.plist` metadata.
-
-The address can also be changed under **remotex → Settings**.
+application bundle and can behave differently — missing menus, no
+`Info.plist` version, and, since the viewer does its own networking, **no App
+Transport Security exception**, so a plain-HTTP gateway fails only in the
+unbundled build.
 
 ## Keyboard capture
 
-Capture is active only while the SPA reports a connected remote desktop.
-Press **Control-Option-Command-Escape** to release it. Use the same Remote menu
-item to capture it again.
+Capture is active only while a connected remote desktop is painting.
 
-Application-delivered shortcuts such as Command-W, Command-R, F5, and F11 can
+Application-delivered shortcuts such as Command-W, Command-R, F5, and F11
 therefore reach the remote. macOS-global shortcuts such as Command-Tab and
 Command-Space remain owned by the operating system.
 
