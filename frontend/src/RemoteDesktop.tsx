@@ -134,6 +134,7 @@ export default function RemoteDesktop({
       type: "remoteClipboard",
       text: remoteClipboardPush.text,
       changedAtMs: remoteClipboardPush.changedAtMs,
+      oversizedBytes: remoteClipboardPush.oversizedBytes,
     });
   }, [nativeHost, remoteClipboardPush]);
 
@@ -169,6 +170,7 @@ export default function RemoteDesktop({
                     requestId: command.requestId,
                     text: snapshot.text,
                     changedAtMs: snapshot.changedAtMs,
+                    oversizedBytes: snapshot.oversizedBytes,
                   }
                 : {
                     type: "clipboardFetchResult",

@@ -49,7 +49,10 @@ struct ClipboardCard: View {
 
             HStack {
                 if !clipboard.isEditing {
-                    Button("Reveal") {
+                    // There is nothing to reveal when the remote's clipboard was
+                    // refused for its size; the same button then opens an empty
+                    // editor, so it says so.
+                    Button(clipboard.oversizedBytes == nil ? "Reveal" : "Type instead") {
                         clipboard.reveal()
                     }
                 }
@@ -108,9 +111,19 @@ struct ClipboardCard: View {
 
     private var concealedSummary: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("CRC32 \(clipboard.concealedCRC32 ?? "00000000")")
-            Text("LEN \(clipboard.concealedByteCount ?? 0)B")
-            Text("AT \(clipboard.activityDescription ?? "UNKNOWN")")
+            // No CRC32 for a clipboard that was never transferred — there are no
+            // bytes here to checksum. Its size and the limit are the whole story.
+            if let oversizedBytes = clipboard.oversizedBytes {
+                Text("LEN \(oversizedBytes)B")
+                Text("LIMIT \(ClipboardSynchronizer.maximumBytes)B")
+                Text("AT \(clipboard.activityDescription ?? "UNKNOWN")")
+                Text("TOO LARGE TO TRANSFER")
+                    .foregroundStyle(.orange)
+            } else {
+                Text("CRC32 \(clipboard.concealedCRC32 ?? "00000000")")
+                Text("LEN \(clipboard.concealedByteCount ?? 0)B")
+                Text("AT \(clipboard.activityDescription ?? "UNKNOWN")")
+            }
         }
         .font(.body.monospaced())
         .textSelection(.disabled)
@@ -118,6 +131,10 @@ struct ClipboardCard: View {
         .padding(12)
         .background(.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Concealed remote clipboard summary")
+        .accessibilityLabel(
+            clipboard.oversizedBytes == nil
+                ? "Concealed remote clipboard summary"
+                : "Remote clipboard too large to transfer"
+        )
     }
 }

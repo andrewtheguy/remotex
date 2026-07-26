@@ -3,6 +3,10 @@ import WebKit
 
 struct RemoteClipboardPush: Equatable {
     let text: String
+    /// `Some` when the remote's clipboard was refused for its size, which is
+    /// what it carries. `text` is empty then, and nothing is mirrored to the
+    /// pasteboard — there is nothing to mirror.
+    let oversizedBytes: Int64?
 }
 
 struct ClipboardFetchResult: Equatable {
@@ -11,6 +15,9 @@ struct ClipboardFetchResult: Equatable {
     /// read, so the panel can stop waiting on its own deadline.
     let text: String?
     let changedAtMs: Int64?
+    /// `Some` when the remote's clipboard exists but was too large to transfer,
+    /// carrying its size. Distinct from a `nil` text, which is "no answer came".
+    let oversizedBytes: Int64?
 }
 
 @MainActor
@@ -75,7 +82,13 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
                 replyHandler(nil, "invalid clipboard")
                 return
             }
-            model.clipboard.receiveRemotePush(payload.text)
+            // An oversized push carries no text to mirror. It is still remote
+            // clipboard activity, so the panel is told — the pasteboard is not.
+            if let oversizedBytes = payload.oversizedBytes {
+                model.clipboard.noteRemoteOversized(bytes: oversizedBytes)
+            } else {
+                model.clipboard.receiveRemotePush(payload.text)
+            }
             replyHandler(["accepted": true], nil)
         case "clipboardFetchResult":
             guard handshakeAccepted,
@@ -88,7 +101,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
                 model.clipboard.receiveFetchResult(
                     requestID: payload.requestID,
                     text: text,
-                    changedAtMs: payload.changedAtMs
+                    changedAtMs: payload.changedAtMs,
+                    oversizedBytes: payload.oversizedBytes
                 )
             } else {
                 model.clipboard.fetchUnavailable(requestID: payload.requestID)
@@ -186,16 +200,17 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
     static func decodeRemoteClipboardPush(
         _ value: [String: Any]
     ) -> RemoteClipboardPush? {
-        // The v5 shape requires the timestamp, so a payload without it is still
+        // The shape requires the timestamp, so a payload without it is still
         // rejected — but nothing consumes it here: an unsolicited push mirrors
         // unconditionally. Validate, then drop it rather than carry a field the
         // viewer never reads.
         guard let text = value["text"] as? String,
-              decodeChangedAtMs(value) != nil
+              decodeChangedAtMs(value) != nil,
+              let oversizedBytes = decodeOptionalBytes(value, key: "oversizedBytes")
         else {
             return nil
         }
-        return RemoteClipboardPush(text: text)
+        return RemoteClipboardPush(text: text, oversizedBytes: oversizedBytes)
     }
 
     static func decodeClipboardFetchResult(
@@ -210,31 +225,44 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
             return ClipboardFetchResult(
                 requestID: requestID,
                 text: nil,
-                changedAtMs: nil
+                changedAtMs: nil,
+                oversizedBytes: nil
             )
         }
         guard let text = value["text"] as? String,
-              let changedAtMs = decodeChangedAtMs(value)
+              let changedAtMs = decodeChangedAtMs(value),
+              let oversizedBytes = decodeOptionalBytes(value, key: "oversizedBytes")
         else {
             return nil
         }
         return ClipboardFetchResult(
             requestID: requestID,
             text: text,
-            changedAtMs: changedAtMs
+            changedAtMs: changedAtMs,
+            oversizedBytes: oversizedBytes
         )
     }
 
-    /// A nullable timestamp is required on both v5 clipboard event shapes.
-    /// The outer optional is decoding success; the inner optional is JSON
-    /// null, used when the remote content predates this session.
+    /// A nullable timestamp is required on both clipboard event shapes. The
+    /// outer optional is decoding success; the inner optional is JSON null, used
+    /// when the remote content predates this session.
     private static func decodeChangedAtMs(
         _ value: [String: Any]
     ) -> Int64?? {
-        guard value.keys.contains("changedAtMs") else {
+        decodeOptionalBytes(value, key: "changedAtMs")
+    }
+
+    /// A required field holding either JSON null or a non-negative integer, as
+    /// both `changedAtMs` and `oversizedBytes` are. The outer optional is
+    /// decoding success; the inner one is the null.
+    private static func decodeOptionalBytes(
+        _ value: [String: Any],
+        key: String
+    ) -> Int64?? {
+        guard value.keys.contains(key) else {
             return nil
         }
-        let raw = value["changedAtMs"]
+        let raw = value[key]
         if raw is NSNull {
             return .some(nil)
         }

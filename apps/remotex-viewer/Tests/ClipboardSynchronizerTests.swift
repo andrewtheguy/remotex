@@ -206,6 +206,95 @@ struct ClipboardSynchronizerTests {
         #expect(commandTypes(commands) == ["clipboard"])
     }
 
+    // A remote clipboard too large to transfer is reported, not mirrored: there
+    // is no text to put on the pasteboard, and empty text alone would read as a
+    // remote that copied nothing.
+    @Test
+    @MainActor
+    func anOversizedRemoteClipboardIsReportedInsteadOfMirrored() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        write("keep local", to: pasteboard)
+
+        let clipboard = ClipboardSynchronizer(
+            pasteboard: pasteboard,
+            startsPolling: false,
+            makeRequestID: { "fetch-oversized" }
+        )
+        var commands: [[String: Any]] = []
+        clipboard.sendCommand = { commands.append($0) }
+        clipboard.update(enabled: true)
+        commands.removeAll()
+
+        clipboard.requestFreshSnapshot()
+        #expect(
+            clipboard.receiveFetchResult(
+                requestID: "fetch-oversized",
+                text: "",
+                changedAtMs: 1_725_000_123_456,
+                oversizedBytes: 209_715_200
+            )
+        )
+        #expect(clipboard.isPresented)
+        #expect(clipboard.oversizedBytes == 209_715_200)
+        #expect(pasteboard.string(forType: .string) == "keep local")
+        #expect(clipboard.activityDescription != "UNKNOWN")
+
+        // Copy names the reason rather than the "Nothing to copy" it would
+        // otherwise share with an empty remote clipboard.
+        #expect(!clipboard.copy())
+        #expect(clipboard.notice == "Remote clipboard too large to transfer")
+        #expect(pasteboard.string(forType: .string) == "keep local")
+
+        // Reveal has nothing to show, so it opens the editor empty — the one way
+        // on from here, and Send works from it.
+        clipboard.reveal()
+        #expect(clipboard.isEditing)
+        #expect(clipboard.draft.isEmpty)
+        #expect(clipboard.oversizedBytes == nil, "no snapshot is left to describe")
+        #expect(clipboard.unavailableMessage == "Remote clipboard was too large to transfer")
+        clipboard.draft = "typed by hand"
+        #expect(clipboard.sendDraft())
+        #expect(commands.last?["text"] as? String == "typed by hand")
+    }
+
+    // An unsolicited oversized copy is panel state only: it must never reach the
+    // pasteboard, and must not be mistaken for the previous value either.
+    @Test
+    @MainActor
+    func anOversizedRemotePushUpdatesAnOpenPanelButNotThePasteboard() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        write("keep local", to: pasteboard)
+
+        let clipboard = ClipboardSynchronizer(
+            pasteboard: pasteboard,
+            startsPolling: false,
+            makeRequestID: { "fetch-then-push" }
+        )
+        clipboard.sendCommand = { _ in }
+        clipboard.update(enabled: true)
+        clipboard.requestFreshSnapshot()
+        _ = clipboard.receiveFetchResult(
+            requestID: "fetch-then-push",
+            text: "small remote value",
+            changedAtMs: nil
+        )
+
+        clipboard.noteRemoteOversized(bytes: 209_715_200)
+        #expect(clipboard.oversizedBytes == 209_715_200)
+        #expect(clipboard.snapshot?.text.isEmpty == true)
+        #expect(
+            pasteboard.string(forType: .string) == "keep local",
+            "an oversized push has nothing to mirror"
+        )
+
+        // The same value arriving again once it fits is not an echo of what the
+        // panel just showed, so it still mirrors.
+        clipboard.receiveRemotePush("small remote value")
+        #expect(pasteboard.string(forType: .string) == "small remote value")
+    }
+
     // The web side answers every request, so a failed read reaches the panel
     // without waiting out the local deadline.
     @Test

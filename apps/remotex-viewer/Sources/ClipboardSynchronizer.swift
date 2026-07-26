@@ -5,6 +5,11 @@ import Observation
 struct NativeClipboardSnapshot: Equatable {
     let text: String
     let changedAtMs: Int64?
+    /// Set when the remote's clipboard was refused for exceeding
+    /// ``ClipboardSynchronizer/maximumBytes``, to the size it actually is.
+    /// `text` is empty then — which on its own would read as "the remote has
+    /// copied nothing", the very thing this tells apart.
+    let oversizedBytes: Int64?
 }
 
 @MainActor
@@ -69,6 +74,12 @@ final class ClipboardSynchronizer {
 
     var isOverByteLimit: Bool {
         draftByteCount > Self.maximumBytes
+    }
+
+    /// The size of a remote clipboard that was refused for exceeding
+    /// ``maximumBytes``, or nil when there is a real snapshot to describe.
+    var oversizedBytes: Int64? {
+        snapshot?.oversizedBytes
     }
 
     var concealedCRC32: String? {
@@ -157,6 +168,27 @@ final class ClipboardSynchronizer {
     ///
     /// `receiveRemotePush` needs no such check: the gateway has already clamped
     /// everything arriving on that link.
+    /// The remote copied more than can be transferred. Nothing reaches the
+    /// pasteboard — there is nothing to put on it — but an open panel showing
+    /// the previous value would now be describing a clipboard that has moved on,
+    /// so it is updated to say what happened.
+    func noteRemoteOversized(bytes: Int64) {
+        guard isEnabled else {
+            return
+        }
+        // Cleared so the echo guard cannot mistake the next arrival of the old
+        // text for something already mirrored.
+        lastFromRemote = nil
+        guard isPresented, !isEditing else {
+            return
+        }
+        snapshot = NativeClipboardSnapshot(
+            text: "",
+            changedAtMs: nil,
+            oversizedBytes: bytes
+        )
+    }
+
     func pushLocalClipboard(force: Bool) {
         guard isEnabled,
               let text = pasteboard.string(forType: .string),
@@ -224,7 +256,8 @@ final class ClipboardSynchronizer {
     func receiveFetchResult(
         requestID: String,
         text: String,
-        changedAtMs: Int64?
+        changedAtMs: Int64?,
+        oversizedBytes: Int64? = nil
     ) -> Bool {
         guard isEnabled, isFetching, requestID == pendingRequestID else {
             return false
@@ -233,7 +266,11 @@ final class ClipboardSynchronizer {
         fetchDeadline = nil
         pendingRequestID = nil
         isFetching = false
-        snapshot = NativeClipboardSnapshot(text: text, changedAtMs: changedAtMs)
+        snapshot = NativeClipboardSnapshot(
+            text: text,
+            changedAtMs: changedAtMs,
+            oversizedBytes: oversizedBytes
+        )
         isEditing = false
         draft = ""
         unavailableMessage = nil
@@ -265,6 +302,17 @@ final class ClipboardSynchronizer {
         guard let snapshot else {
             return
         }
+        // Nothing was transferred, so there is nothing to reveal. Still opens
+        // the editor: it is the only way on from here, and Send is then usable
+        // for text typed in by hand.
+        guard snapshot.oversizedBytes == nil else {
+            self.snapshot = nil
+            draft = ""
+            isEditing = true
+            unavailableMessage = "Remote clipboard was too large to transfer"
+            notice = nil
+            return
+        }
         draft = snapshot.text
         isEditing = true
         unavailableMessage = nil
@@ -276,9 +324,15 @@ final class ClipboardSynchronizer {
         let text = isEditing ? draft : (snapshot?.text ?? "")
         // Copying nothing would still clear the local pasteboard, which is a
         // destructive answer to a button the panel offers in every state —
-        // including the unavailable editor, whose draft starts empty.
+        // including the unavailable editor, whose draft starts empty. The two
+        // reasons there is nothing read the same from here, so they are named
+        // apart: one of them means the remote copied nothing.
         guard !text.isEmpty else {
-            showNotice("Nothing to copy")
+            showNotice(
+                oversizedBytes == nil
+                    ? "Nothing to copy"
+                    : "Remote clipboard too large to transfer"
+            )
             return false
         }
         pasteboard.clearContents()

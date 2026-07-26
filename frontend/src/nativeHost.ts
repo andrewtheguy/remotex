@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 // The viewer and the served frontend ship in lockstep. Increment this whenever
 // either side changes the shape or semantics of a native-host message.
-export const NATIVE_HOST_BRIDGE_VERSION = 5;
+export const NATIVE_HOST_BRIDGE_VERSION = 6;
 
 interface NativeHostDescriptor {
   bridgeVersion: number;
@@ -70,12 +70,19 @@ export type NativeHostEvent =
       type: "remoteClipboard";
       text: string;
       changedAtMs: number | null;
+      // Set to the remote clipboard's size when it was refused for exceeding
+      // MAX_CLIPBOARD_BYTES; `text` is empty then. The viewer reports the size
+      // rather than mirroring nothing into the Mac's pasteboard.
+      oversizedBytes: number | null;
     }
   | {
       type: "clipboardFetchResult";
       requestId: string;
       text: string;
       changedAtMs: number | null;
+      // As on remoteClipboard: the size when the remote's clipboard was too
+      // large to transfer, and `text` is then empty.
+      oversizedBytes: number | null;
     }
   // The failure answer to a `clipboardRequest`: a null text tells the viewer to
   // show its unavailable panel now instead of waiting out its own deadline.

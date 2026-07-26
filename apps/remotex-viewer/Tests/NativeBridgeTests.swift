@@ -76,33 +76,54 @@ struct NativeBridgeTests {
 
     @Test
     @MainActor
-    func clipboardPushPayloadRequiresTextAndANullableTimestamp() {
+    func clipboardPushPayloadRequiresTextAndTwoNullableNumbers() {
         #expect(
             NativeBridge.decodeRemoteClipboardPush([
                 "type": "remoteClipboard",
                 "text": "copied",
                 "changedAtMs": 1_725_000_123_456,
+                "oversizedBytes": NSNull(),
             ])
-                == RemoteClipboardPush(text: "copied")
+                == RemoteClipboardPush(text: "copied", oversizedBytes: nil)
         )
         #expect(
             NativeBridge.decodeRemoteClipboardPush([
                 "type": "remoteClipboard",
                 "text": "old",
                 "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
             ])
-                == RemoteClipboardPush(text: "old")
+                == RemoteClipboardPush(text: "old", oversizedBytes: nil)
+        )
+        // Refused for its size: no text, and the size it actually is. Well past
+        // what an Int32 would hold, which is the point of carrying it as Int64.
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "",
+                "changedAtMs": 1_725_000_123_456,
+                "oversizedBytes": 209_715_200,
+            ])
+                == RemoteClipboardPush(text: "", oversizedBytes: 209_715_200)
         )
 
         for malformed: [String: Any] in [
-            ["text": "missing timestamp"],
-            ["changedAtMs": NSNull()],
-            ["text": 7, "changedAtMs": NSNull()],
-            ["text": "fractional", "changedAtMs": 1.5],
-            ["text": "boolean", "changedAtMs": true],
-            ["text": "negative", "changedAtMs": -1],
+            ["text": "missing timestamp", "oversizedBytes": NSNull()],
+            ["changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            ["text": 7, "changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            ["text": "fractional", "changedAtMs": 1.5, "oversizedBytes": NSNull()],
+            ["text": "boolean", "changedAtMs": true, "oversizedBytes": NSNull()],
+            ["text": "negative", "changedAtMs": -1, "oversizedBytes": NSNull()],
             // 2^63: the nearest Double to Int64.max, and one past it.
-            ["text": "unrepresentable", "changedAtMs": 9_223_372_036_854_775_808.0],
+            [
+                "text": "unrepresentable",
+                "changedAtMs": 9_223_372_036_854_775_808.0,
+                "oversizedBytes": NSNull(),
+            ],
+            // The size field is held to the same shape as the timestamp.
+            ["text": "no size field", "changedAtMs": NSNull()],
+            ["text": "bad size", "changedAtMs": NSNull(), "oversizedBytes": "big"],
+            ["text": "negative size", "changedAtMs": NSNull(), "oversizedBytes": -1],
         ] {
             #expect(NativeBridge.decodeRemoteClipboardPush(malformed) == nil)
         }
@@ -117,11 +138,13 @@ struct NativeBridgeTests {
                 "requestId": "viewer-request",
                 "text": "fetched",
                 "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
             ])
                 == ClipboardFetchResult(
                     requestID: "viewer-request",
                     text: "fetched",
-                    changedAtMs: nil
+                    changedAtMs: nil,
+                    oversizedBytes: nil
                 )
         )
         #expect(
@@ -130,11 +153,13 @@ struct NativeBridgeTests {
                 "requestId": "viewer-request",
                 "text": "",
                 "changedAtMs": 0,
+                "oversizedBytes": NSNull(),
             ])
                 == ClipboardFetchResult(
                     requestID: "viewer-request",
                     text: "",
-                    changedAtMs: 0
+                    changedAtMs: 0,
+                    oversizedBytes: nil
                 )
         )
 
@@ -148,17 +173,53 @@ struct NativeBridgeTests {
                 == ClipboardFetchResult(
                     requestID: "viewer-request",
                     text: nil,
-                    changedAtMs: nil
+                    changedAtMs: nil,
+                    oversizedBytes: nil
+                )
+        )
+
+        // A clipboard that exists but is too large to transfer: empty text with
+        // the size beside it, which is what keeps it apart from the empty
+        // clipboard two cases above.
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "",
+                "changedAtMs": 1_725_000_123_456,
+                "oversizedBytes": 209_715_200,
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "",
+                    changedAtMs: 1_725_000_123_456,
+                    oversizedBytes: 209_715_200
                 )
         )
 
         for malformed: [String: Any] in [
-            ["text": "missing id", "changedAtMs": NSNull()],
-            ["requestId": "", "text": "empty id", "changedAtMs": NSNull()],
-            ["requestId": 9, "text": "bad id", "changedAtMs": NSNull()],
-            ["requestId": "id", "changedAtMs": NSNull()],
-            ["requestId": "id", "text": "missing timestamp"],
-            ["requestId": "id", "text": "bad timestamp", "changedAtMs": "now"],
+            ["text": "missing id", "changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            [
+                "requestId": "",
+                "text": "empty id",
+                "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
+            ],
+            [
+                "requestId": 9,
+                "text": "bad id",
+                "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
+            ],
+            ["requestId": "id", "changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            ["requestId": "id", "text": "missing timestamp", "oversizedBytes": NSNull()],
+            [
+                "requestId": "id",
+                "text": "bad timestamp",
+                "changedAtMs": "now",
+                "oversizedBytes": NSNull(),
+            ],
+            ["requestId": "id", "text": "no size field", "changedAtMs": NSNull()],
         ] {
             #expect(NativeBridge.decodeClipboardFetchResult(malformed) == nil)
         }
@@ -175,6 +236,7 @@ struct NativeBridgeTests {
                 "requestId": "stale-id",
                 "text": "stale",
                 "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
             ])
         )
         #expect(stale.requestID == "stale-id")
