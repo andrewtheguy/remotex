@@ -206,6 +206,7 @@ async fn serve_fake_agent(
                             &AgentMsg::Clipboard {
                                 text: pasteboard.clone(),
                                 changed_at_ms: clipboard_changed_at_ms,
+                                requested: false,
                             }
                             .encode(),
                         )
@@ -219,6 +220,7 @@ async fn serve_fake_agent(
                         &AgentMsg::Clipboard {
                             text: pasteboard.clone(),
                             changed_at_ms: clipboard_changed_at_ms,
+                            requested: true,
                         }
                         .encode(),
                     )
@@ -520,6 +522,7 @@ async fn expect_input(rx: &mut mpsc::UnboundedReceiver<GatewayMsg>) -> GatewayMs
 struct ClipboardMessage {
     text: String,
     changed_at_ms: Option<u64>,
+    requested: bool,
 }
 
 /// Drain the socket until a timestamped `clipboard` control message arrives.
@@ -535,6 +538,7 @@ async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
                         return ClipboardMessage {
                             text: parsed["text"].as_str().unwrap().to_owned(),
                             changed_at_ms: parsed["changedAtMs"].as_u64(),
+                            requested: parsed["requested"].as_bool().unwrap(),
                         };
                     }
                 }
@@ -735,16 +739,19 @@ async fn clipboard_round_trips_through_the_agent_in_utf8() {
         ClipboardMessage {
             text: FAKE_PASTEBOARD.to_owned(),
             changed_at_ms: Some(FAKE_CLIPBOARD_CHANGED_AT_MS),
+            requested: false,
         }
     );
 
     // Mac → browser: the agent reads its pasteboard when asked.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    let fetched = expect_clipboard(&mut ws).await;
+    assert_eq!(fetched.text, pushed.text);
     assert_eq!(
-        expect_clipboard(&mut ws).await,
-        pushed,
+        fetched.changed_at_ms, pushed.changed_at_ms,
         "Fetch must preserve the agent-observed clipboard activity timestamp"
     );
+    assert!(fetched.requested, "Fetch replies must be marked requested");
 
     // Browser → Mac. The é/画面/☕ that VNC would have flattened to '?' arrive
     // intact here.
@@ -768,6 +775,7 @@ async fn clipboard_round_trips_through_the_agent_in_utf8() {
         ClipboardMessage {
             text: sent.to_owned(),
             changed_at_ms: Some(FAKE_CLIPBOARD_CHANGED_AT_MS + 1),
+            requested: true,
         }
     );
 }

@@ -352,8 +352,8 @@ async fn pump(
                     AgentMsg::Pong { .. } => {}
                     // Either a reply to a ClipboardRequest this pump sent, or
                     // an unprompted push from the agent's pasteboard watcher.
-                    // Identical to the browser either way, which is what lets
-                    // the panel and the automatic sync share one path.
+                    // The payload shares one path, but `requested` stays intact
+                    // so only watcher pushes drive browser OS-clipboard sync.
                     //
                     // Dropped outright for a target that didn't opt in: this
                     // pump then never asked and never enabled the watch, so
@@ -364,6 +364,7 @@ async fn pump(
                     AgentMsg::Clipboard {
                         text,
                         changed_at_ms,
+                        requested,
                     } => {
                         let changed_at_ms = changed_at_ms.or_else(|| {
                             clipboard_snapshot
@@ -381,6 +382,7 @@ async fn pump(
                                 .send(ServerMsg::Clipboard {
                                     text: snapshot.text,
                                     changed_at_ms: snapshot.changed_at_ms,
+                                    requested,
                                 })
                                 .await
                                 .is_err()

@@ -125,14 +125,18 @@ pub enum AgentMsg {
     /// The Mac's pasteboard text. Sent either in reply to a
     /// [`GatewayMsg::ClipboardRequest`], or unprompted after
     /// [`GatewayMsg::ClipboardWatch`] turned the watcher on and the pasteboard
-    /// changed. `changed_at_ms` is when the agent observed that change, and is
-    /// retained on later Fetch replies. `None` means the pasteboard content
-    /// predates this watched session, so its real change time is unknown.
+    /// changed. `requested` is true only for the former, so the gateway can
+    /// preserve automatic browser clipboard sync for watcher pushes without
+    /// treating a panel Fetch as a copy action. `changed_at_ms` is when the
+    /// agent observed that change, and is retained on later Fetch replies.
+    /// `None` means the pasteboard content predates this watched session, so its
+    /// real change time is unknown.
     /// Never sent otherwise: with the watch off the agent does not look at the
     /// pasteboard at all.
     Clipboard {
         text: String,
         changed_at_ms: Option<u64>,
+        requested: bool,
     },
 }
 
@@ -222,8 +226,10 @@ impl AgentMsg {
             AgentMsg::Clipboard {
                 text,
                 changed_at_ms,
+                requested,
             } => {
                 out.push(Self::T_CLIPBOARD);
+                out.push(u8::from(*requested));
                 match changed_at_ms {
                     Some(value) => {
                         out.push(1);
@@ -284,6 +290,7 @@ impl AgentMsg {
                 message: r.string()?,
             },
             Self::T_CLIPBOARD => AgentMsg::Clipboard {
+                requested: r.bool()?,
                 changed_at_ms: if r.bool()? { Some(r.u64()?) } else { None },
                 text: r.text()?,
             },
@@ -621,11 +628,13 @@ mod tests {
             AgentMsg::Clipboard {
                 text: "pasteboard contents — 画面".to_owned(),
                 changed_at_ms: Some(1_721_234_567_890),
+                requested: true,
             },
             // An empty pasteboard is text too, and distinct from "no reply".
             AgentMsg::Clipboard {
                 text: String::new(),
                 changed_at_ms: None,
+                requested: false,
             },
         ]
     }
@@ -719,6 +728,7 @@ mod tests {
         let msg = AgentMsg::Clipboard {
             text: text.clone(),
             changed_at_ms: Some(u64::MAX),
+            requested: true,
         };
         assert_eq!(AgentMsg::decode(&msg.encode()).unwrap(), msg);
 
@@ -730,7 +740,7 @@ mod tests {
     fn clipboard_text_that_is_not_utf8_is_rejected() {
         // A well-formed frame whose payload is not UTF-8: length 2, then a lone
         // continuation byte pair.
-        let mut bytes = vec![AgentMsg::T_CLIPBOARD, 0];
+        let mut bytes = vec![AgentMsg::T_CLIPBOARD, 0, 0];
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&[0xC3, 0x28]);
         assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::BadUtf8));
@@ -741,7 +751,7 @@ mod tests {
         assert_eq!(GatewayMsg::decode(&bytes), Err(MsgError::BadUtf8));
 
         // A length that overruns the body is truncation, not bad UTF-8.
-        let mut bytes = vec![AgentMsg::T_CLIPBOARD, 0];
+        let mut bytes = vec![AgentMsg::T_CLIPBOARD, 0, 0];
         bytes.extend_from_slice(&9u32.to_le_bytes());
         bytes.extend_from_slice(b"short");
         assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Truncated));

@@ -452,6 +452,7 @@ async fn pump(
                                 &AgentMsg::Clipboard {
                                     text: text.to_owned(),
                                     changed_at_ms: clipboard_changed_at_ms,
+                                    requested: true,
                                 }
                                 .encode(),
                             )
@@ -606,6 +607,7 @@ async fn pump(
                                 &AgentMsg::Clipboard {
                                     text: text.to_owned(),
                                     changed_at_ms: Some(changed_at_ms),
+                                    requested: false,
                                 }
                                 .encode(),
                             )

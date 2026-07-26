@@ -356,10 +356,9 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
-  // The remote's clipboard text as last fetched, and a counter that ticks on
-  // every reply. The counter is what the panel watches: fetching the same text
-  // twice must still register as an answer, and a null-vs-string flag can't
-  // express that.
+  // The last remote clipboard snapshot, whether fetched or pushed, and a
+  // counter that ticks on every arrival. Fetching the same text twice must
+  // still register as an answer, and a null-vs-string flag cannot express that.
   const [remoteClipboard, setRemoteClipboard] =
     useState<RemoteClipboard | null>(null);
   // The two halves of the automatic sync's echo guard: text last received from
@@ -368,11 +367,10 @@ export function useRemoteDesktop(
   // Refs, not state — they gate effects and must not re-run them.
   const lastFromRemoteRef = useRef<string | null>(null);
   const lastToRemoteRef = useRef<string | null>(null);
-  // Callers of `requestClipboard` waiting on the server's answer. The reply is
-  // an ordinary out-of-band control message with nothing tying it to a request,
-  // so every pending caller is settled by the next `clipboard` message that
-  // arrives, whether it answers a fetch or is an unprompted push — either way
-  // it is the freshest text the remote has.
+  // Callers of `requestClipboard` waiting on the server's requested reply.
+  // Unsolicited pushes update the snapshot and automatic sync but deliberately
+  // leave these pending, so a push racing a panel open cannot masquerade as the
+  // read that button requested.
   const clipboardWaitersRef = useRef<
     ((snapshot: ClipboardSnapshot | null) => void)[]
   >([]);
@@ -748,29 +746,28 @@ export function useRemoteDesktop(
           break;
         }
         case "clipboard": {
-          // Either a reply to this browser's Fetch or an unprompted push
-          // (VNC's ServerCutText, the Mac agent's pasteboard watcher). The
-          // panel shows it either way.
-          const { text, changedAtMs } = msg;
+          // Both paths update the panel, but only unsolicited pushes mirror
+          // into the browser's OS clipboard. Opening/revealing the panel is a
+          // read action; its explicit Copy button is the consent boundary for
+          // changing the local clipboard.
+          const { text, changedAtMs, requested } = msg;
           const snapshot = { text, changedAtMs };
           setRemoteClipboard((prev) => ({
             ...snapshot,
             seq: (prev?.seq ?? 0) + 1,
           }));
-          // Release anyone blocked on a fetch — the clipboard button waits on
-          // this before it will open the panel.
-          settleClipboardWaiters(snapshot);
-          // And mirror it into the local OS clipboard, so a copy on the remote
-          // is immediately pastable here. Best effort by design: `writeText`
-          // is absent on a non-secure origin (plain HTTP on a LAN — the usual
-          // deployment) and rejects when the tab is unfocused. The panel is
-          // the fallback in both cases, so a failure is not worth reporting.
-          //
-          // Never for an empty reply, which is what the remote sends when its
-          // clipboard holds no text at all (an image, or nothing yet) —
-          // mirroring that would wipe the local clipboard on connect. The
-          // panel still reports it as empty.
-          mirrorRemoteClipboard(text);
+          if (requested) {
+            // Release anyone blocked on this Fetch; a racing unsolicited push
+            // remains an automatic-sync event and does not open the panel
+            // before the actual response arrives.
+            settleClipboardWaiters(snapshot);
+          } else {
+            // A copy on the remote is immediately pastable here. Best effort
+            // by design: `writeText` is absent on a non-secure origin and can
+            // reject when the tab is unfocused. Never mirror an empty push,
+            // which would wipe the local clipboard for a non-text remote copy.
+            mirrorRemoteClipboard(text);
+          }
           break;
         }
         case "remoteOs":

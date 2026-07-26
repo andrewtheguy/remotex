@@ -436,6 +436,7 @@ async fn active_loop(
                             .send(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
+                                requested: true,
                             })
                             .await
                             .is_err()
@@ -604,6 +605,7 @@ async fn read_loop(
                     .send(ServerMsg::Clipboard {
                         text: snapshot.text,
                         changed_at_ms: snapshot.changed_at_ms,
+                        requested: false,
                     })
                     .await
                     .is_err()
@@ -686,6 +688,7 @@ async fn extended_cut_text(
                 .send(ServerMsg::Clipboard {
                     text: snapshot.text,
                     changed_at_ms: snapshot.changed_at_ms,
+                    requested: false,
                 })
                 .await
                 .is_err()

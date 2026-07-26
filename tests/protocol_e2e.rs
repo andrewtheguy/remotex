@@ -522,6 +522,7 @@ async fn switch_target_returns_to_the_picker_then_reconnects() {
 struct ClipboardMessage {
     text: String,
     changed_at_ms: Option<u64>,
+    requested: bool,
 }
 
 /// Read from the socket until a timestamped `clipboard` control message
@@ -537,6 +538,7 @@ async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
                         return ClipboardMessage {
                             text: parsed["text"].as_str().unwrap().to_owned(),
                             changed_at_ms: parsed["changedAtMs"].as_u64(),
+                            requested: parsed["requested"].as_bool().unwrap(),
                         };
                     }
                 }
@@ -579,16 +581,19 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
         pushed.changed_at_ms.is_some(),
         "a live remote clipboard change needs an activity timestamp"
     );
+    assert!(!pushed.requested, "a live remote change must remain a push");
     expect_tile(&mut ws).await;
 
     // And the same text is still there to be fetched: a browser that attached
     // after the push — or reattached — has to be able to ask.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    let fetched = expect_clipboard(&mut ws).await;
+    assert_eq!(fetched.text, pushed.text);
     assert_eq!(
-        expect_clipboard(&mut ws).await,
-        pushed,
+        fetched.changed_at_ms, pushed.changed_at_ms,
         "Fetch must preserve the clipboard activity timestamp"
     );
+    assert!(fetched.requested, "Fetch replies must be marked requested");
 
     // Browser → remote. Latin-1 survives; anything beyond it becomes '?'.
     ws.send(Message::text(r#"{"type":"clipboard","text":"typed ☕ here"}"#))
@@ -628,6 +633,7 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
         ClipboardMessage {
             text: String::new(),
             changed_at_ms: None,
+            requested: true,
         }
     );
 }

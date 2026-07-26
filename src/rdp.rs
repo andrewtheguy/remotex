@@ -340,6 +340,7 @@ async fn active_loop(
                             .send(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
+                                requested: true,
                             })
                             .await
                             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
@@ -400,6 +401,7 @@ async fn active_loop(
                             .send(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
+                                requested: false,
                             })
                             .await
                             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;

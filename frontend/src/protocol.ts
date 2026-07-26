@@ -89,8 +89,9 @@ export type ControlMsg =
   // shortcut stays Command or becomes remote Control.
   | { type: "remoteOs"; macos: boolean }
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
-  // an unprompted push when the remote's clipboard changed.
-  | ({ type: "clipboard" } & ClipboardSnapshot)
+  // an unprompted push when the remote's clipboard changed. Requested replies
+  // populate the panel without silently copying; pushes retain automatic sync.
+  | ({ type: "clipboard"; requested: boolean } & ClipboardSnapshot)
   // The resolutions the remote display accepts, largest first — the floating
   // menu's Resolution section, answered with "setResolution". Only the rxa
   // engine sends this, and only for a target whose Mac shares a virtual

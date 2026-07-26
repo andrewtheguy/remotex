@@ -321,11 +321,15 @@ pub enum ServerMsg {
     RemoteOs { macos: bool },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
-    /// `changed_at_ms` is retained across Fetches; `None` means the content
-    /// predates the session and its real activity time is unknown.
+    /// `requested` distinguishes those paths so an explicit panel read does
+    /// not silently replace the browser's local OS clipboard; unsolicited
+    /// pushes still drive automatic sync. `changed_at_ms` is retained across
+    /// Fetches; `None` means the content predates the session and its real
+    /// activity time is unknown.
     Clipboard {
         text: String,
         changed_at_ms: Option<u64>,
+        requested: bool,
     },
     /// The resolutions the remote display will accept, largest first — the menu
     /// behind the floating menu's Resolution section, answered with
@@ -373,6 +377,7 @@ enum ControlMsg<'a> {
         text: &'a str,
         #[serde(rename = "changedAtMs")]
         changed_at_ms: Option<u64>,
+        requested: bool,
     },
     DisplayModes { modes: Vec<Resolution> },
 }
@@ -428,9 +433,11 @@ impl ServerMsg {
             ServerMsg::Clipboard {
                 text,
                 changed_at_ms,
+                requested,
             } => WireFrame::Text(control(&ControlMsg::Clipboard {
                 text: clamp_clipboard(text),
                 changed_at_ms: *changed_at_ms,
+                requested: *requested,
             })),
             ServerMsg::DisplayModes { modes } => WireFrame::Text(control(&ControlMsg::DisplayModes {
                 modes: modes.iter().map(|&(w, h)| Resolution { w, h }).collect(),
@@ -548,13 +555,14 @@ mod tests {
         match (ServerMsg::Clipboard {
             text: "hi \"there\"".to_owned(),
             changed_at_ms: Some(1_721_234_567_890),
+            requested: false,
         })
         .encode()
         {
             WireFrame::Text(json) => {
                 assert_eq!(
                     json,
-                    r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890}"#
+                    r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890,"requested":false}"#
                 );
             }
             other => panic!("clipboard should be a text frame: {other:?}"),
@@ -562,13 +570,14 @@ mod tests {
         match (ServerMsg::Clipboard {
             text: String::new(),
             changed_at_ms: None,
+            requested: true,
         })
         .encode()
         {
             WireFrame::Text(json) => {
                 assert_eq!(
                     json,
-                    r#"{"type":"clipboard","text":"","changedAtMs":null}"#
+                    r#"{"type":"clipboard","text":"","changedAtMs":null,"requested":true}"#
                 );
             }
             other => panic!("clipboard should be a text frame: {other:?}"),
@@ -611,13 +620,14 @@ mod tests {
         match (ServerMsg::Clipboard {
             text: "x".repeat(MAX_CLIPBOARD_BYTES + 10),
             changed_at_ms: Some(42),
+            requested: true,
         })
         .encode()
         {
             WireFrame::Text(json) => assert_eq!(
                 json,
                 format!(
-                    r#"{{"type":"clipboard","text":"{}","changedAtMs":42}}"#,
+                    r#"{{"type":"clipboard","text":"{}","changedAtMs":42,"requested":true}}"#,
                     "x".repeat(MAX_CLIPBOARD_BYTES)
                 )
             ),
