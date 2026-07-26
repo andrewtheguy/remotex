@@ -11,8 +11,12 @@ struct DesktopScreen: View {
 
     var body: some View {
         ZStack {
-            RemoteSurfaceHost(model: model)
-                .ignoresSafeArea()
+            RemoteSurfaceHost(
+                model: model,
+                remoteSize: model.session.remoteSize,
+                cursor: model.remoteCursor
+            )
+            .ignoresSafeArea()
 
             // The picker owns the screen only once the socket is really attached;
             // before that the interstitial is what should be visible.

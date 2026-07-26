@@ -15,9 +15,16 @@ final class RemoteSurfaceView: NSView {
     /// Flipped so y grows downward, as it does in the framebuffer and in the DOM
     /// coordinates the protocol inherited.
     override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    /// So the first click into an inactive window reaches the remote instead of
+    /// being spent activating the app.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     private let framebuffer: FramebufferView
     private weak var model: AppModel?
+    private var trackingArea: NSTrackingArea?
+    private var cursor = RemoteCursor.hidden
 
     init(model: AppModel, renderer: FramebufferRenderer) {
         self.model = model
@@ -98,5 +105,130 @@ final class RemoteSurfaceView: NSView {
             in: framebuffer.frame.size,
             remote: remoteSize
         )
+    }
+
+    // MARK: - Pointer
+
+    /// `.mouseMoved` needs a tracking area at all, and inside a scroll view it
+    /// has to be `.inVisibleRect` or the rect goes stale on every scroll.
+    ///
+    /// `.activeInKeyWindow` rather than `.activeAlways`: pointer motion should not
+    /// reach the remote while another app is in front.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    /// The remote's pointer shape wins over the margin's ordinary arrow, but only
+    /// over the framebuffer — a hidden pointer in the black margin would be a
+    /// pointer the user cannot find.
+    override func resetCursorRects() {
+        guard !framebuffer.frame.isEmpty else {
+            return
+        }
+        addCursorRect(framebuffer.frame, cursor: cursor)
+    }
+
+    func apply(cursor next: NSCursor) {
+        cursor = next
+        window?.invalidateCursorRects(for: self)
+    }
+
+    // `mouseMoved` is *not* delivered while a button is down, so all three drag
+    // variants are needed or dragging a window on the remote stops the moment the
+    // button goes down.
+    override func mouseMoved(with event: NSEvent) {
+        report(motion: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        report(motion: event)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        report(motion: event)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        report(motion: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        report(button: event, pressed: true)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        report(button: event, pressed: false)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        // Deliberately not calling super, which would open a context menu instead
+        // of letting the press through. `menu(for:)` refuses one as well.
+        window?.makeFirstResponder(self)
+        report(button: event, pressed: true)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        report(button: event, pressed: false)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        report(button: event, pressed: true)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        report(button: event, pressed: false)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let model, model.session.canCaptureKeyboard else {
+            return
+        }
+        guard let delta = WheelMapping.delta(
+            scrollingDeltaX: event.scrollingDeltaX,
+            scrollingDeltaY: event.scrollingDeltaY,
+            hasPreciseScrollingDeltas: event.hasPreciseScrollingDeltas
+        ) else {
+            return
+        }
+        model.sendWheel(dx: delta.dx, dy: delta.dy)
+    }
+
+    private func report(motion event: NSEvent) {
+        guard let model,
+              let point = remotePoint(for: convert(event.locationInWindow, from: nil))
+        else {
+            return
+        }
+        model.sendPointer(x: point.x, y: point.y)
+    }
+
+    private func report(button event: NSEvent, pressed: Bool) {
+        guard let model,
+              let button = WheelMapping.button(forEventNumber: event.buttonNumber)
+        else {
+            return
+        }
+        // The position first, so a click lands where the pointer is even if no
+        // motion was reported since the last one (a tap without a move).
+        if pressed, let point = remotePoint(for: convert(event.locationInWindow, from: nil)) {
+            model.sendPointer(x: point.x, y: point.y)
+        }
+        model.sendMouseButton(button, pressed: pressed)
     }
 }

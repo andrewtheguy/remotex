@@ -7,6 +7,11 @@ import SwiftUI
 /// is shown at its own size and scrolls, rather than being scaled down to fit.
 struct RemoteSurfaceHost: NSViewRepresentable {
     let model: AppModel
+    /// Passed in rather than read off the model inside `updateNSView`, so the
+    /// enclosing `body` is what observes them and SwiftUI actually calls the
+    /// update when they change.
+    let remoteSize: DisplayMode?
+    let cursor: ServerMessage.Cursor?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(model: model)
@@ -40,7 +45,8 @@ struct RemoteSurfaceHost: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        context.coordinator.apply(remoteSize: model.session.remoteSize)
+        context.coordinator.apply(remoteSize: remoteSize)
+        context.coordinator.apply(cursor: cursor)
     }
 
     static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
@@ -52,7 +58,9 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         private let model: AppModel
         private var renderer: FramebufferRenderer?
         private weak var surface: RemoteSurfaceView?
+        private var keyboard: KeyboardCapture?
         private var observers: [NSObjectProtocol] = []
+        private var appliedCursor: ServerMessage.Cursor??
 
         init(model: AppModel) {
             self.model = model
@@ -66,6 +74,10 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             self.renderer = renderer
             self.surface = surface
             model.attach(renderer: renderer)
+            // A local event monitor rather than `keyDown` on the surface: menu key
+            // equivalents are consumed by the menu bar before the responder chain,
+            // and Command chords have to reach the remote.
+            keyboard = KeyboardCapture(model: model, surface: surface)
 
             // The visible area changing is the only thing that changes how much
             // room the remote has. `contentView` posts this once its own bounds
@@ -110,11 +122,29 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             )
         }
 
+        /// The doubly-optional `appliedCursor` is the point: "no message yet" and
+        /// "a message with a null image" are different states, and only the first
+        /// means the remote is drawing its own pointer.
+        func apply(cursor: ServerMessage.Cursor?) {
+            guard let surface, appliedCursor != .some(cursor) else {
+                return
+            }
+            appliedCursor = .some(cursor)
+            let scale = surface.window?.backingScaleFactor ?? 1
+            surface.apply(
+                cursor: RemoteCursor.cursor(
+                    for: RemoteCursor.shape(for: cursor, backingScale: scale)
+                )
+            )
+        }
+
         func detach() {
             for observer in observers {
                 NotificationCenter.default.removeObserver(observer)
             }
             observers.removeAll()
+            keyboard?.invalidate()
+            keyboard = nil
             model.attach(renderer: nil)
             renderer = nil
             surface = nil

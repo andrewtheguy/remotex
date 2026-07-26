@@ -46,6 +46,9 @@ final class AppModel: GatewaySessionSink {
     private(set) var loginError: String?
     /// The alert.
     var actionError: String?
+    /// The remote's pointer shape, once an engine hands one over. Nil means the
+    /// remote is drawing its own pointer into the framebuffer.
+    private(set) var remoteCursor: ServerMessage.Cursor?
 
     let clipboard: ClipboardSynchronizer
 
@@ -281,6 +284,7 @@ final class AppModel: GatewaySessionSink {
             session.canResize = false
             session.manualResize = false
             session.canClipboard = false
+            remoteCursor = nil
             updateClipboardEnablement()
             clipboard.failPendingFetch()
             Task { await loadTargets() }
@@ -329,9 +333,10 @@ final class AppModel: GatewaySessionSink {
         case .clipboard(let payload):
             receive(clipboard: payload)
 
-        case .cursor:
-            // The pointer arrives with the renderer, from M7.
-            break
+        case .cursor(let payload):
+            // Receiving one of these at all means the viewer owns pointer
+            // rendering for the rest of the session.
+            remoteCursor = payload
 
         case .unsupported(let type):
             // A newer gateway. Deliberately nothing: the frame was already
@@ -443,12 +448,28 @@ final class AppModel: GatewaySessionSink {
         connection?.send(.setResolution(w: mode.w, h: mode.h))
     }
 
+    func sendPointer(x: Int32, y: Int32) {
+        guard session.canCaptureKeyboard else {
+            return
+        }
+        connection?.send(.mouseMove(x: x, y: y))
+    }
+
+    func sendWheel(dx: Float, dy: Float) {
+        connection?.send(.wheel(dx: dx, dy: dy))
+    }
+
     func sendKey(code: String, pressed isPressed: Bool, caps: Bool) {
         pressed.record(code: code, pressed: isPressed)
         connection?.send(.key(code: code, pressed: isPressed, caps: caps))
     }
 
     func sendMouseButton(_ button: MouseButton, pressed isPressed: Bool) {
+        // A release is always forwarded, even off the desktop: a button recorded
+        // as held has to be able to come back up.
+        guard session.canCaptureKeyboard || !isPressed else {
+            return
+        }
         pressed.record(button: button, pressed: isPressed)
         connection?.send(.mouseButton(button: button, pressed: isPressed))
     }
