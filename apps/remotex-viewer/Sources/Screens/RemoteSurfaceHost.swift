@@ -30,8 +30,10 @@ struct RemoteSurfaceHost: NSViewRepresentable {
 
         guard let renderer = FramebufferRenderer.make() else {
             // No Metal device, or a shader that will not compile. Nothing can be
-            // drawn, and saying so beats an unexplained black window.
-            model.showError("This Mac cannot start the remote display renderer.")
+            // drawn, and saying so beats an unexplained black window — but not from
+            // here: this runs inside SwiftUI's update, and setting observed state
+            // during one is undefined. The alert goes up on the next turn instead.
+            Task { model.showError("This Mac cannot start the remote display renderer.") }
             return scrollView
         }
         let surface = RemoteSurfaceView(model: model, renderer: renderer)
@@ -100,6 +102,12 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                         guard let self, let surface else {
                             return
                         }
+                        // Re-sized against the new visible area. A window-only
+                        // resize changes no observed state, so SwiftUI does not run
+                        // `updateNSView`, and the document view would keep a frame
+                        // measured against the old window — leaving a remote smaller
+                        // than the window off-centre in the space it grew into.
+                        self.apply(remoteSize: surface.remoteSize)
                         surface.needsLayout = true
                         self.report(from: surface)
                     }

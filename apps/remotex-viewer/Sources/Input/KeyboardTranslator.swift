@@ -109,6 +109,13 @@ struct KeyboardTranslator {
 
         let wasPending = pendingCommandCodes.remove(event.keyCode) != nil
         if forwardedCommandCodes.remove(event.keyCode) != nil {
+            // Command is up, so the chord it was part of is over. Clearing here
+            // too, not only on the path below: this one returns early, and leaving
+            // the flag set swallows the synthetic tap for the *next* standalone
+            // Command press.
+            if pendingCommandCodes.isEmpty {
+                commandWasUsed = false
+            }
             return [TranslatedKeyEvent(code: code, pressed: false, caps: caps)]
         }
         guard wasPending else {

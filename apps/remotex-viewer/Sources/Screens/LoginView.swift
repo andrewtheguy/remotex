@@ -43,9 +43,13 @@ struct LoginView: View {
                     Text("Username")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                    // The captions above are separate Text views, so without these
+                    // VoiceOver reaches two unnamed fields. No placeholder instead:
+                    // it would show as grey sample text inside an empty field.
                     TextField("", text: $username)
                         .textFieldStyle(.roundedBorder)
                         .textContentType(.username)
+                        .accessibilityLabel("Username")
                         .focused($focus, equals: .username)
                         .onSubmit { focus = .password }
                     Text("Password")
@@ -54,6 +58,7 @@ struct LoginView: View {
                     SecureField("", text: $password)
                         .textFieldStyle(.roundedBorder)
                         .textContentType(.password)
+                        .accessibilityLabel("Password")
                         .focused($focus, equals: .password)
                         .onSubmit(signIn)
                     if let error = model.loginError {

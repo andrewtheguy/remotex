@@ -63,12 +63,17 @@ final class AppModel: GatewaySessionSink {
     private var connection: GatewayConnection?
     @ObservationIgnored
     private var pressed = PressedInput()
-    /// The room available for the remote desktop, in device pixels, as the
-    /// surface last measured it. Nil until a surface exists.
-    @ObservationIgnored
-    /// The last size the surface measured. Readable so a test can see that a
-    /// window resize reached the model at all, which is the half of automatic
-    /// resizing that lives in AppKit notifications rather than in `ViewportPolicy`.
+    /// The room available for the remote desktop, in device pixels, as the surface
+    /// last measured it. Nil until a surface exists.
+    ///
+    /// Observed, unlike the rest of the session plumbing below, because
+    /// `canResizeNow` reads it: the first measurement is what enables "Resize to
+    /// Window", and a surface that appears after `connected` would otherwise leave
+    /// the item disabled with nothing to invalidate it.
+    ///
+    /// Readable so a test can see that a window resize reached the model at all —
+    /// the half of automatic resizing that lives in AppKit notifications rather
+    /// than in `ViewportPolicy`.
     private(set) var viewportSize: DisplayMode?
     @ObservationIgnored
     private var viewportPolicy = ViewportPolicy()

@@ -78,7 +78,9 @@ enum ProbeCommand {
                 print("probe: could not claim the session slot")
                 return false
             }
-            print("probe: claimed \(token)")
+            // Not the token itself: this prints to a terminal and gets pasted into
+            // bug reports, and it is a live credential for the session slot.
+            print("probe: claimed the session slot")
 
             let transport = try await client.openSocket(sessionToken: token)
             if let target = argument("--probe-target") {
@@ -133,11 +135,16 @@ enum ProbeCommand {
                 print("probe: control \(text.prefix(200))")
             case .binary(let data):
                 tiles += 1
-                largestPayload = max(largestPayload, data.count)
-                if let tile = TileFrame.decode(data) {
-                    largestTile = "\(tile.w)x\(tile.h) \(tile.format)"
-                } else {
+                let tile = TileFrame.decode(data)
+                if tile == nil {
                     print("probe: undecodable \(data.count)-byte binary frame")
+                }
+                // Both halves have to come from the *same* frame, or the summary
+                // pairs the largest payload with whatever tile happened to arrive
+                // last — which is the number this probe exists to report.
+                if data.count > largestPayload {
+                    largestPayload = data.count
+                    largestTile = tile.map { "\($0.w)x\($0.h) \($0.format)" } ?? "undecodable"
                 }
             }
         }

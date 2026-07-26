@@ -93,6 +93,23 @@ struct RemoteSurfaceViewTests {
         #expect(full == harness.expectedViewport(width: 800, height: 600))
     }
 
+    /// A window-only resize changes no observed state, so SwiftUI never runs
+    /// `updateNSView` and the surface would keep a frame measured against the old
+    /// window — leaving a remote smaller than the window off-centre in the space it
+    /// grew into, with input mapped against the stale frame.
+    @Test
+    func growingTheWindowGrowsTheSurfaceUnderASmallerRemote() async throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 600, height: 400))
+        harness.coordinator.apply(remoteSize: harness.remote(width: 400, height: 300))
+        let before = try await harness.reportedViewport()
+
+        harness.resize(to: CGSize(width: 900, height: 700))
+        _ = try await harness.reportedViewport(otherThan: before)
+
+        #expect(harness.surface.frame.size == CGSize(width: 900, height: 700))
+    }
+
     /// Scrolling changes what is visible, not how much room there is.
     @Test
     func scrollingDoesNotChangeTheViewport() async throws {
@@ -117,7 +134,7 @@ struct RemoteSurfaceViewTests {
         let window: NSWindow
         let scrollView: NSScrollView
         let surface: RemoteSurfaceView
-        private let coordinator: RemoteSurfaceHost.Coordinator
+        let coordinator: RemoteSurfaceHost.Coordinator
 
         init() throws {
             let renderer = try #require(FramebufferRenderer.make(), "needs a Metal device")
@@ -154,6 +171,12 @@ struct RemoteSurfaceViewTests {
         func resize(to size: CGSize) {
             scrollView.setFrameSize(size)
             scrollView.layoutSubtreeIfNeeded()
+        }
+
+        /// A remote whose size in *points* on this window's display is
+        /// `width`×`height` — the same points-to-pixels rule, read the other way.
+        func remote(width: CGFloat, height: CGFloat) -> DisplayMode {
+            expectedViewport(width: width, height: height)
         }
 
         /// Points to pixels through the same rule the surface uses, so a display

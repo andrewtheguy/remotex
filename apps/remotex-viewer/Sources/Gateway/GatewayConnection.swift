@@ -111,6 +111,12 @@ actor GatewayConnection {
 
     /// Tear everything down. The gateway keeps the engine alive for its reattach
     /// grace period, so this is not a disconnect from the remote.
+    ///
+    /// **One-way.** The outbound queue's wake-up stream is finished here and an
+    /// `AsyncStream` cannot be reopened, so a `start` after this would attach a
+    /// drain loop that ends immediately and silently swallow every send. Nothing
+    /// restarts a stopped connection — `AppModel.teardown` drops it and the next
+    /// session builds a new one — and a restart should build a new one too.
     func stop() {
         running = false
         claimTask?.cancel()

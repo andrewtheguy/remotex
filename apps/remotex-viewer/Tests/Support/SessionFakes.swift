@@ -223,6 +223,11 @@ final class RecordingSink: GatewaySessionSink {
             }
             try? await Task.sleep(for: .milliseconds(2))
         }
+        // Once more after the deadline: the predicate may have come true during the
+        // last sleep, and failing on that would be a flake, not a finding.
+        if predicate(events) {
+            return
+        }
         Issue.record(
             "timed out waiting; saw \(trace)",
             sourceLocation: sourceLocation
