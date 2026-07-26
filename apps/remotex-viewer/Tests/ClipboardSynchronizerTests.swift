@@ -170,6 +170,42 @@ struct ClipboardSynchronizerTests {
         #expect(pasteboard.string(forType: .string) == "copy draft")
     }
 
+    // Autosync refuses what the panel would refuse, minus the explanation: it
+    // fires on a timer and on Command-V, so an oversized pasteboard must not
+    // ride the socket just to be truncated at the far end.
+    @Test
+    @MainActor
+    func anOversizedPasteboardIsNotSyncedAutomatically() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let clipboard = ClipboardSynchronizer(
+            pasteboard: pasteboard,
+            startsPolling: false
+        )
+        var commands: [[String: Any]] = []
+        clipboard.sendCommand = { commands.append($0) }
+
+        write(
+            String(repeating: "a", count: ClipboardSynchronizer.maximumBytes + 1),
+            to: pasteboard
+        )
+        clipboard.update(enabled: true)
+        #expect(commands.isEmpty, "one byte over the limit is still over it")
+
+        // Not even the explicit Command-V push, which forces past the echo
+        // guard but not past the ceiling.
+        clipboard.pushLocalClipboard(force: true)
+        #expect(commands.isEmpty)
+
+        // At the limit it syncs, so the boundary is inclusive on both sides.
+        write(
+            String(repeating: "a", count: ClipboardSynchronizer.maximumBytes),
+            to: pasteboard
+        )
+        clipboard.pollPasteboard()
+        #expect(commandTypes(commands) == ["clipboard"])
+    }
+
     // The web side answers every request, so a failed read reaches the panel
     // without waiting out the local deadline.
     @Test

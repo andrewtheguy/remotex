@@ -148,14 +148,20 @@ final class ClipboardSynchronizer {
         observedChangeCount = pasteboard.changeCount
     }
 
-    /// Deliberately uncapped, as is `receiveRemotePush` on the way back:
-    /// `maximumBytes` is a panel affordance, checked in `sendDraft` so the card
-    /// can refuse and say why before spending a round trip. The automatic sync
-    /// has no UI to say it in. Revisit if that changes.
+    /// An oversized pasteboard is skipped rather than sent for the gateway to
+    /// truncate. Nothing here is user-initiated — polling and the Command-V hook
+    /// both land in this path — and the whole string would ride the socket
+    /// first, which past 64 MiB drops the session outright. The remote keeps
+    /// whatever it had; `sendDraft` is the path that reports the limit, because
+    /// it has the card to report it on.
+    ///
+    /// `receiveRemotePush` needs no such check: the gateway has already clamped
+    /// everything arriving on that link.
     func pushLocalClipboard(force: Bool) {
         guard isEnabled,
               let text = pasteboard.string(forType: .string),
-              !text.isEmpty
+              !text.isEmpty,
+              Self.utf8ByteCount(text) <= Self.maximumBytes
         else {
             return
         }

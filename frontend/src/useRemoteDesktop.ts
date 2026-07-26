@@ -5,6 +5,7 @@ import {
   type ClipboardSnapshot,
   type ControlMsg,
   decodeTileFrame,
+  MAX_CLIPBOARD_BYTES,
   type MouseButton,
   mouseButtonFromEvent,
   type RemoteClipboard,
@@ -80,6 +81,21 @@ interface TouchViewState {
 function touchFitScale(size: RemoteSize): number {
   return Math.min(document.documentElement.clientWidth / size.w, 1);
 }
+const clipboardEncoder = new TextEncoder();
+
+// Whether `text` exceeds one clipboard transfer's ceiling.
+//
+// The length test comes first and is not just a fast path: UTF-8 never spends
+// fewer bytes than the string has UTF-16 code units, so anything longer than the
+// ceiling is already over it — and that decides the huge cases without encoding
+// a copy of the string to measure it.
+function overClipboardLimit(text: string): boolean {
+  return (
+    text.length > MAX_CLIPBOARD_BYTES ||
+    clipboardEncoder.encode(text).byteLength > MAX_CLIPBOARD_BYTES
+  );
+}
+
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -1025,10 +1041,15 @@ export function useRemoteDesktop(
   // absent on a non-secure origin, and Safari refuses it outright without a
   // paste gesture. The panel's Send covers those.
   //
-  // Deliberately uncapped, in both directions of the automatic sync (this push
-  // and mirrorRemoteClipboard): MAX_CLIPBOARD_BYTES is a panel affordance. It
-  // exists so the UI can refuse and say why before spending a round trip, and
-  // autosync has no UI to say it in. Revisit if that changes.
+  // An oversized clipboard is skipped rather than sent for the gateway to
+  // truncate: this fires on focus with no user action behind it, and the whole
+  // string would ride the socket first — past 64 MiB (axum's default
+  // max_message_size) that drops the session, which reconnect then hides. The
+  // remote therefore keeps whatever it had; the panel's Send is the path that
+  // reports the limit, since autosync has no UI to report it in.
+  //
+  // The inbound half (mirrorRemoteClipboard) needs no check: everything on that
+  // link is already clamped by the gateway (see src/protocol.rs).
   useEffect(() => {
     if (mode !== "desktop" || !canClipboard || nativeHost) {
       return;
@@ -1046,6 +1067,7 @@ export function useRemoteDesktop(
         }
         if (
           text === "" ||
+          overClipboardLimit(text) ||
           // Came from the remote a moment ago; sending it back is a loop.
           text === lastFromRemoteRef.current ||
           text === lastToRemoteRef.current
