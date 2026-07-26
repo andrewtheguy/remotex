@@ -42,7 +42,9 @@ struct WebViewContainer: NSViewRepresentable {
         return webView
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {}
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.keyboard?.updateWindowObservation()
+    }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.stopLoading()

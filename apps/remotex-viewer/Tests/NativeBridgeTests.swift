@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import RemotexViewer
@@ -71,5 +72,116 @@ struct NativeBridgeTests {
             let value = Self.desktopState(removing: [field])
             #expect(NativeBridge.decodeState(value) == nil, "\(field) must be required")
         }
+    }
+
+    @Test
+    @MainActor
+    func clipboardPushPayloadRequiresTextAndANullableTimestamp() {
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "copied",
+                "changedAtMs": 1_725_000_123_456,
+            ])
+                == RemoteClipboardPush(
+                    text: "copied",
+                    changedAtMs: 1_725_000_123_456
+                )
+        )
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "old",
+                "changedAtMs": NSNull(),
+            ])
+                == RemoteClipboardPush(text: "old", changedAtMs: nil)
+        )
+
+        for malformed: [String: Any] in [
+            ["text": "missing timestamp"],
+            ["changedAtMs": NSNull()],
+            ["text": 7, "changedAtMs": NSNull()],
+            ["text": "fractional", "changedAtMs": 1.5],
+            ["text": "boolean", "changedAtMs": true],
+            ["text": "negative", "changedAtMs": -1],
+            // 2^63: the nearest Double to Int64.max, and one past it.
+            ["text": "unrepresentable", "changedAtMs": 9_223_372_036_854_775_808.0],
+        ] {
+            #expect(NativeBridge.decodeRemoteClipboardPush(malformed) == nil)
+        }
+    }
+
+    @Test
+    @MainActor
+    func fetchResultPayloadRequiresARequestIdTextAndNullableTimestamp() {
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "fetched",
+                "changedAtMs": NSNull(),
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "fetched",
+                    changedAtMs: nil
+                )
+        )
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "",
+                "changedAtMs": 0,
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "",
+                    changedAtMs: 0
+                )
+        )
+
+        // The failure answer: nothing was read, so there is no timestamp.
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": NSNull(),
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: nil,
+                    changedAtMs: nil
+                )
+        )
+
+        for malformed: [String: Any] in [
+            ["text": "missing id", "changedAtMs": NSNull()],
+            ["requestId": "", "text": "empty id", "changedAtMs": NSNull()],
+            ["requestId": 9, "text": "bad id", "changedAtMs": NSNull()],
+            ["requestId": "id", "changedAtMs": NSNull()],
+            ["requestId": "id", "text": "missing timestamp"],
+            ["requestId": "id", "text": "bad timestamp", "changedAtMs": "now"],
+        ] {
+            #expect(NativeBridge.decodeClipboardFetchResult(malformed) == nil)
+        }
+    }
+
+    // Whether a request id is current is panel state, so decoding cannot judge
+    // it: a stale answer has to arrive intact and be refused a layer up (see
+    // `requestMatchingTimeoutAndCloseResetThePanel`).
+    @Test
+    @MainActor
+    func aStaleFetchRequestIdStillDecodes() throws {
+        let stale = try #require(
+            NativeBridge.decodeClipboardFetchResult([
+                "requestId": "stale-id",
+                "text": "stale",
+                "changedAtMs": NSNull(),
+            ])
+        )
+        #expect(stale.requestID == "stale-id")
+        #expect(stale.text == "stale")
+        #expect(stale.changedAtMs == nil)
     }
 }
