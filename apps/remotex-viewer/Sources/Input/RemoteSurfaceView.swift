@@ -74,17 +74,33 @@ final class RemoteSurfaceView: NSView {
     /// the framebuffer occupies changed even though the remote did not.
     func backingScaleChanged() {
         needsLayout = true
-        model?.reportViewport(measuredViewport())
+        if let measured = measuredViewport() {
+            model?.reportViewport(measured)
+        }
     }
 
-    /// The room available for the remote desktop, in device pixels.
+    /// The room available for the remote desktop in device pixels, or nil while
+    /// there is none to measure.
     ///
-    /// Measured from the scroll view's visible area rather than from this view,
-    /// whose own size is at least the remote's — using this view's bounds would
-    /// report the desktop's current size back as the space available for it and
-    /// never shrink.
-    func measuredViewport() -> DisplayMode {
-        let visible = enclosingScrollView?.contentView.bounds.size ?? bounds.size
+    /// The scroll view's own size, and deliberately neither of the two nearer
+    /// measurements:
+    ///
+    /// - not this view's bounds, which are at least the remote's, so they would
+    ///   report the desktop's current size back as the room available for it and
+    ///   never shrink;
+    /// - not the clip view's, which a legacy scroller shrinks by 17pt when the
+    ///   remote overflows. An engine that follows the window would then resize to
+    ///   the smaller size, the scrollers would hide, the full size would be
+    ///   reported again, and the desktop would flip between the two forever.
+    ///
+    /// Nil rather than a floored 1×1 before the first layout: `RemoteGeometry`
+    /// has to clamp because the gateway rejects a zero, but an engine that
+    /// follows the window would take that clamp literally.
+    func measuredViewport() -> DisplayMode? {
+        let visible = enclosingScrollView?.bounds.size ?? bounds.size
+        guard visible.width >= 1, visible.height >= 1 else {
+            return nil
+        }
         return RemoteGeometry.viewport(
             clip: visible,
             backingScale: window?.backingScaleFactor ?? 1

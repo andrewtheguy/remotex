@@ -129,6 +129,24 @@ Viewport reports are clamped into `u16` before they are sent. The gateway
 *rejects* an out-of-range value rather than clamping it, and only logs the
 rejection, so an unclamped report would silently stop resizing anything.
 
+What gets measured, and when, is two AppKit facts that read backwards:
+
+- The trigger is the **scroll view's** `frameDidChange`. `NSClipView`'s
+  `boundsDidChange` sounds like the right signal and is not: it fires on a
+  *scroll*, where the origin moves and no size changes, and stays silent through a
+  window resize, where its frame changes and its bounds size follows. Watching it
+  meant a VNC target never followed the window at all.
+- The measurement is the **scroll view's** size, not the clip view's. A legacy
+  scroller — the style macOS uses once a mouse is attached — takes 17pt off the
+  clip view when the remote overflows. Reporting that would resize the remote
+  smaller, hide the scrollers, report the full size again, and flip between the
+  two forever. The stable alternative is a desktop up to 17pt wider than the
+  visible area, which scrolls.
+
+Nothing is reported before the first layout. `RemoteGeometry` floors a report at
+1 because the gateway rejects a zero, and an engine that follows the window would
+take that literally.
+
 ## Keyboard
 
 An AppKit local event monitor consumes `keyDown`, `keyUp`, and `flagsChanged`

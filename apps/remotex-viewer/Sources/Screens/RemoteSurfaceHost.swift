@@ -79,14 +79,21 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             // and Command chords have to reach the remote.
             keyboard = KeyboardCapture(model: model, surface: surface)
 
-            // The visible area changing is the only thing that changes how much
-            // room the remote has. `contentView` posts this once its own bounds
-            // change, which covers window resizes and scroller appearance alike.
-            scrollView.contentView.postsBoundsChangedNotifications = true
+            // The scroll view being resized is the only thing that changes how
+            // much room the remote has, and a resize is a *frame* change. The clip
+            // view's `boundsDidChange` — watched here at first — fires on a scroll,
+            // which moves its origin and changes no size at all, and stays silent
+            // when a window resize changes its frame and its bounds size follows;
+            // so nothing ever reported and no engine ever followed the window.
+            //
+            // Watched on the scroll view rather than the clip view for the reason
+            // `measuredViewport()` gives: a scroller appearing must not read as
+            // less room, or the remote oscillates between two sizes.
+            scrollView.postsFrameChangedNotifications = true
             observers.append(
                 NotificationCenter.default.addObserver(
-                    forName: NSView.boundsDidChangeNotification,
-                    object: scrollView.contentView,
+                    forName: NSView.frameDidChangeNotification,
+                    object: scrollView,
                     queue: .main
                 ) { [weak self, weak surface] _ in
                     MainActor.assumeIsolated {
@@ -94,11 +101,22 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                             return
                         }
                         surface.needsLayout = true
-                        self.model.reportViewport(surface.measuredViewport())
+                        self.report(from: surface)
                     }
                 }
             )
-            model.reportViewport(surface.measuredViewport())
+            report(from: surface)
+        }
+
+        /// Report the room available, if there is any yet. Nothing is sent before
+        /// the first layout: this runs from `makeNSView`, where the scroll view is
+        /// still zero-sized, and a floored 1×1 report would be acted on by an
+        /// engine that follows the window.
+        private func report(from surface: RemoteSurfaceView) {
+            guard let measured = surface.measuredViewport() else {
+                return
+            }
+            model.reportViewport(measured)
         }
 
         func apply(remoteSize: DisplayMode?) {

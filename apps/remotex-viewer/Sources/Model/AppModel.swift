@@ -66,7 +66,10 @@ final class AppModel: GatewaySessionSink {
     /// The room available for the remote desktop, in device pixels, as the
     /// surface last measured it. Nil until a surface exists.
     @ObservationIgnored
-    private var viewportSize: DisplayMode?
+    /// The last size the surface measured. Readable so a test can see that a
+    /// window resize reached the model at all, which is the half of automatic
+    /// resizing that lives in AppKit notifications rather than in `ViewportPolicy`.
+    private(set) var viewportSize: DisplayMode?
     @ObservationIgnored
     private var viewportPolicy = ViewportPolicy()
     /// Debounces automatic reports. A window drag changes the visible area on
