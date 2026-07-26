@@ -206,7 +206,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
         // viewer never reads.
         guard let text = value["text"] as? String,
               decodeChangedAtMs(value) != nil,
-              let oversizedBytes = decodeOptionalBytes(value, key: "oversizedBytes")
+              let oversizedBytes = decodeOptionalNonNegativeInt64(value, key: "oversizedBytes")
         else {
             return nil
         }
@@ -231,7 +231,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
         }
         guard let text = value["text"] as? String,
               let changedAtMs = decodeChangedAtMs(value),
-              let oversizedBytes = decodeOptionalBytes(value, key: "oversizedBytes")
+              let oversizedBytes = decodeOptionalNonNegativeInt64(value, key: "oversizedBytes")
         else {
             return nil
         }
@@ -249,13 +249,14 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
     private static func decodeChangedAtMs(
         _ value: [String: Any]
     ) -> Int64?? {
-        decodeOptionalBytes(value, key: "changedAtMs")
+        decodeOptionalNonNegativeInt64(value, key: "changedAtMs")
     }
 
-    /// A required field holding either JSON null or a non-negative integer, as
-    /// both `changedAtMs` and `oversizedBytes` are. The outer optional is
-    /// decoding success; the inner one is the null.
-    private static func decodeOptionalBytes(
+    /// A required field holding either JSON null or a non-negative integer — the
+    /// shape shared by `changedAtMs`, a millisecond timestamp, and
+    /// `oversizedBytes`, a byte count. The outer optional is decoding success;
+    /// the inner one is the null.
+    private static func decodeOptionalNonNegativeInt64(
         _ value: [String: Any],
         key: String
     ) -> Int64?? {
