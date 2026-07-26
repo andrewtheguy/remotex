@@ -39,24 +39,23 @@ pub enum MsgError {
 /// Lives here rather than in the gateway because all three hops — browser link,
 /// gateway, agent — have to agree on it, and the agent cannot see the gateway's
 /// `src/protocol.rs`. Clipboard text rides the same link as live frames, so an
-/// accidental 200 MB copy must not stall a session; text over this is truncated
-/// (see [`clamp_clipboard`]) rather than refused, because a truncated paste is
-/// recoverable and a silently dropped one just looks broken.
+/// accidental 200 MB copy must not stall a session.
+///
+/// Text over this is refused, not truncated. Truncation is the worse failure of
+/// the two: it arrives looking exactly like a complete paste, and neither end
+/// can tell that the rest is missing until something downstream is quietly
+/// wrong. A refusal is reported as one — the panels name the size and the limit
+/// (see the `oversized_bytes` on the clipboard messages) — so the surprise
+/// happens at the clipboard, where it can be understood, instead of in whatever
+/// the text was pasted into.
 pub const MAX_CLIPBOARD_BYTES: usize = 65_536;
 
-/// Truncate `text` to at most [`MAX_CLIPBOARD_BYTES`], on a char boundary.
+/// Whether `text` fits one clipboard transfer.
 ///
-/// Returns the input untouched when it already fits, so the common case does
-/// not allocate.
-pub fn clamp_clipboard(text: &str) -> &str {
-    if text.len() <= MAX_CLIPBOARD_BYTES {
-        return text;
-    }
-    let mut end = MAX_CLIPBOARD_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+/// The byte length is what counts: [`MAX_CLIPBOARD_BYTES`] bounds the wire, and
+/// `str::len` is already UTF-8 bytes.
+pub fn clipboard_fits(text: &str) -> bool {
+    text.len() <= MAX_CLIPBOARD_BYTES
 }
 
 /// The tile payload codec, mirroring the gateway's `Tile::FORMAT_*` constants
@@ -125,9 +124,24 @@ pub enum AgentMsg {
     /// The Mac's pasteboard text. Sent either in reply to a
     /// [`GatewayMsg::ClipboardRequest`], or unprompted after
     /// [`GatewayMsg::ClipboardWatch`] turned the watcher on and the pasteboard
-    /// changed. Never sent otherwise: with the watch off the agent does not
-    /// look at the pasteboard at all.
-    Clipboard { text: String },
+    /// changed. `requested` is true only for the former, so the gateway can
+    /// preserve automatic browser clipboard sync for watcher pushes without
+    /// treating a panel Fetch as a copy action. `changed_at_ms` is when the
+    /// agent observed that change, and is retained on later Fetch replies.
+    /// `None` means the pasteboard content predates this watched session, so its
+    /// real change time is unknown.
+    /// Never sent otherwise: with the watch off the agent does not look at the
+    /// pasteboard at all.
+    /// `oversized_bytes` is `Some(len)` when the pasteboard held more than
+    /// [`MAX_CLIPBOARD_BYTES`] of text: `text` is then empty and `len` is what
+    /// the Mac actually holds, so the browser can say so rather than show an
+    /// empty clipboard or a truncated one.
+    Clipboard {
+        text: String,
+        changed_at_ms: Option<u64>,
+        requested: bool,
+        oversized_bytes: Option<u64>,
+    },
 }
 
 impl AgentMsg {
@@ -213,8 +227,28 @@ impl AgentMsg {
                 out.push(Self::T_ERROR);
                 put_str(&mut out, message);
             }
-            AgentMsg::Clipboard { text } => {
+            AgentMsg::Clipboard {
+                text,
+                changed_at_ms,
+                requested,
+                oversized_bytes,
+            } => {
                 out.push(Self::T_CLIPBOARD);
+                out.push(u8::from(*requested));
+                match changed_at_ms {
+                    Some(value) => {
+                        out.push(1);
+                        out.extend_from_slice(&value.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                match oversized_bytes {
+                    Some(value) => {
+                        out.push(1);
+                        out.extend_from_slice(&value.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
                 put_text(&mut out, text);
             }
         }
@@ -267,7 +301,14 @@ impl AgentMsg {
             Self::T_ERROR => AgentMsg::Error {
                 message: r.string()?,
             },
-            Self::T_CLIPBOARD => AgentMsg::Clipboard { text: r.text()? },
+            // Field order is wire order: a struct literal evaluates in the
+            // order written, and every one of these reads moves the cursor.
+            Self::T_CLIPBOARD => AgentMsg::Clipboard {
+                requested: r.bool()?,
+                changed_at_ms: if r.bool()? { Some(r.u64()?) } else { None },
+                oversized_bytes: if r.bool()? { Some(r.u64()?) } else { None },
+                text: r.text()?,
+            },
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -601,10 +642,23 @@ mod tests {
             },
             AgentMsg::Clipboard {
                 text: "pasteboard contents — 画面".to_owned(),
+                changed_at_ms: Some(1_721_234_567_890),
+                requested: true,
+                oversized_bytes: None,
             },
             // An empty pasteboard is text too, and distinct from "no reply".
             AgentMsg::Clipboard {
                 text: String::new(),
+                changed_at_ms: None,
+                requested: false,
+                oversized_bytes: None,
+            },
+            // Refused for its size: no text, and the size it would have been.
+            AgentMsg::Clipboard {
+                text: String::new(),
+                changed_at_ms: Some(1_721_234_567_890),
+                requested: true,
+                oversized_bytes: Some(200 * 1024 * 1024),
             },
         ]
     }
@@ -695,7 +749,12 @@ mod tests {
         let text = "é".repeat(usize::from(u16::MAX)); // 128 KiB of UTF-8
         assert!(text.len() > usize::from(u16::MAX));
 
-        let msg = AgentMsg::Clipboard { text: text.clone() };
+        let msg = AgentMsg::Clipboard {
+            text: text.clone(),
+            changed_at_ms: Some(u64::MAX),
+            requested: true,
+            oversized_bytes: None,
+        };
         assert_eq!(AgentMsg::decode(&msg.encode()).unwrap(), msg);
 
         let msg = GatewayMsg::Clipboard { text };
@@ -704,9 +763,10 @@ mod tests {
 
     #[test]
     fn clipboard_text_that_is_not_utf8_is_rejected() {
-        // A well-formed frame whose payload is not UTF-8: length 2, then a lone
+        // A well-formed frame whose payload is not UTF-8: the three option/flag
+        // bytes (requested, no timestamp, not oversized), length 2, then a lone
         // continuation byte pair.
-        let mut bytes = vec![AgentMsg::T_CLIPBOARD];
+        let mut bytes = vec![AgentMsg::T_CLIPBOARD, 0, 0, 0];
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&[0xC3, 0x28]);
         assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::BadUtf8));
@@ -717,7 +777,7 @@ mod tests {
         assert_eq!(GatewayMsg::decode(&bytes), Err(MsgError::BadUtf8));
 
         // A length that overruns the body is truncation, not bad UTF-8.
-        let mut bytes = vec![AgentMsg::T_CLIPBOARD];
+        let mut bytes = vec![AgentMsg::T_CLIPBOARD, 0, 0, 0];
         bytes.extend_from_slice(&9u32.to_le_bytes());
         bytes.extend_from_slice(b"short");
         assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Truncated));

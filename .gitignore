@@ -1,6 +1,7 @@
 /target
 **/.build/
 frontend/node_modules
+tests/playwright/node_modules
 frontend/dist
 /dist
 tmp/

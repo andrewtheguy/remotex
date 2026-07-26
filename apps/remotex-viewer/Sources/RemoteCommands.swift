@@ -16,10 +16,14 @@ struct RemoteCommands: Commands {
 
             Divider()
 
-            Button("Synchronize Clipboard") {
-                model.clipboard.synchronizeNow()
+            Button(
+                model.clipboard.isFetching
+                    ? "Fetching Clipboard…"
+                    : "Clipboard…"
+            ) {
+                model.clipboard.togglePanel()
             }
-            .disabled(!model.session.canClipboard)
+            .disabled(!model.clipboard.isEnabled || model.clipboard.isFetching)
 
             Button("Resize to Window") {
                 model.resizeToWindow()

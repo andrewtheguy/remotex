@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import RemotexViewer
@@ -71,5 +72,175 @@ struct NativeBridgeTests {
             let value = Self.desktopState(removing: [field])
             #expect(NativeBridge.decodeState(value) == nil, "\(field) must be required")
         }
+    }
+
+    @Test
+    @MainActor
+    func clipboardPushPayloadRequiresTextAndTwoNullableNumbers() {
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "copied",
+                "changedAtMs": 1_725_000_123_456,
+                "oversizedBytes": NSNull(),
+            ])
+                == RemoteClipboardPush(text: "copied", oversizedBytes: nil)
+        )
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "old",
+                "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
+            ])
+                == RemoteClipboardPush(text: "old", oversizedBytes: nil)
+        )
+        // Refused for its size: no text, and the size it actually is. Well past
+        // what an Int32 would hold, which is the point of carrying it as Int64.
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "",
+                "changedAtMs": 1_725_000_123_456,
+                "oversizedBytes": 209_715_200,
+            ])
+                == RemoteClipboardPush(text: "", oversizedBytes: 209_715_200)
+        )
+
+        for malformed: [String: Any] in [
+            ["text": "missing timestamp", "oversizedBytes": NSNull()],
+            ["changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            ["text": 7, "changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            ["text": "fractional", "changedAtMs": 1.5, "oversizedBytes": NSNull()],
+            ["text": "boolean", "changedAtMs": true, "oversizedBytes": NSNull()],
+            ["text": "negative", "changedAtMs": -1, "oversizedBytes": NSNull()],
+            // 2^63: the nearest Double to Int64.max, and one past it.
+            [
+                "text": "unrepresentable",
+                "changedAtMs": 9_223_372_036_854_775_808.0,
+                "oversizedBytes": NSNull(),
+            ],
+            // The size field is held to the same shape as the timestamp.
+            ["text": "no size field", "changedAtMs": NSNull()],
+            ["text": "bad size", "changedAtMs": NSNull(), "oversizedBytes": "big"],
+            ["text": "negative size", "changedAtMs": NSNull(), "oversizedBytes": -1],
+        ] {
+            #expect(NativeBridge.decodeRemoteClipboardPush(malformed) == nil)
+        }
+    }
+
+    @Test
+    @MainActor
+    func fetchResultPayloadRequiresARequestIdTextAndNullableTimestamp() {
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "fetched",
+                "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "fetched",
+                    changedAtMs: nil,
+                    oversizedBytes: nil
+                )
+        )
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "",
+                "changedAtMs": 0,
+                "oversizedBytes": NSNull(),
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "",
+                    changedAtMs: 0,
+                    oversizedBytes: nil
+                )
+        )
+
+        // The failure answer: nothing was read, so there is no timestamp.
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": NSNull(),
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: nil,
+                    changedAtMs: nil,
+                    oversizedBytes: nil
+                )
+        )
+
+        // A clipboard that exists but is too large to transfer: empty text with
+        // the size beside it, which is what keeps it apart from the empty
+        // clipboard two cases above.
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "",
+                "changedAtMs": 1_725_000_123_456,
+                "oversizedBytes": 209_715_200,
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "",
+                    changedAtMs: 1_725_000_123_456,
+                    oversizedBytes: 209_715_200
+                )
+        )
+
+        for malformed: [String: Any] in [
+            ["text": "missing id", "changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            [
+                "requestId": "",
+                "text": "empty id",
+                "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
+            ],
+            [
+                "requestId": 9,
+                "text": "bad id",
+                "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
+            ],
+            ["requestId": "id", "changedAtMs": NSNull(), "oversizedBytes": NSNull()],
+            ["requestId": "id", "text": "missing timestamp", "oversizedBytes": NSNull()],
+            [
+                "requestId": "id",
+                "text": "bad timestamp",
+                "changedAtMs": "now",
+                "oversizedBytes": NSNull(),
+            ],
+            ["requestId": "id", "text": "no size field", "changedAtMs": NSNull()],
+        ] {
+            #expect(NativeBridge.decodeClipboardFetchResult(malformed) == nil)
+        }
+    }
+
+    // Whether a request id is current is panel state, so decoding cannot judge
+    // it: a stale answer has to arrive intact and be refused a layer up (see
+    // `requestMatchingTimeoutAndCloseResetThePanel`).
+    @Test
+    @MainActor
+    func aStaleFetchRequestIdStillDecodes() throws {
+        let stale = try #require(
+            NativeBridge.decodeClipboardFetchResult([
+                "requestId": "stale-id",
+                "text": "stale",
+                "changedAtMs": NSNull(),
+                "oversizedBytes": NSNull(),
+            ])
+        )
+        #expect(stale.requestID == "stale-id")
+        #expect(stale.text == "stale")
+        #expect(stale.changedAtMs == nil)
     }
 }

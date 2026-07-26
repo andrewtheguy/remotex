@@ -1,6 +1,7 @@
 //! Shared helpers for the e2e tests: claim the session slot over the HTTP
 //! API, locate a container runtime, build a dummy-server image, and run it
-//! with cleanup-on-drop. (Never a headless browser — see CLAUDE.md.)
+//! with cleanup-on-drop. These exercise the wire directly; stable DOM-only
+//! browser flows live separately under `tests/playwright/`.
 //!
 //! Each test binary uses a subset of these, so the helpers are individually
 //! `#[allow(dead_code)]`.

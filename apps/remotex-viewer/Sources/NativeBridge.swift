@@ -1,6 +1,25 @@
 import AppKit
 import WebKit
 
+struct RemoteClipboardPush: Equatable {
+    let text: String
+    /// `Some` when the remote's clipboard was refused for its size, which is
+    /// what it carries. `text` is empty then, and nothing is mirrored to the
+    /// pasteboard — there is nothing to mirror.
+    let oversizedBytes: Int64?
+}
+
+struct ClipboardFetchResult: Equatable {
+    let requestID: String
+    /// `nil` when the web side answered that the remote clipboard could not be
+    /// read, so the panel can stop waiting on its own deadline.
+    let text: String?
+    let changedAtMs: Int64?
+    /// `Some` when the remote's clipboard exists but was too large to transfer,
+    /// carrying its size. Distinct from a `nil` text, which is "no answer came".
+    let oversizedBytes: Int64?
+}
+
 @MainActor
 final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigationDelegate {
     static let handlerName = "remotexNative"
@@ -57,11 +76,37 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
             model.apply(session: decoded)
             replyHandler(["accepted": true], nil)
         case "remoteClipboard":
-            guard handshakeAccepted, let text = body["text"] as? String else {
+            guard handshakeAccepted,
+                  let payload = Self.decodeRemoteClipboardPush(body)
+            else {
                 replyHandler(nil, "invalid clipboard")
                 return
             }
-            model.clipboard.receiveRemote(text)
+            // An oversized push carries no text to mirror. It is still remote
+            // clipboard activity, so the panel is told — the pasteboard is not.
+            if let oversizedBytes = payload.oversizedBytes {
+                model.clipboard.noteRemoteOversized(bytes: oversizedBytes)
+            } else {
+                model.clipboard.receiveRemotePush(payload.text)
+            }
+            replyHandler(["accepted": true], nil)
+        case "clipboardFetchResult":
+            guard handshakeAccepted,
+                  let payload = Self.decodeClipboardFetchResult(body)
+            else {
+                replyHandler(nil, "invalid clipboard fetch result")
+                return
+            }
+            if let text = payload.text {
+                model.clipboard.receiveFetchResult(
+                    requestID: payload.requestID,
+                    text: text,
+                    changedAtMs: payload.changedAtMs,
+                    oversizedBytes: payload.oversizedBytes
+                )
+            } else {
+                model.clipboard.fetchUnavailable(requestID: payload.requestID)
+            }
             replyHandler(["accepted": true], nil)
         default:
             replyHandler(nil, "unknown message type")
@@ -150,5 +195,89 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
             canClipboard: canClipboard,
             canCaptureKeyboard: canCaptureKeyboard
         )
+    }
+
+    static func decodeRemoteClipboardPush(
+        _ value: [String: Any]
+    ) -> RemoteClipboardPush? {
+        // The shape requires the timestamp, so a payload without it is still
+        // rejected — but nothing consumes it here: an unsolicited push mirrors
+        // unconditionally. Validate, then drop it rather than carry a field the
+        // viewer never reads.
+        guard let text = value["text"] as? String,
+              decodeChangedAtMs(value) != nil,
+              let oversizedBytes = decodeOptionalNonNegativeInt64(value, key: "oversizedBytes")
+        else {
+            return nil
+        }
+        return RemoteClipboardPush(text: text, oversizedBytes: oversizedBytes)
+    }
+
+    static func decodeClipboardFetchResult(
+        _ value: [String: Any]
+    ) -> ClipboardFetchResult? {
+        guard let requestID = value["requestId"] as? String, !requestID.isEmpty else {
+            return nil
+        }
+        // A null text is the failure shape and carries no timestamp: the fetch
+        // resolved with nothing to show.
+        if value["text"] is NSNull {
+            return ClipboardFetchResult(
+                requestID: requestID,
+                text: nil,
+                changedAtMs: nil,
+                oversizedBytes: nil
+            )
+        }
+        guard let text = value["text"] as? String,
+              let changedAtMs = decodeChangedAtMs(value),
+              let oversizedBytes = decodeOptionalNonNegativeInt64(value, key: "oversizedBytes")
+        else {
+            return nil
+        }
+        return ClipboardFetchResult(
+            requestID: requestID,
+            text: text,
+            changedAtMs: changedAtMs,
+            oversizedBytes: oversizedBytes
+        )
+    }
+
+    /// A nullable timestamp is required on both clipboard event shapes. The
+    /// outer optional is decoding success; the inner optional is JSON null, used
+    /// when the remote content predates this session.
+    private static func decodeChangedAtMs(
+        _ value: [String: Any]
+    ) -> Int64?? {
+        decodeOptionalNonNegativeInt64(value, key: "changedAtMs")
+    }
+
+    /// A required field holding either JSON null or a non-negative integer — the
+    /// shape shared by `changedAtMs`, a millisecond timestamp, and
+    /// `oversizedBytes`, a byte count. The outer optional is decoding success;
+    /// the inner one is the null.
+    private static func decodeOptionalNonNegativeInt64(
+        _ value: [String: Any],
+        key: String
+    ) -> Int64?? {
+        guard value.keys.contains(key) else {
+            return nil
+        }
+        let raw = value[key]
+        if raw is NSNull {
+            return .some(nil)
+        }
+        guard !(raw is Bool),
+              let number = raw as? NSNumber,
+              number.doubleValue.isFinite,
+              number.doubleValue >= 0,
+              // `Double(Int64.max)` rounds up to 2^63, which `int64Value`
+              // cannot represent, so the bound has to be exclusive.
+              number.doubleValue < Double(Int64.max),
+              number.doubleValue.rounded(.towardZero) == number.doubleValue
+        else {
+            return nil
+        }
+        return .some(number.int64Value)
     }
 }

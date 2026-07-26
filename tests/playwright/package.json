@@ -1,0 +1,15 @@
+{
+  "name": "remotex-playwright-e2e",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:clipboard": "playwright test '/clipboard\\.spec\\.ts$'",
+    "test:oversized": "playwright test '/oversized-clipboard\\.spec\\.ts$'",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@types/node": "^26.1.1",
+    "typescript": "~5.9"
+  }
+}

@@ -1,108 +1,97 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { MAX_CLIPBOARD_BYTES } from "./protocol.ts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MAX_CLIPBOARD_BYTES, type RemoteClipboard } from "./protocol.ts";
 import { useDockedHeight } from "./SoftKeyboardPanel.tsx";
 
-// The clipboard bridge's manual half: a text box with Fetch and Send.
-//
-// The automatic path (useRemoteDesktop) mirrors the clipboard both ways on its
-// own where the browser allows it. This panel is what makes the feature work
-// anyway when it doesn't — a non-secure origin has no `navigator.clipboard` at
-// all, and Safari will not read the clipboard without a paste gesture. It is
-// also the only way to see what the remote sent without it landing in your
-// local clipboard.
-//
-// The server owns the data (the VNC engine buffers what the remote last cut,
-// the Mac agent reads its pasteboard), so this panel holds nothing that isn't
-// on screen.
-//
-// Shown only for targets that opted in (`clipboard = true`); FloatingMenu keeps
-// the button disabled otherwise.
+// Deliberately follows tmp/remotex-old's clipboard state machine: the remote
+// value starts as a metadata card, revealing it turns that same slot into the
+// editable textarea, and closing the panel throws the manual state away. The
+// difference is storage — the plaintext snapshot came from remotex on Fetch;
+// it is not encrypted into localStorage by this browser.
 
-// How long the "Fetched"/"Sent" line stays up.
-const NOTICE_MS = 2000;
-
+const NOTICE_MS = 1800;
+const CRC32_POLYNOMIAL = 0xedb88320;
 const encoder = new TextEncoder();
 
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let j = 0; j < 8; j += 1) {
+      c = (c & 1) === 1 ? CRC32_POLYNOMIAL ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function computeCrc32Hex(bytes: Uint8Array): string {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    const tableIndex = (crc ^ byte) & 0xff;
+    crc = (crc >>> 8) ^ CRC32_TABLE[tableIndex];
+  }
+  const normalized = (crc ^ 0xffffffff) >>> 0;
+  return normalized.toString(16).padStart(8, "0");
+}
+
 interface ClipboardPanelProps {
-  // Ask for the remote's clipboard, resolving with its text or null if nothing
-  // answered. The text also arrives out of band as a new `remoteClipboard`,
-  // which is what actually fills the box — the resolved value is only used to
-  // tell "no answer" apart from "answered, and it was empty".
-  onFetch: () => Promise<string | null>;
   onSend: (text: string) => void;
-  // The last reply from the server. `seq` ticks on every reply so re-fetching
-  // identical text still counts as an answer.
-  remoteClipboard: { text: string; seq: number } | null;
+  remoteClipboard: RemoteClipboard | null;
   onClose: () => void;
-  // Reports the panel's height (CSS px) while it's docked to the bottom edge
-  // (mobile), 0 while it floats (desktop) or when it unmounts — same contract
-  // as SoftKeyboardPanel, so the touch canvas can inset above it.
   onDockedHeightChange?: (px: number) => void;
 }
 
 export function ClipboardPanel({
-  onFetch,
   onSend,
   remoteClipboard,
   onClose,
   onDockedHeightChange,
 }: ClipboardPanelProps) {
-  // Seeded from the last reply so reopening the panel shows what was last
-  // fetched rather than an empty box; lastSeqRef starts there too, so that
-  // restored text doesn't announce itself as a fresh fetch.
-  const [text, setText] = useState(() => remoteClipboard?.text ?? "");
+  const [clipboardInput, setClipboardInput] = useState("");
+  const [isManualInputActive, setIsManualInputActive] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  // Set when Fetch is pressed, cleared by the reply. Distinguishes "waiting"
-  // from "the remote's clipboard is genuinely empty", which look identical
-  // otherwise — the server answers an empty remote clipboard with "".
-  const [awaitingFetch, setAwaitingFetch] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const clipboardInputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Set once the user types, cleared whenever the box is filled from the
-  // remote. Guards unsent work: pushes now arrive unprompted, and silently
-  // replacing half-typed text with someone's copy on the remote would be an
-  // unrecoverable loss.
-  const dirtyRef = useRef(false);
+  useDockedHeight(panelRef, onDockedHeightChange);
 
-  // Set while a Fetch is unanswered, so a reply that lands after the component
-  // is gone doesn't set state on it.
-  const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  // Adopt each reply or push. Keyed on seq, so the same text arriving twice
-  // still registers (and re-shows the notice).
-  const seq = remoteClipboard?.seq;
-  const lastSeqRef = useRef<number | undefined>(remoteClipboard?.seq);
-  useEffect(() => {
-    if (seq === undefined || seq === lastSeqRef.current) {
-      return;
+  const isRemoteMetadataMode = remoteClipboard !== null && !isManualInputActive;
+  // The remote's clipboard was refused for its size, so there is nothing to
+  // conceal, reveal or copy — only the size to report. Kept distinct from an
+  // empty clipboard, which is what a truncating transfer would have looked like.
+  const oversizedBytes =
+    isRemoteMetadataMode && remoteClipboard
+      ? remoteClipboard.oversizedBytes
+      : null;
+  const remoteBytes = useMemo(
+    () => encoder.encode(remoteClipboard?.text ?? ""),
+    [remoteClipboard?.text],
+  );
+  const metadataLines = useMemo(() => {
+    if (!remoteClipboard) {
+      return [];
     }
-    lastSeqRef.current = seq;
-    const text = remoteClipboard?.text ?? "";
-    // An explicit Fetch always wins — the user asked for exactly this.
-    if (!awaitingFetch && dirtyRef.current) {
-      setNotice("Remote clipboard changed — Fetch to load it");
-      return;
+    const changedAt =
+      remoteClipboard.changedAtMs === null
+        ? "UNKNOWN"
+        : new Date(remoteClipboard.changedAtMs).toLocaleString(undefined, {
+            dateStyle: "short",
+            timeStyle: "medium",
+          });
+    if (remoteClipboard.oversizedBytes !== null) {
+      return [
+        `LEN ${remoteClipboard.oversizedBytes}B`,
+        `LIMIT ${MAX_CLIPBOARD_BYTES}B`,
+        `AT ${changedAt}`,
+      ];
     }
-    dirtyRef.current = false;
-    setText(text);
-    setAwaitingFetch(false);
-    setNotice(
-      text
-        ? awaitingFetch
-          ? "Fetched from remote"
-          : "Updated from remote"
-        : "Remote clipboard is empty",
-    );
-  }, [seq, remoteClipboard?.text, awaitingFetch]);
+    return [
+      `CRC32 ${computeCrc32Hex(remoteBytes)}`,
+      `LEN ${remoteBytes.byteLength}B`,
+      `AT ${changedAt}`,
+    ];
+  }, [remoteClipboard, remoteBytes]);
 
-  // Clear the notice a moment after it appears (and on unmount).
   useEffect(() => {
     if (notice === null) {
       return;
@@ -111,40 +100,112 @@ export function ClipboardPanel({
     return () => clearTimeout(timer);
   }, [notice]);
 
-  useDockedHeight(panelRef, onDockedHeightChange);
-
-  // Focus the box on open: the common move is paste-then-send, and the canvas
-  // only takes keyboard focus back on a pointer press over it.
+  // As in remotex-old, only an already-manual/empty input gets focus. The
+  // metadata card remains the first deliberate action for a fetched snapshot.
   useEffect(() => {
-    textareaRef.current?.focus();
+    if (!isRemoteMetadataMode) {
+      clipboardInputRef.current?.focus();
+    }
+  }, [isRemoteMetadataMode]);
+
+  const revealRemoteClipboard = useCallback(() => {
+    if (!remoteClipboard) {
+      return;
+    }
+    setClipboardInput(remoteClipboard.text);
+    setIsManualInputActive(true);
+  }, [remoteClipboard]);
+
+  // The editor with nothing in it, for a remote clipboard there is no text for.
+  const startManualInput = useCallback(() => {
+    setClipboardInput("");
+    setIsManualInputActive(true);
   }, []);
 
-  // The reply fills the box through `remoteClipboard` (the effect above), so
-  // all this has to do is report the case that produces no reply at all —
-  // otherwise the button would sit on "Fetching…" indefinitely.
-  const handleFetch = useCallback(() => {
-    setAwaitingFetch(true);
-    setNotice(null);
-    void onFetch().then((text) => {
-      if (!mountedRef.current || text !== null) {
-        return;
-      }
-      setAwaitingFetch(false);
-      setNotice("No reply from remote — is the session still up?");
-    });
-  }, [onFetch]);
+  // Why Copy has nothing to put on this browser's clipboard. The two cases look
+  // identical from here — both are empty text — and only one of them means the
+  // remote copied nothing.
+  const emptyCopyNotice =
+    oversizedBytes === null
+      ? "Nothing to copy"
+      : "Remote clipboard too large to transfer";
+
+  const selectClipboardText = useCallback((target: HTMLTextAreaElement) => {
+    target.focus();
+    target.select();
+    target.setSelectionRange(0, target.value.length);
+  }, []);
 
   const handleSend = useCallback(() => {
-    onSend(text);
-    // Sent, so it is no longer unsaved work an incoming push would destroy.
-    dirtyRef.current = false;
-    setNotice("Sent to remote");
-  }, [onSend, text]);
+    const bytes = encoder.encode(clipboardInput).byteLength;
+    if (bytes > MAX_CLIPBOARD_BYTES || isRemoteMetadataMode) {
+      return;
+    }
+    // The remote takes ownership of whatever arrives, so an empty send would
+    // wipe its clipboard rather than leave it alone.
+    if (clipboardInput.length === 0) {
+      setNotice("Reveal or enter clipboard text first");
+      return;
+    }
+    onSend(clipboardInput);
+    setNotice("Clipboard sent to remote");
+  }, [clipboardInput, isRemoteMetadataMode, onSend]);
 
-  // Bytes, not characters: the cap is a byte cap on both sides, and a box of
-  // emoji hits it four times sooner than the character count suggests.
-  const bytes = encoder.encode(text).length;
-  const overCap = bytes > MAX_CLIPBOARD_BYTES;
+  const handleCopy = useCallback(async () => {
+    const text =
+      isRemoteMetadataMode && remoteClipboard
+        ? remoteClipboard.text
+        : clipboardInput;
+    // Same reason in the other direction: writing an empty string is not a
+    // no-op, it clears this browser's clipboard.
+    if (text.length === 0) {
+      setNotice(emptyCopyNotice);
+      return;
+    }
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        setNotice("Clipboard copied");
+        return;
+      } catch {
+        // Fall through to the selection-based path used by remotex-old.
+      }
+    }
+
+    const existingInput = clipboardInputRef.current;
+    if (existingInput) {
+      const previousStart = existingInput.selectionStart;
+      const previousEnd = existingInput.selectionEnd;
+      selectClipboardText(existingInput);
+      document.execCommand("copy");
+      existingInput.setSelectionRange(previousStart, previousEnd);
+      setNotice("Clipboard copied");
+      return;
+    }
+
+    // Metadata mode has no mounted textarea. Use a short-lived off-screen one
+    // so Copy remains a fallback without revealing the remote value on screen.
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.className = "cb-copy-fallback";
+    document.body.append(input);
+    try {
+      selectClipboardText(input);
+      document.execCommand("copy");
+      setNotice("Clipboard copied");
+    } finally {
+      input.remove();
+    }
+  }, [
+    clipboardInput,
+    emptyCopyNotice,
+    isRemoteMetadataMode,
+    remoteClipboard,
+    selectClipboardText,
+  ]);
+
+  const inputBytes = encoder.encode(clipboardInput).byteLength;
+  const overCap = inputBytes > MAX_CLIPBOARD_BYTES;
 
   return (
     <div className="panel" ref={panelRef}>
@@ -160,42 +221,88 @@ export function ClipboardPanel({
         </button>
       </div>
 
-      <textarea
-        ref={textareaRef}
-        className="cb-text"
-        value={text}
-        onChange={(e) => {
-          dirtyRef.current = true;
-          setText(e.target.value);
-        }}
-        placeholder="Fetch the remote's clipboard, or paste here and send."
-        aria-label="Clipboard text"
-        spellCheck={false}
-      />
+      <div className="cb-input-shell">
+        {oversizedBytes !== null ? (
+          /* Nothing was transferred, so there is no text behind this to
+             reveal. It still switches to the editor, which is the one thing
+             left to do from here — otherwise this state has no way out of
+             metadata mode and Send stays disabled for the session. */
+          <button
+            type="button"
+            className="cb-metadata-card"
+            onClick={startManualInput}
+            aria-label="Remote clipboard too large; switch to typing"
+          >
+            {metadataLines.map((line) => (
+              <span key={line} className="cb-metadata-primary">
+                {line}
+              </span>
+            ))}
+            <span className="cb-metadata-secondary">
+              Too large to transfer. Copy less on the remote, or click to type
+            </span>
+          </button>
+        ) : isRemoteMetadataMode ? (
+          <button
+            type="button"
+            className="cb-metadata-card"
+            onClick={revealRemoteClipboard}
+            aria-label="Reveal remote clipboard content"
+          >
+            {metadataLines.map((line) => (
+              <span key={line} className="cb-metadata-primary">
+                {line}
+              </span>
+            ))}
+            <span className="cb-metadata-secondary">
+              Click anywhere to reveal
+            </span>
+          </button>
+        ) : (
+          <textarea
+            ref={clipboardInputRef}
+            className="cb-text"
+            value={clipboardInput}
+            onChange={(event) => {
+              setClipboardInput(event.currentTarget.value);
+              setIsManualInputActive(true);
+            }}
+            onFocus={(event) => selectClipboardText(event.currentTarget)}
+            onClick={(event) => selectClipboardText(event.currentTarget)}
+            rows={6}
+            aria-label="Clipboard text"
+            spellCheck={false}
+          />
+        )}
+      </div>
 
       <div className="cb-actions">
-        <button type="button" className="cb-btn" onClick={handleFetch}>
-          {awaitingFetch ? "Fetching…" : "Fetch from remote"}
-        </button>
         <button
           type="button"
-          className="cb-btn cb-btn-primary"
+          className="cb-btn"
           onClick={handleSend}
-          disabled={overCap}
+          disabled={
+            isRemoteMetadataMode || overCap || clipboardInput.length === 0
+          }
           title={
             overCap
-              ? `Too long: ${bytes} bytes, the limit is ${MAX_CLIPBOARD_BYTES}`
+              ? `Too long: ${inputBytes} bytes, the limit is ${MAX_CLIPBOARD_BYTES}`
               : undefined
           }
         >
-          Send to remote
+          Send
+        </button>
+        <button type="button" className="cb-btn" onClick={handleCopy}>
+          Copy
         </button>
       </div>
 
       <div className="cb-status">
-        <span className={overCap ? "cb-count cb-count-over" : "cb-count"}>
-          {bytes} / {MAX_CLIPBOARD_BYTES} bytes
-        </span>
+        {!isRemoteMetadataMode && (
+          <span className={overCap ? "cb-count cb-count-over" : "cb-count"}>
+            {inputBytes} / {MAX_CLIPBOARD_BYTES} bytes
+          </span>
+        )}
         <output className="cb-notice" aria-live="polite">
           {notice ?? ""}
         </output>

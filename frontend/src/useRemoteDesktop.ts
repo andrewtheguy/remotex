@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isNativeHostConnected } from "./nativeHost.ts";
 import {
   type ClientMsg,
+  type ClipboardSnapshot,
   type ControlMsg,
   decodeTileFrame,
+  MAX_CLIPBOARD_BYTES,
   type MouseButton,
   mouseButtonFromEvent,
+  type RemoteClipboard,
   type TileMsg,
 } from "./protocol.ts";
 import {
@@ -78,6 +81,21 @@ interface TouchViewState {
 function touchFitScale(size: RemoteSize): number {
   return Math.min(document.documentElement.clientWidth / size.w, 1);
 }
+const clipboardEncoder = new TextEncoder();
+
+// Whether `text` exceeds one clipboard transfer's ceiling.
+//
+// The length test comes first and is not just a fast path: UTF-8 never spends
+// fewer bytes than the string has UTF-16 code units, so anything longer than the
+// ceiling is already over it — and that decides the huge cases without encoding
+// a copy of the string to measure it.
+function overClipboardLimit(text: string): boolean {
+  return (
+    text.length > MAX_CLIPBOARD_BYTES ||
+    clipboardEncoder.encode(text).byteLength > MAX_CLIPBOARD_BYTES
+  );
+}
+
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -354,35 +372,41 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
-  // The remote's clipboard text as last fetched, and a counter that ticks on
-  // every reply. The counter is what the panel watches: fetching the same text
-  // twice must still register as an answer, and a null-vs-string flag can't
-  // express that.
-  const [remoteClipboard, setRemoteClipboard] = useState<{
-    text: string;
-    seq: number;
-  } | null>(null);
+  // The last remote clipboard snapshot, whether fetched or pushed, and a
+  // counter that ticks on every arrival. Fetching the same text twice must
+  // still register as an answer, and a null-vs-string flag cannot express that.
+  const [remoteClipboard, setRemoteClipboard] =
+    useState<RemoteClipboard | null>(null);
+  // Native automatic synchronization consumes only unsolicited activity.
+  // Keep it separate from the panel snapshot so a requested Fetch can never
+  // masquerade as a remote push at the v5 native bridge boundary.
+  const [remoteClipboardPush, setRemoteClipboardPush] =
+    useState<RemoteClipboard | null>(null);
   // The two halves of the automatic sync's echo guard: text last received from
   // the remote (so it is never sent straight back), and text last sent to the
   // remote (so a server that echoes a cut back at us does not bounce forever).
   // Refs, not state — they gate effects and must not re-run them.
   const lastFromRemoteRef = useRef<string | null>(null);
   const lastToRemoteRef = useRef<string | null>(null);
-  // Callers of `requestClipboard` waiting on the server's answer. The reply is
-  // an ordinary out-of-band control message with nothing tying it to a request,
-  // so every pending caller is settled by the next `clipboard` message that
-  // arrives, whether it answers a fetch or is an unprompted push — either way
-  // it is the freshest text the remote has.
-  const clipboardWaitersRef = useRef<((text: string | null) => void)[]>([]);
+  // Callers of `requestClipboard` waiting on the server's requested reply.
+  // Unsolicited pushes update the snapshot and automatic sync but deliberately
+  // leave these pending, so a push racing a panel open cannot masquerade as the
+  // read that button requested.
+  const clipboardWaitersRef = useRef<
+    ((snapshot: ClipboardSnapshot | null) => void)[]
+  >([]);
 
   // Settle everyone waiting on a fetch. `null` means "no answer came".
-  const settleClipboardWaiters = useCallback((text: string | null) => {
-    const waiters = clipboardWaitersRef.current;
-    clipboardWaitersRef.current = [];
-    for (const settle of waiters) {
-      settle(text);
-    }
-  }, []);
+  const settleClipboardWaiters = useCallback(
+    (snapshot: ClipboardSnapshot | null) => {
+      const waiters = clipboardWaitersRef.current;
+      clipboardWaitersRef.current = [];
+      for (const settle of waiters) {
+        settle(snapshot);
+      }
+    },
+    [],
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -670,7 +694,12 @@ export function useRemoteDesktop(
       if (text === "") {
         return;
       }
+      const alreadyMirrored = text === lastFromRemoteRef.current;
+      const echoedFromHost = text === lastToRemoteRef.current;
       lastFromRemoteRef.current = text;
+      if (alreadyMirrored || echoedFromHost) {
+        return;
+      }
       // The runtime getter is intentional: this effect does not depend on the
       // nativeHost prop, whose captured value could therefore be stale.
       if (!isNativeHostConnected()) {
@@ -743,28 +772,34 @@ export function useRemoteDesktop(
           break;
         }
         case "clipboard": {
-          // Either a reply to this browser's Fetch or an unprompted push
-          // (VNC's ServerCutText, the Mac agent's pasteboard watcher). The
-          // panel shows it either way.
-          const { text } = msg;
+          // Both paths update the panel, but only unsolicited pushes mirror
+          // into the browser's OS clipboard. Opening/revealing the panel is a
+          // read action; its explicit Copy button is the consent boundary for
+          // changing the local clipboard.
+          const { text, changedAtMs, requested, oversizedBytes } = msg;
+          const snapshot = { text, changedAtMs, oversizedBytes };
           setRemoteClipboard((prev) => ({
-            text,
+            ...snapshot,
             seq: (prev?.seq ?? 0) + 1,
           }));
-          // Release anyone blocked on a fetch — the clipboard button waits on
-          // this before it will open the panel.
-          settleClipboardWaiters(text);
-          // And mirror it into the local OS clipboard, so a copy on the remote
-          // is immediately pastable here. Best effort by design: `writeText`
-          // is absent on a non-secure origin (plain HTTP on a LAN — the usual
-          // deployment) and rejects when the tab is unfocused. The panel is
-          // the fallback in both cases, so a failure is not worth reporting.
-          //
-          // Never for an empty reply, which is what the remote sends when its
-          // clipboard holds no text at all (an image, or nothing yet) —
-          // mirroring that would wipe the local clipboard on connect. The
-          // panel still reports it as empty.
-          mirrorRemoteClipboard(text);
+          if (requested) {
+            // Release anyone blocked on this Fetch; a racing unsolicited push
+            // remains an automatic-sync event and does not open the panel
+            // before the actual response arrives.
+            settleClipboardWaiters(snapshot);
+          } else {
+            setRemoteClipboardPush((prev) => ({
+              ...snapshot,
+              seq: (prev?.seq ?? 0) + 1,
+            }));
+            // A copy on the remote is immediately pastable here. Best effort
+            // by design: `writeText` is absent on a non-secure origin and can
+            // reject when the tab is unfocused. Never mirror an empty push,
+            // which would wipe the local clipboard for a non-text remote copy —
+            // a refused oversized copy arrives as one of those, and the panel
+            // is where its size is reported.
+            mirrorRemoteClipboard(text);
+          }
           break;
         }
         case "remoteOs":
@@ -789,6 +824,7 @@ export function useRemoteDesktop(
           setDisplayModes([]);
           setCanClipboard(false);
           setRemoteClipboard(null);
+          setRemoteClipboardPush(null);
           lastFromRemoteRef.current = null;
           lastToRemoteRef.current = null;
           // No engine left to answer a fetch that is still in flight.
@@ -954,36 +990,37 @@ export function useRemoteDesktop(
   }, [mode, releaseNativeKeys]);
 
   // Ask the server for the remote's clipboard and wait for the answer, which
-  // also lands in `remoteClipboard` on its way past. Resolves with the text, or
-  // `null` when nothing came back — the socket was down, the session returned
-  // to the picker, or the engine never answered.
+  // also lands in `remoteClipboard` on its way past. Resolves with the snapshot,
+  // or `null` when nothing came back — the socket was down, the session
+  // returned to the picker, or the engine never answered.
   //
   // Awaitable so the toolbar can hold the panel closed until there is something
   // current to show, rather than opening on stale text that updates a moment
   // later. Every engine answers exactly one `clipboard` message per request
   // (from a buffer for VNC and RDP, from a live pasteboard read for `rxa`), so
   // this behaves the same on all three.
-  const requestClipboard = useCallback((): Promise<string | null> => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return Promise.resolve(null);
-    }
-    ws.send(JSON.stringify({ type: "clipboardRequest" } satisfies ClientMsg));
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout>;
-      const waiter = (text: string | null) => {
-        clearTimeout(timer);
-        resolve(text);
-      };
-      timer = setTimeout(() => {
-        clipboardWaitersRef.current = clipboardWaitersRef.current.filter(
-          (w) => w !== waiter,
-        );
-        resolve(null);
-      }, CLIPBOARD_FETCH_TIMEOUT_MS);
-      clipboardWaitersRef.current.push(waiter);
-    });
-  }, []);
+  const requestClipboard =
+    useCallback((): Promise<ClipboardSnapshot | null> => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return Promise.resolve(null);
+      }
+      ws.send(JSON.stringify({ type: "clipboardRequest" } satisfies ClientMsg));
+      return new Promise((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const waiter = (snapshot: ClipboardSnapshot | null) => {
+          clearTimeout(timer);
+          resolve(snapshot);
+        };
+        timer = setTimeout(() => {
+          clipboardWaitersRef.current = clipboardWaitersRef.current.filter(
+            (w) => w !== waiter,
+          );
+          resolve(null);
+        }, CLIPBOARD_FETCH_TIMEOUT_MS);
+        clipboardWaitersRef.current.push(waiter);
+      });
+    }, []);
 
   // Put `text` on the remote's clipboard. Fire and forget: neither VNC's
   // ClientCutText nor the agent's pasteboard write is acknowledged, so there is
@@ -1005,6 +1042,16 @@ export function useRemoteDesktop(
   // copied something elsewhere. Everything here is best effort: `readText` is
   // absent on a non-secure origin, and Safari refuses it outright without a
   // paste gesture. The panel's Send covers those.
+  //
+  // An oversized clipboard is skipped rather than sent for the gateway to
+  // truncate: this fires on focus with no user action behind it, and the whole
+  // string would ride the socket first — past 64 MiB (axum's default
+  // max_message_size) that drops the session, which reconnect then hides. The
+  // remote therefore keeps whatever it had; the panel's Send is the path that
+  // reports the limit, since autosync has no UI to report it in.
+  //
+  // The inbound half (mirrorRemoteClipboard) needs no check: everything on that
+  // link is already clamped by the gateway (see src/protocol.rs).
   useEffect(() => {
     if (mode !== "desktop" || !canClipboard || nativeHost) {
       return;
@@ -1022,6 +1069,7 @@ export function useRemoteDesktop(
         }
         if (
           text === "" ||
+          overClipboardLimit(text) ||
           // Came from the remote a moment ago; sending it back is a loop.
           text === lastFromRemoteRef.current ||
           text === lastToRemoteRef.current
@@ -1235,6 +1283,7 @@ export function useRemoteDesktop(
     displayModes,
     canClipboard,
     remoteClipboard,
+    remoteClipboardPush,
     takeOver,
     connect,
     switchTarget,

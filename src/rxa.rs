@@ -34,7 +34,9 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 
 use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
-use crate::protocol::{ClientMsg, CursorShape, MouseButton, ServerMsg, Tile, clamp_clipboard};
+use crate::protocol::{
+    ClientMsg, ClipboardSnapshot, CursorShape, MouseButton, ServerMsg, Tile, clipboard_fits,
+};
 
 /// How long a connect + handshake + `Hello` may take before we give up on this
 /// attempt. Guards against a host that accepts the TCP connection and then says
@@ -101,6 +103,10 @@ pub async fn run(
     // `Resize` costs the frontend its canvas contents, so a silent reconnect to
     // an unchanged desktop must not announce one.
     let mut announced: Option<(u16, u16)> = None;
+    // The agent supplies the activity time. Keep the last snapshot across a
+    // silent agent reconnect so an otherwise-identical Fetch does not lose a
+    // timestamp merely because the transport link changed underneath it.
+    let mut clipboard_snapshot: Option<ClipboardSnapshot> = None;
     loop {
         let size = (session.width, session.height);
         info!("rxa: session up, desktop {}x{}", size.0, size.1);
@@ -109,6 +115,7 @@ pub async fn run(
             &mut input_rx,
             &frame_tx,
             &mut announced,
+            &mut clipboard_snapshot,
             config.clipboard,
             config.resize,
         )
@@ -213,6 +220,7 @@ async fn pump(
     input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: &mpsc::Sender<ServerMsg>,
     announced: &mut Option<(u16, u16)>,
+    clipboard_snapshot: &mut Option<ClipboardSnapshot>,
     clipboard: bool,
     resize: bool,
 ) -> anyhow::Result<()> {
@@ -344,8 +352,8 @@ async fn pump(
                     AgentMsg::Pong { .. } => {}
                     // Either a reply to a ClipboardRequest this pump sent, or
                     // an unprompted push from the agent's pasteboard watcher.
-                    // Identical to the browser either way, which is what lets
-                    // the panel and the automatic sync share one path.
+                    // The payload shares one path, but `requested` stays intact
+                    // so only watcher pushes drive browser OS-clipboard sync.
                     //
                     // Dropped outright for a target that didn't opt in: this
                     // pump then never asked and never enabled the watch, so
@@ -353,9 +361,40 @@ async fn pump(
                     // and the browser writes an incoming clipboard into the
                     // real OS clipboard. Same belt-and-braces as VNC's
                     // ServerCutText.
-                    AgentMsg::Clipboard { text } => {
+                    AgentMsg::Clipboard {
+                        text,
+                        changed_at_ms,
+                        requested,
+                        oversized_bytes,
+                    } => {
+                        if let Some(bytes) = oversized_bytes {
+                            debug!(
+                                "rxa: the Mac's pasteboard holds {bytes} bytes, over the {} byte limit",
+                                crate::protocol::MAX_CLIPBOARD_BYTES
+                            );
+                        }
+                        let changed_at_ms = changed_at_ms.or_else(|| {
+                            clipboard_snapshot
+                                .as_ref()
+                                .filter(|snapshot| snapshot.text == text)
+                                .and_then(|snapshot| snapshot.changed_at_ms)
+                        });
+                        let snapshot = ClipboardSnapshot {
+                            text,
+                            changed_at_ms,
+                            oversized_bytes,
+                        };
+                        *clipboard_snapshot = Some(snapshot.clone());
                         if clipboard
-                            && frame_tx.send(ServerMsg::Clipboard { text }).await.is_err()
+                            && frame_tx
+                                .send(ServerMsg::Clipboard {
+                                    text: snapshot.text,
+                                    changed_at_ms: snapshot.changed_at_ms,
+                                    requested,
+                                    oversized_bytes: snapshot.oversized_bytes,
+                                })
+                                .await
+                                .is_err()
                         {
                             return Ok(());
                         }
@@ -492,8 +531,20 @@ fn to_agent(msg: &ClientMsg, clipboard: bool, resize: bool) -> Option<GatewayMsg
         // round trip rather than a cached value (unlike VNC, where the server
         // pushes and the engine caches).
         ClientMsg::ClipboardRequest if clipboard => GatewayMsg::ClipboardRequest,
+        // Refused rather than truncated, so the Mac's pasteboard keeps what it
+        // had instead of gaining a partial copy that looks whole. The browser
+        // and the viewer both refuse this themselves and say why; reaching here
+        // means one of them let it through.
+        ClientMsg::Clipboard { text } if clipboard && !clipboard_fits(text) => {
+            warn!(
+                "rxa: refusing {} bytes to the Mac's pasteboard, over the {} byte limit",
+                text.len(),
+                crate::protocol::MAX_CLIPBOARD_BYTES
+            );
+            return None;
+        }
         ClientMsg::Clipboard { text } if clipboard => GatewayMsg::Clipboard {
-            text: clamp_clipboard(text).to_owned(),
+            text: text.clone(),
         },
         ClientMsg::SetResolution { w, h } if resize => GatewayMsg::SetDisplaySize { w: *w, h: *h },
         ClientMsg::ClipboardRequest
@@ -698,16 +749,26 @@ mod tests {
         );
     }
 
-    // An oversized paste is truncated at the gateway rather than handed to the
-    // agent whole — and on a char boundary, since the wire carries UTF-8.
+    // An oversized paste is dropped at the gateway rather than handed to the
+    // agent truncated: the Mac keeps the pasteboard it had, instead of gaining a
+    // partial copy that looks like the whole thing.
     #[test]
-    fn oversized_clipboard_text_is_clamped_before_the_agent_sees_it() {
+    fn oversized_clipboard_text_never_reaches_the_agent() {
+        // Two bytes per char, so this is twice the ceiling.
         let text = "é".repeat(crate::protocol::MAX_CLIPBOARD_BYTES);
-        match to_agent(&ClientMsg::Clipboard { text }, true, false) {
-            Some(GatewayMsg::Clipboard { text }) => {
-                assert_eq!(text.len(), crate::protocol::MAX_CLIPBOARD_BYTES);
-                assert!(text.chars().all(|c| c == 'é'));
-            }
+        assert_eq!(to_agent(&ClientMsg::Clipboard { text }, true, false), None);
+
+        // At the ceiling it goes through untouched, so the boundary is
+        // inclusive and nothing is rewritten on the way past.
+        let text = "a".repeat(crate::protocol::MAX_CLIPBOARD_BYTES);
+        match to_agent(
+            &ClientMsg::Clipboard {
+                text: text.clone(),
+            },
+            true,
+            false,
+        ) {
+            Some(GatewayMsg::Clipboard { text: sent }) => assert_eq!(sent, text),
             other => panic!("expected a clipboard message, got {other:?}"),
         }
     }

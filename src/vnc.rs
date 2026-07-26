@@ -47,8 +47,8 @@ use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS, ServerMsg, Tile,
-    clamp_clipboard,
+    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS,
+    ServerMsg, Tile, clipboard_fits,
 };
 use crate::vnc_clipboard;
 
@@ -132,7 +132,7 @@ type SharedCursor = Arc<std::sync::Mutex<CursorState>>;
 struct ClipboardState {
     /// What the remote last sent. `None` means nothing has been copied there
     /// this session.
-    remote: Option<String>,
+    remote: Option<ClipboardSnapshot>,
     /// What the browser last sent, held until the server asks for it. Only the
     /// extended path defers like that; the latin-1 fallback writes immediately
     /// and never reads this.
@@ -426,21 +426,46 @@ async fn active_loop(
                     // the remote copies something, which reads in the panel as
                     // "nothing has been copied over there yet".
                     if clipboard_enabled {
-                        let text = clipboard.lock().unwrap().remote.clone().unwrap_or_default();
-                        if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                        let snapshot = clipboard
+                            .lock()
+                            .unwrap()
+                            .remote
+                            .clone()
+                            .unwrap_or_else(ClipboardSnapshot::unobserved);
+                        if frame_tx
+                            .send(ServerMsg::Clipboard {
+                                text: snapshot.text,
+                                changed_at_ms: snapshot.changed_at_ms,
+                                requested: true,
+                                oversized_bytes: snapshot.oversized_bytes,
+                            })
+                            .await
+                            .is_err()
+                        {
                             break Err(anyhow::anyhow!("frame channel closed"));
                         }
                     }
                     Ok(())
                 } else if let ClientMsg::Clipboard { text } = &input {
-                    if clipboard_enabled {
+                    if clipboard_enabled && !clipboard_fits(text) {
+                        // Refused, as the RDP and rxa engines do: the remote
+                        // keeps what it had rather than being handed a partial
+                        // copy that looks whole. Also keeps an oversized string
+                        // out of `state.local`, which the deferred Provide can
+                        // be asked for long after the copy.
+                        warn!(
+                            "vnc: refusing {} bytes to the remote clipboard, over the {MAX_CLIPBOARD_BYTES} byte limit",
+                            text.len()
+                        );
+                        Ok(())
+                    } else if clipboard_enabled {
                         // Extended when the server offered it, which is the
                         // only path that carries anything outside latin-1.
                         // Deferred by design: advertise now, hand the text over
                         // when the remote actually pastes and asks for it.
                         let extended = {
                             let mut state = clipboard.lock().unwrap();
-                            state.local = Some(text.clone());
+                            state.local = Some(text.to_owned());
                             state
                                 .server
                                 .is_some_and(|caps| caps.handles(vnc_clipboard::ACTION_NOTIFY))
@@ -449,7 +474,12 @@ async fn active_loop(
                             let notify = vnc_clipboard::notify(vnc_clipboard::FORMAT_TEXT);
                             write_to(&writer, &cut_text_extended(&notify)).await
                         } else {
-                            write_to(&writer, &client_cut_text(text)).await
+                            // Unreachable None: the branch above refused
+                            // anything over the ceiling.
+                            match client_cut_text(text) {
+                                Some(msg) => write_to(&writer, &msg).await,
+                                None => Ok(()),
+                            }
                         }
                     } else {
                         Ok(())
@@ -563,15 +593,37 @@ async fn read_loop(
                     discard(&mut reader, len).await?;
                     continue;
                 }
-                // Read what fits and drop the rest: the stream position must
-                // stay exact whatever the server sends.
-                let take = len.min(MAX_CLIPBOARD_BYTES as u64);
-                let mut bytes = vec![0u8; take as usize];
-                reader.read_exact(&mut bytes).await?;
-                discard(&mut reader, len - take).await?;
-                if len > take {
-                    warn!("vnc: clipboard from the remote truncated at {take} of {len} bytes");
+                // Discard an oversized announcement and report its size instead
+                // of the first 64 KiB, which would look like the whole thing.
+                // The body is consumed either way: the stream position must stay
+                // exact whatever the server sends.
+                if len > MAX_CLIPBOARD_BYTES as u64 {
+                    discard(&mut reader, len).await?;
+                    debug!(
+                        "vnc: remote clipboard is {len} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit"
+                    );
+                    let snapshot = {
+                        let mut state = clipboard.lock().unwrap();
+                        let snapshot = ClipboardSnapshot::oversized(len, state.remote.as_ref());
+                        state.remote = Some(snapshot.clone());
+                        snapshot
+                    };
+                    if frame_tx
+                        .send(ServerMsg::Clipboard {
+                            text: snapshot.text,
+                            changed_at_ms: snapshot.changed_at_ms,
+                            requested: false,
+                            oversized_bytes: snapshot.oversized_bytes,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                    continue;
                 }
+                let mut bytes = vec![0u8; len as usize];
+                reader.read_exact(&mut bytes).await?;
 
                 if signed < 0 {
                     if extended_cut_text(&bytes, &writer, &clipboard, &frame_tx).await? {
@@ -582,8 +634,22 @@ async fn read_loop(
 
                 let text = latin1_to_string(&bytes);
                 debug!("vnc: remote clipboard updated, {} bytes", bytes.len());
-                clipboard.lock().unwrap().remote = Some(text.clone());
-                if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                let snapshot = {
+                    let mut state = clipboard.lock().unwrap();
+                    let snapshot = ClipboardSnapshot::changed(text, state.remote.as_ref());
+                    state.remote = Some(snapshot.clone());
+                    snapshot
+                };
+                if frame_tx
+                    .send(ServerMsg::Clipboard {
+                        text: snapshot.text,
+                        changed_at_ms: snapshot.changed_at_ms,
+                        requested: false,
+                        oversized_bytes: snapshot.oversized_bytes,
+                    })
+                    .await
+                    .is_err()
+                {
                     return Ok(()); // browser link gone; the session layer handles it
                 }
             }
@@ -641,19 +707,63 @@ async fn extended_cut_text(
                 // panel as it is until something asks is the quieter half of
                 // the same truth, and Fetch now answers correctly.
                 debug!("vnc: remote copied a format the browser cannot hold");
-                clipboard.lock().unwrap().remote = None;
+                let mut state = clipboard.lock().unwrap();
+                state.remote = Some(ClipboardSnapshot::changed(
+                    String::new(),
+                    state.remote.as_ref(),
+                ));
             }
         }
-        // The answer to that request.
+        // The answer to that request, or — when there is too much of it to
+        // carry — the size it would have been. Both are clipboard activity the
+        // panel reports; only one of them has text in it.
         vnc_clipboard::Incoming::Provide(Some(text)) => {
-            let text = clamp_clipboard(&text).to_owned();
             debug!("vnc: remote clipboard updated, {} bytes (utf-8)", text.len());
-            clipboard.lock().unwrap().remote = Some(text.clone());
-            if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+            let snapshot = {
+                let mut state = clipboard.lock().unwrap();
+                let snapshot = ClipboardSnapshot::changed(text, state.remote.as_ref());
+                state.remote = Some(snapshot.clone());
+                snapshot
+            };
+            if frame_tx
+                .send(ServerMsg::Clipboard {
+                    text: snapshot.text,
+                    changed_at_ms: snapshot.changed_at_ms,
+                    requested: false,
+                    oversized_bytes: snapshot.oversized_bytes,
+                })
+                .await
+                .is_err()
+            {
                 return Ok(true);
             }
         }
         vnc_clipboard::Incoming::Provide(None) => {}
+        // Refused, and reported as the size it was: the panel says so instead of
+        // showing the first 64 KiB as though it were the whole clipboard.
+        vnc_clipboard::Incoming::Oversized(bytes) => {
+            debug!(
+                "vnc: remote clipboard is {bytes} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit"
+            );
+            let snapshot = {
+                let mut state = clipboard.lock().unwrap();
+                let snapshot = ClipboardSnapshot::oversized(bytes, state.remote.as_ref());
+                state.remote = Some(snapshot.clone());
+                snapshot
+            };
+            if frame_tx
+                .send(ServerMsg::Clipboard {
+                    text: snapshot.text,
+                    changed_at_ms: snapshot.changed_at_ms,
+                    requested: false,
+                    oversized_bytes: snapshot.oversized_bytes,
+                })
+                .await
+                .is_err()
+            {
+                return Ok(true);
+            }
+        }
         // The server wants what the browser has. This is the deferred half of
         // a browser copy: we advertised with a notify, it asks here.
         vnc_clipboard::Incoming::Request(formats) => {
@@ -1079,15 +1189,19 @@ fn pointer_event(button_mask: u8, pos: (u16, u16)) -> [u8; 6] {
 
 /// ClientCutText: put `text` on the remote's clipboard.
 ///
-/// RFB cut text is latin-1 ([`latin1_from_str`]), and the length is capped at
-/// [`MAX_CLIPBOARD_BYTES`] — after the latin-1 conversion, which is one byte
-/// per char, so the cap applies to characters here.
-fn client_cut_text(text: &str) -> Vec<u8> {
+/// RFB cut text is latin-1 ([`latin1_from_str`]). `None` over
+/// [`MAX_CLIPBOARD_BYTES`]: the caller has already refused by then, and an
+/// encoder that quietly truncated instead would be the one place a partial
+/// paste could still reach a remote.
+fn client_cut_text(text: &str) -> Option<Vec<u8>> {
+    if !clipboard_fits(text) {
+        return None;
+    }
     let bytes = latin1_from_str(text);
     let mut msg = vec![6u8, 0, 0, 0]; // message type + 3 padding
     msg.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     msg.extend_from_slice(&bytes);
-    msg
+    Some(msg)
 }
 
 /// ClientCutText carrying an Extended Clipboard body.
@@ -1109,26 +1223,19 @@ fn latin1_to_string(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| char::from(b)).collect()
 }
 
-/// Encode a `String` as RFB cut text (latin-1), truncated to
-/// [`MAX_CLIPBOARD_BYTES`].
+/// Encode a `String` as RFB cut text (latin-1).
 ///
 /// Anything outside latin-1 becomes `?`, which is what noVNC does and all the
 /// baseline protocol can carry — RFB's UTF-8 clipboard lives in the Extended
 /// Clipboard pseudo-encoding, which this client does not negotiate.
+///
+/// Length is [`client_cut_text`]'s business: latin-1 spends one byte per char
+/// where UTF-8 spends at least one, so text that fits the ceiling as UTF-8
+/// cannot exceed it here.
 fn latin1_from_str(text: &str) -> Vec<u8> {
-    let bytes: Vec<u8> = text
-        .chars()
-        .take(MAX_CLIPBOARD_BYTES)
+    text.chars()
         .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
-        .collect();
-    if bytes.len() < text.chars().count() {
-        warn!(
-            "vnc: clipboard to the remote truncated at {} of {} characters",
-            bytes.len(),
-            text.chars().count()
-        );
-    }
-    bytes
+        .collect()
 }
 
 /// Classic VNC authentication: DES-ECB over the 16-byte challenge, keyed by
@@ -1315,7 +1422,7 @@ mod tests {
 
     #[test]
     fn client_cut_text_is_type_6_with_a_big_endian_length() {
-        let msg = client_cut_text("hi");
+        let msg = client_cut_text("hi").expect("fits");
         assert_eq!(msg[0], 6);
         assert_eq!(&msg[1..4], &[0, 0, 0]); // padding
         assert_eq!(&msg[4..8], &2u32.to_be_bytes()); // length, big-endian
@@ -1323,7 +1430,7 @@ mod tests {
 
         // Empty text is a well-formed message, not a skipped one — clearing the
         // remote clipboard is a legitimate thing to ask for.
-        let msg = client_cut_text("");
+        let msg = client_cut_text("").expect("fits");
         assert_eq!(msg.len(), 8);
         assert_eq!(&msg[4..8], &0u32.to_be_bytes());
     }
@@ -1331,7 +1438,7 @@ mod tests {
     #[test]
     fn cut_text_is_latin1_with_a_question_mark_for_the_rest() {
         // Latin-1 survives; anything above U+00FF degrades to '?'.
-        let msg = client_cut_text("café ☕");
+        let msg = client_cut_text("café ☕").expect("fits");
         assert_eq!(&msg[8..], &[b'c', b'a', b'f', 0xE9, b' ', b'?']);
 
         // Round trip: what a server echoes back decodes to the same latin-1.
@@ -1341,17 +1448,20 @@ mod tests {
         assert_eq!(latin1_to_string(&[0x00, 0x80, 0xFF]), "\u{0}\u{80}\u{ff}");
     }
 
+    // Refused, not truncated: this encoder is the last place a partial paste
+    // could still reach a remote, and one byte of latin-1 per char means it
+    // cannot silently overshoot either.
     #[test]
-    fn cut_text_to_the_remote_is_capped() {
-        // One latin-1 byte per char, so the cap counts characters here.
-        let msg = client_cut_text(&"a".repeat(MAX_CLIPBOARD_BYTES + 100));
+    fn cut_text_over_the_ceiling_is_refused() {
+        assert_eq!(client_cut_text(&"a".repeat(MAX_CLIPBOARD_BYTES + 1)), None);
+        // Measured in UTF-8 bytes, so multi-byte characters hit it sooner than
+        // their latin-1 '?' would suggest.
+        assert_eq!(client_cut_text(&"☕".repeat(MAX_CLIPBOARD_BYTES)), None);
+
+        // At the ceiling it still encodes, so the boundary is inclusive.
+        let msg = client_cut_text(&"a".repeat(MAX_CLIPBOARD_BYTES)).expect("fits");
         assert_eq!(msg.len(), 8 + MAX_CLIPBOARD_BYTES);
         assert_eq!(&msg[4..8], &(MAX_CLIPBOARD_BYTES as u32).to_be_bytes());
-
-        // Multi-byte characters count as one each, and the '?' they degrade to
-        // must not push the message past the cap either.
-        let msg = client_cut_text(&"☕".repeat(MAX_CLIPBOARD_BYTES + 100));
-        assert_eq!(msg.len(), 8 + MAX_CLIPBOARD_BYTES);
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 // The viewer and the served frontend ship in lockstep. Increment this whenever
 // either side changes the shape or semantics of a native-host message.
-export const NATIVE_HOST_BRIDGE_VERSION = 4;
+export const NATIVE_HOST_BRIDGE_VERSION = 6;
 
 interface NativeHostDescriptor {
   bridgeVersion: number;
@@ -28,7 +28,7 @@ export type NativeCommand =
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
   | { type: "releaseKeys" }
   | { type: "clipboard"; text: string }
-  | { type: "clipboardRequest" }
+  | { type: "clipboardRequest"; requestId: string }
   | { type: "resize" }
   // A pick from `displayModes`, not a viewport report — see ClientMsg in
   // src/protocol.rs for why the two are separate.
@@ -66,7 +66,27 @@ export type NativeHostEvent =
       appVersion: string;
     }
   | { type: "state"; state: NativeHostState }
-  | { type: "remoteClipboard"; text: string; seq: number };
+  | {
+      type: "remoteClipboard";
+      text: string;
+      changedAtMs: number | null;
+      // Set to the remote clipboard's size when it was refused for exceeding
+      // MAX_CLIPBOARD_BYTES; `text` is empty then. The viewer reports the size
+      // rather than mirroring nothing into the Mac's pasteboard.
+      oversizedBytes: number | null;
+    }
+  | {
+      type: "clipboardFetchResult";
+      requestId: string;
+      text: string;
+      changedAtMs: number | null;
+      // As on remoteClipboard: the size when the remote's clipboard was too
+      // large to transfer, and `text` is then empty.
+      oversizedBytes: number | null;
+    }
+  // The failure answer to a `clipboardRequest`: a null text tells the viewer to
+  // show its unavailable panel now instead of waiting out its own deadline.
+  | { type: "clipboardFetchResult"; requestId: string; text: null };
 
 declare global {
   interface Window {
@@ -114,6 +134,11 @@ function parseCommand(value: unknown): NativeCommand | null {
       return typeof command.text === "string"
         ? { type: "clipboard", text: command.text }
         : null;
+    case "clipboardRequest":
+      return typeof command.requestId === "string" &&
+        command.requestId.length > 0
+        ? { type: "clipboardRequest", requestId: command.requestId }
+        : null;
     case "setResolution":
       return typeof command.w === "number" &&
         Number.isFinite(command.w) &&
@@ -126,7 +151,6 @@ function parseCommand(value: unknown): NativeCommand | null {
         ? { type: "setResolution", w: command.w, h: command.h }
         : null;
     case "releaseKeys":
-    case "clipboardRequest":
     case "resize":
     case "switchTarget":
     case "logout":

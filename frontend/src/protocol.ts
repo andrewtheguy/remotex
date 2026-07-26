@@ -38,9 +38,26 @@ export type ClientMsg =
   | { type: "clipboardRequest" };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
-// src/protocol.rs. The backend clamps too; this is so the panel can say so
-// before the round trip.
+// src/protocol.rs. The backend refuses anything over it in either direction;
+// checking here too is what lets the panel say so before the round trip.
 export const MAX_CLIPBOARD_BYTES = 65_536;
+
+export interface ClipboardSnapshot {
+  text: string;
+  // Unix epoch milliseconds when remotex observed the remote clipboard
+  // change. Null is honest for clipboard content that predates this session.
+  changedAtMs: number | null;
+  // Set when the remote's clipboard was refused for exceeding
+  // MAX_CLIPBOARD_BYTES, to the size it actually is. `text` is empty then, and
+  // this is what keeps that apart from a remote that has copied nothing —
+  // truncating instead would have arrived looking like the whole clipboard.
+  oversizedBytes: number | null;
+}
+
+export interface RemoteClipboard extends ClipboardSnapshot {
+  // Ticks on every reply/push so an identical Fetch is still observable.
+  seq: number;
+}
 
 // Server -> browser text frames: everything but screen tiles. `resize`/`error`
 // come from the engine; `picker`/`connected` are the session-slot status the
@@ -77,8 +94,9 @@ export type ControlMsg =
   // shortcut stays Command or becomes remote Control.
   | { type: "remoteOs"; macos: boolean }
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
-  // an unprompted push when the remote's clipboard changed.
-  | { type: "clipboard"; text: string }
+  // an unprompted push when the remote's clipboard changed. Requested replies
+  // populate the panel without silently copying; pushes retain automatic sync.
+  | ({ type: "clipboard"; requested: boolean } & ClipboardSnapshot)
   // The resolutions the remote display accepts, largest first — the floating
   // menu's Resolution section, answered with "setResolution". Only the rxa
   // engine sends this, and only for a target whose Mac shares a virtual
