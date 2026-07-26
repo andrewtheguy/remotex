@@ -26,11 +26,12 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
 use rxa_proto::msg::{AgentMsg, GatewayMsg, clamp_clipboard};
+use rxa_proto::next_clipboard_time;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
@@ -52,19 +53,6 @@ const OUT_BACKLOG: usize = 64;
 
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
-
-fn unix_time_ms() -> u64 {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis();
-    u64::try_from(elapsed).unwrap_or(u64::MAX)
-}
-
-fn next_clipboard_time(previous: Option<u64>) -> u64 {
-    let now = unix_time_ms();
-    previous.map_or(now, |last| now.max(last.saturating_add(1)))
-}
 
 /// Waits before each attempt to restart a capture stream that died, and with
 /// their length, the number of attempts.

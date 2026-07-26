@@ -228,7 +228,8 @@ async fn serve_fake_agent(
             }
             GatewayMsg::Clipboard { text } => {
                 pasteboard = text.clone();
-                clipboard_changed_at_ms = Some(FAKE_CLIPBOARD_CHANGED_AT_MS + 1);
+                clipboard_changed_at_ms =
+                    clipboard_changed_at_ms.map(|timestamp| timestamp.saturating_add(1));
                 let _ = input_tx.send(GatewayMsg::Clipboard { text });
             }
             // A real agent switches the display's mode and says nothing; the
@@ -770,13 +771,43 @@ async fn clipboard_round_trips_through_the_agent_in_utf8() {
 
     // And it stuck: fetching again returns what was just written.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    let first_write = expect_clipboard(&mut ws).await;
     assert_eq!(
-        expect_clipboard(&mut ws).await,
+        first_write,
         ClipboardMessage {
             text: sent.to_owned(),
             changed_at_ms: Some(FAKE_CLIPBOARD_CHANGED_AT_MS + 1),
             requested: true,
         }
+    );
+
+    // A second browser write is distinct clipboard activity even when the
+    // fake clock starts from a fixed value.
+    let sent_again = "typed in the browser again";
+    ws.send(Message::text(
+        serde_json::json!({ "type": "clipboard", "text": sent_again }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::Clipboard {
+            text: sent_again.to_owned()
+        }
+    );
+    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
+    let second_write = expect_clipboard(&mut ws).await;
+    assert_eq!(
+        second_write,
+        ClipboardMessage {
+            text: sent_again.to_owned(),
+            changed_at_ms: Some(FAKE_CLIPBOARD_CHANGED_AT_MS + 2),
+            requested: true,
+        }
+    );
+    assert!(
+        second_write.changed_at_ms > first_write.changed_at_ms,
+        "each browser write must advance the fake clipboard timestamp"
     );
 }
 

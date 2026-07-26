@@ -15,7 +15,6 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Transport policy shared by all engines: a dirty rectangle taller than this
 /// is split into strips before being sent, so a full-screen repaint doesn't
@@ -41,10 +40,8 @@ pub struct ClipboardSnapshot {
 impl ClipboardSnapshot {
     /// Record a clipboard change observed right now.
     pub fn changed(text: String, previous: Option<&Self>) -> Self {
-        let now = unix_time_ms();
-        let changed_at_ms = previous
-            .and_then(|snapshot| snapshot.changed_at_ms)
-            .map_or(now, |last| now.max(last.saturating_add(1)));
+        let previous = previous.and_then(|snapshot| snapshot.changed_at_ms);
+        let changed_at_ms = rxa_proto::next_clipboard_time(previous);
         Self {
             text,
             changed_at_ms: Some(changed_at_ms),
@@ -59,17 +56,6 @@ impl ClipboardSnapshot {
             changed_at_ms: None,
         }
     }
-}
-
-/// Wall-clock milliseconds are carried because the browser has to render the
-/// activity time in the user's locale. Saturation only matters after the year
-/// 584,554,051 or if the system clock predates Unix.
-pub fn unix_time_ms() -> u64 {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis();
-    u64::try_from(elapsed).unwrap_or(u64::MAX)
 }
 
 /// A mouse button, matching the DOM `MouseEvent.button` numbering.
@@ -639,7 +625,7 @@ mod tests {
     fn repeated_clipboard_activity_advances_the_timestamp_even_for_identical_text() {
         let first = ClipboardSnapshot {
             text: "same text".to_owned(),
-            changed_at_ms: Some(unix_time_ms().saturating_add(1_000)),
+            changed_at_ms: Some(rxa_proto::unix_time_ms().saturating_add(1_000)),
         };
         let second = ClipboardSnapshot::changed("same text".to_owned(), Some(&first));
         assert_eq!(second.text, first.text);

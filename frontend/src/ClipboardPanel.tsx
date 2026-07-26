@@ -149,10 +149,13 @@ export function ClipboardPanel({
     input.value = text;
     input.className = "cb-copy-fallback";
     document.body.append(input);
-    selectClipboardText(input);
-    document.execCommand("copy");
-    input.remove();
-    setNotice("Clipboard copied");
+    try {
+      selectClipboardText(input);
+      document.execCommand("copy");
+      setNotice("Clipboard copied");
+    } finally {
+      input.remove();
+    }
   }, [
     clipboardInput,
     isRemoteMetadataMode,
