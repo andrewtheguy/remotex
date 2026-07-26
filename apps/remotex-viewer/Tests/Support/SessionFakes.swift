@@ -1,0 +1,290 @@
+import CoreGraphics
+import Foundation
+import ImageIO
+import Synchronization
+import Testing
+import UniformTypeIdentifiers
+@testable import RemotexViewer
+
+/// A scripted session socket.
+///
+/// Frames can be queued up front, pushed later, or both, and the socket either
+/// closes once the script drains or stays open — a socket that closes the moment
+/// its script runs out cannot be sent to, which is most of what there is to test
+/// on the outbound side.
+final class FakeWebSocketTransport: WebSocketTransport {
+    private struct State {
+        var inbound: [WebSocketFrame]
+        var closeAfterDraining: Bool
+        var pendingClose: Int?
+        var waiter: CheckedContinuation<WebSocketFrame, any Error>?
+        var ended = false
+        var sent: [String] = []
+        var cancelled = false
+    }
+
+    private let state: Mutex<State>
+
+    init(
+        inbound: [WebSocketFrame] = [],
+        closeCode: Int? = nil,
+        closeAfterDraining: Bool = true
+    ) {
+        state = Mutex(
+            State(
+                inbound: inbound,
+                closeAfterDraining: closeAfterDraining,
+                pendingClose: closeCode
+            )
+        )
+    }
+
+    /// Only known once the socket has ended, as with the real one.
+    var closeCode: Int? {
+        state.withLock { $0.ended ? $0.pendingClose : nil }
+    }
+
+    var sentFrames: [String] {
+        state.withLock { $0.sent }
+    }
+
+    var wasCancelled: Bool {
+        state.withLock { $0.cancelled }
+    }
+
+    func send(_ text: String) async throws {
+        try state.withLock { state in
+            guard !state.ended, !state.cancelled else {
+                throw FakeTransportError.closed
+            }
+            state.sent.append(text)
+        }
+    }
+
+    func receive() async throws -> WebSocketFrame {
+        try await withCheckedThrowingContinuation { continuation in
+            // Resuming has to happen outside the lock, or a synchronous resume
+            // could re-enter it.
+            enum Next {
+                case frame(WebSocketFrame)
+                case closed
+                case park
+            }
+            let next: Next = state.withLock { state in
+                if !state.inbound.isEmpty {
+                    return .frame(state.inbound.removeFirst())
+                }
+                guard state.closeAfterDraining || state.cancelled else {
+                    state.waiter = continuation
+                    return .park
+                }
+                state.ended = true
+                return .closed
+            }
+            switch next {
+            case .frame(let frame):
+                continuation.resume(returning: frame)
+            case .closed:
+                continuation.resume(throwing: FakeTransportError.closed)
+            case .park:
+                break
+            }
+        }
+    }
+
+    /// Deliver a frame to a socket that stayed open.
+    func push(_ frame: WebSocketFrame) {
+        let waiter = state.withLock { state -> CheckedContinuation<WebSocketFrame, any Error>? in
+            guard let waiter = state.waiter else {
+                state.inbound.append(frame)
+                return nil
+            }
+            state.waiter = nil
+            return waiter
+        }
+        waiter?.resume(returning: frame)
+    }
+
+    /// End a socket that stayed open, as the gateway would.
+    func close(code: Int?) {
+        let waiter = state.withLock { state -> CheckedContinuation<WebSocketFrame, any Error>? in
+            state.pendingClose = code
+            state.closeAfterDraining = true
+            guard let waiter = state.waiter else {
+                return nil
+            }
+            state.waiter = nil
+            state.ended = true
+            return waiter
+        }
+        waiter?.resume(throwing: FakeTransportError.closed)
+    }
+
+    func cancel() {
+        let waiter = state.withLock { state -> CheckedContinuation<WebSocketFrame, any Error>? in
+            state.cancelled = true
+            defer { state.waiter = nil }
+            if state.waiter != nil {
+                state.ended = true
+            }
+            return state.waiter
+        }
+        waiter?.resume(throwing: FakeTransportError.closed)
+    }
+}
+
+enum FakeTransportError: Error, Equatable {
+    case closed
+    case refused
+}
+
+/// A scripted gateway: claim answers and sockets in the order the test wants
+/// them, plus a record of what was asked for.
+final class FakeGateway: SessionGateway {
+    private struct State {
+        var claims: [ClaimOutcome]
+        var sockets: [FakeWebSocketTransport]
+        var claimCalls: [(force: Bool, sessionId: String?)] = []
+        var socketTokens: [String] = []
+    }
+
+    private let state: Mutex<State>
+
+    init(claims: [ClaimOutcome], sockets: [FakeWebSocketTransport]) {
+        state = Mutex(State(claims: claims, sockets: sockets))
+    }
+
+    var claimCalls: [(force: Bool, sessionId: String?)] {
+        state.withLock { $0.claimCalls }
+    }
+
+    var socketTokens: [String] {
+        state.withLock { $0.socketTokens }
+    }
+
+    func claimSession(force: Bool, sessionId: String?) async throws -> ClaimOutcome {
+        try state.withLock { state in
+            state.claimCalls.append((force: force, sessionId: sessionId))
+            guard !state.claims.isEmpty else {
+                throw FakeTransportError.refused
+            }
+            return state.claims.removeFirst()
+        }
+    }
+
+    func openSocket(sessionToken: String) async throws -> any WebSocketTransport {
+        try state.withLock { state in
+            state.socketTokens.append(sessionToken)
+            guard !state.sockets.isEmpty else {
+                throw FakeTransportError.refused
+            }
+            return state.sockets.removeFirst()
+        }
+    }
+}
+
+/// Records the whole event stream so tests can assert on its order.
+@MainActor
+final class RecordingSink: GatewaySessionSink {
+    private(set) var events: [SessionEvent] = []
+
+    func apply(_ event: SessionEvent) {
+        events.append(event)
+    }
+
+    /// A compact rendering of the stream, so an ordering failure reads as a
+    /// diff rather than as a wall of associated values.
+    var trace: [String] {
+        events.map { event in
+            switch event {
+            case .status(let status): "status:\(status.rawValue)"
+            case .control(let message): "control:\(Self.label(message))"
+            case .tile(let tile): "tile:\(tile.x),\(tile.y),\(tile.w)x\(tile.h)"
+            case .clearFramebuffer: "clear"
+            case .releaseInput: "release"
+            case .failPendingClipboardFetch: "failFetch"
+            case .unauthorized: "unauthorized"
+            }
+        }
+    }
+
+    /// Poll until `predicate` holds, or fail on the deadline. Polling rather than
+    /// a fixed wait: the work is asynchronous and this must not encode a guess
+    /// about how long it takes.
+    func wait(
+        for predicate: @escaping @MainActor ([SessionEvent]) -> Bool,
+        timeout: Duration = .seconds(5),
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if predicate(events) {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        Issue.record(
+            "timed out waiting; saw \(trace)",
+            sourceLocation: sourceLocation
+        )
+    }
+
+    private static func label(_ message: ServerMessage) -> String {
+        switch message {
+        case .resize(let w, let h): "resize(\(w)x\(h))"
+        case .cursor: "cursor"
+        case .error(let message): "error(\(message))"
+        case .picker: "picker"
+        case .connected(let payload): "connected(\(payload.name))"
+        case .remoteOs(let macos): "remoteOs(\(macos))"
+        case .clipboard: "clipboard"
+        case .displayModes(let modes): "displayModes(\(modes.count))"
+        case .unsupported(let type): "unsupported(\(type))"
+        }
+    }
+}
+
+/// A real single-colour PNG tile frame, header and all. Encoded rather than
+/// hand-rolled so the decode under test is the same one production runs.
+func tileFrame(
+    x: UInt16,
+    y: UInt16,
+    size: UInt16 = 2,
+    red: UInt8 = 0xFF
+) throws -> Data {
+    let side = Int(size)
+    var pixels = [UInt8]()
+    for _ in 0 ..< side * side {
+        pixels.append(contentsOf: [red, 0x20, 0x40, 0xFF])
+    }
+    let provider = try #require(CGDataProvider(data: Data(pixels) as CFData))
+    let image = try #require(
+        CGImage(
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: side * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    )
+    let encoded = NSMutableData()
+    let destination = try #require(
+        CGImageDestinationCreateWithData(encoded, UTType.png.identifier as CFString, 1, nil)
+    )
+    CGImageDestinationAddImage(destination, image, nil)
+    #expect(CGImageDestinationFinalize(destination))
+
+    var frame = Data([TileFrame.frameKind, TileFormat.png.rawValue])
+    for value in [x, y, size, size] {
+        frame.append(UInt8(value & 0xFF))
+        frame.append(UInt8(value >> 8))
+    }
+    frame.append(encoded as Data)
+    return frame
+}

@@ -31,6 +31,7 @@ struct RemotexViewerApp: App {
             print("remotex-viewer \(ProductInfo.version)")
             Foundation.exit(EXIT_SUCCESS)
         }
+        ProbeCommand.runIfRequested()
     }
 
     var body: some Scene {
