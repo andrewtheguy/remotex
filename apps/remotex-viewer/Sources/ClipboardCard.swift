@@ -80,9 +80,12 @@ struct ClipboardCard: View {
                     .foregroundStyle(clipboard.isOverByteLimit ? .red : .secondary)
                 }
                 Spacer()
+                // Transient: the notice appears and clears itself, so VoiceOver
+                // has to poll it. Its own text is the announcement, which is
+                // why it carries no separate label.
                 Text(clipboard.notice ?? "")
                     .foregroundStyle(.secondary)
-                    .accessibilityLabel(clipboard.notice ?? "")
+                    .accessibilityAddTraits(.updatesFrequently)
             }
             .font(.caption)
             .frame(minHeight: 16)

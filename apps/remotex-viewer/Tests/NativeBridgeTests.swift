@@ -83,10 +83,7 @@ struct NativeBridgeTests {
                 "text": "copied",
                 "changedAtMs": 1_725_000_123_456,
             ])
-                == RemoteClipboardPush(
-                    text: "copied",
-                    changedAtMs: 1_725_000_123_456
-                )
+                == RemoteClipboardPush(text: "copied")
         )
         #expect(
             NativeBridge.decodeRemoteClipboardPush([
@@ -94,7 +91,7 @@ struct NativeBridgeTests {
                 "text": "old",
                 "changedAtMs": NSNull(),
             ])
-                == RemoteClipboardPush(text: "old", changedAtMs: nil)
+                == RemoteClipboardPush(text: "old")
         )
 
         for malformed: [String: Any] in [

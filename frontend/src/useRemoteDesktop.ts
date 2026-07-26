@@ -806,6 +806,7 @@ export function useRemoteDesktop(
           setDisplayModes([]);
           setCanClipboard(false);
           setRemoteClipboard(null);
+          setRemoteClipboardPush(null);
           lastFromRemoteRef.current = null;
           lastToRemoteRef.current = null;
           // No engine left to answer a fetch that is still in flight.

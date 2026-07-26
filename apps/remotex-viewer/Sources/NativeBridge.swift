@@ -3,7 +3,6 @@ import WebKit
 
 struct RemoteClipboardPush: Equatable {
     let text: String
-    let changedAtMs: Int64?
 }
 
 struct ClipboardFetchResult: Equatable {
@@ -187,12 +186,16 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
     static func decodeRemoteClipboardPush(
         _ value: [String: Any]
     ) -> RemoteClipboardPush? {
+        // The v5 shape requires the timestamp, so a payload without it is still
+        // rejected — but nothing consumes it here: an unsolicited push mirrors
+        // unconditionally. Validate, then drop it rather than carry a field the
+        // viewer never reads.
         guard let text = value["text"] as? String,
-              let changedAtMs = decodeChangedAtMs(value)
+              decodeChangedAtMs(value) != nil
         else {
             return nil
         }
-        return RemoteClipboardPush(text: text, changedAtMs: changedAtMs)
+        return RemoteClipboardPush(text: text)
     }
 
     static func decodeClipboardFetchResult(
