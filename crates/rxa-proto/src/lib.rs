@@ -76,7 +76,8 @@ mod tests {
 
     #[test]
     fn clipboard_time_advances_past_a_future_previous_value() {
-        let previous = unix_time_ms().saturating_add(1_000);
+        const FAR_FUTURE_MS: u64 = 32_503_680_000_000; // 3000-01-01 UTC
+        let previous = FAR_FUTURE_MS;
         assert_eq!(
             next_clipboard_time(Some(previous)),
             previous.saturating_add(1)

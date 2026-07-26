@@ -7,6 +7,7 @@ const USERNAME = process.env.REMOTEX_PLAYWRIGHT_USERNAME;
 const PASSWORD = process.env.REMOTEX_PLAYWRIGHT_PASSWORD;
 const TARGET = process.env.REMOTEX_PLAYWRIGHT_TARGET ?? "mac";
 const MAC_SSH = process.env.REMOTEX_PLAYWRIGHT_MAC_SSH;
+const SSH_TIMEOUT_MS = 10_000;
 const REQUIRED_ENV = {
   REMOTEX_PLAYWRIGHT_USERNAME: USERNAME,
   REMOTEX_PLAYWRIGHT_PASSWORD: PASSWORD,
@@ -45,12 +46,15 @@ function setRemoteClipboard(text) {
   execFileSync("ssh", [
     MAC_SSH,
     `printf '%s' '${encoded}' | base64 --decode | pbcopy`,
-  ]);
+  ], {
+    timeout: SSH_TIMEOUT_MS,
+  });
 }
 
 function readRemoteClipboard() {
   return execFileSync("ssh", [MAC_SSH, "pbpaste"], {
     encoding: "utf8",
+    timeout: SSH_TIMEOUT_MS,
   }).replace(/\r?\n$/, "");
 }
 
@@ -62,6 +66,7 @@ function targetNamePattern(name) {
 test("clipboard panel reads require explicit Copy while pushes still auto-sync", async ({
   page,
 }) => {
+  test.setTimeout(90_000);
   test.skip(
     MISSING_ENV.length > 0,
     `live Mac clipboard test requires ${MISSING_ENV.join(", ")}`,
