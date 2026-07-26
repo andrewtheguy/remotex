@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import RemotexViewer
@@ -71,5 +72,114 @@ struct NativeBridgeTests {
             let value = Self.desktopState(removing: [field])
             #expect(NativeBridge.decodeState(value) == nil, "\(field) must be required")
         }
+    }
+
+    @Test
+    @MainActor
+    func clipboardPushPayloadRequiresTextAndANullableTimestamp() {
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "copied",
+                "changedAtMs": 1_725_000_123_456,
+            ])
+                == RemoteClipboardPush(
+                    text: "copied",
+                    changedAtMs: 1_725_000_123_456
+                )
+        )
+        #expect(
+            NativeBridge.decodeRemoteClipboardPush([
+                "type": "remoteClipboard",
+                "text": "old",
+                "changedAtMs": NSNull(),
+            ])
+                == RemoteClipboardPush(text: "old", changedAtMs: nil)
+        )
+
+        for malformed: [String: Any] in [
+            ["text": "missing timestamp"],
+            ["changedAtMs": NSNull()],
+            ["text": 7, "changedAtMs": NSNull()],
+            ["text": "fractional", "changedAtMs": 1.5],
+            ["text": "boolean", "changedAtMs": true],
+            ["text": "negative", "changedAtMs": -1],
+        ] {
+            #expect(NativeBridge.decodeRemoteClipboardPush(malformed) == nil)
+        }
+    }
+
+    @Test
+    @MainActor
+    func fetchResultPayloadRequiresARequestIdTextAndNullableTimestamp() {
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "fetched",
+                "changedAtMs": NSNull(),
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "fetched",
+                    changedAtMs: nil
+                )
+        )
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": "",
+                "changedAtMs": 0,
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: "",
+                    changedAtMs: 0
+                )
+        )
+
+        for malformed: [String: Any] in [
+            ["text": "missing id", "changedAtMs": NSNull()],
+            ["requestId": "", "text": "empty id", "changedAtMs": NSNull()],
+            ["requestId": 9, "text": "bad id", "changedAtMs": NSNull()],
+            ["requestId": "id", "changedAtMs": NSNull()],
+            ["requestId": "id", "text": "missing timestamp"],
+            ["requestId": "id", "text": "bad timestamp", "changedAtMs": "now"],
+        ] {
+            #expect(NativeBridge.decodeClipboardFetchResult(malformed) == nil)
+        }
+    }
+
+    @Test
+    @MainActor
+    func staleFetchRequestIdsAreDecodedButCannotMutatePanelState() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let clipboard = ClipboardSynchronizer(
+            pasteboard: pasteboard,
+            startsPolling: false,
+            makeRequestID: { "current-id" }
+        )
+        clipboard.sendCommand = { _ in }
+        clipboard.update(enabled: true)
+        clipboard.requestFreshSnapshot()
+
+        let stale = NativeBridge.decodeClipboardFetchResult([
+            "requestId": "stale-id",
+            "text": "stale",
+            "changedAtMs": NSNull(),
+        ])
+        #expect(stale != nil, "staleness is state, not malformed JSON")
+        #expect(
+            !clipboard.receiveFetchResult(
+                requestID: stale?.requestID ?? "",
+                text: stale?.text ?? "",
+                changedAtMs: stale?.changedAtMs
+            )
+        )
+        #expect(clipboard.pendingRequestID == "current-id")
+        #expect(clipboard.snapshot == nil)
+        #expect(!clipboard.isPresented)
     }
 }

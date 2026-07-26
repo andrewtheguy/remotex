@@ -361,6 +361,11 @@ export function useRemoteDesktop(
   // still register as an answer, and a null-vs-string flag cannot express that.
   const [remoteClipboard, setRemoteClipboard] =
     useState<RemoteClipboard | null>(null);
+  // Native automatic synchronization consumes only unsolicited activity.
+  // Keep it separate from the panel snapshot so a requested Fetch can never
+  // masquerade as a remote push at the v5 native bridge boundary.
+  const [remoteClipboardPush, setRemoteClipboardPush] =
+    useState<RemoteClipboard | null>(null);
   // The two halves of the automatic sync's echo guard: text last received from
   // the remote (so it is never sent straight back), and text last sent to the
   // remote (so a server that echoes a cut back at us does not bounce forever).
@@ -767,6 +772,10 @@ export function useRemoteDesktop(
             // before the actual response arrives.
             settleClipboardWaiters(snapshot);
           } else {
+            setRemoteClipboardPush((prev) => ({
+              ...snapshot,
+              seq: (prev?.seq ?? 0) + 1,
+            }));
             // A copy on the remote is immediately pastable here. Best effort
             // by design: `writeText` is absent on a non-secure origin and can
             // reject when the tab is unfocused. Never mirror an empty push,
@@ -1244,6 +1253,7 @@ export function useRemoteDesktop(
     displayModes,
     canClipboard,
     remoteClipboard,
+    remoteClipboardPush,
     takeOver,
     connect,
     switchTarget,

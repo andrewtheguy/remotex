@@ -14,7 +14,43 @@ struct ContentView: View {
                 EmptyView()
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if model.clipboard.isPresented {
+                ClipboardCard(clipboard: model.clipboard)
+                    .padding(20)
+            }
+        }
         .navigationTitle(model.windowTitle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.clipboard.togglePanel()
+                } label: {
+                    HStack(spacing: 6) {
+                        if model.clipboard.isFetching {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "doc.on.clipboard")
+                        }
+                        Text("Clipboard")
+                    }
+                }
+                .disabled(
+                    !model.clipboard.isEnabled
+                        || model.clipboard.isFetching
+                )
+                .help(
+                    model.clipboard.isEnabled
+                        ? "Read and write the remote clipboard"
+                        : "Clipboard integration is not connected"
+                )
+                .accessibilityLabel("Clipboard")
+                .accessibilityValue(
+                    model.clipboard.isFetching ? "Fetching" : ""
+                )
+            }
+        }
         .alert(
             "remotex",
             isPresented: Binding(

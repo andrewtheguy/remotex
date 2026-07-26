@@ -1,6 +1,17 @@
 import AppKit
 import WebKit
 
+struct RemoteClipboardPush: Equatable {
+    let text: String
+    let changedAtMs: Int64?
+}
+
+struct ClipboardFetchResult: Equatable {
+    let requestID: String
+    let text: String
+    let changedAtMs: Int64?
+}
+
 @MainActor
 final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigationDelegate {
     static let handlerName = "remotexNative"
@@ -57,11 +68,29 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
             model.apply(session: decoded)
             replyHandler(["accepted": true], nil)
         case "remoteClipboard":
-            guard handshakeAccepted, let text = body["text"] as? String else {
+            guard handshakeAccepted,
+                  let payload = Self.decodeRemoteClipboardPush(body)
+            else {
                 replyHandler(nil, "invalid clipboard")
                 return
             }
-            model.clipboard.receiveRemote(text)
+            model.clipboard.receiveRemotePush(
+                payload.text,
+                changedAtMs: payload.changedAtMs
+            )
+            replyHandler(["accepted": true], nil)
+        case "clipboardFetchResult":
+            guard handshakeAccepted,
+                  let payload = Self.decodeClipboardFetchResult(body)
+            else {
+                replyHandler(nil, "invalid clipboard fetch result")
+                return
+            }
+            model.clipboard.receiveFetchResult(
+                requestID: payload.requestID,
+                text: payload.text,
+                changedAtMs: payload.changedAtMs
+            )
             replyHandler(["accepted": true], nil)
         default:
             replyHandler(nil, "unknown message type")
@@ -150,5 +179,58 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
             canClipboard: canClipboard,
             canCaptureKeyboard: canCaptureKeyboard
         )
+    }
+
+    static func decodeRemoteClipboardPush(
+        _ value: [String: Any]
+    ) -> RemoteClipboardPush? {
+        guard let text = value["text"] as? String,
+              let changedAtMs = decodeChangedAtMs(value)
+        else {
+            return nil
+        }
+        return RemoteClipboardPush(text: text, changedAtMs: changedAtMs)
+    }
+
+    static func decodeClipboardFetchResult(
+        _ value: [String: Any]
+    ) -> ClipboardFetchResult? {
+        guard let requestID = value["requestId"] as? String,
+              !requestID.isEmpty,
+              let text = value["text"] as? String,
+              let changedAtMs = decodeChangedAtMs(value)
+        else {
+            return nil
+        }
+        return ClipboardFetchResult(
+            requestID: requestID,
+            text: text,
+            changedAtMs: changedAtMs
+        )
+    }
+
+    /// A nullable timestamp is required on both v5 clipboard event shapes.
+    /// The outer optional is decoding success; the inner optional is JSON
+    /// null, used when the remote content predates this session.
+    private static func decodeChangedAtMs(
+        _ value: [String: Any]
+    ) -> Int64?? {
+        guard value.keys.contains("changedAtMs") else {
+            return nil
+        }
+        let raw = value["changedAtMs"]
+        if raw is NSNull {
+            return .some(nil)
+        }
+        guard !(raw is Bool),
+              let number = raw as? NSNumber,
+              number.doubleValue.isFinite,
+              number.doubleValue >= 0,
+              number.doubleValue <= Double(Int64.max),
+              number.doubleValue.rounded(.towardZero) == number.doubleValue
+        else {
+            return nil
+        }
+        return .some(number.int64Value)
     }
 }

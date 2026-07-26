@@ -71,6 +71,7 @@ export default function RemoteDesktop({
     displayModes,
     canClipboard,
     remoteClipboard,
+    remoteClipboardPush,
     takeOver,
     connect,
     switchTarget,
@@ -126,15 +127,15 @@ export default function RemoteDesktop({
   ]);
 
   useEffect(() => {
-    if (!nativeHost || !remoteClipboard) {
+    if (!nativeHost || !remoteClipboardPush) {
       return;
     }
     postNativeHostEvent({
       type: "remoteClipboard",
-      text: remoteClipboard.text,
-      seq: remoteClipboard.seq,
+      text: remoteClipboardPush.text,
+      changedAtMs: remoteClipboardPush.changedAtMs,
     });
-  }, [nativeHost, remoteClipboard]);
+  }, [nativeHost, remoteClipboardPush]);
 
   useEffect(() => {
     if (!nativeHost) {
@@ -160,7 +161,17 @@ export default function RemoteDesktop({
           sendClipboard(command.text);
           return { ok: true };
         case "clipboardRequest":
-          void requestClipboard();
+          void requestClipboard().then((snapshot) => {
+            if (!snapshot) {
+              return;
+            }
+            postNativeHostEvent({
+              type: "clipboardFetchResult",
+              requestId: command.requestId,
+              text: snapshot.text,
+              changedAtMs: snapshot.changedAtMs,
+            });
+          });
           return { ok: true };
         case "resize":
           resizeToWindow();
