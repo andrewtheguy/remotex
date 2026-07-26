@@ -179,6 +179,18 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   await expect(page.getByText("Clipboard sent to remote")).toBeVisible();
   await expect.poll(readRemoteClipboard).toBe(webValue);
 
+  // An empty panel is not a way to clear either clipboard: the remote takes
+  // ownership of whatever is sent, and Copy would overwrite the local value.
+  await input.fill("");
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await page.getByRole("button", { name: "Copy" }).click();
+  await expect(page.getByText("Nothing to copy")).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(remoteValue);
+  await expect.poll(readRemoteClipboard).toBe(webValue);
+  await input.fill(webValue);
+
   // Some remote clipboard bridges re-announce host-provided text when the
   // guest pastes it. That echo is not a guest copy/cut and must not travel
   // back over a newer host clipboard.

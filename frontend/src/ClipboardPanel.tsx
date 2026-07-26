@@ -113,6 +113,12 @@ export function ClipboardPanel({
     if (bytes > MAX_CLIPBOARD_BYTES || isRemoteMetadataMode) {
       return;
     }
+    // The remote takes ownership of whatever arrives, so an empty send would
+    // wipe its clipboard rather than leave it alone.
+    if (clipboardInput.length === 0) {
+      setNotice("Reveal or enter clipboard text first");
+      return;
+    }
     onSend(clipboardInput);
     setNotice("Clipboard sent to remote");
   }, [clipboardInput, isRemoteMetadataMode, onSend]);
@@ -122,6 +128,12 @@ export function ClipboardPanel({
       isRemoteMetadataMode && remoteClipboard
         ? remoteClipboard.text
         : clipboardInput;
+    // Same reason in the other direction: writing an empty string is not a
+    // no-op, it clears this browser's clipboard.
+    if (text.length === 0) {
+      setNotice("Nothing to copy");
+      return;
+    }
     if (navigator.clipboard?.writeText) {
       try {
         await navigator.clipboard.writeText(text);
@@ -220,7 +232,9 @@ export function ClipboardPanel({
           type="button"
           className="cb-btn"
           onClick={handleSend}
-          disabled={isRemoteMetadataMode || overCap}
+          disabled={
+            isRemoteMetadataMode || overCap || clipboardInput.length === 0
+          }
           title={
             overCap
               ? `Too long: ${inputBytes} bytes, the limit is ${MAX_CLIPBOARD_BYTES}`
