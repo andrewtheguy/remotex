@@ -16,6 +16,7 @@ struct ClipboardCard: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
+                .keyboardShortcut(.cancelAction)
                 .help("Close clipboard")
                 .accessibilityLabel("Close clipboard")
             }

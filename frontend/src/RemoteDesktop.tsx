@@ -162,15 +162,20 @@ export default function RemoteDesktop({
           return { ok: true };
         case "clipboardRequest":
           void requestClipboard().then((snapshot) => {
-            if (!snapshot) {
-              return;
-            }
-            postNativeHostEvent({
-              type: "clipboardFetchResult",
-              requestId: command.requestId,
-              text: snapshot.text,
-              changedAtMs: snapshot.changedAtMs,
-            });
+            postNativeHostEvent(
+              snapshot
+                ? {
+                    type: "clipboardFetchResult",
+                    requestId: command.requestId,
+                    text: snapshot.text,
+                    changedAtMs: snapshot.changedAtMs,
+                  }
+                : {
+                    type: "clipboardFetchResult",
+                    requestId: command.requestId,
+                    text: null,
+                  },
+            );
           });
           return { ok: true };
         case "resize":

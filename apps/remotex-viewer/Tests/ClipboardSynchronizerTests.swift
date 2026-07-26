@@ -46,12 +46,12 @@ struct ClipboardSynchronizerTests {
         clipboard.update(enabled: true)
         commands.removeAll()
 
-        clipboard.receiveRemotePush("remote", changedAtMs: 1_700_000_000_000)
+        clipboard.receiveRemotePush("remote")
         #expect(pasteboard.string(forType: .string) == "remote")
         #expect(commands.isEmpty)
 
         write("newer local", to: pasteboard)
-        clipboard.receiveRemotePush("older remote", changedAtMs: nil)
+        clipboard.receiveRemotePush("older remote")
         #expect(pasteboard.string(forType: .string) == "newer local")
         #expect(commands.count == 1)
         #expect(commands.first?["text"] as? String == "newer local")
@@ -72,9 +72,9 @@ struct ClipboardSynchronizerTests {
         clipboard.sendCommand = { _ in }
         clipboard.update(enabled: true)
 
-        clipboard.receiveRemotePush("remote", changedAtMs: nil)
+        clipboard.receiveRemotePush("remote")
         write("newer", to: pasteboard)
-        clipboard.receiveRemotePush("remote", changedAtMs: nil)
+        clipboard.receiveRemotePush("remote")
         #expect(pasteboard.string(forType: .string) == "newer")
 
         clipboard.requestFreshSnapshot()
@@ -90,7 +90,7 @@ struct ClipboardSynchronizerTests {
         #expect(clipboard.sendDraft())
 
         write("still newer", to: pasteboard)
-        clipboard.receiveRemotePush("sent draft", changedAtMs: nil)
+        clipboard.receiveRemotePush("sent draft")
         #expect(pasteboard.string(forType: .string) == "still newer")
     }
 
@@ -164,6 +164,38 @@ struct ClipboardSynchronizerTests {
         clipboard.draft = "copy draft"
         #expect(clipboard.copy())
         #expect(pasteboard.string(forType: .string) == "copy draft")
+
+        clipboard.draft = ""
+        #expect(!clipboard.copy(), "an empty copy would only clear the pasteboard")
+        #expect(pasteboard.string(forType: .string) == "copy draft")
+    }
+
+    // The web side answers every request, so a failed read reaches the panel
+    // without waiting out the local deadline.
+    @Test
+    @MainActor
+    func aFailedFetchOpensTheUnavailableEditorImmediately() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let clipboard = ClipboardSynchronizer(
+            pasteboard: pasteboard,
+            startsPolling: false,
+            makeRequestID: { "fetch-3" }
+        )
+        clipboard.sendCommand = { _ in }
+        clipboard.update(enabled: true)
+        clipboard.requestFreshSnapshot()
+
+        clipboard.fetchUnavailable(requestID: "stale")
+        #expect(clipboard.isFetching, "a stale answer cannot end the fetch")
+        #expect(!clipboard.isPresented)
+
+        clipboard.fetchUnavailable(requestID: "fetch-3")
+        #expect(!clipboard.isFetching)
+        #expect(clipboard.isPresented)
+        #expect(clipboard.isEditing)
+        #expect(clipboard.snapshot == nil)
+        #expect(clipboard.unavailableMessage == "Remote clipboard unavailable")
     }
 
     @Test
@@ -211,7 +243,7 @@ struct ClipboardSynchronizerTests {
         #expect(clipboard.notice == nil)
 
         clipboard.requestFreshSnapshot()
-        clipboard.fetchTimedOut(requestID: "request-b")
+        clipboard.fetchUnavailable(requestID: "request-b")
         #expect(clipboard.isPresented)
         #expect(clipboard.isEditing)
         #expect(clipboard.draft.isEmpty)
@@ -240,9 +272,9 @@ struct ClipboardSynchronizerTests {
         clipboard.sendCommand = { _ in }
         clipboard.update(enabled: true)
         clipboard.requestFreshSnapshot()
-        clipboard.fetchTimedOut(requestID: "limit")
+        clipboard.fetchUnavailable(requestID: "limit")
 
-        clipboard.draft = String(repeating: "é", count: 32_768)
+        clipboard.draft = String(repeating: "\u{00E9}", count: 32_768)
         #expect(clipboard.draftByteCount == ClipboardSynchronizer.maximumBytes)
         #expect(!clipboard.isOverByteLimit)
         #expect(clipboard.sendDraft())

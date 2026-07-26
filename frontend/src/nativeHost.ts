@@ -76,7 +76,10 @@ export type NativeHostEvent =
       requestId: string;
       text: string;
       changedAtMs: number | null;
-    };
+    }
+  // The failure answer to a `clipboardRequest`: a null text tells the viewer to
+  // show its unavailable panel now instead of waiting out its own deadline.
+  | { type: "clipboardFetchResult"; requestId: string; text: null };
 
 declare global {
   interface Window {

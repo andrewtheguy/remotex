@@ -104,6 +104,8 @@ struct NativeBridgeTests {
             ["text": "fractional", "changedAtMs": 1.5],
             ["text": "boolean", "changedAtMs": true],
             ["text": "negative", "changedAtMs": -1],
+            // 2^63: the nearest Double to Int64.max, and one past it.
+            ["text": "unrepresentable", "changedAtMs": 9_223_372_036_854_775_808.0],
         ] {
             #expect(NativeBridge.decodeRemoteClipboardPush(malformed) == nil)
         }
@@ -139,6 +141,20 @@ struct NativeBridgeTests {
                 )
         )
 
+        // The failure answer: nothing was read, so there is no timestamp.
+        #expect(
+            NativeBridge.decodeClipboardFetchResult([
+                "type": "clipboardFetchResult",
+                "requestId": "viewer-request",
+                "text": NSNull(),
+            ])
+                == ClipboardFetchResult(
+                    requestID: "viewer-request",
+                    text: nil,
+                    changedAtMs: nil
+                )
+        )
+
         for malformed: [String: Any] in [
             ["text": "missing id", "changedAtMs": NSNull()],
             ["requestId": "", "text": "empty id", "changedAtMs": NSNull()],
@@ -151,35 +167,21 @@ struct NativeBridgeTests {
         }
     }
 
+    // Whether a request id is current is panel state, so decoding cannot judge
+    // it: a stale answer has to arrive intact and be refused a layer up (see
+    // `requestMatchingTimeoutAndCloseResetThePanel`).
     @Test
     @MainActor
-    func staleFetchRequestIdsAreDecodedButCannotMutatePanelState() {
-        let pasteboard = NSPasteboard.withUniqueName()
-        defer { pasteboard.releaseGlobally() }
-        let clipboard = ClipboardSynchronizer(
-            pasteboard: pasteboard,
-            startsPolling: false,
-            makeRequestID: { "current-id" }
+    func aStaleFetchRequestIdStillDecodes() throws {
+        let stale = try #require(
+            NativeBridge.decodeClipboardFetchResult([
+                "requestId": "stale-id",
+                "text": "stale",
+                "changedAtMs": NSNull(),
+            ])
         )
-        clipboard.sendCommand = { _ in }
-        clipboard.update(enabled: true)
-        clipboard.requestFreshSnapshot()
-
-        let stale = NativeBridge.decodeClipboardFetchResult([
-            "requestId": "stale-id",
-            "text": "stale",
-            "changedAtMs": NSNull(),
-        ])
-        #expect(stale != nil, "staleness is state, not malformed JSON")
-        #expect(
-            !clipboard.receiveFetchResult(
-                requestID: stale?.requestID ?? "",
-                text: stale?.text ?? "",
-                changedAtMs: stale?.changedAtMs
-            )
-        )
-        #expect(clipboard.pendingRequestID == "current-id")
-        #expect(clipboard.snapshot == nil)
-        #expect(!clipboard.isPresented)
+        #expect(stale.requestID == "stale-id")
+        #expect(stale.text == "stale")
+        #expect(stale.changedAtMs == nil)
     }
 }

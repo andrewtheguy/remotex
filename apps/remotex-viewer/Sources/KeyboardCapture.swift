@@ -70,7 +70,15 @@ final class KeyboardCapture {
     }
 
     func updateWindowObservation() {
-        guard let window = webView?.window, observedWindow !== window else {
+        guard let window = webView?.window else {
+            // Detached: the observation would otherwise keep the old window
+            // alive and keep reporting its first responder as ours.
+            firstResponderObservation?.invalidate()
+            firstResponderObservation = nil
+            observedWindow = nil
+            return
+        }
+        guard observedWindow !== window else {
             return
         }
         firstResponderObservation?.invalidate()

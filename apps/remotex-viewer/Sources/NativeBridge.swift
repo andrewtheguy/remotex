@@ -8,7 +8,9 @@ struct RemoteClipboardPush: Equatable {
 
 struct ClipboardFetchResult: Equatable {
     let requestID: String
-    let text: String
+    /// `nil` when the web side answered that the remote clipboard could not be
+    /// read, so the panel can stop waiting on its own deadline.
+    let text: String?
     let changedAtMs: Int64?
 }
 
@@ -74,10 +76,7 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
                 replyHandler(nil, "invalid clipboard")
                 return
             }
-            model.clipboard.receiveRemotePush(
-                payload.text,
-                changedAtMs: payload.changedAtMs
-            )
+            model.clipboard.receiveRemotePush(payload.text)
             replyHandler(["accepted": true], nil)
         case "clipboardFetchResult":
             guard handshakeAccepted,
@@ -86,11 +85,15 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
                 replyHandler(nil, "invalid clipboard fetch result")
                 return
             }
-            model.clipboard.receiveFetchResult(
-                requestID: payload.requestID,
-                text: payload.text,
-                changedAtMs: payload.changedAtMs
-            )
+            if let text = payload.text {
+                model.clipboard.receiveFetchResult(
+                    requestID: payload.requestID,
+                    text: text,
+                    changedAtMs: payload.changedAtMs
+                )
+            } else {
+                model.clipboard.fetchUnavailable(requestID: payload.requestID)
+            }
             replyHandler(["accepted": true], nil)
         default:
             replyHandler(nil, "unknown message type")
@@ -195,9 +198,19 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
     static func decodeClipboardFetchResult(
         _ value: [String: Any]
     ) -> ClipboardFetchResult? {
-        guard let requestID = value["requestId"] as? String,
-              !requestID.isEmpty,
-              let text = value["text"] as? String,
+        guard let requestID = value["requestId"] as? String, !requestID.isEmpty else {
+            return nil
+        }
+        // A null text is the failure shape and carries no timestamp: the fetch
+        // resolved with nothing to show.
+        if value["text"] is NSNull {
+            return ClipboardFetchResult(
+                requestID: requestID,
+                text: nil,
+                changedAtMs: nil
+            )
+        }
+        guard let text = value["text"] as? String,
               let changedAtMs = decodeChangedAtMs(value)
         else {
             return nil
@@ -226,7 +239,9 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
               let number = raw as? NSNumber,
               number.doubleValue.isFinite,
               number.doubleValue >= 0,
-              number.doubleValue <= Double(Int64.max),
+              // `Double(Int64.max)` rounds up to 2^63, which `int64Value`
+              // cannot represent, so the bound has to be exclusive.
+              number.doubleValue < Double(Int64.max),
               number.doubleValue.rounded(.towardZero) == number.doubleValue
         else {
             return nil

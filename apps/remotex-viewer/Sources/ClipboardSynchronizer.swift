@@ -120,7 +120,7 @@ final class ClipboardSynchronizer {
 
     /// Only unsolicited remote activity reaches this path. A requested fetch
     /// is panel state and must never cross the NSPasteboard consent boundary.
-    func receiveRemotePush(_ text: String, changedAtMs: Int64?) {
+    func receiveRemotePush(_ text: String) {
         guard isEnabled, !text.isEmpty else {
             return
         }
@@ -146,7 +146,6 @@ final class ClipboardSynchronizer {
             return
         }
         observedChangeCount = pasteboard.changeCount
-        _ = changedAtMs
     }
 
     func pushLocalClipboard(force: Bool) {
@@ -207,7 +206,7 @@ final class ClipboardSynchronizer {
             guard !Task.isCancelled else {
                 return
             }
-            self.fetchTimedOut(requestID: requestID)
+            self.fetchUnavailable(requestID: requestID)
         }
     }
 
@@ -233,7 +232,10 @@ final class ClipboardSynchronizer {
         return true
     }
 
-    func fetchTimedOut(requestID: String) {
+    /// Either the local deadline expired or the web side reported that it could
+    /// not read the remote clipboard at all. Both leave the panel open on an
+    /// empty editor, so the draft is still sendable.
+    func fetchUnavailable(requestID: String) {
         guard isEnabled, isFetching, requestID == pendingRequestID else {
             return
         }
@@ -262,6 +264,13 @@ final class ClipboardSynchronizer {
     @discardableResult
     func copy() -> Bool {
         let text = isEditing ? draft : (snapshot?.text ?? "")
+        // Copying nothing would still clear the local pasteboard, which is a
+        // destructive answer to a button the panel offers in every state —
+        // including the unavailable editor, whose draft starts empty.
+        guard !text.isEmpty else {
+            showNotice("Nothing to copy")
+            return false
+        }
         pasteboard.clearContents()
         let copied = pasteboard.setString(text, forType: .string)
         observedChangeCount = pasteboard.changeCount
