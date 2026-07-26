@@ -441,7 +441,7 @@ async fn active_loop(
                             }
                         }
                     }
-                    ClipboardEvent::RemoteData(Some(text)) => {
+                    ClipboardEvent::RemoteData(text) => {
                         pending_clipboard_read = None;
                         clipboard_retry_at = None;
                         let text = rdp_clipboard::from_remote(&text);
@@ -463,7 +463,7 @@ async fn active_loop(
                     // MS-RDPECLIP's CB_RESPONSE_FAIL does not identify why the
                     // peer could not process the request. A live Windows peer
                     // recovered when the same advertised format was retried.
-                    ClipboardEvent::RemoteData(None) => {
+                    ClipboardEvent::RemoteDataRefused => {
                         if let Some(read) = pending_clipboard_read.as_mut() {
                             match read.retry_after_failure() {
                                 Some(delay) => {
@@ -480,6 +480,13 @@ async fn active_loop(
                                 }
                             }
                         }
+                    }
+                    // Invalid bytes cannot become valid by repeating the same
+                    // request. Keep the last good clipboard value and finish
+                    // this read without scheduling a retry.
+                    ClipboardEvent::RemoteDataMalformed => {
+                        pending_clipboard_read = None;
+                        clipboard_retry_at = None;
                     }
                     ClipboardEvent::DataRequested(format) => {
                         provide_clipboard(

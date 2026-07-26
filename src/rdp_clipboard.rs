@@ -53,9 +53,12 @@ pub enum ClipboardEvent {
     FormatListRequested,
     /// The remote's clipboard changed and now holds these formats.
     RemoteFormats(Vec<ClipboardFormat>),
-    /// The answer to a paste we asked for. `None` is an error response or text
-    /// we could not decode — both mean "nothing to show", not "empty".
-    RemoteData(Option<String>),
+    /// Decoded text returned for the format we requested.
+    RemoteData(String),
+    /// The remote returned CB_RESPONSE_FAIL. This can be retried.
+    RemoteDataRefused,
+    /// The remote returned data that was not valid Unicode clipboard text.
+    RemoteDataMalformed,
     /// The remote is pasting and wants our text in this format.
     DataRequested(ClipboardFormatId),
 }
@@ -121,21 +124,21 @@ impl CliprdrBackend for Backend {
     }
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
-        let text = if response.is_error() {
+        let event = if response.is_error() {
             // CB_RESPONSE_FAIL says only that the format-data request was not
             // processed successfully; the wire response carries no cause.
             debug!("rdp: the remote failed the clipboard format-data request");
-            None
+            ClipboardEvent::RemoteDataRefused
         } else {
             match response.to_unicode_string() {
-                Ok(text) => Some(text),
+                Ok(text) => ClipboardEvent::RemoteData(text),
                 Err(e) => {
                     warn!("rdp: undecodable clipboard text from the remote: {e}");
-                    None
+                    ClipboardEvent::RemoteDataMalformed
                 }
             }
         };
-        self.emit(ClipboardEvent::RemoteData(text));
+        self.emit(event);
     }
 
     /// Unreachable: [`Self::client_capabilities`] advertises no file support,
@@ -299,6 +302,7 @@ mod tests {
         });
         backend.on_format_data_response(FormatDataResponse::new_unicode_string("画面"));
         backend.on_format_data_response(FormatDataResponse::new_error());
+        backend.on_format_data_response(FormatDataResponse::new_data(vec![0x00, 0xd8]));
 
         assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::Ready);
         assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::FormatListRequested);
@@ -314,10 +318,10 @@ mod tests {
         );
         assert_eq!(
             rx.try_recv().unwrap(),
-            ClipboardEvent::RemoteData(Some("画面".to_owned()))
+            ClipboardEvent::RemoteData("画面".to_owned())
         );
-        // An error response is "nothing to show", distinct from empty text.
-        assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::RemoteData(None));
+        assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::RemoteDataRefused);
+        assert_eq!(rx.try_recv().unwrap(), ClipboardEvent::RemoteDataMalformed);
         assert!(rx.try_recv().is_err(), "no extra events");
     }
 
