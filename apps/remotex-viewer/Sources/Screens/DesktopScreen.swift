@@ -11,7 +11,7 @@ struct DesktopScreen: View {
 
     var body: some View {
         ZStack {
-            Color.black
+            RemoteSurfaceHost(model: model)
                 .ignoresSafeArea()
 
             // The picker owns the screen only once the socket is really attached;

@@ -61,6 +61,11 @@ final class AppModel: GatewaySessionSink {
     /// surface last measured it. Nil until a surface exists.
     @ObservationIgnored
     private var viewportSize: DisplayMode?
+    /// Deliberately outside Observation. Tiles arrive dozens of times a second;
+    /// routing them through `@Observable` would invalidate the view hierarchy on
+    /// every strip.
+    @ObservationIgnored
+    private weak var renderer: FramebufferRenderer?
 
     /// `clipboard` is a parameter so tests can hand in one bound to a throwaway
     /// pasteboard instead of the user's own.
@@ -247,13 +252,13 @@ final class AppModel: GatewaySessionSink {
             updateClipboardEnablement()
         case .control(let message):
             handle(message)
-        case .tile:
-            // The renderer takes these from M4 on.
-            break
+        case .tile(let tile):
+            renderer?.upload(tile)
         case .clearFramebuffer:
             // Dropping the size is what puts the "waiting for the remote
             // desktop" interstitial back up; the gateway always repaints in full.
             session.remoteSize = nil
+            renderer?.clear()
         case .releaseInput:
             releaseInput()
         case .failPendingClipboardFetch:
@@ -298,7 +303,9 @@ final class AppModel: GatewaySessionSink {
             updateClipboardEnablement()
 
         case .resize(let w, let h):
-            session.remoteSize = DisplayMode(w: w, h: h)
+            let size = DisplayMode(w: w, h: h)
+            session.remoteSize = size
+            renderer?.resize(to: size)
 
         case .remoteOs(let macos):
             // Which Mac a Command chord belongs to just changed, so nothing may
@@ -365,6 +372,23 @@ final class AppModel: GatewaySessionSink {
         } catch {
             session.connectError = error.localizedDescription
         }
+    }
+
+    // MARK: - The remote surface
+
+    func attach(renderer: FramebufferRenderer?) {
+        self.renderer = renderer
+        // A surface appearing mid-session has an empty texture, so ask for the
+        // pixels rather than waiting for the remote to change something.
+        if renderer != nil, let size = session.remoteSize {
+            renderer?.resize(to: size)
+            refresh()
+        }
+    }
+
+    /// The surface measured how much room it has, in device pixels.
+    func reportViewport(_ size: DisplayMode) {
+        viewportSize = size
     }
 
     // MARK: - Actions
