@@ -1,7 +1,7 @@
-const path = require("node:path");
-const { defineConfig } = require("@playwright/test");
+import path from "node:path";
+import { defineConfig } from "@playwright/test";
 
-module.exports = defineConfig({
+export default defineConfig({
   testDir: __dirname,
   fullyParallel: false,
   workers: 1,

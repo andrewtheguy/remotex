@@ -5,16 +5,16 @@
 // layers that each used to truncate independently — agent, gateway, browser link,
 // panel state, and the panel's own buttons — and the interesting failure is a
 // truncated value arriving *successfully*, which no single layer can catch.
-const { test, expect } = require("@playwright/test");
-const {
-  MISSING_ENV,
+import { expect, test } from "@playwright/test";
+import {
   logInAndConnect,
+  MISSING_ENV,
   openClipboardPanel,
   readRemoteClipboard,
   returnToPicker,
   setRemoteClipboard,
   setRemoteClipboardBytes,
-} = require("./support.js");
+} from "./support";
 
 const LIMIT = 65_536;
 const OVERSIZED = 200_000;
@@ -28,7 +28,7 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
     `live Mac clipboard test requires ${MISSING_ENV.join(", ")}`,
   );
 
-  const pageErrors = [];
+  const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
   await logInAndConnect(page);
@@ -85,13 +85,26 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
   await expect(page.getByText("Clipboard sent to remote")).toBeVisible();
   await expect.poll(readRemoteClipboard).toBe(typed);
 
-  // And a value that fits still syncs afterwards, so the refusal left no state
-  // behind that suppresses the next copy.
+  // And a value that fits still comes through afterwards, so the refusal left
+  // nothing behind that suppresses the next copy — the panel shows it as an
+  // ordinary concealed snapshot again.
+  //
+  // Asserted through a panel Fetch rather than through this browser's clipboard:
+  // mirroring into the OS clipboard is best-effort by design (writeText can
+  // reject), so it is the wrong signal for "did the value arrive". The approved
+  // clipboard spec is where that mirror is covered.
   const afterValue = `remotex-ui-after-${Date.now()}`;
   setRemoteClipboard(afterValue);
-  await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(afterValue);
+  await page.getByRole("button", { name: "Close clipboard" }).click();
+  await openClipboardPanel(page);
+  const reopened = page.getByRole("button", {
+    name: "Reveal remote clipboard content",
+  });
+  await expect(reopened).toBeVisible({ timeout: 20_000 });
+  await expect(reopened).toContainText(
+    `LEN ${Buffer.byteLength(afterValue)}B`,
+  );
+  await expect(reopened).not.toContainText("Too large to transfer");
 
   await returnToPicker(page);
   expect(pageErrors).toEqual([]);

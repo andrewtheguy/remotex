@@ -5,18 +5,18 @@ assert canvas pixels, framebuffer timing, cursor rendering, pointer input, or
 remote-desktop gestures; the Rust protocol and container E2E tests cover those
 paths.
 
-`clipboard.spec.js` is the live-Mac regression for the web clipboard panel. It
+`clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
 revealing the panel leave the local clipboard untouched until explicit Copy.
 
-`oversized-clipboard.spec.js` covers the refusal path: a Mac pasteboard larger
+`oversized-clipboard.spec.ts` covers the refusal path: a Mac pasteboard larger
 than `MAX_CLIPBOARD_BYTES` reaches the panel as its size, not as the first 64 KiB
 of itself. It is here rather than only in the Rust and Swift unit tests because
 the claim spans the agent, the gateway, the browser link and the panel, and the
 failure it guards against — a truncated value arriving *successfully* — is
 invisible to any one of them.
 
-`support.js` holds what both share: the login/target flow and the SSH hooks that
+`support.ts` holds what both share: the login/target flow and the SSH hooks that
 read and write the Mac's pasteboard. Two conventions live there. Every spec ends
 by handing the session back to the picker, because the server keeps a target
 session running when its browser goes away; and `logInAndConnect` accepts either
@@ -54,8 +54,19 @@ REMOTEX_PLAYWRIGHT_MAC_SSH='<ssh-user>@<mac-host>' \
 npx playwright test
 ```
 
-That runs both specs; name one (`npx playwright test clipboard.spec.js`) to run
-it alone.
+That runs both specs. `npm run test:clipboard` and `npm run test:oversized` run
+one each; their filters are anchored (`'/clipboard\.spec\.ts$'`) because a
+positional argument is a regex matched against the whole path, and the bare name
+`clipboard.spec.ts` also matches `oversized-clipboard.spec.ts`.
+
+The specs are TypeScript, which Playwright transpiles itself — and transpiling is
+all it does, so a type error would otherwise never surface. `npm run typecheck`
+is what actually checks them:
+
+```sh
+cd tests/playwright
+npm run typecheck
+```
 
 The defaults are `http://127.0.0.1:5173/` and target `mac`. Override the URL
 with `REMOTEX_PLAYWRIGHT_BASE_URL` when the dev server uses another address.

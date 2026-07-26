@@ -1,11 +1,11 @@
-const { test, expect } = require("@playwright/test");
-const {
-  MISSING_ENV,
+import { expect, test } from "@playwright/test";
+import {
   logInAndConnect,
+  MISSING_ENV,
   openClipboardPanel,
   readRemoteClipboard,
   setRemoteClipboard,
-} = require("./support.js");
+} from "./support";
 
 const CRC32_POLYNOMIAL = 0xedb88320;
 const CRC32_TABLE = (() => {
@@ -13,17 +13,14 @@ const CRC32_TABLE = (() => {
   for (let i = 0; i < 256; i += 1) {
     let value = i;
     for (let bit = 0; bit < 8; bit += 1) {
-      value =
-        (value & 1) === 1
-          ? CRC32_POLYNOMIAL ^ (value >>> 1)
-          : value >>> 1;
+      value = (value & 1) === 1 ? CRC32_POLYNOMIAL ^ (value >>> 1) : value >>> 1;
     }
     table[i] = value >>> 0;
   }
   return table;
 })();
 
-function crc32(text) {
+function crc32(text: string): string {
   let crc = 0xffffffff;
   for (const byte of Buffer.from(text, "utf8")) {
     crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
@@ -40,7 +37,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
     `live Mac clipboard test requires ${MISSING_ENV.join(", ")}`,
   );
 
-  const pageErrors = [];
+  const pageErrors: string[] = [];
   let remotePushes = 0;
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("websocket", (socket) => {
@@ -49,7 +46,10 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
         return;
       }
       try {
-        const message = JSON.parse(payload);
+        const message = JSON.parse(payload) as {
+          type?: string;
+          requested?: boolean;
+        };
         if (message.type === "clipboard" && !message.requested) {
           remotePushes += 1;
         }
@@ -175,7 +175,11 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   // deliberately unasserted.
   await page.setViewportSize({ width: 390, height: 844 });
   const panelBox = await page.locator(".panel").boundingBox();
-  expect(panelBox).not.toBeNull();
+  // A throw rather than expect(...).not.toBeNull(): the assertions below need a
+  // box, and TypeScript cannot learn from an expectation.
+  if (panelBox === null) {
+    throw new Error("the docked clipboard panel has no bounding box");
+  }
   expect(Math.round(panelBox.x)).toBe(0);
   expect(Math.round(panelBox.width)).toBe(390);
   expect(Math.round(panelBox.y + panelBox.height)).toBe(844);

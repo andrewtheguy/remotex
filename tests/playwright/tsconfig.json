@@ -1,0 +1,21 @@
+{
+  // `include` names the files on purpose. A config that resolves to nothing
+  // still exits 0, so `npm run typecheck` would pass while checking nothing —
+  // the trap frontend/tsconfig.json fell into.
+  "include": ["*.ts"],
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  }
+}
