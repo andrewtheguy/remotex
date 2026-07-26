@@ -127,14 +127,18 @@ final class FakeWebSocketTransport: WebSocketTransport {
         waiter?.resume(throwing: FakeTransportError.closed)
     }
 
+    /// Over for good, as `URLSessionWebSocketTask.cancel()` is: whatever is left
+    /// of the script goes with it, and the socket counts as ended whether or not
+    /// anyone was parked on it. Keeping the buffer would let a `receive` that is
+    /// already in flight hand a frame to a session that has dropped this socket —
+    /// which is the reordering `closeTransport` exists to prevent, made invisible.
     func cancel() {
         let waiter = state.withLock { state -> CheckedContinuation<WebSocketFrame, any Error>? in
             state.cancelled = true
+            state.ended = true
+            state.inbound.removeAll()
             let waiter = state.waiter
             state.waiter = nil
-            if waiter != nil {
-                state.ended = true
-            }
             return waiter
         }
         waiter?.resume(throwing: FakeTransportError.closed)
