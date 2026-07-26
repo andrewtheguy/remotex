@@ -1024,6 +1024,11 @@ export function useRemoteDesktop(
   // copied something elsewhere. Everything here is best effort: `readText` is
   // absent on a non-secure origin, and Safari refuses it outright without a
   // paste gesture. The panel's Send covers those.
+  //
+  // Deliberately uncapped, in both directions of the automatic sync (this push
+  // and mirrorRemoteClipboard): MAX_CLIPBOARD_BYTES is a panel affordance. It
+  // exists so the UI can refuse and say why before spending a round trip, and
+  // autosync has no UI to say it in. Revisit if that changes.
   useEffect(() => {
     if (mode !== "desktop" || !canClipboard || nativeHost) {
       return;

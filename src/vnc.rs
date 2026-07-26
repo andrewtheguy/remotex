@@ -447,13 +447,20 @@ async fn active_loop(
                     Ok(())
                 } else if let ClientMsg::Clipboard { text } = &input {
                     if clipboard_enabled {
+                        // Clamped on the way in, as the RDP and rxa engines do.
+                        // Both encoders below carry the same ceiling of their
+                        // own; doing it here as well is what keeps an oversized
+                        // copy from sitting in `state.local` until the session
+                        // replaces it — the deferred Provide can be asked for
+                        // long after the copy.
+                        let text = clamp_clipboard(text);
                         // Extended when the server offered it, which is the
                         // only path that carries anything outside latin-1.
                         // Deferred by design: advertise now, hand the text over
                         // when the remote actually pastes and asks for it.
                         let extended = {
                             let mut state = clipboard.lock().unwrap();
-                            state.local = Some(text.clone());
+                            state.local = Some(text.to_owned());
                             state
                                 .server
                                 .is_some_and(|caps| caps.handles(vnc_clipboard::ACTION_NOTIFY))

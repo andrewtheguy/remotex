@@ -43,7 +43,7 @@ use std::io::Read as _;
 
 use anyhow::Context as _;
 
-use crate::protocol::MAX_CLIPBOARD_BYTES;
+use crate::protocol::{MAX_CLIPBOARD_BYTES, clamp_clipboard};
 
 /// The pseudo-encoding advertised in SetEncodings to turn this on.
 pub const ENCODING: i32 = 0xc0a1_e5ce_u32 as i32;
@@ -205,10 +205,18 @@ pub fn request(formats: u32) -> Vec<u8> {
 }
 
 /// The text itself, deflated.
+///
+/// Clamped here, not trusted to arrive clamped: this is the deferred half of a
+/// browser copy, so the text comes from a Provide request that can land long
+/// after the copy did. The latin-1 path has the same ceiling of its own
+/// (`latin1_from_str` in src/vnc.rs), and [`MAX_INFLATED`] on the way back in
+/// assumes it. The clamp runs before [`to_wire`], so the wire form can overshoot
+/// by one byte per line break plus the NUL — harmless, where clamping afterwards
+/// could slice a CRLF pair or a multi-byte character in half.
 pub fn provide(text: &str) -> anyhow::Result<Vec<u8>> {
     use std::io::Write as _;
 
-    let wire = to_wire(text);
+    let wire = to_wire(clamp_clipboard(text));
     let mut payload = (wire.len() as u32).to_be_bytes().to_vec();
     payload.extend_from_slice(&wire);
 
@@ -279,6 +287,29 @@ mod tests {
                 Incoming::Notify(formats),
                 "format bit {bit}"
             );
+        }
+    }
+
+    // No path may hand the remote an unbounded string. The latin-1 cut carries
+    // its own ceiling, and before this the extended path had none: an oversized
+    // copy went out whole, and would have come back past MAX_INFLATED.
+    #[test]
+    fn an_oversized_provide_is_clamped_rather_than_sent_whole() {
+        let text = "a".repeat(MAX_CLIPBOARD_BYTES + 5_000);
+        match roundtrip(&provide(&text).expect("provide")) {
+            Incoming::Provide(Some(out)) => assert_eq!(out.len(), MAX_CLIPBOARD_BYTES),
+            other => panic!("expected a text provide, got {other:?}"),
+        }
+
+        // The boundary is a char boundary, so a multi-byte tail is dropped
+        // whole rather than cut in half (which would arrive as U+FFFD).
+        let two_byte = "é".repeat(MAX_CLIPBOARD_BYTES); // 2 bytes each
+        match roundtrip(&provide(&two_byte).expect("provide")) {
+            Incoming::Provide(Some(out)) => {
+                assert_eq!(out.len(), MAX_CLIPBOARD_BYTES);
+                assert!(!out.contains('\u{fffd}'), "a char was sliced in half");
+            }
+            other => panic!("expected a text provide, got {other:?}"),
         }
     }
 
