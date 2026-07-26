@@ -37,6 +37,7 @@ use log::{debug, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
 
 use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
@@ -51,6 +52,35 @@ use crate::rdp_clipboard::{self, ClipboardEvent};
 trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite {}
 type UpgradedFramed = TokioFramed<Box<dyn AsyncReadWrite + Unpin + Send + Sync>>;
+
+// A Windows peer can advertise Unicode text, fail the first FormatDataRequest,
+// then satisfy a retry shortly afterward. Retrying only after that explicit
+// failure keeps the normal path fast and stays entirely separate from a remote
+// Paste, which arrives as ClipboardEvent::DataRequested instead.
+const CLIPBOARD_READ_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(50),
+    Duration::from_millis(150),
+    Duration::from_millis(400),
+];
+
+struct PendingClipboardRead {
+    format: ClipboardFormatId,
+    failures: usize,
+}
+
+impl PendingClipboardRead {
+    fn new(format: ClipboardFormatId) -> Self {
+        Self { format, failures: 0 }
+    }
+
+    fn retry_after_failure(&mut self) -> Option<Duration> {
+        let delay = CLIPBOARD_READ_RETRY_DELAYS.get(self.failures).copied();
+        if delay.is_some() {
+            self.failures += 1;
+        }
+        delay
+    }
+}
 
 /// Connect to the RDP host, then drive the session until it ends.
 ///
@@ -248,6 +278,11 @@ async fn active_loop(
     // asks for it. That deferral is MS-RDPECLIP's delayed rendering: we
     // advertise the format, the bytes travel only if they are wanted.
     let mut local_clipboard: Option<String> = None;
+    // A remote Copy/Cut whose delayed-rendered text we are fetching. The retry
+    // deadline exists only after the remote explicitly refuses a request; one
+    // successful response or a newer FormatList cancels the old generation.
+    let mut pending_clipboard_read: Option<PendingClipboardRead> = None;
+    let mut clipboard_retry_at: Option<Instant> = None;
 
     loop {
         // The clipboard sender lives inside `active_stage`, so it is only
@@ -259,6 +294,12 @@ async fn active_loop(
         let clipboard_event = async {
             match clip_rx.recv().await {
                 Some(event) => event,
+                None => std::future::pending().await,
+            }
+        };
+        let clipboard_retry = async {
+            match clipboard_retry_at {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
         };
@@ -314,6 +355,10 @@ async fn active_loop(
                 // so this is the belt to that UI's braces.
                 if let ClientMsg::Clipboard { text } = &input {
                     if clipboard {
+                        // We are taking ownership of the remote clipboard, so
+                        // an older remote Copy/Cut can no longer be fetched.
+                        pending_clipboard_read = None;
+                        clipboard_retry_at = None;
                         // Only advertised, not sent. The remote asks for the
                         // bytes if and when someone pastes.
                         let text = rdp_clipboard::to_remote(text);
@@ -380,9 +425,14 @@ async fn active_loop(
                     ClipboardEvent::RemoteFormats(formats) => {
                         match rdp_clipboard::pick_text_format(&formats) {
                             Some(format) => {
+                                pending_clipboard_read =
+                                    Some(PendingClipboardRead::new(format));
+                                clipboard_retry_at = None;
                                 request_clipboard(&mut active_stage, &mut framed, format).await?;
                             }
                             None => {
+                                pending_clipboard_read = None;
+                                clipboard_retry_at = None;
                                 debug!("rdp: the remote copied no text format we can carry");
                                 remote_clipboard = Some(ClipboardSnapshot::changed(
                                     String::new(),
@@ -392,6 +442,8 @@ async fn active_loop(
                         }
                     }
                     ClipboardEvent::RemoteData(Some(text)) => {
+                        pending_clipboard_read = None;
+                        clipboard_retry_at = None;
                         let text = rdp_clipboard::from_remote(&text);
                         debug!("rdp: remote clipboard updated, {} bytes", text.len());
                         let snapshot =
@@ -408,7 +460,27 @@ async fn active_loop(
                     }
                     // Nothing to show, and deliberately not forwarded as empty
                     // text: that would wipe the panel over a transient refusal.
-                    ClipboardEvent::RemoteData(None) => {}
+                    // MS-RDPECLIP's CB_RESPONSE_FAIL does not identify why the
+                    // peer could not process the request. A live Windows peer
+                    // recovered when the same advertised format was retried.
+                    ClipboardEvent::RemoteData(None) => {
+                        if let Some(read) = pending_clipboard_read.as_mut() {
+                            match read.retry_after_failure() {
+                                Some(delay) => {
+                                    debug!(
+                                        "rdp: retrying refused remote clipboard read in {}ms",
+                                        delay.as_millis()
+                                    );
+                                    clipboard_retry_at = Some(Instant::now() + delay);
+                                }
+                                None => {
+                                    debug!("rdp: remote clipboard read exhausted its retries");
+                                    pending_clipboard_read = None;
+                                    clipboard_retry_at = None;
+                                }
+                            }
+                        }
+                    }
                     ClipboardEvent::DataRequested(format) => {
                         provide_clipboard(
                             &mut active_stage,
@@ -418,6 +490,13 @@ async fn active_loop(
                         )
                         .await?;
                     }
+                }
+                continue;
+            }
+            _ = clipboard_retry => {
+                clipboard_retry_at = None;
+                if let Some(read) = pending_clipboard_read.as_ref() {
+                    request_clipboard(&mut active_stage, &mut framed, read.format).await?;
                 }
                 continue;
             }
@@ -974,5 +1053,16 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn refused_remote_clipboard_reads_retry_with_a_bound() {
+        let mut read = PendingClipboardRead::new(ClipboardFormatId::CF_UNICODETEXT);
+        assert_eq!(read.format, ClipboardFormatId::CF_UNICODETEXT);
+        for expected in CLIPBOARD_READ_RETRY_DELAYS {
+            assert_eq!(read.retry_after_failure(), Some(expected));
+        }
+        assert_eq!(read.retry_after_failure(), None);
+        assert_eq!(read.retry_after_failure(), None);
     }
 }

@@ -122,10 +122,9 @@ impl CliprdrBackend for Backend {
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         let text = if response.is_error() {
-            // The remote had the format a moment ago and no longer does — the
-            // user copied something else in between. Not an error worth
-            // surfacing; the next copy will push again.
-            debug!("rdp: the remote refused the clipboard paste it advertised");
+            // CB_RESPONSE_FAIL says only that the format-data request was not
+            // processed successfully; the wire response carries no cause.
+            debug!("rdp: the remote failed the clipboard format-data request");
             None
         } else {
             match response.to_unicode_string() {
