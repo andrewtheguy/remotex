@@ -245,7 +245,14 @@ final class AppModel: GatewaySessionSink {
     }
 
     private func beginSession() async {
-        let connection = GatewayConnection(gateway: client, sink: self)
+        await beginSession(over: client)
+    }
+
+    /// Split out from `beginSession` so a test can drive a whole session — claim,
+    /// attach, control messages, and what gets sent back — over a scripted socket
+    /// instead of the network.
+    func beginSession(over gateway: any SessionGateway) async {
+        let connection = GatewayConnection(gateway: gateway, sink: self)
         self.connection = connection
         clipboard.send = { [weak connection] message in
             connection?.send(message)
@@ -337,10 +344,13 @@ final class AppModel: GatewaySessionSink {
             session.canResize = payload.protocolName == "rdp" && payload.resize
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
-            // The gateway knows nothing about this socket's window yet, and the
-            // dedupe from the previous connection would swallow an identical first
-            // report.
+            // A freshly started engine knows nothing about this window, and both
+            // dedupes would swallow the first report for repeating a size already
+            // sent — for the previous target, or for the picker. Both have to be
+            // cleared, not just the policy's: the queue's memo survives a target
+            // switch because the socket does.
             viewportPolicy.resetForNewConnection()
+            connection?.resetViewportMemo()
             sendViewport(manual: false)
 
         case .resize(let w, let h):
@@ -444,8 +454,14 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// The surface exists for the picker as well as the desktop — it has to, so the
+    /// framebuffer survives a trip to the picker and back — so a window resized
+    /// while choosing a target measures and records, but has nothing to report to:
+    /// there is no engine yet. Sending anyway also taught the queue's dedupe the
+    /// size, which then swallowed the report that matters, the one from `connected`.
     private func sendViewport(manual: Bool) {
-        guard let viewportSize,
+        guard session.screen == .desktop,
+              let viewportSize,
               let message = viewportPolicy.report(viewportSize, manual: manual)
         else {
             return

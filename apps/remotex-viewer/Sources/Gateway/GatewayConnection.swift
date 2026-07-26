@@ -89,6 +89,14 @@ actor GatewayConnection {
         outbound.enqueue(message)
     }
 
+    /// Forget the queue's viewport dedupe. Needed on every `connected`, not only
+    /// on a new socket: a freshly started engine knows nothing about this window,
+    /// so the report that follows has to go out even when it repeats the size
+    /// already sent for the previous target — or for the picker.
+    nonisolated func resetViewportMemo() {
+        outbound.resetViewportMemo()
+    }
+
     /// Start, or restart after a `busy`/`takenOver` stall. `force` evicts whoever
     /// holds the slot — the "Take over" / "Take it back" action.
     func start(force: Bool = false) async {

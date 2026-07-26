@@ -145,7 +145,15 @@ What gets measured, and when, is two AppKit facts that read backwards:
 
 Nothing is reported before the first layout. `RemoteGeometry` floors a report at
 1 because the gateway rejects a zero, and an engine that follows the window would
-take that literally.
+take that literally. Nothing is reported from the picker either: the surface
+exists there — the framebuffer has to survive a trip to the picker and back — but
+there is no engine to resize.
+
+The report that sizes a freshly started engine is the one from `connected`, and it
+necessarily repeats a size already measured, so **both** dedupes have to be
+cleared there: `ViewportPolicy`'s, and the queue's. The queue's is otherwise reset
+only on a new socket, and a target switch keeps the socket it has — so without it
+the second target of a session never resized to the window.
 
 ## Keyboard
 
