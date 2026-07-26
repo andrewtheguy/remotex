@@ -1,20 +1,18 @@
 import SwiftUI
 
-/// Sign in, and choose which gateway to sign in to.
+/// Step two: who you are.
 ///
-/// The Server field is here rather than in a Settings window because the address
-/// and the credentials are one decision — and because a gateway that cannot be
-/// reached, or speaks a protocol this build does not, is a thing to say next to
-/// the field that caused it rather than in a floating error card.
+/// The gateway was already validated by the server step, so a failure here can
+/// only be about the credentials — which is why the address is shown but not
+/// editable. **Change** goes back to step one.
 struct LoginView: View {
-    @Bindable var model: AppModel
+    let model: AppModel
 
     @State private var username = ""
     @State private var password = ""
     @FocusState private var focus: Field?
 
     private enum Field {
-        case server
         case username
         case password
     }
@@ -23,23 +21,21 @@ struct LoginView: View {
         VStack(spacing: 0) {
             Spacer()
             VStack(alignment: .leading, spacing: 20) {
-                Text(model.branding)
-                    .font(.largeTitle.weight(.semibold))
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Server")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    TextField("https://remotex.example.com", text: $model.gatewayAddress)
-                        .textFieldStyle(.roundedBorder)
-                        .textContentType(.URL)
-                        .focused($focus, equals: .server)
-                        .onSubmit { focus = .username }
-                    if let error = model.gatewayError {
-                        Label(error, systemImage: "exclamationmark.triangle")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.branding)
+                        .font(.largeTitle.weight(.semibold))
+                    HStack(spacing: 6) {
+                        Text(model.gateway.url.absoluteString)
                             .font(.callout)
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Button("Change") {
+                            Task { await model.changeGateway() }
+                        }
+                        .buttonStyle(.link)
+                        .font(.callout)
+                        .disabled(model.isBusy)
                     }
                 }
 
@@ -85,13 +81,11 @@ struct LoginView: View {
                 .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            focus = model.gatewayError == nil ? .username : .server
-        }
+        .onAppear { focus = .username }
     }
 
     private func signIn() {
-        guard !username.isEmpty, !password.isEmpty else {
+        guard !model.isBusy, !username.isEmpty, !password.isEmpty else {
             return
         }
         Task {

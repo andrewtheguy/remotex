@@ -3,7 +3,7 @@
 `remotex-viewer.app` is the foreground macOS 26 client. It speaks the gateway's
 HTTP and WebSocket protocol directly — there is no embedded web view — and owns:
 
-- login and target selection, with the gateway address on the login screen;
+- gateway selection, login, and target selection;
 - the session socket, including reconnects, takeover, and the single-slot claim;
 - Metal framebuffer rendering at one texel per device pixel;
 - pointer and keyboard input, plus the remote pointer shape;
@@ -45,9 +45,11 @@ open -n dist/remotex-viewer.app --args \
   --gateway http://127.0.0.1:52380
 ```
 
-`--gateway` only prefills the login screen's **Server** field; the address is
-editable there and the last one that answered is remembered. There is no Settings
-window.
+`--gateway` only prefills the first screen's address field. Getting in is two
+steps: **Continue** validates the gateway (reachable, and speaking a protocol
+this build knows), then the credentials. Step two is skipped while the login
+cookie is still good, and the last address that answered is what the next launch
+starts from. There is no Settings window.
 
 Always launch the packaged `.app` during development. `swift run`, a standalone
 `swift build`, and directly launching the executable under `.build` bypass the

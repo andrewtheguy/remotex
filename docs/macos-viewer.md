@@ -41,17 +41,32 @@ fails a Swift test rather than becoming a silently skipped frame. The
 `ServerMessage` decoding tests reuse the exact JSON literals that
 `src/protocol.rs`'s own tests pin.
 
+## Getting in
+
+Two steps, because they answer different questions.
+
+**Server.** An address, and a **Continue** button that validates it: parse, then
+`GET /api/config` for the branding and the protocol check, then
+`GET /api/auth/status`. Nothing is contacted before that button — reaching a
+gateway is something the user asks for and gets an answer to, not something that
+happens behind a launch spinner. A malformed address is refused without a request
+at all. The address is remembered only once it has answered, so a typo does not
+become what the next launch starts from.
+
+**Login.** Credentials only. The gateway was already validated, so a failure here
+can only be about who you are, which is why the address is shown but not editable
+— **Change** goes back to step one. Logging out returns here rather than to the
+server step: it is the credentials being given up, not the address.
+
+Step two is skipped when the cookie is still good, so the common case is one
+button. `HTTPCookieStorage.shared` outlives the app; the gateway's auth sessions
+do not outlive *it*, so its restart ends them and any 401 drops back to login
+rather than into a retry loop.
+
 ## Session lifecycle
 
 Two independent things: the **login cookie** (may I use this gateway) and the
 **claim token** (do I own the one session slot).
-
-The launch probe reads `GET /api/config` and `GET /api/auth/status`. Still signed
-in, and the viewer claims the slot and attaches; otherwise it shows the login
-screen. The cookie lives in `HTTPCookieStorage.shared`, so a login survives
-quitting the app — but the gateway's auth sessions are in memory, so its restart
-ends them and any 401 sends the viewer back to login rather than into a retry
-loop.
 
 `SessionStateMachine` is the claim/attach/reconnect lifecycle as a pure value,
 transcribed from the web client's. Reconnects are automatic with capped backoff

@@ -8,9 +8,8 @@ struct RootView: View {
     var body: some View {
         ZStack {
             switch model.session.screen {
-            case .checking:
-                ProgressView()
-                    .controlSize(.large)
+            case .server:
+                ServerView(model: model)
             case .login:
                 LoginView(model: model)
             case .picker, .desktop:
@@ -73,8 +72,7 @@ struct RootView: View {
                 Text(model.actionError ?? "")
             }
         )
-        .task {
-            await model.start()
-        }
+        // Deliberately no launch `.task`: the gateway is contacted when the user
+        // presses Continue, not on appear.
     }
 }

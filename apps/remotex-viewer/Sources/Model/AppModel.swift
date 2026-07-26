@@ -37,10 +37,11 @@ final class AppModel: GatewaySessionSink {
     private(set) var branding = "remotex"
     private(set) var session = ViewerSessionState()
     private(set) var targets: [TargetInfo] = []
-    /// A probe or login is in flight, so the login screen's controls are locked.
+    /// A gateway check or a login is in flight, so the current step's controls
+    /// are locked.
     private(set) var isBusy = false
-    /// Shown under the Server field: unreachable, or a protocol version this
-    /// build cannot speak.
+    /// Shown on the server step: a malformed address, an unreachable gateway, or
+    /// a protocol version this build cannot speak.
     private(set) var gatewayError: String?
     /// Shown under the credentials.
     private(set) var loginError: String?
@@ -54,6 +55,8 @@ final class AppModel: GatewaySessionSink {
 
     @ObservationIgnored
     private let defaults: UserDefaults
+    @ObservationIgnored
+    private let urlSession: URLSession
     @ObservationIgnored
     private var client: GatewayClient
     @ObservationIgnored
@@ -76,14 +79,17 @@ final class AppModel: GatewaySessionSink {
     @ObservationIgnored
     private weak var renderer: FramebufferRenderer?
 
-    /// `clipboard` is a parameter so tests can hand in one bound to a throwaway
-    /// pasteboard instead of the user's own.
+    /// `clipboard` and `urlSession` are parameters so tests can hand in one bound
+    /// to a throwaway pasteboard instead of the user's own, and a stubbed
+    /// transport instead of the network.
     init(
         defaults: UserDefaults = .standard,
-        clipboard: ClipboardSynchronizer = ClipboardSynchronizer()
+        clipboard: ClipboardSynchronizer = ClipboardSynchronizer(),
+        urlSession: URLSession = .shared
     ) {
         self.defaults = defaults
         self.clipboard = clipboard
+        self.urlSession = urlSession
         let stored = defaults.string(forKey: Self.gatewayDefaultsKey)
         let initial = Self.commandLineGateway() ?? stored ?? Self.fallbackAddress
         let parsed = (try? GatewayLocation.parse(initial))
@@ -92,7 +98,7 @@ final class AppModel: GatewaySessionSink {
         gatewayAddress = parsed.url.absoluteString
         macOSKeyboardOverridesEnabled =
             defaults.object(forKey: Self.keyboardOverridesDefaultsKey) as? Bool ?? true
-        client = GatewayClient(gateway: parsed)
+        client = GatewayClient(gateway: parsed, session: urlSession)
     }
 
     // MARK: - Derived UI state
@@ -133,32 +139,77 @@ final class AppModel: GatewaySessionSink {
             || (session.screen == .desktop && session.remoteSize == nil)
     }
 
-    // MARK: - Launch and login
+    // MARK: - The server step
 
-    /// Probe the configured gateway and resume if the login is still good.
+    /// Adopt whatever is in the Server field and confirm the gateway answers.
     ///
-    /// `isBusy` is part of the guard, not just the screen: SwiftUI can run the
-    /// owning `.task` more than once, and the screen is not updated until the
-    /// first probe's awaits finish — so screen alone lets a second call through
-    /// and the gateway sees two of every request.
-    func start() async {
-        guard session.screen == .checking, !isBusy else {
+    /// The server step's only action, and the only place a gateway is validated.
+    /// Nothing probes on launch: reaching an address is a thing the user asks for
+    /// and gets an answer to, not something that happens to them while a spinner
+    /// is up. It also means an unreachable gateway is reported next to the field
+    /// that caused it, before any credentials have been typed.
+    ///
+    /// Where it lands depends on the cookie, which outlives the app: still signed
+    /// in and this goes straight to the session, skipping the login step.
+    func connectToGateway() async {
+        guard !isBusy else {
             return
         }
         isBusy = true
         defer { isBusy = false }
+        gatewayError = nil
+        loginError = nil
+
+        let next: GatewayLocation
         do {
-            branding = try await client.configuration().branding
-            if try await client.isAuthenticated() {
-                await beginSession()
-                return
-            }
+            next = try GatewayLocation.parse(gatewayAddress)
         } catch {
             gatewayError = error.localizedDescription
+            return
         }
-        session.screen = .login
+        if next != gateway {
+            await teardown()
+            // A token for the previous host would be sent to this one and 401
+            // with nothing to explain it.
+            client.forgetSessionCookie()
+            gateway = next
+            client = GatewayClient(gateway: next, session: urlSession)
+        }
+        // Normalized: a bare host gains a scheme, a path is dropped.
+        gatewayAddress = next.url.absoluteString
+
+        let authenticated: Bool
+        do {
+            branding = try await client.configuration().branding
+            authenticated = try await client.isAuthenticated()
+        } catch {
+            gatewayError = error.localizedDescription
+            return
+        }
+        // Persisted only once it answered, so a typo does not become the address
+        // the next launch starts from.
+        defaults.set(gatewayAddress, forKey: Self.gatewayDefaultsKey)
+
+        if authenticated {
+            await beginSession()
+        } else {
+            session.screen = .login
+        }
     }
 
+    /// Back to the server step, to point somewhere else.
+    func changeGateway() async {
+        await teardown()
+        session = ViewerSessionState(screen: .server)
+        targets = []
+        loginError = nil
+        gatewayError = nil
+    }
+
+    // MARK: - Login
+
+    /// The credentials only. The gateway was already validated by the server
+    /// step, so a failure here can only be about who you are.
     func logIn(username: String, password: String) async {
         guard !isBusy else {
             return
@@ -166,9 +217,6 @@ final class AppModel: GatewaySessionSink {
         isBusy = true
         defer { isBusy = false }
         loginError = nil
-        guard await adoptGatewayAddress() else {
-            return
-        }
         do {
             switch try await client.logIn(username: username, password: password) {
             case .ok:
@@ -183,42 +231,14 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// Log out but stay on this gateway — it is the credentials being given up,
+    /// not the address.
     func logOut() async {
         await teardown()
         try? await client.logOut()
         session = ViewerSessionState(screen: .login)
         targets = []
         loginError = nil
-    }
-
-    /// Adopt whatever is in the Server field and confirm the gateway answers.
-    /// Persisted only on success, so a typo does not become the new default.
-    private func adoptGatewayAddress() async -> Bool {
-        gatewayError = nil
-        let next: GatewayLocation
-        do {
-            next = try GatewayLocation.parse(gatewayAddress)
-        } catch {
-            gatewayError = error.localizedDescription
-            return false
-        }
-        if next != gateway {
-            await teardown()
-            // A token for the previous host would be sent to this one and 401
-            // with nothing to explain it.
-            client.forgetSessionCookie()
-            gateway = next
-            client = GatewayClient(gateway: next)
-        }
-        gatewayAddress = next.url.absoluteString
-        do {
-            branding = try await client.configuration().branding
-        } catch {
-            gatewayError = error.localizedDescription
-            return false
-        }
-        defaults.set(gatewayAddress, forKey: Self.gatewayDefaultsKey)
-        return true
     }
 
     private func beginSession() async {

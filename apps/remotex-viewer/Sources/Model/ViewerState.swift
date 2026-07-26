@@ -1,8 +1,12 @@
 import Foundation
 
 enum ViewerScreen: String {
-    /// Asking the gateway who we are, at launch.
-    case checking
+    /// Choose a gateway and confirm it can be spoken to. Its own step ahead of
+    /// the credentials, because "can this address be reached, and does it speak a
+    /// protocol this build knows" is a separate question from "who are you" — and
+    /// it is answered when the user asks for it, not as a side effect of signing
+    /// in.
+    case server
     case login
     case picker
     case desktop
@@ -37,7 +41,7 @@ struct DisplayMode: Equatable, Identifiable, Hashable, Sendable, Decodable {
 /// bridge. It is now derived from the gateway's own control messages, which is
 /// why the derivations are spelled out where they happen (`AppModel.handle`).
 struct ViewerSessionState: Equatable {
-    var screen = ViewerScreen.checking
+    var screen = ViewerScreen.server
     var connectionStatus: ViewerConnectionStatus?
     var connectedTarget: String?
     /// `"rdp"`, `"vnc"`, or `"rxa"`, from `connected`. Decides the resize
