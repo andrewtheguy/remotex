@@ -154,8 +154,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandlerWithReply, WKNavigatio
 
     static func decodeMode(_ value: Any?) -> DisplayMode? {
         guard let mode = value as? [String: Any],
-              let w = mode["w"] as? Int,
-              let h = mode["h"] as? Int
+              let w = (mode["w"] as? Int).flatMap(UInt16.init(exactly:)),
+              let h = (mode["h"] as? Int).flatMap(UInt16.init(exactly:))
         else {
             return nil
         }

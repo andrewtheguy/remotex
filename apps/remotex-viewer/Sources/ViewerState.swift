@@ -16,9 +16,13 @@ enum ViewerConnectionStatus: String {
 }
 
 /// One entry of the remote's resolution menu, in device pixels.
-struct DisplayMode: Equatable, Identifiable, Hashable {
-    var w: Int
-    var h: Int
+///
+/// `UInt16` because that is what `setResolution` is on the wire, and the gateway
+/// rejects an out-of-range value rather than clamping it — so a mode that could
+/// not be sent back is not representable here either.
+struct DisplayMode: Equatable, Identifiable, Hashable, Sendable, Decodable {
+    var w: UInt16
+    var h: UInt16
 
     var id: String { "\(w)x\(h)" }
     var label: String { "\(w) × \(h)" }
