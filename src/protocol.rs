@@ -15,6 +15,7 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Transport policy shared by all engines: a dirty rectangle taller than this
 /// is split into strips before being sent, so a full-screen repaint doesn't
@@ -26,6 +27,50 @@ pub const STRIP_ROWS: u16 = 64;
 /// agent crate can't see this file). Re-exported here because every other
 /// boundary in this crate reaches for `protocol::` first.
 pub use rxa_proto::msg::{MAX_CLIPBOARD_BYTES, clamp_clipboard};
+
+/// A remote clipboard value held by an engine, plus when remotex last observed
+/// that clipboard change. `None` is honest for content that predates the
+/// session: VNC and RDP do not expose an OS clipboard timestamp, so there is no
+/// reliable time to invent until a change arrives on their clipboard channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardSnapshot {
+    pub text: String,
+    pub changed_at_ms: Option<u64>,
+}
+
+impl ClipboardSnapshot {
+    /// Record a clipboard change observed right now.
+    pub fn changed(text: String, previous: Option<&Self>) -> Self {
+        let now = unix_time_ms();
+        let changed_at_ms = previous
+            .and_then(|snapshot| snapshot.changed_at_ms)
+            .map_or(now, |last| now.max(last.saturating_add(1)));
+        Self {
+            text,
+            changed_at_ms: Some(changed_at_ms),
+        }
+    }
+
+    /// The answer before this session has observed any remote clipboard
+    /// activity. Empty text is still a successful Fetch response.
+    pub fn unobserved() -> Self {
+        Self {
+            text: String::new(),
+            changed_at_ms: None,
+        }
+    }
+}
+
+/// Wall-clock milliseconds are carried because the browser has to render the
+/// activity time in the user's locale. Saturation only matters after the year
+/// 584,554,051 or if the system clock predates Unix.
+pub fn unix_time_ms() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis();
+    u64::try_from(elapsed).unwrap_or(u64::MAX)
+}
 
 /// A mouse button, matching the DOM `MouseEvent.button` numbering.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -274,10 +319,14 @@ pub enum ServerMsg {
     /// discovered from the connection rather than an OS name someone has to
     /// keep correct in the config file.
     RemoteOs { macos: bool },
-    /// The remote's clipboard text, in reply to a
-    /// [`ClientMsg::ClipboardRequest`]. Only ever sent when asked: the browser
-    /// is never pushed clipboard contents it did not request.
-    Clipboard { text: String },
+    /// The remote's clipboard text, either pushed when the engine observes a
+    /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
+    /// `changed_at_ms` is retained across Fetches; `None` means the content
+    /// predates the session and its real activity time is unknown.
+    Clipboard {
+        text: String,
+        changed_at_ms: Option<u64>,
+    },
     /// The resolutions the remote display will accept, largest first — the menu
     /// behind the floating menu's Resolution section, answered with
     /// [`ClientMsg::SetResolution`].
@@ -320,7 +369,11 @@ enum ControlMsg<'a> {
         clipboard: bool,
     },
     RemoteOs { macos: bool },
-    Clipboard { text: &'a str },
+    Clipboard {
+        text: &'a str,
+        #[serde(rename = "changedAtMs")]
+        changed_at_ms: Option<u64>,
+    },
     DisplayModes { modes: Vec<Resolution> },
 }
 
@@ -372,8 +425,12 @@ impl ServerMsg {
             }
             // Clamped here as well as at the engines, so no path can put an
             // unbounded string on the browser link.
-            ServerMsg::Clipboard { text } => WireFrame::Text(control(&ControlMsg::Clipboard {
+            ServerMsg::Clipboard {
+                text,
+                changed_at_ms,
+            } => WireFrame::Text(control(&ControlMsg::Clipboard {
                 text: clamp_clipboard(text),
+                changed_at_ms: *changed_at_ms,
             })),
             ServerMsg::DisplayModes { modes } => WireFrame::Text(control(&ControlMsg::DisplayModes {
                 modes: modes.iter().map(|&(w, h)| Resolution { w, h }).collect(),
@@ -488,9 +545,31 @@ mod tests {
                 other => panic!("remoteOs should be a text frame: {other:?}"),
             }
         }
-        match (ServerMsg::Clipboard { text: "hi \"there\"".to_owned() }).encode() {
+        match (ServerMsg::Clipboard {
+            text: "hi \"there\"".to_owned(),
+            changed_at_ms: Some(1_721_234_567_890),
+        })
+        .encode()
+        {
             WireFrame::Text(json) => {
-                assert_eq!(json, r#"{"type":"clipboard","text":"hi \"there\""}"#);
+                assert_eq!(
+                    json,
+                    r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890}"#
+                );
+            }
+            other => panic!("clipboard should be a text frame: {other:?}"),
+        }
+        match (ServerMsg::Clipboard {
+            text: String::new(),
+            changed_at_ms: None,
+        })
+        .encode()
+        {
+            WireFrame::Text(json) => {
+                assert_eq!(
+                    json,
+                    r#"{"type":"clipboard","text":"","changedAtMs":null}"#
+                );
             }
             other => panic!("clipboard should be a text frame: {other:?}"),
         }
@@ -529,16 +608,35 @@ mod tests {
         // Fits: returned untouched.
         assert_eq!(clamp_clipboard("short"), "short");
 
-        match (ServerMsg::Clipboard { text: "x".repeat(MAX_CLIPBOARD_BYTES + 10) }).encode() {
+        match (ServerMsg::Clipboard {
+            text: "x".repeat(MAX_CLIPBOARD_BYTES + 10),
+            changed_at_ms: Some(42),
+        })
+        .encode()
+        {
             WireFrame::Text(json) => assert_eq!(
                 json,
                 format!(
-                    r#"{{"type":"clipboard","text":"{}"}}"#,
+                    r#"{{"type":"clipboard","text":"{}","changedAtMs":42}}"#,
                     "x".repeat(MAX_CLIPBOARD_BYTES)
                 )
             ),
             other => panic!("clipboard should be a text frame: {other:?}"),
         }
+    }
+
+    #[test]
+    fn repeated_clipboard_activity_advances_the_timestamp_even_for_identical_text() {
+        let first = ClipboardSnapshot {
+            text: "same text".to_owned(),
+            changed_at_ms: Some(unix_time_ms().saturating_add(1_000)),
+        };
+        let second = ClipboardSnapshot::changed("same text".to_owned(), Some(&first));
+        assert_eq!(second.text, first.text);
+        assert!(
+            second.changed_at_ms > first.changed_at_ms,
+            "activity identity comes from its timestamp, not only its text"
+        );
     }
 
     // The cursor control message: base64 PNG plus geometry, and an explicit

@@ -36,7 +36,7 @@ pub const PROLOGUE: &[u8] = b"rxa/1";
 /// Protocol version carried in [`msg::AgentMsg::Hello`]. Redundant with
 /// [`PROLOGUE`] (a mismatch already fails the handshake) but cheap, and it
 /// gives the gateway something to log.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// The protocol's default TCP port, adjacent to the web server's 52380.
 pub const DEFAULT_PORT: u16 = 52381;

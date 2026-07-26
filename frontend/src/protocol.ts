@@ -42,6 +42,18 @@ export type ClientMsg =
 // before the round trip.
 export const MAX_CLIPBOARD_BYTES = 65_536;
 
+export interface ClipboardSnapshot {
+  text: string;
+  // Unix epoch milliseconds when remotex observed the remote clipboard
+  // change. Null is honest for clipboard content that predates this session.
+  changedAtMs: number | null;
+}
+
+export interface RemoteClipboard extends ClipboardSnapshot {
+  // Ticks on every reply/push so an identical Fetch is still observable.
+  seq: number;
+}
+
 // Server -> browser text frames: everything but screen tiles. `resize`/`error`
 // come from the engine; `picker`/`connected` are the session-slot status the
 // server sends so the browser knows which post-login state it is in.
@@ -78,7 +90,7 @@ export type ControlMsg =
   | { type: "remoteOs"; macos: boolean }
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
   // an unprompted push when the remote's clipboard changed.
-  | { type: "clipboard"; text: string }
+  | ({ type: "clipboard" } & ClipboardSnapshot)
   // The resolutions the remote display accepts, largest first — the floating
   // menu's Resolution section, answered with "setResolution". Only the rxa
   // engine sends this, and only for a target whose Mac shares a virtual

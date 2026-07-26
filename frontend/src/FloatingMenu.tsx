@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
+import type { ClipboardSnapshot, RemoteClipboard } from "./protocol.ts";
 import { ResolutionPanel } from "./ResolutionPanel.tsx";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 
@@ -121,7 +122,6 @@ function DockedPanel({
   remoteSize,
   onPickResolution,
   remoteClipboard,
-  onFetchClipboard,
   onSendClipboard,
 }: {
   panel: Panel | null;
@@ -131,8 +131,7 @@ function DockedPanel({
   modes: { w: number; h: number }[];
   remoteSize: { w: number; h: number } | null;
   onPickResolution: (w: number, h: number) => void;
-  remoteClipboard: { text: string; seq: number } | null;
-  onFetchClipboard: () => Promise<string | null>;
+  remoteClipboard: RemoteClipboard | null;
   onSendClipboard: (text: string) => void;
 }) {
   switch (panel) {
@@ -157,7 +156,6 @@ function DockedPanel({
     case "clipboard":
       return (
         <ClipboardPanel
-          onFetch={onFetchClipboard}
           onSend={onSendClipboard}
           remoteClipboard={remoteClipboard}
           onClose={onClose}
@@ -251,10 +249,10 @@ export default function FloatingMenu({
   canClipboard: boolean;
   // The last clipboard reply from the server, and the fetch actions. See
   // ClipboardPanel — the browser holds no clipboard state of its own.
-  // `onFetchClipboard` resolves with the remote's text, or null if nothing
+  // `onFetchClipboard` resolves with the remote snapshot, or null if nothing
   // answered.
-  remoteClipboard: { text: string; seq: number } | null;
-  onFetchClipboard: () => Promise<string | null>;
+  remoteClipboard: RemoteClipboard | null;
+  onFetchClipboard: () => Promise<ClipboardSnapshot | null>;
   onSendClipboard: (text: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -688,7 +686,6 @@ export default function FloatingMenu({
         remoteSize={remoteSize}
         onPickResolution={onPickResolution}
         remoteClipboard={remoteClipboard}
-        onFetchClipboard={onFetchClipboard}
         onSendClipboard={onSendClipboard}
       />
     </>

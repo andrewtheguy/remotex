@@ -114,15 +114,19 @@ forwards `ServerCutText` as it arrives and also buffers it, the RDP engine asks
 for the text as soon as the remote announces a copy, and the Mac agent watches
 its pasteboard and pushes changes. On top of that the browser can always
 request the current text, which is what a browser attaching mid-session does,
-having missed every push so far.
+having missed every push so far. Each cached value carries when remotex last
+observed the remote clipboard change; fetching it later preserves that activity
+time instead of replacing it with the fetch time.
 
 In the browser those arrivals feed both the clipboard panel and, where the
 Clipboard API is available, the local OS clipboard. Automatic sync is best
 effort by design — `navigator.clipboard` is absent on a non-secure origin, the
 usual LAN deployment over plain HTTP, and Safari will not read the clipboard
-without a paste gesture. The panel is a plain text box needing no permission,
-so the feature degrades to manual rather than breaking. One transfer is capped
-at 64 KiB in each direction.
+without a paste gesture. The panel needs no permission: it opens on a concealed
+CRC32/length/activity-time summary, reveals the fetched text into its editable
+box on request, and offers explicit Send and Copy actions. The feature therefore
+degrades to manual rather than breaking. One transfer is capped at 64 KiB in
+each direction.
 
 The gateway sends a WebSocket protocol ping every five seconds. Browsers answer
 with a protocol pong in their networking stack, so background-tab JavaScript

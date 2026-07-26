@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isNativeHostConnected } from "./nativeHost.ts";
 import {
   type ClientMsg,
+  type ClipboardSnapshot,
   type ControlMsg,
   decodeTileFrame,
   type MouseButton,
   mouseButtonFromEvent,
+  type RemoteClipboard,
   type TileMsg,
 } from "./protocol.ts";
 import {
@@ -358,10 +360,8 @@ export function useRemoteDesktop(
   // every reply. The counter is what the panel watches: fetching the same text
   // twice must still register as an answer, and a null-vs-string flag can't
   // express that.
-  const [remoteClipboard, setRemoteClipboard] = useState<{
-    text: string;
-    seq: number;
-  } | null>(null);
+  const [remoteClipboard, setRemoteClipboard] =
+    useState<RemoteClipboard | null>(null);
   // The two halves of the automatic sync's echo guard: text last received from
   // the remote (so it is never sent straight back), and text last sent to the
   // remote (so a server that echoes a cut back at us does not bounce forever).
@@ -373,16 +373,21 @@ export function useRemoteDesktop(
   // so every pending caller is settled by the next `clipboard` message that
   // arrives, whether it answers a fetch or is an unprompted push — either way
   // it is the freshest text the remote has.
-  const clipboardWaitersRef = useRef<((text: string | null) => void)[]>([]);
+  const clipboardWaitersRef = useRef<
+    ((snapshot: ClipboardSnapshot | null) => void)[]
+  >([]);
 
   // Settle everyone waiting on a fetch. `null` means "no answer came".
-  const settleClipboardWaiters = useCallback((text: string | null) => {
-    const waiters = clipboardWaitersRef.current;
-    clipboardWaitersRef.current = [];
-    for (const settle of waiters) {
-      settle(text);
-    }
-  }, []);
+  const settleClipboardWaiters = useCallback(
+    (snapshot: ClipboardSnapshot | null) => {
+      const waiters = clipboardWaitersRef.current;
+      clipboardWaitersRef.current = [];
+      for (const settle of waiters) {
+        settle(snapshot);
+      }
+    },
+    [],
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -746,14 +751,15 @@ export function useRemoteDesktop(
           // Either a reply to this browser's Fetch or an unprompted push
           // (VNC's ServerCutText, the Mac agent's pasteboard watcher). The
           // panel shows it either way.
-          const { text } = msg;
+          const { text, changedAtMs } = msg;
+          const snapshot = { text, changedAtMs };
           setRemoteClipboard((prev) => ({
-            text,
+            ...snapshot,
             seq: (prev?.seq ?? 0) + 1,
           }));
           // Release anyone blocked on a fetch — the clipboard button waits on
           // this before it will open the panel.
-          settleClipboardWaiters(text);
+          settleClipboardWaiters(snapshot);
           // And mirror it into the local OS clipboard, so a copy on the remote
           // is immediately pastable here. Best effort by design: `writeText`
           // is absent on a non-secure origin (plain HTTP on a LAN — the usual
@@ -954,36 +960,37 @@ export function useRemoteDesktop(
   }, [mode, releaseNativeKeys]);
 
   // Ask the server for the remote's clipboard and wait for the answer, which
-  // also lands in `remoteClipboard` on its way past. Resolves with the text, or
-  // `null` when nothing came back — the socket was down, the session returned
-  // to the picker, or the engine never answered.
+  // also lands in `remoteClipboard` on its way past. Resolves with the snapshot,
+  // or `null` when nothing came back — the socket was down, the session
+  // returned to the picker, or the engine never answered.
   //
   // Awaitable so the toolbar can hold the panel closed until there is something
   // current to show, rather than opening on stale text that updates a moment
   // later. Every engine answers exactly one `clipboard` message per request
   // (from a buffer for VNC and RDP, from a live pasteboard read for `rxa`), so
   // this behaves the same on all three.
-  const requestClipboard = useCallback((): Promise<string | null> => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return Promise.resolve(null);
-    }
-    ws.send(JSON.stringify({ type: "clipboardRequest" } satisfies ClientMsg));
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout>;
-      const waiter = (text: string | null) => {
-        clearTimeout(timer);
-        resolve(text);
-      };
-      timer = setTimeout(() => {
-        clipboardWaitersRef.current = clipboardWaitersRef.current.filter(
-          (w) => w !== waiter,
-        );
-        resolve(null);
-      }, CLIPBOARD_FETCH_TIMEOUT_MS);
-      clipboardWaitersRef.current.push(waiter);
-    });
-  }, []);
+  const requestClipboard =
+    useCallback((): Promise<ClipboardSnapshot | null> => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return Promise.resolve(null);
+      }
+      ws.send(JSON.stringify({ type: "clipboardRequest" } satisfies ClientMsg));
+      return new Promise((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const waiter = (snapshot: ClipboardSnapshot | null) => {
+          clearTimeout(timer);
+          resolve(snapshot);
+        };
+        timer = setTimeout(() => {
+          clipboardWaitersRef.current = clipboardWaitersRef.current.filter(
+            (w) => w !== waiter,
+          );
+          resolve(null);
+        }, CLIPBOARD_FETCH_TIMEOUT_MS);
+        clipboardWaitersRef.current.push(waiter);
+      });
+    }, []);
 
   // Put `text` on the remote's clipboard. Fire and forget: neither VNC's
   // ClientCutText nor the agent's pasteboard write is acknowledged, so there is

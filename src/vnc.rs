@@ -47,8 +47,8 @@ use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS, ServerMsg, Tile,
-    clamp_clipboard,
+    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS,
+    ServerMsg, Tile, clamp_clipboard,
 };
 use crate::vnc_clipboard;
 
@@ -132,7 +132,7 @@ type SharedCursor = Arc<std::sync::Mutex<CursorState>>;
 struct ClipboardState {
     /// What the remote last sent. `None` means nothing has been copied there
     /// this session.
-    remote: Option<String>,
+    remote: Option<ClipboardSnapshot>,
     /// What the browser last sent, held until the server asks for it. Only the
     /// extended path defers like that; the latin-1 fallback writes immediately
     /// and never reads this.
@@ -426,8 +426,20 @@ async fn active_loop(
                     // the remote copies something, which reads in the panel as
                     // "nothing has been copied over there yet".
                     if clipboard_enabled {
-                        let text = clipboard.lock().unwrap().remote.clone().unwrap_or_default();
-                        if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                        let snapshot = clipboard
+                            .lock()
+                            .unwrap()
+                            .remote
+                            .clone()
+                            .unwrap_or_else(ClipboardSnapshot::unobserved);
+                        if frame_tx
+                            .send(ServerMsg::Clipboard {
+                                text: snapshot.text,
+                                changed_at_ms: snapshot.changed_at_ms,
+                            })
+                            .await
+                            .is_err()
+                        {
                             break Err(anyhow::anyhow!("frame channel closed"));
                         }
                     }
@@ -582,8 +594,20 @@ async fn read_loop(
 
                 let text = latin1_to_string(&bytes);
                 debug!("vnc: remote clipboard updated, {} bytes", bytes.len());
-                clipboard.lock().unwrap().remote = Some(text.clone());
-                if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+                let snapshot = {
+                    let mut state = clipboard.lock().unwrap();
+                    let snapshot = ClipboardSnapshot::changed(text, state.remote.as_ref());
+                    state.remote = Some(snapshot.clone());
+                    snapshot
+                };
+                if frame_tx
+                    .send(ServerMsg::Clipboard {
+                        text: snapshot.text,
+                        changed_at_ms: snapshot.changed_at_ms,
+                    })
+                    .await
+                    .is_err()
+                {
                     return Ok(()); // browser link gone; the session layer handles it
                 }
             }
@@ -641,15 +665,31 @@ async fn extended_cut_text(
                 // panel as it is until something asks is the quieter half of
                 // the same truth, and Fetch now answers correctly.
                 debug!("vnc: remote copied a format the browser cannot hold");
-                clipboard.lock().unwrap().remote = None;
+                let mut state = clipboard.lock().unwrap();
+                state.remote = Some(ClipboardSnapshot::changed(
+                    String::new(),
+                    state.remote.as_ref(),
+                ));
             }
         }
         // The answer to that request.
         vnc_clipboard::Incoming::Provide(Some(text)) => {
             let text = clamp_clipboard(&text).to_owned();
             debug!("vnc: remote clipboard updated, {} bytes (utf-8)", text.len());
-            clipboard.lock().unwrap().remote = Some(text.clone());
-            if frame_tx.send(ServerMsg::Clipboard { text }).await.is_err() {
+            let snapshot = {
+                let mut state = clipboard.lock().unwrap();
+                let snapshot = ClipboardSnapshot::changed(text, state.remote.as_ref());
+                state.remote = Some(snapshot.clone());
+                snapshot
+            };
+            if frame_tx
+                .send(ServerMsg::Clipboard {
+                    text: snapshot.text,
+                    changed_at_ms: snapshot.changed_at_ms,
+                })
+                .await
+                .is_err()
+            {
                 return Ok(true);
             }
         }

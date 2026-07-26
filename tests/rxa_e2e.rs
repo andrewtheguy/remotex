@@ -56,6 +56,7 @@ const HOTSPOT: (u16, u16) = (4, 7);
 /// What the fake agent's pasteboard starts out holding. Multi-byte on purpose:
 /// unlike VNC's latin-1 cut text, this path is UTF-8 end to end.
 const FAKE_PASTEBOARD: &str = "on the Mac — 画面 ☕";
+const FAKE_CLIPBOARD_CHANGED_AT_MS: u64 = 1_721_234_567_890;
 
 /// Stand-in for a JPEG the agent encoded. The gateway never decodes a tile
 /// payload — that is the point of the pass-through design — so these bytes only
@@ -184,6 +185,7 @@ async fn serve_fake_agent(
     // Otherwise behave like the real agent: answer keepalives, repaint on ask.
     // The pasteboard is a plain String here — the real one is NSPasteboard.
     let mut pasteboard = FAKE_PASTEBOARD.to_owned();
+    let mut clipboard_changed_at_ms = Some(FAKE_CLIPBOARD_CHANGED_AT_MS);
     loop {
         match GatewayMsg::decode(&reader.recv().await?)? {
             GatewayMsg::Ping { nonce } => {
@@ -203,6 +205,7 @@ async fn serve_fake_agent(
                         .send(
                             &AgentMsg::Clipboard {
                                 text: pasteboard.clone(),
+                                changed_at_ms: clipboard_changed_at_ms,
                             }
                             .encode(),
                         )
@@ -215,6 +218,7 @@ async fn serve_fake_agent(
                     .send(
                         &AgentMsg::Clipboard {
                             text: pasteboard.clone(),
+                            changed_at_ms: clipboard_changed_at_ms,
                         }
                         .encode(),
                     )
@@ -222,6 +226,7 @@ async fn serve_fake_agent(
             }
             GatewayMsg::Clipboard { text } => {
                 pasteboard = text.clone();
+                clipboard_changed_at_ms = Some(FAKE_CLIPBOARD_CHANGED_AT_MS + 1);
                 let _ = input_tx.send(GatewayMsg::Clipboard { text });
             }
             // A real agent switches the display's mode and says nothing; the
@@ -511,9 +516,15 @@ async fn expect_input(rx: &mut mpsc::UnboundedReceiver<GatewayMsg>) -> GatewayMs
         .expect("the fake agent's input channel closed")
 }
 
-/// Drain the socket until a `clipboard` control message arrives; returns its
-/// text. Fails on an error or a close, like the paint helper.
-async fn expect_clipboard(ws: &mut Ws) -> String {
+#[derive(Debug, PartialEq, Eq)]
+struct ClipboardMessage {
+    text: String,
+    changed_at_ms: Option<u64>,
+}
+
+/// Drain the socket until a timestamped `clipboard` control message arrives.
+/// Fails on an error or a close, like the paint helper.
+async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
     tokio::time::timeout(Duration::from_secs(20), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -521,7 +532,10 @@ async fn expect_clipboard(ws: &mut Ws) -> String {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                     if text.contains(r#""type":"clipboard""#) {
                         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                        return parsed["text"].as_str().unwrap().to_owned();
+                        return ClipboardMessage {
+                            text: parsed["text"].as_str().unwrap().to_owned(),
+                            changed_at_ms: parsed["changedAtMs"].as_u64(),
+                        };
                     }
                 }
                 Message::Close(frame) => panic!("session closed: {frame:?}"),
@@ -715,11 +729,22 @@ async fn clipboard_round_trips_through_the_agent_in_utf8() {
         expect_input(&mut input).await,
         GatewayMsg::ClipboardWatch { enabled: true }
     );
-    assert_eq!(expect_clipboard(&mut ws).await, FAKE_PASTEBOARD);
+    let pushed = expect_clipboard(&mut ws).await;
+    assert_eq!(
+        pushed,
+        ClipboardMessage {
+            text: FAKE_PASTEBOARD.to_owned(),
+            changed_at_ms: Some(FAKE_CLIPBOARD_CHANGED_AT_MS),
+        }
+    );
 
     // Mac → browser: the agent reads its pasteboard when asked.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
-    assert_eq!(expect_clipboard(&mut ws).await, FAKE_PASTEBOARD);
+    assert_eq!(
+        expect_clipboard(&mut ws).await,
+        pushed,
+        "Fetch must preserve the agent-observed clipboard activity timestamp"
+    );
 
     // Browser → Mac. The é/画面/☕ that VNC would have flattened to '?' arrive
     // intact here.
@@ -738,7 +763,13 @@ async fn clipboard_round_trips_through_the_agent_in_utf8() {
 
     // And it stuck: fetching again returns what was just written.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
-    assert_eq!(expect_clipboard(&mut ws).await, sent);
+    assert_eq!(
+        expect_clipboard(&mut ws).await,
+        ClipboardMessage {
+            text: sent.to_owned(),
+            changed_at_ms: Some(FAKE_CLIPBOARD_CHANGED_AT_MS + 1),
+        }
+    );
 }
 
 // A target that did not opt in gets no clipboard traffic in either direction,

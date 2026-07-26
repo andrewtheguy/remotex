@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
@@ -52,6 +52,19 @@ const OUT_BACKLOG: usize = 64;
 
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
+
+fn unix_time_ms() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis();
+    u64::try_from(elapsed).unwrap_or(u64::MAX)
+}
+
+fn next_clipboard_time(previous: Option<u64>) -> u64 {
+    let now = unix_time_ms();
+    previous.map_or(now, |last| now.max(last.saturating_add(1)))
+}
 
 /// Waits before each attempt to restart a capture stream that died, and with
 /// their length, the number of attempts.
@@ -229,6 +242,10 @@ async fn pump(
     // reads nothing. `Some(count)` is the last change counter this session has
     // accounted for; contents are read only when the live counter differs.
     let mut clipboard_seen: Option<isize> = None;
+    // Wall-clock time of the last pasteboard counter change this agent
+    // observed. A Fetch never advances it; `None` means the current contents
+    // predate this watched session and macOS exposes no timestamp for them.
+    let mut clipboard_changed_at_ms: Option<u64> = None;
 
     let result = loop {
         // `out_rx` only exists once the stream is attached; before that, park
@@ -431,7 +448,13 @@ async fn pump(
                         let text = clamp_clipboard(&text);
                         debug!("session: pasteboard read, {} bytes", text.len());
                         writer
-                            .send(&AgentMsg::Clipboard { text: text.to_owned() }.encode())
+                            .send(
+                                &AgentMsg::Clipboard {
+                                    text: text.to_owned(),
+                                    changed_at_ms: clipboard_changed_at_ms,
+                                }
+                                .encode(),
+                            )
                             .await?;
                     }
                     GatewayMsg::Clipboard { text } => {
@@ -451,6 +474,8 @@ async fn pump(
                         // the browser that just sent it.
                         if wrote && clipboard_seen.is_some() {
                             clipboard_seen = Some(pasteboard::change_count());
+                            clipboard_changed_at_ms =
+                                Some(next_clipboard_time(clipboard_changed_at_ms));
                         }
                     }
                     // Never fatal when refused: AgentMsg::Error tears the
@@ -515,6 +540,7 @@ async fn pump(
                     // only arrives on a change.
                     GatewayMsg::ClipboardWatch { enabled } => {
                         clipboard_seen = enabled.then(pasteboard::change_count);
+                        clipboard_changed_at_ms = None;
                         info!(
                             "session: pasteboard watch {}",
                             if enabled { "on" } else { "off" }
@@ -567,6 +593,8 @@ async fn pump(
                     let now = pasteboard::change_count();
                     if now != seen {
                         clipboard_seen = Some(now);
+                        let changed_at_ms = next_clipboard_time(clipboard_changed_at_ms);
+                        clipboard_changed_at_ms = Some(changed_at_ms);
                         // The one content read, and only because the counter
                         // moved. An empty string covers a pasteboard holding
                         // an image or a file — the browser wants text.
@@ -574,7 +602,13 @@ async fn pump(
                         let text = clamp_clipboard(&text);
                         debug!("session: pasteboard changed, pushing {} bytes", text.len());
                         writer
-                            .send(&AgentMsg::Clipboard { text: text.to_owned() }.encode())
+                            .send(
+                                &AgentMsg::Clipboard {
+                                    text: text.to_owned(),
+                                    changed_at_ms: Some(changed_at_ms),
+                                }
+                                .encode(),
+                            )
                             .await?;
                     }
                 }

@@ -41,7 +41,9 @@ use tokio::sync::mpsc;
 use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
-use crate::protocol::{ClientMsg, MouseButton, STRIP_ROWS, ServerMsg, Tile};
+use crate::protocol::{
+    ClientMsg, ClipboardSnapshot, MouseButton, STRIP_ROWS, ServerMsg, Tile,
+};
 use crate::rdp_clipboard::{self, ClipboardEvent};
 
 // A type-erased async stream, so the connect path (which upgrades TCP → TLS) can
@@ -241,7 +243,7 @@ async fn active_loop(
     // Fetch — RDP, like RFB, has no way to *ask* for the current contents, only
     // to react to a change. `None` means nothing has been copied over there
     // since this session started.
-    let mut remote_clipboard: Option<String> = None;
+    let mut remote_clipboard: Option<ClipboardSnapshot> = None;
     // What the browser last sent, held until the remote actually pastes and
     // asks for it. That deferral is MS-RDPECLIP's delayed rendering: we
     // advertise the format, the bytes travel only if they are wanted.
@@ -331,9 +333,14 @@ async fn active_loop(
                     // the remote copies something, which reads in the panel as
                     // "nothing has been copied over there yet".
                     if clipboard {
-                        let text = remote_clipboard.clone().unwrap_or_default();
+                        let snapshot = remote_clipboard
+                            .clone()
+                            .unwrap_or_else(ClipboardSnapshot::unobserved);
                         frame_tx
-                            .send(ServerMsg::Clipboard { text })
+                            .send(ServerMsg::Clipboard {
+                                text: snapshot.text,
+                                changed_at_ms: snapshot.changed_at_ms,
+                            })
                             .await
                             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                     }
@@ -374,15 +381,26 @@ async fn active_loop(
                             Some(format) => {
                                 request_clipboard(&mut active_stage, &mut framed, format).await?;
                             }
-                            None => debug!("rdp: the remote copied no text format we can carry"),
+                            None => {
+                                debug!("rdp: the remote copied no text format we can carry");
+                                remote_clipboard = Some(ClipboardSnapshot::changed(
+                                    String::new(),
+                                    remote_clipboard.as_ref(),
+                                ));
+                            }
                         }
                     }
                     ClipboardEvent::RemoteData(Some(text)) => {
                         let text = rdp_clipboard::from_remote(&text);
                         debug!("rdp: remote clipboard updated, {} bytes", text.len());
-                        remote_clipboard = Some(text.clone());
+                        let snapshot =
+                            ClipboardSnapshot::changed(text, remote_clipboard.as_ref());
+                        remote_clipboard = Some(snapshot.clone());
                         frame_tx
-                            .send(ServerMsg::Clipboard { text })
+                            .send(ServerMsg::Clipboard {
+                                text: snapshot.text,
+                                changed_at_ms: snapshot.changed_at_ms,
+                            })
                             .await
                             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                     }

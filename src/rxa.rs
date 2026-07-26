@@ -34,7 +34,9 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 
 use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
-use crate::protocol::{ClientMsg, CursorShape, MouseButton, ServerMsg, Tile, clamp_clipboard};
+use crate::protocol::{
+    ClientMsg, ClipboardSnapshot, CursorShape, MouseButton, ServerMsg, Tile, clamp_clipboard,
+};
 
 /// How long a connect + handshake + `Hello` may take before we give up on this
 /// attempt. Guards against a host that accepts the TCP connection and then says
@@ -101,6 +103,10 @@ pub async fn run(
     // `Resize` costs the frontend its canvas contents, so a silent reconnect to
     // an unchanged desktop must not announce one.
     let mut announced: Option<(u16, u16)> = None;
+    // The agent supplies the activity time. Keep the last snapshot across a
+    // silent agent reconnect so an otherwise-identical Fetch does not lose a
+    // timestamp merely because the transport link changed underneath it.
+    let mut clipboard_snapshot: Option<ClipboardSnapshot> = None;
     loop {
         let size = (session.width, session.height);
         info!("rxa: session up, desktop {}x{}", size.0, size.1);
@@ -109,6 +115,7 @@ pub async fn run(
             &mut input_rx,
             &frame_tx,
             &mut announced,
+            &mut clipboard_snapshot,
             config.clipboard,
             config.resize,
         )
@@ -213,6 +220,7 @@ async fn pump(
     input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: &mpsc::Sender<ServerMsg>,
     announced: &mut Option<(u16, u16)>,
+    clipboard_snapshot: &mut Option<ClipboardSnapshot>,
     clipboard: bool,
     resize: bool,
 ) -> anyhow::Result<()> {
@@ -353,9 +361,29 @@ async fn pump(
                     // and the browser writes an incoming clipboard into the
                     // real OS clipboard. Same belt-and-braces as VNC's
                     // ServerCutText.
-                    AgentMsg::Clipboard { text } => {
+                    AgentMsg::Clipboard {
+                        text,
+                        changed_at_ms,
+                    } => {
+                        let changed_at_ms = changed_at_ms.or_else(|| {
+                            clipboard_snapshot
+                                .as_ref()
+                                .filter(|snapshot| snapshot.text == text)
+                                .and_then(|snapshot| snapshot.changed_at_ms)
+                        });
+                        let snapshot = ClipboardSnapshot {
+                            text,
+                            changed_at_ms,
+                        };
+                        *clipboard_snapshot = Some(snapshot.clone());
                         if clipboard
-                            && frame_tx.send(ServerMsg::Clipboard { text }).await.is_err()
+                            && frame_tx
+                                .send(ServerMsg::Clipboard {
+                                    text: snapshot.text,
+                                    changed_at_ms: snapshot.changed_at_ms,
+                                })
+                                .await
+                                .is_err()
                         {
                             return Ok(());
                         }

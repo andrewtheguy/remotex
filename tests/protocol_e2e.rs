@@ -518,9 +518,15 @@ async fn switch_target_returns_to_the_picker_then_reconnects() {
     expect_tile(&mut ws).await;
 }
 
-/// Read from the socket until a `clipboard` control message arrives, and return
-/// its text.
-async fn expect_clipboard(ws: &mut Ws) -> String {
+#[derive(Debug, PartialEq, Eq)]
+struct ClipboardMessage {
+    text: String,
+    changed_at_ms: Option<u64>,
+}
+
+/// Read from the socket until a timestamped `clipboard` control message
+/// arrives.
+async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -528,7 +534,10 @@ async fn expect_clipboard(ws: &mut Ws) -> String {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                     if text.contains(r#""type":"clipboard""#) {
                         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                        return parsed["text"].as_str().unwrap().to_owned();
+                        return ClipboardMessage {
+                            text: parsed["text"].as_str().unwrap().to_owned(),
+                            changed_at_ms: parsed["changedAtMs"].as_u64(),
+                        };
                     }
                 }
                 Message::Close(frame) => panic!("closed while waiting for clipboard: {frame:?}"),
@@ -564,13 +573,22 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
     // writes the cut text ahead of the framebuffer update, so it cannot be
     // racing the tile below. The engine decodes latin-1, so the é the server
     // sent as one byte arrives as one character.
-    assert_eq!(expect_clipboard(&mut ws).await, "copied on café");
+    let pushed = expect_clipboard(&mut ws).await;
+    assert_eq!(pushed.text, "copied on café");
+    assert!(
+        pushed.changed_at_ms.is_some(),
+        "a live remote clipboard change needs an activity timestamp"
+    );
     expect_tile(&mut ws).await;
 
     // And the same text is still there to be fetched: a browser that attached
     // after the push — or reattached — has to be able to ask.
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
-    assert_eq!(expect_clipboard(&mut ws).await, "copied on café");
+    assert_eq!(
+        expect_clipboard(&mut ws).await,
+        pushed,
+        "Fetch must preserve the clipboard activity timestamp"
+    );
 
     // Browser → remote. Latin-1 survives; anything beyond it becomes '?'.
     ws.send(Message::text(r#"{"type":"clipboard","text":"typed ☕ here"}"#))
@@ -605,7 +623,13 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
     expect_tile(&mut ws).await;
 
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
-    assert_eq!(expect_clipboard(&mut ws).await, "");
+    assert_eq!(
+        expect_clipboard(&mut ws).await,
+        ClipboardMessage {
+            text: String::new(),
+            changed_at_ms: None,
+        }
+    );
 }
 
 // The opt-out path: the flag off means the engine neither answers a fetch nor

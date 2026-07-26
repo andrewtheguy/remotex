@@ -970,14 +970,18 @@ body {
 
 /* ── Clipboard panel ─────────────────────────────────────────────────────── */
 
+.cb-input-shell {
+  position: relative;
+}
+
 .cb-text {
-  /* Tall enough for a paragraph, short enough to leave the desktop visible on
-     a phone in landscape. */
+  width: 100%;
+  box-sizing: border-box;
   min-height: 6.5rem;
   max-height: 40vh;
-  padding: 0.5rem 0.6rem;
+  padding: 0.5rem;
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 0.875rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #e6edf3;
   background: #0d1117;
@@ -986,9 +990,69 @@ body {
   resize: vertical;
 }
 
+@media (min-height: 800px) {
+  .cb-text {
+    min-height: 12rem;
+  }
+}
+
+@media (min-height: 1100px) {
+  .cb-text {
+    min-height: 20rem;
+  }
+}
+
 .cb-text:focus {
-  outline: 2px solid #1f6feb;
-  outline-offset: -1px;
+  outline: none;
+  border-color: #58a6ff;
+}
+
+.cb-metadata-card {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #0d1117;
+  color: #e6edf3;
+  padding: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cb-metadata-card:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+
+.cb-metadata-card:hover {
+  background: #161b22;
+}
+
+.cb-metadata-primary {
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.cb-metadata-secondary {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+}
+
+.cb-copy-fallback {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
 }
 
 .cb-actions {
@@ -1040,6 +1104,7 @@ body {
 }
 
 .cb-notice {
+  margin-left: auto;
   color: #7ee787;
 }
 
