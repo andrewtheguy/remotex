@@ -145,6 +145,10 @@ cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
 
 `tests/rxa_e2e.rs` uses an in-process fake agent and runs by default.
 
+Stable headless browser checks for DOM/control-plane flows live under
+[`tests/playwright`](tests/playwright/README.md). They intentionally do not
+assert framebuffer/canvas output, cursor rendering, or gesture timing.
+
 For a remote Podman connection:
 
 ```sh

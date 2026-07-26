@@ -7,7 +7,9 @@
 - use tmp/ for temporary files and test config
 - for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
-- for e2e tests use tests/*, can start dummy RDP server or vnc server with docker or podman if needed, but never start headless browser because automated tests on browser is flaky
+- keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
+- headless Playwright is allowed only for DOM/control-plane flows that have proved stable; the current whitelist is `tests/playwright/clipboard.spec.js` (login, target selection, menu/panel state, clipboard metadata/reveal/copy/send, and responsive panel docking). Preserve approved tests in `tests/playwright/` instead of leaving one-off copies in `tmp/`; add another flow to this whitelist only after repeated local passes
+- run Playwright tests headless and single-worker, use accessible locators plus web-first assertions/polling, and do not add fixed sleeps; framebuffer/canvas pixels, paint timing, cursor rendering, pointer input, and gesture behaviour remain out of scope for browser automation because those are the flaky paths the original restriction covered — test them through the existing raw WebSocket, protocol, and container e2e tests
 - multi session is always out of scope (never planned, not merely deferred): this is a single-user program with one active session only, with session takeover logic (a new browser force-claims the single session slot and evicts the previous holder) — no concurrent sessions, session sharing, or session broker
 
 ## macOS viewer

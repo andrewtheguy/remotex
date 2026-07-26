@@ -2,7 +2,8 @@
 //!
 //! Starts the dummy xrdp container (`tests/xrdp-dummy/`) with podman or
 //! docker, points the real axum server at it, and connects a raw WebSocket
-//! client (never a headless browser — see CLAUDE.md). xrdp paints its login
+//! client. Browser automation deliberately does not validate canvas paint
+//! timing or pixels (see CLAUDE.md). xrdp paints its login
 //! screen even with no session backend, so real bitmap updates flow through
 //! the whole pipeline: IronRDP session -> `ServerMsg::Tile` -> binary WS
 //! frames, which this test validates byte-for-byte against the wire layout

@@ -2,7 +2,8 @@
 //!
 //! Starts the dummy TigerVNC container (`tests/vnc-dummy/`, VncAuth-protected)
 //! with podman or docker, points the real axum server at it, and connects a
-//! raw WebSocket client (never a headless browser — see CLAUDE.md). Xtigervnc
+//! raw WebSocket client. Browser automation deliberately does not validate
+//! canvas paint timing or pixels (see CLAUDE.md). Xtigervnc
 //! serves its root window with no session behind it, so the first
 //! non-incremental update request drives real raw-encoded pixels through the
 //! whole pipeline: RFB handshake + DES auth -> `ServerMsg::Tile` -> the same
