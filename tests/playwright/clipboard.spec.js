@@ -1,21 +1,11 @@
-const { execFileSync } = require("node:child_process");
 const { test, expect } = require("@playwright/test");
-
-const BASE_URL =
-  process.env.REMOTEX_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:5173/";
-const USERNAME = process.env.REMOTEX_PLAYWRIGHT_USERNAME;
-const PASSWORD = process.env.REMOTEX_PLAYWRIGHT_PASSWORD;
-const TARGET = process.env.REMOTEX_PLAYWRIGHT_TARGET ?? "mac";
-const MAC_SSH = process.env.REMOTEX_PLAYWRIGHT_MAC_SSH;
-const SSH_TIMEOUT_MS = 10_000;
-const REQUIRED_ENV = {
-  REMOTEX_PLAYWRIGHT_USERNAME: USERNAME,
-  REMOTEX_PLAYWRIGHT_PASSWORD: PASSWORD,
-  REMOTEX_PLAYWRIGHT_MAC_SSH: MAC_SSH,
-};
-const MISSING_ENV = Object.entries(REQUIRED_ENV)
-  .filter(([, value]) => !value)
-  .map(([name]) => name);
+const {
+  MISSING_ENV,
+  logInAndConnect,
+  openClipboardPanel,
+  readRemoteClipboard,
+  setRemoteClipboard,
+} = require("./support.js");
 
 const CRC32_POLYNOMIAL = 0xedb88320;
 const CRC32_TABLE = (() => {
@@ -39,28 +29,6 @@ function crc32(text) {
     crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
   }
   return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0");
-}
-
-function setRemoteClipboard(text) {
-  const encoded = Buffer.from(text, "utf8").toString("base64");
-  execFileSync("ssh", [
-    MAC_SSH,
-    `printf '%s' '${encoded}' | base64 --decode | pbcopy`,
-  ], {
-    timeout: SSH_TIMEOUT_MS,
-  });
-}
-
-function readRemoteClipboard() {
-  return execFileSync("ssh", [MAC_SSH, "pbpaste"], {
-    encoding: "utf8",
-    timeout: SSH_TIMEOUT_MS,
-  }).replace(/\r?\n$/, "");
-}
-
-function targetNamePattern(name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped}\\b`);
 }
 
 test("clipboard panel reads require explicit Copy while pushes still auto-sync", async ({
@@ -92,21 +60,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
     });
   });
 
-  await page.goto(BASE_URL);
-  await expect(page.getByText(/^v\d+\.\d+\.\d+$/)).toBeVisible();
-  await page.getByLabel("Username").fill(USERNAME);
-  await page.getByLabel("Password").fill(PASSWORD);
-  await page.getByRole("button", { name: "Log in" }).click();
-
-  await expect(
-    page.getByRole("heading", { name: "Pick a target" }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: targetNamePattern(TARGET) })
-    .click();
-  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
-    timeout: 20_000,
-  });
+  await logInAndConnect(page);
 
   // Unsolicited remote changes retain the established automatic-sync path.
   const remoteValue = `remotex-ui-remote-${Date.now()}`;
@@ -133,8 +87,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
 
   // A panel Fetch and Reveal are reads. Neither may cross the explicit Copy
   // boundary and replace this unrelated local clipboard value.
-  await page.getByRole("button", { name: "Open menu" }).click();
-  await page.getByRole("button", { name: "Clipboard", exact: true }).click();
+  await openClipboardPanel(page);
 
   const metadata = page.getByRole("button", {
     name: "Reveal remote clipboard content",
@@ -208,8 +161,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
 
   // Closing discards the reveal state; reopening fetches and conceals again.
   await page.getByRole("button", { name: "Close clipboard" }).click();
-  await page.getByRole("button", { name: "Open menu" }).click();
-  await page.getByRole("button", { name: "Clipboard", exact: true }).click();
+  await openClipboardPanel(page);
   const reopenedMetadata = page.getByRole("button", {
     name: "Reveal remote clipboard content",
   });

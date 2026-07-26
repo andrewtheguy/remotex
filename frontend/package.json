@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "lint": "biome lint .",
     "format": "biome format --write .",
-    "check": "biome check . && tsc --noEmit"
+    "check": "biome check . && tsc -b"
   },
   "dependencies": {
     "react": "^19.2.0",
