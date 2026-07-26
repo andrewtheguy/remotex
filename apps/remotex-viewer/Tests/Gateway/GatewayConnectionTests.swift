@@ -85,12 +85,10 @@ struct GatewayConnectionTests {
         let connection = GatewayConnection(gateway: gateway, sink: sink)
 
         await connection.start()
-        // Waited out to `release`, the last of the three, rather than to the status:
-        // the status change and each action are published in hops of their own, so a
-        // wait that stops at `status:takenOver` can read the trace before any of
-        // them has landed and see an eviction that cleaned nothing up.
-        await sink.wait { _ in
-            sink.trace.drop { $0 != "status:takenOver" }.contains("release")
+        // The status alone is enough to wait for: a transition reaches the sink in
+        // one hop, so the cleanup below has landed with it.
+        await sink.wait { events in
+            events.contains { if case .status(.takenOver) = $0 { true } else { false } }
         }
         #expect(gateway.claimCalls.count == 1, "an eviction must not re-claim on its own")
 

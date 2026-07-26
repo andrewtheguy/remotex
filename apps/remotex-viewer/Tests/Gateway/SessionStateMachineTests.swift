@@ -160,4 +160,35 @@ struct SessionStateMachineTests {
             )
         }
     }
+
+    /// `GatewayConnection.handle` delivers a transition's sink events in one hop and
+    /// does the connection's own work after it, which reorders nothing only as long
+    /// as every list here is grouped that way. A list that put a `claim` ahead of a
+    /// `clearFramebuffer` would come out with the framebuffer cleared *after* the
+    /// claim it was written to precede.
+    @Test
+    func everyTransitionPutsItsSinkActionsFirst() {
+        let events: [SessionStateMachine.Event] = [
+            .start(force: false),
+            .start(force: true),
+            .claimed(token: "tok-1"),
+            .claimBusy,
+            .claimUnauthorized,
+            .claimFailed,
+            .socketOpened,
+            .controlReceived,
+            .socketClosed(code: 4001),
+            .socketClosed(code: nil),
+            .retryElapsed,
+        ]
+        for event in events {
+            var machine = SessionStateMachine()
+            let actions = machine.handle(event)
+            let forSink = actions.map { $0.sinkEvent != nil }
+            #expect(
+                !forSink.drop(while: { $0 }).contains(true),
+                "\(event) returned \(actions), which GatewayConnection.handle would reorder"
+            )
+        }
+    }
 }

@@ -18,6 +18,21 @@ enum SessionEvent: Sendable {
     case unauthorized
 }
 
+extension SessionStateMachine.Action {
+    /// What this action delivers to the sink, or nil when it is work for the
+    /// connection itself. The split is what lets a whole transition reach the sink
+    /// in one hop; the machine stays free of it.
+    var sinkEvent: SessionEvent? {
+        switch self {
+        case .clearFramebuffer: .clearFramebuffer
+        case .releaseInput: .releaseInput
+        case .failPendingClipboardFetch: .failPendingClipboardFetch
+        case .toLogin: .unauthorized
+        case .claim, .openSocket, .scheduleRetry: nil
+        }
+    }
+}
+
 /// `Sendable` so the connection actor can hand events to it across isolation; a
 /// `@MainActor` class conformer satisfies that on its own.
 @MainActor
@@ -139,20 +154,34 @@ actor GatewayConnection {
 
     // MARK: - The state machine's two halves
 
+    /// One hop to the sink per transition.
+    ///
+    /// The status change and every event the transition produces go in a single
+    /// `MainActor.run`, so half a transition cannot be observed — a `takenOver`
+    /// whose framebuffer has not been dropped yet, say, or a test that reads the
+    /// status and finds none of the cleanup that belongs with it. The connection's
+    /// own work follows, in the order the machine returned it, which reorders
+    /// nothing because every list it returns puts its sink actions first — pinned
+    /// by `everyTransitionPutsItsSinkActionsFirst`.
     private func handle(_ event: SessionStateMachine.Event) async {
         let before = machine.status
         let actions = machine.handle(event)
-        if machine.status != before {
-            let status = machine.status
+        var events: [SessionEvent] = machine.status == before ? [] : [.status(machine.status)]
+        events.append(contentsOf: actions.compactMap(\.sinkEvent))
+        if !events.isEmpty {
             await MainActor.run { [sink] in
-                sink?.apply(.status(status))
+                for event in events {
+                    sink?.apply(event)
+                }
             }
         }
-        for action in actions {
+        for action in actions where action.sinkEvent == nil {
             await perform(action)
         }
     }
 
+    /// The connection's own half of a transition. The sink's half has already been
+    /// delivered by `handle`.
     private func perform(_ action: SessionStateMachine.Action) async {
         switch action {
         case .claim(let force):
@@ -161,14 +190,10 @@ actor GatewayConnection {
             await openSocket(token: token)
         case .scheduleRetry(let delay):
             scheduleRetry(after: delay)
-        case .clearFramebuffer:
-            await publish(.clearFramebuffer)
-        case .releaseInput:
-            await publish(.releaseInput)
-        case .failPendingClipboardFetch:
-            await publish(.failPendingClipboardFetch)
-        case .toLogin:
-            await publish(.unauthorized)
+        case .clearFramebuffer, .releaseInput, .failPendingClipboardFetch, .toLogin:
+            // `sinkEvent` is what routes these, and `handle` filters them out
+            // before calling this.
+            break
         }
     }
 
