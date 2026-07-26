@@ -673,7 +673,12 @@ export function useRemoteDesktop(
       if (text === "") {
         return;
       }
+      const alreadyMirrored = text === lastFromRemoteRef.current;
+      const echoedFromHost = text === lastToRemoteRef.current;
       lastFromRemoteRef.current = text;
+      if (alreadyMirrored || echoedFromHost) {
+        return;
+      }
       // The runtime getter is intentional: this effect does not depend on the
       // nativeHost prop, whose captured value could therefore be stale.
       if (!isNativeHostConnected()) {

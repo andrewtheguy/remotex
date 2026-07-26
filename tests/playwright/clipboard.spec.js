@@ -73,7 +73,24 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   );
 
   const pageErrors = [];
+  let remotePushes = 0;
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("websocket", (socket) => {
+    socket.on("framereceived", ({ payload }) => {
+      if (typeof payload !== "string") {
+        return;
+      }
+      try {
+        const message = JSON.parse(payload);
+        if (message.type === "clipboard" && !message.requested) {
+          remotePushes += 1;
+        }
+      } catch {
+        // Binary tile frames and unrelated non-JSON data are not clipboard
+        // control messages.
+      }
+    });
+  });
 
   await page.goto(BASE_URL);
   await expect(page.getByText(/^v\d+\.\d+\.\d+$/)).toBeVisible();
@@ -97,15 +114,25 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
     .toBe(remoteValue);
+  await expect.poll(() => remotePushes).toBeGreaterThan(0);
 
-  // A panel Fetch and Reveal are reads. Neither may cross the explicit Copy
-  // boundary and replace this unrelated local clipboard value.
+  // A repeated remote announcement can follow a guest paste even though the
+  // guest clipboard content did not change. It is activity for metadata, but
+  // must not replace a newer local clipboard value.
   const localSentinel = `remotex-ui-local-${Date.now()}`;
   await page.evaluate(
     (text) => navigator.clipboard.writeText(text),
     localSentinel,
   );
+  const pushesBeforeRepeat = remotePushes;
+  setRemoteClipboard(remoteValue);
+  await expect.poll(() => remotePushes).toBeGreaterThan(pushesBeforeRepeat);
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(localSentinel);
 
+  // A panel Fetch and Reveal are reads. Neither may cross the explicit Copy
+  // boundary and replace this unrelated local clipboard value.
   await page.getByRole("button", { name: "Open menu" }).click();
   await page.getByRole("button", { name: "Clipboard", exact: true }).click();
 
@@ -151,6 +178,21 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Clipboard sent to remote")).toBeVisible();
   await expect.poll(readRemoteClipboard).toBe(webValue);
+
+  // Some remote clipboard bridges re-announce host-provided text when the
+  // guest pastes it. That echo is not a guest copy/cut and must not travel
+  // back over a newer host clipboard.
+  const echoSentinel = `remotex-ui-after-send-${Date.now()}`;
+  await page.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    echoSentinel,
+  );
+  const pushesBeforeEcho = remotePushes;
+  setRemoteClipboard(webValue);
+  await expect.poll(() => remotePushes).toBeGreaterThan(pushesBeforeEcho);
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(echoSentinel);
 
   // Closing discards the reveal state; reopening fetches and conceals again.
   await page.getByRole("button", { name: "Close clipboard" }).click();
