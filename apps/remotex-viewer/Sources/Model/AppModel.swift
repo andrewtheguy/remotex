@@ -64,6 +64,12 @@ final class AppModel: GatewaySessionSink {
     /// surface last measured it. Nil until a surface exists.
     @ObservationIgnored
     private var viewportSize: DisplayMode?
+    @ObservationIgnored
+    private var viewportPolicy = ViewportPolicy()
+    /// Debounces automatic reports. A window drag changes the visible area on
+    /// every frame, and a VNC target acts on each one it is told about.
+    @ObservationIgnored
+    private var viewportDebounce: Task<Void, Never>?
     /// Deliberately outside Observation. Tiles arrive dozens of times a second;
     /// routing them through `@Observable` would invalidate the view hierarchy on
     /// every strip.
@@ -285,6 +291,7 @@ final class AppModel: GatewaySessionSink {
             session.manualResize = false
             session.canClipboard = false
             remoteCursor = nil
+            viewportPolicy = ViewportPolicy()
             updateClipboardEnablement()
             clipboard.failPendingFetch()
             Task { await loadTargets() }
@@ -299,12 +306,19 @@ final class AppModel: GatewaySessionSink {
             // them. RDP resizes only on request because a resize forces a heavy
             // Deactivation-Reactivation; rxa ignores viewport reports and offers a
             // fixed list instead; VNC is the only one that follows the window.
-            session.manualResize =
-                (payload.protocolName == "rdp" || payload.protocolName == "rxa")
-                    && payload.resize
+            viewportPolicy = ViewportPolicy(
+                protocolName: payload.protocolName,
+                resize: payload.resize
+            )
+            session.manualResize = viewportPolicy.manualOnly
             session.canResize = payload.protocolName == "rdp" && payload.resize
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
+            // The gateway knows nothing about this socket's window yet, and the
+            // dedupe from the previous connection would swallow an identical first
+            // report.
+            viewportPolicy.resetForNewConnection()
+            sendViewport(manual: false)
 
         case .resize(let w, let h):
             let size = DisplayMode(w: w, h: h)
@@ -392,8 +406,28 @@ final class AppModel: GatewaySessionSink {
     }
 
     /// The surface measured how much room it has, in device pixels.
+    ///
+    /// Debounced rather than sent straight through: a window drag reports on every
+    /// frame, and VNC acts on every report it receives.
     func reportViewport(_ size: DisplayMode) {
         viewportSize = size
+        viewportDebounce?.cancel()
+        viewportDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.sendViewport(manual: false)
+        }
+    }
+
+    private func sendViewport(manual: Bool) {
+        guard let viewportSize,
+              let message = viewportPolicy.report(viewportSize, manual: manual)
+        else {
+            return
+        }
+        connection?.send(message)
     }
 
     // MARK: - Actions
@@ -430,11 +464,12 @@ final class AppModel: GatewaySessionSink {
         connection?.send(.refresh)
     }
 
+    /// "Resize to Window": the one report that gets past `manualOnly`.
     func resizeToWindow() {
-        guard session.canResize, let viewportSize else {
+        guard session.canResize else {
             return
         }
-        connection?.send(.viewport(w: viewportSize.w, h: viewportSize.h))
+        sendViewport(manual: true)
     }
 
     /// Apply one of the resolutions the remote offered. Unlike `resizeToWindow`
