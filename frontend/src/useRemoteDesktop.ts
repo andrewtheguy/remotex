@@ -776,8 +776,8 @@ export function useRemoteDesktop(
           // into the browser's OS clipboard. Opening/revealing the panel is a
           // read action; its explicit Copy button is the consent boundary for
           // changing the local clipboard.
-          const { text, changedAtMs, requested } = msg;
-          const snapshot = { text, changedAtMs };
+          const { text, changedAtMs, requested, oversizedBytes } = msg;
+          const snapshot = { text, changedAtMs, oversizedBytes };
           setRemoteClipboard((prev) => ({
             ...snapshot,
             seq: (prev?.seq ?? 0) + 1,
@@ -795,7 +795,9 @@ export function useRemoteDesktop(
             // A copy on the remote is immediately pastable here. Best effort
             // by design: `writeText` is absent on a non-secure origin and can
             // reject when the tab is unfocused. Never mirror an empty push,
-            // which would wipe the local clipboard for a non-text remote copy.
+            // which would wipe the local clipboard for a non-text remote copy —
+            // a refused oversized copy arrives as one of those, and the panel
+            // is where its size is reported.
             mirrorRemoteClipboard(text);
           }
           break;

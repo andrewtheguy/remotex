@@ -56,6 +56,13 @@ export function ClipboardPanel({
   useDockedHeight(panelRef, onDockedHeightChange);
 
   const isRemoteMetadataMode = remoteClipboard !== null && !isManualInputActive;
+  // The remote's clipboard was refused for its size, so there is nothing to
+  // conceal, reveal or copy — only the size to report. Kept distinct from an
+  // empty clipboard, which is what a truncating transfer would have looked like.
+  const oversizedBytes =
+    isRemoteMetadataMode && remoteClipboard
+      ? remoteClipboard.oversizedBytes
+      : null;
   const remoteBytes = useMemo(
     () => encoder.encode(remoteClipboard?.text ?? ""),
     [remoteClipboard?.text],
@@ -71,6 +78,13 @@ export function ClipboardPanel({
             dateStyle: "short",
             timeStyle: "medium",
           });
+    if (remoteClipboard.oversizedBytes !== null) {
+      return [
+        `LEN ${remoteClipboard.oversizedBytes}B`,
+        `LIMIT ${MAX_CLIPBOARD_BYTES}B`,
+        `AT ${changedAt}`,
+      ];
+    }
     return [
       `CRC32 ${computeCrc32Hex(remoteBytes)}`,
       `LEN ${remoteBytes.byteLength}B`,
@@ -102,6 +116,20 @@ export function ClipboardPanel({
     setIsManualInputActive(true);
   }, [remoteClipboard]);
 
+  // The editor with nothing in it, for a remote clipboard there is no text for.
+  const startManualInput = useCallback(() => {
+    setClipboardInput("");
+    setIsManualInputActive(true);
+  }, []);
+
+  // Why Copy has nothing to put on this browser's clipboard. The two cases look
+  // identical from here — both are empty text — and only one of them means the
+  // remote copied nothing.
+  const emptyCopyNotice =
+    oversizedBytes === null
+      ? "Nothing to copy"
+      : "Remote clipboard too large to transfer";
+
   const selectClipboardText = useCallback((target: HTMLTextAreaElement) => {
     target.focus();
     target.select();
@@ -131,7 +159,7 @@ export function ClipboardPanel({
     // Same reason in the other direction: writing an empty string is not a
     // no-op, it clears this browser's clipboard.
     if (text.length === 0) {
-      setNotice("Nothing to copy");
+      setNotice(emptyCopyNotice);
       return;
     }
     if (navigator.clipboard?.writeText) {
@@ -170,6 +198,7 @@ export function ClipboardPanel({
     }
   }, [
     clipboardInput,
+    emptyCopyNotice,
     isRemoteMetadataMode,
     remoteClipboard,
     selectClipboardText,
@@ -193,7 +222,27 @@ export function ClipboardPanel({
       </div>
 
       <div className="cb-input-shell">
-        {isRemoteMetadataMode ? (
+        {oversizedBytes !== null ? (
+          /* Nothing was transferred, so there is no text behind this to
+             reveal. It still switches to the editor, which is the one thing
+             left to do from here — otherwise this state has no way out of
+             metadata mode and Send stays disabled for the session. */
+          <button
+            type="button"
+            className="cb-metadata-card"
+            onClick={startManualInput}
+            aria-label="Remote clipboard too large; switch to typing"
+          >
+            {metadataLines.map((line) => (
+              <span key={line} className="cb-metadata-primary">
+                {line}
+              </span>
+            ))}
+            <span className="cb-metadata-secondary">
+              Too large to transfer. Copy less on the remote, or click to type
+            </span>
+          </button>
+        ) : isRemoteMetadataMode ? (
           <button
             type="button"
             className="cb-metadata-card"

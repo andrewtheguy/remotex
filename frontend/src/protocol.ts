@@ -38,8 +38,8 @@ export type ClientMsg =
   | { type: "clipboardRequest" };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
-// src/protocol.rs. The backend clamps too; this is so the panel can say so
-// before the round trip.
+// src/protocol.rs. The backend refuses anything over it in either direction;
+// checking here too is what lets the panel say so before the round trip.
 export const MAX_CLIPBOARD_BYTES = 65_536;
 
 export interface ClipboardSnapshot {
@@ -47,6 +47,11 @@ export interface ClipboardSnapshot {
   // Unix epoch milliseconds when remotex observed the remote clipboard
   // change. Null is honest for clipboard content that predates this session.
   changedAtMs: number | null;
+  // Set when the remote's clipboard was refused for exceeding
+  // MAX_CLIPBOARD_BYTES, to the size it actually is. `text` is empty then, and
+  // this is what keeps that apart from a remote that has copied nothing —
+  // truncating instead would have arrived looking like the whole clipboard.
+  oversizedBytes: number | null;
 }
 
 export interface RemoteClipboard extends ClipboardSnapshot {
