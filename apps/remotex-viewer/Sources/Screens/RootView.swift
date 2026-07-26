@@ -1,17 +1,20 @@
 import SwiftUI
 
-struct ContentView: View {
+/// Which screen is showing, plus the chrome that outlives all of them: the
+/// clipboard card and its toolbar button, the window title, and the alert.
+struct RootView: View {
     let model: AppModel
 
     var body: some View {
         ZStack {
-            WebViewContainer(model: model)
-
-            switch model.bridgeStatus {
-            case .incompatible(let message), .failed(let message):
-                bridgeError(message)
-            case .loading, .ready:
-                EmptyView()
+            switch model.session.screen {
+            case .checking:
+                ProgressView()
+                    .controlSize(.large)
+            case .login:
+                LoginView(model: model)
+            case .picker, .desktop:
+                DesktopScreen(model: model)
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -54,7 +57,7 @@ struct ContentView: View {
         .alert(
             "remotex",
             isPresented: Binding(
-                get: { model.navigationError != nil },
+                get: { model.actionError != nil },
                 set: { showing in
                     if !showing {
                         model.clearError()
@@ -67,29 +70,11 @@ struct ContentView: View {
                 }
             },
             message: {
-                Text(model.navigationError ?? "")
+                Text(model.actionError ?? "")
             }
         )
-    }
-
-    private func bridgeError(_ message: String) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 36))
-                .foregroundStyle(.orange)
-            Text("Viewer integration unavailable")
-                .font(.title2)
-            Text(message)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: 440)
-            Button("Reload") {
-                model.reload()
-            }
-            .keyboardShortcut(.defaultAction)
+        .task {
+            await model.start()
         }
-        .padding(28)
-        .background(.regularMaterial, in: .rect(cornerRadius: 16))
-        .shadow(radius: 20)
     }
 }

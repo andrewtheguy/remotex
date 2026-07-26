@@ -17,7 +17,10 @@ struct NativeClipboardSnapshot: Equatable {
 final class ClipboardSynchronizer {
     static let maximumBytes = 65_536
 
-    var sendCommand: (([String: Any]) -> Void)?
+    /// Where a clipboard message goes. Typed rather than a dictionary, so this
+    /// speaks the same `ClientMessage` the socket does and cannot invent a shape
+    /// the gateway would drop.
+    var send: ((ClientMessage) -> Void)?
 
     private(set) var isEnabled = false
     private(set) var isPresented = false
@@ -201,10 +204,7 @@ final class ClipboardSynchronizer {
             return
         }
         lastToRemote = text
-        sendCommand?([
-            "type": "clipboard",
-            "text": text,
-        ])
+        send?(.clipboard(text: text))
     }
 
     func pollPasteboard() {
@@ -228,13 +228,14 @@ final class ClipboardSynchronizer {
             return
         }
         resetPanelContent()
+        // The request id is this object's own, not the wire's — `clipboardRequest`
+        // carries none, and the gateway answers with a single `clipboard` reply
+        // marked `requested`. Keeping the id means an answer that arrives after a
+        // close or a second Fetch still cannot land in the wrong panel.
         let requestID = makeRequestID()
         pendingRequestID = requestID
         isFetching = true
-        sendCommand?([
-            "type": "clipboardRequest",
-            "requestId": requestID,
-        ])
+        send?(.clipboardRequest)
         fetchDeadline?.cancel()
         fetchDeadline = Task { [weak self] in
             guard let self else {
@@ -279,9 +280,39 @@ final class ClipboardSynchronizer {
         return true
     }
 
-    /// Either the local deadline expired or the web side reported that it could
-    /// not read the remote clipboard at all. Both leave the panel open on an
-    /// empty editor, so the draft is still sendable.
+    /// The gateway's answer to a `clipboardRequest` — a `clipboard` message with
+    /// `requested` set. Correlated against the fetch in flight, since the wire
+    /// carries no request id of its own.
+    @discardableResult
+    func receiveFetchReply(
+        text: String,
+        changedAtMs: Int64?,
+        oversizedBytes: Int64?
+    ) -> Bool {
+        guard let pendingRequestID else {
+            return false
+        }
+        return receiveFetchResult(
+            requestID: pendingRequestID,
+            text: text,
+            changedAtMs: changedAtMs,
+            oversizedBytes: oversizedBytes
+        )
+    }
+
+    /// Give up on the fetch in flight, if there is one. Called when the socket
+    /// goes away or the session returns to the picker: nothing is left to answer,
+    /// so the button should not sit on "Fetching…" until its own deadline.
+    func failPendingFetch() {
+        guard let pendingRequestID else {
+            return
+        }
+        fetchUnavailable(requestID: pendingRequestID)
+    }
+
+    /// Either the local deadline expired or there is nothing left that could
+    /// answer. Both leave the panel open on an empty editor, so the draft is
+    /// still sendable.
     func fetchUnavailable(requestID: String) {
         guard isEnabled, isFetching, requestID == pendingRequestID else {
             return
@@ -357,10 +388,7 @@ final class ClipboardSynchronizer {
             return false
         }
         lastToRemote = draft
-        sendCommand?([
-            "type": "clipboard",
-            "text": draft,
-        ])
+        send?(.clipboard(text: draft))
         showNotice("Clipboard sent to remote")
         return true
     }

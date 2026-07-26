@@ -1,19 +1,18 @@
 @preconcurrency import AppKit
-import WebKit
 
 @MainActor
 final class KeyboardCapture {
     private weak var model: AppModel?
-    private weak var webView: WKWebView?
+    private weak var surface: NSView?
     private var translator = KeyboardTranslator()
     private var monitor: Any?
     private var observers: [NSObjectProtocol] = []
     private var firstResponderObservation: NSKeyValueObservation?
     private weak var observedWindow: NSWindow?
 
-    init(model: AppModel, webView: WKWebView) {
+    init(model: AppModel, surface: NSView) {
         self.model = model
-        self.webView = webView
+        self.surface = surface
         monitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .keyUp, .flagsChanged]
         ) { [weak self] event in
@@ -41,7 +40,7 @@ final class KeyboardCapture {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self, self.webView?.window?.isKeyWindow == false else {
+                    guard let self, self.surface?.window?.isKeyWindow == false else {
                         return
                     }
                     self.releaseAll()
@@ -70,7 +69,7 @@ final class KeyboardCapture {
     }
 
     func updateWindowObservation() {
-        guard let window = webView?.window else {
+        guard let window = surface?.window else {
             // Detached: the observation would otherwise keep the old window
             // alive and keep reporting its first responder as ours.
             firstResponderObservation?.invalidate()
@@ -93,23 +92,27 @@ final class KeyboardCapture {
         }
     }
 
+    /// Whether `responder` is the remote surface or something inside it.
+    ///
+    /// The gate that keeps typing into the clipboard card's editor from being
+    /// forwarded to the remote: an `NSTextView` is not the surface.
     static func capturesFirstResponder(
         _ responder: NSResponder?,
-        inside webView: WKWebView
+        inside surface: NSView
     ) -> Bool {
         guard let view = responder as? NSView else {
             return false
         }
-        return view === webView || view.isDescendant(of: webView)
+        return view === surface || view.isDescendant(of: surface)
     }
 
     private func consume(_ event: NSEvent) -> Bool {
-        guard let model, let webView, event.window === webView.window else {
+        guard let model, let surface, event.window === surface.window else {
             return false
         }
         guard Self.capturesFirstResponder(
-            webView.window?.firstResponder,
-            inside: webView
+            surface.window?.firstResponder,
+            inside: surface
         ) else {
             releaseAll()
             return false
@@ -147,12 +150,12 @@ final class KeyboardCapture {
 
     private func releaseAll() {
         translator.reset()
-        model?.releaseNativeKeys()
+        model?.releaseInput()
     }
 
     private func firstResponderChanged(_ responder: NSResponder?) {
-        guard let webView,
-              !Self.capturesFirstResponder(responder, inside: webView)
+        guard let surface,
+              !Self.capturesFirstResponder(responder, inside: surface)
         else {
             return
         }

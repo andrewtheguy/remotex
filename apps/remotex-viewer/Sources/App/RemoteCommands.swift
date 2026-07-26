@@ -28,11 +28,10 @@ struct RemoteCommands: Commands {
             Button("Resize to Window") {
                 model.resizeToWindow()
             }
-            .disabled(!model.session.canResize)
+            .disabled(!model.canResizeNow)
 
-            // The web floating menu is hidden while the viewer is attached, so
-            // without this a target whose only resize path is a fixed list
-            // (the Mac agent on a virtual display) could not be resized at all.
+            // A target whose only resize path is a fixed list — the Mac agent on
+            // a virtual display — has no other way to be resized.
             Menu("Resolution") {
                 ForEach(model.session.displayModes) { mode in
                     Button {
@@ -47,6 +46,14 @@ struct RemoteCommands: Commands {
                 }
             }
             .disabled(model.session.displayModes.isEmpty)
+
+            // The escape hatch for a framebuffer that has gone wrong: re-announce
+            // the size and repaint everything.
+            Button("Refresh") {
+                model.refresh()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(model.session.screen != .desktop)
 
             Button("Switch Target") {
                 model.switchTarget()
@@ -66,7 +73,7 @@ struct RemoteCommands: Commands {
             Divider()
 
             Button("Log Out") {
-                model.logout()
+                Task { await model.logOut() }
             }
             .disabled(
                 model.session.screen != .picker

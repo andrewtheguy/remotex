@@ -127,15 +127,17 @@ struct GatewayConnectionTests {
         let connection = GatewayConnection(
             gateway: gateway,
             sink: sink,
-            policy: ReconnectPolicy(baseMilliseconds: 1, capMilliseconds: 1)
+            policy: ReconnectPolicy(baseMilliseconds: 20, capMilliseconds: 20)
         )
 
         await connection.start()
-        await sink.wait { _ in gateway.claimCalls.count == 2 }
+        // `>=`, not `==`: once the scripted sockets run out the driver keeps
+        // retrying, so the count overshoots between polls.
+        await sink.wait { _ in gateway.claimCalls.count >= 2 }
         #expect(gateway.claimCalls[1].force == false)
         #expect(gateway.claimCalls[1].sessionId == "tok-1")
         await sink.wait { events in
-            events.filter { if case .status(.connected) = $0 { true } else { false } }.count == 2
+            events.filter { if case .status(.connected) = $0 { true } else { false } }.count >= 2
         }
         await connection.stop()
     }

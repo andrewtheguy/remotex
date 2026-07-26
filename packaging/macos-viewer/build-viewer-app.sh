@@ -49,10 +49,12 @@ version="$(
 }
 
 # An unbundled `swift run` has no Info.plist, so ProductInfo carries the same
-# value for development. Refuse to package a bridge that would reject itself.
+# value for development. It no longer guards a bridge handshake — the viewer and
+# the gateway now agree on a protocol version instead — but a package whose
+# fallback disagrees with the workspace would still report the wrong `--version`.
 development_version="$(
   sed -n 's/.*developmentVersion = "\([^"]*\)".*/\1/p' \
-    apps/remotex-viewer/Sources/ProductInfo.swift
+    apps/remotex-viewer/Sources/App/ProductInfo.swift
 )"
 [ "$development_version" = "$version" ] || {
   echo "viewer development version $development_version does not match $version" >&2

@@ -36,16 +36,14 @@ struct RemotexViewerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(model: model)
+            RootView(model: model)
                 .frame(minWidth: 900, minHeight: 640)
         }
         .defaultSize(width: 1440, height: 900)
         .commandsReplaced {
             RemoteCommands(model: model)
         }
-
-        Settings {
-            SettingsView(model: model)
-        }
+        // No Settings scene: the gateway address lives on the login screen, next
+        // to the credentials it goes with.
     }
 }
