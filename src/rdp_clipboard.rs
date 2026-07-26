@@ -40,7 +40,7 @@ use ironrdp::core::impl_as_any;
 use log::{debug, warn};
 use tokio::sync::mpsc;
 
-use crate::protocol::clamp_clipboard;
+use crate::protocol::clipboard_fits;
 
 /// What the channel processor noticed, for the session loop to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,28 +171,36 @@ pub fn pick_text_format(formats: &[ClipboardFormat]) -> Option<ClipboardFormatId
         .find(|&id| id == ClipboardFormatId::CF_UNICODETEXT)
 }
 
-/// Remote → browser: CRLF to LF, clamped to the browser link's ceiling.
+/// Remote → browser: CRLF to LF.
 ///
 /// Windows clipboard text uses CRLF. Passing it through would put a stray `\r`
 /// at the end of every line in the browser's textarea and in the local OS
 /// clipboard.
-pub fn from_remote(text: &str) -> String {
+///
+/// `Err(len)` when the text exceeds [`MAX_CLIPBOARD_BYTES`](crate::protocol::MAX_CLIPBOARD_BYTES), carrying the size
+/// it was: the caller reports that instead, because a truncated paste is
+/// indistinguishable from a whole one.
+pub fn from_remote(text: &str) -> Result<String, u64> {
     // Some servers pad the response past the terminator IronRDP already
     // stripped; a trailing NUL renders as a replacement glyph in the panel.
     let text = text.trim_end_matches('\0');
-    clamp_clipboard(text).replace("\r\n", "\n")
+    if !clipboard_fits(text) {
+        return Err(text.len() as u64);
+    }
+    Ok(text.replace("\r\n", "\n"))
 }
 
-/// Browser → remote: LF to CRLF, clamped first.
+/// Browser → remote: LF to CRLF.
 ///
 /// Normalizing to LF before expanding is what keeps text that already contains
-/// CRLF from coming out with doubled line breaks. The clamp runs first, so the
-/// expansion can overshoot the ceiling by the number of line breaks — harmless,
-/// and the alternative (clamping afterwards) can slice a CRLF pair in half.
-pub fn to_remote(text: &str) -> String {
-    clamp_clipboard(text)
-        .replace("\r\n", "\n")
-        .replace('\n', "\r\n")
+/// CRLF from coming out with doubled line breaks.
+///
+/// `None` when the text exceeds [`MAX_CLIPBOARD_BYTES`](crate::protocol::MAX_CLIPBOARD_BYTES) — the remote keeps what
+/// it had rather than taking ownership of a partial copy. The expansion can
+/// still overshoot the ceiling by the number of line breaks, which is the
+/// remote's own clipboard and no longer this link's problem.
+pub fn to_remote(text: &str) -> Option<String> {
+    clipboard_fits(text).then(|| text.replace("\r\n", "\n").replace('\n', "\r\n"))
 }
 
 #[cfg(test)]
@@ -202,36 +210,43 @@ mod tests {
 
     #[test]
     fn unix_line_endings_become_windows_ones() {
-        assert_eq!(to_remote("one\ntwo"), "one\r\ntwo");
-        assert_eq!(to_remote("trailing\n"), "trailing\r\n");
+        assert_eq!(to_remote("one\ntwo").unwrap(), "one\r\ntwo");
+        assert_eq!(to_remote("trailing\n").unwrap(), "trailing\r\n");
     }
 
     // The bug this guards: normalizing first is what stops "\r\n" turning into
     // "\r\r\n" and doubling every line break on the remote.
     #[test]
     fn windows_line_endings_are_not_doubled() {
-        assert_eq!(to_remote("one\r\ntwo"), "one\r\ntwo");
-        assert_eq!(to_remote("mixed\r\nand\nmatched"), "mixed\r\nand\r\nmatched");
+        assert_eq!(to_remote("one\r\ntwo").unwrap(), "one\r\ntwo");
+        assert_eq!(
+            to_remote("mixed\r\nand\nmatched").unwrap(),
+            "mixed\r\nand\r\nmatched"
+        );
     }
 
     // A lone CR is not a line ending in either convention, so neither
     // direction may invent one around it.
     #[test]
     fn a_bare_carriage_return_survives_both_directions() {
-        assert_eq!(to_remote("a\rb"), "a\rb");
-        assert_eq!(from_remote("a\rb"), "a\rb");
+        assert_eq!(to_remote("a\rb").unwrap(), "a\rb");
+        assert_eq!(from_remote("a\rb").unwrap(), "a\rb");
     }
 
     #[test]
     fn windows_line_endings_come_back_as_unix_ones() {
-        assert_eq!(from_remote("one\r\ntwo"), "one\ntwo");
-        assert_eq!(from_remote("no line breaks"), "no line breaks");
+        assert_eq!(from_remote("one\r\ntwo").unwrap(), "one\ntwo");
+        assert_eq!(from_remote("no line breaks").unwrap(), "no line breaks");
     }
 
     #[test]
     fn a_round_trip_through_the_remote_preserves_the_text() {
         for original in ["", "plain", "one\ntwo\nthree", "画面 ☕\nemoji 🚀"] {
-            assert_eq!(from_remote(&to_remote(original)), original, "{original:?}");
+            assert_eq!(
+                from_remote(&to_remote(original).unwrap()).unwrap(),
+                original,
+                "{original:?}"
+            );
         }
     }
 
@@ -239,20 +254,29 @@ mod tests {
     // a replacement glyph on the end of every paste.
     #[test]
     fn trailing_nul_padding_is_stripped() {
-        assert_eq!(from_remote("text\0"), "text");
-        assert_eq!(from_remote("text\0\0\0"), "text");
+        assert_eq!(from_remote("text\0").unwrap(), "text");
+        assert_eq!(from_remote("text\0\0\0").unwrap(), "text");
         // Only trailing: a NUL in the middle is the remote's own data.
-        assert_eq!(from_remote("a\0b"), "a\0b");
+        assert_eq!(from_remote("a\0b").unwrap(), "a\0b");
     }
 
+    // Refused in both directions rather than truncated: a partial paste is
+    // indistinguishable from a whole one, on either side of the link.
     #[test]
-    fn oversized_text_is_clamped_on_a_char_boundary() {
-        let text = "é".repeat(MAX_CLIPBOARD_BYTES); // two bytes each
-        let out = to_remote(&text);
-        assert_eq!(out.len(), MAX_CLIPBOARD_BYTES);
-        assert!(out.chars().all(|c| c == 'é'));
+    fn oversized_text_is_refused_in_both_directions() {
+        let text = "é".repeat(MAX_CLIPBOARD_BYTES); // two bytes each, so 2x over
+        assert_eq!(to_remote(&text), None);
+        assert_eq!(from_remote(&text), Err(text.len() as u64));
 
-        assert_eq!(from_remote(&text).len(), MAX_CLIPBOARD_BYTES);
+        // At the ceiling both still pass, so the boundary is inclusive.
+        let fits = "a".repeat(MAX_CLIPBOARD_BYTES);
+        assert_eq!(to_remote(&fits).unwrap().len(), MAX_CLIPBOARD_BYTES);
+        assert_eq!(from_remote(&fits).unwrap().len(), MAX_CLIPBOARD_BYTES);
+
+        // The size reported is the text's own, measured after the NUL padding
+        // this direction strips.
+        let padded = format!("{}\0\0", "a".repeat(MAX_CLIPBOARD_BYTES + 5));
+        assert_eq!(from_remote(&padded), Err(MAX_CLIPBOARD_BYTES as u64 + 5));
     }
 
     #[test]

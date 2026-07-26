@@ -207,6 +207,7 @@ async fn serve_fake_agent(
                                 text: pasteboard.clone(),
                                 changed_at_ms: clipboard_changed_at_ms,
                                 requested: false,
+                                oversized_bytes: None,
                             }
                             .encode(),
                         )
@@ -221,6 +222,7 @@ async fn serve_fake_agent(
                             text: pasteboard.clone(),
                             changed_at_ms: clipboard_changed_at_ms,
                             requested: true,
+                            oversized_bytes: None,
                         }
                         .encode(),
                     )

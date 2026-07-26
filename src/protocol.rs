@@ -21,11 +21,11 @@ use serde::{Deserialize, Serialize};
 /// produce one huge WebSocket message.
 pub const STRIP_ROWS: u16 = 64;
 
-/// The clipboard transfer cap and its clamp, defined in `rxa-proto` so the
+/// The clipboard transfer cap and its test, defined in `rxa-proto` so the
 /// browser link, the gateway and the Mac agent cannot drift apart on it (the
 /// agent crate can't see this file). Re-exported here because every other
 /// boundary in this crate reaches for `protocol::` first.
-pub use rxa_proto::msg::{MAX_CLIPBOARD_BYTES, clamp_clipboard};
+pub use rxa_proto::msg::{MAX_CLIPBOARD_BYTES, clipboard_fits};
 
 /// A remote clipboard value held by an engine, plus when remotex last observed
 /// that clipboard change. `None` is honest for content that predates the
@@ -35,16 +35,32 @@ pub use rxa_proto::msg::{MAX_CLIPBOARD_BYTES, clamp_clipboard};
 pub struct ClipboardSnapshot {
     pub text: String,
     pub changed_at_ms: Option<u64>,
+    /// `Some(len)` when the remote's clipboard was refused for exceeding
+    /// [`MAX_CLIPBOARD_BYTES`], carrying the size it actually was. `text` is
+    /// empty then — build these through [`Self::oversized`], because empty text
+    /// on its own already means "the remote has copied nothing".
+    pub oversized_bytes: Option<u64>,
 }
 
 impl ClipboardSnapshot {
     /// Record a clipboard change observed right now.
     pub fn changed(text: String, previous: Option<&Self>) -> Self {
-        let previous = previous.and_then(|snapshot| snapshot.changed_at_ms);
-        let changed_at_ms = rxa_proto::next_clipboard_time(previous);
         Self {
             text,
-            changed_at_ms: Some(changed_at_ms),
+            changed_at_ms: Some(Self::now(previous)),
+            oversized_bytes: None,
+        }
+    }
+
+    /// Record that the remote holds `bytes` of text, too much to transfer.
+    ///
+    /// Still a clipboard change with a timestamp: something was copied over
+    /// there, and the panel says so — just not what.
+    pub fn oversized(bytes: u64, previous: Option<&Self>) -> Self {
+        Self {
+            text: String::new(),
+            changed_at_ms: Some(Self::now(previous)),
+            oversized_bytes: Some(bytes),
         }
     }
 
@@ -54,7 +70,12 @@ impl ClipboardSnapshot {
         Self {
             text: String::new(),
             changed_at_ms: None,
+            oversized_bytes: None,
         }
+    }
+
+    fn now(previous: Option<&Self>) -> u64 {
+        rxa_proto::next_clipboard_time(previous.and_then(|snapshot| snapshot.changed_at_ms))
     }
 }
 
@@ -316,6 +337,9 @@ pub enum ServerMsg {
         text: String,
         changed_at_ms: Option<u64>,
         requested: bool,
+        /// `Some(len)` when the remote's clipboard was refused for exceeding
+        /// [`MAX_CLIPBOARD_BYTES`] — see [`ClipboardSnapshot::oversized_bytes`].
+        oversized_bytes: Option<u64>,
     },
     /// The resolutions the remote display will accept, largest first — the menu
     /// behind the floating menu's Resolution section, answered with
@@ -364,6 +388,8 @@ enum ControlMsg<'a> {
         #[serde(rename = "changedAtMs")]
         changed_at_ms: Option<u64>,
         requested: bool,
+        #[serde(rename = "oversizedBytes")]
+        oversized_bytes: Option<u64>,
     },
     DisplayModes { modes: Vec<Resolution> },
 }
@@ -414,17 +440,23 @@ impl ServerMsg {
             ServerMsg::RemoteOs { macos } => {
                 WireFrame::Text(control(&ControlMsg::RemoteOs { macos: *macos }))
             }
-            // Clamped here as well as at the engines, so no path can put an
-            // unbounded string on the browser link.
+            // The last gate on the browser link, behind each engine's own: an
+            // oversized value is reported as its size rather than sent, so no
+            // path can put an unbounded string on this link.
             ServerMsg::Clipboard {
                 text,
                 changed_at_ms,
                 requested,
-            } => WireFrame::Text(control(&ControlMsg::Clipboard {
-                text: clamp_clipboard(text),
-                changed_at_ms: *changed_at_ms,
-                requested: *requested,
-            })),
+                oversized_bytes,
+            } => {
+                let refused = (!clipboard_fits(text)).then_some(text.len() as u64);
+                WireFrame::Text(control(&ControlMsg::Clipboard {
+                    text: if refused.is_some() { "" } else { text },
+                    changed_at_ms: *changed_at_ms,
+                    requested: *requested,
+                    oversized_bytes: oversized_bytes.or(refused),
+                }))
+            }
             ServerMsg::DisplayModes { modes } => WireFrame::Text(control(&ControlMsg::DisplayModes {
                 modes: modes.iter().map(|&(w, h)| Resolution { w, h }).collect(),
             })),
@@ -542,13 +574,14 @@ mod tests {
             text: "hi \"there\"".to_owned(),
             changed_at_ms: Some(1_721_234_567_890),
             requested: false,
+            oversized_bytes: None,
         })
         .encode()
         {
             WireFrame::Text(json) => {
                 assert_eq!(
                     json,
-                    r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890,"requested":false}"#
+                    r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890,"requested":false,"oversizedBytes":null}"#
                 );
             }
             other => panic!("clipboard should be a text frame: {other:?}"),
@@ -557,13 +590,14 @@ mod tests {
             text: String::new(),
             changed_at_ms: None,
             requested: true,
+            oversized_bytes: None,
         })
         .encode()
         {
             WireFrame::Text(json) => {
                 assert_eq!(
                     json,
-                    r#"{"type":"clipboard","text":"","changedAtMs":null,"requested":true}"#
+                    r#"{"type":"clipboard","text":"","changedAtMs":null,"requested":true,"oversizedBytes":null}"#
                 );
             }
             other => panic!("clipboard should be a text frame: {other:?}"),
@@ -587,38 +621,65 @@ mod tests {
         }
     }
 
-    // Nothing may put an unbounded string on the browser link, and a cut in the
-    // middle of a multi-byte character would not be valid UTF-8 to cut at.
+    // Nothing may put an unbounded string on the browser link. Refused rather
+    // than truncated: the browser is told the size so it can say so, where the
+    // first 64 KiB of a copy could not be told from all of it.
     #[test]
-    fn clipboard_text_is_clamped_on_a_char_boundary() {
-        let text = "é".repeat(MAX_CLIPBOARD_BYTES); // 2 bytes each
-        let clamped = clamp_clipboard(&text);
-        assert_eq!(clamped.len(), MAX_CLIPBOARD_BYTES);
-        assert!(clamped.chars().all(|c| c == 'é'));
+    fn oversized_clipboard_text_is_refused_with_its_size() {
+        assert!(clipboard_fits(&"a".repeat(MAX_CLIPBOARD_BYTES)));
+        assert!(!clipboard_fits(&"a".repeat(MAX_CLIPBOARD_BYTES + 1)));
+        // Bytes, not characters: two-byte chars hit the ceiling twice as fast.
+        assert!(!clipboard_fits(&"é".repeat(MAX_CLIPBOARD_BYTES)));
 
-        // An odd cap would land mid-character; the clamp must back off.
-        let text = format!("{}é", "a".repeat(MAX_CLIPBOARD_BYTES - 1));
-        assert_eq!(clamp_clipboard(&text).len(), MAX_CLIPBOARD_BYTES - 1);
-
-        // Fits: returned untouched.
-        assert_eq!(clamp_clipboard("short"), "short");
-
+        let oversized = MAX_CLIPBOARD_BYTES + 10;
         match (ServerMsg::Clipboard {
-            text: "x".repeat(MAX_CLIPBOARD_BYTES + 10),
+            text: "x".repeat(oversized),
             changed_at_ms: Some(42),
             requested: true,
+            oversized_bytes: None,
         })
         .encode()
         {
             WireFrame::Text(json) => assert_eq!(
                 json,
                 format!(
-                    r#"{{"type":"clipboard","text":"{}","changedAtMs":42,"requested":true}}"#,
-                    "x".repeat(MAX_CLIPBOARD_BYTES)
+                    r#"{{"type":"clipboard","text":"","changedAtMs":42,"requested":true,"oversizedBytes":{oversized}}}"#
                 )
             ),
             other => panic!("clipboard should be a text frame: {other:?}"),
         }
+
+        // An engine that already refused it says so itself, and that size is
+        // kept rather than recomputed from the empty text it sent.
+        match (ServerMsg::Clipboard {
+            text: String::new(),
+            changed_at_ms: Some(42),
+            requested: false,
+            oversized_bytes: Some(209_715_200),
+        })
+        .encode()
+        {
+            WireFrame::Text(json) => assert_eq!(
+                json,
+                r#"{"type":"clipboard","text":"","changedAtMs":42,"requested":false,"oversizedBytes":209715200}"#
+            ),
+            other => panic!("clipboard should be a text frame: {other:?}"),
+        }
+    }
+
+    // Empty text alone means "the remote has copied nothing", so the oversized
+    // marker is what keeps the two apart.
+    #[test]
+    fn an_oversized_snapshot_is_distinguishable_from_an_empty_one() {
+        let oversized = ClipboardSnapshot::oversized(209_715_200, None);
+        assert!(oversized.text.is_empty());
+        assert_eq!(oversized.oversized_bytes, Some(209_715_200));
+        assert!(oversized.changed_at_ms.is_some(), "still clipboard activity");
+
+        let unobserved = ClipboardSnapshot::unobserved();
+        assert!(unobserved.text.is_empty());
+        assert_eq!(unobserved.oversized_bytes, None);
+        assert_eq!(unobserved.changed_at_ms, None);
     }
 
     #[test]
@@ -626,6 +687,7 @@ mod tests {
         let first = ClipboardSnapshot {
             text: "same text".to_owned(),
             changed_at_ms: Some(rxa_proto::unix_time_ms().saturating_add(1_000)),
+            oversized_bytes: None,
         };
         let second = ClipboardSnapshot::changed("same text".to_owned(), Some(&first));
         assert_eq!(second.text, first.text);

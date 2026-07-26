@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
-use rxa_proto::msg::{AgentMsg, GatewayMsg, clamp_clipboard};
+use rxa_proto::msg::{AgentMsg, GatewayMsg, MAX_CLIPBOARD_BYTES, clipboard_fits};
 use rxa_proto::next_clipboard_time;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -433,17 +433,8 @@ async fn pump(
                     // pasteboard holds an image": the browser wants text.
                     GatewayMsg::ClipboardRequest => {
                         let text = pasteboard::read().unwrap_or_default();
-                        let text = clamp_clipboard(&text);
-                        debug!("session: pasteboard read, {} bytes", text.len());
                         writer
-                            .send(
-                                &AgentMsg::Clipboard {
-                                    text: text.to_owned(),
-                                    changed_at_ms: clipboard_changed_at_ms,
-                                    requested: true,
-                                }
-                                .encode(),
-                            )
+                            .send(&clipboard_msg(text, clipboard_changed_at_ms, true).encode())
                             .await?;
                     }
                     GatewayMsg::Clipboard { text } => {
@@ -457,7 +448,20 @@ async fn pump(
                         // is no negative acknowledgement on this wire, and
                         // AgentMsg::Error is fatal at the gateway — far too
                         // blunt for one lost paste.
-                        let wrote = pasteboard::write(clamp_clipboard(&text));
+                        // Oversized text is refused outright rather than written
+                        // in part: a partial paste on the Mac would look like the
+                        // whole thing. Every layer above refuses it too, so this
+                        // is the last line rather than the expected one.
+                        let wrote = if clipboard_fits(&text) {
+                            pasteboard::write(&text)
+                        } else {
+                            warn!(
+                                "session: refusing {} bytes to the pasteboard, over the {} byte limit",
+                                text.len(),
+                                MAX_CLIPBOARD_BYTES
+                            );
+                            false
+                        };
                         // Our own write bumps the counter. Without this the
                         // watcher would read it straight back and push it to
                         // the browser that just sent it.
@@ -588,16 +592,9 @@ async fn pump(
                         // moved. An empty string covers a pasteboard holding
                         // an image or a file — the browser wants text.
                         let text = pasteboard::read().unwrap_or_default();
-                        let text = clamp_clipboard(&text);
-                        debug!("session: pasteboard changed, pushing {} bytes", text.len());
                         writer
                             .send(
-                                &AgentMsg::Clipboard {
-                                    text: text.to_owned(),
-                                    changed_at_ms: Some(changed_at_ms),
-                                    requested: false,
-                                }
-                                .encode(),
+                                &clipboard_msg(text, Some(changed_at_ms), false).encode(),
                             )
                             .await?;
                     }
@@ -630,6 +627,33 @@ async fn pump(
 /// Read fresh every time rather than cached: the list is regenerated whenever
 /// the host resizes a virtual display, so the only correct list is the one read
 /// at the moment it is sent.
+/// One pasteboard read as a message for the gateway.
+///
+/// Text over [`MAX_CLIPBOARD_BYTES`] is reported as its size instead of being
+/// truncated to fit: the browser can then say the Mac's clipboard is too large,
+/// where a truncated paste would arrive looking like all of it.
+fn clipboard_msg(text: String, changed_at_ms: Option<u64>, requested: bool) -> AgentMsg {
+    if clipboard_fits(&text) {
+        debug!("session: pasteboard read, {} bytes", text.len());
+        return AgentMsg::Clipboard {
+            text,
+            changed_at_ms,
+            requested,
+            oversized_bytes: None,
+        };
+    }
+    debug!(
+        "session: pasteboard holds {} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit",
+        text.len()
+    );
+    AgentMsg::Clipboard {
+        oversized_bytes: Some(text.len() as u64),
+        text: String::new(),
+        changed_at_ms,
+        requested,
+    }
+}
+
 async fn send_modes(
     writer: &mut FrameWriter<OwnedWriteHalf>,
     display_id: u32,

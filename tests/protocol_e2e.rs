@@ -606,23 +606,30 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
         .expect("cut text channel closed");
     assert_eq!(received, b"typed ? here");
 
-    // And an oversized copy reaches the server truncated. The browser's own
-    // ceiling is a panel affordance the automatic sync skips deliberately, so
-    // the engine is what has to hold the line. This pins the latin-1 cut end to
-    // end; the extended path's own ceiling is covered in vnc_clipboard.rs.
-    // ASCII keeps the clamp's char boundary and the latin-1 length the same
-    // number.
+    // An oversized copy reaches the server not at all. Truncating it would hand
+    // the remote a paste that looks whole, so the engine drops it and the
+    // remote keeps the clipboard it had. The browser refuses this itself and
+    // says why; the engine is the belt to that.
     let oversized = "a".repeat(MAX_CLIPBOARD_BYTES + 5_000);
     ws.send(Message::text(format!(
         r#"{{"type":"clipboard","text":"{oversized}"}}"#
     )))
     .await
     .unwrap();
+    // Nothing on the wire for it, and — the reason this is worth asserting over
+    // the socket rather than in a unit test — the session is still live
+    // afterwards: the next copy goes through on the same connection.
+    ws.send(Message::text(r#"{"type":"clipboard","text":"after refusal"}"#))
+        .await
+        .unwrap();
+    // The channel is FIFO, so the next thing on it being this proves the
+    // oversized copy produced nothing — whole or truncated — and that the
+    // refusal cost the session nothing.
     let received = tokio::time::timeout(Duration::from_secs(10), cut_texts.recv())
         .await
-        .expect("timed out waiting for the clamped ClientCutText")
+        .expect("timed out waiting for ClientCutText")
         .expect("cut text channel closed");
-    assert_eq!(received.len(), MAX_CLIPBOARD_BYTES);
+    assert_eq!(received, b"after refusal");
 }
 
 // A fetch is answered even when the remote has copied nothing, and the answer

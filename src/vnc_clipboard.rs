@@ -43,7 +43,7 @@ use std::io::Read as _;
 
 use anyhow::Context as _;
 
-use crate::protocol::{MAX_CLIPBOARD_BYTES, clamp_clipboard};
+use crate::protocol::{MAX_CLIPBOARD_BYTES, clipboard_fits};
 
 /// The pseudo-encoding advertised in SetEncodings to turn this on.
 pub const ENCODING: i32 = 0xc0a1_e5ce_u32 as i32;
@@ -101,6 +101,11 @@ pub enum Incoming {
     /// The data itself. `None` when the message carried no text format, which
     /// is an image or file copy we have nowhere to put.
     Provide(Option<String>),
+    /// The peer's text is larger than [`MAX_CLIPBOARD_BYTES`], carrying the size
+    /// it declared. Refused rather than inflated: reporting the size lets the
+    /// panel say what happened, where the first 64 KiB of it could not be told
+    /// from the whole clipboard.
+    Oversized(u64),
     /// An action this build does not implement. Named rather than an error:
     /// the extension is open-ended and an unknown action is not a protocol
     /// violation, just something to ignore.
@@ -127,7 +132,7 @@ pub fn parse(body: &[u8]) -> anyhow::Result<Incoming> {
         ACTION_REQUEST => Ok(Incoming::Request(formats)),
         ACTION_PEEK => Ok(Incoming::Peek),
         ACTION_NOTIFY => Ok(Incoming::Notify(formats)),
-        ACTION_PROVIDE => Ok(Incoming::Provide(parse_provide(formats, rest)?)),
+        ACTION_PROVIDE => parse_provide(formats, rest),
         other => Ok(Incoming::Unknown(other)),
     }
 }
@@ -138,7 +143,7 @@ pub fn parse(body: &[u8]) -> anyhow::Result<Incoming> {
 /// byte count followed by that many bytes. Formats before the text one have to
 /// be walked past rather than skipped to, since their sizes are only known from
 /// the stream itself.
-fn parse_provide(formats: u32, deflated: &[u8]) -> anyhow::Result<Option<String>> {
+fn parse_provide(formats: u32, deflated: &[u8]) -> anyhow::Result<Incoming> {
     let mut stream = flate2::read::ZlibDecoder::new(deflated).take(MAX_INFLATED);
     let mut inflated = Vec::new();
     stream
@@ -155,15 +160,31 @@ fn parse_provide(formats: u32, deflated: &[u8]) -> anyhow::Result<Option<String>
             .split_at_checked(4)
             .context("extended clipboard payload ended inside a length")?;
         let size = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+        // Past the inflate cap the data cannot all be here — but this length
+        // prefix sits at the front of the stream and survived, so the size is
+        // reported from it rather than as "at least the cap". It describes the
+        // wire form, a little larger than the text inside it, which at these
+        // sizes is noise.
+        if format == FORMAT_TEXT && size as u64 > MAX_INFLATED {
+            return Ok(Incoming::Oversized(size as u64));
+        }
         let (data, tail) = tail
             .split_at_checked(size)
             .context("extended clipboard payload ended inside its data")?;
         if format == FORMAT_TEXT {
-            return Ok(Some(from_wire(data)));
+            // Measured after decoding, not on the payload: the wire form carries
+            // a NUL terminator and a CR per line break, so text exactly at the
+            // ceiling declares a size just past it and must still be accepted.
+            let text = from_wire(data);
+            return Ok(if clipboard_fits(&text) {
+                Incoming::Provide(Some(text))
+            } else {
+                Incoming::Oversized(text.len() as u64)
+            });
         }
         rest = tail;
     }
-    Ok(None)
+    Ok(Incoming::Provide(None))
 }
 
 /// The 4-byte flags word, big-endian: actions in the top byte, the full
@@ -206,17 +227,20 @@ pub fn request(formats: u32) -> Vec<u8> {
 
 /// The text itself, deflated.
 ///
-/// Clamped here, not trusted to arrive clamped: this is the deferred half of a
-/// browser copy, so the text comes from a Provide request that can land long
-/// after the copy did. The latin-1 path has the same ceiling of its own
-/// (`latin1_from_str` in src/vnc.rs), and [`MAX_INFLATED`] on the way back in
-/// assumes it. The clamp runs before [`to_wire`], so the wire form can overshoot
-/// by one byte per line break plus the NUL — harmless, where clamping afterwards
-/// could slice a CRLF pair or a multi-byte character in half.
+/// Refused over [`MAX_CLIPBOARD_BYTES`], not truncated: this is the deferred
+/// half of a browser copy, so the text comes from a Provide request that can
+/// land long after the copy did, and a partial answer here would reach the
+/// remote looking like the whole clipboard. [`MAX_INFLATED`] on the way back in
+/// assumes the same ceiling.
 pub fn provide(text: &str) -> anyhow::Result<Vec<u8>> {
     use std::io::Write as _;
 
-    let wire = to_wire(clamp_clipboard(text));
+    anyhow::ensure!(
+        clipboard_fits(text),
+        "clipboard is {} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit",
+        text.len()
+    );
+    let wire = to_wire(text);
     let mut payload = (wire.len() as u32).to_be_bytes().to_vec();
     payload.extend_from_slice(&wire);
 
@@ -290,27 +314,51 @@ mod tests {
         }
     }
 
-    // No path may hand the remote an unbounded string. The latin-1 cut carries
-    // its own ceiling, and before this the extended path had none: an oversized
-    // copy went out whole, and would have come back past MAX_INFLATED.
+    // No path may hand the remote an unbounded string, and none may hand it a
+    // partial one either: a truncated paste arrives looking complete.
     #[test]
-    fn an_oversized_provide_is_clamped_rather_than_sent_whole() {
-        let text = "a".repeat(MAX_CLIPBOARD_BYTES + 5_000);
-        match roundtrip(&provide(&text).expect("provide")) {
-            Incoming::Provide(Some(out)) => assert_eq!(out.len(), MAX_CLIPBOARD_BYTES),
+    fn an_oversized_provide_is_refused_rather_than_sent_or_truncated() {
+        assert!(provide(&"a".repeat(MAX_CLIPBOARD_BYTES + 1)).is_err());
+        // Bytes, not characters: two-byte chars reach the ceiling twice as fast.
+        assert!(provide(&"é".repeat(MAX_CLIPBOARD_BYTES)).is_err());
+
+        // At the ceiling it encodes and round-trips whole, so the boundary is
+        // inclusive and nothing was quietly dropped from the end. Also the case
+        // that catches the ceiling being applied to the wire form: the NUL
+        // `to_wire` appends would put this one byte over.
+        let fits = "a".repeat(MAX_CLIPBOARD_BYTES);
+        match roundtrip(&provide(&fits).expect("fits")) {
+            Incoming::Provide(Some(out)) => assert_eq!(out, fits),
             other => panic!("expected a text provide, got {other:?}"),
         }
 
-        // The boundary is a char boundary, so a multi-byte tail is dropped
-        // whole rather than cut in half (which would arrive as U+FFFD).
-        let two_byte = "é".repeat(MAX_CLIPBOARD_BYTES); // 2 bytes each
-        match roundtrip(&provide(&two_byte).expect("provide")) {
-            Incoming::Provide(Some(out)) => {
-                assert_eq!(out.len(), MAX_CLIPBOARD_BYTES);
-                assert!(!out.contains('\u{fffd}'), "a char was sliced in half");
-            }
+        // And a line break, whose CR expansion is the other way the wire form
+        // outgrows the text it carries.
+        let lines = format!("{}\n{}", "a".repeat(30_000), "b".repeat(35_535));
+        assert_eq!(lines.len(), MAX_CLIPBOARD_BYTES);
+        match roundtrip(&provide(&lines).expect("fits")) {
+            Incoming::Provide(Some(out)) => assert_eq!(out, lines),
             other => panic!("expected a text provide, got {other:?}"),
         }
+    }
+
+    // The other direction: a peer whose clipboard is too big is reported as its
+    // size, which the panel can name, rather than as a truncated paste.
+    #[test]
+    fn an_oversized_incoming_provide_reports_its_declared_size() {
+        let text = "a".repeat(MAX_CLIPBOARD_BYTES + 5_000);
+        // Built the way a peer would, bypassing our own outbound refusal.
+        let wire = to_wire(&text);
+        let mut payload = (wire.len() as u32).to_be_bytes().to_vec();
+        payload.extend_from_slice(&wire);
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &payload).expect("deflate");
+        let mut body = flags(ACTION_PROVIDE, FORMAT_TEXT).to_vec();
+        body.extend_from_slice(&encoder.finish().expect("finish"));
+
+        // The declared length, not the ceiling and not "at least the cap".
+        assert_eq!(roundtrip(&body), Incoming::Oversized(wire.len() as u64));
     }
 
     #[test]
@@ -467,8 +515,10 @@ mod tests {
 
         let mut body = flags(ACTION_PROVIDE, FORMAT_TEXT).to_vec();
         body.extend_from_slice(&deflated);
-        // Truncated by the cap, so the length prefix no longer matches and the
-        // parse fails — refused, not swallowed whole.
-        assert!(parse(&body).is_err());
+        // Inflation stopped at the cap, and the length prefix that survived at
+        // the front is what names the size — so a bomb is refused as merely
+        // oversized rather than inflated or swallowed whole. The number is the
+        // peer's own claim, which is only ever displayed.
+        assert_eq!(parse(&body).expect("parse"), Incoming::Oversized(huge.len() as u64));
     }
 }

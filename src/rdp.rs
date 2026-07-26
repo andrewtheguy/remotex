@@ -361,15 +361,30 @@ async fn active_loop(
                         clipboard_retry_at = None;
                         // Only advertised, not sent. The remote asks for the
                         // bytes if and when someone pastes.
-                        let text = rdp_clipboard::to_remote(text);
-                        debug!("rdp: advertising {} bytes to the remote clipboard", text.len());
-                        local_clipboard = Some(text);
-                        advertise_clipboard(
-                            &mut active_stage,
-                            &mut framed,
-                            local_clipboard.as_deref(),
-                        )
-                        .await?;
+                        match rdp_clipboard::to_remote(text) {
+                            Some(text) => {
+                                debug!(
+                                    "rdp: advertising {} bytes to the remote clipboard",
+                                    text.len()
+                                );
+                                local_clipboard = Some(text);
+                                advertise_clipboard(
+                                    &mut active_stage,
+                                    &mut framed,
+                                    local_clipboard.as_deref(),
+                                )
+                                .await?;
+                            }
+                            // Refused, so the remote keeps whatever it had:
+                            // advertising a partial copy would hand out a paste
+                            // that looks complete. Both clients refuse this and
+                            // say why before it reaches the gateway.
+                            None => warn!(
+                                "rdp: refusing {} bytes to the remote clipboard, over the {} byte limit",
+                                text.len(),
+                                crate::protocol::MAX_CLIPBOARD_BYTES
+                            ),
+                        }
                     }
                     continue;
                 }
@@ -386,6 +401,7 @@ async fn active_loop(
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
                                 requested: true,
+                                oversized_bytes: snapshot.oversized_bytes,
                             })
                             .await
                             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
@@ -444,16 +460,29 @@ async fn active_loop(
                     ClipboardEvent::RemoteData(text) => {
                         pending_clipboard_read = None;
                         clipboard_retry_at = None;
-                        let text = rdp_clipboard::from_remote(&text);
-                        debug!("rdp: remote clipboard updated, {} bytes", text.len());
-                        let snapshot =
-                            ClipboardSnapshot::changed(text, remote_clipboard.as_ref());
+                        let snapshot = match rdp_clipboard::from_remote(&text) {
+                            Ok(text) => {
+                                debug!("rdp: remote clipboard updated, {} bytes", text.len());
+                                ClipboardSnapshot::changed(text, remote_clipboard.as_ref())
+                            }
+                            // Reported as its size instead of the first 64 KiB
+                            // of it: the panel can say what happened, where a
+                            // truncated paste could not be told from a whole one.
+                            Err(bytes) => {
+                                debug!(
+                                    "rdp: remote clipboard is {bytes} bytes, over the {} byte limit",
+                                    crate::protocol::MAX_CLIPBOARD_BYTES
+                                );
+                                ClipboardSnapshot::oversized(bytes, remote_clipboard.as_ref())
+                            }
+                        };
                         remote_clipboard = Some(snapshot.clone());
                         frame_tx
                             .send(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
                                 requested: false,
+                                oversized_bytes: snapshot.oversized_bytes,
                             })
                             .await
                             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
