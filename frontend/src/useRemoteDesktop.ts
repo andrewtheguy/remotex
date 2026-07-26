@@ -179,6 +179,13 @@ interface CursorImage {
   h: number;
 }
 
+// How small the virtual pointer may get on screen, in CSS pixels across its
+// longer side. Zoomed out to fit a phone, a pointer drawn at the desktop's own
+// scale is a few pixels across, and the pointer is the one thing on screen that
+// has to stay findable. Deliberately low: the pointer should read as part of
+// the desktop it sits on, so the floor is a last resort rather than a size.
+const MIN_POINTER_CSS_PX = 14;
+
 // The engine's pointer state. `image` is null when the remote hid the pointer;
 // the state as a whole is null while the remote is drawing it itself.
 interface RemoteCursor {
@@ -269,12 +276,17 @@ function paintCursor(
     pointer.style.display = "none";
     return;
   }
-  // The desktop's on-screen scale places the pointer on its remote position;
-  // the pointer itself is never drawn below 1:1, because zoomed out to fit a
-  // phone screen a shrunken pointer is the last thing that can afford to
-  // shrink.
+  // The desktop's on-screen scale places the pointer on its remote position
+  // and sizes it to match the desktop under it, floored at a minimum size so
+  // it stays visible when the desktop is scaled down to fit.
+  //
+  // The floor is an on-screen size, not one CSS pixel per cursor pixel: the
+  // shape arrives in remote framebuffer pixels, so a Retina remote sends it at
+  // 2x (an `rxa` Mac always does), and pinning that to 1:1 drew a pointer
+  // several times the size of everything around it on a phone.
   const view = rect.width / size.w;
-  const draw = Math.max(view, 1);
+  const extent = Math.max(image.w, image.h);
+  const draw = extent > 0 ? Math.max(view, MIN_POINTER_CSS_PX / extent) : view;
   if (pointer.src !== image.url) {
     pointer.src = image.url;
   }
