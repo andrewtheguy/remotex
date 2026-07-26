@@ -24,6 +24,15 @@ struct GatewayLocationTests {
         }
     }
 
+    /// Equality decides whether the gateway *changed*, which tears the session
+    /// down and forgets the login cookie. Case alone must not read as a new host.
+    @Test
+    func aHostIsNormalizedToLowercase() throws {
+        let mixed = try GatewayLocation.parse("http://Example.Test:8443")
+        #expect(mixed.url.absoluteString == "http://example.test:8443/")
+        #expect(mixed == (try GatewayLocation.parse("http://example.test:8443")))
+    }
+
     @Test
     func originUsesDefaultPorts() throws {
         let https = try GatewayLocation.parse("https://example.test")

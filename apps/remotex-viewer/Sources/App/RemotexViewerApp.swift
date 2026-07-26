@@ -18,21 +18,31 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// The process entry point, ahead of SwiftUI.
+///
+/// Both command-line paths have to be answered before an application exists:
+/// `--probe` runs its own main loop and never returns, and neither it nor
+/// `--version` wants a window. Doing this in `RemotexViewerApp.init()` meant
+/// SwiftUI had already begun bringing one up around them.
 @main
-struct RemotexViewerApp: App {
-    @NSApplicationDelegateAdaptor(ViewerApplicationDelegate.self)
-    private var applicationDelegate
-    @State private var model = AppModel()
-
-    init() {
-        NSWindow.allowsAutomaticWindowTabbing = false
-
+@MainActor
+enum ViewerMain {
+    static func main() {
         if CommandLine.arguments.contains("--version") {
             print("remotex-viewer \(ProductInfo.version)")
             Foundation.exit(EXIT_SUCCESS)
         }
         ProbeCommand.runIfRequested()
+
+        NSWindow.allowsAutomaticWindowTabbing = false
+        RemotexViewerApp.main()
     }
+}
+
+struct RemotexViewerApp: App {
+    @NSApplicationDelegateAdaptor(ViewerApplicationDelegate.self)
+    private var applicationDelegate
+    @State private var model = AppModel()
 
     var body: some Scene {
         WindowGroup {

@@ -53,6 +53,7 @@ struct TargetPickerView: View {
 
     private func row(_ target: TargetInfo) -> some View {
         let pending = model.session.pendingTarget
+        let isPending = pending == target.name
         return Button {
             model.connect(to: target.name)
         } label: {
@@ -65,7 +66,7 @@ struct TargetPickerView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if pending == target.name {
+                if isPending {
                     Text("Connecting…")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -80,6 +81,12 @@ struct TargetPickerView: View {
         // Every row locks, not just the chosen one: there is one session slot,
         // so a second pick mid-connect has nowhere to go.
         .disabled(pending != nil)
+        // `.plain` gives a disabled button no treatment of its own, so the lock
+        // would be invisible. Dimmed as `.picker-target:disabled` is in the SPA.
+        .opacity(pending == nil ? 1 : 0.6)
         .accessibilityLabel("\(target.name), \(target.detail)")
+        // The "Connecting…" line is inside the label VoiceOver replaces, so the
+        // one row that is doing something has to say so somewhere else.
+        .accessibilityValue(isPending ? "Connecting…" : "")
     }
 }

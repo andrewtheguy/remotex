@@ -93,7 +93,7 @@ final class AppModel: GatewaySessionSink {
     init(
         defaults: UserDefaults = .standard,
         clipboard: ClipboardSynchronizer = ClipboardSynchronizer(),
-        urlSession: URLSession = .shared
+        urlSession: URLSession = GatewayClient.defaultSession
     ) {
         self.defaults = defaults
         self.clipboard = clipboard
@@ -535,6 +535,9 @@ final class AppModel: GatewaySessionSink {
     }
 
     func sendWheel(dx: Float, dy: Float) {
+        guard session.canCaptureKeyboard else {
+            return
+        }
         connection?.send(.wheel(dx: dx, dy: dy))
     }
 

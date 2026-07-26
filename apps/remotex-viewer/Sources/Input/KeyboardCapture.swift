@@ -9,6 +9,7 @@ final class KeyboardCapture {
     private var observers: [NSObjectProtocol] = []
     private var firstResponderObservation: NSKeyValueObservation?
     private weak var observedWindow: NSWindow?
+    private var isInvalidated = false
 
     init(model: AppModel, surface: NSView) {
         self.model = model
@@ -54,6 +55,10 @@ final class KeyboardCapture {
     }
 
     func invalidate() {
+        // Before the teardown, not after: the deferred setup in `init` may still
+        // be waiting its turn, and `RemoteSurfaceHost` holds this until it has
+        // built the next one.
+        isInvalidated = true
         releaseAll()
         firstResponderObservation?.invalidate()
         firstResponderObservation = nil
@@ -69,6 +74,11 @@ final class KeyboardCapture {
     }
 
     func updateWindowObservation() {
+        // Retired. The observation this would install outlives `invalidate`, and
+        // the surface it reports first responders for is no longer this one's.
+        guard !isInvalidated else {
+            return
+        }
         guard let window = surface?.window else {
             // Detached: the observation would otherwise keep the old window
             // alive and keep reporting its first responder as ours.

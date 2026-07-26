@@ -50,7 +50,7 @@ struct ViewportReportingTests {
     /// The debounce, from the other side: a window dragged across many sizes ends
     /// as one report, not one per frame.
     @Test
-    func adragResizeCollapsesIntoOneReport() async throws {
+    func aDragResizeCollapsesIntoOneReport() async throws {
         let session = try await Session.attached()
         session.connect(protocolName: "vnc")
         try await session.settle()

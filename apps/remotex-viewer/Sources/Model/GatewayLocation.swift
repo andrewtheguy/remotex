@@ -26,6 +26,15 @@ struct GatewayLocation: Equatable {
             throw GatewayLocationError.invalid
         }
         components.scheme = scheme
+        // A host is case-insensitive, so `Example.test` and `example.test` are one
+        // gateway. Normalized here because two locations that differ only in case
+        // would otherwise compare unequal, and `AppModel.connectToGateway` reads
+        // that as a move to another host: it tears the session down and drops the
+        // login cookie. Left alone when it is already lowercase, so nothing
+        // round-trips an IPv6 literal through the setter for no reason.
+        if let host = components.host, host != host.lowercased() {
+            components.host = host.lowercased()
+        }
         components.path = "/"
         guard let url = components.url else {
             throw GatewayLocationError.invalid

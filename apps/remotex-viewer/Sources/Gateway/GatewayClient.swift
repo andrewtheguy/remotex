@@ -80,10 +80,17 @@ struct GatewayClient: Sendable, SessionGateway {
     /// `COOKIE_NAME` in src/auth.rs.
     static let cookieName = "remotex_session"
 
+    /// The session the app runs on. Built from `.default` rather than being
+    /// `URLSession.shared`, so `configuration` is really this client's own —
+    /// `sessionCookieHeader` and `forgetSessionCookie` read the cookie storage off
+    /// it — and so a timeout, a delegate, or a proxy stays something that can be
+    /// configured here, which the shared session does not allow.
+    static let defaultSession = URLSession(configuration: .default)
+
     let gateway: GatewayLocation
     private let session: URLSession
 
-    init(gateway: GatewayLocation, session: URLSession = .shared) {
+    init(gateway: GatewayLocation, session: URLSession = GatewayClient.defaultSession) {
         self.gateway = gateway
         self.session = session
     }

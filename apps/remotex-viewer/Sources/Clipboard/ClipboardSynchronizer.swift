@@ -162,15 +162,6 @@ final class ClipboardSynchronizer {
         observedChangeCount = pasteboard.changeCount
     }
 
-    /// An oversized pasteboard is skipped rather than sent for the gateway to
-    /// truncate. Nothing here is user-initiated — polling and the Command-V hook
-    /// both land in this path — and the whole string would ride the socket
-    /// first, which past 64 MiB drops the session outright. The remote keeps
-    /// whatever it had; `sendDraft` is the path that reports the limit, because
-    /// it has the card to report it on.
-    ///
-    /// `receiveRemotePush` needs no such check: the gateway has already clamped
-    /// everything arriving on that link.
     /// The remote copied more than can be transferred. Nothing reaches the
     /// pasteboard — there is nothing to put on it — but an open panel showing
     /// the previous value would now be describing a clipboard that has moved on,
@@ -192,6 +183,15 @@ final class ClipboardSynchronizer {
         )
     }
 
+    /// An oversized pasteboard is skipped rather than sent for the gateway to
+    /// truncate. Nothing here is user-initiated — polling and the Command-V hook
+    /// both land in this path — and the whole string would ride the socket
+    /// first, which past 64 MiB drops the session outright. The remote keeps
+    /// whatever it had; `sendDraft` is the path that reports the limit, because
+    /// it has the card to report it on.
+    ///
+    /// `receiveRemotePush` needs no such check: the gateway has already clamped
+    /// everything arriving on that link.
     func pushLocalClipboard(force: Bool) {
         guard isEnabled,
               let text = pasteboard.string(forType: .string),

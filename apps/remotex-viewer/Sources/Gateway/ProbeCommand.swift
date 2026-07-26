@@ -84,9 +84,13 @@ enum ProbeCommand {
 
             let transport = try await client.openSocket(sessionToken: token)
             if let target = argument("--probe-target") {
-                try await transport.send(
-                    ClientMessage.connect(target: target).jsonText() ?? ""
-                )
+                // An empty frame is one the gateway drops, and the probe would
+                // then idle against the picker while reporting it was connecting.
+                guard let connect = ClientMessage.connect(target: target).jsonText() else {
+                    print("probe: could not encode a connect for \(target)")
+                    return false
+                }
+                try await transport.send(connect)
                 print("probe: connecting to \(target)")
             }
             return await pump(transport, seconds: seconds)

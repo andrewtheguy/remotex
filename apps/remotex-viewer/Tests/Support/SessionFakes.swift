@@ -75,6 +75,13 @@ final class FakeWebSocketTransport: WebSocketTransport {
                     return .frame(state.inbound.removeFirst())
                 }
                 guard state.closeAfterDraining || state.cancelled else {
+                    // One consumer, as with the real socket: a second `receive`
+                    // would overwrite the parked continuation and leak the first,
+                    // which shows up as a test that hangs rather than fails.
+                    precondition(
+                        state.waiter == nil,
+                        "overlapping receive() on FakeWebSocketTransport"
+                    )
                     state.waiter = continuation
                     return .park
                 }
@@ -123,11 +130,12 @@ final class FakeWebSocketTransport: WebSocketTransport {
     func cancel() {
         let waiter = state.withLock { state -> CheckedContinuation<WebSocketFrame, any Error>? in
             state.cancelled = true
-            defer { state.waiter = nil }
-            if state.waiter != nil {
+            let waiter = state.waiter
+            state.waiter = nil
+            if waiter != nil {
                 state.ended = true
             }
-            return state.waiter
+            return waiter
         }
         waiter?.resume(throwing: FakeTransportError.closed)
     }
