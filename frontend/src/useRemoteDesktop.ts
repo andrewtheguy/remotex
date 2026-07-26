@@ -247,6 +247,33 @@ function cursorImage(remote: RemoteCursor | null): CursorImage | null {
   return remote.image ?? fallbackCursor();
 }
 
+// Wear the shape as an element's CSS cursor, sized to `view` — the desktop's
+// on-screen scale, framebuffer pixels to CSS pixels.
+//
+// A cursor image is laid out at its intrinsic size in CSS pixels, and shapes
+// arrive in remote framebuffer pixels, so on a Retina remote the hardware
+// pointer came out at twice the size of the desktop it sits on (a half-scale
+// canvas, a full-scale pointer). `cursor` has no width to set, so the scale
+// travels as an image-set() resolution instead: 2x says "two image pixels per
+// CSS pixel", which is what a 2x shape on a half-scale canvas is. The hotspot
+// scales with it — those coordinates are in CSS pixels of the laid-out image,
+// not in image pixels.
+//
+// Written twice on purpose. image-set() inside `cursor` is not universal, and an
+// unsupported value is rejected by the CSSOM rather than applied, which leaves
+// the plain url() standing: a pointer at the wrong size beats no pointer at all,
+// which is what this element's stylesheet `cursor: none` would otherwise give.
+function applyCursorCss(el: HTMLElement, image: CursorImage, view: number) {
+  el.style.cursor = `${cssUrl(image.url)} ${image.hx} ${image.hy}, default`;
+  if (!(view > 0) || !Number.isFinite(view) || Math.abs(view - 1) < 0.01) {
+    return;
+  }
+  const density = (1 / view).toFixed(3);
+  const hx = Math.round(image.hx * view);
+  const hy = Math.round(image.hy * view);
+  el.style.cursor = `image-set(${cssUrl(image.url)} ${density}x) ${hx} ${hy}, default`;
+}
+
 // Push the pointer state to the DOM: the CSS cursor on the input overlay (it
 // tracks the hardware pointer with no lag) and the image element the touch
 // gesture layer's virtual pointer rides on. `touchAt` is that virtual position
@@ -262,29 +289,32 @@ function paintCursor(
   touchAt: Point | null,
 ): void {
   const image = cursorImage(remote);
+  const rect = els.canvas?.getBoundingClientRect();
+  // The desktop's on-screen scale, framebuffer pixels to CSS pixels: both
+  // pointers are sized through it. 1:1 until the first resize names a size.
+  const view = rect && size && size.w > 0 ? rect.width / size.w : 1;
   if (els.overlay) {
-    els.overlay.style.cursor = image
-      ? `${cssUrl(image.url)} ${image.hx} ${image.hy}, default`
-      : "none";
+    if (image) {
+      applyCursorCss(els.overlay, image, view);
+    } else {
+      els.overlay.style.cursor = "none";
+    }
   }
   const pointer = els.pointer;
   if (!pointer) {
     return;
   }
-  const rect = els.canvas?.getBoundingClientRect();
   if (!image || !touchAt || !rect || !size || size.w <= 0) {
     pointer.style.display = "none";
     return;
   }
-  // The desktop's on-screen scale places the pointer on its remote position
-  // and sizes it to match the desktop under it, floored at a minimum size so
-  // it stays visible when the desktop is scaled down to fit.
+  // `view` places the virtual pointer on its remote position and sizes it to
+  // match the desktop under it, floored at a minimum size so it stays visible
+  // when the desktop is scaled down to fit.
   //
-  // The floor is an on-screen size, not one CSS pixel per cursor pixel: the
-  // shape arrives in remote framebuffer pixels, so a Retina remote sends it at
-  // 2x (an `rxa` Mac always does), and pinning that to 1:1 drew a pointer
-  // several times the size of everything around it on a phone.
-  const view = rect.width / size.w;
+  // The floor is an on-screen size, not one CSS pixel per cursor pixel: pinning
+  // a 2x shape to 1:1 drew a pointer several times the size of everything
+  // around it on a phone.
   const extent = Math.max(image.w, image.h);
   const draw = extent > 0 ? Math.max(view, MIN_POINTER_CSS_PX / extent) : view;
   if (pointer.src !== image.url) {
