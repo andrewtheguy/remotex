@@ -280,7 +280,11 @@ final class ClipboardSynchronizer {
 
     @discardableResult
     func sendDraft() -> Bool {
-        guard isEnabled, isPresented, isEditing else {
+        // An empty draft is not a way to clear the remote clipboard: the remote
+        // takes ownership of whatever arrives, so sending nothing would wipe it
+        // while reporting success. `pushLocalClipboard` skips empty text for the
+        // same reason.
+        guard isEnabled, isPresented, isEditing, !draft.isEmpty else {
             showNotice("Reveal or enter clipboard text first")
             return false
         }

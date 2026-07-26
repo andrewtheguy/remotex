@@ -56,7 +56,11 @@ struct ClipboardCard: View {
                 Button("Send") {
                     clipboard.sendDraft()
                 }
-                .disabled(!clipboard.isEditing || clipboard.isOverByteLimit)
+                .disabled(
+                    !clipboard.isEditing
+                        || clipboard.draft.isEmpty
+                        || clipboard.isOverByteLimit
+                )
                 .help(
                     clipboard.isOverByteLimit
                         ? "Too long: \(clipboard.draftByteCount) bytes; the limit is \(ClipboardSynchronizer.maximumBytes)"

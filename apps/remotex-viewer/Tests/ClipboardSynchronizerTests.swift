@@ -248,6 +248,8 @@ struct ClipboardSynchronizerTests {
         #expect(clipboard.isEditing)
         #expect(clipboard.draft.isEmpty)
         #expect(clipboard.unavailableMessage == "Remote clipboard unavailable")
+        #expect(!clipboard.sendDraft(), "an empty draft would wipe the remote")
+        clipboard.draft = "typed into the unavailable editor"
         #expect(clipboard.sendDraft(), "the timeout editor keeps Send usable")
 
         clipboard.closePanel()
