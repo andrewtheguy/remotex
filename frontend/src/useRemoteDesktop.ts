@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isNativeHostConnected } from "./nativeHost.ts";
 import {
   type ClientMsg,
   type ClipboardSnapshot,
@@ -384,18 +383,12 @@ export function useRemoteDesktop(
   overlayRef: React.RefObject<HTMLElement | null>,
   pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
-  nativeHost: boolean,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
-  // Picker vs desktop, and (when connected) which target. `connectError` holds
-  // the last engine error to show against the picker after a failed connect.
+  // Picker vs desktop. `connectError` holds the last engine error to show
+  // against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
-  const [connectedTarget, setConnectedTarget] = useState<string | null>(null);
-  // Discovered by the engine at connect (`remoteOs`), not configured. False
-  // until it says otherwise, which is the right default for every remote the
-  // native viewer will not be translating Command shortcuts for.
-  const [remoteIsMac, setRemoteIsMac] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
@@ -418,11 +411,6 @@ export function useRemoteDesktop(
   // counter that ticks on every arrival. Fetching the same text twice must
   // still register as an answer, and a null-vs-string flag cannot express that.
   const [remoteClipboard, setRemoteClipboard] =
-    useState<RemoteClipboard | null>(null);
-  // Native automatic synchronization consumes only unsolicited activity.
-  // Keep it separate from the panel snapshot so a requested Fetch can never
-  // masquerade as a remote push at the v5 native bridge boundary.
-  const [remoteClipboardPush, setRemoteClipboardPush] =
     useState<RemoteClipboard | null>(null);
   // The two halves of the automatic sync's echo guard: text last received from
   // the remote (so it is never sent straight back), and text last sent to the
@@ -501,10 +489,6 @@ export function useRemoteDesktop(
       ws.send(JSON.stringify(msg));
     }
   });
-  // Native input is tracked separately from DOM input. The AppKit host consumes
-  // captured events before WebKit sees them, and asks this set to release on
-  // focus loss so a remote modifier can never remain stuck.
-  const nativePressedKeysRef = useRef(new Set<string>());
 
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
@@ -742,11 +726,7 @@ export function useRemoteDesktop(
       if (alreadyMirrored || echoedFromHost) {
         return;
       }
-      // The runtime getter is intentional: this effect does not depend on the
-      // nativeHost prop, whose captured value could therefore be stale.
-      if (!isNativeHostConnected()) {
-        void navigator.clipboard?.writeText?.(text).catch(() => {});
-      }
+      void navigator.clipboard?.writeText?.(text).catch(() => {});
     };
 
     const handleControlMsg = (msg: ControlMsg) => {
@@ -789,11 +769,7 @@ export function useRemoteDesktop(
           // a live desktop): switch to the desktop.
           setConnectError(null);
           setPendingTarget(null);
-          setConnectedTarget(msg.name);
           setMode("desktop");
-          // Cleared for the new session; the engine announces it as it
-          // connects, and on a reattach the engine has already sent it.
-          setRemoteIsMac(false);
           // RDP resizes only on request (heavy reactivation) and rxa only to a
           // size off the Mac's own list; VNC follows the viewport
           // automatically. In manual mode the report below is suppressed, so
@@ -830,10 +806,6 @@ export function useRemoteDesktop(
             // before the actual response arrives.
             settleClipboardWaiters(snapshot);
           } else {
-            setRemoteClipboardPush((prev) => ({
-              ...snapshot,
-              seq: (prev?.seq ?? 0) + 1,
-            }));
             // A copy on the remote is immediately pastable here. Best effort
             // by design: `writeText` is absent on a non-secure origin and can
             // reject when the tab is unfocused. Never mirror an empty push,
@@ -845,7 +817,11 @@ export function useRemoteDesktop(
           break;
         }
         case "remoteOs":
-          setRemoteIsMac(msg.macos);
+          // Ignored here. Whether the remote is a Mac only decides a keyboard
+          // convention (does a local Command shortcut stay Command or become
+          // remote Control), and the browser never translates shortcuts — it
+          // forwards the physical `code` it saw. The macOS viewer is the client
+          // that acts on this.
           break;
         case "displayModes":
           // The remote's resolution menu, replaced wholesale: the list is
@@ -858,15 +834,12 @@ export function useRemoteDesktop(
           // ended): show the picker. Drop any retained framebuffer so a later
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
-          setConnectedTarget(null);
-          setRemoteIsMac(false);
           setMode("picker");
           manualResizeRef.current = false;
           setCanResize(false);
           setDisplayModes([]);
           setCanClipboard(false);
           setRemoteClipboard(null);
-          setRemoteClipboardPush(null);
           lastFromRemoteRef.current = null;
           lastToRemoteRef.current = null;
           // No engine left to answer a fetch that is still in flight.
@@ -1002,35 +975,6 @@ export function useRemoteDesktop(
     }
   }, []);
 
-  const sendNativeKey = useCallback(
-    (code: string, pressed: boolean, caps: boolean) => {
-      if (mode !== "desktop") {
-        return;
-      }
-      if (pressed) {
-        nativePressedKeysRef.current.add(code);
-      } else {
-        nativePressedKeysRef.current.delete(code);
-      }
-      sendRef.current({ type: "key", code, pressed, caps });
-    },
-    [mode],
-  );
-
-  const releaseNativeKeys = useCallback(() => {
-    for (const code of nativePressedKeysRef.current) {
-      sendRef.current({ type: "key", code, pressed: false, caps: false });
-    }
-    nativePressedKeysRef.current.clear();
-  }, []);
-
-  useEffect(() => {
-    if (mode !== "desktop") {
-      releaseNativeKeys();
-    }
-    return releaseNativeKeys;
-  }, [mode, releaseNativeKeys]);
-
   // Ask the server for the remote's clipboard and wait for the answer, which
   // also lands in `remoteClipboard` on its way past. Resolves with the snapshot,
   // or `null` when nothing came back — the socket was down, the session
@@ -1095,7 +1039,7 @@ export function useRemoteDesktop(
   // The inbound half (mirrorRemoteClipboard) needs no check: everything on that
   // link is already clamped by the gateway (see src/protocol.rs).
   useEffect(() => {
-    if (mode !== "desktop" || !canClipboard || nativeHost) {
+    if (mode !== "desktop" || !canClipboard) {
       return;
     }
     const pushLocalClipboard = () => {
@@ -1130,7 +1074,7 @@ export function useRemoteDesktop(
       window.removeEventListener("focus", pushLocalClipboard);
       document.removeEventListener("visibilitychange", pushLocalClipboard);
     };
-  }, [mode, canClipboard, nativeHost]);
+  }, [mode, canClipboard]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
@@ -1292,10 +1236,8 @@ export function useRemoteDesktop(
     el.addEventListener("contextmenu", onContextMenu);
     // Keyboard is scoped to the focused overlay (not window) so the remote
     // surface only grabs keys when the user is interacting with it.
-    if (!nativeHost) {
-      el.addEventListener("keydown", onKeyDown);
-      el.addEventListener("keyup", onKeyUp);
-    }
+    el.addEventListener("keydown", onKeyDown);
+    el.addEventListener("keyup", onKeyUp);
     el.addEventListener("blur", onBlur);
 
     return () => {
@@ -1305,19 +1247,15 @@ export function useRemoteDesktop(
       window.removeEventListener("mouseup", onMouseUp);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("contextmenu", onContextMenu);
-      if (!nativeHost) {
-        el.removeEventListener("keydown", onKeyDown);
-        el.removeEventListener("keyup", onKeyUp);
-      }
+      el.removeEventListener("keydown", onKeyDown);
+      el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, syncCursor, nativeHost]);
+  }, [overlayRef, canvasRef, syncCursor]);
 
   return {
     status,
     mode,
-    connectedTarget,
-    remoteIsMac,
     connectError,
     pendingTarget,
     size,
@@ -1325,15 +1263,12 @@ export function useRemoteDesktop(
     displayModes,
     canClipboard,
     remoteClipboard,
-    remoteClipboardPush,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
     setResolution,
     sendKeyCombo,
-    sendNativeKey,
-    releaseNativeKeys,
     requestClipboard,
     sendClipboard,
     setBottomInset,
