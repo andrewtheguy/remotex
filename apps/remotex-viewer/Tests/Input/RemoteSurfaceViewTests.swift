@@ -110,6 +110,29 @@ struct RemoteSurfaceViewTests {
         #expect(harness.surface.frame.size == CGSize(width: 900, height: 700))
     }
 
+    /// The same hole as the resize above, reached the other way: moving the window
+    /// between displays of different scale changes no observed state either, so
+    /// `updateNSView` never runs and the document keeps a frame derived from the
+    /// scale it left behind. The framebuffer *does* lay itself out at the new one —
+    /// so a remote at 2× inside a 1× document overflows into space that is not even
+    /// scrollable, which is a non-Retina guest's taskbar below the fold on a Retina
+    /// host, with no way to scroll to it.
+    @Test
+    func aBackingScaleChangeReDerivesTheDocument() async throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 900, height: 700))
+        harness.coordinator.apply(remoteSize: harness.remote(width: 1200, height: 900))
+        _ = try await harness.reportedViewport()
+        let correct = harness.surface.frame.size
+
+        // What a stale scale leaves behind: a document sized for the other display.
+        harness.surface.setFrameSize(CGSize(width: 600, height: 450))
+        harness.surface.backingScaleChanged()
+
+        #expect(harness.surface.frame.size == correct)
+        #expect(correct == CGSize(width: 1200, height: 900))
+    }
+
     /// Scrolling changes what is visible, not how much room there is.
     @Test
     func scrollingDoesNotChangeTheViewport() async throws {

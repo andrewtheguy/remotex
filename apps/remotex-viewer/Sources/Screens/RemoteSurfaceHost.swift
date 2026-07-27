@@ -113,6 +113,27 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                     }
                 }
             )
+            // A scale change is the same problem as a window-only resize, and it
+            // arrives the same way: no observed state changes, so SwiftUI does not
+            // run `updateNSView`, and every point size below was derived from the
+            // old scale. The document would keep the size it had — a remote laid out
+            // at 2× inside a document that never grew overflows into space that is
+            // not even scrollable, which on a Retina host is a non-Retina guest's
+            // taskbar sitting below the fold with no way to reach it. This is what
+            // `onDprChange` re-derives in `useRemoteDesktop.ts`.
+            surface.onBackingScaleChange = { [weak self, weak surface] in
+                guard let self, let surface else {
+                    return
+                }
+                self.apply(remoteSize: surface.remoteSize)
+                // The message has not changed, only the scale its image is drawn
+                // at, so the dedupe in `apply(cursor:)` has to be stepped past.
+                if let applied = appliedCursor {
+                    appliedCursor = nil
+                    self.apply(cursor: applied)
+                }
+                self.report(from: surface)
+            }
             report(from: surface)
         }
 

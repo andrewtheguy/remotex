@@ -70,13 +70,17 @@ final class RemoteSurfaceView: NSView {
         )
     }
 
-    /// The window moved to a display with a different scale, so the point size
-    /// the framebuffer occupies changed even though the remote did not.
+    /// Set by `RemoteSurfaceHost.Coordinator`. Every point size in this view's
+    /// geometry is derived from the window's backing scale, and the host owns all
+    /// of them, so a change is its to answer.
+    var onBackingScaleChange: (() -> Void)?
+
+    /// The window moved to a display with a different scale — or into a window at
+    /// all — so the point size the framebuffer occupies changed even though the
+    /// remote did not.
     func backingScaleChanged() {
         needsLayout = true
-        if let measured = measuredViewport() {
-            model?.reportViewport(measured)
-        }
+        onBackingScaleChange?()
     }
 
     /// The room available for the remote desktop in device pixels, or nil while
