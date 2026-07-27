@@ -97,7 +97,8 @@ Its menu provides:
 
 - connection and listen-address status;
 - PSK copy;
-- address, display, and PSK settings;
+- settings: listen address, a read-only list of the displays this Mac can share,
+  whether to add a private 2x display of the agent's own, and the PSK;
 - config and log shortcuts;
 - permission shortcuts;
 - the **Start at Login** toggle and **Quit**.
@@ -154,8 +155,11 @@ remote access generally. RealVNC Service Mode and RustDesk's installed service
 support the login screen by adding system-level launch components. Equivalent
 login-screen support is planned for remotex.
 
-The agent mirrors the selected physical display and does not resize it to the
-browser viewport.
+The agent mirrors one whole display at a time and does not resize it to the
+browser viewport. Which display is chosen from the remotex viewer or the browser,
+per session, not in the agent's settings — so there is no display setting here,
+and a `config.toml` left over from an earlier version must have its `display = N`
+line **removed by hand** or the agent refuses to start.
 
 See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
 for the capture, transport, and lifecycle design.

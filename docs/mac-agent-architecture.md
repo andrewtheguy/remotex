@@ -43,15 +43,44 @@ endpoints and includes a checksum to catch transcription errors.
 
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
-- agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, pasteboard text
-  (on request or when the watched pasteboard changes), and heartbeat pongs;
-- gateway to agent: mouse, wheel, and keyboard input, session control, clipboard
-  read requests, writes and the watch toggle, and heartbeat pings.
+- agent to gateway: desktop size, the display list and which display is being
+  shared, PNG/JPEG tiles, cursor shape, pasteboard text (on request or when the
+  watched pasteboard changes), and heartbeat pongs;
+- gateway to agent: mouse, wheel, and keyboard input, session control, a display
+  selection, clipboard read requests, writes and the watch toggle, and heartbeat
+  pings.
 
 The gateway translates these into the same browser protocol used by RDP and
 VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
 checks the gateway-agent link; browser liveness is handled by the gateway's
 shared WebSocket/session layer.
+
+## Which display
+
+One at a time, and the client's to choose. The agent reports every display it
+could share — `AgentMsg::Displays`, sent beside `Hello`, on `Attach`, after a
+switch, and whenever a two-second poll finds the set changed — and a client
+answers with `GatewayMsg::SelectDisplay` naming one by `CGDirectDisplayID`.
+Positions in a list are deliberately not identities: attaching or unplugging a
+screen renumbers everything after it.
+
+A session starts on the main display, and the choice lasts as long as the
+session. Nothing about it is written to the config: the person at the far end is
+picking a screen for as long as they are looking at it, and the next connection
+should start from the same place rather than from wherever the last one wandered
+off to.
+
+Switching restarts the capture stream, which is why the agent reuses the
+teardown-and-restart its capture-failure path already had — including putting the
+old display back if the new one cannot be captured, because the stream was torn
+down to make room and leaving it down would freeze the desktop. The new size goes
+out before any tile drawn at it, and the injector's scale and origin are
+re-derived before the first click on the new display arrives.
+
+Clients hold no display state of their own. The checkmark follows the `active` in
+the agent's report, so a selection that failed leaves the menu agreeing with what
+is on screen. And this is the *only* display decision a client makes: see
+Resolution below for the one it does not.
 
 ## Capture and encoding
 
@@ -70,7 +99,12 @@ used.
 
 ## Resolution
 
-The Mac's, and only the Mac's. There is no message on this wire that asks it to
+The Mac's, and only the Mac's — and the contrast with the section above is the
+whole point. *Which* screen to look at is a question about the person looking, so
+a client answers it. *What resolution* that screen runs at is a question about
+the machine, so the machine answers it.
+
+There is no message on this wire that asks it to
 change resolution, and `resize = true` on an `rxa` target is a config error.
 Whoever is using that machine sets the mode where every other mode is set — in
 System Settings > Displays — and the agent finds out the same way for every kind
@@ -79,7 +113,9 @@ capture surface, and the new size travels as `AgentMsg::DisplaySize` ordered wit
 the tiles it applies to.
 
 That includes the display the agent creates for itself, which is why it needs no
-mechanism of its own — see below.
+mechanism of its own — see below. Selecting a different display is not a
+resolution change either: the size that follows is the size that display was
+already at.
 
 Some displays change size with nobody touching System Settings at all. A UTM
 guest's default screen is the host's to size: Apple Virtualization's
@@ -97,13 +133,19 @@ the same pixel count presented at different sizes.
 
 ## A display of our own
 
-Selecting **Virtual display** in the settings dialog shares a display the agent
-creates with the private `CGVirtualDisplay` API instead of any of the Mac's
-screens — a private 2x desktop that nobody is sitting in front of. It is created
-once at startup and released when the agent exits; the process owns it, so a
-crash cannot leave one behind. A failure to create it falls back to the Mac's
-screen with a line in the log, because a macOS release that takes the private API
-away should cost the sharpness, not the agent.
+Ticking **Add a private 2x display** in the settings dialog gives the Mac an
+extra display, made with the private `CGVirtualDisplay` API — a 2x desktop that
+nobody is sitting in front of. It is created once at startup and released when
+the agent exits; the process owns it, so a crash cannot leave one behind. A
+failure to create it costs the extra display and nothing else, with a line in the
+log, because a macOS release that takes the private API away should cost the
+sharpness rather than the agent.
+
+An **addition**, not a replacement, which is all `CGVirtualDisplay` was ever able
+to be: it adds a monitor beside the ones already attached. The Mac's own screens
+stay shareable and the new one simply joins the list a client picks from. This
+setting therefore decides only whether that display exists — never which display
+is shared, which is a per-session choice made from the viewer or the browser.
 
 Created once, and then it belongs to macOS. It appears in System Settings >
 Displays with the mode list macOS derives from the descriptor — a HiDPI entry and
@@ -183,8 +225,9 @@ launchd.
 
 ## Constraints
 
-- The agent mirrors a whole display and never follows client viewport reports.
-  It never changes any display's resolution either — see Resolution above.
+- The agent mirrors one whole display at a time and never follows client viewport
+  reports. A client chooses *which* display; it never changes any display's
+  resolution — see Which display and Resolution above.
 - It runs only in a logged-in GUI session. It does not support the macOS login
   window or an unattended service mode.
 - Screen Recording and Accessibility grants are tied to the app's signing

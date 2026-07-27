@@ -10,9 +10,14 @@ Defects, and the limitations imposed on us from outside, are tracked in
 The first of the three routes below is **implemented**, behind the agent's
 `virtual_display` setting (see
 [`mac-agent-architecture.md`](mac-agent-architecture.md)). What is still open is
-whether it should ever be the default, which is the question at the end of this
-section — and the two routes not taken, kept because the private one can be
-withdrawn by any macOS release.
+whether it should ever be the default — and the two routes not taken, kept
+because the private one can be withdrawn by any macOS release.
+
+One thing this section originally got wrong, and which the implementation now
+reflects: `CGVirtualDisplay` does not *replace* a Mac's screen. It adds a monitor
+beside the ones already there. So the setting decides only whether that display
+exists, and which display a session shares is a separate, per-session choice made
+from either client.
 
 Both clients now present a remote at its own size, scaling by the ratio between
 the two densities, so a Retina host no longer draws a 1x guest at half size — it
@@ -77,13 +82,17 @@ routes, none of them free:
   something an agent inside the guest can drive, so it settles the development
   machine and nothing else.
 
-What has to be decided before any of them: a display of our own turns `rxa` from
-screen sharing into a **separate desktop**. Nobody's windows get rearranged by a
-connection any more, which is the upside — and it stops being "what is on that
-Mac's screen", which is the point of `rxa` today, and leaves a desktop nobody is
-looking at once the viewer goes away. It also only helps `rxa`: a Linux or Windows
-box cannot be handed a display from here, so for those the scaled presentation is
-the whole answer.
+What is still to be decided: whether a display of our own should ever be the
+**default**. Sharing it turns `rxa` from screen sharing into a separate desktop —
+nobody's windows get rearranged by a connection, which is the upside, and it
+stops being "what is on that Mac's screen", which is the point of `rxa` today,
+and leaves a desktop nobody is looking at once the viewer goes away. Since it is
+an extra display rather than a replacement, that trade is now made per session by
+whoever is connecting rather than once in a config file, which is a large part of
+why it need not be settled here.
+
+It also only helps `rxa`: a Linux or Windows box cannot be handed a display from
+here, so for those the scaled presentation is the whole answer.
 
 ## Deferred pending measurements
 
@@ -203,7 +212,12 @@ cheap, and RDP, on request, because its Deactivation-Reactivation is not.
 Those are the two whose protocols hand the desktop size to the client.
 
 Nothing else will get it, and no client will ever offer a *menu* of resolutions.
-A remote's resolution belongs to the machine running it. On a physical display
+A remote's resolution belongs to the machine running it.
+
+Not to be read as covering the display **picker** both clients now have for
+`rxa`. That answers a different question — which of a Mac's screens to look at —
+and it is a question about the person looking rather than about the machine, so
+it is theirs to answer. Nothing about it changes a mode. On a physical display
 there is nothing to resize but the panel in front of a person: it would rearrange
 their windows and leave the machine altered after the client disconnects. On a
 Mac — including one sharing a display the agent created for itself, which shows

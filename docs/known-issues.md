@@ -67,10 +67,11 @@ holds it fixed, are the record.
 
 ## macOS can hold a virtual display's identity offline
 
-- **Area:** the agent with `virtual_display = true`.
+- **Area:** the agent with **Add a private 2x display** ticked.
 - **Seen:** the agent logs that it created a display, but nothing can capture
-  it: it is missing from the active display list and from ScreenCaptureKit,
-  while `CGDisplayBounds` still reports exactly the size that was asked for.
+  it: it is missing from the active display list and from ScreenCaptureKit —
+  and so from the display picker in both clients — while `CGDisplayBounds` still
+  reports exactly the size that was asked for.
 - **Cause:** the WindowServer remembers arrangement state against a display's
   vendor, product and serial, and can decide to keep that identity offline. The
   state survives a reboot and cannot be cleared from inside the process.

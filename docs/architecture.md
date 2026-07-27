@@ -88,14 +88,16 @@ u8 kind | u8 format | u16 x | u16 y | u16 width | u16 height | image bytes
 ```
 
 Formats are PNG and JPEG. Control messages cover picker/connected state,
-desktop size, cursor shape, clipboard text, and errors. Large dirty rectangles
+desktop size, the remote's display list, cursor shape, clipboard text, and
+errors. Large dirty rectangles
 are split into 64-row strips to bound individual WebSocket frames.
 
 Browser-to-server traffic is JSON:
 
 - session control: connect or disconnect;
 - input: mouse movement/buttons, wheel, and DOM keyboard codes;
-- display control: viewport size and a full-refresh request;
+- display control: viewport size, a display selection, and a full-refresh
+  request;
 - clipboard: send text to the remote, or request the remote's text.
 
 Viewport reports affect only engines configured for resize, and there is no
@@ -104,6 +106,13 @@ protocol. RDP resize is explicit from the UI; VNC resize follows the browser
 when the server advertises the extension. Those two protocols hand the desktop
 size to the client; every other remote's resolution is set on the remote, `rxa`
 included, and reaches the client only as a `resize`.
+
+Choosing *which* of a remote's displays to view is a separate matter, and one a
+client does decide: an engine that can offer a choice sends a `displays` list and
+acts on `selectDisplay`. Only `rxa` can — RDP and VNC each deliver a single
+framebuffer spanning every remote screen — so those clients show no picker. It
+changes nothing about resolution: the size that follows is the size the chosen
+display was already at.
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine so a new canvas does not
@@ -227,8 +236,9 @@ retrying indefinitely, and so does an established link that stays down for 30
 seconds — long enough to hide a Wi-Fi roam or an agent restart, short enough that
 a Mac which was switched off does not leave a frozen desktop on screen.
 
-Nothing on this wire asks the Mac to change resolution, and `resize = true` on
-an `rxa` target is a config error. The Mac's mode is changed on the Mac — in
+A client picks which of the Mac's displays to share, and the agent reports the
+set it has. Nothing on this wire asks the Mac to change a display's *resolution*,
+though, and `resize = true` on an `rxa` target is a config error. The Mac's mode is changed on the Mac — in
 System Settings, including for the private display the agent can create for
 itself, which appears there like any other screen — and the agent reports the
 new size when it sees it. See
