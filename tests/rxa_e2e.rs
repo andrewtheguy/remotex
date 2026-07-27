@@ -300,7 +300,9 @@ fn displays_msg(active: u32) -> AgentMsg {
             DisplayEntry {
                 id: MAIN_DISPLAY,
                 label: "Display 1".to_owned(),
-                detail: format!("{AGENT_W}×{AGENT_H} at 2x"),
+                // Points, as the real agent reports them: half the captured pixels
+                // on a 2x display.
+                detail: format!("{}×{} at 2x", AGENT_W / 2, AGENT_H / 2),
                 w: AGENT_W,
                 h: AGENT_H,
                 scale: AGENT_SCALE,
@@ -309,7 +311,7 @@ fn displays_msg(active: u32) -> AgentMsg {
             DisplayEntry {
                 id: VIRTUAL_DISPLAY,
                 label: "Virtual display".to_owned(),
-                detail: format!("{VIRTUAL_W}×{VIRTUAL_H} at 2x"),
+                detail: format!("{}×{} at 2x", VIRTUAL_W / 2, VIRTUAL_H / 2),
                 w: VIRTUAL_W,
                 h: VIRTUAL_H,
                 scale: AGENT_SCALE,
@@ -892,8 +894,12 @@ async fn a_mode_change_on_the_mac_reaches_the_browser() {
 fn expected_displays(active: u32) -> String {
     format!(
         r#"{{"type":"displays","active":{active},"displays":[\
-{{"id":{MAIN_DISPLAY},"label":"Display 1","detail":"{AGENT_W}×{AGENT_H} at 2x","main":true,"virtual":false}},\
-{{"id":{VIRTUAL_DISPLAY},"label":"Virtual display","detail":"{VIRTUAL_W}×{VIRTUAL_H} at 2x","main":false,"virtual":true}}]}}"#
+{{"id":{MAIN_DISPLAY},"label":"Display 1","detail":"{main_w}×{main_h} at 2x","main":true,"virtual":false}},\
+{{"id":{VIRTUAL_DISPLAY},"label":"Virtual display","detail":"{virtual_w}×{virtual_h} at 2x","main":false,"virtual":true}}]}}"#,
+        main_w = AGENT_W / 2,
+        main_h = AGENT_H / 2,
+        virtual_w = VIRTUAL_W / 2,
+        virtual_h = VIRTUAL_H / 2
     )
     .replace("\\\n", "")
 }

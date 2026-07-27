@@ -274,13 +274,7 @@ pub fn displays(owned: Option<Target>) -> anyhow::Result<Vec<DisplayInfo>> {
                 format!("Display {number}")
             };
             DisplayInfo {
-                detail: format!(
-                    "{}×{} at {}x",
-                    geometry.width,
-                    geometry.height,
-                    // Trims 2.0 to "2" while leaving a fractional scale readable.
-                    (geometry.scale * 100.0).round() / 100.0
-                ),
+                detail: detail(&geometry),
                 label,
                 geometry,
                 is_main: id == main,
@@ -289,6 +283,30 @@ pub fn displays(owned: Option<Target>) -> anyhow::Result<Vec<DisplayInfo>> {
         })
         .collect();
     Ok(listed)
+}
+
+/// The line a client shows under a display's name: its size in **points**, and
+/// the scale those points are drawn at.
+///
+/// Points rather than the captured pixels, which is what [`Geometry`] carries and
+/// what this used to print. A 2x display would otherwise be listed at twice the
+/// size System Settings calls it — "3200×2400 at 2x" for the display macOS,
+/// the settings dialog and the Displays pane all agree is 1600×1200 — which reads
+/// as a resolution nobody chose. The pixel count is not lost, it is the product of
+/// the two numbers shown.
+fn detail(geometry: &Geometry) -> String {
+    let scale = if geometry.scale > 0.0 {
+        geometry.scale
+    } else {
+        1.0
+    };
+    format!(
+        "{}×{} at {}x",
+        (f64::from(geometry.width) / scale).round() as u32,
+        (f64::from(geometry.height) / scale).round() as u32,
+        // Trims 2.0 to "2" while leaving a fractional scale readable.
+        (scale * 100.0).round() / 100.0
+    )
 }
 
 /// A running capture stream. Dropping this stops the capture.
@@ -826,6 +844,31 @@ mod tests {
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect { x, y, w, h }
+    }
+
+    fn geometry_at(width: u16, height: u16, scale: f64) -> Geometry {
+        Geometry {
+            id: 1,
+            width,
+            height,
+            scale,
+            origin: (0.0, 0.0),
+        }
+    }
+
+    // What a client puts under a display's name. Points, not captured pixels: a
+    // 2x display listed at 3200×2400 reads as a resolution nobody chose, when
+    // System Settings and the agent's own dialog both call it 1600×1200.
+    #[test]
+    fn the_detail_line_gives_the_size_in_points() {
+        assert_eq!(detail(&geometry_at(3200, 2400, 2.0)), "1600×1200 at 2x");
+        assert_eq!(detail(&geometry_at(1280, 800, 1.0)), "1280×800 at 1x");
+        // A scale that is not a whole number stays readable rather than being
+        // rounded away, and the points are still the honest division.
+        assert_eq!(detail(&geometry_at(2560, 1600, 1.5)), "1707×1067 at 1.5x");
+        // `geometry` falls back to 1.0 for a display whose mode it cannot read;
+        // a zero must not divide the size to nothing here either.
+        assert_eq!(detail(&geometry_at(1440, 900, 0.0)), "1440×900 at 1x");
     }
 
     // The created size and everything under it is HiDPI; the 1x modes macOS

@@ -65,6 +65,31 @@ holds it fixed, are the record.
   agent keeps capturing whatever the display last settled on.
 - **Guard:** none possible off a real VM.
 
+## The browser can render a 2x display less crisply than the viewer
+
+- **Area:** `protocol = "rxa"` sharing a display with a backing scale of 2 — the
+  private display the agent can add, or a Retina Mac. Both clients receive the
+  same tiles; only the browser shows it.
+- **Seen:** text on the remote desktop is soft or slightly blurred in the
+  browser, intermittently. The native viewer, on the same session and the same
+  display, does not appear to do it.
+- **Cause: unknown.** What is ruled out is the wire: the gateway relays the
+  agent's PNG/JPEG bytes without decoding them
+  ([`architecture.md`](architecture.md)), the tiles the two clients receive are
+  identical, and the agent's captured size and reported scale are checked against
+  a native capture (`virtualdisplay.rs`). So it is downstream of the pixels
+  arriving, somewhere in how the browser presents them — the canvas is sized in
+  CSS pixels as framebuffer pixels over the remote's scale and the browser
+  resamples that to the host display, which is one resample the viewer's Metal
+  path does not do. Which resample, and why it is intermittent rather than
+  constant, is not established.
+- **Workaround:** use the viewer for a 2x display when the text matters. The
+  clients are otherwise equivalent for this.
+- **Guard:** none, and none is possible from the current tests: paint quality is
+  out of scope for browser automation (see `CLAUDE.md`), so this needs a human
+  looking at glyphs. Do not close it on a reading of the code — it was reported
+  from a real session and the cause has not been found.
+
 ## macOS can hold a virtual display's identity offline
 
 - **Area:** the agent with **Add a private 2x display** ticked.
