@@ -86,22 +86,17 @@ final class RemoteSurfaceView: NSView {
     /// The room available for the remote desktop in device pixels, or nil while
     /// there is none to measure.
     ///
-    /// The scroll view's own size, and deliberately neither of the two nearer
-    /// measurements:
-    ///
-    /// - not this view's bounds, which are at least the remote's, so they would
-    ///   report the desktop's current size back as the room available for it and
-    ///   never shrink;
-    /// - not the clip view's, which a legacy scroller shrinks by 17pt when the
-    ///   remote overflows. An engine that follows the window would then resize to
-    ///   the smaller size, the scrollers would hide, the full size would be
-    ///   reported again, and the desktop would flip between the two forever.
+    /// `roomForDocument`, and deliberately none of the three nearer measurements:
+    /// not this view's bounds, which are at least the remote's, so they would
+    /// report the desktop's current size back as the room available for it and
+    /// never shrink; not the scroll view's `bounds`, which include the title bar's
+    /// content inset; not the clip view's, which a legacy scroller narrows.
     ///
     /// Nil rather than a floored 1×1 before the first layout: `RemoteGeometry`
     /// has to clamp because the gateway rejects a zero, but an engine that
     /// follows the window would take that clamp literally.
     func measuredViewport() -> DisplayMode? {
-        let visible = enclosingScrollView?.bounds.size ?? bounds.size
+        let visible = enclosingScrollView?.roomForDocument ?? bounds.size
         guard visible.width >= 1, visible.height >= 1 else {
             return nil
         }
@@ -250,5 +245,43 @@ final class RemoteSurfaceView: NSView {
             model.sendPointer(x: point.x, y: point.y)
         }
         model.sendMouseButton(button, pressed: pressed)
+    }
+}
+
+extension NSScrollView {
+    /// The room a document really has, in points — the size a remote desktop has
+    /// to be to fit exactly.
+    ///
+    /// Three nearer sizes are wrong, and each was wrong in a way that showed:
+    ///
+    /// - `bounds` is the whole frame, and under a title bar that includes the
+    ///   inset AppKit adds for it (`automaticallyAdjustsContentInsets` — 52pt on
+    ///   this window). A desktop sized to it hangs its last 52pt below the fold,
+    ///   which for a Linux guest is its taskbar, and unreachable: the document is
+    ///   no taller than the scroll extent either.
+    /// - the same overshoot is what raises scrollers after an RDP "Resize to
+    ///   Window" — the remote comes back larger than the room it was measured
+    ///   against, every time.
+    /// - the clip view's size *is* inset-aware, but a legacy scroller (the style
+    ///   macOS uses once a mouse is attached) narrows it by 17pt, so a desktop
+    ///   sized to that leaves black margin — and hiding the scrollers widens the
+    ///   clip again, so an engine that follows the window can flip between the two
+    ///   forever.
+    ///
+    /// So: the frame's room with no scroller showing, less the insets. Independent
+    /// of whether a scroller happens to be up, and a desktop this size needs none.
+    var roomForDocument: CGSize {
+        let room = Self.contentSize(
+            forFrameSize: frame.size,
+            horizontalScrollerClass: nil,
+            verticalScrollerClass: nil,
+            borderType: borderType,
+            controlSize: .regular,
+            scrollerStyle: scrollerStyle
+        )
+        return CGSize(
+            width: max(0, room.width - contentInsets.left - contentInsets.right),
+            height: max(0, room.height - contentInsets.top - contentInsets.bottom)
+        )
     }
 }

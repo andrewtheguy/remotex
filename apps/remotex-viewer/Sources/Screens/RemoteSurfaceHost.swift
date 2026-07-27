@@ -88,31 +88,40 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             // when a window resize changes its frame and its bounds size follows;
             // so nothing ever reported and no engine ever followed the window.
             //
-            // Watched on the scroll view rather than the clip view for the reason
-            // `measuredViewport()` gives: a scroller appearing must not read as
-            // less room, or the remote oscillates between two sizes.
+            // The clip view is watched *as well*, and only for its frame: AppKit
+            // applies this window's title bar as a top `contentInset` partway
+            // through the first layout, which shrinks the room without touching the
+            // scroll view's frame. Nothing noticed, so the desktop kept the size
+            // that included the title bar and its last 52pt stayed below the fold
+            // for the rest of the session. It fires when a scroller toggles too,
+            // which costs nothing: `roomForDocument` does not read the clip, so the
+            // measurement is the same one and the report is deduped.
             scrollView.postsFrameChangedNotifications = true
-            observers.append(
-                NotificationCenter.default.addObserver(
-                    forName: NSView.frameDidChangeNotification,
-                    object: scrollView,
-                    queue: .main
-                ) { [weak self, weak surface] _ in
-                    MainActor.assumeIsolated {
-                        guard let self, let surface else {
-                            return
+            scrollView.contentView.postsFrameChangedNotifications = true
+            for observed in [scrollView, scrollView.contentView] as [NSView] {
+                observers.append(
+                    NotificationCenter.default.addObserver(
+                        forName: NSView.frameDidChangeNotification,
+                        object: observed,
+                        queue: .main
+                    ) { [weak self, weak surface] _ in
+                        MainActor.assumeIsolated {
+                            guard let self, let surface else {
+                                return
+                            }
+                            // Re-sized against the new visible area. A window-only
+                            // resize changes no observed state, so SwiftUI does not
+                            // run `updateNSView`, and the document view would keep a
+                            // frame measured against the old window — leaving a
+                            // remote smaller than the window off-centre in the space
+                            // it grew into.
+                            self.apply(remoteSize: surface.remoteSize)
+                            surface.needsLayout = true
+                            self.report(from: surface)
                         }
-                        // Re-sized against the new visible area. A window-only
-                        // resize changes no observed state, so SwiftUI does not run
-                        // `updateNSView`, and the document view would keep a frame
-                        // measured against the old window — leaving a remote smaller
-                        // than the window off-centre in the space it grew into.
-                        self.apply(remoteSize: surface.remoteSize)
-                        surface.needsLayout = true
-                        self.report(from: surface)
                     }
-                }
-            )
+                )
+            }
             // A scale change is the same problem as a window-only resize, and it
             // arrives the same way: no observed state changes, so SwiftUI does not
             // run `updateNSView`, and every point size below was derived from the
@@ -156,7 +165,12 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             // At least the visible area, so a remote smaller than the window still
             // fills it with margin instead of leaving the scroll view's own
             // background showing through.
-            let visible = surface.enclosingScrollView?.contentView.bounds.size ?? .zero
+            //
+            // The same measurement the report is made against, or the two disagree:
+            // floored on the clip view, a legacy scroller's 17pt made the document
+            // overflow the room the desktop had just been sized to, which put the
+            // scrollers up and kept them there.
+            let visible = surface.enclosingScrollView?.roomForDocument ?? .zero
             let scale = surface.window?.backingScaleFactor ?? 1
             let wanted = remoteSize.map {
                 RemoteGeometry.pointSize(of: $0, backingScale: scale)

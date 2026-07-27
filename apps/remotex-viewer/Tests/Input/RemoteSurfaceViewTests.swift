@@ -93,6 +93,44 @@ struct RemoteSurfaceViewTests {
         #expect(full == harness.expectedViewport(width: 800, height: 600))
     }
 
+    /// The bug behind a Linux guest's taskbar being unreachable. A window with a
+    /// title bar gets a top `contentInset` for it (`automaticallyAdjustsContentInsets`),
+    /// and the scroll view's `bounds` include that inset — so a desktop sized to
+    /// them hangs its last 52pt below the fold, with no scroll extent to reach it,
+    /// and an RDP "Resize to Window" comes back larger than the window every time.
+    @Test
+    func theTitleBarsContentInsetIsNotReportedAsRoom() throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 900, height: 700))
+        harness.inset(top: 52)
+
+        #expect(
+            harness.surface.measuredViewport()
+                == harness.expectedViewport(width: 900, height: 648)
+        )
+        // And the document is floored on the same room, so a remote that fits it
+        // exactly cannot overflow and raise a scroller.
+        harness.coordinator.apply(remoteSize: harness.remote(width: 900, height: 648))
+        #expect(harness.surface.frame.size == CGSize(width: 900, height: 648))
+    }
+
+    /// The inset lands *after* the first layout, without the scroll view's own frame
+    /// changing — so the first report is made against the whole frame and something
+    /// has to notice. Nothing did: the desktop kept the size that included the title
+    /// bar for the rest of the session.
+    @Test
+    func aContentInsetThatArrivesLateIsReported() async throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 900, height: 700))
+        let first = try await harness.reportedViewport()
+        #expect(first == harness.expectedViewport(width: 900, height: 700))
+
+        harness.inset(top: 52)
+
+        let second = try await harness.reportedViewport(otherThan: first)
+        #expect(second == harness.expectedViewport(width: 900, height: 648))
+    }
+
     /// A window-only resize changes no observed state, so SwiftUI never runs
     /// `updateNSView` and the surface would keep a frame measured against the old
     /// window — leaving a remote smaller than the window off-centre in the space it
@@ -172,6 +210,12 @@ struct RemoteSurfaceViewTests {
             scrollView.hasVerticalScroller = true
             scrollView.hasHorizontalScroller = true
             scrollView.autohidesScrollers = true
+            // Off, so the room is the frame and every size below is the one written
+            // here. AppKit would otherwise add this window's title bar as a top
+            // inset partway through the first layout, which is a thing to test
+            // deliberately — see the two tests that set an inset themselves — not
+            // to have arriving underneath every other number.
+            scrollView.automaticallyAdjustsContentInsets = false
             surface = RemoteSurfaceView(model: model, renderer: renderer)
             scrollView.documentView = surface
             window.contentView = scrollView
@@ -193,6 +237,16 @@ struct RemoteSurfaceViewTests {
 
         func resize(to size: CGSize) {
             scrollView.setFrameSize(size)
+            scrollView.layoutSubtreeIfNeeded()
+        }
+
+        /// What AppKit does for a title bar, done deliberately: the frame is
+        /// untouched and the room inside it shrinks.
+        func inset(top: CGFloat) {
+            scrollView.contentInsets = NSEdgeInsets(
+                top: top, left: 0, bottom: 0, right: 0
+            )
+            scrollView.tile()
             scrollView.layoutSubtreeIfNeeded()
         }
 
