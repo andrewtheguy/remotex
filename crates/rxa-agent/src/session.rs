@@ -946,3 +946,55 @@ impl Drop for AbortOnDrop {
         self.0.abort();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The point size the owned target in these tests was created at.
+    const BASE: (u32, u32) = (1600, 1000);
+    const OURS: u32 = 6;
+
+    fn owned() -> capture::Target {
+        capture::Target::Owned {
+            id: OURS,
+            base_points: BASE,
+        }
+    }
+
+    // The bug this function exists to prevent, and it was a live one: an id that
+    // is *ours* has to come back as `Owned`, or its backing scale is read through
+    // `CGDisplayCopyDisplayMode` — which returns nothing for a display we made,
+    // and so reads 1x. The list then advertises a 2x display while capture takes
+    // half the pixels.
+    //
+    // It bit on the display a session *starts* on rather than one it switches to,
+    // because macOS made ours the main display and the start went straight to
+    // `Target::Real(main_display())`. Both paths go through here now.
+    #[test]
+    fn our_own_display_resolves_to_the_owned_target_that_carries_its_size() {
+        assert_eq!(resolve(OURS, Some(owned())), owned());
+        // Every other id is one of the Mac's own, whether or not we made one.
+        assert_eq!(resolve(1, Some(owned())), capture::Target::Real(1));
+        assert_eq!(resolve(OURS, None), capture::Target::Real(OURS));
+        assert_eq!(resolve(1, None), capture::Target::Real(1));
+    }
+
+    // `resolved` keeps `active` honest after a pipeline start: a real display
+    // that has been unplugged falls back to the main one, so the id captured can
+    // differ from the id asked for. An owned target never falls back.
+    #[test]
+    fn a_real_target_follows_the_display_capture_landed_on() {
+        assert_eq!(
+            capture::Target::Real(3).resolved(1),
+            capture::Target::Real(1)
+        );
+        assert_eq!(owned().resolved(1), owned(), "ours does not fall back");
+    }
+
+    #[test]
+    fn a_targets_id_is_the_display_it_names() {
+        assert_eq!(capture::Target::Real(4).id(), 4);
+        assert_eq!(owned().id(), OURS);
+    }
+}
