@@ -140,19 +140,36 @@ struct ViewOnlyTests {
         #expect(session.model.canCaptureKeyboardNow, "and resumed on the way back")
     }
 
-    /// The mode outlives a target switch — it says how the viewer is being used,
-    /// not anything about what it is attached to — and the clipboard stays off with
-    /// it rather than coming back up under the next target.
+    /// Nothing remembers the mode. The way back to the picker clears it with the
+    /// rest of what belonged to that target, so the checkbox there starts clear and
+    /// the next pick is driveable unless it is answered for again.
     @Test
-    func theModeSurvivesATargetSwitch() async throws {
+    func theModeIsDroppedOnTheWayBackToThePicker() async throws {
         let session = try await Self.interactive()
         session.model.isViewOnly = true
 
         session.model.apply(.control(.picker))
+        #expect(!session.model.isViewOnly)
+
         session.connect(protocolName: "vnc", clipboard: true)
 
-        #expect(session.model.isViewOnly)
+        #expect(session.model.canSendInput)
+        #expect(session.model.clipboard.isEnabled)
+    }
+
+    /// Answered in the picker, which is the point of the checkbox there: the desktop
+    /// arrives with capture already suspended rather than a target up and typing
+    /// gone to it.
+    @Test
+    func aModeChosenInThePickerIsWhatTheDesktopStartsIn() async throws {
+        let session = try await AttachedSession.attached(suite: "ViewOnlyTests")
+        #expect(session.model.session.screen == .picker)
+
+        session.model.isViewOnly = true
+        session.connect(protocolName: "vnc", clipboard: true)
+
         #expect(!session.model.canSendInput)
+        #expect(!session.model.canCaptureKeyboardNow)
         #expect(!session.model.clipboard.isEnabled)
     }
 

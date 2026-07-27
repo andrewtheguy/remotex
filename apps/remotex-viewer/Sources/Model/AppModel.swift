@@ -49,10 +49,10 @@ final class AppModel: GatewaySessionSink {
     /// the toggle said otherwise. That it is off is what the disabled Clipboard
     /// button next to this one shows.
     ///
-    /// Deliberately not persisted, unlike the keyboard overrides: that is a
-    /// convention this Mac keeps, and this is a mode you are in for a while. It
-    /// does outlive a target switch, since it says how you mean to use the viewer
-    /// rather than anything about what you are attached to.
+    /// Not remembered anywhere: not in defaults, unlike the keyboard overrides —
+    /// that is a convention this Mac keeps — and not across a target switch either.
+    /// A session is answered for as it starts, by the picker's checkbox or the
+    /// toolbar's toggle, and the answer goes back with the target it was about.
     var isViewOnly = false {
         didSet {
             guard isViewOnly != oldValue else {
@@ -396,6 +396,10 @@ final class AppModel: GatewaySessionSink {
             session.manualResize = false
             session.canClipboard = false
             remoteCursor = nil
+            // Cleared with the rest of what belonged to that target: view only is an
+            // answer about the session being left, not a setting the next pick
+            // inherits, and the picker's checkbox says as much by starting clear.
+            isViewOnly = false
             viewportPolicy = ViewportPolicy()
             updateClipboardEnablement()
             clipboard.failPendingFetch()

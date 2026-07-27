@@ -3,7 +3,7 @@ import SwiftUI
 /// Which screen is showing, plus the chrome that outlives all of them: the
 /// clipboard card and its toolbar button, the window title, and the alert.
 struct RootView: View {
-    let model: AppModel
+    @Bindable var model: AppModel
 
     var body: some View {
         ZStack {
@@ -30,12 +30,7 @@ struct RootView: View {
             // greys the button beside it out.
             if model.session.screen == .desktop {
                 ToolbarItem(placement: .primaryAction) {
-                    Toggle(
-                        isOn: Binding(
-                            get: { model.isViewOnly },
-                            set: { model.isViewOnly = $0 }
-                        )
-                    ) {
+                    Toggle(isOn: $model.isViewOnly) {
                         HStack(spacing: 6) {
                             // Filled as well as highlighted: the button style's own
                             // "on" background is the whole difference otherwise, and
