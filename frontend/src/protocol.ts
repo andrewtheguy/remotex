@@ -24,6 +24,17 @@ export type ClientMsg =
   // it. The two engines that act on this are the two whose protocols hand that
   // decision to the client — VNC continuously, RDP on request.
   | { type: "viewport"; w: number; h: number }
+  // The density of the screen this browser window is on, in hundredths:
+  // `devicePixelRatio * 100`, so 100 for a 1x screen and 200 for a Retina one.
+  // Sent on connect and again whenever the window moves to a screen of a
+  // different density.
+  //
+  // This does *not* change how the canvas is presented — that stays the remote's
+  // own point size, with the browser rasterizing it for whatever screen it is on
+  // (see `applyCanvasCss`). It asks the remote to *have* the density that makes
+  // that one pixel per pixel. Only an rxa target with a display the agent made
+  // can act on it; everything else ignores it.
+  | { type: "hostScale"; scale: number }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it.

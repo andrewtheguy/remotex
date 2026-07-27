@@ -123,11 +123,16 @@ const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 //                                nothing resampled
 //
 // Dragging the window to a display of a different density switches between
-// those on its own, which is why `devicePixelRatio` appears nowhere in this
-// file. Following the host's density is the behaviour; not naming it is how it
-// is obtained. Dividing by it here, as this did once, is what *broke* the table
-// above — the canvas was then sized in the host's device pixels, so a 1x guest
-// came out at half its physical size on a Retina screen instead of magnified.
+// those on its own, which is why `devicePixelRatio` appears nowhere *here*.
+// Following the host's density is the behaviour; not naming it is how it is
+// obtained. Dividing by it in this function, as it once did, is what *broke* the
+// table above — the canvas was then sized in the host's device pixels, so a 1x
+// guest came out at half its physical size on a Retina screen, not magnified.
+//
+// The ratio is read elsewhere in this file (`sendHostScale`) for an unrelated
+// job: telling the *remote* what this screen is, so a display the agent made can
+// match it and turn row one or two of that table into row three. That changes
+// what arrives, never how what arrives is drawn.
 //
 // No letterboxing; when the desktop is larger than the viewport the canvas
 // overflows and the screen container scrolls.
@@ -644,6 +649,27 @@ export function useRemoteDesktop(
     // window size won't fire a redundant resize.
     resizeToWindowRef.current = () => sendViewport({ manual: true });
 
+    // This screen's density, deduped the same way: only an rxa target with a
+    // display the agent made acts on it, and only by matching it, so re-sending
+    // an unchanged value would be a WindowServer round trip for nothing.
+    let lastHostScale: number | null = null;
+    const sendHostScale = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      // Rounded to hundredths because the wire carries an integer, and clamped
+      // to something a screen could plausibly be: a fractional-DPI screen is
+      // ordinary, `devicePixelRatio` of 0 or Infinity is not.
+      const dpr = window.devicePixelRatio;
+      const scale =
+        Number.isFinite(dpr) && dpr > 0 ? Math.round(dpr * 100) : 100;
+      if (lastHostScale === scale) {
+        return;
+      }
+      lastHostScale = scale;
+      ws.send(JSON.stringify({ type: "hostScale", scale } satisfies ClientMsg));
+    };
+
     const open = (sessionId: string) => {
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
       const socket = new WebSocket(
@@ -813,6 +839,11 @@ export function useRemoteDesktop(
           // sent here (once the protocol is known), undeduped.
           lastViewport = null;
           sendViewport();
+          // And this screen's density, which is what lets a display the agent
+          // made come up matching the window it is about to be shown in rather
+          // than at whatever density it was left at.
+          lastHostScale = null;
+          sendHostScale();
           break;
         }
         case "clipboard": {
@@ -910,12 +941,31 @@ export function useRemoteDesktop(
     };
     window.addEventListener("resize", onViewportChange);
 
-    // No devicePixelRatio watcher, and the desktop follows the host's density
-    // anyway: the canvas is sized in the remote's points, so a window dragged
-    // between monitors of different scale is re-rasterized at the new one by the
-    // browser — a 1x guest magnifying on Retina, a Retina guest halving on a 1x
-    // screen — with its physical size unchanged. A watcher was only needed back
-    // when this size was in the host's device pixels and had to be recomputed.
+    // A devicePixelRatio watcher, but not for the canvas: nothing about how the
+    // desktop is *presented* depends on this screen's density. The canvas is
+    // sized in the remote's points, so a window dragged between monitors of
+    // different scale is re-rasterized at the new one by the browser — a 1x guest
+    // magnifying on Retina, a Retina guest halving on a 1x screen — with its
+    // physical size unchanged and nothing here recomputed.
+    //
+    // What the new density is worth telling is the *remote*, so a display the
+    // agent made can match it and the picture becomes one pixel per pixel instead
+    // of resampled. There is no devicePixelRatio event, so this is the standard
+    // trick: a media query pinned to the current ratio, which stops matching the
+    // moment the ratio changes, re-armed each time from the new value.
+    let dprQuery: MediaQueryList | null = null;
+    const watchDpr = () => {
+      dprQuery?.removeEventListener("change", onDprChange);
+      dprQuery = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio}dppx)`,
+      );
+      dprQuery.addEventListener("change", onDprChange);
+    };
+    function onDprChange() {
+      sendHostScale();
+      watchDpr();
+    }
+    watchDpr();
 
     return () => {
       disposed = true;
@@ -925,6 +975,7 @@ export function useRemoteDesktop(
       settleClipboardWaiters(null);
       clearTimeout(retryTimer);
       window.removeEventListener("resize", onViewportChange);
+      dprQuery?.removeEventListener("change", onDprChange);
       clearTimeout(resizeTimer);
       ws?.close();
     };
