@@ -178,6 +178,14 @@ before application menu equivalents, while a connected desktop is painting. A
 responder chain, so Command chords would never reach the remote. macOS virtual
 keycodes map to the same physical DOM `code` values the protocol uses.
 
+It cuts the other way too, and decides what the **Remote** menu may carry: while
+the desktop is painting and focused, every Command chord except Quit, Close and
+Settings goes to the remote, so a key equivalent on one of those items fires only
+on the screens where nothing is captured. Log Out and Change Gateway had one for
+driving the app from the keyboard in a test; they carry none now, because a
+shortcut that works on the picker and types into the guest on the desktop is
+worse than no shortcut at all.
+
 For a non-Mac remote, standard Mac Command shortcuts map to remote Control
 shortcuts. A bare Command taps remote Meta, and other Command chords are sent as
 remote Meta chords. For a Mac remote, Command remains Meta for every chord, so
