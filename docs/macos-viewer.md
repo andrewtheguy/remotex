@@ -198,6 +198,16 @@ field in the app answered Command-V with a beep. It does not reopen the problem
 the rule is about: a focused desktop takes the chord in the monitor before the
 menu bar is offered it, and with no text field in the responder chain the item is
 disabled. The sweep skips this menu by object identity, not by title.
+
+Installing it is not a launch-time step, and looked like one until it was measured:
+SwiftUI rebuilds the whole menu bar from its own model of it when the first window
+comes up, and a menu this app inserted is not in that model. The bar carried Edit
+for about a second after launch and then went back to `View` in its place, so the
+fix for the beeping read as no change at all. `ViewerMenus.ensureEditMenu` puts the
+menu back whenever the bar no longer holds the one the delegate is holding, off the
+same change notifications the sweep runs from — the bar the app hands out is not
+the last one it gets, and both rules have to outlive a rebuild.
+
 For a non-Mac remote, standard Mac Command shortcuts map to remote Control
 shortcuts. A bare Command taps remote Meta, and other Command chords are sent as
 remote Meta chords. For a Mac remote, Command remains Meta for every chord, so

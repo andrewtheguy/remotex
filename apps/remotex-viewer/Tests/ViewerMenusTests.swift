@@ -29,6 +29,66 @@ struct ViewerMenusTests {
         )
     }
 
+    /// The bug behind the bug: the menu went in at launch and SwiftUI's first
+    /// rebuild of the bar took it back out about a second later, so the fix for
+    /// the beeping looked like it had done nothing at all.
+    @Test
+    func theEditMenuGoesBackIntoARebuiltBar() {
+        let mainMenu = NSMenu()
+        mainMenu.addItem(withTitle: "remotex-viewer", action: nil, keyEquivalent: "")
+        mainMenu.addItem(withTitle: "Remote", action: nil, keyEquivalent: "")
+
+        let installed = ViewerMenus.ensureEditMenu(in: mainMenu, current: nil)
+        #expect(mainMenu.items.map(\.title) == ["remotex-viewer", "Edit", "Remote"])
+
+        // Rebuilt from a model this menu is not in, the way SwiftUI does it.
+        mainMenu.removeAllItems()
+        mainMenu.addItem(withTitle: "remotex-viewer", action: nil, keyEquivalent: "")
+        mainMenu.addItem(withTitle: "View", action: nil, keyEquivalent: "")
+        mainMenu.addItem(withTitle: "Remote", action: nil, keyEquivalent: "")
+
+        let reinstalled = ViewerMenus.ensureEditMenu(in: mainMenu, current: installed)
+        #expect(reinstalled !== installed)
+        #expect(mainMenu.items.map(\.title) == ["remotex-viewer", "Edit", "View", "Remote"])
+        #expect(reinstalled.items.contains { $0.keyEquivalent == "v" })
+    }
+
+    /// Run from a change notification, and inserting the menu posts one.
+    @Test
+    func ensuringTheEditMenuTwiceLeavesOne() {
+        let mainMenu = NSMenu()
+        mainMenu.addItem(withTitle: "remotex-viewer", action: nil, keyEquivalent: "")
+
+        let installed = ViewerMenus.ensureEditMenu(in: mainMenu, current: nil)
+        let again = ViewerMenus.ensureEditMenu(in: mainMenu, current: installed)
+
+        #expect(again === installed)
+        #expect(mainMenu.items.filter { $0.title == "Edit" }.count == 1)
+    }
+
+    /// Membership is by identity too: a rebuilt bar carrying something else called
+    /// Edit is not this menu surviving the rebuild, and the chords the sweep
+    /// exempts are only on the menu this app holds.
+    @Test
+    func aLookalikeEditMenuDoesNotCountAsInstalled() {
+        let mainMenu = NSMenu()
+        mainMenu.addItem(withTitle: "remotex-viewer", action: nil, keyEquivalent: "")
+        let ours = ViewerMenus.ensureEditMenu(in: mainMenu, current: nil)
+
+        // Rebuilt without ours, but with something of its own by that name.
+        mainMenu.removeAllItems()
+        mainMenu.addItem(withTitle: "remotex-viewer", action: nil, keyEquivalent: "")
+        let impostor = NSMenu(title: "Edit")
+        mainMenu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = impostor
+
+        let installed = ViewerMenus.ensureEditMenu(in: mainMenu, current: ours)
+
+        #expect(installed !== impostor)
+        #expect(installed !== ours)
+        #expect(installed.items.contains { $0.keyEquivalent == "v" })
+        #expect(mainMenu.items.filter { $0.title == "Edit" }.count == 2)
+    }
+
     /// The rest of the bar keeps none of its chords, at any depth — AppKit's own
     /// Control-Command-F on Enter Full Screen arrives long after launch, and a
     /// focused desktop would capture it and hand it to the guest.
