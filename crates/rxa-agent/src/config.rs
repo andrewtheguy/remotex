@@ -71,12 +71,12 @@ fn default_listen() -> String {
     format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT)
 }
 
-/// 1600x1000 points — 3200x2000 pixels once doubled.
+/// 1600x1200 points — 3200x2400 pixels once doubled, 7.7 megapixels a full frame.
 ///
-/// Chosen to be a comfortable desktop without making every full frame a
-/// 6.4-megapixel encode.
+/// The encode cost is the reason not to keep going up; the ceiling is what makes
+/// a smaller mode picked in System Settings cost proportionally less.
 fn default_virtual_display_initial_size() -> String {
-    "1600x1000".to_owned()
+    "1600x1200".to_owned()
 }
 
 impl Config {
