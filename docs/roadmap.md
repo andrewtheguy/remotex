@@ -26,6 +26,43 @@ The mechanical half of this is done — the viewer re-derives its geometry when 
 window changes display, rather than keeping the size it had — so what is left is
 the presentation policy, and it wants deciding for both clients at once.
 
+For `rxa` specifically there is a way to make the problem not exist rather than
+be managed — see the next entry.
+
+### A display of our own for `rxa`
+
+A display whose pixel size *and* HiDPI flag we choose is the one lever missing
+today. Ask for a display of the viewport's device-pixel size marked as scale 2,
+and its logical size is the window's point size: the existing 1:1 device-pixel
+blit is then sharp *and* physically the right size on a Retina host, with no
+presentation-scale policy in either client. Three routes, none of them free:
+
+- **`CGVirtualDisplay` (private CoreGraphics/SkyLight).** What BetterDisplay and
+  similar tools use: arbitrary pixel size, and a mode list whose HiDPI flag is
+  ours to set. There is no entitlement to request — and no compatibility promise
+  either. This is the kind of API that breaks on a major release, and it would be
+  load-bearing for the whole `rxa` display path.
+- **DriverKit virtual framebuffer.** The supported route. Needs an Apple-granted
+  DriverKit entitlement and a system extension the user approves, which is a
+  heavier install than the rest of the agent put together, and the entitlement is
+  not a given.
+- **Host-side, and only for a VM.** An Apple Virtualization guest's scale is
+  already the host's to decide:
+  `VZMacGraphicsDisplayConfiguration(widthInPixels:heightInPixels:pixelsPerInch:)`
+  — a high `pixelsPerInch` gives a HiDPI display — and on macOS 14+
+  `automaticallyReconfiguresDisplay` makes the guest's display follow the VM
+  window. That is the VM app's configuration (UTM, in the test setup), not
+  something an agent inside the guest can drive, so it settles the development
+  machine and nothing else.
+
+What has to be decided before any of them: a display of our own turns `rxa` from
+screen sharing into a **separate desktop**. Nobody's windows get rearranged by a
+connection any more, which is the upside — and it stops being "what is on that
+Mac's screen", which is the point of `rxa` today, and leaves a desktop nobody is
+looking at once the viewer goes away. It also only helps `rxa`: a Linux or Windows
+box cannot be handed a display from here, so VNC and RDP still need the
+presentation-scale decision above.
+
 ## Deferred pending measurements
 
 ### Retina performance for `rxa`
@@ -127,9 +164,11 @@ advertises, so following the viewport would mean a mode switch on every window
 drag, each landing on a neighbouring size nobody asked for, and each risking the
 display-stack wedge that only a VM reboot clears.
 
-An isolated, session-sized desktop would need a virtual display of our own.
-macOS has no suitable public API; DriverKit or private `CGVirtualDisplay`
-integration would also change `rxa` from screen sharing into a separate desktop.
+What is *not* settled here is a display of our own. An isolated, session-sized
+desktop needs one, and the routes to it are real enough to be written down — see
+"A display of our own for `rxa`" under Planned. That would retire this entry for
+one protocol rather than answer it: what stays not planned is following the
+viewport on the Mac's *existing* display, for the two reasons above.
 
 ### Multiple sessions
 
