@@ -115,24 +115,14 @@ impl VirtualDisplay {
     /// Fails rather than degrading if HiDPI does not engage: a 1x display at
     /// twice the requested size is worse than no display of our own, and the
     /// caller can fall back to the Mac's real screen and say so.
+    ///
+    /// The identity is new on every launch, which is what keeps this display from
+    /// rearranging the Mac — see [`fresh_serial`]. It also means the `Offline`
+    /// case that used to need a retry cannot arise from a remembered arrangement,
+    /// because there is none to remember; it is still reported if the
+    /// WindowServer refuses the display for some other reason.
     pub fn create(points: (u32, u32)) -> anyhow::Result<Self> {
-        match Self::create_with_serial(points, STABLE_SERIAL) {
-            Ok(display) => Ok(display),
-            // A remembered arrangement can leave one identity permanently
-            // offline (see `apply`), and nothing inside the process can clear
-            // it. A serial macOS has never seen has no arrangement to remember,
-            // so one retry with a fresh one gets a working display — at the cost
-            // of the window positions saved against the old identity.
-            Err(e) if e.downcast_ref::<Offline>().is_some() => {
-                let serial = fresh_serial();
-                warn!(
-                    "virtualdisplay: {e}; retrying as a display macOS has not seen before \
-                     (serial {serial})"
-                );
-                Self::create_with_serial(points, serial)
-            }
-            Err(e) => Err(e),
-        }
+        Self::create_with_serial(points, fresh_serial())
     }
 
     fn create_with_serial(points: (u32, u32), serial: u32) -> anyhow::Result<Self> {
@@ -200,11 +190,13 @@ impl VirtualDisplay {
             );
         };
         if shown != points {
-            // Not a problem, and worth a line: it is the remembered arrangement
-            // `STABLE_SERIAL` exists to preserve, doing its job.
+            // Unexpected now that every launch is a new identity — there should be
+            // no remembered mode to come up in — so it is worth a line rather than
+            // silence. Harmless either way: the size is measured, not assumed, and
+            // `backable_at_scale` has already established it can be 2x.
             info!(
                 "virtualdisplay: display {id} came up at {}x{} points rather than the {}x{} it was \
-                 created at — macOS remembered the mode this identity was last set to",
+                 created at",
                 shown.0, shown.1, points.0, points.1
             );
         }
@@ -244,12 +236,13 @@ impl VirtualDisplay {
 /// [`SCALE`], and return it — or `None` if the deadline passes first.
 ///
 /// Not "until it reports the size we asked for". macOS remembers a mode against a
-/// display identity and [`STABLE_SERIAL`] reuses one on purpose, so a display
-/// whose resolution has been changed on the Mac comes back at *that* mode: the
-/// remembered arrangement working as intended, and the whole point of a resolution
-/// the guest owns. Demanding the created size here rejected exactly that, and the
-/// message blamed density — a display set to 1024x640 on the Mac made the agent
-/// fall back to the real screen at every launch afterwards.
+/// display identity, so an identity it recognises comes back at whatever mode was
+/// last set on it rather than the one just asked for. Demanding the created size
+/// here rejected exactly that, and the message blamed density — a display set to
+/// 1024x640 on the Mac made the agent fall back to the real screen at every
+/// launch afterwards. [`fresh_serial`] means there should be nothing remembered
+/// now, but the check stays permissive: what matters is not the size, it is
+/// whether the size can be 2x.
 ///
 /// What has to hold instead is the thing `maxPixels` decides: at or under the
 /// created size macOS can put twice the pixels behind the mode, and past it it
@@ -293,13 +286,52 @@ impl Drop for VirtualDisplay {
     }
 }
 
-/// The identity the agent normally creates its display with.
+/// A serial number this Mac has not seen before.
 ///
-/// Stable on purpose: macOS remembers a display's arrangement — where it sits
-/// relative to the real screen, and where windows on it were — against vendor,
-/// product and serial, so keeping the same one means a restarted agent gives
-/// back the desktop the user had.
-const STABLE_SERIAL: u32 = 1;
+/// Every launch gets a new one, and that is the whole of what keeps this display
+/// **uninvasive**. macOS remembers an arrangement against vendor, product and
+/// serial — where the display sat, whether it was the primary, and what mode the
+/// screens around it were in — and re-applies all of it the moment an identity it
+/// recognises appears. Measured on the test VM, with one identity it had seen
+/// before:
+///
+/// ```text
+/// before: [1 @ (0,0) 1280x800 MAIN]
+/// after : [ours @ (0,0) 1600x1000 MAIN] [1 @ (-1024,0) 1024x640]
+/// ```
+///
+/// Ours took the primary role, and the Mac's own panel was moved *and resized* —
+/// from 1280x800 to 1024x640 — because that is the arrangement it remembered.
+/// Adding a display had rearranged the machine.
+///
+/// With a serial it has never seen, twice over:
+///
+/// ```text
+/// before: [1 @ (0,0) 1280x800 MAIN]
+/// after : [1 @ (0,0) 1280x800 MAIN] [ours @ (1280,0) 1600x1000]
+/// ```
+///
+/// Extended, to the right, primary untouched, the real screen untouched — which
+/// is what plugging in a monitor does, and what this should do.
+///
+/// What it costs: nothing about our display persists across an agent restart, so
+/// windows left on it come back where macOS puts them. That was the reason a
+/// stable serial existed, and it is the wrong trade — a remembered desktop is not
+/// worth rearranging the Mac to get it, and the remembered state cannot be
+/// cleared from inside the process once it is wrong.
+fn fresh_serial() -> u32 {
+    // Time-derived rather than random: the agent has no RNG dependency, and all
+    // this has to be is a number the WindowServer has no arrangement filed
+    // under. The low bits of the nanosecond clock differ across any two launches
+    // that could collide.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos() ^ elapsed.as_secs() as u32)
+        .unwrap_or(0);
+    // Away from the low numbers a hand-written descriptor would pick, and never
+    // zero — a paravirtual display reports zero for vendor, product and serial.
+    0x1000_0000 | (nanos & 0x0FFF_FFFF)
+}
 
 /// A display that was created but that the WindowServer will not bring online.
 ///
@@ -324,19 +356,6 @@ impl std::fmt::Display for Offline {
 }
 
 impl std::error::Error for Offline {}
-
-/// A serial number macOS has not seen before, so it carries no remembered state.
-///
-/// The clock rather than a random-number dependency: uniqueness across runs on
-/// one machine is all this needs.
-fn fresh_serial() -> u32 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
-        .unwrap_or(2)
-        // 0 and 1 mean "unset" and "the stable identity"; never collide with them.
-        .max(2)
-}
 
 /// Look up a private class, with an error that names it.
 fn class(name: &str) -> anyhow::Result<&'static AnyClass> {

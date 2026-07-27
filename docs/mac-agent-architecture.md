@@ -186,9 +186,41 @@ so a mode at or under that size is 2x and anything larger provably is not — wh
 is what keeps a `(low resolution)` pick from being captured as a surface four
 times the size it should be. Third, `CGDisplayBounds` reports the requested size
 even for a display the WindowServer refuses to bring online, so creation also
-checks `CGDisplayIsOnline` and `CGDisplayIsActive`. That offline state is
-remembered against the display's identity and survives a reboot, so it retries
-once with a serial macOS has not seen.
+checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
+
+## A new identity every launch
+
+The display is created with a serial number macOS has never seen, and that is
+what keeps adding one from **rearranging the Mac**. The WindowServer files an
+arrangement against vendor, product and serial — where the display sat, whether
+it was the primary, and what mode the screens around it were in — and re-applies
+every part of it the moment an identity it recognises appears. Measured on the
+test VM against an identity it had seen before:
+
+```text
+before: [1 @ (0,0) 1280x800 MAIN]
+after : [ours @ (0,0) 1600x1000 MAIN] [1 @ (-1024,0) 1024x640]
+```
+
+Ours took the primary role, and the Mac's own panel was moved *and resized*, from
+1280x800 to 1024x640. With a serial it has never seen, twice over:
+
+```text
+before: [1 @ (0,0) 1280x800 MAIN]
+after : [1 @ (0,0) 1280x800 MAIN] [ours @ (1280,0) 1600x1000]
+```
+
+Extended, to the right, primary untouched, the real screen untouched — which is
+what plugging in a monitor does. There is no API for any of this: nothing on
+`CGVirtualDisplayDescriptor` or `CGVirtualDisplaySettings` places a display or
+declines the primary role, so the identity is the only lever, and the arrangement
+cannot be cleared from inside the process once it is wrong.
+
+The cost is that nothing about our display persists across an agent restart, so
+windows left on it come back where macOS puts them. A stable serial bought that
+persistence and this is the better trade: a remembered desktop is not worth
+rearranging the machine to get, and it also means no session has to work around
+being handed our display as the main one.
 
 What this costs in practice — the ways macOS can leave such a display unusable —
 is in [`known-issues.md`](known-issues.md).

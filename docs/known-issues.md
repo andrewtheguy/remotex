@@ -76,10 +76,13 @@ holds it fixed, are the record.
   vendor, product and serial, and can decide to keep that identity offline. The
   state survives a reboot and cannot be cleared from inside the process.
   Observed 2026-07-27 against an identity earlier probe builds had used.
-- **Mitigation:** creation checks `CGDisplayIsOnline` and `CGDisplayIsActive`
-  rather than trusting bounds, and retries once with a serial number macOS has
-  not seen before. What is lost is the desktop arrangement saved against the old
-  identity — window positions on that display start over.
+- **Mitigation:** the agent now creates its display with a serial number macOS
+  has never seen, on every launch, so there is no remembered state for the
+  WindowServer to hold it offline *with* — see the same measurement in
+  [`mac-agent-architecture.md`](mac-agent-architecture.md), which is there for a
+  louder reason. Creation still checks `CGDisplayIsOnline` and `CGDisplayIsActive`
+  rather than trusting bounds, so a display refused for any other reason is
+  reported instead of silently uncapturable.
 - **Guard:** none possible in CI; it needs a real WindowServer in a state that
   cannot be created on demand.
 
