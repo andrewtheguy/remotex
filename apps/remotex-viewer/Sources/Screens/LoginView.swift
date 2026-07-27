@@ -51,9 +51,25 @@ struct LoginView: View {
                     // The captions above are separate Text views, so without these
                     // VoiceOver reaches two unnamed fields. No placeholder instead:
                     // it would show as grey sample text inside an empty field.
+                    // No `textContentType`, on either field, and that is the whole
+                    // point: `.username` and `.password` broke Command-V here. Once
+                    // macOS's Passwords panel had appeared over this form, paste
+                    // beeped in *both* fields and went on beeping after the panel
+                    // was gone — it takes key window and the responder chain does
+                    // not come back from it, so the Edit menu's `paste:` had nothing
+                    // to act on, and the paste that works everywhere else in the app
+                    // (see `ViewerMenus`) was broken again here, durably, for anyone
+                    // with a saved login.
+                    //
+                    // Nothing is given up by dropping them: the Passwords panel
+                    // still offers itself over these fields — macOS reads a secure
+                    // field and its neighbour on its own — and paste now survives
+                    // it. The content types added the breakage and not the offer,
+                    // which is not what their names suggest, so this is a comment
+                    // rather than a line someone tidies back in. The gateway address
+                    // keeps `.URL`; it was never part of this.
                     TextField("", text: $username)
                         .textFieldStyle(.roundedBorder)
-                        .textContentType(.username)
                         .accessibilityLabel("Username")
                         .focused($focus, equals: .username)
                         .onSubmit { focus = .password }
@@ -62,7 +78,6 @@ struct LoginView: View {
                         .foregroundStyle(.secondary)
                     SecureField("", text: $password)
                         .textFieldStyle(.roundedBorder)
-                        .textContentType(.password)
                         .accessibilityLabel("Password")
                         .focused($focus, equals: .password)
                         .onSubmit(signIn)
