@@ -336,39 +336,59 @@ fn report_startup_failure(args: &Args, title: &str, body: &str) {
     panels::startup_failure(mtm, title, body);
 }
 
-/// Restart the agent in place, to run under a config that has just changed.
+/// Restart the agent to run under a config that has just changed, by asking
+/// launchd to restart its job.
 ///
-/// `exec`, not "quit and be relaunched", and not "spawn a copy and exit":
+/// launchd does it, rather than this process doing it to itself. `exec` was the
+/// obvious way and is the wrong one for an app with a menu bar item: the process
+/// keeps the window server connection, the application identity and the Mach
+/// ports the *old* image registered, and the new image's AppKit comes up on top of
+/// them only half working. Measured on the test VM, with the status item forced
+/// visible (see [`menubar::run`]): the icon drew as an empty pill whose menu would
+/// not open, so the agent had saved the setting and could no longer be quit at
+/// all. The same build restarted by launchd comes up clean every time.
 ///
-/// - The embedded LaunchAgent's `KeepAlive` is `SuccessfulExit: false` — that is
-///   what makes Quit mean Quit (see [`menubar`]) — so a clean exit would leave the
-///   agent stopped, not restarted.
-/// - Spawning a second copy first loses a race with its own listener: the new
-///   process binds before this one has let the port go, finds it in use, and
-///   exits cleanly (see [`serve`]), leaving nothing running.
+/// Not "spawn a copy and exit" either, which loses a race with its own listener:
+/// the new process binds before this one has let the port go, finds it in use, and
+/// exits cleanly (see [`serve`]), leaving nothing running. launchd has no such
+/// race — it takes this instance down and then starts the next one.
 ///
-/// Replacing the process image has neither problem. The PID, the launchd job and
-/// the code identity the two TCC grants are keyed to all survive, the listening
-/// socket closes on the way (Rust opens sockets `CLOEXEC`), and the new image
-/// re-reads the config from scratch. The gateway sees a dropped connection and
-/// reconnects, which it is already built to do.
+/// The PID changes now, which nothing depended on; the launchd job and the code
+/// identity the two TCC grants are keyed to are exactly what is preserved. The
+/// gateway sees a dropped connection and reconnects, which it is already built to
+/// do.
 ///
-/// Only returns if the exec failed, in which case nothing has changed and the
-/// caller still has a running agent to report to.
+/// Only returns if the restart could not be asked for at all — an agent that is
+/// not registered as a login item has no job to kick — in which case nothing has
+/// changed but the config file, and the caller says so on screen.
 fn restart() -> anyhow::Error {
-    use std::os::unix::process::CommandExt as _;
+    let service = format!("gui/{}/{}", uid(), loginitem::LABEL);
+    info!("restarting through launchd: {service}");
+    match std::process::Command::new("/bin/launchctl")
+        .args(["kickstart", "-k", &service])
+        .status()
+    {
+        // launchd takes this instance down as part of the restart, so the ordinary
+        // end of this call is not returning from it.
+        Ok(status) if status.success() => {
+            std::thread::sleep(Duration::from_secs(5));
+            anyhow::anyhow!("launchd accepted the restart of {service}, but this process is still running")
+        }
+        Ok(status) => anyhow::anyhow!(
+            "launchctl could not restart {service} ({status}) — the agent may not be registered \
+             as a login item"
+        ),
+        Err(e) => anyhow::anyhow!("cannot run launchctl to restart {service}: {e}"),
+    }
+}
 
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(e) => return anyhow::anyhow!("cannot find my own executable: {e}"),
-    };
-    info!("restarting into {}", exe.display());
-    // Same arguments, so a `--config` path or a `--no-menu` session restarts as
-    // itself rather than as a default agent.
-    let error = std::process::Command::new(&exe)
-        .args(std::env::args_os().skip(1))
-        .exec();
-    anyhow::anyhow!("cannot restart {}: {error}", exe.display())
+/// This user's uid, for the launchd domain the login item lives in.
+fn uid() -> u32 {
+    // No safe binding in std, and it cannot fail.
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
 }
 
 /// Log to stderr on a terminal, and to a bounded set of files rooted at

@@ -271,16 +271,17 @@ define_class!(
                     // Nothing changed, so there is nothing to restart into and no
                     // reason to interrupt a session that is running.
                     Ok(false) => return,
-                    // Never returns unless the exec itself failed.
+                    // Never returns unless launchd refused the restart.
                     Ok(true) => {
-                        let status_item = self.ivars().status_item.get();
-                        if let Some(status_item) = status_item {
-                            status_item.setVisible(false);
-                        }
+                        // The status item is left alone on the way out, and that
+                        // is the whole point. Hiding it here — to spare the user a
+                        // stale icon while the agent restarted — persisted:
+                        // `setVisible(false)` is recorded by Control Center in
+                        // this app's preferences, `restart` does not come back to
+                        // undo it, and every launch afterwards came up with no
+                        // icon and therefore no way to quit. See [`run`], which
+                        // now also insists on visibility at creation.
                         let e = crate::restart();
-                        if let Some(status_item) = status_item {
-                            status_item.setVisible(true);
-                        }
                         warn!("menu: {e:#}");
                         panels::error(
                             mtm,
