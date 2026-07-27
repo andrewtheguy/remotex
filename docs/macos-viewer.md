@@ -179,15 +179,14 @@ responder chain, so Command chords would never reach the remote. macOS virtual
 keycodes map to the same physical DOM `code` values the protocol uses.
 
 It cuts the other way too, and decides what the **Remote** menu may carry: while
-the desktop is painting and focused, every Command chord except Quit, Close and
-Settings goes to the remote, so a key equivalent on one of those items fires only
+the desktop is painting and focused, every Command chord AppKit delivers goes
+to the remote, so a key equivalent on one of those items fires only
 on the screens where nothing is captured — and types into the guest on the one
 where the item usually matters. No item on that menu carries one, by rule. The
 four that did (Refresh, Log Out, Change Gateway, Connect to Gateway) were there to
 drive the app from the keyboard in a test, which is not reason enough to ship a
 chord whose meaning depends on which screen is up. The picker's own ⌘1…⌘9 target
 picks stay: nothing is captured there, and they are printed on the rows.
-
 For a non-Mac remote, standard Mac Command shortcuts map to remote Control
 shortcuts. A bare Command taps remote Meta, and other Command chords are sent as
 remote Meta chords. For a Mac remote, Command remains Meta for every chord, so
