@@ -16,8 +16,10 @@
 //! - `CGDisplayBounds` gives the intended **point** size whether or not the
 //!   backing store is 2x, so it cannot tell the two apart on its own. What it
 //!   *can* do is catch the failure: a display that dropped to 1x comes back at
-//!   *twice* the requested point size, so bounds equal to the request means
-//!   HiDPI engaged. That is the check [`VirtualDisplay::apply`] makes.
+//!   *twice* the requested point size, which is past the ceiling `maxPixels`
+//!   fixes — so bounds at or under the created size mean HiDPI engaged. That is
+//!   the check [`await_hidpi_bounds`] makes, by the same rule
+//!   [`crate::capture::owned_scale`] reads a live mode with.
 //! - `CGDisplayCopyDisplayMode` returns NULL and `CGDisplayCopyAllDisplayModes`
 //!   returns nothing, so the usual geometry reads do not work here at all —
 //!   which is why `capture.rs` has a separate path for these displays.
@@ -167,7 +169,7 @@ impl VirtualDisplay {
         let applied: bool = unsafe { msg_send![&*handle.0, applySettings: &*settings] };
         anyhow::ensure!(applied, "applySettings: refused {}x{}", points.0, points.1);
 
-        let settled = await_bounds(id, points);
+        let settled = await_hidpi_bounds(id, points);
         // Bounds alone cannot tell a working display from a disabled one: a
         // display the WindowServer has decided to keep offline reports the size
         // it was asked for and is in no other way present — not in the active
@@ -183,17 +185,27 @@ impl VirtualDisplay {
             }
             .into());
         }
-        if !settled {
+        let Some(shown) = settled else {
             // Twice the request is the signature of HiDPI not engaging; anything
-            // else means the WindowServer is somewhere we did not predict.
+            // else past the ceiling means the WindowServer is somewhere we did not
+            // predict.
             let bounds = CGDisplayBounds(id);
             anyhow::bail!(
-                "display {id} came up {}x{} points for a {}x{} request — HiDPI did not engage \
-                 (density outside the {MAX_DPI} dpi window?)",
+                "display {id} came up {}x{} points, past the {}x{} it was created at — HiDPI did \
+                 not engage (density outside the {MAX_DPI} dpi window?)",
                 bounds.size.width as u32,
                 bounds.size.height as u32,
                 points.0,
                 points.1
+            );
+        };
+        if shown != points {
+            // Not a problem, and worth a line: it is the remembered arrangement
+            // `STABLE_SERIAL` exists to preserve, doing its job.
+            info!(
+                "virtualdisplay: display {id} came up at {}x{} points rather than the {}x{} it was \
+                 created at — macOS remembered the mode this identity was last set to",
+                shown.0, shown.1, points.0, points.1
             );
         }
 
@@ -228,19 +240,49 @@ impl VirtualDisplay {
     }
 }
 
-/// Poll until `CGDisplayBounds` reports `points`, or the deadline passes.
-fn await_bounds(id: u32, points: (u32, u32)) -> bool {
+/// Poll until `CGDisplayBounds` reports a size the created display can back at
+/// [`SCALE`], and return it — or `None` if the deadline passes first.
+///
+/// Not "until it reports the size we asked for". macOS remembers a mode against a
+/// display identity and [`STABLE_SERIAL`] reuses one on purpose, so a display
+/// whose resolution has been changed on the Mac comes back at *that* mode: the
+/// remembered arrangement working as intended, and the whole point of a resolution
+/// the guest owns. Demanding the created size here rejected exactly that, and the
+/// message blamed density — a display set to 1024x640 on the Mac made the agent
+/// fall back to the real screen at every launch afterwards.
+///
+/// What has to hold instead is the thing `maxPixels` decides: at or under the
+/// created size macOS can put twice the pixels behind the mode, and past it it
+/// provably cannot. That is where a 1x display lands, at twice the request.
+fn await_hidpi_bounds(id: u32, points: (u32, u32)) -> Option<(u32, u32)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(SETTLE_TIMEOUT_MS);
     loop {
         let bounds = CGDisplayBounds(id);
-        if bounds.size.width as u32 == points.0 && bounds.size.height as u32 == points.1 {
-            return true;
+        let size = (bounds.size.width as u32, bounds.size.height as u32);
+        if backable_at_scale(size, points) {
+            return Some(size);
         }
         if std::time::Instant::now() >= deadline {
-            return false;
+            return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(SETTLE_POLL_MS));
     }
+}
+
+/// Whether `size` is a mode a display created at `created` points can put
+/// [`SCALE`] times the pixels behind.
+///
+/// The same rule [`crate::capture::owned_scale`] reads a live mode with, and it
+/// shares that rule's one blind spot: a `(low resolution)` 1x mode at or under
+/// the created size reads as 2x here too. Nothing can tell them apart — the three
+/// geometry reads in the module docs all refuse to — and the failure this check
+/// exists for is not that one. A display whose *creation* did not engage HiDPI
+/// comes up at twice the request, well past the ceiling.
+///
+/// Zero on either axis is a display that has not published a configuration yet
+/// (or is not there at all), which must not pass for "comfortably under".
+fn backable_at_scale(size: (u32, u32), created: (u32, u32)) -> bool {
+    size.0 > 0 && size.1 > 0 && size.0 <= created.0 && size.1 <= created.1
 }
 
 impl Drop for VirtualDisplay {
@@ -385,5 +427,43 @@ fn set_queue(descriptor: &Retained<AnyObject>) {
     let queue: *mut AnyObject = (&raw const _dispatch_main_q).cast_mut().cast();
     unsafe {
         let _: () = msg_send![&**descriptor, setQueue: queue];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Creating a display needs a WindowServer, so what is testable here is the
+    // rule creation is accepted or rejected by.
+    #[test]
+    fn a_display_at_or_under_the_size_it_was_created_at_is_2x() {
+        let created = (1600, 1000);
+        assert!(backable_at_scale(created, created), "the created mode itself");
+        // The case that sent the agent back to the real screen at every launch:
+        // the Mac had been set to 1024x640, and macOS restores that mode for an
+        // identity it has seen.
+        assert!(backable_at_scale((1024, 640), created));
+        assert!(backable_at_scale((320, 200), created));
+    }
+
+    #[test]
+    fn a_display_past_it_is_not() {
+        let created = (1600, 1000);
+        // Twice the request: the signature of HiDPI not engaging at creation,
+        // which is the failure this check exists for.
+        assert!(!backable_at_scale((3200, 2000), created));
+        // One axis is enough — `maxPixels` is a ceiling on both.
+        assert!(!backable_at_scale((1601, 1000), created));
+        assert!(!backable_at_scale((1600, 1001), created));
+    }
+
+    // A display that has not published a configuration yet reads 0x0, which is
+    // arithmetically "under" the created size and must not settle the poll.
+    #[test]
+    fn nothing_published_yet_is_not_a_settled_display() {
+        assert!(!backable_at_scale((0, 0), (1600, 1000)));
+        assert!(!backable_at_scale((1600, 0), (1600, 1000)));
+        assert!(!backable_at_scale((0, 1000), (1600, 1000)));
     }
 }
