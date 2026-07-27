@@ -1125,6 +1125,11 @@ fn translate_input(
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.
         ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
+        // RFB has one framebuffer, and on a multi-screen server it spans all of
+        // them: the ExtendedDesktopSize screen list describes how they are laid
+        // out inside it, not a set of things to choose between. So this engine
+        // never sends a display list and no client offers the picker.
+        ClientMsg::SelectDisplay { .. } => Vec::new(),
     }
 }
 
