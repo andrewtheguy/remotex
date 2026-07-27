@@ -8,7 +8,7 @@ enum ProductInfo {
     /// The fallback for an unbundled build, which has no `Info.plist` to read a
     /// version out of. `build-viewer-app.sh` refuses to package a mismatch, so
     /// `--version` stays honest.
-    static let developmentVersion = "0.0.30"
+    static let developmentVersion = "0.0.31"
 
     static var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
