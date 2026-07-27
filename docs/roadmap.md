@@ -99,6 +99,29 @@ desktop. If it cannot keep up, optimize in this order:
 H.264 is last because it creates a second browser decode path and adds stream
 state that the current independent tile protocol avoids.
 
+### Application-level liveness for VNC
+
+Socket keepalive bounds host death and network partition
+([`architecture.md`](architecture.md)), but it is answered by the peer's kernel,
+so a remote that is hung while still on the network reads as an idle desktop
+([`known-issues.md`](known-issues.md)). RFB has exactly one message a conformant
+server must answer regardless of change: a **non-incremental**
+`FramebufferUpdateRequest`. A 1×1 one at the origin is therefore a ~10-byte probe,
+and `update_request` already builds the shape — it would need the region
+parameterised.
+
+Three things to measure before committing to it. There is no correlation nonce, so
+liveness could only mean "some update arrived within the deadline". Servers union
+pending requests, and while libvncserver and TigerVNC add a non-incremental region
+to the modified region (so only the 1×1 comes back), a server that instead applies
+the flag to the whole union would retransmit the entire framebuffer every probe —
+4 MB at 1280×800 raw. And each probe pushes a 1×1 tile through to the client.
+
+RDP has no equivalent to offer. Its Heartbeat PDU is server-to-client only and
+undecoded by `ironrdp-pdu`; Refresh Rect would force a round trip but may not be
+sent unless the server advertised `refreshRectSupport`, which IronRDP's
+`ConnectionResult` does not expose. That needs an upstream change first.
+
 ### Capture-stream linger
 
 Keeping `SCStream` alive briefly after a gateway disconnect could avoid capture

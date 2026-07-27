@@ -221,7 +221,9 @@ and encodes the Mac display, and the gateway relays its tiles. Established
 connections retry with capped backoff after transient failures and request a
 repaint on recovery. Input generated while disconnected is discarded. Initial
 connection and authentication failures return to the picker instead of
-retrying indefinitely.
+retrying indefinitely, and so does an established link that stays down for 30
+seconds — long enough to hide a Wi-Fi roam or an agent restart, short enough that
+a Mac which was switched off does not leave a frozen desktop on screen.
 
 Nothing on this wire asks the Mac to change resolution, and `resize = true` on
 an `rxa` target is a config error. The Mac's mode is changed on the Mac — in
@@ -231,7 +233,11 @@ new size when it sees it. See
 [`mac-agent-architecture.md`](mac-agent-architecture.md).
 
 RXA has a separate application ping/pong between the gateway and agent to detect
-a half-open agent TCP connection quickly and reconnect it. Browser lifetime
+a half-open agent TCP connection quickly and reconnect it — faster than the
+socket keepalive every engine gets, and answered by the agent process rather than
+its kernel, so it also catches a Mac that is reachable while the agent is wedged.
+Because that ping goes out every five seconds, this engine's own socket is never
+idle and its keepalive timer effectively never arms. Browser lifetime
 remains owned by the shared session layer under the same rules as RDP and VNC.
 When that layer ends an RXA engine, it closes the agent connection, stops
 capture, and clears the agent's sharing status.
