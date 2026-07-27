@@ -63,8 +63,8 @@ final class AppModel: GatewaySessionSink {
     private var connection: GatewayConnection?
     @ObservationIgnored
     private var pressed = PressedInput()
-    /// The room available for the remote desktop, in device pixels, as the surface
-    /// last measured it. Nil until a surface exists.
+    /// The room available for the remote desktop, in the remote's own pixels, as
+    /// the surface last measured it. Nil until a surface exists.
     ///
     /// Observed, unlike the rest of the session plumbing below, because
     /// `canResizeNow` reads it: the first measurement is what enables "Resize to
@@ -358,9 +358,13 @@ final class AppModel: GatewaySessionSink {
             connection?.resetViewportMemo()
             sendViewport(manual: false)
 
-        case .resize(let w, let h):
+        case .resize(let w, let h, let scale):
             let size = DisplayMode(w: w, h: h)
             session.remoteSize = size
+            // The texture is the remote's pixels; the density only decides how
+            // large those pixels are drawn (`RemoteGeometry`), so the renderer
+            // never hears about it.
+            session.remoteScale = scale > 0 ? CGFloat(scale) : 1
             renderer?.resize(to: size)
 
         case .remoteOs(let macos):
@@ -443,7 +447,7 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
-    /// The surface measured how much room it has, in device pixels.
+    /// The surface measured how much room it has, in the remote's pixels.
     ///
     /// Debounced rather than sent straight through: a window drag reports on every
     /// frame, and VNC acts on every report it receives.

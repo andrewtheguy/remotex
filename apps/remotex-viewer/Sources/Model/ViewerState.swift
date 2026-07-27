@@ -22,7 +22,7 @@ enum ViewerConnectionStatus: String {
     case takenOver
 }
 
-/// One entry of the remote's resolution menu, in device pixels.
+/// One entry of the remote's resolution menu, in the remote's own pixels.
 ///
 /// `UInt16` because that is what `setResolution` is on the wire, and the gateway
 /// rejects an out-of-range value rather than clamping it — so a mode that could
@@ -54,9 +54,16 @@ struct ViewerSessionState: Equatable {
     /// The resolutions the remote offers. Empty for every target without a
     /// menu — only a Mac agent on a virtual display fills this in.
     var displayModes: [DisplayMode] = []
-    /// The remote's current size, from the last `resize`. Nil before the first
-    /// one, which is the "waiting for the remote desktop" state.
+    /// The remote's current size in framebuffer pixels, from the last `resize`.
+    /// Nil before the first one, which is the "waiting for the remote desktop"
+    /// state.
     var remoteSize: DisplayMode?
+    /// How many of those pixels the remote draws per point of its own desktop: 1
+    /// for VNC, RDP and a 1x Mac, 2 for a Retina one. Everything the desktop is
+    /// presented at is derived from it rather than from this Mac's display, which
+    /// is what keeps the remote the same physical size on either — see
+    /// `RemoteGeometry`.
+    var remoteScale: CGFloat = 1
     /// Whether to offer "Resize to Window": RDP only. VNC follows the viewport
     /// on its own, and rxa answers a resolution menu instead.
     var canResize = false

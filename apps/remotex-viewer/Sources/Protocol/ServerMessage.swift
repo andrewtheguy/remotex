@@ -4,7 +4,11 @@ import Foundation
 /// is where the exact JSON is pinned by tests worth reading alongside this.
 /// Screen tiles are binary frames and decode through `TileFrame` instead.
 enum ServerMessage: Sendable, Equatable {
-    case resize(w: UInt16, h: UInt16)
+    /// The remote's framebuffer size, and how many of those pixels it draws per
+    /// point of its *own* desktop — 1 for VNC, RDP and a 1x Mac, 2 for a Retina
+    /// one. The pair is what a client needs to present the desktop at the size it
+    /// is meant to be; see `RemoteGeometry`.
+    case resize(w: UInt16, h: UInt16, scale: Double)
     case cursor(Cursor)
     /// A fatal engine error. Not a dead end: the session returns to the picker,
     /// so this is shown there.
@@ -97,6 +101,11 @@ extension ServerMessage: Decodable {
     private struct Resize: Decodable {
         let w: UInt16
         let h: UInt16
+        /// Required, not defaulted: the gateway has sent it since
+        /// `PROTOCOL_VERSION` 2, and this build refuses a gateway that speaks
+        /// anything else — so a `resize` without one is drift worth reporting
+        /// rather than guessing 1x through.
+        let scale: Double
     }
 
     private struct Message: Decodable {
@@ -122,7 +131,7 @@ extension ServerMessage: Decodable {
             switch type {
             case "resize":
                 let payload = try Resize(from: decoder)
-                self = .resize(w: payload.w, h: payload.h)
+                self = .resize(w: payload.w, h: payload.h, scale: payload.scale)
             case "cursor":
                 self = .cursor(try Cursor(from: decoder))
             case "error":

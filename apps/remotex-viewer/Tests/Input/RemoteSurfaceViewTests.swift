@@ -10,7 +10,7 @@ struct RemoteSurfaceViewTests {
     /// size, which is at least the remote's and would report the desktop's
     /// current size back as the space available for it.
     @Test
-    func theViewportIsTheVisibleAreaInDevicePixels() throws {
+    func theViewportIsTheVisibleAreaInRemotePixels() throws {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 640, height: 480))
 
@@ -110,7 +110,7 @@ struct RemoteSurfaceViewTests {
         )
         // And the document is floored on the same room, so a remote that fits it
         // exactly cannot overflow and raise a scroller.
-        harness.coordinator.apply(remoteSize: harness.remote(width: 900, height: 648))
+        harness.apply(remote: harness.remote(width: 900, height: 648))
         #expect(harness.surface.frame.size == CGSize(width: 900, height: 648))
     }
 
@@ -166,7 +166,7 @@ struct RemoteSurfaceViewTests {
     func growingTheWindowGrowsTheSurfaceUnderASmallerRemote() async throws {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 600, height: 400))
-        harness.coordinator.apply(remoteSize: harness.remote(width: 400, height: 300))
+        harness.apply(remote: harness.remote(width: 400, height: 300))
         let before = try await harness.reportedViewport()
 
         harness.resize(to: CGSize(width: 900, height: 700))
@@ -175,28 +175,50 @@ struct RemoteSurfaceViewTests {
         #expect(harness.surface.frame.size == CGSize(width: 900, height: 700))
     }
 
-    /// The same hole as the resize above, reached the other way: moving the window
-    /// between displays of different scale changes no observed state either, so
-    /// `updateNSView` never runs and the document keeps a frame derived from the
-    /// scale it left behind. The framebuffer *does* lay itself out at the new one —
-    /// so a remote at 2× inside a 1× document overflows into space that is not even
-    /// scrollable, which is a non-Retina guest's taskbar below the fold on a Retina
-    /// host, with no way to scroll to it.
+    /// Moving the window between displays of different scale is the case that used
+    /// to double or halve the desktop: the layout was in the host's device pixels,
+    /// so a 1x guest on a Retina display came out at half its size and a document
+    /// derived from the scale left behind overflowed into space that was not even
+    /// scrollable. The desktop is laid out in the *remote's* points now, so the move
+    /// is the host's to absorb and there is nothing here to re-derive.
     @Test
-    func aBackingScaleChangeReDerivesTheDocument() throws {
+    func theHostsDisplayDensityChangesNothing() throws {
         let harness = try Harness()
         harness.window.scale = 1
         harness.resize(to: CGSize(width: 900, height: 700))
-        // Larger than the room at either scale, so the document is the remote's own
-        // point size both times and the scale it was derived from is readable off it.
-        harness.coordinator.apply(remoteSize: DisplayMode(w: 4_000, h: 3_000))
-        #expect(harness.surface.frame.size == CGSize(width: 4_000, height: 3_000))
+        // Larger than the room, so the document is the remote's own point size and
+        // any scale it had been derived from would be readable off it.
+        harness.apply(remote: DisplayMode(w: 4_000, h: 3_000))
+        let document = harness.surface.frame.size
+        let reported = harness.surface.measuredViewport()
+        #expect(document == CGSize(width: 4_000, height: 3_000))
 
-        // Onto a Retina display: the same remote is half the points it was.
+        // Onto a Retina display. Same desktop, same size, same request.
         harness.window.scale = 2
-        harness.surface.backingScaleChanged()
+        harness.resize(to: CGSize(width: 900, height: 700))
+
+        #expect(harness.surface.frame.size == document)
+        #expect(harness.surface.measuredViewport() == reported)
+    }
+
+    /// A Retina remote draws two framebuffer pixels per point of its own desktop,
+    /// so it is presented at half its pixel size — on a Retina host that is one
+    /// texel per device pixel, and on a 1x one it is scaled down rather than shown
+    /// at twice the size it is meant to be. The window here is deliberately 1x so
+    /// that a layout derived from the *host* instead could not pass.
+    @Test
+    func aRetinaRemoteIsLaidOutAtItsOwnPointSize() throws {
+        let harness = try Harness()
+        harness.window.scale = 1
+        harness.resize(to: CGSize(width: 900, height: 700))
+        harness.apply(remote: DisplayMode(w: 4_000, h: 3_000), guestScale: 2)
 
         #expect(harness.surface.frame.size == CGSize(width: 2_000, height: 1_500))
+        // And the room is reported in the remote's pixels, which is what a desktop
+        // that fills a 900x700pt window at that density would have to be.
+        #expect(
+            harness.surface.measuredViewport() == DisplayMode(w: 1_800, h: 1_400)
+        )
     }
 
     /// Scrolling changes what is visible, not how much room there is.
@@ -279,18 +301,24 @@ struct RemoteSurfaceViewTests {
             scrollView.layoutSubtreeIfNeeded()
         }
 
-        /// A remote whose size in *points* on this window's display is
-        /// `width`×`height` — the same points-to-pixels rule, read the other way.
+        /// What the host does on a `resize`, both halves of it together.
+        func apply(remote: DisplayMode, guestScale: CGFloat = 1) {
+            coordinator.apply(remoteSize: remote, guestScale: guestScale)
+        }
+
+        /// A remote whose desktop is `width`×`height` of its own points — the same
+        /// rule as the report below, read the other way.
         func remote(width: CGFloat, height: CGFloat) -> DisplayMode {
             expectedViewport(width: width, height: height)
         }
 
-        /// Points to pixels through the same rule the surface uses, so a display
-        /// with any backing scale gives the same answer.
+        /// Room in points to the remote pixels it is reported as, through the same
+        /// rule the surface uses. The surface's density rather than the window's, so
+        /// which display the tests run on cannot change the answer.
         func expectedViewport(width: CGFloat, height: CGFloat) -> DisplayMode {
             RemoteGeometry.viewport(
                 clip: CGSize(width: width, height: height),
-                backingScale: window.backingScaleFactor
+                guestScale: surface.guestScale
             )
         }
 

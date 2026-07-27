@@ -106,7 +106,7 @@ struct AppModelTests {
         let model = makeModel()
         model.apply(.status(.connected))
         model.apply(.control(.connected(connected(protocolName: "rxa", resize: true, clipboard: true))))
-        model.apply(.control(.resize(w: 1920, h: 1080)))
+        model.apply(.control(.resize(w: 1920, h: 1080, scale: 2)))
         model.apply(.control(.displayModes(modes: [DisplayMode(w: 1920, h: 1080)])))
         model.apply(.control(.remoteOs(macos: true)))
 
@@ -171,7 +171,7 @@ struct AppModelTests {
         let model = makeModel()
         model.apply(.status(.connected))
         model.apply(.control(.connected(connected(protocolName: "vnc"))))
-        model.apply(.control(.resize(w: 800, h: 600)))
+        model.apply(.control(.resize(w: 800, h: 600, scale: 1)))
         #expect(!model.showsStatusOverlay)
 
         model.apply(.clearFramebuffer)
@@ -191,7 +191,7 @@ struct AppModelTests {
         model.apply(.control(.connected(connected(protocolName: "rxa"))))
         #expect(!model.canCaptureKeyboardNow, "no frame yet")
 
-        model.apply(.control(.resize(w: 800, h: 600)))
+        model.apply(.control(.resize(w: 800, h: 600, scale: 1)))
         #expect(model.canCaptureKeyboardNow)
 
         model.apply(.status(.reconnecting))

@@ -254,7 +254,7 @@ final class RecordingSink: GatewaySessionSink {
 
     private static func label(_ message: ServerMessage) -> String {
         switch message {
-        case .resize(let w, let h): "resize(\(w)x\(h))"
+        case .resize(let w, let h, let scale): "resize(\(w)x\(h)@\(scale)x)"
         case .cursor: "cursor"
         case .error(let message): "error(\(message))"
         case .picker: "picker"

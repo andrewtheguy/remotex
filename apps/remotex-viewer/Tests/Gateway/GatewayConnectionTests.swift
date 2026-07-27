@@ -14,7 +14,7 @@ struct GatewayConnectionTests {
         let transport = FakeWebSocketTransport(
             inbound: [
                 .text(#"{"type":"connected","name":"mac","protocol":"rxa","resize":true,"clipboard":true}"#),
-                .text(#"{"type":"resize","w":64,"h":64}"#),
+                .text(#"{"type":"resize","w":64,"h":64,"scale":2.0}"#),
                 .binary(try tileFrame(x: 0, y: 0)),
                 .binary(try tileFrame(x: 8, y: 16)),
                 .text(#"{"type":"displayModes","modes":[{"w":64,"h":64}]}"#),
@@ -34,7 +34,7 @@ struct GatewayConnectionTests {
         #expect(
             interesting == [
                 "control:connected(mac)",
-                "control:resize(64x64)",
+                "control:resize(64x64@2.0x)",
                 "tile:0,0,2x2",
                 "tile:8,16,2x2",
                 "control:displayModes(1)",

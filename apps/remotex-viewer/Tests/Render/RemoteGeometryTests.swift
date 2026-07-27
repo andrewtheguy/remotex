@@ -4,22 +4,25 @@ import Testing
 @testable import RemotexViewer
 
 struct RemoteGeometryTests {
-    /// One texel per device pixel: a 2× display shows a 2560-wide desktop in
-    /// 1280 points.
+    /// The remote's own points, not the host's: a Retina remote's 2560 pixels are
+    /// the 1280 points its desktop is laid out in, and the same framebuffer from a
+    /// 1x remote is 2560 points wide. What the host does with those points — one
+    /// texel per device pixel, or scaled either way — is the host's business, and is
+    /// what keeps a desktop the same physical size on any display.
     @Test
-    func aRemoteIsSizedInPointsByTheBackingScale() {
+    func aRemoteIsSizedInPointsByItsOwnDensity() {
         let remote = DisplayMode(w: 2560, h: 1600)
         #expect(
-            RemoteGeometry.pointSize(of: remote, backingScale: 2)
+            RemoteGeometry.pointSize(of: remote, guestScale: 2)
                 == CGSize(width: 1280, height: 800)
         )
         #expect(
-            RemoteGeometry.pointSize(of: remote, backingScale: 1)
+            RemoteGeometry.pointSize(of: remote, guestScale: 1)
                 == CGSize(width: 2560, height: 1600)
         )
         // A scale of zero would divide by nothing; 1 is the sane reading.
         #expect(
-            RemoteGeometry.pointSize(of: remote, backingScale: 0)
+            RemoteGeometry.pointSize(of: remote, guestScale: 0)
                 == CGSize(width: 2560, height: 1600)
         )
     }
@@ -80,14 +83,18 @@ struct RemoteGeometryTests {
         }
     }
 
+    /// The room asked for is in the remote's pixels: a Retina Mac has to be given
+    /// two per point to fill the same window, while a remote whose pixels are its
+    /// points is asked for the points themselves — no matter how dense the display
+    /// the window happens to be on.
     @Test
-    func aViewportIsMeasuredInDevicePixels() {
+    func aViewportIsMeasuredInTheRemotesPixels() {
         #expect(
-            RemoteGeometry.viewport(clip: CGSize(width: 720, height: 450), backingScale: 2)
+            RemoteGeometry.viewport(clip: CGSize(width: 720, height: 450), guestScale: 2)
                 == DisplayMode(w: 1440, h: 900)
         )
         #expect(
-            RemoteGeometry.viewport(clip: CGSize(width: 1280, height: 800), backingScale: 1)
+            RemoteGeometry.viewport(clip: CGSize(width: 1280, height: 800), guestScale: 1)
                 == DisplayMode(w: 1280, h: 800)
         )
     }
@@ -99,19 +106,19 @@ struct RemoteGeometryTests {
     func aViewportIsClampedIntoTheGatewaysRange() {
         let huge = RemoteGeometry.viewport(
             clip: CGSize(width: 40_000, height: 40_000),
-            backingScale: 3
+            guestScale: 3
         )
         #expect(huge == DisplayMode(w: 65535, h: 65535))
 
         // Zero is refused as well: a zero-size desktop is nobody's intent, and a
         // window can measure zero mid-layout.
         #expect(
-            RemoteGeometry.viewport(clip: .zero, backingScale: 2) == DisplayMode(w: 1, h: 1)
+            RemoteGeometry.viewport(clip: .zero, guestScale: 2) == DisplayMode(w: 1, h: 1)
         )
         #expect(
             RemoteGeometry.viewport(
                 clip: CGSize(width: -10, height: 5),
-                backingScale: 1
+                guestScale: 1
             ) == DisplayMode(w: 1, h: 5)
         )
     }
@@ -123,7 +130,7 @@ struct RemoteGeometryTests {
         #expect(
             RemoteGeometry.viewport(
                 clip: CGSize(width: CGFloat.nan, height: CGFloat.infinity),
-                backingScale: 2
+                guestScale: 2
             ) == DisplayMode(w: 1, h: 1)
         )
         let remote = DisplayMode(w: 100, h: 100)

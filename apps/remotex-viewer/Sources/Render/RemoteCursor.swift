@@ -28,14 +28,17 @@ enum RemoteCursor {
 
     /// Decide what a `cursor` message means. Nil means none has arrived.
     ///
-    /// `backingScale` converts the payload's *pixels* into the points AppKit
-    /// wants. Without it a Retina remote's pointer comes out at double size with
-    /// its hotspot displaced by half the image.
-    static func shape(for payload: ServerMessage.Cursor?, backingScale: CGFloat) -> Shape {
+    /// `guestScale` — the remote's density, the same one the desktop is laid out
+    /// with — converts the payload's *pixels* into the points AppKit wants.
+    /// Without it a Retina remote's pointer comes out at double size with its
+    /// hotspot displaced by half the image, and next to a desktop drawn at the
+    /// remote's own size it would be a pointer twice as large as the windows it
+    /// points at.
+    static func shape(for payload: ServerMessage.Cursor?, guestScale: CGFloat) -> Shape {
         guard let payload else {
             return .hidden
         }
-        let scale = backingScale > 0 ? backingScale : 1
+        let scale = guestScale > 0 ? guestScale : 1
         guard let base64 = payload.image,
               let png = Data(base64Encoded: base64),
               payload.w > 0,

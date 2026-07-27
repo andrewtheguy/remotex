@@ -25,7 +25,7 @@ struct RemoteCursorTests {
         )
 
         #expect(
-            RemoteCursor.shape(for: payload, backingScale: 2)
+            RemoteCursor.shape(for: payload, guestScale: 2)
                 == .image(
                     png: png,
                     size: CGSize(width: 16, height: 24),
@@ -33,7 +33,7 @@ struct RemoteCursorTests {
                 )
         )
         #expect(
-            RemoteCursor.shape(for: payload, backingScale: 1)
+            RemoteCursor.shape(for: payload, guestScale: 1)
                 == .image(
                     png: png,
                     size: CGSize(width: 32, height: 48),
@@ -46,7 +46,7 @@ struct RemoteCursorTests {
     /// the framebuffer and ours has to be out of the way.
     @Test
     func noMessageMeansTheRemoteDrawsItsOwn() {
-        #expect(RemoteCursor.shape(for: nil, backingScale: 2) == .hidden)
+        #expect(RemoteCursor.shape(for: nil, guestScale: 2) == .hidden)
     }
 
     /// A null image is the remote hiding its pointer — a different thing from
@@ -55,7 +55,7 @@ struct RemoteCursorTests {
     @Test
     func aNullImageMeansTheRemoteHidItsPointer() {
         let payload = ServerMessage.Cursor(image: nil, w: 0, h: 0, hx: 0, hy: 0)
-        #expect(RemoteCursor.shape(for: payload, backingScale: 2) == .fallbackArrow)
+        #expect(RemoteCursor.shape(for: payload, guestScale: 2) == .fallbackArrow)
     }
 
     @Test
@@ -67,7 +67,7 @@ struct RemoteCursorTests {
             hx: 0,
             hy: 0
         )
-        #expect(RemoteCursor.shape(for: notBase64, backingScale: 1) == .fallbackArrow)
+        #expect(RemoteCursor.shape(for: notBase64, guestScale: 1) == .fallbackArrow)
 
         // Valid base64 that is not an image.
         let notAnImage = ServerMessage.Cursor(
@@ -77,7 +77,7 @@ struct RemoteCursorTests {
             hx: 0,
             hy: 0
         )
-        #expect(RemoteCursor.shape(for: notAnImage, backingScale: 1) == .fallbackArrow)
+        #expect(RemoteCursor.shape(for: notAnImage, guestScale: 1) == .fallbackArrow)
     }
 
     /// A zero dimension would divide the hotspot into nothing.
@@ -88,13 +88,13 @@ struct RemoteCursorTests {
             ServerMessage.Cursor(image: png, w: 0, h: 8, hx: 0, hy: 0),
             ServerMessage.Cursor(image: png, w: 8, h: 0, hx: 0, hy: 0),
         ] {
-            #expect(RemoteCursor.shape(for: payload, backingScale: 1) == .fallbackArrow)
+            #expect(RemoteCursor.shape(for: payload, guestScale: 1) == .fallbackArrow)
         }
     }
 
     /// A scale of zero would divide by nothing.
     @Test
-    func aZeroBackingScaleReadsAsOne() throws {
+    func aZeroGuestScaleReadsAsOne() throws {
         let png = try pngData(width: 10, height: 10)
         let payload = ServerMessage.Cursor(
             image: png.base64EncodedString(),
@@ -104,7 +104,7 @@ struct RemoteCursorTests {
             hy: 5
         )
         #expect(
-            RemoteCursor.shape(for: payload, backingScale: 0)
+            RemoteCursor.shape(for: payload, guestScale: 0)
                 == .image(
                     png: png,
                     size: CGSize(width: 10, height: 10),

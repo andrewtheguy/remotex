@@ -11,6 +11,9 @@ struct RemoteSurfaceHost: NSViewRepresentable {
     /// enclosing `body` is what observes them and SwiftUI actually calls the
     /// update when they change.
     let remoteSize: DisplayMode?
+    /// The remote's own density, from the same `resize` as `remoteSize`. Both are
+    /// needed to lay the desktop out, so both arrive together.
+    let guestScale: CGFloat
     let cursor: ServerMessage.Cursor?
 
     func makeCoordinator() -> Coordinator {
@@ -24,8 +27,8 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .black
-        // Zoom is out of scope: the desktop is shown at one texel per device pixel
-        // or it scrolls.
+        // Zoom is out of scope: the desktop is shown at its own point size — scaled
+        // to the display it is on, never by the user — or it scrolls.
         scrollView.allowsMagnification = false
 
         guard let renderer = FramebufferRenderer.make() else {
@@ -47,7 +50,7 @@ struct RemoteSurfaceHost: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        context.coordinator.apply(remoteSize: remoteSize)
+        context.coordinator.apply(remoteSize: remoteSize, guestScale: guestScale)
         context.coordinator.apply(cursor: cursor)
     }
 
@@ -115,34 +118,23 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                             // frame measured against the old window — leaving a
                             // remote smaller than the window off-centre in the space
                             // it grew into.
-                            self.apply(remoteSize: surface.remoteSize)
+                            self.apply(
+                                remoteSize: surface.remoteSize,
+                                guestScale: surface.guestScale
+                            )
                             surface.needsLayout = true
                             self.report(from: surface)
                         }
                     }
                 )
             }
-            // A scale change is the same problem as a window-only resize, and it
-            // arrives the same way: no observed state changes, so SwiftUI does not
-            // run `updateNSView`, and every point size below was derived from the
-            // old scale. The document would keep the size it had — a remote laid out
-            // at 2× inside a document that never grew overflows into space that is
-            // not even scrollable, which on a Retina host is a non-Retina guest's
-            // taskbar sitting below the fold with no way to reach it. This is what
-            // `onDprChange` re-derives in `useRemoteDesktop.ts`.
-            surface.onBackingScaleChange = { [weak self, weak surface] in
-                guard let self, let surface else {
-                    return
-                }
-                self.apply(remoteSize: surface.remoteSize)
-                // The message has not changed, only the scale its image is drawn
-                // at, so the dedupe in `apply(cursor:)` has to be stepped past.
-                if let applied = appliedCursor {
-                    appliedCursor = nil
-                    self.apply(cursor: applied)
-                }
-                self.report(from: surface)
-            }
+            // Deliberately nothing for the window changing display. Every point
+            // size here is the remote's own, so a host scale change has no geometry
+            // to re-derive — the layer resamples the same desktop for whichever
+            // screen the window is on (see `FramebufferView`). It was not always so:
+            // while the desktop was laid out in the host's device pixels, a move to
+            // a Retina display doubled it inside a document that never grew, and the
+            // overflow was not even scrollable.
             report(from: surface)
         }
 
@@ -157,11 +149,18 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             model.reportViewport(measured)
         }
 
-        func apply(remoteSize: DisplayMode?) {
+        func apply(remoteSize: DisplayMode?, guestScale: CGFloat) {
             guard let surface else {
                 return
             }
+            // The pointer is sized in the remote's points too, so a density change
+            // has to re-derive it from a `cursor` message that has not itself
+            // changed — which means stepping past the dedupe in `apply(cursor:)`.
+            if surface.guestScale != guestScale {
+                appliedCursor = nil
+            }
             surface.remoteSize = remoteSize
+            surface.guestScale = guestScale
             // At least the visible area, so a remote smaller than the window still
             // fills it with margin instead of leaving the scroll view's own
             // background showing through.
@@ -171,9 +170,8 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             // overflow the room the desktop had just been sized to, which put the
             // scrollers up and kept them there.
             let visible = surface.enclosingScrollView?.roomForDocument ?? .zero
-            let scale = surface.window?.backingScaleFactor ?? 1
             let wanted = remoteSize.map {
-                RemoteGeometry.pointSize(of: $0, backingScale: scale)
+                RemoteGeometry.pointSize(of: $0, guestScale: guestScale)
             } ?? .zero
             surface.setFrameSize(
                 CGSize(
@@ -191,10 +189,9 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                 return
             }
             appliedCursor = .some(cursor)
-            let scale = surface.window?.backingScaleFactor ?? 1
             surface.apply(
                 cursor: RemoteCursor.cursor(
-                    for: RemoteCursor.shape(for: cursor, backingScale: scale)
+                    for: RemoteCursor.shape(for: cursor, guestScale: surface.guestScale)
                 )
             )
         }

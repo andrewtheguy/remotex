@@ -39,11 +39,23 @@ final class RemoteSurfaceView: NSView {
         fatalError("RemoteSurfaceView is not loaded from a nib")
     }
 
-    /// The remote's size, or nil while there is nothing to show. Set by the host
-    /// when the model's `remoteSize` changes.
+    /// The remote's size in framebuffer pixels, or nil while there is nothing to
+    /// show. Set by the host when the model's `remoteSize` changes.
     var remoteSize: DisplayMode? {
         didSet {
             guard remoteSize != oldValue else {
+                return
+            }
+            needsLayout = true
+        }
+    }
+
+    /// The remote's own density: framebuffer pixels per point of *its* desktop,
+    /// from the same `resize` as `remoteSize`. Never this window's backing scale —
+    /// see `RemoteGeometry`.
+    var guestScale: CGFloat = 1 {
+        didSet {
+            guard guestScale != oldValue else {
                 return
             }
             needsLayout = true
@@ -58,8 +70,7 @@ final class RemoteSurfaceView: NSView {
             return
         }
         framebuffer.isHidden = false
-        let scale = window?.backingScaleFactor ?? 1
-        let size = RemoteGeometry.pointSize(of: remoteSize, backingScale: scale)
+        let size = RemoteGeometry.pointSize(of: remoteSize, guestScale: guestScale)
         // Centred in whatever margin there is, so a remote smaller than the window
         // does not sit in a corner.
         framebuffer.frame = CGRect(
@@ -70,20 +81,7 @@ final class RemoteSurfaceView: NSView {
         )
     }
 
-    /// Set by `RemoteSurfaceHost.Coordinator`. Every point size in this view's
-    /// geometry is derived from the window's backing scale, and the host owns all
-    /// of them, so a change is its to answer.
-    var onBackingScaleChange: (() -> Void)?
-
-    /// The window moved to a display with a different scale — or into a window at
-    /// all — so the point size the framebuffer occupies changed even though the
-    /// remote did not.
-    func backingScaleChanged() {
-        needsLayout = true
-        onBackingScaleChange?()
-    }
-
-    /// The room available for the remote desktop in device pixels, or nil while
+    /// The room available for the remote desktop in *remote* pixels, or nil while
     /// there is none to measure.
     ///
     /// `roomForDocument`, and deliberately none of the three nearer measurements:
@@ -100,10 +98,7 @@ final class RemoteSurfaceView: NSView {
         guard visible.width >= 1, visible.height >= 1 else {
             return nil
         }
-        return RemoteGeometry.viewport(
-            clip: visible,
-            backingScale: window?.backingScaleFactor ?? 1
-        )
+        return RemoteGeometry.viewport(clip: visible, guestScale: guestScale)
     }
 
     /// The remote pixel under a point in this view's coordinates, or nil when

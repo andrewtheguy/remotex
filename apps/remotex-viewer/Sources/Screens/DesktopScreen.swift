@@ -14,6 +14,7 @@ struct DesktopScreen: View {
             RemoteSurfaceHost(
                 model: model,
                 remoteSize: model.session.remoteSize,
+                guestScale: model.session.remoteScale,
                 cursor: model.remoteCursor
             )
             .ignoresSafeArea()
