@@ -11,7 +11,7 @@ enum MouseButton: String, Sendable, Codable, CaseIterable {
 /// `type` with the payload fields as siblings.
 ///
 /// The integer widths are the Rust ones, not the convenient ones. `viewport`
-/// and `setResolution` carry `UInt16` because the gateway *rejects* an
+/// carries `UInt16` because the gateway *rejects* an
 /// out-of-range value at deserialization rather than clamping it, and a
 /// rejected frame is only logged — so the symptom of getting this wrong is
 /// "resize silently stopped working". Making the payload `UInt16` means an
@@ -30,9 +30,6 @@ enum ClientMessage: Sendable, Equatable {
     /// times the density the remote draws at. Followed continuously by VNC, acted on
     /// only by request for RDP, ignored entirely by rxa.
     case viewport(w: UInt16, h: UInt16)
-    /// The user's pick from a `displayModes` menu. Not a spelling of `viewport`:
-    /// a Mac's virtual display takes nothing but sizes off a fixed list.
-    case setResolution(w: UInt16, h: UInt16)
     /// Re-announce the desktop size and repaint everything. The gateway injects
     /// one itself on reattach, so this is the manual escape hatch.
     case refresh
@@ -50,7 +47,6 @@ enum ClientMessage: Sendable, Equatable {
         case .wheel: "wheel"
         case .key: "key"
         case .viewport: "viewport"
-        case .setResolution: "setResolution"
         case .refresh: "refresh"
         case .connect: "connect"
         case .disconnect: "disconnect"
@@ -61,7 +57,7 @@ enum ClientMessage: Sendable, Equatable {
 
     /// Every tag this build can send, for the wire-contract test.
     static let allTags: Set<String> = [
-        "mouseMove", "mouseButton", "wheel", "key", "viewport", "setResolution",
+        "mouseMove", "mouseButton", "wheel", "key", "viewport",
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
     ]
 }
@@ -88,7 +84,7 @@ extension ClientMessage: Encodable {
             try container.encode(code, forKey: .code)
             try container.encode(pressed, forKey: .pressed)
             try container.encode(caps, forKey: .caps)
-        case .viewport(let w, let h), .setResolution(let w, let h):
+        case .viewport(let w, let h):
             try container.encode(w, forKey: .w)
             try container.encode(h, forKey: .h)
         case .connect(let target):

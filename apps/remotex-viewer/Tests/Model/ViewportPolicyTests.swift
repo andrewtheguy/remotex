@@ -30,9 +30,9 @@ struct ViewportPolicyTests {
         )
     }
 
-    /// A Mac's virtual display takes only sizes off a fixed list, so rxa answers
-    /// `displayModes`/`setResolution` and a viewport report means nothing to it —
-    /// including one the user asked for.
+    /// A Mac's resolution is set on that Mac — in System Settings, whether the
+    /// screen is one of its own or one the agent created — so a viewport report
+    /// means nothing to it, including one the user asked for.
     @Test
     func rxaIgnoresViewportsEntirely() {
         for resize in [true, false] {

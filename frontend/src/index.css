@@ -1107,37 +1107,3 @@ body {
   margin-left: auto;
   color: #7ee787;
 }
-
-/* ── Resolution panel ────────────────────────────────────────────────────── */
-/* A wrapping grid rather than a column: the lists are short (a virtual Mac
-   display advertises a handful of modes) and every entry is the same shape. */
-
-.res-modes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-.res-mode {
-  flex: 1 1 8.5rem;
-  padding: 0.5rem 0.6rem;
-  font: inherit;
-  font-size: 0.85rem;
-  font-variant-numeric: tabular-nums;
-  color: #e6edf3;
-  background: #21262d;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.res-mode:hover {
-  background: #30363d;
-}
-
-/* The size the remote is already at. Not disabled — re-picking it is harmless
-   and the agent short-circuits an unchanged mode. */
-.res-mode-active {
-  color: #7ee787;
-  border-color: #2ea043;
-}

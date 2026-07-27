@@ -62,8 +62,8 @@ struct ViewportReportingTests {
         try await session.expectViewport(w: 1600, h: 1000)
     }
 
-    /// rxa answers `setResolution` off a fixed list instead, so an automatic report
-    /// would be refused anyway — and it is never sent.
+    /// A Mac's resolution is set on that Mac, so a report has nothing to act on
+    /// — and it is never sent.
     @Test
     func anRxaTargetReportsNothingAutomatically() async throws {
         let session = try await Self.attached()

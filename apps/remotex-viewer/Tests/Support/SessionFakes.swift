@@ -262,7 +262,6 @@ final class RecordingSink: GatewaySessionSink {
         case .connected(let payload): "connected(\(payload.name))"
         case .remoteOs(let macos): "remoteOs(\(macos))"
         case .clipboard: "clipboard"
-        case .displayModes(let modes): "displayModes(\(modes.count))"
         case .unsupported(let type): "unsupported(\(type))"
         }
     }

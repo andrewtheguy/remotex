@@ -12,14 +12,14 @@ import Foundation
 ///   resize cheaply.
 /// - **RDP** resizes only when the user asks, because a resize forces a
 ///   Deactivation-Reactivation — an expensive, visible renegotiation.
-/// - **rxa** ignores viewport reports outright. A Mac's virtual display takes
-///   only sizes off a fixed list, so it answers `displayModes` and
-///   `setResolution` instead.
+/// - **rxa** ignores viewport reports outright. A Mac's resolution is set on
+///   that Mac, in System Settings, and the gateway has no message to ask for
+///   one — the size arrives here as a `resize`, never as an answer.
 struct ViewportPolicy: Equatable {
     /// Suppress automatic reports; only an explicit request gets through. RDP and
     /// rxa with `resize`.
     var manualOnly = false
-    /// Send nothing at all. rxa, which acts on `setResolution` instead.
+    /// Send nothing at all. Every rxa target.
     var ignoresViewport = false
 
     /// The last size sent on this connection, for the dedupe below.
@@ -30,11 +30,11 @@ struct ViewportPolicy: Equatable {
         self.ignoresViewport = ignoresViewport
     }
 
-    /// Derive the policy from a `connected` message.
+    /// Derive the policy from a `connected` message. This is the whole decision:
+    /// nothing later changes it.
     init(protocolName: String, resize: Bool) {
-        // rxa never wants one, whether or not it can resize.
         ignoresViewport = protocolName == "rxa"
-        manualOnly = (protocolName == "rdp" || protocolName == "rxa") && resize
+        manualOnly = protocolName == "rdp" && resize
     }
 
     /// The message to send for a measured window, or nil for none.

@@ -40,17 +40,13 @@ struct ClientMessageTests {
         )
     }
 
-    /// `viewport` and `setResolution` share a payload shape but not a meaning —
-    /// see ClientMsg in src/protocol.rs — so both tags must survive encoding.
+    /// The only way this client asks for a remote size — see ClientMsg in
+    /// src/protocol.rs, where it is also the only one.
     @Test
-    func viewportAndSetResolutionKeepTheirOwnTags() throws {
+    func viewportEncodesItsSize() throws {
         try expectEncoding(
             .viewport(w: 1280, h: 800),
             ["type": "viewport", "w": 1280, "h": 800]
-        )
-        try expectEncoding(
-            .setResolution(w: 1280, h: 800),
-            ["type": "setResolution", "w": 1280, "h": 800]
         )
     }
 
@@ -82,7 +78,6 @@ struct ClientMessageTests {
             .wheel(dx: 0, dy: 0),
             .key(code: "KeyA", pressed: true, caps: false),
             .viewport(w: 1, h: 1),
-            .setResolution(w: 1, h: 1),
             .refresh,
             .connect(target: "t"),
             .disconnect,

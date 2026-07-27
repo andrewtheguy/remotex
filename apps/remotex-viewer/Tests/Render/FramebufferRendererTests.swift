@@ -67,8 +67,8 @@ struct FramebufferRendererTests {
     }
 
     /// The gateway suppresses a redundant `resize` so an unchanged desktop keeps
-    /// its pixels, and an rxa `setResolution` can be answered with the size
-    /// already in use. Reallocating here would throw the framebuffer away anyway.
+    /// its pixels, but a reconnect re-announces one. Reallocating here would
+    /// throw the framebuffer away for nothing.
     @Test
     func resizingToTheSameSizeKeepsThePixels() throws {
         let renderer = try #require(FramebufferRenderer.make())
