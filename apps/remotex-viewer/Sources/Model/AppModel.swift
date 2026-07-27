@@ -112,6 +112,11 @@ final class AppModel: GatewaySessionSink {
     /// every frame, and a VNC target acts on each one it is told about.
     @ObservationIgnored
     private var viewportDebounce: Task<Void, Never>?
+    /// The backing scale of the screen this window is on, and the last value
+    /// reported to the remote. `nil` means nothing has been reported for this
+    /// connection yet, so the next report goes even if it repeats the number.
+    private var hostScale: CGFloat = 1
+    private var lastHostScale: UInt16?
     /// Deliberately outside Observation. Tiles arrive dozens of times a second;
     /// routing them through `@Observable` would invalidate the view hierarchy on
     /// every strip.
@@ -458,6 +463,12 @@ final class AppModel: GatewaySessionSink {
             viewportPolicy.resetForNewConnection()
             connection?.resetViewportMemo()
             sendViewport(manual: false)
+            // And this window's screen density, so a display the agent made comes
+            // up matching the screen it is about to be shown on rather than at
+            // whatever it was left at. Undeduped for the same reason as the
+            // viewport: the previous target's value means nothing to this one.
+            lastHostScale = nil
+            sendHostScale()
 
         case .resize(let w, let h, let scale):
             let size = DisplayMode(w: w, h: h)
@@ -577,6 +588,31 @@ final class AppModel: GatewaySessionSink {
             return
         }
         connection?.send(message)
+    }
+
+    /// The density of the screen this window is on, reported to the remote.
+    ///
+    /// Called on connect and whenever the window changes screen. Deduped because
+    /// acting on it is a WindowServer reconfigure on the Mac at the other end:
+    /// re-sending a value it already matches would relay that desktop's windows
+    /// for nothing. Unlike the viewport there is no debounce — a window changes
+    /// screen once, discretely, where a drag-resize reports every frame.
+    func reportHostScale(_ scale: CGFloat) {
+        hostScale = scale
+        sendHostScale()
+    }
+
+    private func sendHostScale() {
+        // Hundredths, because the wire carries an integer. A screen whose scale
+        // is not a positive finite number is not one AppKit describes, so 1x is
+        // the answer that asks the remote for the least.
+        let usable = hostScale.isFinite && hostScale > 0 ? hostScale : 1
+        let scale = UInt16(clamping: Int((usable * 100).rounded()))
+        guard session.screen == .desktop, scale != lastHostScale else {
+            return
+        }
+        lastHostScale = scale
+        connection?.send(.hostScale(scale: scale))
     }
 
     // MARK: - Actions

@@ -65,6 +65,18 @@ struct ClientMessageTests {
         )
     }
 
+    /// Hundredths of a backing scale, matching the density a `resize` reports in
+    /// the other direction — so the two are comparable without either end knowing
+    /// how the other spells 2x.
+    @Test
+    func hostScaleTravelsAsHundredths() throws {
+        try expectEncoding(.hostScale(scale: 100), ["type": "hostScale", "scale": 100])
+        try expectEncoding(.hostScale(scale: 200), ["type": "hostScale", "scale": 200])
+        // A screen with a fractional ratio is ordinary and must survive intact
+        // rather than being rounded to one of the two common cases here.
+        try expectEncoding(.hostScale(scale: 150), ["type": "hostScale", "scale": 150])
+    }
+
     /// The gateway's `w`/`h` are u16 and it rejects anything wider rather than
     /// clamping, so the type carries the ceiling and the extremes must survive.
     @Test
@@ -99,6 +111,7 @@ struct ClientMessageTests {
             .clipboard(text: ""),
             .clipboardRequest,
             .selectDisplay(id: 1),
+            .hostScale(scale: 200),
         ]
         #expect(Set(messages.map(\.tag)) == ClientMessage.allTags)
         #expect(messages.count == ClientMessage.allTags.count)

@@ -45,6 +45,16 @@ enum ClientMessage: Sendable, Equatable {
     /// its screens to look at* is only a question for the person looking. Only
     /// rxa answers it.
     case selectDisplay(id: UInt32)
+    /// The density of the screen this window is on, in hundredths — 100 for a 1x
+    /// screen, 200 for a Retina one. Sent on connect and whenever the window
+    /// changes screen.
+    ///
+    /// It changes nothing about how the remote is drawn here: the framebuffer view
+    /// is laid out at the remote's own point size and AppKit rasterizes that for
+    /// whichever screen it is on (see `RemoteGeometry`). This asks the remote to
+    /// *have* the density that makes the result one pixel per pixel. Only rxa acts
+    /// on it, and only for a display the agent made.
+    case hostScale(scale: UInt16)
 
     /// The `type` tag this encodes as. Public so the wire-contract test can
     /// compare the whole set against the Rust enum.
@@ -61,6 +71,7 @@ enum ClientMessage: Sendable, Equatable {
         case .clipboard: "clipboard"
         case .clipboardRequest: "clipboardRequest"
         case .selectDisplay: "selectDisplay"
+        case .hostScale: "hostScale"
         }
     }
 
@@ -68,14 +79,14 @@ enum ClientMessage: Sendable, Equatable {
     static let allTags: Set<String> = [
         "mouseMove", "mouseButton", "wheel", "key", "viewport",
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
-        "selectDisplay",
+        "selectDisplay", "hostScale",
     ]
 }
 
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
         case type, x, y, button, pressed, dx, dy, code, caps, w, h, target, text
-        case id
+        case id, scale
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -104,6 +115,8 @@ extension ClientMessage: Encodable {
             try container.encode(text, forKey: .text)
         case .selectDisplay(let id):
             try container.encode(id, forKey: .id)
+        case .hostScale(let scale):
+            try container.encode(scale, forKey: .scale)
         case .refresh, .disconnect, .clipboardRequest:
             break
         }

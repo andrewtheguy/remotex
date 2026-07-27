@@ -8,6 +8,11 @@ import MetalKit
 /// resamples a framebuffer-sized drawable into whatever the window's display makes
 /// of those points. One texel per device pixel only when the two densities agree.
 final class FramebufferView: MTKView {
+    /// Called with this window's backing scale whenever it changes, so the remote
+    /// can be asked to match it. Presentation does not depend on it — see
+    /// `viewDidChangeBackingProperties`.
+    var onBackingScaleChange: ((CGFloat) -> Void)?
+
     init(renderer: FramebufferRenderer) {
         super.init(frame: .zero, device: renderer.device)
         // On demand, not on a clock: a burst of strips coalesces into one draw at
@@ -36,14 +41,22 @@ final class FramebufferView: MTKView {
     /// `backingScaleFactor` without any resize notification, and the layer has to
     /// be told or it keeps rasterizing for the display it left.
     ///
-    /// Nothing else follows from it: neither the drawable (which tracks the remote)
-    /// nor this view's point size (the remote's own — see `RemoteGeometry`) depends
-    /// on the host's density, so the desktop keeps its physical size across the move
-    /// and this one line is the whole of switching density with it — the layer now
-    /// rasterizes at the new screen's scale, magnifying a 1x remote onto a Retina
-    /// display and halving a Retina remote onto a 1x one.
+    /// Nothing else *presented* follows from it: neither the drawable (which tracks
+    /// the remote) nor this view's point size (the remote's own — see
+    /// `RemoteGeometry`) depends on the host's density, so the desktop keeps its
+    /// physical size across the move and the `contentsScale` line is the whole of
+    /// switching density with it — the layer now rasterizes at the new screen's
+    /// scale, magnifying a 1x remote onto a Retina display and halving a Retina
+    /// remote onto a 1x one.
+    ///
+    /// The new scale is also handed upwards, which is a different question: not how
+    /// to draw what arrives, but what to ask the remote to send. A display the agent
+    /// made can change its own density to match, turning a resampled picture into
+    /// one pixel per pixel.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        layer?.contentsScale = window?.backingScaleFactor ?? 1
+        let scale = window?.backingScaleFactor ?? 1
+        layer?.contentsScale = scale
+        onBackingScaleChange?(scale)
     }
 }

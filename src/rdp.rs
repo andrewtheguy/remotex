@@ -840,6 +840,11 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // So this engine never sends a display list, no client offers the
         // picker, and anything arriving here is a client that invented one.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
+        // Nothing to act on: an RDP server draws at one density and has no
+        // notion of a backing scale to change. Clients send this unconditionally
+        // rather than asking what the engine is, so it is ignored here rather
+        // than treated as a client error.
+        ClientMsg::HostScale { .. } => Vec::new(),
     }
 }
 
