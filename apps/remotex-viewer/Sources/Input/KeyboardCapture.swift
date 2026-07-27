@@ -127,7 +127,14 @@ final class KeyboardCapture {
             releaseAll()
             return false
         }
+        // Nothing to capture for: no desktop, no first frame yet, or view only —
+        // which suspends capture outright, so every chord goes back to meaning
+        // locally what it says. Whatever the translator was part way through goes
+        // with it: a Command left pending, or the synthetic Control a mapped chord
+        // rides on, would otherwise be resumed against a remote whose releases have
+        // already been sent.
         guard model.canCaptureKeyboardNow else {
+            releaseAll()
             return false
         }
         if event.modifierFlags.contains(.command),

@@ -62,6 +62,23 @@ final class RemoteSurfaceView: NSView {
         }
     }
 
+    /// View only: the pointer over the desktop controls nothing, so it is drawn as
+    /// the ordinary arrow instead of the remote's shape.
+    ///
+    /// Not cosmetic. For a remote that composites its own pointer into the
+    /// framebuffer — RDP, and VNC without the Cursor pseudo-encoding — ours is
+    /// deliberately *transparent*, so two are not drawn for one; with the remote's
+    /// no longer following the mouse, keeping that would leave nothing on screen to
+    /// point with.
+    var isViewOnly = false {
+        didSet {
+            guard isViewOnly != oldValue else {
+                return
+            }
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
     override func layout() {
         super.layout()
         guard let remoteSize else {
@@ -146,7 +163,7 @@ final class RemoteSurfaceView: NSView {
         guard !framebuffer.frame.isEmpty else {
             return
         }
-        addCursorRect(framebuffer.frame, cursor: cursor)
+        addCursorRect(framebuffer.frame, cursor: isViewOnly ? .arrow : cursor)
     }
 
     func apply(cursor next: NSCursor) {
@@ -206,7 +223,7 @@ final class RemoteSurfaceView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard let model, model.session.canCaptureKeyboard else {
+        guard let model, model.canSendInput else {
             return
         }
         guard let delta = WheelMapping.delta(
@@ -218,6 +235,19 @@ final class RemoteSurfaceView: NSView {
         }
         model.sendWheel(dx: delta.dx, dy: delta.dy)
     }
+
+    // MARK: - Keyboard
+
+    /// Swallowed, silently.
+    ///
+    /// Keys that belong to the remote never arrive here: `KeyboardCapture` takes
+    /// them from a local event monitor, ahead of the responder chain. Anything that
+    /// does arrive is a key nobody wants — capture is suspended (view only, or no
+    /// frame yet), and the menu bar has already had its shot at the chords — and the
+    /// only thing left down the chain is the window's `noResponder`, which beeps.
+    /// One beep per keystroke is a poor answer to typing at a desktop that is
+    /// deliberately not listening.
+    override func keyDown(with event: NSEvent) {}
 
     private func report(motion event: NSEvent) {
         guard let model,

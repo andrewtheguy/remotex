@@ -33,6 +33,38 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// View only: the session stays attached and painting, and nothing the user
+    /// does reaches the remote — no key, no pointer, no wheel, and no clipboard.
+    ///
+    /// What it is *for* is `KeyboardCapture`. That monitor takes every Command chord
+    /// bar Quit, Close and Settings for the guest, so a desktop in front means this
+    /// Mac has no shortcuts of its own; this is the switch that suspends it. The
+    /// pointer and the clipboard follow because a mode that gave the keyboard back
+    /// while still driving the remote with the mouse would be a confusing half of an
+    /// idea.
+    ///
+    /// The clipboard goes with the rest because nothing on that link is
+    /// user-initiated: the synchronizer polls this Mac's pasteboard and pushes
+    /// whatever it finds, so leaving it up would keep writing to the remote while
+    /// the toggle said otherwise. That it is off is what the disabled Clipboard
+    /// button next to this one shows.
+    ///
+    /// Deliberately not persisted, unlike the keyboard overrides: that is a
+    /// convention this Mac keeps, and this is a mode you are in for a while. It
+    /// does outlive a target switch, since it says how you mean to use the viewer
+    /// rather than anything about what you are attached to.
+    var isViewOnly = false {
+        didSet {
+            guard isViewOnly != oldValue else {
+                return
+            }
+            // Whatever is held was pressed while input was still going through, and
+            // the paths that would have released it are the ones just closed.
+            releaseInput()
+            updateClipboardEnablement()
+        }
+    }
+
     private(set) var gateway: GatewayLocation
     private(set) var branding = "remotex"
     private(set) var session = ViewerSessionState()
@@ -119,8 +151,21 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// Whether anything the user does may reach the remote. The single gate every
+    /// outbound input path is written against, and the whole of what view only
+    /// means.
+    var canSendInput: Bool {
+        session.canCaptureKeyboard && !isViewOnly
+    }
+
+    /// Whether `KeyboardCapture` takes key events for the remote at all.
+    ///
+    /// False in view only, and that is the point of the mode rather than a
+    /// consequence of it: capture is a local event monitor that swallows every
+    /// Command chord bar Quit, Close and Settings, so while it is up this Mac's
+    /// keyboard belongs to the guest. Suspending it is what gives the chords back.
     var canCaptureKeyboardNow: Bool {
-        session.canCaptureKeyboard && session.remoteSize != nil
+        canSendInput && session.remoteSize != nil
     }
 
     var macOSKeyboardOverridesActive: Bool {
@@ -447,6 +492,7 @@ final class AppModel: GatewaySessionSink {
             enabled: session.screen == .desktop
                 && session.connectionStatus == .connected
                 && session.canClipboard
+                && !isViewOnly
         )
     }
 
@@ -557,20 +603,28 @@ final class AppModel: GatewaySessionSink {
     }
 
     func sendPointer(x: Int32, y: Int32) {
-        guard session.canCaptureKeyboard else {
+        guard canSendInput else {
             return
         }
         connection?.send(.mouseMove(x: x, y: y))
     }
 
     func sendWheel(dx: Float, dy: Float) {
-        guard session.canCaptureKeyboard else {
+        guard canSendInput else {
             return
         }
         connection?.send(.wheel(dx: dx, dy: dy))
     }
 
+    /// Gated here as well as in `KeyboardCapture`, which is the only caller: this
+    /// is where "nothing reaches the remote" is a property of the model rather than
+    /// of one event monitor. Unlike a mouse button there is no exception for a
+    /// release, because there is nothing left to release — switching view only on
+    /// let go of everything held.
     func sendKey(code: String, pressed isPressed: Bool, caps: Bool) {
+        guard canSendInput else {
+            return
+        }
         pressed.record(code: code, pressed: isPressed)
         connection?.send(.key(code: code, pressed: isPressed, caps: caps))
     }
@@ -578,7 +632,7 @@ final class AppModel: GatewaySessionSink {
     func sendMouseButton(_ button: MouseButton, pressed isPressed: Bool) {
         // A release is always forwarded, even off the desktop: a button recorded
         // as held has to be able to come back up.
-        guard session.canCaptureKeyboard || !isPressed else {
+        guard canSendInput || !isPressed else {
             return
         }
         pressed.record(button: button, pressed: isPressed)
