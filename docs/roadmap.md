@@ -34,7 +34,7 @@ physically right with nothing resampled. Three routes, none of them free:
   lists and captures it at full resolution, and the display is process-scoped:
   released object, display gone.
 
-  What makes the route treacherous rather than merely unsupported is that three
+  What makes the route treacherous rather than merely unsupported is that two
   readings misreport such a display. `CGDisplayBounds` shows the intended point
   size even when the backing store is 1x, so a wrong configuration looks right
   until something captures native pixels. `SCContentFilter.pointPixelScale`
@@ -45,8 +45,8 @@ physically right with nothing resampled. Three routes, none of them free:
   `NSScreen.backingScaleFactor` is the one that takes its place, reporting 2.00
   for a display that is genuinely 1x.) And of five plausible descriptor
   configurations only one produced 2x, because the HiDPI flag does not command
-  it: what decides is pixel density,
-  `modePixels / sizeInMillimeters`, which has to land in a window of roughly
+  it: what decides is pixel density, `modePixels / sizeInMillimeters`, which has
+  to land in a window of roughly
   145–300 dpi. At a fixed 1000×700 pt mode, 134 and 318 dpi both came up 1x,
   while 149 through 264 dpi came up 2x. Outside that window the display appears
   at twice the requested point size at 1x — a desktop with unreadable UI rather
@@ -90,6 +90,40 @@ trade per session, which is a large part of why it need not be settled here.
 
 It also only helps `rxa`: a Linux or Windows box cannot be handed a display from
 here, so for those the scaled presentation is the whole answer.
+
+### Resize the private display to the client's window, on request
+
+Its **density** already follows the client, automatically: both clients report
+the backing scale of the screen their window is on
+(`GatewayMsg::HostScale`), and a display the agent made matches it, so a session
+from a Retina screen gets a 2x desktop and one from a 1x screen gets a 1x desktop
+at a quarter of the framebuffer. Its **size** does not follow anything yet, and
+that is the piece left.
+
+The shape is RDP's, not VNC's: a button, not continuous following. A reconfigure
+relays every window on that desktop, so it must be something the person asks for
+rather than something a window drag does forty times. Both clients already have
+the control — the floating menu's **Resize to window** — and it is disabled for
+`rxa` today.
+
+Measured on the test VM (macOS 26.5.2), the mechanics work: `applySettings:` on
+the live display honours an arbitrary point size, keeps the same `displayID`, and
+takes 66–397 ms to apply with bounds settled 134–580 ms later. Two limits are
+fixed at creation and cannot be changed, and they are what make this a design
+rather than a patch:
+
+- **`maxPixels`** is a hard ceiling. Asking past it silently halves the result
+  while `applySettings:` still returns YES — so a window larger than the created
+  size cannot be matched, only clamped to it.
+- **`sizeInMillimeters`** fixes the density, so shrinking the mode walks the
+  display down out of the HiDPI window; about 57% of the created width loses 2x,
+  and recovering it needs a *new* display, hence a new `displayID` and a new
+  identity for macOS to file an arrangement against.
+
+So `virtual_display_initial_size` stops being "the resolution" and becomes what
+it already is underneath: the **envelope** — the largest mode that can ever be 2x,
+and the range a resize has to work inside. Which is also the answer to "should
+the user change it": not as a resolution, only as a ceiling, once.
 
 ## Deferred pending measurements
 

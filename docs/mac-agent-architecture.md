@@ -193,6 +193,30 @@ points alone those are one number. Whichever entry macOS restored for the identi
 decided whether the agent's reported density was right, which is why it looked
 random.
 
+## Its density follows the client
+
+The one thing about this display that is not the Mac's to decide, and it is the
+one thing nobody at the Mac is deciding *for*: a display nobody sits in front of
+has no right density of its own, only the right density for whoever is looking
+through it. So both clients report the backing scale of the screen their window
+is on — on connect, and again when the window changes screen — and the agent
+matches it with `applySettings:` at the display's current point size.
+
+The point size is deliberately preserved, so the desktop keeps its layout and only
+the pixels behind it change; a client connecting from a different screen does not
+rearrange anyone's windows. `VirtualDisplay::set_scale` returns early when the
+densities already agree, which is the common case, because every apply is a
+WindowServer round trip that relays that desktop's windows.
+
+Narrow on purpose, in three ways. It reaches only a display the agent *made* — a
+Mac's own panel does not change because someone connected. It changes only the
+density, never the resolution (see [`roadmap.md`](roadmap.md) for the size
+question, which is a button rather than something automatic). And it changes what
+the client *receives*, never how the client draws it: both clients present a
+remote at its own point size and let their host rasterize that, so mismatched
+densities already look correct — this is what makes them stop costing four times
+the framebuffer, or stop being resampled.
+
 ## Its identity, and what macOS remembers against it
 
 The display reports a fixed vendor, product and serial, for the same reason a
