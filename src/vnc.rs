@@ -73,9 +73,15 @@ const MAX_ARD_KEY_BYTES: usize = 512;
 /// Smallest DH key length accepted, in bytes. The server picks the group, and
 /// what rides inside it is an account password, so a small prime is not a
 /// server being frugal — it is a shared secret anyone watching the wire can
-/// recover. 64 bytes (512 bits) is far below the 128 macOS sends and still
-/// beyond reach.
-const MIN_ARD_KEY_BYTES: usize = 64;
+/// recover.
+///
+/// 128 bytes: the 1024 bits macOS 26 sends, with no room below it. The 512-bit
+/// group Apple's own documentation calls the "older, less secure method" is
+/// therefore refused rather than downgraded to, which is the point. If a Mac old
+/// enough to still offer it ever turns up, this is what it will fail on, and the
+/// error says so — a refusal being the honest answer for a group that would put
+/// an account password behind precomputation anyone can afford.
+const MIN_ARD_KEY_BYTES: usize = 128;
 /// Apple's credential blob: `username[64]`, then `password[64]`, each
 /// null-terminated, the remainder random.
 const ARD_CREDENTIALS_LEN: usize = 128;
@@ -1702,12 +1708,12 @@ mod tests {
     async fn a_full_dh_exchange_hands_the_server_the_credentials_back() {
         use aes::cipher::{BlockCipherDecrypt as _, KeyInit as _};
 
-        // A 1024-bit prime is what macOS sends; 64 bytes is enough to exercise
-        // the same code and keeps the test fast.
-        let key_len = 64usize;
+        // The group macOS sends, and now the smallest this client accepts: 128
+        // bytes of it.
+        let key_len = MIN_ARD_KEY_BYTES;
         let prime = {
             let mut bytes = vec![0xffu8; key_len];
-            bytes[key_len - 1] = 0x61; // 2^512 - 159, a prime
+            bytes[key_len - 1] = 0x97; // 2^1024 - 105, prime
             bytes
         };
         let server_private = vec![0x5au8; key_len];
@@ -1770,6 +1776,11 @@ mod tests {
 
         let too_small = authenticate(offer(MIN_ARD_KEY_BYTES - 1, 0xff)).await;
         assert!(too_small.contains("outside the"), "{too_small}");
+        // Named for what it is rather than left to the arithmetic above: 64
+        // bytes is the 512-bit group Apple used to use, and refusing it is the
+        // reason the floor exists.
+        let legacy = authenticate(offer(64, 0xff)).await;
+        assert!(legacy.contains("outside the"), "{legacy}");
         let too_large = authenticate(offer(MAX_ARD_KEY_BYTES + 1, 0xff)).await;
         assert!(too_large.contains("outside the"), "{too_large}");
         // Long enough, and still no group at all.
