@@ -184,20 +184,6 @@ final class AppModel: GatewaySessionSink {
         session.canResize && viewportSize != nil
     }
 
-    /// Whether the address may still be changed — only while signed out, which
-    /// here means the credentials step.
-    ///
-    /// The gateway is the ground everything after it stands on: the login cookie
-    /// is scoped to that host, the claim token was minted by it, and the socket is
-    /// attached to it. Moving it out from under a live session meant tearing all
-    /// three down as a side effect of a menu item, so the way out of a session is
-    /// now the one that says so — Log Out, which lands on the step this is offered
-    /// from. On the server step there is nothing to change *to*: it is already the
-    /// step that asks.
-    var canChangeGateway: Bool {
-        session.screen == .login && !isBusy
-    }
-
     /// The interstitial covers the connection lifecycle and the claim conflicts,
     /// and on the desktop it also covers the gap before the first frame. The
     /// picker owns the screen once connected.
@@ -264,11 +250,19 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
-    /// Back to the server step, to point somewhere else. Refused once signed in
-    /// — see `canChangeGateway` — so neither entry point can strand a live
-    /// session on a gateway the viewer has stopped talking to.
+    /// Back to the server step, to point somewhere else. The login screen's
+    /// **Change** link is the only caller.
+    ///
+    /// The credentials step is also the only screen it is allowed from, and the
+    /// guard says so rather than trusting that: the gateway is the ground
+    /// everything after it stands on — the login cookie is scoped to that host,
+    /// the claim token was minted by it, the socket is attached to it — so moving
+    /// it out from under a live session is a log out that does not say so. From
+    /// the picker or the desktop, Log Out is the step to take first, and it lands
+    /// here. On the server step there is nothing to change *to*: it is already the
+    /// step that asks.
     func changeGateway() async {
-        guard canChangeGateway else {
+        guard session.screen == .login, !isBusy else {
             return
         }
         await teardown()
