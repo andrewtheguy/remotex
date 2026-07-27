@@ -112,10 +112,26 @@ final class AppModel: GatewaySessionSink {
     /// every frame, and a VNC target acts on each one it is told about.
     @ObservationIgnored
     private var viewportDebounce: Task<Void, Never>?
-    /// The backing scale of the screen this window is on, and the last value
-    /// reported to the remote. `nil` means nothing has been reported for this
-    /// connection yet, so the next report goes even if it repeats the number.
-    private var hostScale: CGFloat = 1
+    /// Reads the backing scale of the screen this window is currently on.
+    ///
+    /// A closure rather than a stored value, and that is the bug it fixes. Caching
+    /// what `viewDidChangeBackingProperties` last pushed means trusting that the
+    /// notification fired *and* fired last on the final screen. It does not: a
+    /// window is created on the main screen and only then restored to its saved
+    /// frame, so on a Mac whose main screen is Retina and whose saved frame is on a
+    /// 1x screen, the one notification carries 2 and no second one follows. The
+    /// viewer then asked for a 2x desktop on a 1x screen, and only moving the
+    /// window to another display and back — two more notifications — corrected it.
+    /// Read at send time there is nothing to be stale.
+    ///
+    /// Installed by the surface's coordinator, which is the only thing here that
+    /// holds a window, exactly as `fitWindowToRemote` is.
+    @ObservationIgnored
+    var hostScaleReader: (() -> CGFloat)?
+    /// The last value reported to the remote. `nil` means nothing has been
+    /// reported for this connection or this display yet, so the next report goes
+    /// even if it repeats the number.
+    @ObservationIgnored
     private var lastHostScale: UInt16?
     /// Deliberately outside Observation. Tiles arrive dozens of times a second;
     /// routing them through `@Observable` would invalidate the view hierarchy on
@@ -480,8 +496,19 @@ final class AppModel: GatewaySessionSink {
             renderer?.resize(to: size)
 
         case .displays(let active, let displays):
+            let switched = session.activeDisplayID != active
             session.displays = displays
             session.activeDisplayID = active
+            // A different display is being shared, and the density was only ever
+            // reported *at* the previous one — the agent acts on it for the display
+            // it is currently sharing, so a switch onto one the agent made would
+            // otherwise leave it at whatever density macOS remembered. The dedupe
+            // has to be cleared for the same reason: the number is usually
+            // unchanged, and it is the display underneath it that moved.
+            if switched {
+                lastHostScale = nil
+                sendHostScale()
+            }
 
         case .remoteOs(let macos):
             // Which Mac a Command chord belongs to just changed, so nothing may
@@ -597,8 +624,7 @@ final class AppModel: GatewaySessionSink {
     /// re-sending a value it already matches would relay that desktop's windows
     /// for nothing. Unlike the viewport there is no debounce — a window changes
     /// screen once, discretely, where a drag-resize reports every frame.
-    func reportHostScale(_ scale: CGFloat) {
-        hostScale = scale
+    func reportHostScale() {
         sendHostScale()
     }
 
@@ -606,7 +632,8 @@ final class AppModel: GatewaySessionSink {
         // Hundredths, because the wire carries an integer. A screen whose scale
         // is not a positive finite number is not one AppKit describes, so 1x is
         // the answer that asks the remote for the least.
-        let usable = hostScale.isFinite && hostScale > 0 ? hostScale : 1
+        let read = hostScaleReader?() ?? 1
+        let usable = read.isFinite && read > 0 ? read : 1
         let scale = UInt16(clamping: Int((usable * 100).rounded()))
         guard session.screen == .desktop, scale != lastHostScale else {
             return

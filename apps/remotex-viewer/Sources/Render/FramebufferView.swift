@@ -8,10 +8,12 @@ import MetalKit
 /// resamples a framebuffer-sized drawable into whatever the window's display makes
 /// of those points. One texel per device pixel only when the two densities agree.
 final class FramebufferView: MTKView {
-    /// Called with this window's backing scale whenever it changes, so the remote
-    /// can be asked to match it. Presentation does not depend on it — see
+    /// Called when this window's backing scale changes, so the remote can be asked
+    /// to match it. Carries no value: the scale is *read* where it is sent, since a
+    /// notification is a hint that something moved and not a reliable record of
+    /// where it ended up. Presentation does not depend on it — see
     /// `viewDidChangeBackingProperties`.
-    var onBackingScaleChange: ((CGFloat) -> Void)?
+    var onBackingScaleChange: (() -> Void)?
 
     init(renderer: FramebufferRenderer) {
         super.init(frame: .zero, device: renderer.device)
@@ -55,8 +57,7 @@ final class FramebufferView: MTKView {
     /// one pixel per pixel.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        let scale = window?.backingScaleFactor ?? 1
-        layer?.contentsScale = scale
-        onBackingScaleChange?(scale)
+        layer?.contentsScale = window?.backingScaleFactor ?? 1
+        onBackingScaleChange?()
     }
 }

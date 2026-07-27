@@ -133,6 +133,12 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             model.fitWindowToRemote = { [weak self] in
                 self?.fitWindowToRemote()
             }
+            // Read on demand rather than pushed, for the same reason and from the
+            // same place: only this coordinator holds a window, and the density the
+            // remote is asked to match has to be the one this window is on *now*.
+            model.hostScaleReader = { [weak surface] in
+                surface?.window?.backingScaleFactor ?? 1
+            }
             // Deliberately nothing for the window changing display. Every point
             // size here is the remote's own, so a host scale change has no geometry
             // to re-derive — the layer resamples the same desktop for whichever
@@ -275,6 +281,7 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             scrollView?.onTile = nil
             scrollView = nil
             model.fitWindowToRemote = nil
+            model.hostScaleReader = nil
             keyboard?.invalidate()
             keyboard = nil
             model.attach(renderer: nil)
