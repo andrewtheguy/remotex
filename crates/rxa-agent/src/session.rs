@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
-use rxa_proto::msg::{AgentMsg, GatewayMsg, MAX_CLIPBOARD_BYTES, clipboard_fits};
+use rxa_proto::msg::{AgentMsg, GatewayMsg, MAX_CLIPBOARD_BYTES, SCALE_ONE, clipboard_fits};
 use rxa_proto::next_clipboard_time;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -85,6 +85,21 @@ const GATEWAY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 // state, and it only pays off for outages shorter than the gateway's own 1s
 // minimum reconnect backoff — restarting the stream costs about as much. Left as
 // a measured optimisation rather than a guess; see docs/roadmap.md.
+
+/// A measured backing scale as the wire carries it: hundredths, so a Retina
+/// display's 2.0 travels as 200.
+///
+/// The gateway refuses anything outside 1x..4x (`scale_ratio`), so this only has
+/// to keep a measurement from wrapping on the way there; `capture` already falls
+/// back to 1.0 for a display whose mode it cannot read.
+fn wire_scale(scale: f64) -> u16 {
+    let hundredths = (scale * f64::from(SCALE_ONE)).round();
+    if hundredths.is_finite() {
+        hundredths.clamp(0.0, f64::from(u16::MAX)) as u16
+    } else {
+        SCALE_ONE
+    }
+}
 
 /// What the encoder sends to the pump, in capture order.
 enum Out {
@@ -182,6 +197,7 @@ pub async fn serve(
                 w: geometry.width,
                 h: geometry.height,
                 resizable,
+                scale: wire_scale(geometry.scale),
             }
             .encode(),
         )
@@ -264,8 +280,26 @@ async fn pump(
                         }.encode()).await?;
                     }
                     Out::Resized(w, h) => {
-                        info!("session: display reconfigured to {w}x{h}");
-                        writer.send(&AgentMsg::DisplaySize { w, h }.encode()).await?;
+                        // The scale comes from the display rather than the frame:
+                        // a surface size arrives with none attached, and
+                        // `follow_display` has already re-measured the display by
+                        // the time frames at the new size do. The size cannot
+                        // stand in for it either — 1920x1080 HiDPI and 3840x2160
+                        // at 1x capture the same pixel count at different scales.
+                        let scale = capture
+                            .as_ref()
+                            .map_or(geometry.scale, |live| live.geometry.scale);
+                        info!("session: display reconfigured to {w}x{h} at {scale}x");
+                        writer
+                            .send(
+                                &AgentMsg::DisplaySize {
+                                    w,
+                                    h,
+                                    scale: wire_scale(scale),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                         // The mode list is regenerated around whatever size the
                         // host just pushed, so the browser's menu is stale from
                         // this moment — including after a resize this session
@@ -337,6 +371,7 @@ async fn pump(
                         writer.send(&AgentMsg::DisplaySize {
                             w: live.width,
                             h: live.height,
+                            scale: wire_scale(live.scale),
                         }.encode()).await?;
                         if resizable {
                             send_modes(&mut writer, display_id).await?;
@@ -363,14 +398,21 @@ async fn pump(
                                     // dividing input by a stale scale — is worse
                                     // than a redundant DisplaySize.
                                     let live = started.geometry;
-                                    if (live.width, live.height) != (geometry.width, geometry.height) {
+                                    // The scale counts as a change of its own: a
+                                    // mode switch can keep the pixel count and
+                                    // change how those pixels should be presented,
+                                    // and the gateway would otherwise still be
+                                    // holding the one `Hello` carried.
+                                    let announced = (geometry.width, geometry.height, geometry.scale);
+                                    if (live.width, live.height, live.scale) != announced {
                                         info!(
-                                            "session: display changed since Hello, now {}x{}",
-                                            live.width, live.height
+                                            "session: display changed since Hello, now {}x{} at {}x",
+                                            live.width, live.height, live.scale
                                         );
                                         writer.send(&AgentMsg::DisplaySize {
                                             w: live.width,
                                             h: live.height,
+                                            scale: wire_scale(live.scale),
                                         }.encode()).await?;
                                     }
                                     injector = Injector::new(live.scale, live.origin);

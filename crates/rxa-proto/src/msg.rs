@@ -58,6 +58,31 @@ pub fn clipboard_fits(text: &str) -> bool {
     text.len() <= MAX_CLIPBOARD_BYTES
 }
 
+/// A display's backing scale as it travels on this wire: hundredths of a
+/// captured pixel per point of the desktop being captured — 100 for a 1× panel,
+/// 200 for a Retina one. Hundredths rather than a float because every other
+/// number in these messages is an integer, and the scale is a ratio of two
+/// integer display-mode sizes to begin with.
+pub const SCALE_ONE: u16 = 100;
+
+/// The largest scale worth believing. macOS has only ever shipped 1× and 2×
+/// panels; this leaves room for one more doubling and rejects the rest.
+const SCALE_MAX: u16 = 4 * SCALE_ONE;
+
+/// A wire `scale` as the ratio clients divide the framebuffer by.
+///
+/// Anything outside [`SCALE_ONE`]`..=`[`SCALE_MAX`] — a zero from an agent that
+/// could not read the display's mode, a number no panel has — reads as 1×,
+/// which is the answer that leaves the framebuffer alone. A scale below 1 is as
+/// wrong as one above 4: it would blow the desktop up rather than shrink it.
+pub fn scale_ratio(scale: u16) -> f32 {
+    if (SCALE_ONE..=SCALE_MAX).contains(&scale) {
+        f32::from(scale) / f32::from(SCALE_ONE)
+    } else {
+        1.0
+    }
+}
+
 /// The tile payload codec, mirroring the gateway's `Tile::FORMAT_*` constants
 /// (`src/protocol.rs`) so the byte passes straight through to the browser.
 pub mod format {
@@ -94,6 +119,12 @@ pub enum AgentMsg {
         /// it rides along here rather than waiting for
         /// [`AgentMsg::DisplayModes`].
         resizable: bool,
+        /// The shared display's backing scale, in [`SCALE_ONE`] hundredths. This
+        /// is what makes `w`/`h` above readable: they are captured *pixels*, and
+        /// only this says how many of them the Mac draws per point of its own
+        /// desktop, which is what a client needs to present a Retina Mac at its
+        /// own size rather than at twice it.
+        scale: u16,
     },
     /// A dirty rectangle, already encoded as PNG or JPEG (see [`format`]).
     Tile {
@@ -106,8 +137,11 @@ pub enum AgentMsg {
     },
     /// The pointer shape changed. `None` means the pointer is hidden.
     Cursor(Option<CursorImage>),
-    /// The display was reconfigured on the Mac.
-    DisplaySize { w: u16, h: u16 },
+    /// The display was reconfigured on the Mac. `scale` is its backing scale in
+    /// [`SCALE_ONE`] hundredths, re-sent with every size because a mode switch
+    /// can change it: the same panel has HiDPI and 1× modes, and which one it is
+    /// in decides how the pixels below should be presented.
+    DisplaySize { w: u16, h: u16, scale: u16 },
     /// The resolutions the shared display will accept, in captured pixels,
     /// largest first — the menu the browser offers for
     /// [`GatewayMsg::SetDisplaySize`].
@@ -163,6 +197,7 @@ impl AgentMsg {
                 w,
                 h,
                 resizable,
+                scale,
             } => {
                 out.push(Self::T_HELLO);
                 put_u16(&mut out, *version);
@@ -170,6 +205,7 @@ impl AgentMsg {
                 put_u16(&mut out, *w);
                 put_u16(&mut out, *h);
                 out.push(u8::from(*resizable));
+                put_u16(&mut out, *scale);
             }
             AgentMsg::Tile {
                 format,
@@ -202,10 +238,11 @@ impl AgentMsg {
                     None => out.push(0),
                 }
             }
-            AgentMsg::DisplaySize { w, h } => {
+            AgentMsg::DisplaySize { w, h, scale } => {
                 out.push(Self::T_DISPLAY_SIZE);
                 put_u16(&mut out, *w);
                 put_u16(&mut out, *h);
+                put_u16(&mut out, *scale);
             }
             AgentMsg::DisplayModes { modes } => {
                 out.push(Self::T_DISPLAY_MODES);
@@ -265,6 +302,7 @@ impl AgentMsg {
                 w: r.u16()?,
                 h: r.u16()?,
                 resizable: r.bool()?,
+                scale: r.u16()?,
             },
             Self::T_TILE => AgentMsg::Tile {
                 format: r.u8()?,
@@ -288,6 +326,7 @@ impl AgentMsg {
             Self::T_DISPLAY_SIZE => AgentMsg::DisplaySize {
                 w: r.u16()?,
                 h: r.u16()?,
+                scale: r.u16()?,
             },
             Self::T_DISPLAY_MODES => {
                 let count = usize::from(r.u16()?);
@@ -591,14 +630,18 @@ mod tests {
                 w: 3456,
                 h: 2234,
                 resizable: false,
+                scale: 2 * SCALE_ONE,
             },
-            // An empty version string and a zero-size display still roundtrip.
+            // An empty version string, a zero-size display and a scale no display
+            // has still roundtrip: the codec carries what it is given, and
+            // `scale_ratio` is where an impossible one is refused.
             AgentMsg::Hello {
                 version: 0,
                 agent_version: String::new(),
                 w: 0,
                 h: 0,
                 resizable: true,
+                scale: 0,
             },
             AgentMsg::Tile {
                 format: format::JPEG,
@@ -624,7 +667,11 @@ mod tests {
                 png: vec![0x89, b'P', b'N', b'G'],
             })),
             AgentMsg::Cursor(None),
-            AgentMsg::DisplaySize { w: 1920, h: 1080 },
+            AgentMsg::DisplaySize {
+                w: 1920,
+                h: 1080,
+                scale: SCALE_ONE,
+            },
             AgentMsg::DisplayModes {
                 modes: vec![(1290, 830), (1280, 960), (1024, 768), (800, 514)],
             },
@@ -855,7 +902,12 @@ mod tests {
         bytes.push(0);
         assert_eq!(GatewayMsg::decode(&bytes), Err(MsgError::Trailing(1)));
 
-        let mut bytes = AgentMsg::DisplaySize { w: 1, h: 2 }.encode();
+        let mut bytes = AgentMsg::DisplaySize {
+            w: 1,
+            h: 2,
+            scale: SCALE_ONE,
+        }
+        .encode();
         bytes.extend_from_slice(&[0, 0, 0]);
         assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Trailing(3)));
     }
@@ -885,6 +937,25 @@ mod tests {
         // PointerButton with a `pressed` byte that is neither 0 nor 1.
         let bytes = [0x04, 0x00, 0x02];
         assert_eq!(GatewayMsg::decode(&bytes), Err(MsgError::BadBool(2)));
+    }
+
+    // Clients *divide* the framebuffer by this, so every answer has to be a
+    // number that leaves a desktop on screen — 1x for anything unbelievable
+    // rather than a zero to divide by or a factor that would shrink the desktop
+    // to nothing.
+    #[test]
+    fn an_unbelievable_scale_reads_as_one() {
+        assert_eq!(scale_ratio(SCALE_ONE), 1.0);
+        assert_eq!(scale_ratio(2 * SCALE_ONE), 2.0);
+        assert_eq!(scale_ratio(150), 1.5);
+        assert_eq!(scale_ratio(SCALE_MAX), 4.0);
+
+        // An agent that could not read the display's mode, a scale that would
+        // magnify rather than reduce, and one no panel has.
+        assert_eq!(scale_ratio(0), 1.0);
+        assert_eq!(scale_ratio(50), 1.0);
+        assert_eq!(scale_ratio(SCALE_MAX + 1), 1.0);
+        assert_eq!(scale_ratio(u16::MAX), 1.0);
     }
 
     // Wheel deltas are f32 and pass through untouched: no rounding, and the

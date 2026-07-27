@@ -252,7 +252,7 @@ async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                     if text.contains(r#""type":"resize""#) {
-                        assert_eq!(text, format!(r#"{{"type":"resize","w":{w},"h":{h}}}"#));
+                        assert_eq!(text, format!(r#"{{"type":"resize","w":{w},"h":{h},"scale":1.0}}"#));
                         return;
                     }
                 }
