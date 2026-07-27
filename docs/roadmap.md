@@ -5,6 +5,27 @@ Active defects and their required regression guards are tracked in
 
 ## Planned
 
+### A scale of its own for a remote that does not match the host display
+
+Both clients map the remote 1:1 to *device* pixels: the desktop's CSS or point
+size is its pixel count divided by the host's scale factor. So a non-Retina guest
+on a Retina host is drawn at half its physical size — everything visible, all of
+it small — and the same desktop on a 1× display is twice as large again, which
+past the window's size can only be scrolled to. It is the same in the browser
+(`applyCanvasCss` in `frontend/src/useRemoteDesktop.ts`) and in the viewer
+(`RemoteGeometry.pointSize`), and moving a window between displays of different
+scale switches between the two.
+
+What is missing is a scale the user chooses — fit-to-window, or 1:1 in *points*
+rather than pixels — instead of the host's backing scale being the only rule.
+Deliberately not a viewport report: for `rxa` the remote cannot follow the window
+at all (see "Viewport-following resize" below), and for the others resizing the
+remote is a different thing from presenting it at a readable size.
+
+The mechanical half of this is done — the viewer re-derives its geometry when the
+window changes display, rather than keeping the size it had — so what is left is
+the presentation policy, and it wants deciding for both clients at once.
+
 ## Deferred pending measurements
 
 ### Retina performance for `rxa`
