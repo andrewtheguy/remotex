@@ -653,6 +653,9 @@ export function useRemoteDesktop(
     // display the agent made acts on it, and only by matching it, so re-sending
     // an unchanged value would be a WindowServer round trip for nothing.
     let lastHostScale: number | null = null;
+    // Which display the remote is sharing, as its last `displays` reported it.
+    // Only so a switch can be told from the first list of a session.
+    let sharedDisplay: number | null = null;
     const sendHostScale = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
@@ -771,6 +774,25 @@ export function useRemoteDesktop(
       syncCursor();
     };
 
+    // The remote's display list, and the one follow-up a change of display
+    // needs: this screen's density again.
+    //
+    // The number has not changed, but what it applies to has. The agent sets the
+    // density of whichever display it is sharing *now*, so a switch onto one it
+    // made would otherwise leave that display at whatever density macOS had
+    // remembered against it. Only a real switch re-reports: the first list of a
+    // session names the display the report from `connected` already applied to.
+    const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
+      setDisplays(msg.displays);
+      setActiveDisplayId(msg.active);
+      const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
+      sharedDisplay = msg.active;
+      if (switched) {
+        lastHostScale = null;
+        sendHostScale();
+      }
+    };
+
     const mirrorRemoteClipboard = (text: string) => {
       if (text === "") {
         return;
@@ -843,6 +865,7 @@ export function useRemoteDesktop(
           // made come up matching the window it is about to be shown in rather
           // than at whatever density it was left at.
           lastHostScale = null;
+          sharedDisplay = null;
           sendHostScale();
           break;
         }
@@ -874,8 +897,7 @@ export function useRemoteDesktop(
           break;
         }
         case "displays":
-          setDisplays(msg.displays);
-          setActiveDisplayId(msg.active);
+          handleDisplays(msg);
           break;
         case "remoteOs":
           // Ignored here. Whether the remote is a Mac only decides a keyboard
@@ -895,6 +917,7 @@ export function useRemoteDesktop(
           setCanClipboard(false);
           setDisplays([]);
           setActiveDisplayId(null);
+          sharedDisplay = null;
           setRemoteClipboard(null);
           lastFromRemoteRef.current = null;
           lastToRemoteRef.current = null;
