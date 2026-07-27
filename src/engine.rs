@@ -10,10 +10,14 @@
 //! is the one place a remote host that has *gone away* is made noticeable. See
 //! its comments for what the kernel can and cannot tell us.
 
+use std::future::Future;
 use std::time::Duration;
 
 use log::warn;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+
+use crate::protocol::ServerMsg;
 
 /// Idle time before the kernel starts probing a silent peer.
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(10);
@@ -97,6 +101,63 @@ pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
     Ok(stream)
 }
 
+/// Connect to a remote and run its handshake, reporting any failure to the client.
+///
+/// The two engines that need this had the same fifteen lines each: bound the
+/// handshake, warn, send the `ServerMsg::Error` the picker will show, and give up.
+/// `None` means the caller has nothing left to do — it has already been reported.
+///
+/// The budgets are sequential on purpose, and this is the reason the helper takes
+/// a closure rather than a future: the TCP connect has its own deadline inside
+/// [`tcp_connect`], and wrapping both in one timeout meant a slow connect ate the
+/// handshake's time and was then reported as a handshake that took the full
+/// budget. Now a host that is slow to answer is a connect failure, and only what
+/// happens after the socket is up is measured against `budget`.
+///
+/// `protocol` is the log-line prefix (`"rdp"`); the client-facing message
+/// uppercases it, which is the form both engines already used.
+pub async fn connect_and_handshake<T, F, Fut>(
+    protocol: &str,
+    dest: &str,
+    budget: Duration,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+    handshake: F,
+) -> Option<T>
+where
+    F: FnOnce(TcpStream) -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    let report = async |message: String| {
+        let _ = frame_tx.send(ServerMsg::Error { message }).await;
+    };
+    let stream = match tcp_connect(dest).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            warn!("{protocol}: connect failed: {e:#}");
+            report(format!("{} connect failed: {e}", protocol.to_uppercase())).await;
+            return None;
+        }
+    };
+    match tokio::time::timeout(budget, handshake(stream)).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(e)) => {
+            warn!("{protocol}: connect failed: {e:#}");
+            report(format!("{} connect failed: {e}", protocol.to_uppercase())).await;
+            None
+        }
+        Err(_) => {
+            warn!("{protocol}: handshake with {dest} timed out");
+            report(format!(
+                "{} connect failed: {dest} did not finish the handshake within {}s",
+                protocol.to_uppercase(),
+                budget.as_secs()
+            ))
+            .await;
+            None
+        }
+    }
+}
+
 /// Ask the kernel to notice a peer that has stopped answering.
 fn arm_liveness_probes(stream: &TcpStream) -> std::io::Result<()> {
     let socket = socket2::SockRef::from(stream);
@@ -161,6 +222,92 @@ mod tests {
         assert!(stream.nodelay().unwrap(), "input events must not coalesce");
 
         let _ = accept.await.unwrap();
+    }
+
+    /// A listener that accepts one connection and holds it, so a handshake can be
+    /// exercised without a real server behind it.
+    ///
+    /// The returned handle owns the accepted socket and parks: dropping the socket
+    /// would race the handshake with an EOF. Abort the handle to release both.
+    async fn accepting_listener() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest = listener.local_addr().unwrap().to_string();
+        let accept = tokio::spawn(async move {
+            let _stream = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        (dest, accept)
+    }
+
+    #[tokio::test]
+    async fn a_completed_handshake_passes_its_value_through() {
+        let (dest, accept) = accepting_listener().await;
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+
+        let value = connect_and_handshake("test", &dest, HANDSHAKE_TIMEOUT, &frame_tx, |_stream| {
+            std::future::ready(Ok(7u8))
+        })
+        .await;
+
+        assert_eq!(value, Some(7));
+        assert!(frame_rx.try_recv().is_err(), "nothing to report");
+        accept.abort();
+    }
+
+    // The bug this helper's shape exists for: with one timeout around both
+    // phases, a slow connect ate the handshake's budget and was then reported as
+    // a handshake that had run for the whole of it.
+    #[tokio::test]
+    async fn a_stalled_handshake_is_reported_against_its_own_budget() {
+        let (dest, accept) = accepting_listener().await;
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+
+        let value: Option<()> = connect_and_handshake(
+            "test",
+            &dest,
+            Duration::from_millis(50),
+            &frame_tx,
+            |_stream| std::future::pending(),
+        )
+        .await;
+
+        assert!(value.is_none());
+        let ServerMsg::Error { message } = frame_rx.try_recv().unwrap() else {
+            panic!("expected an error for the picker");
+        };
+        assert!(message.contains("did not finish the handshake"), "{message}");
+        // Uppercased for the client, as both engines already spelled it.
+        assert!(message.starts_with("TEST connect failed:"), "{message}");
+        accept.abort();
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_never_lands_is_not_reported_as_a_handshake_failure() {
+        // A port that was just released, so the connect is refused rather than
+        // being left to the connect timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+
+        let value: Option<()> = connect_and_handshake(
+            "test",
+            &dest,
+            HANDSHAKE_TIMEOUT,
+            &frame_tx,
+            |_stream| std::future::ready(Ok(())),
+        )
+        .await;
+
+        assert!(value.is_none());
+        let ServerMsg::Error { message } = frame_rx.try_recv().unwrap() else {
+            panic!("expected an error for the picker");
+        };
+        assert!(message.contains("TCP connect to"), "{message}");
+        assert!(
+            !message.contains("handshake"),
+            "a connect failure must not read as a handshake one: {message}"
+        );
     }
 
     #[test]

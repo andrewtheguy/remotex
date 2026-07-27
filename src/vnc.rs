@@ -153,33 +153,21 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    // Bounded, because the RFB handshake below can stall on a host that accepts
-    // the connection and then says nothing — which no socket timeout catches, and
-    // which leaves the client on "Connecting…" with nothing to read.
-    let connected = match tokio::time::timeout(engine::HANDSHAKE_TIMEOUT, connect(&config)).await {
-        Err(_) => {
-            let dest = host_port(&config.host, config.port);
-            warn!("vnc: handshake with {dest} timed out");
-            let _ = frame_tx
-                .send(ServerMsg::Error {
-                    message: format!(
-                        "VNC connect failed: {dest} did not finish the handshake within {}s",
-                        engine::HANDSHAKE_TIMEOUT.as_secs()
-                    ),
-                })
-                .await;
-            return;
-        }
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            warn!("vnc: connect failed: {e:#}");
-            let _ = frame_tx
-                .send(ServerMsg::Error {
-                    message: format!("VNC connect failed: {e}"),
-                })
-                .await;
-            return;
-        }
+    // The budget covers the RFB handshake, which can stall on a host that accepts
+    // the connection and then says nothing — no socket timeout catches that. The
+    // TCP connect has its own deadline inside the helper, so a slow one is
+    // reported as what it is rather than as a handshake that ran long.
+    let dest = host_port(&config.host, config.port);
+    let Some(connected) = engine::connect_and_handshake(
+        "vnc",
+        &dest,
+        engine::HANDSHAKE_TIMEOUT,
+        &frame_tx,
+        |stream| connect(&config, stream),
+    )
+    .await
+    else {
+        return;
     };
 
     let Connected { reader, writer, width, height, macos } = connected;
@@ -239,12 +227,13 @@ struct Connected {
     macos: bool,
 }
 
-/// TCP connect → RFB version/security handshake → ClientInit/ServerInit →
-/// force our pixel format and the encoding set (raw + the resize
-/// pseudo-encodings).
-async fn connect(config: &TargetConfig) -> anyhow::Result<Connected> {
-    let dest = host_port(&config.host, config.port);
-    let stream = engine::tcp_connect(&dest).await?;
+/// RFB version/security handshake → ClientInit/ServerInit → force our pixel
+/// format and the encoding set (raw + the resize pseudo-encodings), on a
+/// connected socket.
+///
+/// The TCP connect happens in [`run`] (see [`engine::connect_and_handshake`]) so
+/// its deadline and this handshake's are sequential rather than nested.
+async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow::Result<Connected> {
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 

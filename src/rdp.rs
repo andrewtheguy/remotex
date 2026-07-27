@@ -95,35 +95,21 @@ pub async fn run(
     // it outlives `connect`, which is where the backend is handed over.
     let (clip_tx, clip_rx) = mpsc::unbounded_channel();
 
-    // Bounded, because negotiation, the TLS upgrade and CredSSP below can each
-    // stall on a host that accepts the connection and then says nothing — which no
-    // socket timeout catches, and which leaves the client on "Connecting…".
-    let connected =
-        tokio::time::timeout(engine::HANDSHAKE_TIMEOUT, connect(&config, clip_tx)).await;
-    let (connection_result, framed) = match connected {
-        Err(_) => {
-            let dest = host_port(&config.host, config.port);
-            warn!("rdp: handshake with {dest} timed out");
-            let _ = frame_tx
-                .send(ServerMsg::Error {
-                    message: format!(
-                        "RDP connect failed: {dest} did not finish the handshake within {}s",
-                        engine::HANDSHAKE_TIMEOUT.as_secs()
-                    ),
-                })
-                .await;
-            return;
-        }
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            warn!("rdp: connect failed: {e:#}");
-            let _ = frame_tx
-                .send(ServerMsg::Error {
-                    message: format!("RDP connect failed: {e}"),
-                })
-                .await;
-            return;
-        }
+    // The budget covers negotiation, the TLS upgrade and CredSSP — each of which
+    // can stall on a host that accepts the connection and then says nothing, which
+    // no socket timeout catches. The TCP connect has its own deadline inside the
+    // helper, so a slow one is reported as what it is.
+    let dest = host_port(&config.host, config.port);
+    let Some((connection_result, framed)) = engine::connect_and_handshake(
+        "rdp",
+        &dest,
+        engine::HANDSHAKE_TIMEOUT,
+        &frame_tx,
+        |stream| connect(&config, stream, clip_tx),
+    )
+    .await
+    else {
+        return;
     };
 
     let desktop = connection_result.desktop_size;
@@ -169,18 +155,20 @@ pub async fn run(
     info!("rdp: session terminated");
 }
 
-/// TCP connect → RDP negotiation → TLS upgrade → CredSSP/finalize.
+/// RDP negotiation → TLS upgrade → CredSSP/finalize, on a connected socket.
+///
+/// The TCP connect happens in [`run`] (see [`engine::connect_and_handshake`]) so
+/// its deadline and this handshake's are sequential rather than nested.
 ///
 /// `clip_tx` is handed to the clipboard backend when the target opted in; it is
 /// dropped unused otherwise, and the channel is then never registered at all.
 async fn connect(
     config: &TargetConfig,
+    stream: tokio::net::TcpStream,
     clip_tx: mpsc::UnboundedSender<ClipboardEvent>,
 ) -> anyhow::Result<(ConnectionResult, UpgradedFramed)> {
     let server_name = config.host.clone();
-    let dest = host_port(&config.host, config.port);
 
-    let stream = engine::tcp_connect(&dest).await?;
     let client_addr = stream
         .local_addr()
         .map_err(|e| anyhow::anyhow!("get local address: {e}"))?;
