@@ -43,7 +43,7 @@ struct RemoteSurfaceViewTests {
     func nothingIsMeasuredBeforeTheFirstLayout() throws {
         let renderer = try #require(FramebufferRenderer.make(), "needs a Metal device")
         let model = Harness.makeModel()
-        let scrollView = NSScrollView(frame: .zero)
+        let scrollView = RemoteScrollView(frame: .zero)
         let surface = RemoteSurfaceView(model: model, renderer: renderer)
         scrollView.documentView = surface
         let coordinator = RemoteSurfaceHost.Coordinator(model: model)
@@ -159,20 +159,64 @@ struct RemoteSurfaceViewTests {
     }
 
     /// A window-only resize changes no observed state, so SwiftUI never runs
-    /// `updateNSView` and the surface would keep a frame measured against the old
-    /// window — leaving a remote smaller than the window off-centre in the space it
-    /// grew into, with input mapped against the stale frame.
+    /// `updateNSView`; the room has to be re-measured and re-reported anyway, and a
+    /// remote smaller than the window has to stay in the middle of the space it grew
+    /// into rather than sitting where it was.
     @Test
-    func growingTheWindowGrowsTheSurfaceUnderASmallerRemote() async throws {
+    func growingTheWindowLeavesASmallerRemoteCentred() async throws {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 600, height: 400))
         harness.apply(remote: harness.remote(width: 400, height: 300))
         let before = try await harness.reportedViewport()
 
         harness.resize(to: CGSize(width: 900, height: 700))
-        _ = try await harness.reportedViewport(otherThan: before)
+        let after = try await harness.reportedViewport(otherThan: before)
 
-        #expect(harness.surface.frame.size == CGSize(width: 900, height: 700))
+        #expect(after == harness.expectedViewport(width: 900, height: 700))
+        // The document is the remote and nothing more — padding it out to the window
+        // is what used to raise a scroller on the axis that fit — so being centred is
+        // the clip view's doing, and it is read off the clip.
+        #expect(harness.surface.frame.size == CGSize(width: 400, height: 300))
+        let clip = harness.scrollView.contentView
+        #expect(clip.bounds.origin.x == (400 - clip.bounds.width) / 2)
+        #expect(clip.bounds.origin.y == (300 - clip.bounds.height) / 2)
+    }
+
+    /// The reference is Microsoft Remote Desktop: a desktop that does not fit gets a
+    /// scroller on the axis it overflows, *beside* the picture, and nothing on the
+    /// axis that fits. Ours raised both — the document was padded out to the room, so
+    /// the horizontal scroller's 17pt made it overflow vertically too — and with
+    /// them a white corner box the reference never shows.
+    @Test
+    func aRemoteWiderThanTheWindowScrollsOnThatAxisAlone() throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 900, height: 700))
+        // 19pt too wide and well short vertically: the `rxa` near-miss.
+        harness.apply(remote: harness.remote(width: 919, height: 500))
+        harness.scrollView.tile()
+        harness.scrollView.layoutSubtreeIfNeeded()
+
+        #expect(harness.scrollView.visibleBars.horizontal)
+        #expect(!harness.scrollView.visibleBars.vertical)
+        // The scroller took its width out of the room it is drawn beside, and the
+        // desktop is centred in what is left.
+        let clip = harness.scrollView.contentView
+        #expect(clip.frame.height < 700)
+        #expect(clip.bounds.origin.y == (500 - clip.bounds.height) / 2)
+    }
+
+    /// A desktop that fits shows none at all — the state every engine that follows
+    /// the window settles in, and the one the reference client shows bare.
+    @Test
+    func aRemoteThatFitsShowsNoScrollers() throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 900, height: 700))
+        harness.apply(remote: harness.remote(width: 900, height: 700))
+        harness.scrollView.tile()
+        harness.scrollView.layoutSubtreeIfNeeded()
+
+        #expect(!harness.scrollView.visibleBars.horizontal)
+        #expect(!harness.scrollView.visibleBars.vertical)
     }
 
     /// Moving the window between displays of different scale is the case that used
@@ -243,7 +287,7 @@ struct RemoteSurfaceViewTests {
     private struct Harness {
         let model: AppModel
         let window: ScaledWindow
-        let scrollView: NSScrollView
+        let scrollView: RemoteScrollView
         let surface: RemoteSurfaceView
         let coordinator: RemoteSurfaceHost.Coordinator
 
@@ -262,10 +306,7 @@ struct RemoteSurfaceViewTests {
                 backing: .buffered,
                 defer: false
             )
-            scrollView = NSScrollView(frame: .zero)
-            scrollView.hasVerticalScroller = true
-            scrollView.hasHorizontalScroller = true
-            scrollView.autohidesScrollers = true
+            scrollView = RemoteScrollView(frame: .zero)
             scrollView.automaticallyAdjustsContentInsets = automaticContentInsets
             surface = RemoteSurfaceView(model: model, renderer: renderer)
             scrollView.documentView = surface

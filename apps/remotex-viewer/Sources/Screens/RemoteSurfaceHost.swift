@@ -20,18 +20,10 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         Coordinator(model: model)
     }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
-        // Always up, rather than autohiding. An autohiding overlay scroller is drawn
-        // only once a scroll reaches the scroll view, and none ever does here —
-        // `RemoteSurfaceView.scrollWheel` sends every wheel event to the remote,
-        // which is the point of it. So a desktop wider than the window (an `rxa`
-        // target whenever the Mac's display is not the window's shape, an RDP one
-        // before a resize) had its overflow drawn nowhere and reachable by nothing.
-        // A visible scroller can at least be dragged.
-        scrollView.autohidesScrollers = false
+    func makeNSView(context: Context) -> RemoteScrollView {
+        // Scrollbars of our own — see `RemoteScrollView`, which switches AppKit's off
+        // and answers for when they show, where they sit, and what they look like.
+        let scrollView = RemoteScrollView(frame: .zero)
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .black
         // Zoom is out of scope: the desktop is shown at its own point size — scaled
@@ -56,12 +48,12 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         return scrollView
     }
 
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+    func updateNSView(_ scrollView: RemoteScrollView, context: Context) {
         context.coordinator.apply(remoteSize: remoteSize, guestScale: guestScale)
         context.coordinator.apply(cursor: cursor)
     }
 
-    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+    static func dismantleNSView(_ scrollView: RemoteScrollView, coordinator: Coordinator) {
         coordinator.detach()
     }
 
@@ -71,8 +63,11 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         private var renderer: FramebufferRenderer?
         private weak var surface: RemoteSurfaceView?
         private var keyboard: KeyboardCapture?
-        private var observers: [NSObjectProtocol] = []
         private var appliedCursor: ServerMessage.Cursor??
+        /// Guards the one loop this could have: sizing the document re-tiles the
+        /// scroll view, which is what called us.
+        private var isLayingOut = false
+        private weak var scrollView: RemoteScrollView?
 
         init(model: AppModel) {
             self.model = model
@@ -81,59 +76,39 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         func attach(
             renderer: FramebufferRenderer,
             surface: RemoteSurfaceView,
-            scrollView: NSScrollView
+            scrollView: RemoteScrollView
         ) {
             self.renderer = renderer
             self.surface = surface
+            self.scrollView = scrollView
             model.attach(renderer: renderer)
             // A local event monitor rather than `keyDown` on the surface: menu key
             // equivalents are consumed by the menu bar before the responder chain,
             // and Command chords have to reach the remote.
             keyboard = KeyboardCapture(model: model, surface: surface)
 
-            // The scroll view being resized is the only thing that changes how
-            // much room the remote has, and a resize is a *frame* change. The clip
-            // view's `boundsDidChange` — watched here at first — fires on a scroll,
-            // which moves its origin and changes no size at all, and stays silent
-            // when a window resize changes its frame and its bounds size follows;
-            // so nothing ever reported and no engine ever followed the window.
+            // One signal for "the room changed", and it is the layout itself.
             //
-            // The clip view is watched *as well*, and only for its frame: AppKit
-            // applies this window's title bar as a top `contentInset` partway
-            // through the first layout, which shrinks the room without touching the
-            // scroll view's frame. Nothing noticed, so the desktop kept the size
-            // that included the title bar and its last 52pt stayed below the fold
-            // for the rest of the session. It fires when a scroller toggles too,
-            // which costs nothing: `roomForDocument` does not read the clip, so the
-            // measurement is the same one and the report is deduped.
-            scrollView.postsFrameChangedNotifications = true
-            scrollView.contentView.postsFrameChangedNotifications = true
-            for observed in [scrollView, scrollView.contentView] as [NSView] {
-                observers.append(
-                    NotificationCenter.default.addObserver(
-                        forName: NSView.frameDidChangeNotification,
-                        object: observed,
-                        queue: .main
-                    ) { [weak self, weak surface] _ in
-                        MainActor.assumeIsolated {
-                            guard let self, let surface else {
-                                return
-                            }
-                            // Re-sized against the new visible area. A window-only
-                            // resize changes no observed state, so SwiftUI does not
-                            // run `updateNSView`, and the document view would keep a
-                            // frame measured against the old window — leaving a
-                            // remote smaller than the window off-centre in the space
-                            // it grew into.
-                            self.apply(
-                                remoteSize: surface.remoteSize,
-                                guestScale: surface.guestScale
-                            )
-                            surface.needsLayout = true
-                            self.report(from: surface)
-                        }
-                    }
-                )
+            // Frame notifications were watched here before and are not enough. AppKit
+            // applies the window's title bar as a top `contentInset` partway through
+            // the first layout: with no `NSScroller` left in the view tree for that
+            // inset to move, no frame changes and nothing posts — and the first
+            // viewport report would keep carrying the title bar, which is a Linux
+            // guest's taskbar below the fold for the rest of the session. `tile` runs
+            // for the inset, for every window resize, and for a scrollbar appearing.
+            //
+            // A window-only resize also changes no *observed* state, so SwiftUI never
+            // runs `updateNSView`, and the document would keep a size measured
+            // against the old window — which is the other half of why this exists.
+            scrollView.onTile = { [weak self, weak surface] in
+                guard let self, let surface, !self.isLayingOut else {
+                    return
+                }
+                self.isLayingOut = true
+                defer { self.isLayingOut = false }
+                self.apply(remoteSize: surface.remoteSize, guestScale: surface.guestScale)
+                surface.needsLayout = true
+                self.report(from: surface)
             }
             // Deliberately nothing for the window changing display. Every point
             // size here is the remote's own, so a host scale change has no geometry
@@ -168,23 +143,21 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             }
             surface.remoteSize = remoteSize
             surface.guestScale = guestScale
-            // At least the visible area, so a remote smaller than the window still
-            // fills it with margin instead of leaving the scroll view's own
-            // background showing through.
+            // Exactly the remote, with nothing added to fill the window: the
+            // letterbox is the scroll view's own black background and the middle is
+            // where `CenteringClipView` puts a desktop with room to spare. A document
+            // padded out to the window is a document that overflows the other axis as
+            // soon as one scroller takes its 17pt — which is how a desktop 19pt too
+            // wide ended up with a scroller it did not need on each axis.
             //
-            // The same measurement the report is made against, or the two disagree:
-            // floored on the clip view, a legacy scroller's 17pt made the document
-            // overflow the room the desktop had just been sized to, which put the
-            // scrollers up and kept them there.
-            let visible = surface.enclosingScrollView?.roomForDocument ?? .zero
-            let wanted = remoteSize.map {
-                RemoteGeometry.pointSize(of: $0, guestScale: guestScale)
-            } ?? .zero
+            // Before the first `resize` there is no remote to size to, and the answer
+            // is the room rather than nothing: a zero-sized document is one AppKit
+            // stops laying out, so the title bar's `contentInset` — which lands
+            // partway through that first layout — would change no frame, notify
+            // nobody, and leave the first viewport report carrying the title bar.
             surface.setFrameSize(
-                CGSize(
-                    width: max(wanted.width, visible.width),
-                    height: max(wanted.height, visible.height)
-                )
+                remoteSize.map { RemoteGeometry.pointSize(of: $0, guestScale: guestScale) }
+                    ?? surface.enclosingScrollView?.roomForDocument ?? .zero
             )
         }
 
@@ -204,10 +177,8 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         }
 
         func detach() {
-            for observer in observers {
-                NotificationCenter.default.removeObserver(observer)
-            }
-            observers.removeAll()
+            scrollView?.onTile = nil
+            scrollView = nil
             keyboard?.invalidate()
             keyboard = nil
             model.attach(renderer: nil)
