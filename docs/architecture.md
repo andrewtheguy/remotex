@@ -96,8 +96,8 @@ Browser-to-server traffic is JSON:
 
 - session control: connect or disconnect;
 - input: mouse movement/buttons, wheel, and DOM keyboard codes;
-- display control: viewport size, a display selection, and a full-refresh
-  request;
+- display control: viewport size and a display selection;
+- a full repaint request;
 - clipboard: send text to the remote, or request the remote's text.
 
 Viewport reports affect only engines configured for resize, and there is no
@@ -115,8 +115,11 @@ changes nothing about resolution: the size that follows is the size the chosen
 display was already at.
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
-layer injects it after attaching to an existing engine so a new canvas does not
-depend on updates seen by the previous browser.
+layer injects it after attaching to an existing engine, so a new canvas does not
+depend on updates seen by the previous client. A client may also send it to
+recover a canvas that has gone wrong: the viewer offers it as **Remote →
+Refresh**, and the SPA does not — it has no equivalent command and never sends
+the message.
 
 The clipboard is per-target opt-in (`clipboard = true`, supported by every
 engine) and works two ways at once. The backend owns the data: the VNC engine

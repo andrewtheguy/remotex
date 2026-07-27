@@ -235,17 +235,12 @@ fn main() -> anyhow::Result<()> {
     let serve_state = Arc::clone(&state);
     let psk = config.psk_bytes();
 
-
     // A display of our own, if the config asks for one. Created here, on the
     // main thread and before any session exists, because a display that came and
     // went with each connection would rearrange the windows on it every time
     // (see `crate::virtualdisplay`). Held for the life of the process: dropping
     // it is what removes the display.
     //
-    // A failure falls back to the Mac's own screen rather than refusing to
-    // start. The private API this needs can disappear under a macOS upgrade, and
-    // "the agent no longer runs at all" is a far worse way to find that out than
-    // a session that shares the real screen and a line in the log.
     // A failure costs the extra display and nothing else: the Mac's own screens
     // are still there to share, and a client that wanted the private one will
     // simply not find it in the list.

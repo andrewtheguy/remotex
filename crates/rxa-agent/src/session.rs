@@ -213,7 +213,7 @@ pub async fn serve(
         .await?;
 
     // Next to `Hello`, so a client has the menu before it has a picture.
-    let displays = display_list(owned);
+    let displays = display_list(owned).await;
     writer
         .send(
             &AgentMsg::Displays {
@@ -250,9 +250,34 @@ fn resolve(id: u32, owned: Option<capture::Target>) -> capture::Target {
     }
 }
 
-/// Build the display list to report, resolving `owned` so the agent's own
-/// display is measured with [`capture::owned_scale`] rather than as a real one.
-fn display_list(owned: Option<capture::Target>) -> Vec<DisplayEntry> {
+/// Build the display list to report, off the runtime's worker.
+///
+/// `capture::displays` is a synchronous round trip to a system service, measured
+/// at a **68 ms median** on the test VM (min 59, max 71, twelve samples). That is
+/// far too long to run on a worker that is also forwarding tiles, so every caller
+/// goes through `spawn_blocking`.
+///
+/// The callers here are the one-off ones — a `Hello`, an `Attach`, a switch — where
+/// the answer is part of the reply and waiting for it is unavoidable. The periodic
+/// poll must *not* await it inline, or the pump stops forwarding tiles for those
+/// 68 ms; it hands the work to [`spawn_display_probe`] and collects the result on
+/// its own `select!` branch.
+async fn display_list(owned: Option<capture::Target>) -> Vec<DisplayEntry> {
+    match tokio::task::spawn_blocking(move || display_list_blocking(owned)).await {
+        Ok(displays) => displays,
+        // The blocking pool is only gone if the runtime is shutting down, and a
+        // panic in there is a bug. Either way an empty list is the same honest
+        // answer the error case below gives.
+        Err(e) => {
+            warn!("session: display enumeration did not finish: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Enumerate and label the displays. Synchronous, and slow — see [`display_list`],
+/// which is how the async side reaches it.
+fn display_list_blocking(owned: Option<capture::Target>) -> Vec<DisplayEntry> {
     match capture::displays(owned) {
         Ok(displays) => displays
             .into_iter()
@@ -276,6 +301,22 @@ fn display_list(owned: Option<capture::Target>) -> Vec<DisplayEntry> {
             Vec::new()
         }
     }
+}
+
+/// Start a display enumeration on the blocking pool, to be collected on the
+/// pump's `displays_rx` branch.
+///
+/// Fire and forget on purpose. The periodic poll exists so a monitor plugged in
+/// mid-session reaches the menu, which is worth 68 ms of somebody's time but not
+/// 68 ms of the tile path's — so nothing here is awaited, and the pump keeps
+/// forwarding frames while the WindowServer is asked.
+fn spawn_display_probe(owned: Option<capture::Target>, tx: mpsc::Sender<Vec<DisplayEntry>>) {
+    tokio::task::spawn_blocking(move || {
+        // A full channel means a probe's result is still unread, which cannot
+        // happen while the pump starts at most one at a time — and if it ever
+        // did, dropping this list is right: the next poll produces a fresher one.
+        let _ = tx.blocking_send(display_list_blocking(owned));
+    });
 }
 
 /// Tear down whatever is streaming and start again on `target`.
@@ -340,6 +381,11 @@ async fn pump(
     // stay quiet while nothing has changed.
     let mut displays_sent = displays;
     let mut displays_polled = Instant::now();
+    // Results from the periodic enumeration, which runs on the blocking pool
+    // rather than on this loop — see `spawn_display_probe`. Capacity one, and at
+    // most one probe is ever outstanding.
+    let (displays_tx, mut displays_rx) = mpsc::channel::<Vec<DisplayEntry>>(1);
+    let mut probing_displays = false;
 
     // Pasteboard watch state. `None` means not watching, and the gateway only
     // turns it on for a target that opted in — so the default costs nothing and
@@ -524,7 +570,7 @@ async fn pump(
                         // And the display list, for the same reason: a browser
                         // reattaching to a running session missed the one sent
                         // beside `Hello`, and would show no picker at all.
-                        displays_sent = display_list(owned);
+                        displays_sent = display_list(owned).await;
                         writer.send(&AgentMsg::Displays {
                             active: target.id(),
                             displays: displays_sent.clone(),
@@ -611,7 +657,7 @@ async fn pump(
                                         scale: wire_scale(live.scale),
                                     }.encode()).await?;
                                 }
-                                displays_sent = display_list(owned);
+                                displays_sent = display_list(owned).await;
                             }
                             // Already there, or refused above. Either way the list
                             // still goes back, so a checkmark that moved
@@ -704,6 +750,21 @@ async fn pump(
                 }
             }
 
+            Some(live) = displays_rx.recv() => {
+                probing_displays = false;
+                // Timed from the answer rather than from the question, so a slow
+                // WindowServer spaces the probes out instead of queueing them.
+                displays_polled = Instant::now();
+                if live != displays_sent {
+                    info!("session: the display list changed ({} attached)", live.len());
+                    displays_sent = live;
+                    writer.send(&AgentMsg::Displays {
+                        active: target.id(),
+                        displays: displays_sent.clone(),
+                    }.encode()).await?;
+                }
+            }
+
             _ = cursor_tick.tick() => {
                 // A display that changed mode does not resize the capture
                 // surface on its own — see `Capture::follow_display`, which
@@ -738,18 +799,12 @@ async fn pump(
                 // in, a lid closed, the agent's own display appearing a moment
                 // after it was created. On its own slower schedule, because
                 // listing them is a round trip to a system service where
-                // everything else on this tick is a local read.
-                if displays_polled.elapsed() >= DISPLAY_POLL {
-                    displays_polled = Instant::now();
-                    let live = display_list(owned);
-                    if live != displays_sent {
-                        info!("session: the display list changed ({} attached)", live.len());
-                        displays_sent = live;
-                        writer.send(&AgentMsg::Displays {
-                            active: target.id(),
-                            displays: displays_sent.clone(),
-                        }.encode()).await?;
-                    }
+                // everything else on this tick is a local read — and started
+                // rather than awaited, so those 68 ms are not taken out of the
+                // tile path. The answer arrives on the branch below.
+                if !probing_displays && displays_polled.elapsed() >= DISPLAY_POLL {
+                    probing_displays = true;
+                    spawn_display_probe(owned, displays_tx.clone());
                 }
                 if let Some((generation, shape)) = cursor_tracker.changed_since(cursor_seen) {
                     cursor_seen = generation;

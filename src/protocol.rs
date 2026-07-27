@@ -139,9 +139,10 @@ pub enum ClientMsg {
     /// channel, on the user's request.
     Viewport { w: u16, h: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
-    /// Injected by the session layer when a browser (re)attaches to
-    /// a running engine; a browser may also send it to recover from a
-    /// corrupted canvas.
+    /// Injected by the session layer when a client (re)attaches to a running
+    /// engine. A client may also send it to recover a canvas that has gone
+    /// wrong, which the viewer offers as Remote > Refresh; the SPA has no such
+    /// command and never sends this.
     Refresh,
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never

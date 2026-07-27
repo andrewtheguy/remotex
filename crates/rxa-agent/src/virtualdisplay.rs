@@ -116,10 +116,6 @@ impl VirtualDisplay {
     /// twice the requested size is worse than no display of our own, and the
     /// caller can fall back to the Mac's real screen and say so.
     pub fn create(points: (u32, u32)) -> anyhow::Result<Self> {
-        Self::create_with_identity(points, SERIAL)
-    }
-
-    fn create_with_identity(points: (u32, u32), serial: u32) -> anyhow::Result<Self> {
         let points = (points.0.max(MIN_POINTS), points.1.max(MIN_POINTS));
         // Worked out once and used three ways: the descriptor's ceiling, the
         // physical size that places the mode in the density window, and the log
@@ -136,7 +132,7 @@ impl VirtualDisplay {
             f64::from(pixels.1) / MAX_DPI * 25.4,
         );
 
-        let descriptor = descriptor(pixels, mm, serial)?;
+        let descriptor = descriptor(pixels, mm, SERIAL)?;
         let class = class("CGVirtualDisplay")?;
         let allocated: Allocated<AnyObject> = unsafe { msg_send![class, alloc] };
         let display: Retained<AnyObject> =
