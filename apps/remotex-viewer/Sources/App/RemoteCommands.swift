@@ -4,6 +4,14 @@ struct RemoteCommands: Commands {
     @Bindable var model: AppModel
 
     var body: some Commands {
+        // No item here carries a key equivalent, and that is a rule rather than an
+        // omission. While the desktop is painting and focused, `KeyboardCapture`
+        // takes every Command chord bar Quit, Close and Settings and sends it to
+        // the remote — so a shortcut on this menu fires only on the screens where
+        // nothing is captured, and types into the guest on the one where the item
+        // usually matters. The ones that were here existed to drive the app from
+        // the keyboard in a test, which is not reason enough to ship a chord whose
+        // meaning depends on which screen is up.
         CommandMenu("Remote") {
             Toggle(
                 model.macOSKeyboardOverridesLabel,
@@ -52,7 +60,6 @@ struct RemoteCommands: Commands {
             Button("Refresh") {
                 model.refresh()
             }
-            .keyboardShortcut("r", modifiers: [.command, .shift])
             .disabled(model.session.screen != .desktop)
 
             Button("Switch Target") {
@@ -72,14 +79,7 @@ struct RemoteCommands: Commands {
 
             Divider()
 
-            // Both steps back out of the session, and neither carries a key
-            // equivalent. They had one so the way in — server, login, picker —
-            // could be walked from the keyboard, which was only ever for driving
-            // the app in a test: on a painting desktop `KeyboardCapture` takes
-            // every Command chord bar Quit, Close and Settings and sends it to the
-            // remote, so the shortcut worked on some screens and silently typed
-            // into the guest on others. A shortcut that depends on which screen is
-            // up is worse than none.
+            // Both steps back out of the session.
             Button("Log Out") {
                 Task { await model.logOut() }
             }
@@ -95,14 +95,11 @@ struct RemoteCommands: Commands {
             }
             .disabled(!model.canChangeGateway)
 
-            // The server step's Continue answers to Return already, but only while
-            // the window is key and nothing else has eaten it. On the menu it is
-            // reachable no matter where focus sits, which is what a keyboard-only
-            // pass — or a script driving one — needs.
+            // The server step's own Continue button is the way in; this is the same
+            // action on the menu, reachable no matter where focus sits.
             Button("Connect to Gateway") {
                 Task { await model.connectToGateway() }
             }
-            .keyboardShortcut(.return, modifiers: .command)
             .disabled(
                 model.session.screen != .server
                     || model.isBusy
