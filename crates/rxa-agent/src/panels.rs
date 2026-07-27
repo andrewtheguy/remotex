@@ -161,9 +161,9 @@ pub fn config(
         false,
     );
     virtual_size.setToolTip(Some(&NSString::from_str(
-        "The virtual display's size in points, WIDTHxHEIGHT. Also the largest \
-         it will take: Resize to window moves within a range reaching down to \
-         about 62% of it.",
+        "The size the virtual display comes up at, in points, WIDTHxHEIGHT — and \
+         the largest mode macOS can render on it at 2x. Change its resolution \
+         afterwards in System Settings > Displays.",
     )));
     view.addSubview(&virtual_size);
 

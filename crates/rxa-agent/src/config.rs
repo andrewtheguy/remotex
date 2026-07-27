@@ -102,12 +102,16 @@ impl Config {
             let n: u32 = value.trim().parse().with_context(|| {
                 format!("virtual_display_size {axis} must be a whole number, got {value:?}")
             })?;
+            // The floor is the one the display is clamped to at creation, shared
+            // rather than repeated: a size accepted here and then quietly changed
+            // there would be a saved setting that does not describe the display.
             // Twice this is the pixel size, and the protocol carries pixels as
             // u16 — so anything past 32767 points cannot be described to the
             // gateway at all.
+            const MIN: u32 = crate::virtualdisplay::MIN_POINTS;
             anyhow::ensure!(
-                (320..=32_767).contains(&n),
-                "virtual_display_size {axis} must be between 320 and 32767 points, got {n}"
+                (MIN..=32_767).contains(&n),
+                "virtual_display_size {axis} must be between {MIN} and 32767 points, got {n}"
             );
             Ok(n)
         };
@@ -264,11 +268,12 @@ display = {display}
 
 # Share a display of our own — a private 2x desktop that no one is sitting in
 # front of — instead of mirroring the Mac's screen. It exists for as long as the
-# agent runs, and the browser can size it with "Resize to window".
+# agent runs, and it appears in System Settings > Displays like any other screen.
 virtual_display = {virtual_display}
 
-# That display's size in points, WIDTHxHEIGHT. Also the largest it will take:
-# "Resize to window" moves within a range reaching down to about 62% of it.
+# The size that display comes up at, in points, WIDTHxHEIGHT — and the largest
+# mode macOS can render on it at 2x. Its resolution is the Mac's to change after
+# that, in System Settings > Displays; nothing on the remote end resizes it.
 virtual_display_size = "{virtual_display_size}"
 "#,
         listen = config.listen,
@@ -481,6 +486,28 @@ mod tests {
             virtual_display_size: "1440x900".to_owned(),
         };
         assert_eq!(Config::parse(&render(&config)).unwrap(), config);
+    }
+
+    // The floor the config accepts is the floor the display is created at. Were
+    // they to drift, a size saved from the dialog would come back as a display of
+    // some other size, with nothing having said so.
+    #[test]
+    fn a_virtual_display_size_below_the_created_floor_is_rejected() {
+        let floor = crate::virtualdisplay::MIN_POINTS;
+        let err = Config::parse(&with_psk(&format!(
+            "virtual_display_size = \"{}x{floor}\"",
+            floor - 1
+        )))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("width"), "{msg}");
+        assert!(msg.contains(&floor.to_string()), "{msg}");
+
+        // And the floor itself is fine, so the message is a bound and not an
+        // off-by-one.
+        let config =
+            Config::parse(&with_psk(&format!("virtual_display_size = \"{floor}x{floor}\""))).unwrap();
+        assert_eq!(config.virtual_display_points().unwrap(), (floor, floor));
     }
 
     #[test]

@@ -67,8 +67,11 @@ const MAX_DPI: f64 = 250.0;
 /// Floor for a created display, in points.
 ///
 /// Nothing enforces a minimum in the API — this is here so a nonsensical
-/// configured size cannot ask for a 2x1 desktop.
-const MIN_POINTS: u32 = 320;
+/// configured size cannot ask for a 2x1 desktop. Public because
+/// [`crate::config`] validates against the same number: a size the config
+/// accepts and the clamp below then quietly changes would be a saved setting
+/// that does not describe the display.
+pub const MIN_POINTS: u32 = 320;
 
 /// How long to wait for the WindowServer to publish a new configuration.
 ///
@@ -132,18 +135,22 @@ impl VirtualDisplay {
 
     fn create_with_serial(points: (u32, u32), serial: u32) -> anyhow::Result<Self> {
         let points = (points.0.max(MIN_POINTS), points.1.max(MIN_POINTS));
+        // Worked out once and used three ways: the descriptor's ceiling, the
+        // physical size that places the mode in the density window, and the log
+        // line. A second calculation of it is a second place for `SCALE` to be
+        // spelled as a literal 2 and drift.
         let pixels = (
-            f64::from(points.0) * SCALE,
-            f64::from(points.1) * SCALE,
+            (f64::from(points.0) * SCALE) as u32,
+            (f64::from(points.1) * SCALE) as u32,
         );
         // Physical size that puts the created mode at the top of the density
         // window. 25.4 mm to the inch.
         let mm = (
-            pixels.0 / MAX_DPI * 25.4,
-            pixels.1 / MAX_DPI * 25.4,
+            f64::from(pixels.0) / MAX_DPI * 25.4,
+            f64::from(pixels.1) / MAX_DPI * 25.4,
         );
 
-        let descriptor = descriptor(points, mm, serial)?;
+        let descriptor = descriptor(pixels, mm, serial)?;
         let class = class("CGVirtualDisplay")?;
         let allocated: Allocated<AnyObject> = unsafe { msg_send![class, alloc] };
         let display: Retained<AnyObject> =
@@ -195,8 +202,8 @@ impl VirtualDisplay {
              {:.0}x{:.0} mm; its resolution is now the Mac's to change",
             points.0,
             points.1,
-            pixels.0 as u32,
-            pixels.1 as u32,
+            pixels.0,
+            pixels.1,
             mm.0,
             mm.1,
         );
@@ -302,7 +309,7 @@ fn class(name: &str) -> anyhow::Result<&'static AnyClass> {
 
 /// The descriptor: identity, physical size, and the pixel ceiling.
 fn descriptor(
-    points: (u32, u32),
+    pixels: (u32, u32),
     mm: (f64, f64),
     serial: u32,
 ) -> anyhow::Result<Retained<AnyObject>> {
@@ -312,11 +319,12 @@ fn descriptor(
 
     unsafe {
         let _: () = msg_send![&*descriptor, setName: &*name];
-        // The framebuffer ceiling. Asking for more than this later does not
-        // fail — it silently halves the result — so it is set to exactly the
-        // largest size this display will ever be asked for.
-        let _: () = msg_send![&*descriptor, setMaxPixelsWide: points.0 * 2];
-        let _: () = msg_send![&*descriptor, setMaxPixelsHigh: points.1 * 2];
+        // The framebuffer ceiling, and the same pixel size the HiDPI check is
+        // made against. Asking for more than this later does not fail — it
+        // silently halves the result — so it is set to exactly the largest size
+        // this display will ever be asked for.
+        let _: () = msg_send![&*descriptor, setMaxPixelsWide: pixels.0];
+        let _: () = msg_send![&*descriptor, setMaxPixelsHigh: pixels.1];
         let _: () = msg_send![&*descriptor, setSizeInMillimeters: CGSize::new(mm.0, mm.1)];
         // sRGB primaries. macOS wants a colour space and these are the ordinary
         // one; nothing in the capture path depends on the choice.

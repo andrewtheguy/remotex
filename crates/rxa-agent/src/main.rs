@@ -246,14 +246,21 @@ fn main() -> anyhow::Result<()> {
     // start. The private API this needs can disappear under a macOS upgrade, and
     // "the agent no longer runs at all" is a far worse way to find that out than
     // a session that shares the real screen and a line in the log.
+    // Both warnings name the display the fallback lands on, because that is what
+    // the next line of the log is about: `display = 0` in the config is a screen
+    // somebody may be sitting at, and "sharing the Mac's screen instead" does not
+    // say which screen when there is more than one.
+    let fallback = config.display;
     let virtual_display = config
         .virtual_display
         .then(|| match config.virtual_display_points() {
             Ok(points) => virtualdisplay::VirtualDisplay::create(points)
-                .inspect_err(|e| warn!("virtualdisplay: {e:#}; sharing the Mac's screen instead"))
+                .inspect_err(|e| {
+                    warn!("virtualdisplay: {e:#}; sharing the Mac's display {fallback} instead")
+                })
                 .ok(),
             Err(e) => {
-                warn!("virtualdisplay: {e:#}; sharing the Mac's screen instead");
+                warn!("virtualdisplay: {e:#}; sharing the Mac's display {fallback} instead");
                 None
             }
         })
