@@ -373,14 +373,18 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (protocol, Some(subtype)) => anyhow::bail!(
+                // The protocols without subtypes are named rather than left to a
+                // catch-all, so that a second VNC subtype cannot land here and
+                // be told it belongs to another protocol. Adding one stops the
+                // build until this match says what it means.
+                (protocol @ (Protocol::Rdp | Protocol::Rxa), Some(subtype)) => anyhow::bail!(
                     "target {:?} is protocol {:?} and sets subtype {:?}, which only \"vnc\" \
                      targets have",
                     target.name,
                     protocol.name(),
                     subtype.name()
                 ),
-                (_, None) => {}
+                (Protocol::Rdp | Protocol::Rxa, None) => {}
             }
             if target.protocol != Protocol::Vnc {
                 anyhow::ensure!(
