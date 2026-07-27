@@ -50,6 +50,52 @@ struct ServerMessageTests {
         )
     }
 
+    /// `virtual` is a Swift keyword-adjacent name the struct spells `isVirtual`,
+    /// so the coding key is the one thing here that can silently drift.
+    @Test
+    func displaysDecodeIncludingTheVirtualFlag() throws {
+        let decoded = try ServerMessage.decode(
+            #"""
+            {"type":"displays","active":9,"displays":[\
+            {"id":7,"label":"Display 1","detail":"1920×1080 at 1x","main":true,"virtual":false},\
+            {"id":9,"label":"Virtual display","detail":"3200×2000 at 2x","main":false,"virtual":true}]}
+            """#
+                .replacingOccurrences(of: "\\\n", with: "")
+        )
+        #expect(
+            decoded
+                == .displays(
+                    active: 9,
+                    displays: [
+                        .init(
+                            id: 7,
+                            label: "Display 1",
+                            detail: "1920×1080 at 1x",
+                            main: true,
+                            isVirtual: false
+                        ),
+                        .init(
+                            id: 9,
+                            label: "Virtual display",
+                            detail: "3200×2000 at 2x",
+                            main: false,
+                            isVirtual: true
+                        ),
+                    ]
+                )
+        )
+    }
+
+    /// A Mac can have every screen unplugged, so an empty list is a state to
+    /// carry rather than one to treat as drift.
+    @Test
+    func anEmptyDisplayListDecodes() throws {
+        #expect(
+            try ServerMessage.decode(#"{"type":"displays","active":0,"displays":[]}"#)
+                == .displays(active: 0, displays: [])
+        )
+    }
+
     @Test
     func cursorCarriesAnImageOrTheRemoteHidingIt() throws {
         #expect(

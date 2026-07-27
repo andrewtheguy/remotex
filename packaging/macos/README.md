@@ -97,7 +97,9 @@ Its menu provides:
 
 - connection and listen-address status;
 - PSK copy;
-- address, display, and PSK settings;
+- settings: listen address, a read-only list of the displays this Mac can share,
+  whether to add a private 2x display of the agent's own, that display's
+  **initial** size, and the PSK;
 - config and log shortcuts;
 - permission shortcuts;
 - the **Start at Login** toggle and **Quit**.
@@ -154,8 +156,18 @@ remote access generally. RealVNC Service Mode and RustDesk's installed service
 support the login screen by adding system-level launch components. Equivalent
 login-screen support is planned for remotex.
 
-The agent mirrors the selected physical display and does not resize it to the
-browser viewport.
+The agent mirrors one whole display at a time and does not resize it to the
+browser viewport. Which display is chosen from the remotex viewer or the browser,
+per session, not in the agent's settings — so there is no display setting here,
+only the checkbox that decides whether the private display exists and the
+`virtual_display_initial_size` its first appearance uses.
+
+"Initial" is the whole of how that size behaves: it is what the private display is
+created at the first time this Mac sees it. After that its resolution is the Mac's
+like any other screen's — set it in System Settings > Displays, where macOS
+remembers it against the display and restores it on the next launch. Editing the
+setting will not move a display that has already been arranged; what it fixes
+permanently is the largest mode that display can ever render at 2x.
 
 See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
 for the capture, transport, and lifecycle design.

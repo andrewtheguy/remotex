@@ -237,35 +237,23 @@ define_class!(
             let mtm = MainThreadMarker::from(self);
             let settings = &self.ivars().settings;
             let saved = settings.saved();
-            let selection = if saved.virtual_display {
-                panels::Selection::Virtual
-            } else {
-                panels::Selection::Real(saved.display)
-            };
-            let choices = display_choices(selection);
+            let attached = display_summary();
             let mut draft = panels::Draft {
                 listen: saved.listen.clone(),
                 psk: saved.psk.clone(),
-                display: selection,
-                virtual_size: saved.virtual_display_size.clone(),
+                virtual_display: saved.virtual_display,
+                virtual_size: saved.virtual_display_initial_size.clone(),
             };
 
             loop {
-                let Some(edited) = panels::config(mtm, &draft, &choices) else {
+                let Some(edited) = panels::config(mtm, &draft, &attached) else {
                     return;
                 };
                 let next = config::Config {
                     listen: edited.listen.clone(),
                     psk: edited.psk.clone(),
-                    // Which real display stays whatever it was while the virtual
-                    // one is chosen, so switching back does not land on display 0
-                    // rather than the screen the user had picked.
-                    display: match edited.display {
-                        panels::Selection::Real(index) => index,
-                        panels::Selection::Virtual => saved.display,
-                    },
-                    virtual_display: edited.display == panels::Selection::Virtual,
-                    virtual_display_size: edited.virtual_size.clone(),
+                    virtual_display: edited.virtual_display,
+                    virtual_display_initial_size: edited.virtual_size.clone(),
                 };
                 match settings.apply(next) {
                     // Nothing changed, so there is nothing to restart into and no
@@ -763,57 +751,39 @@ pub fn run(
     std::process::exit(0);
 }
 
-/// The settings dialog's display menu.
+/// The settings dialog's read-only list of what this Mac can share, one line per
+/// display.
 ///
-/// Two cases besides the ordinary one, and both have to leave the dialog usable —
-/// it is the only way to reach the other two settings:
+/// Informational only. Which display a session shares is picked in the viewer or
+/// the browser, so there is nothing here to set — but "what is there to pick
+/// from" is still worth being able to see from the Mac itself, not least to
+/// confirm that a virtual display switched on in this same dialog actually
+/// arrived.
 ///
-/// - **The list cannot be read**, which is almost always the missing Screen
-///   Recording grant. The configured display is offered on its own, so the key
-///   and the address are still editable.
-/// - **The configured display is not attached** (a `display = 3` left over from an
-///   unplugged monitor). It is appended, and stays selected, so opening the dialog
-///   and pressing Save does not silently move the agent to another screen. The
-///   agent falls back to the main display meanwhile — see [`capture::probe`].
+/// A list that cannot be read is almost always the missing Screen Recording
+/// grant, and it must still leave the dialog usable: this is the only way to
+/// reach the address and the key. So the failure becomes a line of text rather
+/// than an empty box or an error panel.
 ///
-/// A display of the agent's own is one more entry, always offered and always
-/// last: choosing it is choosing not to share any of the real ones, which is
-/// what the menu is for (see [`crate::virtualdisplay`]).
-fn display_choices(current: panels::Selection) -> Vec<panels::DisplayChoice> {
-    let mut choices: Vec<panels::DisplayChoice> = match capture::displays() {
+/// The agent's own display is not appended here. It is a real display to macOS
+/// once created, so it comes back from [`capture::displays`] like any other —
+/// and if it is missing from this list after being switched on, that is worth
+/// seeing rather than papering over.
+fn display_summary() -> Vec<String> {
+    // `None`: this runs on the main thread with no session in sight, so the
+    // agent's own display — if there is one — is measured as a real display
+    // would be. Its bounds are right either way; only the derived backing scale
+    // can read low, which is a cosmetic difference in one line of a dialog.
+    match capture::displays(None) {
         Ok(displays) => displays
             .iter()
-            .map(|display| panels::DisplayChoice {
-                selection: panels::Selection::Real(display.index),
-                label: format!(
-                    "Display {} · {}×{} at {}x",
-                    display.index + 1,
-                    display.geometry.width,
-                    display.geometry.height,
-                    display.geometry.scale
-                ),
-            })
+            .map(capture::DisplayInfo::summary)
             .collect(),
         Err(e) => {
             warn!("menu: cannot list displays: {e:#}");
-            Vec::new()
+            vec![format!("Cannot list displays — {e}")]
         }
-    };
-    if let panels::Selection::Real(index) = current
-        && !choices
-            .iter()
-            .any(|choice| choice.selection == panels::Selection::Real(index))
-    {
-        choices.push(panels::DisplayChoice {
-            selection: panels::Selection::Real(index),
-            label: format!("Display {} · not attached", index + 1),
-        });
     }
-    choices.push(panels::DisplayChoice {
-        selection: panels::Selection::Virtual,
-        label: "Virtual display · a private desktop at 2x".to_owned(),
-    });
-    choices
 }
 
 fn checkmark(on: bool) -> NSControlStateValue {

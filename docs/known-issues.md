@@ -60,25 +60,51 @@ holds it fixed, are the record.
 - **Seen:** after a number of resolution changes, every further one hangs —
   `CGCompleteDisplayConfiguration` never returns and the calling thread spins at
   around 40% CPU. Nothing but a reboot of the guest clears it.
-- **Not remotex's to trigger any more:** nothing here changes a display's mode,
+- **Not remotex's to trigger:** nothing here changes a display's mode,
   so this is reached only by changing the resolution on the Mac itself. The
   agent keeps capturing whatever the display last settled on.
 - **Guard:** none possible off a real VM.
 
+## The browser can render the virtual display jagged
+
+- **Area:** `protocol = "rxa"` sharing the private display the agent adds, in the
+  browser. Not reported on the Mac's own screens, and not reported in the native
+  viewer on the same display.
+- **Seen:** the image is **jagged** — not soft or blurred, which would be a
+  different symptom with a different cause. Sometimes, rather than every session.
+- **Cause: unknown, and not yet characterised.** What is ruled out is the wire:
+  the gateway relays the agent's PNG/JPEG bytes without decoding them
+  ([`architecture.md`](architecture.md)), so both clients receive identical tiles
+  and the difference is downstream of them arriving. Nothing beyond that has been
+  established — including whether it depends on the display's mode, the browser
+  window size, or the touch zoom, none of which has been varied against it.
+- **Workaround:** the native viewer, on the same session and the same display.
+- **Guard:** none, and none is possible from the current tests: paint quality is
+  out of scope for browser automation (see `CLAUDE.md`), so this needs a human
+  looking at the picture. Do not close it on a reading of the code — it was
+  reported from a real session and no cause has been found.
+
 ## macOS can hold a virtual display's identity offline
 
-- **Area:** the agent with `virtual_display = true`.
+- **Area:** the agent with **Add a private 2x display** ticked.
 - **Seen:** the agent logs that it created a display, but nothing can capture
-  it: it is missing from the active display list and from ScreenCaptureKit,
-  while `CGDisplayBounds` still reports exactly the size that was asked for.
+  it: it is missing from the active display list and from ScreenCaptureKit —
+  and so from the display picker in both clients — while `CGDisplayBounds` still
+  reports exactly the size that was asked for.
 - **Cause:** the WindowServer remembers arrangement state against a display's
-  vendor, product and serial, and can decide to keep that identity offline. The
-  state survives a reboot and cannot be cleared from inside the process.
-  Observed 2026-07-27 against an identity earlier probe builds had used.
-- **Mitigation:** creation checks `CGDisplayIsOnline` and `CGDisplayIsActive`
-  rather than trusting bounds, and retries once with a serial number macOS has
-  not seen before. What is lost is the desktop arrangement saved against the old
-  identity — window positions on that display start over.
+  vendor, product and serial — as it does for any monitor — and can decide to keep
+  that identity offline. The state survives a reboot and cannot be cleared from
+  inside the process. Observed 2026-07-27, after several differing descriptors had
+  claimed the same identity on that Mac.
+- **Reported, not worked around:** creation checks `CGDisplayIsOnline` and
+  `CGDisplayIsActive` rather than trusting bounds, and says so in the log and to
+  the client. The agent deliberately does *not* mint a new identity to escape it
+  — that would produce a working display by discarding the arrangement the
+  identity stands for, which is the one thing a real monitor never does to you
+  (see [`mac-agent-architecture.md`](mac-agent-architecture.md)).
+- **Fix:** on the Mac, where display arrangement lives — System Settings >
+  Displays, resetting the arrangement. The same place you would go for a panel
+  that came back dark.
 - **Guard:** none possible in CI; it needs a real WindowServer in a state that
   cannot be created on demand.
 

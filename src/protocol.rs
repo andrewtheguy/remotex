@@ -139,9 +139,10 @@ pub enum ClientMsg {
     /// channel, on the user's request.
     Viewport { w: u16, h: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
-    /// Injected by the session layer when a browser (re)attaches to
-    /// a running engine; a browser may also send it to recover from a
-    /// corrupted canvas.
+    /// Injected by the session layer when a client (re)attaches to a running
+    /// engine. A client may also send it to recover a canvas that has gone
+    /// wrong, which the viewer offers as Remote > Refresh; the SPA has no such
+    /// command and never sends this.
     Refresh,
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
@@ -160,6 +161,17 @@ pub enum ClientMsg {
     /// alongside the automatic pushes: a browser attaching mid-session has
     /// missed every one of them. See docs/architecture.md.
     ClipboardRequest,
+    /// Share a different one of the remote's displays: the `id` of an entry from
+    /// the last [`ServerMsg::Displays`].
+    ///
+    /// Not the same kind of request as [`ClientMsg::Viewport`] above, and the
+    /// distinction is the whole reason both can exist: a remote's *resolution*
+    /// belongs to the machine running it, while *which of its screens to look
+    /// at* is only ever a question for the person looking. Only `rxa` can answer
+    /// it — RDP and VNC each deliver a single framebuffer spanning every remote
+    /// screen, with no way to ask for one of them — so those engines never send
+    /// a display list and a client with none shows no picker.
+    SelectDisplay { id: u32 },
 }
 
 /// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
@@ -301,6 +313,27 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
 /// half size because the host screen happens to be Retina.
 pub const UNSCALED: f32 = 1.0;
 
+/// One of the remote's displays, as a client lists it for the user to pick from.
+///
+/// The strings are built by the remote end and passed through: the Mac knows how
+/// its displays are named and numbered, and having it say so once keeps the
+/// browser panel and the viewer's menu reading the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayInfo {
+    /// Opaque to every client — whatever the engine wants back in
+    /// [`ClientMsg::SelectDisplay`]. For `rxa` it is a `CGDirectDisplayID`.
+    pub id: u32,
+    /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
+    pub label: String,
+    /// The line under it: `"1600×1000 at 2x"`.
+    pub detail: String,
+    /// The remote's primary screen.
+    pub main: bool,
+    /// A display the remote made for this purpose rather than one of its own
+    /// screens, so a client can say which is which.
+    pub virtual_display: bool,
+}
+
 /// Server -> browser: screen updates and session status.
 ///
 /// Most variants come from the protocol engine (tiles, resize, error); the two
@@ -347,6 +380,19 @@ pub enum ServerMsg {
         protocol: &'static str,
         resize: bool,
         clipboard: bool,
+    },
+    /// The remote's displays and which one is being shared, whenever either
+    /// changes. Pushed, never requested: a client holds no display state of its
+    /// own, so a checkmark follows `active` and a selection that failed leaves
+    /// the menu honest rather than showing a screen nobody is looking at.
+    ///
+    /// An engine that cannot offer a choice never sends this, and its clients
+    /// show no display picker at all — see [`ClientMsg::SelectDisplay`].
+    Displays {
+        /// The `id` of the entry being shared. Not an index, and not necessarily
+        /// present in `displays` — a screen can be unplugged between the two.
+        active: u32,
+        displays: Vec<DisplayInfo>,
     },
     /// Whether the remote runs macOS, discovered by the engine as it connects
     /// and sent once, next to the first [`ServerMsg::Resize`].
@@ -412,6 +458,22 @@ enum ControlMsg<'a> {
         #[serde(rename = "oversizedBytes")]
         oversized_bytes: Option<u64>,
     },
+    Displays {
+        active: u32,
+        displays: Vec<WireDisplay<'a>>,
+    },
+}
+
+/// [`DisplayInfo`] as it goes out: `virtual_display` is `virtual` on the wire,
+/// which is a reserved word in Rust and not in JavaScript.
+#[derive(Serialize)]
+struct WireDisplay<'a> {
+    id: u32,
+    label: &'a str,
+    detail: &'a str,
+    main: bool,
+    #[serde(rename = "virtual")]
+    virtual_display: bool,
 }
 
 impl ServerMsg {
@@ -455,6 +517,21 @@ impl ServerMsg {
             })),
             ServerMsg::RemoteOs { macos } => {
                 WireFrame::Text(control(&ControlMsg::RemoteOs { macos: *macos }))
+            }
+            ServerMsg::Displays { active, displays } => {
+                WireFrame::Text(control(&ControlMsg::Displays {
+                    active: *active,
+                    displays: displays
+                        .iter()
+                        .map(|display| WireDisplay {
+                            id: display.id,
+                            label: &display.label,
+                            detail: &display.detail,
+                            main: display.main,
+                            virtual_display: display.virtual_display,
+                        })
+                        .collect(),
+                }))
             }
             // The last gate on the browser link, behind each engine's own: an
             // oversized value is reported as its size rather than sent, so no
@@ -542,6 +619,18 @@ mod tests {
             ClientMsg::Clipboard { text } => assert_eq!(text, "héllo"),
             other => panic!("unexpected: {other:?}"),
         }
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"selectDisplay","id":2}"#).unwrap(),
+            ClientMsg::SelectDisplay { id: 2 }
+        ));
+        // A display id is opaque and uses the full u32 range: nothing may narrow
+        // it on the way in.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"selectDisplay","id":4294967295}"#)
+                .unwrap(),
+            ClientMsg::SelectDisplay { id: u32::MAX }
+        ));
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"selectDisplay","id":-1}"#).is_err());
     }
 
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.
@@ -570,6 +659,47 @@ mod tests {
                 r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true}"#
             ),
             other => panic!("connected should be a text frame: {other:?}"),
+        }
+        match (ServerMsg::Displays {
+            active: 7,
+            displays: vec![
+                DisplayInfo {
+                    id: 7,
+                    label: "Display 1".to_owned(),
+                    detail: "1920×1080 at 1x".to_owned(),
+                    main: true,
+                    virtual_display: false,
+                },
+                DisplayInfo {
+                    id: 9,
+                    label: "Virtual display".to_owned(),
+                    detail: "3200×2000 at 2x".to_owned(),
+                    main: false,
+                    virtual_display: true,
+                },
+            ],
+        })
+        .encode()
+        {
+            // `virtual` on the wire: reserved in Rust, ordinary in JavaScript.
+            WireFrame::Text(json) => assert_eq!(
+                json,
+                r#"{"type":"displays","active":7,"displays":[{"id":7,"label":"Display 1","detail":"1920×1080 at 1x","main":true,"virtual":false},{"id":9,"label":"Virtual display","detail":"3200×2000 at 2x","main":false,"virtual":true}]}"#
+            ),
+            other => panic!("displays should be a text frame: {other:?}"),
+        }
+        // No displays is a shape a client must handle, not one it never sees: a
+        // Mac can have every screen unplugged.
+        match (ServerMsg::Displays {
+            active: 0,
+            displays: Vec::new(),
+        })
+        .encode()
+        {
+            WireFrame::Text(json) => {
+                assert_eq!(json, r#"{"type":"displays","active":0,"displays":[]}"#)
+            }
+            other => panic!("displays should be a text frame: {other:?}"),
         }
         for macos in [false, true] {
             match (ServerMsg::RemoteOs { macos }).encode() {

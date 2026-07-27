@@ -16,7 +16,8 @@
 
 ## macOS viewer
 
-- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then run `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and launch the packaged app with `open -n dist/remotex-viewer.app`
+- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then run `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and launch the packaged app
+- launch a QA run with its own settings, never bare: `open -n dist/remotex-viewer.app --args --settings qa --gateway http://127.0.0.1:<test port>`. `--settings qa` puts the gateway address in its own `UserDefaults` suite and gives the run an ephemeral cookie jar, so a test run cannot overwrite the address a real one saved or log the real session out — `HTTPCookieStorage` matches by host and ignores the port, so without it a test gateway on `127.0.0.1` shares the real one's login cookie. The trade is that a QA launch always starts at the login screen instead of resuming. Wipe the slate with `defaults delete remotex-viewer.qa`
 - never validate the viewer with `swift run`, a standalone `swift build`, or the executable under `.build`; those bypass the `.app` bundle and can behave differently, including missing menus and `Info.plist` metadata
 - for routine viewer development, the disk-image layer is out of scope: use `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and work exclusively with `dist/remotex-viewer.app`
 - use the viewer script's default DMG build only for production/release validation, changes to the viewer's DMG packaging, or when the user explicitly asks for it

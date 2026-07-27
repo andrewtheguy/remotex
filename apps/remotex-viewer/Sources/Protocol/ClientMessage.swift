@@ -37,6 +37,14 @@ enum ClientMessage: Sendable, Equatable {
     case disconnect
     case clipboard(text: String)
     case clipboardRequest
+    /// Share a different one of the remote's displays, by the `id` of an entry
+    /// from the last `displays` message.
+    ///
+    /// The counterpart to `viewport` above, and the contrast is the point: a
+    /// remote's *resolution* belongs to the machine running it, while *which of
+    /// its screens to look at* is only a question for the person looking. Only
+    /// rxa answers it.
+    case selectDisplay(id: UInt32)
 
     /// The `type` tag this encodes as. Public so the wire-contract test can
     /// compare the whole set against the Rust enum.
@@ -52,6 +60,7 @@ enum ClientMessage: Sendable, Equatable {
         case .disconnect: "disconnect"
         case .clipboard: "clipboard"
         case .clipboardRequest: "clipboardRequest"
+        case .selectDisplay: "selectDisplay"
         }
     }
 
@@ -59,12 +68,14 @@ enum ClientMessage: Sendable, Equatable {
     static let allTags: Set<String> = [
         "mouseMove", "mouseButton", "wheel", "key", "viewport",
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
+        "selectDisplay",
     ]
 }
 
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
         case type, x, y, button, pressed, dx, dy, code, caps, w, h, target, text
+        case id
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -91,6 +102,8 @@ extension ClientMessage: Encodable {
             try container.encode(target, forKey: .target)
         case .clipboard(let text):
             try container.encode(text, forKey: .text)
+        case .selectDisplay(let id):
+            try container.encode(id, forKey: .id)
         case .refresh, .disconnect, .clipboardRequest:
             break
         }

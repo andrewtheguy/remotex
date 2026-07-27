@@ -43,15 +43,49 @@ endpoints and includes a checksum to catch transcription errors.
 
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
-- agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, pasteboard text
-  (on request or when the watched pasteboard changes), and heartbeat pongs;
-- gateway to agent: mouse, wheel, and keyboard input, session control, clipboard
-  read requests, writes and the watch toggle, and heartbeat pings.
+- agent to gateway: desktop size, the display list and which display is being
+  shared, PNG/JPEG tiles, cursor shape, pasteboard text (on request or when the
+  watched pasteboard changes), and heartbeat pongs;
+- gateway to agent: mouse, wheel, and keyboard input, session control, a display
+  selection, clipboard read requests, writes and the watch toggle, and heartbeat
+  pings.
 
 The gateway translates these into the same browser protocol used by RDP and
 VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
 checks the gateway-agent link; browser liveness is handled by the gateway's
 shared WebSocket/session layer.
+
+## Which display
+
+One at a time, and the client's to choose. The agent reports every display it
+could share — `AgentMsg::Displays`, sent beside `Hello`, on `Attach`, after a
+switch, and whenever a two-second poll finds the set changed — and a client
+answers with `GatewayMsg::SelectDisplay` naming one by `CGDirectDisplayID`.
+Positions in a list are deliberately not identities: attaching or unplugging a
+screen renumbers everything after it.
+
+A session starts on whichever display the Mac calls main, and the agent does not
+argue with that answer — including when the main display is the one the agent
+created, which is a thing macOS remembers per arrangement (see A stable identity
+below). Second-guessing it would mean overriding a choice made in System
+Settings.
+
+The choice lasts as long as the session and nothing about it is written to the
+config: the person at the far end is picking a screen for as long as they are
+looking at it, and the next connection should start from the same place rather
+than from wherever the last one wandered off to.
+
+Switching restarts the capture stream, which is why the agent reuses the
+teardown-and-restart its capture-failure path already had — including putting the
+old display back if the new one cannot be captured, because the stream was torn
+down to make room and leaving it down would freeze the desktop. The new size goes
+out before any tile drawn at it, and the injector's scale and origin are
+re-derived before the first click on the new display arrives.
+
+Clients hold no display state of their own. The checkmark follows the `active` in
+the agent's report, so a selection that failed leaves the menu agreeing with what
+is on screen. And this is the *only* display decision a client makes: see
+Resolution below for the one it does not.
 
 ## Capture and encoding
 
@@ -70,7 +104,12 @@ used.
 
 ## Resolution
 
-The Mac's, and only the Mac's. There is no message on this wire that asks it to
+The Mac's, and only the Mac's — and the contrast with the section above is the
+whole point. *Which* screen to look at is a question about the person looking, so
+a client answers it. *What resolution* that screen runs at is a question about
+the machine, so the machine answers it.
+
+There is no message on this wire that asks it to
 change resolution, and `resize = true` on an `rxa` target is a config error.
 Whoever is using that machine sets the mode where every other mode is set — in
 System Settings > Displays — and the agent finds out the same way for every kind
@@ -79,7 +118,9 @@ capture surface, and the new size travels as `AgentMsg::DisplaySize` ordered wit
 the tiles it applies to.
 
 That includes the display the agent creates for itself, which is why it needs no
-mechanism of its own — see below.
+mechanism of its own — see below. Selecting a different display is not a
+resolution change either: the size that follows is the size that display was
+already at.
 
 Some displays change size with nobody touching System Settings at all. A UTM
 guest's default screen is the host's to size: Apple Virtualization's
@@ -97,13 +138,24 @@ the same pixel count presented at different sizes.
 
 ## A display of our own
 
-Selecting **Virtual display** in the settings dialog shares a display the agent
-creates with the private `CGVirtualDisplay` API instead of any of the Mac's
-screens — a private 2x desktop that nobody is sitting in front of. It is created
-once at startup and released when the agent exits; the process owns it, so a
-crash cannot leave one behind. A failure to create it falls back to the Mac's
-screen with a line in the log, because a macOS release that takes the private API
-away should cost the sharpness, not the agent.
+Ticking **Add a private 2x display** in the settings dialog gives the Mac an
+extra display, made with the private `CGVirtualDisplay` API — a 2x desktop that
+nobody is sitting in front of. It is created once at startup and released when
+the agent exits; the process owns it, so a crash cannot leave one behind. A
+failure to create it costs the extra display and nothing else, with a line in the
+log, because a macOS release that takes the private API away should cost the
+sharpness rather than the agent.
+
+An **addition**, not a replacement: `CGVirtualDisplay` adds a monitor beside the
+ones already attached. The Mac's own screens stay shareable and the new one simply
+joins the list a client picks from. This setting therefore decides only whether
+that display exists — never which display is shared, which is a per-session choice
+made from the viewer or the browser, and which no session makes by default.
+
+macOS may not agree about which display is which, either: on the test VM it had
+our display arranged as the *main* one, so a session started there. That is the
+remembered arrangement doing its job — see A stable identity below — and not
+something the agent second-guesses.
 
 Created once, and then it belongs to macOS. It appears in System Settings >
 Displays with the mode list macOS derives from the descriptor — a HiDPI entry and
@@ -118,8 +170,8 @@ pixels; listing it at the pixel size yields the same point size with no extra
 pixels. HiDPI then engages only while pixel density — mode pixels over
 `sizeInMillimeters` — stays inside roughly 149–264 dpi, measured on macOS
 26.5.2. The display is therefore created at the top of that window, which is
-also where `maxPixels` sits, so the configured size is the largest mode that can
-be 2x and every smaller one macOS offers has density to spare. Outside that
+also where `maxPixels` sits, so the initial size is the largest mode that can
+ever be 2x and every smaller one macOS offers has density to spare. Outside that
 window macOS silently produces a 1x desktop at *twice* the requested point size,
 which is what the check after `applySettings:` is looking for.
 
@@ -132,12 +184,41 @@ so a mode at or under that size is 2x and anything larger provably is not — wh
 is what keeps a `(low resolution)` pick from being captured as a surface four
 times the size it should be. Third, `CGDisplayBounds` reports the requested size
 even for a display the WindowServer refuses to bring online, so creation also
-checks `CGDisplayIsOnline` and `CGDisplayIsActive`. That offline state is
-remembered against the display's identity and survives a reboot, so it retries
-once with a serial macOS has not seen.
+checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
 
-What this costs in practice — the ways macOS can leave such a display unusable —
-is in [`known-issues.md`](known-issues.md).
+## Its identity, and what macOS remembers against it
+
+The display reports a fixed vendor, product and serial, for the same reason a
+monitor does: those are burned into the hardware. macOS files an arrangement
+against them — position, mode, whether the display is the primary, and the modes
+of the screens beside it — and restores all of it when that identity reappears.
+That is what makes a monitor you plug back in come back where you left it, and it
+is the behaviour to have rather than one to work around. An identity that changed
+between launches would be a new display every time, and would forget the lot.
+
+So the agent takes the arrangement macOS gives it as given. It measures what it
+finds, reports that, and never applies a second configuration. Two things follow,
+and both are only surprising if you expected the agent to be in charge:
+
+- **A session can start on this display.** It starts on whichever display the Mac
+  calls main, and if the arrangement makes ours primary, that is ours. Overriding
+  it would mean overruling a System Settings choice.
+- **The configured size is an initial size.** `virtual_display_initial_size` is
+  what the display is created at the first time a Mac sees it; afterwards the
+  remembered mode wins, and editing the setting will not move a display that has
+  already been arranged. What the value fixes permanently is the *ceiling*, since
+  `maxPixels` and `sizeInMillimeters` cannot change after creation.
+
+The one remembered state that is a genuine problem is an arrangement that holds
+the identity **offline**. Nothing in the process can clear it, and the agent
+reports it rather than minting a new identity to escape it — escaping it would
+discard the arrangement, which is the one thing a monitor never does. The fix is
+on the Mac, in System Settings, as it would be for a panel that came back dark;
+see [`known-issues.md`](known-issues.md).
+
+There is no API for any of this in either direction: nothing on
+`CGVirtualDisplayDescriptor` or `CGVirtualDisplaySettings` places a display,
+declines the primary role, or clears remembered state.
 
 ## Input
 
@@ -183,8 +264,9 @@ launchd.
 
 ## Constraints
 
-- The agent mirrors a whole display and never follows client viewport reports.
-  It never changes any display's resolution either — see Resolution above.
+- The agent mirrors one whole display at a time and never follows client viewport
+  reports. A client chooses *which* display; it never changes any display's
+  resolution — see Which display and Resolution above.
 - It runs only in a logged-in GUI session. It does not support the macOS login
   window or an unattended service mode.
 - Screen Recording and Accessibility grants are tied to the app's signing

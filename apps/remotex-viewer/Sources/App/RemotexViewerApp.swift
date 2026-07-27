@@ -4,6 +4,17 @@ import SwiftUI
 
 @MainActor
 private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
+    /// The top-level menus this app declares in `RemoteCommands`, beside the app
+    /// menu and the Edit menu inserted below.
+    ///
+    /// Matched by title, unlike the Edit menu's identity check, because these are
+    /// SwiftUI's to build and it hands back a new `NSMenu` on every rebuild —
+    /// there is no object to keep. Anything else in the bar is AppKit's own and
+    /// is removed. A `CommandMenu` added to `RemoteCommands` without its title
+    /// here is stripped on the next rebuild, which looks like a menu that
+    /// flickers and then vanishes.
+    private static let ownMenuTitles: Set<String> = ["Remote", "Display"]
+
     /// The one menu whose chords are kept — see `ViewerMenus.makeEditMenu`. Held
     /// so the sweep below can recognise it by identity, and so a rebuilt bar can
     /// be told apart from one that still has ours in it.
@@ -44,7 +55,8 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
             }
 
             // SwiftUI retains standard menus that command-group replacements cannot remove.
-            for item in mainMenu.items.dropFirst() where item.title != "Remote" {
+            for item in mainMenu.items.dropFirst()
+            where !Self.ownMenuTitles.contains(item.title) {
                 mainMenu.removeItem(item)
             }
             self.enforceMenuBarRules()
@@ -95,7 +107,12 @@ enum ViewerMain {
 struct RemotexViewerApp: App {
     @NSApplicationDelegateAdaptor(ViewerApplicationDelegate.self)
     private var applicationDelegate
-    @State private var model = AppModel()
+    // Both from `ViewerDefaults`, so a `--settings` run keeps the real gateway
+    // address and the real login untouched. See that file.
+    @State private var model = AppModel(
+        defaults: ViewerDefaults.resolved,
+        urlSession: ViewerDefaults.urlSession
+    )
 
     var body: some Scene {
         WindowGroup {

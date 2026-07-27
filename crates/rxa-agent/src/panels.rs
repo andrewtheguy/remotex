@@ -34,8 +34,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSButton, NSFont, NSPopUpButton, NSTextAlignment, NSTextField,
-    NSView,
+    NSApplicationActivationPolicy, NSButton, NSControlStateValueOff, NSControlStateValueOn, NSFont,
+    NSTextAlignment, NSTextField, NSView,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -66,44 +66,22 @@ const BUTTON_WIDTH: f64 = 100.0;
 pub struct Draft {
     pub listen: String,
     pub psk: String,
-    pub display: Selection,
-    /// The virtual display's size, `WIDTHxHEIGHT` in points. Kept whatever the
-    /// selection is, so switching to a real display and back does not lose it.
+    /// Whether to give this Mac an extra display of the agent's own making.
+    pub virtual_display: bool,
+    /// That display's size, `WIDTHxHEIGHT` in points. Kept whether or not it is
+    /// switched on, so turning it off and back on does not lose it.
     pub virtual_size: String,
 }
 
-/// What the display menu can be set to.
-///
-/// A display of the agent's own is one of the entries rather than a checkbox
-/// beside them, because it is not an extra property of a shared screen — it
-/// replaces the screen being shared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Selection {
-    /// One of the Mac's own displays, by index into the shareable list.
-    Real(usize),
-    /// A display the agent creates for itself.
-    Virtual,
-}
-
-/// One entry for the dialog's display menu: what picking it selects, and how to
-/// describe it.
-pub struct DisplayChoice {
-    pub selection: Selection,
-    pub label: String,
-}
-
-/// The settings dialog: listen address, display, pre-shared key.
+/// The settings dialog: listen address, the display list, the virtual display,
+/// pre-shared key.
 ///
 /// Returns what the user typed if they saved, and `None` if they cancelled. The
 /// draft is not validated here — the caller owns the rules, and the point of
 /// handing back exactly what was typed is that it can re-open this dialog on the
 /// same values when one of them is refused, instead of making the user retype a
 /// key to fix a port.
-pub fn config(
-    mtm: MainThreadMarker,
-    current: &Draft,
-    displays: &[DisplayChoice],
-) -> Option<Draft> {
+pub fn config(mtm: MainThreadMarker, current: &Draft, displays: &[String]) -> Option<Draft> {
     let alert = alert(
         mtm,
         "remotex-agent Settings",
@@ -114,64 +92,104 @@ pub fn config(
         NSAlertStyle::Informational,
     );
 
-    let rows = 4.0;
-    let height = rows * ROW_HEIGHT + (rows - 1.0) * ROW_GAP;
+    // Listen address, the display list, the virtual display switch, its size,
+    // the key. Only the list is taller than one row, and only because it grows
+    // with the number of screens attached.
+    let list_height = (displays.len().max(1) as f64) * LABEL_HEIGHT;
+    let heights = [
+        ROW_HEIGHT,
+        list_height,
+        ROW_HEIGHT,
+        ROW_HEIGHT,
+        ROW_HEIGHT,
+    ];
+    let height =
+        heights.iter().sum::<f64>() + (heights.len() as f64 - 1.0) * ROW_GAP;
     let view = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(NSPoint::ZERO, NSSize::new(WIDTH, height)),
     );
     // AppKit's origin is bottom-left, so rows are laid out upwards and named
-    // downwards: listen on top, then display, its size, then the key.
-    let row = |n: f64| (rows - 1.0 - n) * (ROW_HEIGHT + ROW_GAP);
+    // downwards: listen on top, then the displays, the virtual switch and its
+    // size, then the key.
+    let mut tops = [0.0; 5];
+    let mut cursor = height;
+    for (top, row_height) in tops.iter_mut().zip(heights) {
+        cursor -= row_height;
+        *top = cursor;
+        cursor -= ROW_GAP;
+    }
+    let row = |n: usize| tops[n];
 
-    view.addSubview(&label(mtm, "Listen address", row(0.0)));
-    let listen = field(mtm, &current.listen, row(0.0), WIDTH - CONTROL_X, false);
+    view.addSubview(&label(mtm, "Listen address", row(0)));
+    let listen = field(mtm, &current.listen, row(0), WIDTH - CONTROL_X, false);
     view.addSubview(&listen);
 
-    view.addSubview(&label(mtm, "Display", row(1.0)));
-    let display = NSPopUpButton::initWithFrame_pullsDown(
-        NSPopUpButton::alloc(mtm),
-        NSRect::new(
-            NSPoint::new(CONTROL_X, row(1.0)),
-            NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
-        ),
-        false,
-    );
-    for choice in displays {
-        display.addItemWithTitle(&NSString::from_str(&choice.label));
-    }
-    // The configured display can be one that is not attached, and a popup with
-    // nothing selected would silently save a different screen than the one shown.
-    let selected = displays
-        .iter()
-        .position(|choice| choice.selection == current.display)
-        .unwrap_or(0);
-    display.selectItemAtIndex(selected as isize);
-    view.addSubview(&display);
+    // Read-only, and that is the design rather than a shortcut: which display a
+    // session shares is picked in the viewer or the browser, by whoever is
+    // looking at it, and can change several times while this dialog is closed.
+    // A control here would be a second opinion about a decision this process
+    // does not own. What it is good for is answering "what is there to pick
+    // from", which is exactly what the list says.
+    view.addSubview(&label(mtm, "Displays", row(1)));
+    let list = NSTextField::labelWithString(&NSString::from_str(&displays.join("\n")), mtm);
+    list.setFrame(NSRect::new(
+        NSPoint::new(CONTROL_X, row(1)),
+        NSSize::new(WIDTH - CONTROL_X, list_height),
+    ));
+    list.setToolTip(Some(&NSString::from_str(
+        "Every display this Mac can share. Which one a session shares is chosen \
+         from the remotex viewer or the browser, not here.",
+    )));
+    view.addSubview(&list);
 
-    // Only meaningful for the virtual entry, and left enabled regardless: a
-    // field that greys out as the menu above it changes is more startling than
-    // one whose value simply does not apply yet.
-    view.addSubview(&label(mtm, "Virtual size", row(2.0)));
-    let virtual_size = field(
-        mtm,
-        &current.virtual_size,
-        row(2.0),
-        WIDTH - CONTROL_X,
-        false,
-    );
+    let virtual_display = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &NSString::from_str("Add a private 2x display"),
+            None,
+            None,
+            mtm,
+        )
+    };
+    virtual_display.setFrame(NSRect::new(
+        NSPoint::new(CONTROL_X, row(2)),
+        NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
+    ));
+    virtual_display.setState(if current.virtual_display {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    virtual_display.setToolTip(Some(&NSString::from_str(
+        "Give this Mac an extra display that nobody is sitting in front of. It \
+         joins the list above — the Mac's own screens stay shareable.",
+    )));
+    view.addSubview(&virtual_display);
+
+    // Only meaningful with the box above ticked, and left enabled regardless: a
+    // field that greys out as a checkbox is toggled is more startling than one
+    // whose value simply does not apply yet.
+    //
+    // "Initial" is in the label rather than only the tooltip, because the field
+    // otherwise reads as the display's current resolution — which it stops being
+    // the moment anyone changes that display in System Settings.
+    view.addSubview(&label(mtm, "Initial size", row(3)));
+    let virtual_size = field(mtm, &current.virtual_size, row(3), WIDTH - CONTROL_X, false);
     virtual_size.setToolTip(Some(&NSString::from_str(
-        "The size the virtual display comes up at, in points, WIDTHxHEIGHT — and \
-         the largest mode macOS can render on it at 2x. Change its resolution \
-         afterwards in System Settings > Displays.",
+        "The size the virtual display is created at the first time this Mac sees \
+         it, in points, WIDTHxHEIGHT — and the largest mode macOS can ever render \
+         on it at 2x.\n\nAfter that its resolution is the Mac's, like any other \
+         screen: change it in System Settings > Displays, where macOS also \
+         remembers it. Editing this will not move a display already arranged \
+         there.",
     )));
     view.addSubview(&virtual_size);
 
-    view.addSubview(&label(mtm, "Pre-shared key", row(3.0)));
+    view.addSubview(&label(mtm, "Pre-shared key", row(4)));
     let psk = field(
         mtm,
         &current.psk,
-        row(3.0),
+        row(4),
         WIDTH - CONTROL_X - BUTTON_WIDTH - 6.0,
         true,
     );
@@ -191,7 +209,7 @@ pub fn config(
     // Exactly the row, like every other control here: anything hanging outside
     // the accessory view's bounds is at the mercy of the alert's layout.
     regenerate.setFrame(NSRect::new(
-        NSPoint::new(WIDTH - BUTTON_WIDTH, row(3.0)),
+        NSPoint::new(WIDTH - BUTTON_WIDTH, row(4)),
         NSSize::new(BUTTON_WIDTH, ROW_HEIGHT),
     ));
     // A new key lands in the field rather than in the file: nothing is saved
@@ -211,14 +229,10 @@ pub fn config(
     if alert.runModal() != NSAlertFirstButtonReturn {
         return None;
     }
-    let chosen = usize::try_from(display.indexOfSelectedItem())
-        .ok()
-        .and_then(|position| displays.get(position))
-        .map_or(current.display, |choice| choice.selection);
     Some(Draft {
         listen: listen.stringValue().to_string().trim().to_owned(),
         psk: psk.stringValue().to_string().trim().to_owned(),
-        display: chosen,
+        virtual_display: virtual_display.state() == NSControlStateValueOn,
         virtual_size: virtual_size.stringValue().to_string().trim().to_owned(),
     })
 }

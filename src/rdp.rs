@@ -835,6 +835,11 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.
         ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
+        // An RDP session is one framebuffer spanning every monitor the server
+        // composed into it, and its protocol has no way to ask for one of them.
+        // So this engine never sends a display list, no client offers the
+        // picker, and anything arriving here is a client that invented one.
+        ClientMsg::SelectDisplay { .. } => Vec::new(),
     }
 }
 

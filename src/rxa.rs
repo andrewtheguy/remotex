@@ -39,7 +39,8 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use crate::config::TargetConfig;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, MouseButton, ServerMsg, Tile, clipboard_fits,
+    ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MouseButton, ServerMsg, Tile,
+    clipboard_fits,
 };
 
 /// How long a connect + handshake + `Hello` may take before we give up on this
@@ -166,6 +167,10 @@ async fn run_with(
     // silent agent reconnect so an otherwise-identical Fetch does not lose a
     // timestamp merely because the transport link changed underneath it.
     let mut clipboard_snapshot: Option<ClipboardSnapshot> = None;
+    // Likewise the display list. A reconnecting agent re-sends it beside its
+    // `Hello`, but a browser attaching in the gap between the two would
+    // otherwise find no menu at all.
+    let mut displays: Option<(u32, Vec<DisplayInfo>)> = None;
     loop {
         let size = (session.width, session.height);
         info!(
@@ -177,6 +182,7 @@ async fn run_with(
             &mut input_rx,
             &frame_tx,
             &mut announced,
+            &mut displays,
             &mut clipboard_snapshot,
             config.clipboard,
         )
@@ -305,6 +311,10 @@ async fn pump(
     input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: &mpsc::Sender<ServerMsg>,
     announced: &mut Option<Announced>,
+    // The agent's last display list, held across reconnects for the same reason
+    // `announced` is: a browser that attaches mid-session has missed it, and it
+    // is the whole of what the client's display menu knows.
+    displays: &mut Option<(u32, Vec<DisplayInfo>)>,
     clipboard_snapshot: &mut Option<ClipboardSnapshot>,
     clipboard: bool,
 ) -> anyhow::Result<()> {
@@ -415,6 +425,29 @@ async fn pump(
                             return Ok(());
                         }
                     }
+                    // Relayed as it arrives, and kept: a browser that attaches
+                    // later gets it from the cache below rather than waiting for
+                    // the agent's next change.
+                    AgentMsg::Displays { active, displays: reported } => {
+                        let reported: Vec<DisplayInfo> = reported
+                            .into_iter()
+                            .map(|display| DisplayInfo {
+                                id: display.id,
+                                main: display.is_main(),
+                                virtual_display: display.is_owned(),
+                                label: display.label,
+                                detail: display.detail,
+                            })
+                            .collect();
+                        *displays = Some((active, reported.clone()));
+                        if frame_tx
+                            .send(ServerMsg::Displays { active, displays: reported })
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
                     AgentMsg::Pong { .. } => {}
                     // Either a reply to a ClipboardRequest this pump sent, or
                     // an unprompted push from the agent's pasteboard watcher.
@@ -497,6 +530,18 @@ async fn pump(
                     if frame_tx.send(ServerMsg::RemoteOs { macos: true }).await.is_err() {
                         return Ok(());
                     }
+                    // And no display menu. Re-sent from here rather than asked
+                    // for, because `Refresh` reaches the agent as a repaint and
+                    // a repaint is all it should be: the list has not changed
+                    // just because a browser came back to look at it.
+                    if let Some((active, list)) = displays.clone()
+                        && frame_tx
+                            .send(ServerMsg::Displays { active, displays: list })
+                            .await
+                            .is_err()
+                    {
+                        return Ok(());
+                    }
                 }
                 if let Some(out) = to_agent(&msg, clipboard) {
                     writer.send(&out.encode()).await?;
@@ -564,6 +609,11 @@ impl Drop for AbortOnDrop {
 /// the mode is chosen on that machine, in System Settings, and this engine only
 /// ever reports the size back. A client that wants a different shape scales what
 /// it gets into its window.
+///
+/// `SelectDisplay` is passed through, and the contrast with `Viewport` is the
+/// point: *which* screen to look at is the only display decision a client gets
+/// to make, because it is the only one that is about the person looking rather
+/// than about the machine.
 fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
     Some(match msg {
         ClientMsg::MouseMove { x, y } => GatewayMsg::PointerMove {
@@ -593,6 +643,7 @@ fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
             caps: *caps,
         },
         ClientMsg::Refresh => GatewayMsg::Refresh,
+        ClientMsg::SelectDisplay { id } => GatewayMsg::SelectDisplay { id: *id },
         // The agent reads its pasteboard only when asked, so a fetch is a real
         // round trip rather than a cached value (unlike VNC, where the server
         // pushes and the engine caches).

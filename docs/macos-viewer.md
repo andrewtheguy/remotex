@@ -141,6 +141,16 @@ machine running it; the two exceptions above are the two protocols that hand tha
 decision to the client. A Mac's size arrives here as a `resize` and is never
 answered — see `docs/mac-agent-architecture.md`.
 
+The **Display** menu is not one. It lists the remote's screens, one checkable
+item each, and picking one sends a `selectDisplay` — which screen to look at,
+never what size it should be. Only `rxa` fills it: RDP and VNC each deliver a
+single framebuffer spanning every remote screen, so for those the menu carries
+one disabled item saying there is nothing to choose from. It stays in the bar
+either way, because a menu bar whose items come and go is harder to learn than
+one item that is sometimes greyed. The viewer holds no display state: the
+checkmark follows the `active` in the gateway's `displays` message, so a
+selection the remote refused leaves the menu agreeing with the canvas.
+
 Viewport reports are clamped into `u16` before they are sent. The gateway
 *rejects* an out-of-range value rather than clamping it, and only logs the
 rejection, so an unclamped report would silently stop resizing anything.

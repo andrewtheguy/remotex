@@ -4,10 +4,9 @@ import Observation
 /// The viewer's whole state, and the one place the gateway's control messages
 /// become it.
 ///
-/// `ViewerScreen` used to be *reported by the page* over the host bridge. It is
-/// now derived here, which is the substance of the port: `picker` and `connected`
-/// come from the gateway's session layer, and everything the Remote menu enables
-/// or disables follows from them plus `resize` and `remoteOs`.
+/// `ViewerScreen` is derived here rather than reported to the viewer: `picker` and
+/// `connected` come from the gateway's session layer, and everything the Remote
+/// menu enables or disables follows from them plus `resize` and `remoteOs`.
 @MainActor
 @Observable
 final class AppModel: GatewaySessionSink {
@@ -387,6 +386,12 @@ final class AppModel: GatewaySessionSink {
             session.remoteScale = 1
             session.canResize = false
             session.canClipboard = false
+            // The previous target's screens are not the next one's. Left in
+            // place they would fill the Display menu for a target that has none,
+            // and picking one would send a `selectDisplay` naming a display on
+            // another machine.
+            session.displays = []
+            session.activeDisplayID = nil
             remoteCursor = nil
             // Cleared with the rest of what belonged to that target: view only is an
             // answer about the session being left, not a setting the next pick
@@ -434,6 +439,10 @@ final class AppModel: GatewaySessionSink {
             // never hears about it.
             session.remoteScale = scale > 0 ? CGFloat(scale) : 1
             renderer?.resize(to: size)
+
+        case .displays(let active, let displays):
+            session.displays = displays
+            session.activeDisplayID = active
 
         case .remoteOs(let macos):
             // Which Mac a Command chord belongs to just changed, so nothing may
@@ -574,6 +583,19 @@ final class AppModel: GatewaySessionSink {
     /// framebuffer that has gone wrong.
     func refresh() {
         connection?.send(.refresh)
+    }
+
+    /// Share a different one of the remote's displays (the Display menu).
+    ///
+    /// Fire and forget, and deliberately not optimistic: the answer is the
+    /// remote's next `displays`, which is what moves the checkmark. Selecting
+    /// the display already active is dropped here rather than costing the remote
+    /// a capture restart and this viewer a full repaint.
+    func selectDisplay(_ id: UInt32) {
+        guard id != session.activeDisplayID else {
+            return
+        }
+        connection?.send(.selectDisplay(id: id))
     }
 
     /// "Resize to Window": the one report that gets past `manualOnly`.

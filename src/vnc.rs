@@ -1125,6 +1125,11 @@ fn translate_input(
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.
         ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
+        // RFB has one framebuffer, and on a multi-screen server it spans all of
+        // them: the ExtendedDesktopSize screen list describes how they are laid
+        // out inside it, not a set of things to choose between. So this engine
+        // never sends a display list and no client offers the picker.
+        ClientMsg::SelectDisplay { .. } => Vec::new(),
     }
 }
 
@@ -1697,9 +1702,9 @@ mod tests {
         Arc::new(std::sync::Mutex::new(DesktopState { size, screen, pending }))
     }
 
-    // A server that hangs up mid-session used to end the read loop with `Ok`,
-    // which meant `run` skipped its error branch and the browser landed on a
-    // bare picker — or on whatever error was already sitting there.
+    // A server that hangs up mid-session has to reach `run`'s error branch. Ending
+    // the read loop with `Ok` instead skips it, and the browser lands on a bare
+    // picker — or on whatever error was already sitting there.
     #[tokio::test]
     async fn a_server_that_hangs_up_is_reported_instead_of_ending_quietly() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

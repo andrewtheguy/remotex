@@ -37,7 +37,7 @@ use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
 use remotex::protocol::Tile;
 use remotex::server;
 use remotex::session::REATTACH_GRACE_PERIOD;
-use rxa_proto::msg::{AgentMsg, CursorImage, GatewayMsg, SCALE_ONE, format};
+use rxa_proto::msg::{AgentMsg, CursorImage, DisplayEntry, GatewayMsg, SCALE_ONE, format};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -54,6 +54,17 @@ const AGENT_SCALE: u16 = 2 * SCALE_ONE;
 /// The size a mode change on the Mac lands on, in captured pixels. Nothing on
 /// this wire asks for it — see [`a_mode_change_on_the_mac_reaches_the_browser`].
 const AGENT_MODE_CHANGE: (u16, u16) = (240, 180);
+
+/// The fake Mac's two displays: the screen somebody is sitting at, and the extra
+/// one the agent made for itself. Ids are arbitrary and deliberately not 0 and 1,
+/// so nothing can pass by treating them as indexes.
+const MAIN_DISPLAY: u32 = 0x0421;
+const VIRTUAL_DISPLAY: u32 = 0x0938;
+
+/// The virtual display's captured size, different from the main one's so a
+/// switch is visible as a resize rather than only as a checkmark moving.
+const VIRTUAL_W: u16 = 3200;
+const VIRTUAL_H: u16 = 2000;
 
 /// Cursor hotspot, chosen asymmetric so a transposition would show up.
 const HOTSPOT: (u16, u16) = (4, 7);
@@ -163,6 +174,11 @@ async fn serve_fake_agent(
         )
         .await?;
 
+    // Beside Hello, like the real agent: a client needs the menu before it has a
+    // picture.
+    let mut active = MAIN_DISPLAY;
+    writer.send(&displays_msg(active).encode()).await?;
+
     // The gateway must ask for the stream before any pixels flow.
     match GatewayMsg::decode(&reader.recv().await?)? {
         GatewayMsg::Attach => {}
@@ -200,6 +216,30 @@ async fn serve_fake_agent(
                 writer.send(&AgentMsg::Pong { nonce }.encode()).await?;
             }
             GatewayMsg::Refresh => paint(&mut writer).await?,
+            // The real agent restarts its capture stream on the new display and
+            // announces the size before any tile drawn at it. The ordering is
+            // the part worth reproducing here; the stream is not.
+            GatewayMsg::SelectDisplay { id } => {
+                let _ = input_tx.send(GatewayMsg::SelectDisplay { id });
+                active = id;
+                let (w, h) = if id == VIRTUAL_DISPLAY {
+                    (VIRTUAL_W, VIRTUAL_H)
+                } else {
+                    (AGENT_W, AGENT_H)
+                };
+                writer
+                    .send(
+                        &AgentMsg::DisplaySize {
+                            w,
+                            h,
+                            scale: AGENT_SCALE,
+                        }
+                        .encode(),
+                    )
+                    .await?;
+                writer.send(&displays_msg(active).encode()).await?;
+                paint(&mut writer).await?;
+            }
             // The real agent baselines its NSPasteboard change counter here and
             // pushes only when the counter later moves. This one pushes once,
             // immediately, standing in for a copy on the Mac — the gateway
@@ -249,6 +289,35 @@ async fn serve_fake_agent(
                 let _ = input_tx.send(input);
             }
         }
+    }
+}
+
+/// The fake Mac's display list, with `active` marked as the one being shared.
+fn displays_msg(active: u32) -> AgentMsg {
+    AgentMsg::Displays {
+        active,
+        displays: vec![
+            DisplayEntry {
+                id: MAIN_DISPLAY,
+                label: "Display 1".to_owned(),
+                // Points, as the real agent reports them: half the captured pixels
+                // on a 2x display.
+                detail: format!("{}×{} at 2x", AGENT_W / 2, AGENT_H / 2),
+                w: AGENT_W,
+                h: AGENT_H,
+                scale: AGENT_SCALE,
+                flags: DisplayEntry::MAIN,
+            },
+            DisplayEntry {
+                id: VIRTUAL_DISPLAY,
+                label: "Virtual display".to_owned(),
+                detail: format!("{}×{} at 2x", VIRTUAL_W / 2, VIRTUAL_H / 2),
+                w: VIRTUAL_W,
+                h: VIRTUAL_H,
+                scale: AGENT_SCALE,
+                flags: DisplayEntry::OWNED,
+            },
+        ],
     }
 }
 
@@ -346,6 +415,9 @@ async fn open_session(addr: SocketAddr) -> Ws {
 /// deliberately sends none — see the reconnect test.
 struct Paint {
     resize: Option<String>,
+    /// The display list seen on the way to these pixels, if one arrived. Like
+    /// `resize`, it is optional because it is only sent when something changed.
+    displays: Option<String>,
     tile: Vec<u8>,
     cursor: String,
 }
@@ -358,6 +430,7 @@ struct Paint {
 /// link must *not* surface.
 async fn expect_paint(ws: &mut Ws) -> Paint {
     let mut resize = None;
+    let mut displays = None;
     let mut tile = None;
     let mut cursor = None;
     let mut live = false;
@@ -379,6 +452,8 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
                         assert!(!live, "the engine ended and bounced back to the picker");
                     } else if text.contains(r#""type":"resize""#) {
                         resize = Some(text.to_string());
+                    } else if text.contains(r#""type":"displays""#) {
+                        displays = Some(text.to_string());
                     } else if text.contains(r#""type":"cursor""#) {
                         cursor = Some(text.to_string());
                     }
@@ -390,6 +465,7 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
             if let (Some(tile), Some(cursor)) = (&tile, &cursor) {
                 return Paint {
                     resize: resize.clone(),
+                    displays: displays.clone(),
                     tile: tile.clone(),
                     cursor: cursor.clone(),
                 };
@@ -494,6 +570,19 @@ async fn closing_the_browser_releases_the_agent_connection() {
         1,
         "browser loss must end the RXA session instead of reconnecting it"
     );
+}
+
+/// Everything the fake agent has received so far, without waiting for more.
+///
+/// Safe to read straight after a paint that the message in question preceded:
+/// the agent records into this channel before it writes anything back, so a
+/// frame that arrived proves the record was already queued.
+fn drain_input(rx: &mut mpsc::UnboundedReceiver<GatewayMsg>) -> Vec<GatewayMsg> {
+    let mut seen = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        seen.push(msg);
+    }
+    seen
 }
 
 /// Wait for the next input message the fake agent received.
@@ -799,6 +888,100 @@ async fn a_mode_change_on_the_mac_reaches_the_browser() {
         Some(format!(r#"{{"type":"resize","w":{w},"h":{h},"scale":2.0}}"#).as_str())
     );
     assert_paint_pixels(&repaint);
+}
+
+/// The one display list a client is expected to render, with `active` marked.
+fn expected_displays(active: u32) -> String {
+    format!(
+        r#"{{"type":"displays","active":{active},"displays":[\
+{{"id":{MAIN_DISPLAY},"label":"Display 1","detail":"{main_w}×{main_h} at 2x","main":true,"virtual":false}},\
+{{"id":{VIRTUAL_DISPLAY},"label":"Virtual display","detail":"{virtual_w}×{virtual_h} at 2x","main":false,"virtual":true}}]}}"#,
+        main_w = AGENT_W / 2,
+        main_h = AGENT_H / 2,
+        virtual_w = VIRTUAL_W / 2,
+        virtual_h = VIRTUAL_H / 2
+    )
+    .replace("\\\n", "")
+}
+
+// Which display to look at is the browser's to choose, and the only display
+// decision it gets: the round trip has to carry the selection to the Mac and
+// bring back the new size *before* any pixels drawn at it.
+#[tokio::test]
+async fn the_browser_can_pick_which_display_the_mac_shares() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
+    let addr = spawn_app(port, &psk_text).await;
+
+    let mut ws = open_session(addr).await;
+    let first = expect_paint(&mut ws).await;
+    assert_first_paint(&first);
+    assert_eq!(
+        first.displays.as_deref(),
+        Some(expected_displays(MAIN_DISPLAY).as_str()),
+        "the menu has to arrive with the desktop, not after the first change"
+    );
+
+    ws.send(Message::Text(
+        format!(r#"{{"type":"selectDisplay","id":{VIRTUAL_DISPLAY}}}"#).into(),
+    ))
+    .await
+    .expect("send selectDisplay");
+
+    let switched = expect_paint(&mut ws).await;
+    assert_eq!(
+        switched.resize.as_deref(),
+        Some(format!(r#"{{"type":"resize","w":{VIRTUAL_W},"h":{VIRTUAL_H},"scale":2.0}}"#).as_str()),
+        "a different display is a different size, and the canvas must be told first"
+    );
+    assert_eq!(
+        switched.displays.as_deref(),
+        Some(expected_displays(VIRTUAL_DISPLAY).as_str()),
+        "the checkmark follows what the agent says is active, not what was clicked"
+    );
+    assert_paint_pixels(&switched);
+
+    let received = drain_input(&mut input);
+    assert!(
+        received.iter().any(|msg| matches!(
+            msg,
+            GatewayMsg::SelectDisplay { id } if *id == VIRTUAL_DISPLAY
+        )),
+        "the selection must reach the Mac itself: {received:?}"
+    );
+}
+
+// A browser that attaches mid-session missed the list the agent sent beside its
+// Hello. It comes from the gateway's cache rather than by asking the agent,
+// because a refresh is a repaint and the displays have not changed.
+#[tokio::test]
+async fn a_refreshing_browser_gets_the_display_list_again() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
+    let addr = spawn_app(port, &psk_text).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    ws.send(Message::Text(r#"{"type":"refresh"}"#.into()))
+        .await
+        .expect("send refresh");
+
+    let repaint = expect_paint(&mut ws).await;
+    assert_eq!(
+        repaint.displays.as_deref(),
+        Some(expected_displays(MAIN_DISPLAY).as_str()),
+        "a reattaching browser has no display menu until it is told again"
+    );
+    assert_paint_pixels(&repaint);
+    assert!(
+        !drain_input(&mut input)
+            .iter()
+            .any(|msg| matches!(msg, GatewayMsg::SelectDisplay { .. })),
+        "re-announcing must not look like a selection to the agent"
+    );
 }
 
 // The whole reason for this subsystem: an established session that drops comes

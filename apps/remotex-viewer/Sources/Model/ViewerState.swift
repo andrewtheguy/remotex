@@ -34,8 +34,7 @@ struct DisplayMode: Equatable, Hashable, Sendable, Decodable {
 
 /// What the viewer knows about the session it is attached to.
 ///
-/// Every field here used to be computed in JavaScript and shipped over the host
-/// bridge. It is now derived from the gateway's own control messages, which is
+/// Every field here is derived from the gateway's own control messages, which is
 /// why the derivations are spelled out where they happen (`AppModel.handle`).
 struct ViewerSessionState: Equatable {
     var screen = ViewerScreen.server
@@ -62,6 +61,15 @@ struct ViewerSessionState: Equatable {
     /// on its own, and a Mac's resolution is set on that Mac.
     var canResize = false
     var canClipboard = false
+    /// The remote's displays and the one it is sharing, from the last
+    /// `displays`. Empty for every engine that cannot offer a choice, which is
+    /// what leaves the Display menu with nothing in it.
+    ///
+    /// Never written on a click. The checkmark follows `activeDisplayID`, which
+    /// only the remote sets, so a selection it refused leaves the menu agreeing
+    /// with what is on screen.
+    var displays: [ServerMessage.DisplayInfo] = []
+    var activeDisplayID: UInt32?
     /// The target a connect is waiting on, so the picker can show progress until
     /// the gateway answers with `connected` — or with an error.
     var pendingTarget: String?

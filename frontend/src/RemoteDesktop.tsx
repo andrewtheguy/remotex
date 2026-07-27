@@ -36,11 +36,14 @@ export default function RemoteDesktop({
     size,
     canResize,
     canClipboard,
+    displays,
+    activeDisplayId,
     remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
+    selectDisplay,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
@@ -93,6 +96,9 @@ export default function RemoteDesktop({
           remoteClipboard={remoteClipboard}
           onFetchClipboard={requestClipboard}
           onSendClipboard={sendClipboard}
+          displays={displays}
+          activeDisplayId={activeDisplayId}
+          onSelectDisplay={selectDisplay}
         />
       )}
 

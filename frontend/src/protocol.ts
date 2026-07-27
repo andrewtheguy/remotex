@@ -36,7 +36,17 @@ export type ClientMsg =
   // sync in useRemoteDesktop, which pushes the local OS clipboard on focus
   // where the browser permits reading it. Nothing is retained here.
   | { type: "clipboard"; text: string }
-  | { type: "clipboardRequest" };
+  | { type: "clipboardRequest" }
+  // Share a different one of the remote's displays, by the `id` of an entry
+  // from the last `displays` control message.
+  //
+  // The counterpart to "viewport" above, and the contrast is the point: a
+  // remote's *resolution* belongs to the machine running it, while *which of
+  // its screens to look at* is only a question for the person looking. Only rxa
+  // answers it — RDP and VNC each deliver one framebuffer spanning every remote
+  // screen — so for other protocols no display list arrives and no picker is
+  // shown.
+  | { type: "selectDisplay"; id: number };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
 // src/protocol.rs. The backend refuses anything over it in either direction;
@@ -58,6 +68,22 @@ export interface ClipboardSnapshot {
 export interface RemoteClipboard extends ClipboardSnapshot {
   // Ticks on every reply/push so an identical Fetch is still observable.
   seq: number;
+}
+
+// One of the remote's displays, as the picker lists it. The strings are built
+// by the remote end and shown verbatim: the Mac knows how its own displays are
+// named and numbered, and saying it once keeps this panel and the native
+// viewer's Display menu reading the same.
+export interface DisplayInfo {
+  // Opaque here — whatever goes back in a "selectDisplay".
+  id: number;
+  // Short enough for a button: "Display 2", or "Virtual display".
+  label: string;
+  // The line under it: "1600×1000 at 2x".
+  detail: string;
+  main: boolean;
+  // A display the remote made for this purpose rather than one of its screens.
+  virtual: boolean;
 }
 
 // Server -> browser text frames: everything but screen tiles. `resize`/`error`
@@ -98,6 +124,12 @@ export type ControlMsg =
   // Only the native viewer acts on it, to decide whether a local Command
   // shortcut stays Command or becomes remote Control.
   | { type: "remoteOs"; macos: boolean }
+  // The remote's displays and which one is being shared, pushed whenever either
+  // changes. The browser holds no display state of its own: the checkmark
+  // follows `active`, so a selection the remote refused leaves the panel
+  // showing what is really on screen. An engine that cannot offer a choice
+  // never sends this, and the FAB then has no Display section at all.
+  | { type: "displays"; active: number; displays: DisplayInfo[] }
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
   // an unprompted push when the remote's clipboard changed. Requested replies
   // populate the panel without silently copying; pushes retain automatic sync.

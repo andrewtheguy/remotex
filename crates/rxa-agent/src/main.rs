@@ -235,43 +235,37 @@ fn main() -> anyhow::Result<()> {
     let serve_state = Arc::clone(&state);
     let psk = config.psk_bytes();
 
-
     // A display of our own, if the config asks for one. Created here, on the
     // main thread and before any session exists, because a display that came and
     // went with each connection would rearrange the windows on it every time
     // (see `crate::virtualdisplay`). Held for the life of the process: dropping
     // it is what removes the display.
     //
-    // A failure falls back to the Mac's own screen rather than refusing to
-    // start. The private API this needs can disappear under a macOS upgrade, and
-    // "the agent no longer runs at all" is a far worse way to find that out than
-    // a session that shares the real screen and a line in the log.
-    // Both warnings name the display the fallback lands on, because that is what
-    // the next line of the log is about: `display = 0` in the config is a screen
-    // somebody may be sitting at, and "sharing the Mac's screen instead" does not
-    // say which screen when there is more than one.
-    let fallback = config.display;
+    // A failure costs the extra display and nothing else: the Mac's own screens
+    // are still there to share, and a client that wanted the private one will
+    // simply not find it in the list.
     let virtual_display = config
         .virtual_display
-        .then(|| match config.virtual_display_points() {
+        .then(|| match config.virtual_display_initial_points() {
             Ok(points) => virtualdisplay::VirtualDisplay::create(points)
-                .inspect_err(|e| {
-                    warn!("virtualdisplay: {e:#}; sharing the Mac's display {fallback} instead")
-                })
+                .inspect_err(|e| warn!("virtualdisplay: {e:#}; the Mac's screens are unaffected"))
                 .ok(),
             Err(e) => {
-                warn!("virtualdisplay: {e:#}; sharing the Mac's display {fallback} instead");
+                warn!("virtualdisplay: {e:#}; the Mac's screens are unaffected");
                 None
             }
         })
         .flatten();
-    let target = match &virtual_display {
-        Some(display) => capture::Target::Owned {
+    // Creating the display does not select it. It is an *additional* screen —
+    // that is the whole of what `CGVirtualDisplay` does — so it joins the list a
+    // client picks from rather than replacing what the Mac already has. Every
+    // session starts on the main display; the choice after that is the viewer's.
+    let owned = virtual_display
+        .as_ref()
+        .map(|display| capture::Target::Owned {
             id: display.id(),
             base_points: display.base_points(),
-        },
-        None => capture::Target::Index(config.display),
-    };
+        });
 
     std::thread::Builder::new()
         .name("rxa-net".to_owned())
@@ -285,7 +279,7 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            match runtime.block_on(serve(listener, psk, target, serve_tracker, serve_state)) {
+            match runtime.block_on(serve(listener, psk, owned, serve_tracker, serve_state)) {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("remotex-agent: {e:#}");
@@ -438,7 +432,7 @@ fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
 async fn serve(
     listener: std::net::TcpListener,
     psk: [u8; 32],
-    target: capture::Target,
+    owned: Option<capture::Target>,
     tracker: Arc<cursor::Tracker>,
     state: Arc<state::AgentState>,
 ) -> anyhow::Result<()> {
@@ -472,7 +466,7 @@ async fn serve(
         let tracker = Arc::clone(&tracker);
         let session_state = Arc::clone(&state);
         current = Some(tokio::spawn(async move {
-            match session::serve(stream, psk, target, tracker).await {
+            match session::serve(stream, psk, owned, tracker).await {
                 Ok(()) => info!("agent: gateway {peer} disconnected"),
                 // Includes a wrong PSK, which is a failed handshake — logged and
                 // dropped, never fatal to the agent.
