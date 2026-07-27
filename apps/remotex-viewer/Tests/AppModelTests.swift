@@ -106,6 +106,8 @@ struct AppModelTests {
         model.apply(.control(.connected(connected(protocolName: "rxa", resize: true, clipboard: true))))
         model.apply(.control(.resize(w: 1920, h: 1080, scale: 2)))
         model.apply(.control(.remoteOs(macos: true)))
+        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
+        #expect(!model.session.displays.isEmpty, "there is something to reset")
 
         model.apply(.control(.picker))
 

@@ -387,6 +387,12 @@ final class AppModel: GatewaySessionSink {
             session.remoteScale = 1
             session.canResize = false
             session.canClipboard = false
+            // The previous target's screens are not the next one's. Left in
+            // place they would fill the Display menu for a target that has none,
+            // and picking one would send a `selectDisplay` naming a display on
+            // another machine.
+            session.displays = []
+            session.activeDisplayID = nil
             remoteCursor = nil
             // Cleared with the rest of what belonged to that target: view only is an
             // answer about the session being left, not a setting the next pick
