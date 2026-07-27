@@ -205,6 +205,29 @@ struct RemoteSurfaceViewTests {
         #expect(clip.bounds.origin.y == (500 - clip.bounds.height) / 2)
     }
 
+    /// The black band above every desktop, and its last rows below the fold.
+    ///
+    /// AppKit asks the clip view where the document may sit while the clip is still
+    /// the whole frame — the title bar's inset has not been taken off yet — so the
+    /// centring answer is for a clip 52pt taller than the real one, and the origin it
+    /// keeps is half that. Nothing asked again once the clip was resized.
+    ///
+    /// Automatic insets on, because the inset *is* the trigger: with the room and the
+    /// frame the same size there is nothing to centre wrongly.
+    @Test
+    func aDesktopThatFillsTheWindowSitsFlushAgainstIt() throws {
+        let harness = try Harness(automaticContentInsets: true)
+        harness.resize(to: CGSize(width: 900, height: 700))
+        #expect(harness.scrollView.contentInsets.top > 0, "the title bar insets the room")
+
+        // What an engine that follows the window comes back with: exactly the room.
+        harness.apply(remote: try #require(harness.surface.measuredViewport()))
+
+        #expect(harness.scrollView.contentView.bounds.origin == .zero)
+        #expect(!harness.scrollView.visibleBars.horizontal)
+        #expect(!harness.scrollView.visibleBars.vertical)
+    }
+
     /// A desktop that fits shows none at all — the state every engine that follows
     /// the window settles in, and the one the reference client shows bare.
     @Test

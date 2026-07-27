@@ -102,6 +102,20 @@ final class RemoteScrollView: NSScrollView {
         )
         let origin = CGPoint(x: contentInsets.left, y: contentInsets.top)
         contentView.frame = CGRect(origin: origin, size: room)
+        // Say where the document sits, now that the clip is its final size.
+        //
+        // Not left to `constrainBoundsRect`: AppKit asks that during its own pass,
+        // when the clip is still the whole frame — title bar inset and scrollbars not
+        // yet taken off — so the centring answer it gets back is for a clip taller
+        // than the real one, and the origin it stores is half that difference. It
+        // survives into the resized clip because nothing asks again, which is a black
+        // band above every desktop and its last rows below the fold.
+        contentView.setBoundsOrigin(
+            CGPoint(
+                x: settle(document.width, in: room.width, at: contentView.bounds.origin.x),
+                y: settle(document.height, in: room.height, at: contentView.bounds.origin.y)
+            )
+        )
 
         horizontal.isHidden = !needsHorizontal
         vertical.isHidden = !needsVertical
@@ -120,6 +134,16 @@ final class RemoteScrollView: NSScrollView {
             height: room.height
         )
         refreshBars()
+    }
+
+    /// Where a document of `document` points sits along one axis in `room` points of
+    /// clip: centred when there is room to spare (a negative origin, which is how a
+    /// clip view expresses margin), and otherwise the current position kept inside
+    /// the document.
+    private func settle(_ document: CGFloat, in room: CGFloat, at current: CGFloat) -> CGFloat {
+        document <= room
+            ? (document - room) / 2
+            : min(max(0, current), document - room)
     }
 
     /// Push the clip's position into the bars: where the knob sits, and how much of
@@ -341,3 +365,5 @@ final class CenteringClipView: NSClipView {
         return rect
     }
 }
+
+
