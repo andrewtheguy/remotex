@@ -940,13 +940,12 @@ mod tests {
     #[test]
     fn the_fallback_cannot_see_a_low_resolution_mode_at_the_created_size() {
         let base = (1600, 1000);
-        // Genuinely 2x, and genuinely 1x, are the same point size to this.
-        assert_eq!(owned_scale((1600.0, 1000.0), base), crate::virtualdisplay::SCALE);
+        // Genuinely 2x and genuinely 1x are the same point size to this, so this
+        // one call is both of them: the 1x entry at the created size reads as 2x,
+        // which is the reason this is a fallback and not the measurement.
         assert_eq!(
             owned_scale((1600.0, 1000.0), base),
-            crate::virtualdisplay::SCALE,
-            "the 1x entry at the created size reads as 2x — the reason this is a \
-             fallback and not the measurement"
+            crate::virtualdisplay::SCALE
         );
     }
 
