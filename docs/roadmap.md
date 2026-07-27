@@ -16,10 +16,33 @@ one texel per device pixel *and* physically right with nothing resampled. Three
 routes, none of them free:
 
 - **`CGVirtualDisplay` (private CoreGraphics/SkyLight).** What BetterDisplay and
-  similar tools use: arbitrary pixel size, and a mode list whose HiDPI flag is
-  ours to set. There is no entitlement to request — and no compatibility promise
-  either. This is the kind of API that breaks on a major release, and it would be
+  similar tools use: arbitrary pixel size and a HiDPI backing store, with no
+  entitlement to request. Measured on the test VM (macOS 26.5.2, Apple
+  Virtualization guest) it does work there. Listing one mode at the *point* size
+  with `hiDPI = 1`, `maxPixels` at twice that size and `sizeInMillimeters` at
+  `maxPixels / 10` gives a 1600×1000 pt display backed by 3200×2000 real pixels —
+  sharp, on a guest whose own paravirtual framebuffer advertises no HiDPI mode at
+  any size. ScreenCaptureKit lists and captures it at full resolution, and the
+  display is process-scoped: released object, display gone.
+
+  What makes the route treacherous rather than merely unsupported is that three
+  readings misreport such a display. `CGDisplayBounds` shows the intended point
+  size even when the backing store is 1x, so a wrong configuration looks right
+  until something captures native pixels. `SCContentFilter.pointPixelScale`
+  reports 1.00 on a genuine 2x display, so capture size has to be set explicitly
+  instead of derived from the filter. `CGDisplayCopyDisplayMode` returns NULL and
+  `CGDisplayCopyAllDisplayModes` returns nothing, so geometry cannot be read the
+  usual way. Of five plausible descriptor configurations, only that one produced
+  2x: the HiDPI flag does not command it, and `sizeInMillimeters` separately
+  decides whether the mode is halved into points. A major release could keep
+  every symbol and still change which configuration works, and this would be
   load-bearing for the whole `rxa` display path.
+
+  Nothing about the route is VM-specific. It was measured in the guest because
+  that is the test machine; these are the same calls BetterDisplay drives on
+  physical hardware, so it is available on either. Which machines create one is
+  configuration.
+
 - **DriverKit virtual framebuffer.** The supported route. Needs an Apple-granted
   DriverKit entitlement and a system extension the user approves, which is a
   heavier install than the rest of the agent put together, and the entitlement is
