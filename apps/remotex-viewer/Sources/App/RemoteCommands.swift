@@ -56,10 +56,22 @@ struct RemoteCommands: Commands {
             }
             .disabled(!model.clipboard.isEnabled || model.clipboard.isFetching)
 
+            // The two directions a size mismatch can be settled, and exactly one of
+            // them is ever the one that can move: a remote that takes a size from
+            // here (RDP with `resize`) gets the first, and every other target gets
+            // the second, which resizes this window and sends nothing. The greyed
+            // one stays in the menu on purpose — which way a target allows is worth
+            // reading off the pair rather than inferring from an item that is not
+            // there.
             Button("Resize to Window") {
                 model.resizeToWindow()
             }
             .disabled(!model.canResizeNow)
+
+            Button("Resize to Display") {
+                model.resizeToDisplay()
+            }
+            .disabled(!model.canResizeToDisplay)
 
             // The escape hatch for a framebuffer that has gone wrong: re-announce
             // the size and repaint everything.

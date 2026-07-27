@@ -141,6 +141,20 @@ machine running it; the two exceptions above are the two protocols that hand tha
 decision to the client. A Mac's size arrives here as a `resize` and is never
 answered — see `docs/mac-agent-architecture.md`.
 
+A size mismatch has two directions, and **Remote → Resize to Window** is only one
+of them. Below it, **Resize to Display** takes the other: the window is sized so
+the desktop fits it exactly, and nothing goes on the wire. Exactly one of the pair
+is ever enabled, decided by the same fact — a target that takes a size from here
+gets the first, and every other target gets the second, which is the only side
+that can move for it. Both stay in the menu, one greyed, because which direction a
+target allows is worth reading off the pair rather than inferring from an item that
+is not there. The arithmetic is `RemoteGeometry.windowFrame`, taken as a delta on
+the room the scroll view gives the document so the title bar and insets need no
+accounting, anchored at the top-left, and held inside the screen's visible frame —
+a 1x 3840×2160 remote is 3840×2160 points, and the answer there is the largest
+window that fits with the scrollbars that implies. A full-screen window is left
+alone.
+
 The **Display** menu is not one. It lists the remote's screens, one checkable
 item each, and picking one sends a `selectDisplay` — which screen to look at,
 never what size it should be. Only `rxa` fills it: RDP and VNC each deliver a

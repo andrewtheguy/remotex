@@ -84,6 +84,66 @@ struct AppModelTests {
         #expect(!model.canResizeNow, "no surface has reported a size yet")
     }
 
+    /// The pair is mutually exclusive, and the menu shows both either way. A target
+    /// that takes a size from here resizes the remote; every other one resizes this
+    /// window, which is the only side that can move for it.
+    @Test
+    func exactlyOneOfTheTwoResizeDirectionsIsEverAvailable() {
+        let expectations: [(protocolName: String, resize: Bool, toWindow: Bool)] = [
+            ("rdp", true, true),
+            ("rxa", false, false),
+            ("vnc", true, false),
+            ("vnc", false, false),
+            ("rdp", false, false),
+        ]
+        for expectation in expectations {
+            let model = makeModel()
+            model.apply(.status(.connected))
+            model.apply(
+                .control(
+                    .connected(
+                        connected(
+                            protocolName: expectation.protocolName,
+                            resize: expectation.resize
+                        )
+                    )
+                )
+            )
+            model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
+            model.reportViewport(DisplayMode(w: 1600, h: 900))
+
+            let label: Comment = "\(expectation.protocolName) resize=\(expectation.resize)"
+            #expect(model.canResizeNow == expectation.toWindow, label)
+            #expect(model.canResizeToDisplay == !expectation.toWindow, label)
+        }
+    }
+
+    /// Both are disabled off the desktop and before the first `resize`: there is no
+    /// remote to fit the window to, and a window fitted to nothing is a window
+    /// resized for no reason.
+    @Test
+    func resizingToTheDisplayNeedsARemoteToFitTo() {
+        let model = makeModel()
+        var fitted = 0
+        model.fitWindowToRemote = { fitted += 1 }
+
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        #expect(!model.canResizeToDisplay, "no size has arrived yet")
+        model.resizeToDisplay()
+        #expect(fitted == 0)
+
+        model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
+        #expect(model.canResizeToDisplay)
+        model.resizeToDisplay()
+        #expect(fitted == 1)
+
+        model.apply(.control(.picker))
+        #expect(!model.canResizeToDisplay)
+        model.resizeToDisplay()
+        #expect(fitted == 1, "the picker has no desktop to fit")
+    }
+
     @Test
     func connectingMovesToTheDesktopAndNamesTheTarget() {
         let model = makeModel()

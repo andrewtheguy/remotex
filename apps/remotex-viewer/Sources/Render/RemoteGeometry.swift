@@ -27,6 +27,73 @@ enum RemoteGeometry {
         return CGSize(width: CGFloat(remote.w) / scale, height: CGFloat(remote.h) / scale)
     }
 
+    /// The window frame that gives the remote exactly its own point size: the
+    /// desktop fitting, no letterbox and no scrollbars.
+    ///
+    /// The complement of "Resize to Window", and the only half of the pair
+    /// available for a remote whose resolution is not this client's to set. What
+    /// cannot be moved on that side is met by moving this one.
+    ///
+    /// Taken as a delta on the *room* rather than as a content size, so the title
+    /// bar, the scroll view's insets, and anything else between the window's frame
+    /// and the document need no accounting here — `room` is what the desktop
+    /// actually gets, measured through all of it.
+    ///
+    /// Anchored at the top-left, as a window resized by its bottom-right corner is:
+    /// the origin is bottom-left, so a height change moves it. Then held inside
+    /// `limit` (the screen's visible frame) and no smaller than `minimum` (the
+    /// window's own floor), because a remote bigger than the screen is ordinary — a
+    /// 1x 3840×2160 desktop is 3840×2160 points — and the answer there is the
+    /// largest window that fits, with the scrollbars that implies.
+    static func windowFrame(
+        fitting document: CGSize,
+        room: CGSize,
+        window: CGRect,
+        limit: CGRect,
+        minimum: CGSize
+    ) -> CGRect {
+        // A window mid-layout, or one whose scroll view has no room yet, has no
+        // usable chrome to derive. Leaving it alone is the honest answer.
+        let measurements = [
+            document.width, document.height, room.width, room.height,
+            window.minX, window.maxY, window.width, window.height,
+            limit.minX, limit.minY, limit.maxX, limit.maxY,
+            minimum.width, minimum.height,
+        ]
+        guard document.width >= 1, document.height >= 1, room.width >= 1, room.height >= 1,
+              measurements.allSatisfy(\.isFinite)
+        else {
+            return window
+        }
+        let size = CGSize(
+            width: fit(
+                document.width + window.width - room.width,
+                least: minimum.width,
+                most: limit.width
+            ),
+            height: fit(
+                document.height + window.height - room.height,
+                least: minimum.height,
+                most: limit.height
+            )
+        )
+        return CGRect(
+            origin: CGPoint(
+                x: max(limit.minX, min(window.minX, limit.maxX - size.width)),
+                y: max(limit.minY, min(window.maxY - size.height, limit.maxY - size.height))
+            ),
+            size: size
+        )
+    }
+
+    /// `least` wins a fight with `most`: a window AppKit will not shrink past its
+    /// own minimum is the size that actually results, so returning anything smaller
+    /// would describe a window nobody gets.
+    private static func fit(_ value: CGFloat, least: CGFloat, most: CGFloat) -> CGFloat {
+        let ceiling = max(most, least)
+        return min(max(value.rounded(), least), ceiling)
+    }
+
     /// Map a point in the framebuffer view's own coordinates — flipped, so the
     /// origin is top-left as the DOM's is — to a remote pixel.
     ///

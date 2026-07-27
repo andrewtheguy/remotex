@@ -110,6 +110,13 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                 }
                 self?.apply(remoteSize: surface.remoteSize, guestScale: surface.guestScale)
             }
+            // The window side of "Resize to Display". Installed here rather than
+            // reached for from the model, which has no window: this coordinator is
+            // the only thing that holds one, and it holds it only while the surface
+            // is on screen.
+            model.fitWindowToRemote = { [weak self] in
+                self?.fitWindowToRemote()
+            }
             // Deliberately nothing for the window changing display. Every point
             // size here is the remote's own, so a host scale change has no geometry
             // to re-derive — the layer resamples the same desktop for whichever
@@ -175,6 +182,38 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             report(from: surface)
         }
 
+        /// Size the window so the desktop fits it exactly.
+        ///
+        /// The arithmetic is `RemoteGeometry.windowFrame`, and all of it is there:
+        /// what is left here is reading the four measurements off AppKit. The room
+        /// is `roomForDocument` — the same measure the viewport report uses, so a
+        /// window fitted this way reports the size it is showing.
+        ///
+        /// A full-screen window is left alone. Its size is the screen's and not
+        /// this app's to set, and AppKit would either refuse the frame or take the
+        /// window out of full screen to honour it; neither is what the menu item
+        /// offers.
+        func fitWindowToRemote() {
+            guard let surface, let scrollView, let remoteSize = surface.remoteSize,
+                  let window = scrollView.window,
+                  !window.styleMask.contains(.fullScreen),
+                  let screen = window.screen ?? NSScreen.main
+            else {
+                return
+            }
+            let frame = RemoteGeometry.windowFrame(
+                fitting: RemoteGeometry.pointSize(of: remoteSize, guestScale: surface.guestScale),
+                room: scrollView.roomForDocument,
+                window: window.frame,
+                limit: screen.visibleFrame,
+                minimum: window.minSize
+            )
+            guard frame != window.frame else {
+                return
+            }
+            window.setFrame(frame, display: true)
+        }
+
         /// The doubly-optional `appliedCursor` is the point: "no message yet" and
         /// "a message with a null image" are different states, and only the first
         /// means the remote is drawing its own pointer.
@@ -199,6 +238,7 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         func detach() {
             scrollView?.onTile = nil
             scrollView = nil
+            model.fitWindowToRemote = nil
             keyboard?.invalidate()
             keyboard = nil
             model.attach(renderer: nil)
