@@ -266,6 +266,39 @@ final class RemoteScrollbar: NSView {
         needsDisplay = true
     }
 
+    // MARK: - Accessibility
+    //
+    // AppKit's scrollers were in the accessibility tree for free; a plain view is
+    // not, so without this the desktop has no scroll bar as far as VoiceOver or an
+    // AX script is concerned. Role, orientation and position are what a scroll bar
+    // is asked for, and the position is settable so it can be driven the way an
+    // `NSScroller` can. None of it touches layout.
+
+    /// Hidden means *not needed* here, and a bar that is not needed must not be in
+    /// the tree: claiming to be an element unconditionally put two scroll bars on a
+    /// desktop that fit its window perfectly, both reading zero and neither able to
+    /// scroll anything.
+    override func isAccessibilityElement() -> Bool { !isHidden }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .scrollBar }
+
+    override func accessibilityOrientation() -> NSAccessibilityOrientation {
+        orientation == .horizontal ? .horizontal : .vertical
+    }
+
+    /// Where the visible part starts in the travel, 0...1 — the same thing an
+    /// `NSScroller` reports, so anything that knows how to read one reads this.
+    override func accessibilityValue() -> Any? { value }
+
+    override func setAccessibilityValue(_ accessibilityValue: Any?) {
+        guard let fraction = (accessibilityValue as? NSNumber)?.doubleValue else {
+            return
+        }
+        value = CGFloat(min(1, max(0, fraction)))
+        needsDisplay = true
+        onScroll?(value)
+    }
+
     private func report(at along: CGFloat) {
         guard let grab else {
             return
