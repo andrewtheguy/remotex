@@ -218,6 +218,7 @@ final class RemoteScrollbar: NSView {
         guard document > 0 else {
             proportion = 1
             value = 0
+            needsDisplay = true
             return
         }
         proportion = min(1, visible / document)
