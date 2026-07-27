@@ -141,6 +141,45 @@ machine running it; the two exceptions above are the two protocols that hand tha
 decision to the client. A Mac's size arrives here as a `resize` and is never
 answered — see `docs/mac-agent-architecture.md`.
 
+A size mismatch has two directions, and **Remote → Resize to Window** is only one
+of them. Below it, **Resize to Display** takes the other: the window is sized so
+the desktop fits it exactly, and nothing goes on the wire. Which of the two is the
+one that can move is decided by a single fact — a target that takes a size from
+here gets the first, and every other target gets the second — but neither is
+enabled before there is something to act on. **Resize to Display** waits for the
+desktop to have a remote size to fit the window to, and **Resize to Window** for a
+measured viewport to report; until then both are greyed, and after that exactly one
+is. Both stay in the menu either way, one greyed, because which direction a target
+allows is worth reading off the pair rather than inferring from an item that is not
+there. The arithmetic is `RemoteGeometry.windowFrame`, taken as a delta on
+the room the scroll view gives the document so the title bar and insets need no
+accounting, anchored at the top-left, and held inside the screen's visible frame —
+a 1x 3840×2160 remote is 3840×2160 points, and the answer there is the largest
+window that fits with the scrollbars that implies. A full-screen window is left
+alone.
+
+## The window's chrome, and the strip above the desktop
+
+While a desktop is showing, the toolbar gives way to it. In a window that is worth
+8pt; in full screen it is the whole strip, because macOS keeps the title bar pinned
+for as long as a toolbar is shown and auto-hides it as soon as none is — so a
+full-screen desktop reaches the top of the screen, and the chrome returns on a trip
+to the top edge. View Only and Clipboard are on the **Remote** menu as well as the
+toolbar, which is what makes the toolbar's copies expendable.
+
+The remote surface sits *inside* the safe area. Spanning the window instead put
+40pt of black scroll-view background behind the title bar: it reads as part of the
+picture and is not one, because a title bar drags the window and hands the content
+nothing — clicks aimed at a guest's own menu bar landed in it and did nothing,
+while a *drag* there moved the window. The browser has no chrome over its canvas,
+which is why it never showed this.
+
+In a window the title bar's own 32pt cannot be given back. Reclaiming it means
+dropping `.titled`, and a window without it **cannot become the key window**
+(measured: `canBecomeKey` is false even with `.resizable`), which would leave the
+viewer unable to take a keystroke. Full screen is the answer for a remote whose top
+edge matters; a smaller remote resolution, centred with margin, is the other.
+
 The **Display** menu is not one. It lists the remote's screens, one checkable
 item each, and picking one sends a `selectDisplay` — which screen to look at,
 never what size it should be. Only `rxa` fills it: RDP and VNC each deliver a

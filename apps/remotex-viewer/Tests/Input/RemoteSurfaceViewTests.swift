@@ -158,6 +158,33 @@ struct RemoteSurfaceViewTests {
         #expect(harness.model.viewportSize == expected)
     }
 
+    /// The toolbar is the desktop's for as long as one is showing.
+    ///
+    /// In a window that is 8pt; in full screen it is the whole strip, because macOS
+    /// keeps the title bar pinned there while a toolbar is shown and auto-hides it
+    /// when none is. Re-applied on every SwiftUI update, so a rebuilt toolbar does
+    /// not come back up over the desktop — and put back on `detach`, so a login
+    /// screen does not inherit a bare title bar from the session before it.
+    @Test
+    func theToolbarGivesWayToTheDesktopAndComesBack() throws {
+        let harness = try Harness()
+        harness.window.toolbar = NSToolbar()
+        #expect(harness.window.toolbar?.isVisible == true)
+
+        harness.coordinator.apply(hidesToolbar: true)
+        #expect(harness.window.toolbar?.isVisible == false)
+
+        harness.coordinator.apply(hidesToolbar: true)
+        #expect(harness.window.toolbar?.isVisible == false, "and again is still hidden")
+
+        harness.coordinator.apply(hidesToolbar: false)
+        #expect(harness.window.toolbar?.isVisible == true)
+
+        harness.coordinator.apply(hidesToolbar: true)
+        harness.coordinator.detach()
+        #expect(harness.window.toolbar?.isVisible == true)
+    }
+
     /// A window-only resize changes no observed state, so SwiftUI never runs
     /// `updateNSView`; the room has to be re-measured and re-reported anyway, and a
     /// remote smaller than the window has to stay in the middle of the space it grew

@@ -38,7 +38,19 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
         // arrival, and both rules are re-applied over it.
         // `RemoteCommands` says the rest of why; this is the half of it that AppKit's
         // own items can only be held to here.
-        for name in [NSMenu.didAddItemNotification, NSMenu.didChangeItemNotification] {
+        //
+        // A *removal* is one of the three, and the one that matters most for the Edit
+        // menu being there at all. A rebuild that drops our item and adds nothing
+        // after it posts only this notification: without it the menu came back on the
+        // next unrelated change to the bar — a clipboard fetch starting, a display
+        // list arriving — which is a menu that appears while you are looking at it,
+        // and a bar whose entries move under the pointer. It goes back the moment it
+        // goes.
+        for name in [
+            NSMenu.didAddItemNotification,
+            NSMenu.didChangeItemNotification,
+            NSMenu.didRemoveItemNotification,
+        ] {
             NotificationCenter.default.addObserver(
                 forName: name,
                 object: nil,

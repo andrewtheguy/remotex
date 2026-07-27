@@ -117,6 +117,18 @@ final class AppModel: GatewaySessionSink {
     /// every strip.
     @ObservationIgnored
     private weak var renderer: FramebufferRenderer?
+    /// The AppKit half of "Resize to Display", installed by the surface's
+    /// coordinator for as long as it is on screen. Sizing a window needs the window,
+    /// the scroll view and the room it gives the document, none of which this model
+    /// has any business holding.
+    ///
+    /// Outside Observation deliberately: it is installed from inside SwiftUI's own
+    /// update pass, where changing observed state is undefined, and it says nothing
+    /// the menu's enabled state is derived from — the surface exists for the picker
+    /// as well as the desktop, so on the screen where the item is enabled this is
+    /// always set.
+    @ObservationIgnored
+    var fitWindowToRemote: (() -> Void)?
 
     /// `clipboard` and `urlSession` are parameters so tests can hand in one bound
     /// to a throwaway pasteboard instead of the user's own, and a stubbed
@@ -181,6 +193,22 @@ final class AppModel: GatewaySessionSink {
     /// window to report.
     var canResizeNow: Bool {
         session.canResize && viewportSize != nil
+    }
+
+    /// "Resize to Display" is the other direction: a remote whose size is not this
+    /// client's to set is met by sizing the *window* to it instead.
+    ///
+    /// Mutually exclusive with the item above, and by the same fact rather than by
+    /// arrangement — `session.canResize` is exactly "the remote takes a size from
+    /// here", so at most one of the two can be the one that moves. Both stay in the
+    /// menu regardless, one of them greyed, because which direction a target allows
+    /// is worth reading off the menu rather than discovering by its absence.
+    ///
+    /// A VNC target is the case to know about: it takes the window's size
+    /// continuously rather than on request, so `canResize` is false and this is the
+    /// enabled half — where it finds the desktop already fitting and does nothing.
+    var canResizeToDisplay: Bool {
+        session.screen == .desktop && session.remoteSize != nil && !session.canResize
     }
 
     /// The interstitial covers the connection lifecycle and the claim conflicts,
@@ -604,6 +632,18 @@ final class AppModel: GatewaySessionSink {
             return
         }
         sendViewport(manual: true)
+    }
+
+    /// "Resize to Display": the window takes the remote's size, because the remote
+    /// will not take the window's.
+    ///
+    /// Nothing goes on the wire — this is entirely local, which is why it is
+    /// available for the targets the item above is not.
+    func resizeToDisplay() {
+        guard canResizeToDisplay else {
+            return
+        }
+        fitWindowToRemote?()
     }
 
     func sendPointer(x: Int32, y: Int32) {
