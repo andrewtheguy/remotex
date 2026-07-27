@@ -47,6 +47,12 @@ struct RemoteCommands: Commands {
 
             Divider()
 
+            // Also a toolbar button, and this is the copy that survives: the toolbar
+            // gives way to the desktop while one is showing, so on the screen where
+            // view only means anything the button is not on screen.
+            Toggle("View Only", isOn: $model.isViewOnly)
+                .disabled(model.session.screen != .desktop)
+
             Button(
                 model.clipboard.isFetching
                     ? "Fetching Clipboard…"

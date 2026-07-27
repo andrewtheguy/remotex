@@ -5,6 +5,13 @@ import SwiftUI
 ///
 /// The scroll view is what handles a remote larger than the window: the desktop
 /// is shown at its own size and scrolls, rather than being scaled down to fit.
+///
+/// It sits *inside* the safe area, deliberately. Spanning the window instead put
+/// 40pt of black scroll-view background behind the title bar, which reads as part
+/// of the picture and is not: a title bar drags the window and hands the content
+/// nothing, so clicks aimed at a guest's menu bar landed in it. What cannot be
+/// given back in a window can be in full screen, which is what `hidesToolbar`
+/// below is for.
 struct RemoteSurfaceHost: NSViewRepresentable {
     let model: AppModel
     /// Passed in rather than read off the model inside `updateNSView`, so the
@@ -18,6 +25,14 @@ struct RemoteSurfaceHost: NSViewRepresentable {
     /// Passed in for the same reason as the rest: it decides what the pointer over
     /// the desktop looks like, and `updateNSView` has to run when it changes.
     let isViewOnly: Bool
+    /// Whether the window's toolbar gives way to the desktop.
+    ///
+    /// Its 8pt is the smaller half of what this buys. The larger half is full
+    /// screen: macOS keeps the title bar pinned there for as long as a toolbar is
+    /// shown, and auto-hides it as soon as none is — so with this on, a full-screen
+    /// desktop reaches the top of the screen and the chrome comes back on a trip to
+    /// the top edge.
+    let hidesToolbar: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(model: model)
@@ -55,6 +70,7 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         context.coordinator.apply(remoteSize: remoteSize, guestScale: guestScale)
         context.coordinator.apply(cursor: cursor)
         context.coordinator.apply(isViewOnly: isViewOnly)
+        context.coordinator.apply(hidesToolbar: hidesToolbar)
     }
 
     static func dismantleNSView(_ scrollView: RemoteScrollView, coordinator: Coordinator) {
@@ -235,7 +251,27 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             surface?.isViewOnly = isViewOnly
         }
 
+        /// Show or hide the window's toolbar.
+        ///
+        /// Re-applied on every SwiftUI update rather than set once, because the
+        /// toolbar is SwiftUI's and it rebuilds one whenever the commands or the
+        /// scene change — a visibility this app set on the previous one is not
+        /// carried over. Setting it to what it already is costs nothing.
+        ///
+        /// The controls it holds are not lost with it: View Only and Clipboard are
+        /// both on the Remote menu, which is why they can be taken off screen
+        /// without taking them away.
+        func apply(hidesToolbar: Bool) {
+            guard let toolbar = scrollView?.window?.toolbar else {
+                return
+            }
+            toolbar.isVisible = !hidesToolbar
+        }
+
         func detach() {
+            // Put the toolbar back with the surface that took it away: a login screen
+            // under a bare title bar would be this coordinator's doing outliving it.
+            apply(hidesToolbar: false)
             scrollView?.onTile = nil
             scrollView = nil
             model.fitWindowToRemote = nil
