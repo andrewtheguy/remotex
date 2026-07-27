@@ -24,7 +24,14 @@ struct RemoteSurfaceHost: NSViewRepresentable {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = true
+        // Always up, rather than autohiding. An autohiding overlay scroller is drawn
+        // only once a scroll reaches the scroll view, and none ever does here —
+        // `RemoteSurfaceView.scrollWheel` sends every wheel event to the remote,
+        // which is the point of it. So a desktop wider than the window (an `rxa`
+        // target whenever the Mac's display is not the window's shape, an RDP one
+        // before a resize) had its overflow drawn nowhere and reachable by nothing.
+        // A visible scroller can at least be dragged.
+        scrollView.autohidesScrollers = false
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .black
         // Zoom is out of scope: the desktop is shown at its own point size — scaled
