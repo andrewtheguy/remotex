@@ -7,7 +7,12 @@ import {
   useState,
 } from "react";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
-import type { ClipboardSnapshot, RemoteClipboard } from "./protocol.ts";
+import DisplayPanel from "./DisplayPanel.tsx";
+import type {
+  ClipboardSnapshot,
+  DisplayInfo,
+  RemoteClipboard,
+} from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 
 // Phase 9: the floating chrome — a draggable ☰ button that toggles a toolbar
@@ -95,7 +100,7 @@ function readViewport(): Viewport {
 // the same canvas inset, so a second one open would sit on the first. Two
 // booleans made that a rule every call site had to remember — open this one,
 // clear the other — and this makes it impossible to express.
-type Panel = "clipboard" | "keyboard";
+type Panel = "clipboard" | "keyboard" | "display";
 
 function usePanel() {
   const [panel, setPanel] = useState<Panel | null>(null);
@@ -117,6 +122,9 @@ function DockedPanel({
   sendKeyCombo,
   remoteClipboard,
   onSendClipboard,
+  displays,
+  activeDisplayId,
+  onSelectDisplay,
 }: {
   panel: Panel | null;
   onClose: () => void;
@@ -124,6 +132,9 @@ function DockedPanel({
   sendKeyCombo: (codes: string[]) => void;
   remoteClipboard: RemoteClipboard | null;
   onSendClipboard: (text: string) => void;
+  displays: DisplayInfo[];
+  activeDisplayId: number | null;
+  onSelectDisplay: (id: number) => void;
 }) {
   switch (panel) {
     case "keyboard":
@@ -143,9 +154,62 @@ function DockedPanel({
           onDockedHeightChange={onDockedHeightChange}
         />
       );
+    case "display":
+      return (
+        <DisplayPanel
+          displays={displays}
+          activeId={activeDisplayId}
+          onSelect={onSelectDisplay}
+          onClose={onClose}
+          onDockedHeightChange={onDockedHeightChange}
+        />
+      );
     default:
       return null;
   }
+}
+
+// The drawer's Display row, naming the screen currently being shared.
+//
+// Absent rather than disabled when there is no choice to make, which is the
+// opposite of the Clipboard row beside it — and the difference is real. A
+// target without the clipboard bridge has a feature that was switched off, and
+// a greyed button saying so is the answer. A target with one screen has no
+// display feature at all, and a permanently greyed "Display" would be an
+// explanation of nothing.
+function DisplaySection({
+  displays,
+  activeDisplayId,
+  open,
+  onToggle,
+}: {
+  displays: DisplayInfo[];
+  activeDisplayId: number | null;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  if (displays.length <= 1) {
+    return null;
+  }
+  // Undefined for the moment between a switch and the remote's answer, and for
+  // a screen unplugged out from under the session.
+  const active = displays.find((display) => display.id === activeDisplayId);
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Display</span>
+      {/* Unlike Clipboard, this opens straight away: the list is pushed, so
+          there is nothing to fetch and nothing to wait for. */}
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={onToggle}
+        aria-pressed={open}
+        title="Choose which of the remote's displays to view"
+      >
+        {open ? "Hide displays" : (active?.label ?? "Display")}
+      </button>
+    </div>
+  );
 }
 
 export default function FloatingMenu({
@@ -158,6 +222,9 @@ export default function FloatingMenu({
   remoteClipboard,
   onFetchClipboard,
   onSendClipboard,
+  displays,
+  activeDisplayId,
+  onSelectDisplay,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
@@ -184,6 +251,12 @@ export default function FloatingMenu({
   remoteClipboard: RemoteClipboard | null;
   onFetchClipboard: () => Promise<ClipboardSnapshot | null>;
   onSendClipboard: (text: string) => void;
+  // The remote's displays and the one it is sharing. Empty for every engine
+  // that cannot offer a choice, which is what hides the section — a list of one
+  // hides it too, since there would be nothing to switch to. See DisplayPanel.
+  displays: DisplayInfo[];
+  activeDisplayId: number | null;
+  onSelectDisplay: (id: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -450,6 +523,16 @@ export default function FloatingMenu({
 
       {open && (
         <div className="toolbar" style={toolbarStyle}>
+          <DisplaySection
+            displays={displays}
+            activeDisplayId={activeDisplayId}
+            open={panel === "display"}
+            onToggle={() => {
+              setOpen(false);
+              togglePanel("display");
+            }}
+          />
+
           <div className="toolbar-section">
             <span className="toolbar-label">Clipboard</span>
             {/* Enabled per target (`clipboard = true`), which every protocol
@@ -588,6 +671,9 @@ export default function FloatingMenu({
         sendKeyCombo={sendKeyCombo}
         remoteClipboard={remoteClipboard}
         onSendClipboard={onSendClipboard}
+        displays={displays}
+        activeDisplayId={activeDisplayId}
+        onSelectDisplay={onSelectDisplay}
       />
     </>
   );

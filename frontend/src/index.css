@@ -905,7 +905,7 @@ body {
 }
 
 /* ── Docked panels ───────────────────────────────────────────────────────── */
-/* Shared chrome for the clipboard and resolution panels: full-width along the
+/* Shared chrome for the clipboard and display panels: full-width along the
    bottom edge on mobile, a floating card on desktop — the same docking model as
    the soft keyboard. Only one panel is ever open, so they share the canvas
    inset channel. */
@@ -1106,4 +1106,58 @@ body {
 .cb-notice {
   margin-left: auto;
   color: #7ee787;
+}
+
+/* ── Display panel ───────────────────────────────────────────────────────── */
+
+.dp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.dp-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  text-align: left;
+  color: #e6edf3;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.dp-item:hover {
+  background: #21262d;
+}
+
+.dp-item-active {
+  border-color: #58a6ff;
+}
+
+/* Reserved whether or not this row is the active one, so the labels line up
+   instead of shifting sideways as the checkmark moves. */
+.dp-check {
+  flex: 0 0 1rem;
+  color: #58a6ff;
+}
+
+.dp-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.dp-label {
+  font-size: 0.9rem;
+}
+
+.dp-detail {
+  font-size: 0.75rem;
+  color: #8b949e;
 }

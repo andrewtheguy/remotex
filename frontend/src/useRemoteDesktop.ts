@@ -3,6 +3,7 @@ import {
   type ClientMsg,
   type ClipboardSnapshot,
   type ControlMsg,
+  type DisplayInfo,
   decodeTileFrame,
   MAX_CLIPBOARD_BYTES,
   type MouseButton,
@@ -417,6 +418,16 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
+  // The remote's displays and which one it is sharing, as the remote last
+  // reported them. Empty for every engine that cannot offer a choice, which is
+  // what hides the picker rather than a separate capability flag: a list of one
+  // is nothing to choose between either.
+  //
+  // Never written optimistically. A click sends a "selectDisplay" and the
+  // checkmark moves only when the remote says it moved, so a refused selection
+  // leaves the panel agreeing with what is on screen.
+  const [displays, setDisplays] = useState<DisplayInfo[]>([]);
+  const [activeDisplayId, setActiveDisplayId] = useState<number | null>(null);
   // The last remote clipboard snapshot, whether fetched or pushed, and a
   // counter that ticks on every arrival. Fetching the same text twice must
   // still register as an answer, and a null-vs-string flag cannot express that.
@@ -823,6 +834,10 @@ export function useRemoteDesktop(
           }
           break;
         }
+        case "displays":
+          setDisplays(msg.displays);
+          setActiveDisplayId(msg.active);
+          break;
         case "remoteOs":
           // Ignored here. Whether the remote is a Mac only decides a keyboard
           // convention (does a local Command shortcut stay Command or become
@@ -839,6 +854,8 @@ export function useRemoteDesktop(
           manualResizeRef.current = false;
           setCanResize(false);
           setCanClipboard(false);
+          setDisplays([]);
+          setActiveDisplayId(null);
           setRemoteClipboard(null);
           lastFromRemoteRef.current = null;
           lastToRemoteRef.current = null;
@@ -927,6 +944,14 @@ export function useRemoteDesktop(
   // socket is down. The engine answers with a `resize` control message.
   const resizeToWindow = useCallback(() => {
     resizeToWindowRef.current?.();
+  }, []);
+
+  // Share a different one of the remote's displays (the Display panel). Fire
+  // and forget, and deliberately not optimistic: the answer is the remote's
+  // next `displays`, which is what moves the checkmark. A no-op while the
+  // socket is down.
+  const selectDisplay = useCallback((id: number) => {
+    sendRef.current({ type: "selectDisplay", id });
   }, []);
 
   // Inject a key chord from the floating toolbar — keys the browser swallows
@@ -1231,11 +1256,14 @@ export function useRemoteDesktop(
     size,
     canResize,
     canClipboard,
+    displays,
+    activeDisplayId,
     remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
+    selectDisplay,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
