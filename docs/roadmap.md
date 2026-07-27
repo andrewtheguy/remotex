@@ -5,37 +5,15 @@ Active defects and their required regression guards are tracked in
 
 ## Planned
 
-### A scale of its own for a remote that does not match the host display
-
-Both clients map the remote 1:1 to *device* pixels: the desktop's CSS or point
-size is its pixel count divided by the host's scale factor. So a non-Retina guest
-on a Retina host is drawn at half its physical size — everything visible, all of
-it small — and the same desktop on a 1× display is twice as large again, which
-past the window's size can only be scrolled to. It is the same in the browser
-(`applyCanvasCss` in `frontend/src/useRemoteDesktop.ts`) and in the viewer
-(`RemoteGeometry.pointSize`), and moving a window between displays of different
-scale switches between the two.
-
-What is missing is a scale the user chooses — fit-to-window, or 1:1 in *points*
-rather than pixels — instead of the host's backing scale being the only rule.
-Deliberately not a viewport report: for `rxa` the remote cannot follow the window
-at all (see "Viewport-following resize" below), and for the others resizing the
-remote is a different thing from presenting it at a readable size.
-
-The mechanical half of this is done — the viewer re-derives its geometry when the
-window changes display, rather than keeping the size it had — so what is left is
-the presentation policy, and it wants deciding for both clients at once.
-
-For `rxa` specifically there is a way to make the problem not exist rather than
-be managed — see the next entry.
-
 ### A display of our own for `rxa`
 
-A display whose pixel size *and* HiDPI flag we choose is the one lever missing
-today. Ask for a display of the viewport's device-pixel size marked as scale 2,
-and its logical size is the window's point size: the existing 1:1 device-pixel
-blit is then sharp *and* physically the right size on a Retina host, with no
-presentation-scale policy in either client. Three routes, none of them free:
+Both clients now present a remote at its own size, scaling by the ratio between
+the two densities, so a Retina host no longer draws a 1x guest at half size — it
+draws it magnified, which is soft. What a display of our own would add is the
+pixels to be sharp with: ask for a display of the viewport's device-pixel size
+marked as scale 2, and its logical size is the window's point size, so the blit is
+one texel per device pixel *and* physically right with nothing resampled. Three
+routes, none of them free:
 
 - **`CGVirtualDisplay` (private CoreGraphics/SkyLight).** What BetterDisplay and
   similar tools use: arbitrary pixel size, and a mode list whose HiDPI flag is
@@ -60,8 +38,8 @@ screen sharing into a **separate desktop**. Nobody's windows get rearranged by a
 connection any more, which is the upside — and it stops being "what is on that
 Mac's screen", which is the point of `rxa` today, and leaves a desktop nobody is
 looking at once the viewer goes away. It also only helps `rxa`: a Linux or Windows
-box cannot be handed a display from here, so VNC and RDP still need the
-presentation-scale decision above.
+box cannot be handed a display from here, so for those the scaled presentation is
+the whole answer.
 
 ## Deferred pending measurements
 
@@ -163,6 +141,10 @@ take an arbitrary size at all — it switches between the modes the host
 advertises, so following the viewport would mean a mode switch on every window
 drag, each landing on a neighbouring size nobody asked for, and each risking the
 display-stack wedge that only a VM reboot clears.
+
+A viewport that does not match the Mac's display is presented at the remote's own
+size and scaled to fit the window, which is what makes following it unnecessary
+rather than merely unwise.
 
 What is *not* settled here is a display of our own. An isolated, session-sized
 desktop needs one, and the routes to it are real enough to be written down — see

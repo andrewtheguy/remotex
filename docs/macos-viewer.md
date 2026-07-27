@@ -85,10 +85,18 @@ cheap to do because the gateway repaints in full whenever a client attaches.
 ## Rendering
 
 One `MTLTexture` at exactly the remote's size, with the drawable pinned to the
-same size, so the blit is one texel per device pixel with no scaling. Tiles are
-written in with `replaceRegion`; there is no delta encoding, so each tile
-overwrites its rectangle outright. A remote larger than the window scrolls; it is
-never scaled to fit. Zoom is out of scope.
+same size, so nothing is scaled in the renderer. Tiles are written in with
+`replaceRegion`; there is no delta encoding, so each tile overwrites its
+rectangle outright. A remote larger than the window scrolls; it is never scaled to
+fit, and zoom is out of scope.
+
+The framebuffer *view* is laid out at the remote's own point size — its pixels
+over the density `resize` reports — so the layer resamples the drawable for
+whichever display the window is on. Equal densities land on one texel per device
+pixel; a 1x remote on a Retina Mac is magnified rather than drawn at half its
+physical size, and a Retina remote on a 1x display is reduced rather than drawn at
+twice it. Nothing is re-derived when the window changes display, only
+`layer.contentsScale`.
 
 Two ordering facts the port depends on, both covered by tests because neither can
 be inferred by reading:
