@@ -171,16 +171,13 @@ pub async fn serve(
     let (read_half, write_half) = stream.into_split();
     let (reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
 
-    // Every session starts on the main display. A selection is session state,
-    // not agent state: the person at the far end picks a screen for as long as
-    // they are looking at it, and the next connection starts from the same
-    // place rather than from wherever the last one wandered off to.
-    //
-    // Through `resolve` rather than straight to `Target::Real`, because macOS
-    // can make the display we created the main one — it did on the test VM, with
-    // the Mac's own panel arranged to its left — and measuring our own display as
-    // a real one reads its scale as 1x.
-    let target = resolve(capture::main_display(), owned);
+    // Every session starts on one of the Mac's own screens — see
+    // `starting_target`, which is where "the main display" stops being enough.
+    // A selection is session state, not agent state: the person at the far end
+    // picks a screen for as long as they are looking at it, and the next
+    // connection starts from the same place rather than from wherever the last
+    // one wandered off to.
+    let target = starting_target(owned);
 
     // The size has to be known before `Attach`, so it is probed without starting
     // a stream. This is also where a missing Screen Recording grant surfaces.
@@ -234,6 +231,39 @@ pub async fn serve(
         cursor_tracker,
     )
     .await
+}
+
+/// The display a session starts on: one of the Mac's *own* screens, never the
+/// one the agent made.
+///
+/// Not simply `CGMainDisplayID`, and the test VM is why. macOS made the created
+/// display the main one and arranged the Mac's own panel to its left, so
+/// "start on the main display" started on ours — which is the one thing enabling
+/// an extra display must not do. Creating it puts it on the menu; sharing it is
+/// a choice someone makes, every session, on purpose.
+///
+/// A Mac whose only display is ours has nothing else to offer, and starting
+/// there beats refusing the session.
+fn starting_target(owned: Option<capture::Target>) -> capture::Target {
+    let main = capture::main_display();
+    if owned.map(capture::Target::id) != Some(main) {
+        return capture::Target::Real(main);
+    }
+    let first_real = capture::displays(owned)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|display| !display.is_owned)
+        .map(|display| display.geometry.id);
+    match first_real {
+        Some(id) => {
+            info!("session: display {main} is ours; starting on the Mac's own display {id}");
+            capture::Target::Real(id)
+        }
+        None => {
+            warn!("session: the only display is the one we created; starting on it");
+            resolve(main, owned)
+        }
+    }
 }
 
 /// The target for a display id, given the display this agent made (if any).

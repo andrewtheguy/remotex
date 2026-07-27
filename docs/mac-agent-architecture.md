@@ -64,11 +64,17 @@ answers with `GatewayMsg::SelectDisplay` naming one by `CGDirectDisplayID`.
 Positions in a list are deliberately not identities: attaching or unplugging a
 screen renumbers everything after it.
 
-A session starts on the main display, and the choice lasts as long as the
-session. Nothing about it is written to the config: the person at the far end is
-picking a screen for as long as they are looking at it, and the next connection
-should start from the same place rather than from wherever the last one wandered
-off to.
+A session starts on one of the Mac's **own** screens — its main display, or, if
+macOS has made the display the agent created the main one, the first real screen
+it lists. Never on the agent's own display, which is the point of enabling one
+being separate from sharing it: creating it puts it on the menu, and sharing it
+is a choice someone makes, every session, on purpose. (Only a Mac whose *only*
+display is ours starts there, having nothing else to offer.)
+
+The choice lasts as long as the session and nothing about it is written to the
+config: the person at the far end is picking a screen for as long as they are
+looking at it, and the next connection should start from the same place rather
+than from wherever the last one wandered off to.
 
 Switching restarts the capture stream, which is why the agent reuses the
 teardown-and-restart its capture-failure path already had — including putting the
@@ -145,7 +151,13 @@ An **addition**, not a replacement, which is all `CGVirtualDisplay` was ever abl
 to be: it adds a monitor beside the ones already attached. The Mac's own screens
 stay shareable and the new one simply joins the list a client picks from. This
 setting therefore decides only whether that display exists — never which display
-is shared, which is a per-session choice made from the viewer or the browser.
+is shared, which is a per-session choice made from the viewer or the browser, and
+which no session makes by default.
+
+That last part needs saying because macOS may not agree about which display is
+which: on the test VM it made the created display the *main* one and arranged the
+Mac's own panel to its left. So a session starting on "the main display" started
+on ours, and Which display above says what it does instead.
 
 Created once, and then it belongs to macOS. It appears in System Settings >
 Displays with the mode list macOS derives from the descriptor — a HiDPI entry and
