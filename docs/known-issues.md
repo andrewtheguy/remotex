@@ -60,7 +60,7 @@ holds it fixed, are the record.
 - **Seen:** after a number of resolution changes, every further one hangs —
   `CGCompleteDisplayConfiguration` never returns and the calling thread spins at
   around 40% CPU. Nothing but a reboot of the guest clears it.
-- **Not remotex's to trigger any more:** nothing here changes a display's mode,
+- **Not remotex's to trigger:** nothing here changes a display's mode,
   so this is reached only by changing the resolution on the Mac itself. The
   agent keeps capturing whatever the display last settled on.
 - **Guard:** none possible off a real VM.
@@ -94,9 +94,8 @@ holds it fixed, are the record.
 - **Cause:** the WindowServer remembers arrangement state against a display's
   vendor, product and serial — as it does for any monitor — and can decide to keep
   that identity offline. The state survives a reboot and cannot be cleared from
-  inside the process. Observed 2026-07-27 against an identity earlier probe builds
-  had used, which is the condition most likely to produce it: several descriptors
-  claiming one identity.
+  inside the process. Observed 2026-07-27, after several differing descriptors had
+  claimed the same identity on that Mac.
 - **Reported, not worked around:** creation checks `CGDisplayIsOnline` and
   `CGDisplayIsActive` rather than trusting bounds, and says so in the log and to
   the client. The agent deliberately does *not* mint a new identity to escape it

@@ -34,8 +34,7 @@ struct DisplayMode: Equatable, Hashable, Sendable, Decodable {
 
 /// What the viewer knows about the session it is attached to.
 ///
-/// Every field here used to be computed in JavaScript and shipped over the host
-/// bridge. It is now derived from the gateway's own control messages, which is
+/// Every field here is derived from the gateway's own control messages, which is
 /// why the derivations are spelled out where they happen (`AppModel.handle`).
 struct ViewerSessionState: Equatable {
     var screen = ViewerScreen.server

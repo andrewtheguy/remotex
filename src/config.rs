@@ -263,7 +263,7 @@ impl ConfigFile {
                 // and the agent's own display — the one it can create for itself
                 // — appears in System Settings like any other screen and is
                 // changed there. Accepting the key would promise a control that
-                // no longer exists in either client.
+                // neither client offers.
                 anyhow::ensure!(
                     !target.resize,
                     "target {:?} is protocol \"rxa\" and sets resize, which only \"rdp\" and \

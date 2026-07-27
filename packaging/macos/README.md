@@ -159,9 +159,8 @@ login-screen support is planned for remotex.
 The agent mirrors one whole display at a time and does not resize it to the
 browser viewport. Which display is chosen from the remotex viewer or the browser,
 per session, not in the agent's settings — so there is no display setting here,
-and a `config.toml` left over from an earlier version must have its `display = N`
-line **removed by hand** or the agent refuses to start. The same goes for
-`virtual_display_size`, which is now `virtual_display_initial_size`.
+only the checkbox that decides whether the private display exists and the
+`virtual_display_initial_size` its first appearance uses.
 
 "Initial" is the whole of how that size behaves: it is what the private display is
 created at the first time this Mac sees it. After that its resolution is the Mac's

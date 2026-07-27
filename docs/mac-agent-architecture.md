@@ -146,12 +146,11 @@ failure to create it costs the extra display and nothing else, with a line in th
 log, because a macOS release that takes the private API away should cost the
 sharpness rather than the agent.
 
-An **addition**, not a replacement, which is all `CGVirtualDisplay` was ever able
-to be: it adds a monitor beside the ones already attached. The Mac's own screens
-stay shareable and the new one simply joins the list a client picks from. This
-setting therefore decides only whether that display exists — never which display
-is shared, which is a per-session choice made from the viewer or the browser, and
-which no session makes by default.
+An **addition**, not a replacement: `CGVirtualDisplay` adds a monitor beside the
+ones already attached. The Mac's own screens stay shareable and the new one simply
+joins the list a client picks from. This setting therefore decides only whether
+that display exists — never which display is shared, which is a per-session choice
+made from the viewer or the browser, and which no session makes by default.
 
 macOS may not agree about which display is which, either: on the test VM it had
 our display arranged as the *main* one, so a session started there. That is the

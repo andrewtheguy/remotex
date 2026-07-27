@@ -913,8 +913,8 @@ mod tests {
         };
         assert!(!plain.is_main() && !plain.is_owned());
 
-        // The agent's own display is never the Mac's main one, but the flags are
-        // independent bits rather than an enum, so both together must still read.
+        // macOS can arrange the agent's own display as the main one, and the flags
+        // are independent bits rather than an enum, so both together must read.
         let both = DisplayEntry {
             flags: DisplayEntry::MAIN | DisplayEntry::OWNED,
             ..plain.clone()

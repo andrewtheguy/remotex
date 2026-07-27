@@ -300,10 +300,9 @@ const SERIAL: u32 = 1;
 /// Reported rather than worked around, and that is the same answer a real display
 /// gets. macOS files arrangement state against a monitor's identity and can decide
 /// to keep one offline; the resolution is on the Mac, in System Settings, exactly
-/// as it would be for a panel that came back dark. The agent used to mint a new
-/// identity here instead, which did produce a working display — by throwing away
-/// the arrangement that identity stood for, which is the one thing a monitor never
-/// does to you.
+/// as it would be for a panel that came back dark. Minting a new identity here
+/// would produce a working display by throwing away the arrangement that identity
+/// stands for, which is the one thing a monitor never does to you.
 #[derive(Debug)]
 struct Offline {
     id: u32,

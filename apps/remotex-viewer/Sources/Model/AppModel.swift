@@ -4,10 +4,9 @@ import Observation
 /// The viewer's whole state, and the one place the gateway's control messages
 /// become it.
 ///
-/// `ViewerScreen` used to be *reported by the page* over the host bridge. It is
-/// now derived here, which is the substance of the port: `picker` and `connected`
-/// come from the gateway's session layer, and everything the Remote menu enables
-/// or disables follows from them plus `resize` and `remoteOs`.
+/// `ViewerScreen` is derived here rather than reported to the viewer: `picker` and
+/// `connected` come from the gateway's session layer, and everything the Remote
+/// menu enables or disables follows from them plus `resize` and `remoteOs`.
 @MainActor
 @Observable
 final class AppModel: GatewaySessionSink {

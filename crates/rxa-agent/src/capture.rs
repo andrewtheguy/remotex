@@ -288,12 +288,11 @@ pub fn displays(owned: Option<Target>) -> anyhow::Result<Vec<DisplayInfo>> {
 /// The line a client shows under a display's name: its size in **points**, and
 /// the scale those points are drawn at.
 ///
-/// Points rather than the captured pixels, which is what [`Geometry`] carries and
-/// what this used to print. A 2x display would otherwise be listed at twice the
-/// size System Settings calls it — "3200×2400 at 2x" for the display macOS,
-/// the settings dialog and the Displays pane all agree is 1600×1200 — which reads
-/// as a resolution nobody chose. The pixel count is not lost, it is the product of
-/// the two numbers shown.
+/// Points rather than the captured pixels [`Geometry`] carries: a 2x display
+/// would otherwise be listed at twice the size System Settings calls it —
+/// "3200×2400 at 2x" for the display macOS, the settings dialog and the Displays
+/// pane all agree is 1600×1200 — which reads as a resolution nobody chose. The
+/// pixel count is not lost, it is the product of the two numbers shown.
 fn detail(geometry: &Geometry) -> String {
     let scale = if geometry.scale > 0.0 {
         geometry.scale

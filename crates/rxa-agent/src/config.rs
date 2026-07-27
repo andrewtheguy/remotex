@@ -32,12 +32,10 @@ pub struct Config {
     pub psk: String,
     /// Give the Mac an extra display, of the agent's own making.
     ///
-    /// Not "share a display of our own instead of the Mac's screen", which is
-    /// what this used to mean and was never what the API does:
-    /// `CGVirtualDisplay` *adds* a monitor next to the ones already attached. So
-    /// this only decides whether that display exists — which of them a session
-    /// shares is chosen from the viewer or the browser, per session, and is no
-    /// business of this file.
+    /// An addition, not a substitution: `CGVirtualDisplay` *adds* a monitor next
+    /// to the ones already attached. So this only decides whether that display
+    /// exists — which of them a session shares is chosen from the viewer or the
+    /// browser, per session, and is no business of this file.
     ///
     /// Off by default, and still a setting rather than something a client can
     /// ask for: a display appearing and disappearing rearranges the windows on

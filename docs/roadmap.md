@@ -8,24 +8,20 @@ Defects, and the limitations imposed on us from outside, are tracked in
 ### A display of our own for `rxa`
 
 The first of the three routes below is **implemented**, behind the agent's
-`virtual_display` setting (see
-[`mac-agent-architecture.md`](mac-agent-architecture.md)). What is still open is
+**Add a private 2x display** setting (see
+[`mac-agent-architecture.md`](mac-agent-architecture.md)). `CGVirtualDisplay`
+adds a monitor beside a Mac's own screens rather than replacing one, so the
+setting decides only whether that display exists; which display a session shares
+is a separate, per-session choice made from either client. What is still open is
 whether it should ever be the default — and the two routes not taken, kept
 because the private one can be withdrawn by any macOS release.
 
-One thing this section originally got wrong, and which the implementation now
-reflects: `CGVirtualDisplay` does not *replace* a Mac's screen. It adds a monitor
-beside the ones already there. So the setting decides only whether that display
-exists, and which display a session shares is a separate, per-session choice made
-from either client.
-
-Both clients now present a remote at its own size, scaling by the ratio between
-the two densities, so a Retina host no longer draws a 1x guest at half size — it
-draws it magnified, which is soft. What a display of our own would add is the
-pixels to be sharp with: ask for a display of the viewport's device-pixel size
-marked as scale 2, and its logical size is the window's point size, so the blit is
-one texel per device pixel *and* physically right with nothing resampled. Three
-routes, none of them free:
+Both clients present a remote at its own size, scaling by the ratio between the
+two densities, so a 1x guest on a Retina host is drawn magnified, which is soft.
+What a display of our own would add is the pixels to be sharp with: ask for a
+display of the viewport's device-pixel size marked as scale 2, and its logical
+size is the window's point size, so the blit is one texel per device pixel *and*
+physically right with nothing resampled. Three routes, none of them free:
 
 - **`CGVirtualDisplay` (private CoreGraphics/SkyLight).** What BetterDisplay and
   similar tools use: arbitrary pixel size and a HiDPI backing store, with no
@@ -87,9 +83,8 @@ What is still to be decided: whether a display of our own should ever be the
 nobody's windows get rearranged by a connection, which is the upside, and it
 stops being "what is on that Mac's screen", which is the point of `rxa` today,
 and leaves a desktop nobody is looking at once the viewer goes away. Since it is
-an extra display rather than a replacement, that trade is now made per session by
-whoever is connecting rather than once in a config file, which is a large part of
-why it need not be settled here.
+an extra display rather than a replacement, whoever is connecting makes that
+trade per session, which is a large part of why it need not be settled here.
 
 It also only helps `rxa`: a Linux or Windows box cannot be handed a display from
 here, so for those the scaled presentation is the whole answer.
@@ -155,51 +150,24 @@ playback design remain unspecified.
 
 ### macOS login-window service
 
-The current `SMAppService` LaunchAgent runs only in the signed-in user's Aqua
-session. Login-window access is nevertheless an established macOS deployment
-mode: RealVNC provides it in
-[Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes),
-and RustDesk ships it in its installed-service mode.
+The `SMAppService` LaunchAgent runs only in the signed-in user's Aqua session, so
+the agent stops at logout and cannot be reached from the macOS login screen.
 
-RustDesk's minimum design is comparatively small. A root LaunchDaemon runs its
-system service at boot, while one root-installed
-[LaunchAgent](https://github.com/rustdesk/rustdesk/blob/master/src/platform/privileges_scripts/agent.plist)
-declares both `LoginWindow` and `Aqua` session types and runs the same
-`--server` executable in each. Its
-[install script](https://github.com/rustdesk/rustdesk/blob/master/src/platform/privileges_scripts/install.scpt)
-writes both launchd plists and copies the user's config into `/var/root` for the
-login-window process. launchd handles the normal session transition; RustDesk
-reconnects after login rather than transferring a live connection between
-processes. The much larger multi-user and update code in RustDesk is hardening,
-not a prerequisite for basic login-window capture and input.
+The shape of an answer is established: RealVNC's
+[Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes)
+and RustDesk's installed-service mode both provide login-window access, by
+installing launch components that declare the `LoginWindow` session type
+alongside `Aqua` instead of relying on per-user `SMAppService`.
 
-For remotex, launchd may briefly overlap the `LoginWindow` and `Aqua` agents
-during login, and fast user switching can leave more than one Aqua agent alive.
-The direct listener still does not require a broker: treat ownership of
-`/dev/console` as a lease. Only UID 0 at the login window, or the user who
-currently owns the console, may bind port 52381. Inactive agents wait without a
-listener; the newly active agent retries until the previous owner releases the
-port. This preserves the one-active-session model without `SO_REUSEPORT` or
-simultaneous sharing.
+Nothing past that shape is settled, and none of it should be designed here first.
+What has to be measured on a real Mac: how the single listener is held across the
+login transition and fast user switching, where config and PSK readable by both
+the configured user and the UID 0 login-window process should live, and whether
+Screen Recording and Accessibility grants reach the signed app in the
+`LoginWindow` session at all.
 
-Implementation requires:
-
-1. a one-time administrator action that secures the app bundle and installs a
-   LaunchAgent for both `LoginWindow` and `Aqua`, instead of relying only on
-   per-user `SMAppService`;
-2. config and PSK storage readable by both the configured user and the UID 0
-   login-window process;
-3. active-console listener acquisition, release, and retry around the existing
-   agent server;
-4. validation of Screen Recording and Accessibility for the signed app in the
-   `LoginWindow` session, plus boot, login, logout, lock, and fast-user-switch
-   lifecycle tests.
-
-This does not inherently require a package installer, root broker, new
-capture/input implementation, or seamless process handoff. Stable Developer ID
-signing would make TCC identity reliable across upgrades. FileVault remains the
-unavoidable boundary: no remote-access process can run before pre-boot disk
-unlock.
+FileVault is the one boundary none of it crosses: no remote-access process runs
+before pre-boot disk unlock.
 
 
 ## Not planned

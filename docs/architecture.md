@@ -89,8 +89,8 @@ u8 kind | u8 format | u16 x | u16 y | u16 width | u16 height | image bytes
 
 Formats are PNG and JPEG. Control messages cover picker/connected state,
 desktop size, the remote's display list, cursor shape, clipboard text, and
-errors. Large dirty rectangles
-are split into 64-row strips to bound individual WebSocket frames.
+errors. Large dirty rectangles are split into 64-row strips to bound individual
+WebSocket frames.
 
 Browser-to-server traffic is JSON:
 
@@ -241,10 +241,10 @@ a Mac which was switched off does not leave a frozen desktop on screen.
 
 A client picks which of the Mac's displays to share, and the agent reports the
 set it has. Nothing on this wire asks the Mac to change a display's *resolution*,
-though, and `resize = true` on an `rxa` target is a config error. The Mac's mode is changed on the Mac — in
-System Settings, including for the private display the agent can create for
-itself, which appears there like any other screen — and the agent reports the
-new size when it sees it. See
+though, and `resize = true` on an `rxa` target is a config error. The Mac's mode
+is changed on the Mac — in System Settings, including for the private display the
+agent can create for itself, which appears there like any other screen — and the
+agent reports the new size when it sees it. See
 [`mac-agent-architecture.md`](mac-agent-architecture.md).
 
 RXA has a separate application ping/pong between the gateway and agent to detect
