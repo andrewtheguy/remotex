@@ -654,7 +654,20 @@ fn backing_scale(display: &SCDisplay) -> f64 {
     display_scale(display.display_id())
 }
 
-fn display_scale(id: u32) -> f64 {
+/// A display's current size in **points**, from its bounds.
+///
+/// Bounds rather than a mode, because this is asked of a display of our own and
+/// bounds are the one reading always published for those. Points is what
+/// [`crate::virtualdisplay::VirtualDisplay::set_scale`] needs: it re-lists the
+/// same logical size at a different density, so the desktop keeps its layout.
+pub(crate) fn display_points(id: u32) -> (u32, u32) {
+    use objc2_core_graphics::CGDisplayBounds;
+
+    let bounds = CGDisplayBounds(id);
+    (bounds.size.width as u32, bounds.size.height as u32)
+}
+
+pub(crate) fn display_scale(id: u32) -> f64 {
     mode_scale(id).unwrap_or(1.0)
 }
 

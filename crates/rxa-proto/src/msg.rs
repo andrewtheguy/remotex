@@ -1,6 +1,6 @@
 //! The message set, hand-rolled little-endian in the style of `src/vnc.rs`.
 //!
-//! There are seventeen messages between the two enums, so a serialization
+//! There are eighteen messages between the two enums, so a serialization
 //! dependency would buy nothing that these ~200 lines and their roundtrip tests
 //! don't. The payload of a [`AgentMsg::Tile`] is **already** a PNG or JPEG
 //! stream — the exact bytes the browser decodes — so the gateway relays it
@@ -459,6 +459,21 @@ pub enum GatewayMsg {
     /// [`AgentMsg::Error`] while it keeps capturing what it already had. Nothing
     /// here changes a display's *mode*; this only picks which one is shared.
     SelectDisplay { id: u32 },
+    /// The density of the screen the *client's* window is on, in [`SCALE_ONE`]
+    /// hundredths — 100 for a 1x screen, 200 for a Retina one. Sent when a
+    /// session starts and again whenever the client's window changes screen.
+    ///
+    /// This is the one message that asks the Mac to change a display rather than
+    /// describing what the client is doing, and it is deliberately narrow: only a
+    /// display the *agent made* can act on it, and only its density. The Mac's own
+    /// screens ignore it — nobody's physical panel should change because someone
+    /// connected — and no message changes a display's resolution (see
+    /// [`GatewayMsg::SelectDisplay`]).
+    ///
+    /// Acting on it costs nothing when the two already agree, and saves three
+    /// quarters of the pixels when they do not: a 2x guest viewed from a 1x screen
+    /// is four times the framebuffer for a picture the client immediately halves.
+    HostScale { scale: u16 },
 }
 
 impl GatewayMsg {
@@ -473,6 +488,7 @@ impl GatewayMsg {
     const T_CLIPBOARD: u8 = 0x09;
     const T_CLIPBOARD_WATCH: u8 = 0x0a;
     const T_SELECT_DISPLAY: u8 = 0x0b;
+    const T_HOST_SCALE: u8 = 0x0c;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -521,6 +537,10 @@ impl GatewayMsg {
                 out.push(Self::T_SELECT_DISPLAY);
                 put_u32(&mut out, *id);
             }
+            GatewayMsg::HostScale { scale } => {
+                out.push(Self::T_HOST_SCALE);
+                put_u16(&mut out, *scale);
+            }
         }
         out
     }
@@ -555,6 +575,7 @@ impl GatewayMsg {
                 enabled: r.bool()?,
             },
             Self::T_SELECT_DISPLAY => GatewayMsg::SelectDisplay { id: r.u32()? },
+            Self::T_HOST_SCALE => GatewayMsg::HostScale { scale: r.u16()? },
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -842,6 +863,15 @@ mod tests {
             GatewayMsg::ClipboardWatch { enabled: false },
             GatewayMsg::SelectDisplay { id: 0 },
             GatewayMsg::SelectDisplay { id: u32::MAX },
+            GatewayMsg::HostScale { scale: SCALE_ONE },
+            GatewayMsg::HostScale {
+                scale: 2 * SCALE_ONE,
+            },
+            // A client on a screen with a fractional ratio, and one whose report
+            // is nonsense. Both travel; `scale_ratio` is where the second is
+            // refused, exactly as it is for a display's own scale.
+            GatewayMsg::HostScale { scale: 150 },
+            GatewayMsg::HostScale { scale: 0 },
         ]
     }
 
@@ -874,7 +904,7 @@ mod tests {
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 11, "eleven gateway message types");
+        assert_eq!(gateway.len(), 12, "twelve gateway message types");
     }
 
     // The count on the wire is the peer's claim about what follows. A body that
