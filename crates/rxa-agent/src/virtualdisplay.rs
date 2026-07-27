@@ -20,9 +20,14 @@
 //!   fixes — so bounds at or under the created size mean HiDPI engaged. That is
 //!   the check [`await_hidpi_bounds`] makes, by the same rule
 //!   [`crate::capture::owned_scale`] reads a live mode with.
-//! - `CGDisplayCopyDisplayMode` returns NULL and `CGDisplayCopyAllDisplayModes`
-//!   returns nothing, so the usual geometry reads do not work here at all —
-//!   which is why `capture.rs` has a separate path for these displays.
+//! - `CGDisplayCopyDisplayMode` **does** work, and is the one reading that does
+//!   not lie: measured on macOS 26.5.2 it returns `3800x2400 px / 1900x1200 pt`
+//!   at 2x and `1900x1200 px / 1900x1200 pt` for the same display at 1x, so
+//!   pixels over points is the true backing scale. An earlier note here claimed
+//!   it returned NULL for these displays; it does not, and believing that cost a
+//!   heuristic that could not see a `(low resolution)` mode at all — see
+//!   [`crate::capture::owned_scale`]. `CGDisplayCopyAllDisplayModes` works too,
+//!   and lists both entries at each point size.
 //! - `SCContentFilter.pointPixelScale` reports 1.00 on a genuine 2x display, so
 //!   capture size must be set from what we asked for, never derived from it.
 //!
@@ -89,9 +94,9 @@ const SETTLE_POLL_MS: u64 = 25;
 /// containment story: an agent that crashes cannot leave a display behind, and
 /// there is no cleanup path to get wrong.
 pub struct VirtualDisplay {
-    /// `CGVirtualDisplay`. Nothing calls into it after creation — it is held so
-    /// that dropping it removes the display.
-    _handle: Handle,
+    /// `CGVirtualDisplay`. Held so that dropping it removes the display, and
+    /// messaged by [`VirtualDisplay::set_scale`].
+    handle: Handle,
     /// The CoreGraphics display id.
     id: u32,
     /// The point size the display was created at. Also the largest mode macOS
@@ -200,7 +205,7 @@ impl VirtualDisplay {
             mm.1,
         );
         Ok(Self {
-            _handle: handle,
+            handle,
             id,
             base_points: points,
         })
@@ -217,6 +222,50 @@ impl VirtualDisplay {
     /// because it is what says how many pixels back a given mode — see there.
     pub fn base_points(&self) -> (u32, u32) {
         self.base_points
+    }
+
+    /// Put the display at [`SCALE`] or at 1x, keeping the point size it is in.
+    ///
+    /// The one thing about this display that is not the Mac's to decide, because
+    /// it is the one thing no one at the Mac is choosing *for*: a display nobody
+    /// sits in front of has no right density of its own, only the right density
+    /// for whoever is looking through it. So a client's screen sets it — see
+    /// [`rxa_proto::msg::GatewayMsg::HostScale`].
+    ///
+    /// Point size is deliberately preserved: the desktop keeps its layout and only
+    /// the pixels behind it change, so windows are not rearranged by a client
+    /// connecting from a different screen. Measured on macOS 26.5.2, applying
+    /// `hiDPI = 0` at the current point size gives `1900x1200 px / 1900x1200 pt`
+    /// and `hiDPI = 1` gives it back at `3800x2400 px`, on the same `displayID`.
+    ///
+    /// Returns whether anything was asked of the WindowServer: `Ok(false)` means
+    /// the display was already at that density, which is the common case and is
+    /// not worth a reconfigure — every apply relays the desktop's windows.
+    pub fn set_scale(&self, want_hidpi: bool, current_points: (u32, u32)) -> anyhow::Result<bool> {
+        let now = crate::capture::display_scale(self.id);
+        // Compared against the midpoint rather than for equality: `now` is a
+        // ratio of two integers read back from a mode, and the question is only
+        // which of the two densities it is.
+        if (now >= 1.5) == want_hidpi {
+            return Ok(false);
+        }
+        let settings = settings_at(current_points, want_hidpi)?;
+        let applied: bool = unsafe { msg_send![&*self.handle.0, applySettings: &*settings] };
+        anyhow::ensure!(
+            applied,
+            "applySettings: refused {}x{} at {}",
+            current_points.0,
+            current_points.1,
+            if want_hidpi { "2x" } else { "1x" }
+        );
+        info!(
+            "virtualdisplay: display {} is now {} at {}x{} points",
+            self.id,
+            if want_hidpi { "2x" } else { "1x" },
+            current_points.0,
+            current_points.1
+        );
+        Ok(true)
     }
 }
 
@@ -371,8 +420,20 @@ fn descriptor(
     Ok(descriptor)
 }
 
-/// The settings: one mode, listed in points, with HiDPI asked for.
+/// The settings the display is created with: one mode, listed in points, HiDPI on.
 fn settings(points: (u32, u32)) -> anyhow::Result<Retained<AnyObject>> {
+    settings_at(points, true)
+}
+
+/// The same, at a chosen density.
+///
+/// `hidpi` is the whole difference between the two, and it is what decides how
+/// many pixels sit behind the mode: with it on, the mode listed at `points` is
+/// backed at [`SCALE`]; with it off, one pixel per point. The mode is listed in
+/// **points** either way — listing it at the pixel size instead produces a
+/// display of the same point size with no extra pixels, which is the trap this
+/// module is arranged around.
+fn settings_at(points: (u32, u32), hidpi: bool) -> anyhow::Result<Retained<AnyObject>> {
     let mode_class = class("CGVirtualDisplayMode")?;
     let allocated: Allocated<AnyObject> = unsafe { msg_send![mode_class, alloc] };
     let mode: Retained<AnyObject> = unsafe {
@@ -383,7 +444,7 @@ fn settings(points: (u32, u32)) -> anyhow::Result<Retained<AnyObject>> {
     let class = class("CGVirtualDisplaySettings")?;
     let settings: Retained<AnyObject> = unsafe { msg_send![class, new] };
     unsafe {
-        let _: () = msg_send![&*settings, setHiDPI: 1_u32];
+        let _: () = msg_send![&*settings, setHiDPI: u32::from(hidpi)];
         let _: () = msg_send![&*settings, setRotation: 0_u32];
         let _: () = msg_send![&*settings, setModes: &*modes];
     }

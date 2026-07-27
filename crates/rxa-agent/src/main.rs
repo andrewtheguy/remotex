@@ -266,6 +266,17 @@ fn main() -> anyhow::Result<()> {
             id: display.id(),
             base_points: display.base_points(),
         });
+    // Shared with the session so a client can set its density, and *only* its
+    // density (`rxa_proto::msg::GatewayMsg::HostScale`). Behind a mutex rather
+    // than an `unsafe impl Sync`: `applySettings:` is a WindowServer round trip
+    // of 66-397 ms, and two of them racing is a question nothing here needs to
+    // answer. The `Arc` also keeps the display alive for the life of the
+    // process, which is what dropping it would end.
+    let owned = session::Owned {
+        target: owned,
+        handle: virtual_display.map(|display| Arc::new(std::sync::Mutex::new(display))),
+    };
+    let serve_owned = owned.clone();
 
     std::thread::Builder::new()
         .name("rxa-net".to_owned())
@@ -279,7 +290,13 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            match runtime.block_on(serve(listener, psk, owned, serve_tracker, serve_state)) {
+            match runtime.block_on(serve(
+                listener,
+                psk,
+                serve_owned,
+                serve_tracker,
+                serve_state,
+            )) {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("remotex-agent: {e:#}");
@@ -432,7 +449,7 @@ fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
 async fn serve(
     listener: std::net::TcpListener,
     psk: [u8; 32],
-    owned: Option<capture::Target>,
+    owned: session::Owned,
     tracker: Arc<cursor::Tracker>,
     state: Arc<state::AgentState>,
 ) -> anyhow::Result<()> {
@@ -464,9 +481,10 @@ async fn serve(
         }
 
         let tracker = Arc::clone(&tracker);
+        let session_owned = owned.clone();
         let session_state = Arc::clone(&state);
         current = Some(tokio::spawn(async move {
-            match session::serve(stream, psk, owned, tracker).await {
+            match session::serve(stream, psk, session_owned, tracker).await {
                 Ok(()) => info!("agent: gateway {peer} disconnected"),
                 // Includes a wrong PSK, which is a failed handshake — logged and
                 // dropped, never fatal to the agent.

@@ -81,22 +81,20 @@ pub trait FrameSink: Send + Sync + 'static {
 /// every display after it, so a target held across that would quietly become a
 /// different screen.
 ///
-/// Two kinds all the same, because a display of our own cannot be *described*
-/// the way a real one is: [`crate::virtualdisplay`] displays report no
-/// CoreGraphics mode at all, so their backing scale cannot be read back from the
-/// system and has to be worked out from what we know about how the display was
-/// built.
+/// Two kinds all the same, because a display of our own needs its creation size
+/// carried alongside its id: that size is the fallback for reading its backing
+/// scale (see [`owned_display_scale`]) and the ceiling `maxPixels` fixed at
+/// creation. Its mode *is* readable, contrary to what this said before.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
     /// One of the Mac's own displays, by CoreGraphics display id.
     Real(u32),
     /// A display we created, by id, plus the point size it was created at.
     ///
-    /// The size is here because the mode is not ours to know: the display shows
-    /// up in System Settings like any other, so whoever is using the Mac can put
-    /// it in any mode on the list macOS derived — including the `(low
-    /// resolution)` 1x entries. See [`owned_scale`] for what the created size
-    /// settles.
+    /// The display shows up in System Settings like any other, so whoever is
+    /// using the Mac can put it in any mode on the list macOS derived —
+    /// including the `(low resolution)` 1x entries. The size is what
+    /// [`owned_scale`] falls back to when the mode cannot be read.
     Owned { id: u32, base_points: (u32, u32) },
 }
 
@@ -129,12 +127,37 @@ pub fn main_display() -> u32 {
     unsafe { CGMainDisplayID() }
 }
 
-/// The backing scale of a display of our own, currently showing `points`.
+/// The backing scale of a display of our own.
+///
+/// Read from the CoreGraphics mode, exactly as a real display's is. These
+/// displays *do* publish one — measured on macOS 26.5.2 in the test VM, where
+/// `CGDisplayCopyDisplayMode` returns `3800x2400 px / 1900x1200 pt` for a 2x
+/// display and `1900x1200 px / 1900x1200 pt` for the same display switched to
+/// 1x. Earlier notes here said it returned NULL for them and built a heuristic
+/// around that; it does not, and the heuristic was wrong in a way nothing else
+/// could catch (see [`owned_scale`]).
+///
+/// [`owned_scale`] remains the fallback for a macOS where the mode really is
+/// absent, since nothing promises a private display keeps publishing one.
+fn owned_display_scale(id: u32, points: (f64, f64), base: (u32, u32)) -> f64 {
+    mode_scale(id).unwrap_or_else(|| owned_scale(points, base))
+}
+
+/// Fallback scale for a display of our own, from the size it was created at.
 ///
 /// `maxPixels` was set to [`crate::virtualdisplay::SCALE`] times the created
 /// size and cannot be changed, so that size is exactly the largest mode macOS
 /// can put twice the pixels behind: at or under it, assume it did; over it, it
 /// provably did not and the mode is 1x.
+///
+/// **It cannot see the case that matters.** macOS lists a `(low resolution)` 1x
+/// entry beside each HiDPI one *at the same point size* — the mode list for a
+/// 1900x1200 display holds both `1900x1200 pt / 3800x2400 px` and
+/// `1900x1200 pt / 1900x1200 px` — and both are "at or under the created size",
+/// so this answers 2x for either. Whichever one macOS restored for the identity
+/// then decided whether the agent was right, which is what made the reported
+/// density look random from the outside. Only [`owned_display_scale`]'s mode
+/// read separates them; this is the degraded answer when there is no mode.
 ///
 /// Getting this wrong is expensive in one direction — reading a 3200x2000 1x
 /// mode as 2x would ask ScreenCaptureKit for a 6400x4000 surface and hand the
@@ -494,11 +517,12 @@ fn stream_config(width: u16, height: u16) -> SCStreamConfiguration {
 
 /// Re-measure a target the way its kind allows.
 ///
-/// The owned case cannot go through [`geometry_for_id`]: `CGDisplayCopyDisplayMode`
-/// returns NULL for a display we created, so that path would report "no mode,
-/// mid-reconfigure" on every single poll and the capture surface would never
-/// follow a resize. Bounds and the scale we asked for are all it needs, and
-/// bounds *are* published for these displays.
+/// The owned case still does not go through [`geometry_for_id`], but not for the
+/// reason once written here. That path returns `None` when a display has no mode,
+/// meaning "mid-reconfigure, try again"; for a display of our own the absence of a
+/// mode is a state to degrade in, not to stall in, since bounds *are* always
+/// published for these displays and [`owned_display_scale`] has a fallback for the
+/// scale. So bounds drive the size and the mode is consulted only for the scale.
 pub fn geometry_for_target(target: Target, id: u32) -> Option<Geometry> {
     use objc2_core_graphics::CGDisplayBounds;
 
@@ -510,7 +534,7 @@ pub fn geometry_for_target(target: Target, id: u32) -> Option<Geometry> {
     if points_w <= 0.0 || points_h <= 0.0 {
         return None;
     }
-    let scale = owned_scale((points_w, points_h), base_points);
+    let scale = owned_display_scale(id, (points_w, points_h), base_points);
     Some(Geometry {
         id,
         width: clamp_u16((points_w * scale).round() as u32),
@@ -594,12 +618,15 @@ fn pick(displays: &[SCDisplay], target: Target) -> anyhow::Result<&SCDisplay> {
 /// panel's real detail, and carry the scale so input can be converted back.
 fn geometry(display: &SCDisplay, target: Target) -> Geometry {
     let scale = match target {
-        // Not `backing_scale`: CoreGraphics has no mode for an owned display, so
-        // it would report 1.0 and the capture would be half the pixels it should
-        // be — the exact failure `owned_scale` exists to prevent.
-        Target::Owned { base_points, .. } => {
-            owned_scale((display.width() as f64, display.height() as f64), base_points)
-        }
+        // Read like a real display's, with the created size only as a fallback:
+        // an owned display does publish a mode, and it is the one reading that
+        // tells a HiDPI mode from the `(low resolution)` 1x entry at the same
+        // point size.
+        Target::Owned { base_points, .. } => owned_display_scale(
+            display.display_id(),
+            (display.width() as f64, display.height() as f64),
+            base_points,
+        ),
         Target::Real(_) => backing_scale(display),
     };
     let frame = display.frame();
@@ -627,19 +654,36 @@ fn backing_scale(display: &SCDisplay) -> f64 {
     display_scale(display.display_id())
 }
 
-fn display_scale(id: u32) -> f64 {
+/// A display's current size in **points**, from its bounds.
+///
+/// Bounds rather than a mode, because this is asked of a display of our own and
+/// bounds are the one reading always published for those. Points is what
+/// [`crate::virtualdisplay::VirtualDisplay::set_scale`] needs: it re-lists the
+/// same logical size at a different density, so the desktop keeps its layout.
+pub(crate) fn display_points(id: u32) -> (u32, u32) {
+    use objc2_core_graphics::CGDisplayBounds;
+
+    let bounds = CGDisplayBounds(id);
+    (bounds.size.width as u32, bounds.size.height as u32)
+}
+
+pub(crate) fn display_scale(id: u32) -> f64 {
+    mode_scale(id).unwrap_or(1.0)
+}
+
+/// Pixels per point from a display's current CoreGraphics mode, or `None` when
+/// it publishes no mode to read.
+///
+/// The distinction matters for a display of our own: "no mode" is the case
+/// [`owned_display_scale`] has to fall back for, and it is not the same answer
+/// as "1x".
+fn mode_scale(id: u32) -> Option<f64> {
     use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGDisplayMode};
 
-    let Some(mode) = CGDisplayCopyDisplayMode(id) else {
-        return 1.0;
-    };
+    let mode = CGDisplayCopyDisplayMode(id)?;
     let pixel_w = CGDisplayMode::pixel_width(Some(&mode)) as f64;
     let point_w = CGDisplayMode::width(Some(&mode)) as f64;
-    if point_w > 0.0 && pixel_w > 0.0 {
-        pixel_w / point_w
-    } else {
-        1.0
-    }
+    (point_w > 0.0 && pixel_w > 0.0).then(|| pixel_w / point_w)
 }
 
 struct Handler(Arc<Shared>);
@@ -883,6 +927,26 @@ mod tests {
         assert_eq!(owned_scale((3200.0, 2000.0), base), 1.0);
         // One axis over is enough — 1600x1200 would need 3200x2400 pixels.
         assert_eq!(owned_scale((1600.0, 1200.0), base), 1.0);
+    }
+
+    // The blind spot that made the reported density look random, pinned so the
+    // fallback is never mistaken for a measurement again. macOS lists a 1x mode
+    // beside the HiDPI one *at the same point size* — for a display created at
+    // 1600x1000 the list holds both `1600x1000 pt / 3200x2000 px` and
+    // `1600x1000 pt / 1600x1000 px` — and from points alone the two are one
+    // number. Whichever macOS restored decided whether the answer below was
+    // right. Only `owned_display_scale`'s mode read can tell them apart, which is
+    // why it is what both call sites use and this is only the no-mode fallback.
+    #[test]
+    fn the_fallback_cannot_see_a_low_resolution_mode_at_the_created_size() {
+        let base = (1600, 1000);
+        // Genuinely 2x and genuinely 1x are the same point size to this, so this
+        // one call is both of them: the 1x entry at the created size reads as 2x,
+        // which is the reason this is a fallback and not the measurement.
+        assert_eq!(
+            owned_scale((1600.0, 1000.0), base),
+            crate::virtualdisplay::SCALE
+        );
     }
 
     // A client picks a display by the id this list reports, and a session

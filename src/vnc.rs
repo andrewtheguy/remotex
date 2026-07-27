@@ -1169,6 +1169,11 @@ fn translate_input(
         // out inside it, not a set of things to choose between. So this engine
         // never sends a display list and no client offers the picker.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
+        // Nothing to act on: RFB has no backing scale, and a VNC server's
+        // framebuffer is already the pixels it has. Clients send this
+        // unconditionally rather than asking what the engine is, so it is
+        // ignored here rather than treated as a client error.
+        ClientMsg::HostScale { .. } => Vec::new(),
     }
 }
 

@@ -34,16 +34,19 @@ physically right with nothing resampled. Three routes, none of them free:
   lists and captures it at full resolution, and the display is process-scoped:
   released object, display gone.
 
-  What makes the route treacherous rather than merely unsupported is that three
+  What makes the route treacherous rather than merely unsupported is that two
   readings misreport such a display. `CGDisplayBounds` shows the intended point
   size even when the backing store is 1x, so a wrong configuration looks right
   until something captures native pixels. `SCContentFilter.pointPixelScale`
   reports 1.00 on a genuine 2x display, so capture size has to be set explicitly
-  instead of derived from the filter. `CGDisplayCopyDisplayMode` returns NULL and
-  `CGDisplayCopyAllDisplayModes` returns nothing, so geometry cannot be read the
-  usual way. And of five plausible descriptor configurations only one produced
-  2x, because the HiDPI flag does not command it: what decides is pixel density,
-  `modePixels / sizeInMillimeters`, which has to land in a window of roughly
+  instead of derived from the filter. (A third was listed here and was wrong:
+  `CGDisplayCopyDisplayMode` does work on these displays and reports the true
+  backing scale — see [`mac-agent-architecture.md`](mac-agent-architecture.md).
+  `NSScreen.backingScaleFactor` is the one that takes its place, reporting 2.00
+  for a display that is genuinely 1x.) And of five plausible descriptor
+  configurations only one produced 2x, because the HiDPI flag does not command
+  it: what decides is pixel density, `modePixels / sizeInMillimeters`, which has
+  to land in a window of roughly
   145–300 dpi. At a fixed 1000×700 pt mode, 134 and 318 dpi both came up 1x,
   while 149 through 264 dpi came up 2x. Outside that window the display appears
   at twice the requested point size at 1x — a desktop with unreadable UI rather
@@ -55,10 +58,9 @@ physically right with nothing resampled. Three routes, none of them free:
   System Settings > Displays with the mode list macOS derives from the
   descriptor — a HiDPI entry and a `(low resolution)` one at each size — so
   whoever is using that Mac changes its resolution there, like any other screen.
-  (Re-applying settings from the process would also take any point size exactly,
-  keeping the same `displayID` and settling in 130–580 ms, but there is no reason
-  to: resolution is the Mac's, and every reconfiguration rearranges the windows
-  on it.)
+  Re-applying settings from the process takes any point size exactly and can flip
+  the density, keeping the same `displayID` and settling in 130–580 ms; the agent
+  uses that for density only, and the size question is the section below.
 
   Nothing about the route is VM-specific. It was measured in the guest because
   that is the test machine; these are the same calls BetterDisplay drives on
@@ -88,6 +90,40 @@ trade per session, which is a large part of why it need not be settled here.
 
 It also only helps `rxa`: a Linux or Windows box cannot be handed a display from
 here, so for those the scaled presentation is the whole answer.
+
+### Resize the private display to the client's window, on request
+
+Its **density** already follows the client, automatically: both clients report
+the backing scale of the screen their window is on
+(`GatewayMsg::HostScale`), and a display the agent made matches it, so a session
+from a Retina screen gets a 2x desktop and one from a 1x screen gets a 1x desktop
+at a quarter of the framebuffer. Its **size** does not follow anything yet, and
+that is the piece left.
+
+The shape is RDP's, not VNC's: a button, not continuous following. A reconfigure
+relays every window on that desktop, so it must be something the person asks for
+rather than something a window drag does forty times. Both clients already have
+the control — the floating menu's **Resize to window** — and it is disabled for
+`rxa` today.
+
+Measured on the test VM (macOS 26.5.2), the mechanics work: `applySettings:` on
+the live display honours an arbitrary point size, keeps the same `displayID`, and
+takes 66–397 ms to apply with bounds settled 134–580 ms later. Two limits are
+fixed at creation and cannot be changed, and they are what make this a design
+rather than a patch:
+
+- **`maxPixels`** is a hard ceiling. Asking past it silently halves the result
+  while `applySettings:` still returns YES — so a window larger than the created
+  size cannot be matched, only clamped to it.
+- **`sizeInMillimeters`** fixes the density, so shrinking the mode walks the
+  display down out of the HiDPI window; about 57% of the created width loses 2x,
+  and recovering it needs a *new* display, hence a new `displayID` and a new
+  identity for macOS to file an arrangement against.
+
+So `virtual_display_initial_size` stops being "the resolution" and becomes what
+it already is underneath: the **envelope** — the largest mode that can ever be 2x,
+and the range a resize has to work inside. Which is also the answer to "should
+the user change it": not as a resolution, only as a ceiling, once.
 
 ## Deferred pending measurements
 
@@ -171,36 +207,6 @@ before pre-boot disk unlock.
 
 
 ## Not planned
-
-### Resolution control from a client
-
-`resize = true` drives the desktop size from the client's window, and only two
-protocols get it: VNC, which follows continuously because `SetDesktopSize` is
-cheap, and RDP, on request, because its Deactivation-Reactivation is not.
-Those are the two whose protocols hand the desktop size to the client.
-
-Nothing else will get it, and no client will ever offer a *menu* of resolutions.
-A remote's resolution belongs to the machine running it.
-
-Not to be read as covering the display **picker** both clients now have for
-`rxa`. That answers a different question — which of a Mac's screens to look at —
-and it is a question about the person looking rather than about the machine, so
-it is theirs to answer. Nothing about it changes a mode. On a physical display
-there is nothing to resize but the panel in front of a person: it would rearrange
-their windows and leave the machine altered after the client disconnects. On a
-Mac — including one sharing a display the agent created for itself, which shows
-up in System Settings like any other screen — the mode is chosen there, and the
-agent reports whatever it lands on.
-
-A VM guest makes the point twice over. Its default screen is not even the
-guest's: Apple Virtualization sizes it from the host, and UTM leaves
-`automaticallyReconfiguresDisplay` on, so it follows the VM window and lands on
-sizes nothing inside the guest asked for. A remotex client competing for that
-same decision would be a third party to it.
-
-A client whose window does not match the remote presents the remote at its own
-size and scales it to fit, which is what makes following unnecessary rather than
-merely unwise.
 
 ### Multiple sessions
 

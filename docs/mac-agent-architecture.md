@@ -175,16 +175,47 @@ ever be 2x and every smaller one macOS offers has density to spare. Outside that
 window macOS silently produces a 1x desktop at *twice* the requested point size,
 which is what the check after `applySettings:` is looking for.
 
-Three readings misreport such a display, and each has a workaround here.
-`CGDisplayCopyDisplayMode` returns NULL and `SCContentFilter.pointPixelScale`
-reads 1.00 even at 2x, so neither the geometry nor the backing scale can be read
-back: the size comes from `CGDisplayBounds` and the scale is *derived* from it by
-`capture::owned_scale`. `maxPixels` is twice the created size and cannot change,
-so a mode at or under that size is 2x and anything larger provably is not — which
-is what keeps a `(low resolution)` pick from being captured as a surface four
-times the size it should be. Third, `CGDisplayBounds` reports the requested size
-even for a display the WindowServer refuses to bring online, so creation also
-checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
+Two readings misreport such a display, and each has a workaround here.
+`SCContentFilter.pointPixelScale` reads 1.00 even at 2x, so the capture size is
+set from what was asked for rather than derived from it. And `CGDisplayBounds`
+reports the requested size even for a display the WindowServer refuses to bring
+online, so creation also checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
+
+`CGDisplayCopyDisplayMode` is *not* one of them, though this document and the code
+both said so for a while. It works on these displays and reports the truth —
+`3800x2400 px / 1900x1200 pt` at 2x, `1900x1200 px / 1900x1200 pt` for the same
+display at 1x — so `capture::owned_display_scale` reads the backing scale from it
+exactly as it does for a real screen. The heuristic that stood in for it,
+`capture::owned_scale`, is now only the fallback for a macOS that publishes no
+mode, because it could not see the case that matters: macOS lists a `(low
+resolution)` 1x entry beside each HiDPI one *at the same point size*, and from
+points alone those are one number. Whichever entry macOS restored for the identity
+decided whether the agent's reported density was right, which is why it looked
+random.
+
+## Its density follows the client
+
+The one thing about this display that is not the Mac's to decide, and it is the
+one thing nobody at the Mac is deciding *for*: a display nobody sits in front of
+has no right density of its own, only the right density for whoever is looking
+through it. So both clients report the backing scale of the screen their window
+is on — on connect, and again when the window changes screen — and the agent
+matches it with `applySettings:` at the display's current point size.
+
+The point size is deliberately preserved, so the desktop keeps its layout and only
+the pixels behind it change; a client connecting from a different screen does not
+rearrange anyone's windows. `VirtualDisplay::set_scale` returns early when the
+densities already agree, which is the common case, because every apply is a
+WindowServer round trip that relays that desktop's windows.
+
+Narrow on purpose, in three ways. It reaches only a display the agent *made* — a
+Mac's own panel does not change because someone connected. It changes only the
+density, never the resolution (see [`roadmap.md`](roadmap.md) for the size
+question, which is a button rather than something automatic). And it changes what
+the client *receives*, never how the client draws it: both clients present a
+remote at its own point size and let their host rasterize that, so mismatched
+densities already look correct — this is what makes them stop costing four times
+the framebuffer, or stop being resampled.
 
 ## Its identity, and what macOS remembers against it
 

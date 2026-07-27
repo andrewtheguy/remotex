@@ -154,14 +154,29 @@ impl FrameSink for Sink {
     }
 }
 
+/// The display the agent made, in the two forms a session needs it.
+///
+/// One parameter rather than two because they are never meaningfully apart: a
+/// session either has a display of its own or it does not. `target` is what
+/// resolves a client's display id to a capture target; `handle` is the object
+/// whose density [`rxa_proto::msg::GatewayMsg::HostScale`] can set, behind the
+/// mutex that keeps two reconfigures from racing.
+#[derive(Clone, Default)]
+pub struct Owned {
+    pub target: Option<capture::Target>,
+    pub handle: Option<Arc<std::sync::Mutex<crate::virtualdisplay::VirtualDisplay>>>,
+}
+
 /// Serve one gateway connection until it hangs up or fails.
 pub async fn serve(
     stream: TcpStream,
     psk: [u8; 32],
-    owned: Option<capture::Target>,
+    owned: Owned,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
     let mut stream = stream;
+    let display = owned.handle.clone();
+    let owned = owned.target;
     stream.set_nodelay(true).ok();
 
     // A wrong PSK fails here, before the agent has revealed anything at all.
@@ -229,7 +244,10 @@ pub async fn serve(
         writer,
         geometry,
         target,
-        owned,
+        Owned {
+            target: owned,
+            handle: display,
+        },
         displays,
         cursor_tracker,
     )
@@ -353,11 +371,13 @@ async fn pump(
     mut writer: FrameWriter<OwnedWriteHalf>,
     geometry: capture::Geometry,
     target: capture::Target,
-    owned: Option<capture::Target>,
+    owned: Owned,
     // What `serve` has already reported, so the poll below starts quiet.
     displays: Vec<DisplayEntry>,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
+    let display = owned.handle;
+    let owned = owned.target;
     let mut target = target;
     // `FrameReader::recv` is not cancel-safe, so it gets its own task.
     let (gateway_tx, mut gateway_rx) = mpsc::channel(32);
@@ -575,6 +595,50 @@ async fn pump(
                             active: target.id(),
                             displays: displays_sent.clone(),
                         }.encode()).await?;
+                    }
+                    // The client's screen density. Acted on only for a display
+                    // the agent made, and only while that is the one being
+                    // shared: a Mac's own panel does not change because someone
+                    // connected, and a display nobody is looking at has nothing
+                    // to match. `set_scale` returns early when the density already
+                    // agrees, which is the common case.
+                    //
+                    // The reconfigure itself is a WindowServer round trip that
+                    // takes hundreds of milliseconds, so it is neither run on this
+                    // thread nor waited for on it: awaiting the blocking task here
+                    // would hold the select! loop, and with it tiles, cursor
+                    // updates and input injection, for the whole of it. Nothing in
+                    // the loop depends on the outcome — the size that follows a
+                    // successful change arrives through the display poll like any
+                    // other reconfigure — so the task only has to outlive the
+                    // message, and reports for itself.
+                    GatewayMsg::HostScale { scale } => {
+                        let wanted = rxa_proto::msg::scale_ratio(scale) >= 1.5;
+                        match (&display, target) {
+                            (Some(display), capture::Target::Owned { id, .. })
+                                if Some(id) == owned.map(capture::Target::id) =>
+                            {
+                                let display = Arc::clone(display);
+                                let points = capture::display_points(id);
+                                tokio::spawn(async move {
+                                    let done = tokio::task::spawn_blocking(move || {
+                                        display
+                                            .lock()
+                                            .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
+                                            .and_then(|display| display.set_scale(wanted, points))
+                                    })
+                                    .await;
+                                    match done {
+                                        Ok(Ok(_)) => {}
+                                        Ok(Err(e)) => warn!("session: cannot set the display density: {e:#}"),
+                                        Err(e) => warn!("session: the density change did not run: {e}"),
+                                    }
+                                });
+                            }
+                            // Every other case is a client reporting something
+                            // true that this session cannot use.
+                            _ => {}
+                        }
                     }
                     // Which display, unlike what resolution, is the client's to
                     // choose — see the message's own documentation.

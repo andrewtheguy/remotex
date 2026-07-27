@@ -644,6 +644,9 @@ fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
         },
         ClientMsg::Refresh => GatewayMsg::Refresh,
         ClientMsg::SelectDisplay { id } => GatewayMsg::SelectDisplay { id: *id },
+        // Forwarded whatever display is being shared: only the agent knows
+        // whether the current one is a display it made, and only it can act.
+        ClientMsg::HostScale { scale } => GatewayMsg::HostScale { scale: *scale },
         // The agent reads its pasteboard only when asked, so a fetch is a real
         // round trip rather than a cached value (unlike VNC, where the server
         // pushes and the engine caches).
@@ -909,6 +912,22 @@ mod tests {
                 pressed: false,
                 caps: false,
             })
+        );
+    }
+
+    // The client's screen density reaches the agent whatever display is being
+    // shared: only the agent knows whether the current one is a display it made,
+    // and the gateway holding an opinion here would be a second place for the
+    // answer to be wrong.
+    #[test]
+    fn the_hosts_density_reaches_the_agent() {
+        assert_eq!(
+            to_agent(&ClientMsg::HostScale { scale: 200 }, false),
+            Some(GatewayMsg::HostScale { scale: 200 })
+        );
+        assert_eq!(
+            to_agent(&ClientMsg::HostScale { scale: 100 }, false),
+            Some(GatewayMsg::HostScale { scale: 100 })
         );
     }
 

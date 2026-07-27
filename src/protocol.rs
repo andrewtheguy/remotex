@@ -138,6 +138,24 @@ pub enum ClientMsg {
     /// (TigerVNC-family servers), continuously, and RDP's Display Control
     /// channel, on the user's request.
     Viewport { w: u16, h: u16 },
+    /// The density of the screen this client's window is on, in hundredths —
+    /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
+    /// whenever the window moves to a screen of a different density.
+    ///
+    /// The counterpart to [`ServerMsg::Resize`]'s `scale`, travelling the other
+    /// way, and the two are read together: that one says what the remote draws
+    /// at, this one says what the client can show. Only the `rxa` engine acts on
+    /// it, and only for a display the agent *made* — a Mac's own panel does not
+    /// change density because someone connected to it. Every other engine
+    /// ignores it.
+    ///
+    /// It does not change how a client presents what it receives: a client always
+    /// lays the remote out at the remote's own point size and lets its host
+    /// rasterize that (see `RemoteGeometry` and `applyCanvasCss`). This asks the
+    /// remote to *have* the density that makes the result one pixel per pixel,
+    /// which is a saving, not a correctness fix — mismatched densities already
+    /// look right, they just cost four times the framebuffer or lose sharpness.
+    HostScale { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
     /// engine. A client may also send it to recover a canvas that has gone

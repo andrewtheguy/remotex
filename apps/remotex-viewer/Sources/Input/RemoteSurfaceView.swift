@@ -32,6 +32,12 @@ final class RemoteSurfaceView: NSView {
         super.init(frame: .zero)
         addSubview(framebuffer)
         postsFrameChangedNotifications = true
+        // Report this window's density to the remote when it changes, which is
+        // what lets a display the agent made match it. Nothing about the layout
+        // here depends on it — see `guestScale` below.
+        framebuffer.onBackingScaleChange = { [weak model] in
+            model?.reportHostScale()
+        }
     }
 
     @available(*, unavailable)
