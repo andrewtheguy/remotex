@@ -251,7 +251,7 @@ fn main() -> anyhow::Result<()> {
     // simply not find it in the list.
     let virtual_display = config
         .virtual_display
-        .then(|| match config.virtual_display_points() {
+        .then(|| match config.virtual_display_initial_points() {
             Ok(points) => virtualdisplay::VirtualDisplay::create(points)
                 .inspect_err(|e| warn!("virtualdisplay: {e:#}; the Mac's screens are unaffected"))
                 .ok(),

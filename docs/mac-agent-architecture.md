@@ -64,12 +64,11 @@ answers with `GatewayMsg::SelectDisplay` naming one by `CGDirectDisplayID`.
 Positions in a list are deliberately not identities: attaching or unplugging a
 screen renumbers everything after it.
 
-A session starts on one of the Mac's **own** screens — its main display, or, if
-macOS has made the display the agent created the main one, the first real screen
-it lists. Never on the agent's own display, which is the point of enabling one
-being separate from sharing it: creating it puts it on the menu, and sharing it
-is a choice someone makes, every session, on purpose. (Only a Mac whose *only*
-display is ours starts there, having nothing else to offer.)
+A session starts on whichever display the Mac calls main, and the agent does not
+argue with that answer — including when the main display is the one the agent
+created, which is a thing macOS remembers per arrangement (see A stable identity
+below). Second-guessing it would mean overriding a choice made in System
+Settings.
 
 The choice lasts as long as the session and nothing about it is written to the
 config: the person at the far end is picking a screen for as long as they are
@@ -154,10 +153,10 @@ setting therefore decides only whether that display exists — never which displ
 is shared, which is a per-session choice made from the viewer or the browser, and
 which no session makes by default.
 
-That last part needs saying because macOS may not agree about which display is
-which: on the test VM it made the created display the *main* one and arranged the
-Mac's own panel to its left. So a session starting on "the main display" started
-on ours, and Which display above says what it does instead.
+macOS may not agree about which display is which, either: on the test VM it had
+our display arranged as the *main* one, so a session started there. That is the
+remembered arrangement doing its job — see A stable identity below — and not
+something the agent second-guesses.
 
 Created once, and then it belongs to macOS. It appears in System Settings >
 Displays with the mode list macOS derives from the descriptor — a HiDPI entry and
@@ -172,8 +171,8 @@ pixels; listing it at the pixel size yields the same point size with no extra
 pixels. HiDPI then engages only while pixel density — mode pixels over
 `sizeInMillimeters` — stays inside roughly 149–264 dpi, measured on macOS
 26.5.2. The display is therefore created at the top of that window, which is
-also where `maxPixels` sits, so the configured size is the largest mode that can
-be 2x and every smaller one macOS offers has density to spare. Outside that
+also where `maxPixels` sits, so the initial size is the largest mode that can
+ever be 2x and every smaller one macOS offers has density to spare. Outside that
 window macOS silently produces a 1x desktop at *twice* the requested point size,
 which is what the check after `applySettings:` is looking for.
 
@@ -188,42 +187,48 @@ times the size it should be. Third, `CGDisplayBounds` reports the requested size
 even for a display the WindowServer refuses to bring online, so creation also
 checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
 
-## A new identity every launch
+## A stable identity, and what it carries
 
-The display is created with a serial number macOS has never seen, and that is
-what keeps adding one from **rearranging the Mac**. The WindowServer files an
-arrangement against vendor, product and serial — where the display sat, whether
-it was the primary, and what mode the screens around it were in — and re-applies
-every part of it the moment an identity it recognises appears. Measured on the
-test VM against an identity it had seen before:
+The display is created with a fixed identity — the same vendor, product and
+serial every launch — and macOS files an arrangement against exactly that. On the
+next launch it re-applies **all** of it: where the display sat, what mode it is
+in, whether it is the primary, and the modes of the screens around it. Measured
+on the test VM against an identity it had seen before:
 
 ```text
 before: [1 @ (0,0) 1280x800 MAIN]
 after : [ours @ (0,0) 1600x1000 MAIN] [1 @ (-1024,0) 1024x640]
 ```
 
-Ours took the primary role, and the Mac's own panel was moved *and resized*, from
-1280x800 to 1024x640. With a serial it has never seen, twice over:
+Ours came back as the primary display, and the Mac's own panel came back moved
+and resized. With a serial macOS has never seen the same descriptor lands at
+`(1280,0)` and changes nothing — which was tried, and is not what this does.
 
-```text
-before: [1 @ (0,0) 1280x800 MAIN]
-after : [1 @ (0,0) 1280x800 MAIN] [ours @ (1280,0) 1600x1000]
-```
+Restoring the arrangement is the point rather than a side effect. That state is
+whatever was last set in System Settings by the person using the Mac, including
+which display is primary and where the windows on it were; a display that came
+back somewhere else on every agent restart would be the invasive one. So the
+agent takes the arrangement macOS hands it and reports what it finds, and a
+session starting on the main display starts on whichever display the Mac
+currently calls main.
 
-Extended, to the right, primary untouched, the real screen untouched — which is
-what plugging in a monitor does. There is no API for any of this: nothing on
-`CGVirtualDisplayDescriptor` or `CGVirtualDisplaySettings` places a display or
-declines the primary role, so the identity is the only lever, and the arrangement
-cannot be cleared from inside the process once it is wrong.
+It is also the reason the configured size is an **initial** size:
+`virtual_display_initial_size` is the size this display is created at the first
+time a Mac sees it, and after that the remembered mode wins. Editing the setting
+will not move a display that has already been arranged, and the agent never
+applies a second configuration to one — see Resolution above, and the VM display
+stack in [`known-issues.md`](known-issues.md) for why asking twice is unwise. What
+the setting fixes permanently is the *ceiling*, because `maxPixels` and
+`sizeInMillimeters` cannot be changed after creation.
 
-The cost is that nothing about our display persists across an agent restart, so
-windows left on it come back where macOS puts them. A stable serial bought that
-persistence and this is the better trade: a remembered desktop is not worth
-rearranging the machine to get, and it also means no session has to work around
-being handed our display as the main one.
+The one thing the arrangement can do that nothing here can undo is remember the
+display as **offline**, which is in [`known-issues.md`](known-issues.md); that is
+what `create` retries once with an unseen identity for.
 
-What this costs in practice — the ways macOS can leave such a display unusable —
-is in [`known-issues.md`](known-issues.md).
+There is no API alternative to any of this. Nothing on
+`CGVirtualDisplayDescriptor` or `CGVirtualDisplaySettings` places a display,
+declines the primary role, or clears remembered state — the identity is the only
+lever there is.
 
 ## Input
 

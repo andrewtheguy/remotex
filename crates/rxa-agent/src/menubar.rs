@@ -242,7 +242,7 @@ define_class!(
                 listen: saved.listen.clone(),
                 psk: saved.psk.clone(),
                 virtual_display: saved.virtual_display,
-                virtual_size: saved.virtual_display_size.clone(),
+                virtual_size: saved.virtual_display_initial_size.clone(),
             };
 
             loop {
@@ -253,7 +253,7 @@ define_class!(
                     listen: edited.listen.clone(),
                     psk: edited.psk.clone(),
                     virtual_display: edited.virtual_display,
-                    virtual_display_size: edited.virtual_size.clone(),
+                    virtual_display_initial_size: edited.virtual_size.clone(),
                 };
                 match settings.apply(next) {
                     // Nothing changed, so there is nothing to restart into and no

@@ -98,7 +98,8 @@ Its menu provides:
 - connection and listen-address status;
 - PSK copy;
 - settings: listen address, a read-only list of the displays this Mac can share,
-  whether to add a private 2x display of the agent's own, and the PSK;
+  whether to add a private 2x display of the agent's own, that display's
+  **initial** size, and the PSK;
 - config and log shortcuts;
 - permission shortcuts;
 - the **Start at Login** toggle and **Quit**.
@@ -159,7 +160,15 @@ The agent mirrors one whole display at a time and does not resize it to the
 browser viewport. Which display is chosen from the remotex viewer or the browser,
 per session, not in the agent's settings — so there is no display setting here,
 and a `config.toml` left over from an earlier version must have its `display = N`
-line **removed by hand** or the agent refuses to start.
+line **removed by hand** or the agent refuses to start. The same goes for
+`virtual_display_size`, which is now `virtual_display_initial_size`.
+
+"Initial" is the whole of how that size behaves: it is what the private display is
+created at the first time this Mac sees it. After that its resolution is the Mac's
+like any other screen's — set it in System Settings > Displays, where macOS
+remembers it against the display and restores it on the next launch. Editing the
+setting will not move a display that has already been arranged; what it fixes
+permanently is the largest mode that display can ever render at 2x.
 
 See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
 for the capture, transport, and lifecycle design.

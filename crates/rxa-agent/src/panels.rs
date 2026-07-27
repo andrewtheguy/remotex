@@ -169,12 +169,19 @@ pub fn config(mtm: MainThreadMarker, current: &Draft, displays: &[String]) -> Op
     // Only meaningful with the box above ticked, and left enabled regardless: a
     // field that greys out as a checkbox is toggled is more startling than one
     // whose value simply does not apply yet.
-    view.addSubview(&label(mtm, "Virtual size", row(3)));
+    //
+    // "Initial" is in the label rather than only the tooltip, because the field
+    // otherwise reads as the display's current resolution — which it stops being
+    // the moment anyone changes that display in System Settings.
+    view.addSubview(&label(mtm, "Initial size", row(3)));
     let virtual_size = field(mtm, &current.virtual_size, row(3), WIDTH - CONTROL_X, false);
     virtual_size.setToolTip(Some(&NSString::from_str(
-        "The size the virtual display comes up at, in points, WIDTHxHEIGHT — and \
-         the largest mode macOS can render on it at 2x. Change its resolution \
-         afterwards in System Settings > Displays.",
+        "The size the virtual display is created at the first time this Mac sees \
+         it, in points, WIDTHxHEIGHT — and the largest mode macOS can ever render \
+         on it at 2x.\n\nAfter that its resolution is the Mac's, like any other \
+         screen: change it in System Settings > Displays, where macOS also \
+         remembers it. Editing this will not move a display already arranged \
+         there.",
     )));
     view.addSubview(&virtual_size);
 
