@@ -70,6 +70,12 @@ const SECURITY_ARD: u8 = 30;
 /// (a 1024-bit prime); the cap is what keeps a bogus length from turning into
 /// a huge allocation and a very slow modular exponentiation.
 const MAX_ARD_KEY_BYTES: usize = 512;
+/// Smallest DH key length accepted, in bytes. The server picks the group, and
+/// what rides inside it is an account password, so a small prime is not a
+/// server being frugal — it is a shared secret anyone watching the wire can
+/// recover. 64 bytes (512 bits) is far below the 128 macOS sends and still
+/// beyond reach.
+const MIN_ARD_KEY_BYTES: usize = 64;
 /// Apple's credential blob: `username[64]`, then `password[64]`, each
 /// null-terminated, the remainder random.
 const ARD_CREDENTIALS_LEN: usize = 128;
@@ -1365,13 +1371,33 @@ async fn ard_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let generator = reader.read_u16().await?;
     let key_len = usize::from(reader.read_u16().await?);
     anyhow::ensure!(
-        (1..=MAX_ARD_KEY_BYTES).contains(&key_len),
-        "VNC server offered a {key_len}-byte DH key, outside the 1..={MAX_ARD_KEY_BYTES} accepted"
+        (MIN_ARD_KEY_BYTES..=MAX_ARD_KEY_BYTES).contains(&key_len),
+        "VNC server offered a {key_len}-byte DH key, outside the \
+         {MIN_ARD_KEY_BYTES}..={MAX_ARD_KEY_BYTES} accepted"
     );
     let mut prime = vec![0u8; key_len];
     reader.read_exact(&mut prime).await?;
     let mut peer_public = vec![0u8; key_len];
     reader.read_exact(&mut peer_public).await?;
+    // A zero modulus is not a weak group but an arithmetic impossibility, and
+    // `BigUint::modpow` answers it with a panic rather than a value — so it has
+    // to be refused here, before the exchange, and not inside it.
+    anyhow::ensure!(
+        prime.iter().any(|&b| b != 0),
+        "VNC server offered a zero DH prime"
+    );
+    // And the server's public key has to be a real member of that group. The
+    // degenerate ones — 0, 1, and p-1 — each collapse the shared secret to a
+    // value anyone watching the exchange can work out for themselves, which
+    // costs the account password its only cover on the wire. Parsed twice
+    // rather than threaded into [`ard_exchange`], so the arithmetic stays a
+    // pure function of bytes and this stays where the rest of the refusals are.
+    let modulus = BigUint::from_bytes_be(&prime);
+    let peer = BigUint::from_bytes_be(&peer_public);
+    anyhow::ensure!(
+        peer > BigUint::from(1u8) && peer < modulus - 1u8,
+        "VNC server offered a degenerate DH public key"
+    );
     debug!("vnc: Apple DH authentication as {username:?}, {}-bit prime", key_len * 8);
 
     let mut rng = rand::rng();
@@ -1708,6 +1734,69 @@ mod tests {
         }
         assert_eq!(&plain[..7], b"andrew\0");
         assert_eq!(&plain[64..72], b"hunter2\0");
+    }
+
+    /// The server chooses the group and we have to live in it, so every way that
+    /// choice can be unusable is refused before any arithmetic: a prime small
+    /// enough to break — with an account password riding inside it — a zero one,
+    /// which `BigUint::modpow` answers with a panic rather than a number, and a
+    /// public key whose shared secret anyone could predict.
+    #[tokio::test]
+    async fn a_degenerate_dh_group_is_refused_before_the_exchange() {
+        let offer_with = |key_len: usize, prime_byte: u8, peer: &[u8]| {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&2u16.to_be_bytes());
+            bytes.extend_from_slice(&u16::try_from(key_len).unwrap().to_be_bytes());
+            bytes.extend(std::iter::repeat_n(prime_byte, key_len)); // prime
+            let mut public = vec![0u8; key_len - peer.len()];
+            public.extend_from_slice(peer);
+            bytes.extend_from_slice(&public);
+            bytes
+        };
+        let offer = |key_len: usize, prime_byte: u8| offer_with(key_len, prime_byte, &[3]);
+        let authenticate = async |bytes: Vec<u8>| {
+            let mut sent = Vec::new();
+            let result = ard_authenticate(&mut bytes.as_slice(), &mut sent, "andrew", "pw").await;
+            assert!(sent.is_empty(), "nothing may be sent under a bad group");
+            format!("{:#}", result.unwrap_err())
+        };
+
+        let too_small = authenticate(offer(MIN_ARD_KEY_BYTES - 1, 0xff)).await;
+        assert!(too_small.contains("outside the"), "{too_small}");
+        let too_large = authenticate(offer(MAX_ARD_KEY_BYTES + 1, 0xff)).await;
+        assert!(too_large.contains("outside the"), "{too_large}");
+        // Long enough, and still no group at all.
+        let zero = authenticate(offer(MIN_ARD_KEY_BYTES, 0)).await;
+        assert!(zero.contains("zero DH prime"), "{zero}");
+
+        // A sound group, and a public key that gives the secret away: 0 and 1
+        // fix it outright, and p-1 leaves it one of two values.
+        let p_minus_one = {
+            let mut bytes = vec![0xffu8; MIN_ARD_KEY_BYTES];
+            *bytes.last_mut().unwrap() = 0xfe;
+            bytes
+        };
+        for peer in [
+            vec![0u8],
+            vec![1u8],
+            p_minus_one,                   // leaves the secret one of two values
+            vec![0xff; MIN_ARD_KEY_BYTES], // p itself, whose secret is always 0
+        ] {
+            let msg = authenticate(offer_with(MIN_ARD_KEY_BYTES, 0xff, &peer)).await;
+            assert!(msg.contains("degenerate DH public key"), "peer {peer:02x?}: {msg}");
+        }
+        // The neighbours of those values are accepted: the check is a floor and
+        // a ceiling, not a filter on anything that looks unusual.
+        let mut sent = Vec::new();
+        ard_authenticate(
+            &mut offer_with(MIN_ARD_KEY_BYTES, 0xff, &[2]).as_slice(),
+            &mut sent,
+            "andrew",
+            "pw",
+        )
+        .await
+        .unwrap();
+        assert_eq!(sent.len(), ARD_CREDENTIALS_LEN + MIN_ARD_KEY_BYTES);
     }
 
     #[test]
