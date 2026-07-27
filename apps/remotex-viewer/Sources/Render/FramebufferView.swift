@@ -38,8 +38,10 @@ final class FramebufferView: MTKView {
     ///
     /// Nothing else follows from it: neither the drawable (which tracks the remote)
     /// nor this view's point size (the remote's own — see `RemoteGeometry`) depends
-    /// on the host's density, so the desktop keeps its size across the move and the
-    /// layer just resamples it for the new screen.
+    /// on the host's density, so the desktop keeps its physical size across the move
+    /// and this one line is the whole of switching density with it — the layer now
+    /// rasterizes at the new screen's scale, magnifying a 1x remote onto a Retina
+    /// display and halving a Retina remote onto a 1x one.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         layer?.contentsScale = window?.backingScaleFactor ?? 1

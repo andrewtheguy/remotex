@@ -302,10 +302,13 @@ waits for an explicit takeover; an evicted tab waits for an explicit reclaim.
 Desktop rendering presents the remote at its own size — `resize` carries the
 density the remote draws at, and the canvas is that many framebuffer pixels per
 CSS pixel — and uses scrollbars when the desktop is larger than the viewport. The
-ratio between that density and the display's is what scales the picture: equal
-densities are 1:1 in device pixels, a coarser remote is magnified, a denser one
-reduced. A window moved between displays of different scale needs no
-re-derivation. Viewport reports are in the remote's pixels for the same reason.
+ratio between that density and the host display's is what scales the picture,
+automatically and in both directions: a 1x guest on a Retina host is magnified 2x
+and soft, a Retina guest on a 1x host is reduced to half and sharp, and equal
+densities are 1:1 in device pixels with nothing resampled. A window dragged
+between displays of different scale switches between those on its own and needs
+no re-derivation — the browser rasterizes the same CSS size at the new density.
+Viewport reports are in the remote's pixels for the same reason.
 Touch devices use fit-to-width rendering with pinch zoom, pan, a virtual cursor,
 and multi-finger gestures. View transforms affect presentation and input
 coordinate mapping, not framebuffer resolution.

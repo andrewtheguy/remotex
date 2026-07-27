@@ -52,7 +52,9 @@ final class RemoteSurfaceView: NSView {
 
     /// The remote's own density: framebuffer pixels per point of *its* desktop,
     /// from the same `resize` as `remoteSize`. Never this window's backing scale —
-    /// see `RemoteGeometry`.
+    /// laying out in the remote's density is what lets the host's apply itself on
+    /// top, in either direction, when the window changes display. See
+    /// `RemoteGeometry`.
     var guestScale: CGFloat = 1 {
         didSet {
             guard guestScale != oldValue else {

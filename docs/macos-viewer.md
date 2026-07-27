@@ -100,12 +100,22 @@ rectangle outright. A remote larger than the window scrolls; it is never scaled 
 fit, and zoom is out of scope.
 
 The framebuffer *view* is laid out at the remote's own point size — its pixels
-over the density `resize` reports — so the layer resamples the drawable for
-whichever display the window is on. Equal densities land on one texel per device
-pixel; a 1x remote on a Retina Mac is magnified rather than drawn at half its
-physical size, and a Retina remote on a 1x display is reduced rather than drawn at
-twice it. Nothing is re-derived when the window changes display, only
-`layer.contentsScale`.
+over the density `resize` reports — so the layer rasterizes the drawable for
+whichever display the window is on. The picture is therefore scaled by the ratio
+between the remote's density and the host display's, automatically and in both
+directions:
+
+| guest | host | result |
+|---|---|---|
+| 1x | Retina | magnified 2x, soft — there are no more pixels to have |
+| Retina | 1x | reduced to half, downsampled and sharp |
+| equal | equal | one texel per device pixel, nothing resampled |
+
+Dragging the window between a Retina display and a 1x one switches between those
+by itself: the desktop keeps its physical size, nothing is re-derived, and
+`layer.contentsScale` is the only thing that changes. Laying the view out in the
+host's backing scale instead is what would break this — a 1x remote would come out
+at half its physical size on a Retina Mac rather than magnified.
 
 Two ordering facts the port depends on, both covered by tests because neither can
 be inferred by reading:

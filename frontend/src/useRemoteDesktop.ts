@@ -112,17 +112,25 @@ const MAX_RETRY_DELAY_MS = 15_000;
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
 // Full-screen canvas: display the framebuffer at the remote's own size —
-// CSS size = remote pixels / the remote's density. The browser then resamples
-// that to whatever screen it is on, which is what scales the picture: a remote
-// coarser than the display is magnified (blurry, as every remote desktop client
-// is), a denser one is reduced rather than drawn at twice its size, and equal
-// densities land on 1:1 device pixels. No letterboxing; when the desktop is
-// larger than the viewport the canvas overflows and the screen container scrolls.
+// CSS size = remote pixels / the remote's density. The browser rasterizes that
+// for whichever screen it is on, so the picture is scaled by the ratio between
+// the two densities, automatically and in both directions:
 //
-// Deliberately not `devicePixelRatio`, which is what this divided by before: a
-// canvas sized by the *host's* density is a desktop drawn at the host's density,
-// so a 1x guest came out at half its physical size on a Retina screen and moving
-// the window between displays switched between the two.
+//   1x guest,     Retina host -> magnified 2x, soft (as every remote desktop
+//                                client is: there are no more pixels to have)
+//   Retina guest, 1x host     -> reduced to half, downsampled and sharp
+//   equal densities           -> one framebuffer pixel per device pixel,
+//                                nothing resampled
+//
+// Dragging the window to a display of a different density switches between
+// those on its own, which is why `devicePixelRatio` appears nowhere in this
+// file. Following the host's density is the behaviour; not naming it is how it
+// is obtained. Dividing by it here, as this did once, is what *broke* the table
+// above — the canvas was then sized in the host's device pixels, so a 1x guest
+// came out at half its physical size on a Retina screen instead of magnified.
+//
+// No letterboxing; when the desktop is larger than the viewport the canvas
+// overflows and the screen container scrolls.
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
@@ -902,11 +910,12 @@ export function useRemoteDesktop(
     };
     window.addEventListener("resize", onViewportChange);
 
-    // Deliberately no devicePixelRatio watcher. Moving the window between
-    // monitors of different scale used to have to re-derive the canvas CSS size,
-    // because that size was in the host's device pixels; it is in the remote's
-    // points now, so the desktop keeps its size across the move and the browser
-    // resamples it for the new screen on its own.
+    // No devicePixelRatio watcher, and the desktop follows the host's density
+    // anyway: the canvas is sized in the remote's points, so a window dragged
+    // between monitors of different scale is re-rasterized at the new one by the
+    // browser — a 1x guest magnifying on Retina, a Retina guest halving on a 1x
+    // screen — with its physical size unchanged. A watcher was only needed back
+    // when this size was in the host's device pixels and had to be recomputed.
 
     return () => {
       disposed = true;

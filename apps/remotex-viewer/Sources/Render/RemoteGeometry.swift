@@ -8,11 +8,25 @@ import Foundation
 ///
 /// Everything here is in the *remote's* terms: its pixels, and its own points —
 /// `guestScale` framebuffer pixels to one of them, which is what `resize` carries
-/// (1 for VNC, RDP and a 1x Mac; 2 for a Retina Mac). The host display's backing
-/// scale appears nowhere on purpose. A remote is laid out at its own point size
-/// and the host resamples that to whatever screen the window is on, so a desktop
-/// keeps its physical size when the window moves between a Retina display and a
-/// 1x one — and nothing here has to be re-derived when it does.
+/// (1 for VNC, RDP and a 1x Mac; 2 for a Retina Mac).
+///
+/// The host display's backing scale appears in none of this arithmetic, and that
+/// is precisely how the desktop comes to follow it. A remote laid out at its own
+/// point size is rasterized by AppKit for whichever screen the window is on, so
+/// the picture is scaled by the ratio between the two densities:
+///
+/// | guest | host | result |
+/// |---|---|---|
+/// | 1x | Retina | magnified 2x, soft — there are no more pixels to have |
+/// | Retina | 1x | reduced to half, downsampled and sharp |
+/// | equal | equal | one framebuffer pixel per device pixel, nothing resampled |
+///
+/// Moving the window between a Retina display and a 1x one switches between those
+/// automatically, with the desktop's physical size unchanged and nothing here
+/// re-derived; `layer.contentsScale` is the only thing that follows the move, in
+/// `FramebufferView`. Laying out in the host's backing scale instead — which this
+/// did once — is what breaks the table: a 1x guest then came out at half its
+/// physical size on a Retina screen rather than magnified.
 enum RemoteGeometry {
     /// The remote's size in points: its own logical size, whatever display the
     /// window showing it is on.
