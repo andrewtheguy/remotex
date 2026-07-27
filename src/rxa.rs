@@ -19,6 +19,11 @@
 //! shared session layer ends the engine when the browser stays absent; RXA's
 //! own ping/pong detects a half-open agent link and drives reconnection.
 //!
+//! Silently, but not forever: see [`RECONNECT_GIVE_UP`]. The link that comes back
+//! is the one worth hiding, and a Mac that was switched off or had its lid closed
+//! never does — retrying it indefinitely left the browser holding a frozen
+//! desktop that claimed to be live, which is worse than the picker and an error.
+//!
 //! An *initial* connect failure is still fatal and reported: a wrong host or a
 //! wrong PSK has to be visible immediately, not hidden behind an infinite retry.
 
@@ -27,13 +32,12 @@ use std::time::Duration;
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
 use rxa_proto::msg::{AgentMsg, GatewayMsg};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 
 use crate::config::TargetConfig;
-use crate::engine::{clamp_u16, host_port};
+use crate::engine::{self, clamp_u16, host_port};
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, MouseButton, ServerMsg, Tile, clipboard_fits,
 };
@@ -47,9 +51,55 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(15);
 
-/// Application-level keepalive. `SO_KEEPALIVE` would take minutes to notice a
-/// half-open TCP connection — a Wi-Fi drop where no FIN ever arrives — which is
-/// exactly the failure this project is about.
+/// How long an established link may stay down before the browser is told.
+///
+/// The silent retry exists for the link that comes back — a Wi-Fi roam, a DHCP
+/// renewal, an agent restarting after a settings save. A Mac that was switched
+/// off, or whose lid was closed, never does, and retrying it forever leaves a
+/// frozen desktop on screen claiming to be live. That is worse than the picker.
+///
+/// Twice [`BACKOFF_MAX`], so the window always holds at least five attempts
+/// (t ≈ 1, 3, 7, 15, 30) including one at the cap, and under the session layer's
+/// 60-second reattach grace, so the user learns the reason rather than watching
+/// the engine expire for an unrelated one.
+///
+/// Measured from the moment the link dropped and restarted by a successful
+/// connect, which means the agent answered a handshake and sent `Hello`. An agent
+/// that does that and dies immediately, over and over, is still retried
+/// indefinitely — a flap is not something this bound tries to catch.
+const RECONNECT_GIVE_UP: Duration = Duration::from_secs(30);
+
+/// The reconnect policy, as a value so tests can shrink the clock.
+///
+/// Injected rather than read from the constants directly for the same reason
+/// [`crate::ws`] injects its heartbeat timings — and here it is the only option:
+/// each engine runs on its own thread with its own current-thread runtime (see
+/// [`crate::session`]), so `tokio::time::pause` in a test cannot reach this
+/// timer, and a test on the real constants would take half a minute.
+#[derive(Clone, Copy)]
+struct Retry {
+    backoff_min: Duration,
+    backoff_max: Duration,
+    give_up_after: Duration,
+}
+
+const RETRY: Retry = Retry {
+    backoff_min: BACKOFF_MIN,
+    backoff_max: BACKOFF_MAX,
+    give_up_after: RECONNECT_GIVE_UP,
+};
+
+/// Application-level keepalive, on top of the socket's own.
+///
+/// [`crate::engine`] arms `SO_KEEPALIVE` with a roughly 25-second budget, which
+/// is what the *kernel* can promise: that the agent's host is still answering.
+/// This ping is both faster and different in kind — it is answered by the agent
+/// process, so it also catches a Mac that is reachable while the agent is wedged,
+/// which is the failure keepalive is blind to.
+///
+/// It is also why this engine's own socket keepalive effectively never arms: a
+/// ping every five seconds means the connection is never idle, and idle is the
+/// only state the kernel probes in.
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 /// A link with no `Pong` for this long is treated as dead and reconnected.
 const PONG_TIMEOUT: Duration = Duration::from_secs(15);
@@ -67,6 +117,15 @@ const AGENT_BUFFER: usize = 32;
 /// broken agent link is retried, not reported.
 pub async fn run(
     config: TargetConfig,
+    input_rx: mpsc::UnboundedReceiver<ClientMsg>,
+    frame_tx: mpsc::Sender<ServerMsg>,
+) {
+    run_with(config, RETRY, input_rx, frame_tx).await
+}
+
+async fn run_with(
+    config: TargetConfig,
+    retry: Retry,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
@@ -98,7 +157,7 @@ pub async fn run(
         }
     };
 
-    let mut backoff = BACKOFF_MIN;
+    let mut backoff = retry.backoff_min;
     // What the browser has been told about the desktop, carried across
     // reconnects: a `Resize` costs the frontend its canvas contents, so a silent
     // reconnect to an unchanged display must not announce one.
@@ -131,6 +190,9 @@ pub async fn run(
             Err(e) => warn!("rxa: link lost: {e:#}"),
         }
 
+        // Restarted per outage, which is what makes a successful reconnect reset
+        // the window — see [`RECONNECT_GIVE_UP`].
+        let lost_at = Instant::now();
         session = loop {
             if !idle(backoff, &mut input_rx, &frame_tx).await {
                 info!("rxa: session ended while reconnecting");
@@ -140,11 +202,31 @@ pub async fn run(
                 Ok(session) => break session,
                 Err(e) => {
                     debug!("rxa: reconnect failed, retrying: {e:#}");
-                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                    // Checked after the attempt, so a link that is down for less
+                    // than the window always gets at least one try at coming back.
+                    if lost_at.elapsed() >= retry.give_up_after {
+                        warn!(
+                            "rxa: giving up on the agent link after {}s",
+                            lost_at.elapsed().as_secs()
+                        );
+                        let _ = frame_tx
+                            .send(ServerMsg::Error {
+                                message: format!(
+                                    "the Mac agent did not come back within {}s",
+                                    retry.give_up_after.as_secs()
+                                ),
+                            })
+                            .await;
+                        // Returning drops `frame_tx`, and the session layer turns
+                        // that into a `Picker` for the browser (see
+                        // [`crate::session`]).
+                        return;
+                    }
+                    backoff = (backoff * 2).min(retry.backoff_max);
                 }
             }
         };
-        backoff = BACKOFF_MIN;
+        backoff = retry.backoff_min;
     }
 }
 
@@ -170,11 +252,7 @@ struct Session {
 async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Session> {
     let dest = host_port(&config.host, config.port);
     timeout(CONNECT_TIMEOUT, async {
-        let mut stream = TcpStream::connect(&dest)
-            .await
-            .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}"))?;
-        // Input events are tiny and latency-critical; never coalesce them.
-        stream.set_nodelay(true).ok();
+        let mut stream = engine::tcp_connect(&dest).await?;
 
         let transport = rxa_proto::noise::initiate(&mut stream, psk)
             .await
@@ -573,6 +651,130 @@ async fn idle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A policy with the same shape as [`RETRY`] and a clock a test can wait on.
+    ///
+    /// The real one gives up after 30 seconds; nothing here should take longer
+    /// than a blink. See [`Retry`] for why this is injected rather than paused.
+    const FAST_RETRY: Retry = Retry {
+        backoff_min: Duration::from_millis(10),
+        backoff_max: Duration::from_millis(20),
+        give_up_after: Duration::from_millis(100),
+    };
+
+    fn rxa_target(port: u16, psk: &str) -> TargetConfig {
+        TargetConfig {
+            name: "mac".to_owned(),
+            protocol: crate::config::Protocol::Rxa,
+            host: "127.0.0.1".to_owned(),
+            port,
+            username: String::new(),
+            password: String::new(),
+            domain: None,
+            width: 1,
+            height: 1,
+            security: crate::config::Security::Auto,
+            resize: false,
+            clipboard: false,
+            psk: psk.to_owned(),
+        }
+    }
+
+    /// Serve one link — handshake, `Hello`, one paint — then hang up.
+    ///
+    /// The listener is returned so the caller decides whether the agent ever
+    /// comes back: dropping it is a Mac that was switched off, keeping it is one
+    /// whose link merely blipped.
+    async fn serve_one_link(listener: &tokio::net::TcpListener, psk: [u8; 32]) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let transport = rxa_proto::noise::respond(&mut stream, &psk).await.unwrap();
+        let (read_half, write_half) = stream.into_split();
+        let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
+        writer
+            .send(
+                &AgentMsg::Hello {
+                    version: rxa_proto::VERSION,
+                    agent_version: "fake-agent".to_owned(),
+                    w: 800,
+                    h: 600,
+                    scale: rxa_proto::msg::SCALE_ONE,
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        // The gateway asks for the stream before any pixels flow.
+        match GatewayMsg::decode(&reader.recv().await.unwrap()).unwrap() {
+            GatewayMsg::Attach => {}
+            other => panic!("expected Attach, got {other:?}"),
+        }
+    }
+
+    // The bug this bound exists for: a Mac that is switched off was retried
+    // forever while the browser held a frozen desktop that claimed to be live.
+    #[tokio::test]
+    async fn an_agent_that_never_comes_back_is_reported_instead_of_retried_forever() {
+        let psk_text = rxa_proto::psk::generate();
+        let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let agent = tokio::spawn(async move {
+            serve_one_link(&listener, psk).await;
+            // Everything goes, listener included: nothing will answer again.
+        });
+
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let (frame_tx, mut frame_rx) = mpsc::channel(16);
+        run_with(rxa_target(port, &psk_text), FAST_RETRY, input_rx, frame_tx).await;
+        agent.await.unwrap();
+
+        // `run_with` returning at all is half the point — that is what drops
+        // `frame_tx` and lands the browser on the picker.
+        let mut reported = None;
+        while let Ok(msg) = frame_rx.try_recv() {
+            if let ServerMsg::Error { message } = msg {
+                reported = Some(message);
+            }
+        }
+        let message = reported.expect("the browser was told nothing");
+        assert!(message.contains("did not come back"), "{message}");
+    }
+
+    // And the behaviour that must survive it: a link that comes back is still a
+    // non-event, which is the whole reason the silent retry exists.
+    #[tokio::test]
+    async fn a_reconnect_that_succeeds_restarts_the_give_up_window() {
+        let psk_text = rxa_proto::psk::generate();
+        let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let agent = tokio::spawn(async move {
+            // Hang up twice, each time well inside the window, then stop
+            // answering. A bound measured from the *first* outage rather than
+            // per-outage would have given up during this.
+            for _ in 0..3 {
+                serve_one_link(&listener, psk).await;
+            }
+        });
+
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let (frame_tx, mut frame_rx) = mpsc::channel(16);
+        run_with(rxa_target(port, &psk_text), FAST_RETRY, input_rx, frame_tx).await;
+        agent.await.unwrap();
+
+        // It still ends up reporting — the agent stops answering eventually —
+        // but only after all three links were served, which is what says the
+        // window restarted rather than running from the first drop.
+        let mut errors = 0;
+        while let Ok(msg) = frame_rx.try_recv() {
+            if matches!(msg, ServerMsg::Error { .. }) {
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, 1, "exactly one report, after the last link");
+    }
 
     #[test]
     fn pointer_moves_carry_clamped_framebuffer_coordinates() {

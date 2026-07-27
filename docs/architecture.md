@@ -140,6 +140,26 @@ wait has already consumed the reattach grace period. An orderly WebSocket close
 starts a fresh 60-second reattach window. These frames are transport-level and
 do not appear in the JSON browser protocol.
 
+The connection out to a remote gets the matching treatment, in one place for all
+three protocols (`src/engine.rs`). Every engine socket is opened through the same
+helper: `TCP_NODELAY`, a 20-second connect budget, a 30-second handshake budget,
+and TCP keepalive tuned to notice silence — probing after 10 seconds idle, every
+5 seconds, giving up after 3 unanswered probes, so a host that stops answering is
+reported in about 25 seconds instead of the kernel default's couple of hours.
+Without it a host that vanishes with no FIN — powered off, or cut off — leaves
+the engine blocked on a read forever and the client holding a frozen desktop with
+nothing to say. On Linux the socket also gets a 30-second `TCP_USER_TIMEOUT`,
+because keepalive probes are only sent on an *idle* connection: the moment
+somebody clicks at a desktop that has frozen, unacknowledged data makes the
+retransmission budget own the socket instead, and that runs to about fifteen
+minutes. macOS has no equivalent option.
+
+What this proves is narrow: that the peer's kernel is still answering. For RDP and
+VNC that is all there is, so a remote whose kernel answers while its server
+process is wedged still reads as an idle desktop. RXA asks the agent process
+itself as well, which closes that half for it — see
+[`known-issues.md`](known-issues.md) for what each one still misses.
+
 ## Engines
 
 ### RDP
@@ -203,7 +223,9 @@ and encodes the Mac display, and the gateway relays its tiles. Established
 connections retry with capped backoff after transient failures and request a
 repaint on recovery. Input generated while disconnected is discarded. Initial
 connection and authentication failures return to the picker instead of
-retrying indefinitely.
+retrying indefinitely, and so does an established link that stays down for 30
+seconds — long enough to hide a Wi-Fi roam or an agent restart, short enough that
+a Mac which was switched off does not leave a frozen desktop on screen.
 
 Nothing on this wire asks the Mac to change resolution, and `resize = true` on
 an `rxa` target is a config error. The Mac's mode is changed on the Mac — in
@@ -213,7 +235,11 @@ new size when it sees it. See
 [`mac-agent-architecture.md`](mac-agent-architecture.md).
 
 RXA has a separate application ping/pong between the gateway and agent to detect
-a half-open agent TCP connection quickly and reconnect it. Browser lifetime
+a half-open agent TCP connection quickly and reconnect it — faster than the
+socket keepalive every engine gets, and answered by the agent process rather than
+its kernel, so it also catches a Mac that is reachable while the agent is wedged.
+Because that ping goes out every five seconds, this engine's own socket is never
+idle and its keepalive timer effectively never arms. Browser lifetime
 remains owned by the shared session layer under the same rules as RDP and VNC.
 When that layer ends an RXA engine, it closes the agent connection, stops
 capture, and clears the agent's sharing status.

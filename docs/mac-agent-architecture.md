@@ -165,10 +165,17 @@ agent answers with an RXA pong; a silent agent link is reconnected after its
 a silent gateway.
 
 When an established agent link drops while the browser remains live, the
-gateway reconnects with capped backoff. On recovery it requests a full repaint
-and reports a resize only if the display dimensions changed. Input accumulated
-during an outage is discarded. An initial connection or authentication failure
-is reported immediately.
+gateway reconnects with capped backoff, for up to 30 seconds. On recovery it
+requests a full repaint and reports a resize only if the display dimensions
+changed. Input accumulated during an outage is discarded. An initial connection
+or authentication failure is reported immediately.
+
+Past 30 seconds the browser is told and lands on the picker with the reason. The
+silent reconnect is for the link that comes back — a Wi-Fi roam, a settings save
+restarting the agent — and a Mac that was switched off or had its lid closed does
+not. Retrying it indefinitely left the browser holding a frozen desktop with
+nothing to say. The window is measured per outage, so a link that comes back
+resets it.
 
 Saving settings restarts the agent so address, display, and key changes take
 effect together. A deliberate quit stays stopped; crashes are restarted by

@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.36"
+version = "0.0.37"
 
 [package]
 name = "remotex"
@@ -64,6 +64,13 @@ des = "0.8"
 # (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no
 # new dependency.
 flate2 = "1"
+# Tuned TCP keepalive on every engine socket (src/engine.rs), so a remote host
+# that is switched off — no FIN, no RST, just silence — is noticed in seconds
+# rather than the kernel default's couple of hours. Already in the tree behind
+# tokio, so this costs no new dependency. The `all` feature is not optional
+# decoration: `with_retries`, the `tcp_keepalive_*` getters the test reads back,
+# and Linux's `TCP_USER_TIMEOUT` all live behind it.
+socket2 = { version = "0.6", features = ["all"] }
 
 # The wire protocol shared with the macOS agent (src/rxa.rs, crates/rxa-agent).
 # In-repo so the two halves cannot drift — see docs/mac-agent-architecture.md.
