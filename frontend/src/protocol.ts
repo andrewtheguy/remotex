@@ -7,8 +7,9 @@
 export type MouseButton = "left" | "middle" | "right";
 
 // Browser -> server: input events captured over the remote canvas, plus
-// viewport reports (the desired remote desktop size in device pixels —
-// engines that support dynamic resize act on them, the rest ignore them).
+// viewport reports (the desired remote desktop size, in the *remote's* pixels:
+// the room the browser has times the density the remote draws at — engines that
+// support dynamic resize act on them, the rest ignore them).
 export type ClientMsg =
   | { type: "mouseMove"; x: number; y: number }
   | { type: "mouseButton"; button: MouseButton; pressed: boolean }
@@ -63,7 +64,11 @@ export interface RemoteClipboard extends ClipboardSnapshot {
 // come from the engine; `picker`/`connected` are the session-slot status the
 // server sends so the browser knows which post-login state it is in.
 export type ControlMsg =
-  | { type: "resize"; w: number; h: number }
+  // `w`/`h` are framebuffer pixels; `scale` is how many of them the remote draws
+  // per point of its *own* desktop (1 for VNC, RDP and a 1x Mac, 2 for a Retina
+  // one). The canvas is presented at `w / scale` CSS pixels, so the desktop keeps
+  // its physical size whatever the density of the screen showing it.
+  | { type: "resize"; w: number; h: number; scale: number }
   // The remote pointer shape, sent only by engines whose server hands the
   // cursor over instead of drawing it into the framebuffer (the VNC Cursor
   // pseudo-encoding). Receiving one at all means the browser owns pointer

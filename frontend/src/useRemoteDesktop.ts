@@ -44,6 +44,10 @@ export type SessionMode = "picker" | "desktop";
 export interface RemoteSize {
   w: number;
   h: number;
+  // How many of those pixels the remote draws per point of its own desktop: 1 for
+  // VNC, RDP and a 1x Mac, 2 for a Retina one. Here rather than alongside because
+  // neither number presents the desktop without the other.
+  scale: number;
 }
 
 // Per-tab session identity: lets this tab reclaim its own slot after a drop
@@ -106,10 +110,18 @@ const MAX_RETRY_DELAY_MS = 15_000;
 // never answered at all.
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
-// Full-screen canvas: display the framebuffer at 1:1 device pixels —
-// CSS size = remote pixels / devicePixelRatio. No scaling, no letterboxing;
-// when the remote desktop is larger than the viewport the canvas overflows and
-// the screen container scrolls.
+// Full-screen canvas: display the framebuffer at the remote's own size —
+// CSS size = remote pixels / the remote's density. The browser then resamples
+// that to whatever screen it is on, which is what scales the picture: a remote
+// coarser than the display is magnified (blurry, as every remote desktop client
+// is), a denser one is reduced rather than drawn at twice its size, and equal
+// densities land on 1:1 device pixels. No letterboxing; when the desktop is
+// larger than the viewport the canvas overflows and the screen container scrolls.
+//
+// Deliberately not `devicePixelRatio`, which is what this divided by before: a
+// canvas sized by the *host's* density is a desktop drawn at the host's density,
+// so a 1x guest came out at half its physical size on a Retina screen and moving
+// the window between displays switched between the two.
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
@@ -143,9 +155,9 @@ function applyCanvasCss(
     canvas.style.transform = `translate3d(${view.pan.x}px, ${view.pan.y}px, 0)`;
     return;
   }
-  const dpr = window.devicePixelRatio || 1;
-  let w = size.w / dpr;
-  let h = size.h / dpr;
+  const density = size.scale > 0 ? size.scale : 1;
+  let w = size.w / density;
+  let h = size.h / density;
   // When the remote matched the viewport (dynamic resize), snap to it
   // exactly so fractional-dpr rounding can't spawn phantom scrollbars. The
   // ≤1px scale this introduces is imperceptible.
@@ -345,14 +357,19 @@ async function postClaim(force: boolean): Promise<Response | null> {
 }
 
 // The viewport report sent to the server: the desired remote
-// desktop size, clamped to the protocol's u16 range. Desktop asks for the
-// viewport in device pixels; touch asks for CSS pixels floored per axis at
-// 1024x768 (the mobile bounds — see CAN_PINCH_ZOOM).
-function viewportMsg(): Extract<ClientMsg, { type: "viewport" }> {
+// desktop size, clamped to the protocol's u16 range. Desktop asks in the
+// remote's own pixels — its room in CSS pixels times the density the remote
+// draws at, so a desktop that comes back fills the window and is shown one point
+// per point. Touch asks for CSS pixels floored per axis at 1024x768 (the mobile
+// bounds — see CAN_PINCH_ZOOM), where fit-to-width decides the presentation
+// instead.
+function viewportMsg(
+  guestScale: number,
+): Extract<ClientMsg, { type: "viewport" }> {
   const el = document.documentElement;
-  const dpr = CAN_PINCH_ZOOM ? 1 : window.devicePixelRatio || 1;
+  const density = CAN_PINCH_ZOOM || !(guestScale > 0) ? 1 : guestScale;
   const dim = (cssPx: number, min: number) =>
-    Math.min(65535, Math.max(min, Math.round(cssPx * dpr)));
+    Math.min(65535, Math.max(min, Math.round(cssPx * density)));
   return {
     type: "viewport",
     w: dim(el.clientWidth, CAN_PINCH_ZOOM ? TOUCH_MIN_WIDTH : 1),
@@ -591,7 +608,7 @@ export function useRemoteDesktop(
     // (RDP) the automatic callers are suppressed — an RDP resize triggers a
     // heavy Deactivation-Reactivation, so it happens only when the user asks
     // (`manual: true`, from the menu's "Resize to window").
-    let lastViewport: RemoteSize | null = null;
+    let lastViewport: { w: number; h: number } | null = null;
     const sendViewport = (opts?: { manual?: boolean }) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
@@ -599,7 +616,7 @@ export function useRemoteDesktop(
       if (!opts?.manual && manualResizeRef.current) {
         return;
       }
-      const msg = viewportMsg();
+      const msg = viewportMsg(sizeRef.current?.scale ?? 1);
       if (
         lastViewport &&
         lastViewport.w === msg.w &&
@@ -699,7 +716,7 @@ export function useRemoteDesktop(
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
       const canvas = canvasRef.current;
-      const s = { w: msg.w, h: msg.h };
+      const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
       if (canvas) {
         canvas.width = msg.w;
         canvas.height = msg.h;
@@ -885,31 +902,11 @@ export function useRemoteDesktop(
     };
     window.addEventListener("resize", onViewportChange);
 
-    // devicePixelRatio changes (moving the window between monitors with
-    // different scale factors, browser zoom) must re-derive the canvas CSS
-    // size immediately to keep the 1:1 device-pixel mapping — they don't
-    // reliably fire a resize event. matchMedia only fires when the current
-    // dpr stops matching, so re-arm the query on each change.
-    let dprQuery: MediaQueryList | null = null;
-    const onDprChange = () => {
-      watchDpr();
-      applyCanvasCss(
-        canvasRef.current,
-        sizeRef.current,
-        viewRef.current,
-        bottomInsetRef.current,
-      );
-      syncCursor();
-      onViewportChange();
-    };
-    const watchDpr = () => {
-      dprQuery?.removeEventListener("change", onDprChange);
-      dprQuery = window.matchMedia(
-        `(resolution: ${window.devicePixelRatio || 1}dppx)`,
-      );
-      dprQuery.addEventListener("change", onDprChange);
-    };
-    watchDpr();
+    // Deliberately no devicePixelRatio watcher. Moving the window between
+    // monitors of different scale used to have to re-derive the canvas CSS size,
+    // because that size was in the host's device pixels; it is in the remote's
+    // points now, so the desktop keeps its size across the move and the browser
+    // resamples it for the new screen on its own.
 
     return () => {
       disposed = true;
@@ -920,7 +917,6 @@ export function useRemoteDesktop(
       clearTimeout(retryTimer);
       window.removeEventListener("resize", onViewportChange);
       clearTimeout(resizeTimer);
-      dprQuery?.removeEventListener("change", onDprChange);
       ws?.close();
     };
   }, [canvasRef, onUnauthorized, syncCursor, settleClipboardWaiters]);
