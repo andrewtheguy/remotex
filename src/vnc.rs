@@ -39,7 +39,6 @@ use des::cipher::generic_array::GenericArray;
 use des::cipher::{BlockEncrypt as _, KeyInit as _};
 use log::{debug, info, warn};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
@@ -229,10 +228,7 @@ struct Connected {
 /// pseudo-encodings).
 async fn connect(config: &TargetConfig) -> anyhow::Result<Connected> {
     let dest = host_port(&config.host, config.port);
-    let stream = TcpStream::connect(&dest)
-        .await
-        .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}"))?;
-    stream.set_nodelay(true).ok();
+    let stream = crate::engine::tcp_connect(&dest).await?;
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 

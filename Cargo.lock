@@ -2980,6 +2980,7 @@ dependencies = [
  "rxa-proto",
  "serde",
  "serde_json",
+ "socket2",
  "thiserror",
  "tokio",
  "tokio-rustls",

@@ -27,7 +27,6 @@ use std::time::Duration;
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
 use rxa_proto::msg::{AgentMsg, GatewayMsg};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
@@ -170,11 +169,7 @@ struct Session {
 async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Session> {
     let dest = host_port(&config.host, config.port);
     timeout(CONNECT_TIMEOUT, async {
-        let mut stream = TcpStream::connect(&dest)
-            .await
-            .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}"))?;
-        // Input events are tiny and latency-critical; never coalesce them.
-        stream.set_nodelay(true).ok();
+        let mut stream = crate::engine::tcp_connect(&dest).await?;
 
         let transport = rxa_proto::noise::initiate(&mut stream, psk)
             .await

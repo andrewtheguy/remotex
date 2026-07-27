@@ -35,7 +35,6 @@ use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use ironrdp_tokio::{FramedWrite as _, TokioFramed, single_sequence_step};
 use log::{debug, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
@@ -163,10 +162,7 @@ async fn connect(
     let server_name = config.host.clone();
     let dest = host_port(&config.host, config.port);
 
-    let stream = TcpStream::connect(&dest)
-        .await
-        .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}"))?;
-    stream.set_nodelay(true).ok();
+    let stream = crate::engine::tcp_connect(&dest).await?;
     let client_addr = stream
         .local_addr()
         .map_err(|e| anyhow::anyhow!("get local address: {e}"))?;

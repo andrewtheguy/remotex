@@ -140,6 +140,24 @@ wait has already consumed the reattach grace period. An orderly WebSocket close
 starts a fresh 60-second reattach window. These frames are transport-level and
 do not appear in the JSON browser protocol.
 
+The connection out to a remote gets the matching treatment, in one place for all
+three protocols (`src/engine.rs`). Every engine socket is opened through the same
+helper: `TCP_NODELAY`, a 20-second connect budget, a 30-second handshake budget,
+and TCP keepalive tuned to notice silence — probing after 10 seconds idle, every
+5 seconds, giving up after 3 unanswered probes, so a host that stops answering is
+reported in about 25 seconds instead of the kernel default's couple of hours.
+Without it a host that vanishes with no FIN — powered off, or cut off — leaves
+the engine blocked on a read forever and the client holding a frozen desktop with
+nothing to say. On Linux the socket also gets a 30-second `TCP_USER_TIMEOUT`,
+because keepalive probes are only sent on an *idle* connection: the moment
+somebody clicks at a desktop that has frozen, unacknowledged data makes the
+retransmission budget own the socket instead, and that runs to about fifteen
+minutes. macOS has no equivalent option.
+
+What this proves is narrow: that the peer's kernel is still answering. A remote
+whose kernel answers while its server process is wedged still reads as an idle
+desktop — see [`known-issues.md`](known-issues.md).
+
 ## Engines
 
 ### RDP

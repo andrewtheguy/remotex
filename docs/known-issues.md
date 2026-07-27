@@ -9,6 +9,28 @@ at wherever the mechanism is already explained rather than repeating it.
 Fixed issues are not kept here. The commit that fixed one, and the test that
 holds it fixed, are the record.
 
+## A remote that is hung but still on the network looks live
+
+- **Area:** all three engines.
+- **Seen:** the desktop stops updating and stays on screen. No error, no return
+  to the picker — the client cannot tell it from a desktop nobody is touching.
+  Switching target by hand is the only way out.
+- **Cause:** liveness is the kernel's to report, and TCP keepalive probes are
+  answered by the peer's *kernel* with no involvement from the server process.
+  So a wedged `Xvnc`, a sleeping display, a `SIGSTOP`ped server, or a VM that was
+  *suspended* rather than powered off all keep answering. Neither protocol offers
+  a way to ask better: RFB has no ping, and IronRDP's Heartbeat PDU is
+  server-to-client only while its Refresh Rect PDU may not be sent unless the
+  server advertised `refreshRectSupport`, which the connector does not expose.
+- **Mitigation:** what *is* bounded is host death and network partition, at about
+  25 seconds (30 on Linux for a socket with traffic outstanding) — see the socket
+  policy in [`architecture.md`](architecture.md). A remote that is switched off,
+  unplugged, or has its lid closed reports an error and returns to the picker.
+- **Guard:** none in CI. Reaching the case needs a peer that stops answering
+  without closing, which means root or a container network — by hand:
+  `docker network disconnect <net> <container>` (or `podman`) against a
+  `tests/vnc-dummy` container mid-session, then expect the picker in ~25s.
+
 ## A VM's display stack can wedge until the VM reboots
 
 - **Area:** resolution changes inside an Apple Virtualization (UTM) guest.
