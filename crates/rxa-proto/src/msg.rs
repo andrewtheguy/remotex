@@ -103,6 +103,47 @@ pub struct CursorImage {
     pub png: Vec<u8>,
 }
 
+/// One of the Mac's displays, as the clients list it.
+///
+/// `id` is the `CGDirectDisplayID`, and it is the only field the agent reads
+/// back out of a [`GatewayMsg::SelectDisplay`] — position in the list is not an
+/// identity, because attaching or unplugging a screen renumbers everything after
+/// it. The two strings are built on the Mac so a menu item and a panel row read
+/// the same in both clients, and so that neither has to know how macOS names
+/// displays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayEntry {
+    /// `CGDirectDisplayID`. Stable while the display stays attached.
+    pub id: u32,
+    /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
+    pub label: String,
+    /// The line under it: `"1600×1000 at 2x"`.
+    pub detail: String,
+    /// Captured pixels, as [`AgentMsg::DisplaySize`] would report them.
+    pub w: u16,
+    pub h: u16,
+    /// Backing scale in [`SCALE_ONE`] hundredths.
+    pub scale: u16,
+    /// [`DisplayEntry::MAIN`] and [`DisplayEntry::OWNED`].
+    pub flags: u8,
+}
+
+impl DisplayEntry {
+    /// The Mac's main display — where a fresh session starts.
+    pub const MAIN: u8 = 1 << 0;
+    /// The display the agent created for itself, rather than one of the Mac's
+    /// own screens.
+    pub const OWNED: u8 = 1 << 1;
+
+    pub fn is_main(&self) -> bool {
+        self.flags & Self::MAIN != 0
+    }
+
+    pub fn is_owned(&self) -> bool {
+        self.flags & Self::OWNED != 0
+    }
+}
+
 /// Agent → gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentMsg {
@@ -140,6 +181,21 @@ pub enum AgentMsg {
     /// This is the only direction resolution travels on this wire. The Mac owns
     /// its own resolution; nothing here asks it to change.
     DisplaySize { w: u16, h: u16, scale: u16 },
+    /// Every display the agent could share, and which one it is sharing now.
+    ///
+    /// Sent unprompted: after `Hello`, on `Attach`, whenever the set of attached
+    /// displays changes, and after acting on a [`GatewayMsg::SelectDisplay`].
+    /// The clients hold no display state of their own — the checkmark follows
+    /// `active`, so a selection that failed leaves the menu honest.
+    ///
+    /// Which display, unlike what resolution, *is* a client's to choose: a Mac
+    /// with three screens has three things worth looking at, and the person
+    /// looking is not the one sitting in front of them.
+    Displays {
+        /// The `id` of the entry being captured. Not an index.
+        active: u32,
+        displays: Vec<DisplayEntry>,
+    },
     Pong { nonce: u64 },
     /// Something the user has to act on — most often a missing TCC grant.
     /// Surfaced in the browser rather than dying quietly in a log.
@@ -175,6 +231,7 @@ impl AgentMsg {
     const T_PONG: u8 = 0x05;
     const T_ERROR: u8 = 0x06;
     const T_CLIPBOARD: u8 = 0x07;
+    const T_DISPLAYS: u8 = 0x08;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -229,6 +286,23 @@ impl AgentMsg {
                 put_u16(&mut out, *w);
                 put_u16(&mut out, *h);
                 put_u16(&mut out, *scale);
+            }
+            AgentMsg::Displays { active, displays } => {
+                out.push(Self::T_DISPLAYS);
+                put_u32(&mut out, *active);
+                // A Mac has a handful of displays; the count is u16 for the
+                // same reason every other length here is: one width for all of
+                // them beats a byte saved.
+                put_u16(&mut out, displays.len().min(usize::from(u16::MAX)) as u16);
+                for display in displays.iter().take(usize::from(u16::MAX)) {
+                    put_u32(&mut out, display.id);
+                    put_str(&mut out, &display.label);
+                    put_str(&mut out, &display.detail);
+                    put_u16(&mut out, display.w);
+                    put_u16(&mut out, display.h);
+                    put_u16(&mut out, display.scale);
+                    out.push(display.flags);
+                }
             }
             AgentMsg::Pong { nonce } => {
                 out.push(Self::T_PONG);
@@ -301,6 +375,27 @@ impl AgentMsg {
                 h: r.u16()?,
                 scale: r.u16()?,
             },
+            Self::T_DISPLAYS => {
+                let active = r.u32()?;
+                let count = usize::from(r.u16()?);
+                // Not `with_capacity(count)`: the count is the peer's claim, and
+                // a truncated body would otherwise reserve for a list that isn't
+                // there. Every read below is bounds-checked, so a lie costs a
+                // `Truncated` and nothing else.
+                let mut displays = Vec::new();
+                for _ in 0..count {
+                    displays.push(DisplayEntry {
+                        id: r.u32()?,
+                        label: r.string()?,
+                        detail: r.string()?,
+                        w: r.u16()?,
+                        h: r.u16()?,
+                        scale: r.u16()?,
+                        flags: r.u8()?,
+                    });
+                }
+                AgentMsg::Displays { active, displays }
+            }
             Self::T_PONG => AgentMsg::Pong { nonce: r.u64()? },
             Self::T_ERROR => AgentMsg::Error {
                 message: r.string()?,
@@ -356,6 +451,14 @@ pub enum GatewayMsg {
     /// never sends this, and the agent then never reads the pasteboard
     /// unprompted.
     ClipboardWatch { enabled: bool },
+    /// Share a different display: the `id` of one of the entries the agent last
+    /// reported in [`AgentMsg::Displays`].
+    ///
+    /// The agent answers with a `DisplaySize` for the new display and a fresh
+    /// `Displays` naming it active, or — for an `id` it cannot resolve — an
+    /// [`AgentMsg::Error`] while it keeps capturing what it already had. Nothing
+    /// here changes a display's *mode*; this only picks which one is shared.
+    SelectDisplay { id: u32 },
 }
 
 impl GatewayMsg {
@@ -369,6 +472,7 @@ impl GatewayMsg {
     const T_CLIPBOARD_REQUEST: u8 = 0x08;
     const T_CLIPBOARD: u8 = 0x09;
     const T_CLIPBOARD_WATCH: u8 = 0x0a;
+    const T_SELECT_DISPLAY: u8 = 0x0b;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -413,6 +517,10 @@ impl GatewayMsg {
                 out.push(Self::T_CLIPBOARD_WATCH);
                 out.push(u8::from(*enabled));
             }
+            GatewayMsg::SelectDisplay { id } => {
+                out.push(Self::T_SELECT_DISPLAY);
+                put_u32(&mut out, *id);
+            }
         }
         out
     }
@@ -446,6 +554,7 @@ impl GatewayMsg {
             Self::T_CLIPBOARD_WATCH => GatewayMsg::ClipboardWatch {
                 enabled: r.bool()?,
             },
+            Self::T_SELECT_DISPLAY => GatewayMsg::SelectDisplay { id: r.u32()? },
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -454,6 +563,10 @@ impl GatewayMsg {
 }
 
 fn put_u16(out: &mut Vec<u8>, v: u16) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
@@ -653,6 +766,35 @@ mod tests {
                 requested: true,
                 oversized_bytes: Some(200 * 1024 * 1024),
             },
+            AgentMsg::Displays {
+                active: 2,
+                displays: vec![
+                    DisplayEntry {
+                        id: 1,
+                        label: "Display 1".to_owned(),
+                        detail: "1920×1080 at 1x".to_owned(),
+                        w: 1920,
+                        h: 1080,
+                        scale: SCALE_ONE,
+                        flags: DisplayEntry::MAIN,
+                    },
+                    DisplayEntry {
+                        id: 2,
+                        label: "Virtual display".to_owned(),
+                        detail: "1600×1000 at 2x — écran 画面".to_owned(),
+                        w: 3200,
+                        h: 2000,
+                        scale: 2 * SCALE_ONE,
+                        flags: DisplayEntry::OWNED,
+                    },
+                ],
+            },
+            // No displays at all is a real state — every screen unplugged from a
+            // headless Mac — and distinct from never having reported.
+            AgentMsg::Displays {
+                active: 0,
+                displays: Vec::new(),
+            },
         ]
     }
 
@@ -698,6 +840,8 @@ mod tests {
             },
             GatewayMsg::ClipboardWatch { enabled: true },
             GatewayMsg::ClipboardWatch { enabled: false },
+            GatewayMsg::SelectDisplay { id: 0 },
+            GatewayMsg::SelectDisplay { id: u32::MAX },
         ]
     }
 
@@ -725,12 +869,57 @@ mod tests {
         let mut agent: Vec<u8> = agent_variants().iter().map(|m| m.encode()[0]).collect();
         agent.sort_unstable();
         agent.dedup();
-        assert_eq!(agent.len(), 7, "seven agent message types");
+        assert_eq!(agent.len(), 8, "eight agent message types");
 
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 10, "ten gateway message types");
+        assert_eq!(gateway.len(), 11, "eleven gateway message types");
+    }
+
+    // The count on the wire is the peer's claim about what follows. A body that
+    // does not back it must be refused rather than reserving for it or handing
+    // back a short list.
+    #[test]
+    fn a_display_list_shorter_than_its_count_is_truncated_not_trusted() {
+        let mut bytes = (AgentMsg::Displays {
+            active: 7,
+            displays: vec![DisplayEntry {
+                id: 7,
+                label: "Display 1".to_owned(),
+                detail: "800×600 at 1x".to_owned(),
+                w: 800,
+                h: 600,
+                scale: SCALE_ONE,
+                flags: DisplayEntry::MAIN,
+            }],
+        })
+        .encode();
+        // Claim four more entries than the body carries.
+        bytes[5..7].copy_from_slice(&5u16.to_le_bytes());
+        assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Truncated));
+    }
+
+    #[test]
+    fn display_flags_name_the_main_and_owned_displays() {
+        let plain = DisplayEntry {
+            id: 3,
+            label: "Display 2".to_owned(),
+            detail: "1440×900 at 1x".to_owned(),
+            w: 1440,
+            h: 900,
+            scale: SCALE_ONE,
+            flags: 0,
+        };
+        assert!(!plain.is_main() && !plain.is_owned());
+
+        // The agent's own display is never the Mac's main one, but the flags are
+        // independent bits rather than an enum, so both together must still read.
+        let both = DisplayEntry {
+            flags: DisplayEntry::MAIN | DisplayEntry::OWNED,
+            ..plain.clone()
+        };
+        assert!(both.is_main() && both.is_owned());
     }
 
     // Clipboard text uses u32 framing, not the u16 `put_str` every other string
