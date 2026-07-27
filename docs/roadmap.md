@@ -19,11 +19,12 @@ routes, none of them free:
   similar tools use: arbitrary pixel size and a HiDPI backing store, with no
   entitlement to request. Measured on the test VM (macOS 26.5.2, Apple
   Virtualization guest) it does work there. Listing one mode at the *point* size
-  with `hiDPI = 1`, `maxPixels` at twice that size and `sizeInMillimeters` at
-  `maxPixels / 10` gives a 1600×1000 pt display backed by 3200×2000 real pixels —
-  sharp, on a guest whose own paravirtual framebuffer advertises no HiDPI mode at
-  any size. ScreenCaptureKit lists and captures it at full resolution, and the
-  display is process-scoped: released object, display gone.
+  with `hiDPI = 1`, `maxPixels` at twice that size, and `sizeInMillimeters` sized
+  to put the density near 200 dpi (about `maxPixels / 9`), gives a 1600×1000 pt
+  display backed by 3200×2000 real pixels — sharp, on a guest whose own
+  paravirtual framebuffer advertises no HiDPI mode at any size. ScreenCaptureKit
+  lists and captures it at full resolution, and the display is process-scoped:
+  released object, display gone.
 
   What makes the route treacherous rather than merely unsupported is that three
   readings misreport such a display. `CGDisplayBounds` shows the intended point
@@ -32,11 +33,28 @@ routes, none of them free:
   reports 1.00 on a genuine 2x display, so capture size has to be set explicitly
   instead of derived from the filter. `CGDisplayCopyDisplayMode` returns NULL and
   `CGDisplayCopyAllDisplayModes` returns nothing, so geometry cannot be read the
-  usual way. Of five plausible descriptor configurations, only that one produced
-  2x: the HiDPI flag does not command it, and `sizeInMillimeters` separately
-  decides whether the mode is halved into points. A major release could keep
-  every symbol and still change which configuration works, and this would be
-  load-bearing for the whole `rxa` display path.
+  usual way. And of five plausible descriptor configurations only one produced
+  2x, because the HiDPI flag does not command it: what decides is pixel density,
+  `modePixels / sizeInMillimeters`, which has to land in a window of roughly
+  145–300 dpi. At a fixed 1000×700 pt mode, 134 and 318 dpi both came up 1x,
+  while 149 through 264 dpi came up 2x. Outside that window the display appears
+  at twice the requested point size at 1x — a desktop with unreadable UI rather
+  than a merely soft one. A major release could keep every symbol and still
+  change which configuration works, and this would be load-bearing for the whole
+  `rxa` display path.
+
+  Such a display also resizes on demand, which the host-provided one in a guest
+  cannot. Re-applying settings to a live display takes any point size exactly —
+  1234×789 as readily as 1280×800 — keeps the same `displayID`, settles in
+  130–580 ms, and keeps its 2x backing across the change (confirmed by native
+  capture, not inferred from bounds). Two creation-time fields set the limits.
+  `sizeInMillimeters` cannot be changed afterwards, and HiDPI holds only while
+  density stays in that window, so shrinking past roughly 57% of the original
+  width silently gives a 1x display at twice the requested point size; growing
+  back recovers it, but a different density window needs a new display, and so a
+  new `displayID`. `maxPixels` is a hard ceiling — beyond it the result is
+  silently halved. Every resize is a real reconfiguration, and it rearranges
+  windows.
 
   Nothing about the route is VM-specific. It was measured in the guest because
   that is the test machine; these are the same calls BetterDisplay drives on
@@ -159,11 +177,13 @@ viewport the way RDP and VNC do.
 
 Two reasons. On a **physical** display there is nothing to resize but the panel
 in front of a person: it would rearrange their windows and leave the machine
-altered after the browser disconnects. On a **virtual** display the guest cannot
-take an arbitrary size at all — it switches between the modes the host
-advertises, so following the viewport would mean a mode switch on every window
-drag, each landing on a neighbouring size nobody asked for, and each risking the
-display-stack wedge that only a VM reboot clears.
+altered after the browser disconnects. On the **host-provided virtual** display
+of a VM guest the guest cannot take an arbitrary size at all — it switches
+between the modes the host advertises, so following the viewport would mean a
+mode switch on every window drag, each landing on a neighbouring size nobody
+asked for, and each risking the display-stack wedge that only a VM reboot
+clears. That is a property of that paravirtual framebuffer, not of virtual
+displays in general.
 
 A viewport that does not match the Mac's display is presented at the remote's own
 size and scaled to fit the window, which is what makes following it unnecessary
@@ -171,9 +191,14 @@ rather than merely unwise.
 
 What is *not* settled here is a display of our own. An isolated, session-sized
 desktop needs one, and the routes to it are real enough to be written down — see
-"A display of our own for `rxa`" under Planned. That would retire this entry for
-one protocol rather than answer it: what stays not planned is following the
-viewport on the Mac's *existing* display, for the two reasons above.
+"A display of our own for `rxa`" under Planned. The arbitrary-size objection does
+not carry over to it: a `CGVirtualDisplay` does take any size on demand, keeping
+its scale and its `displayID`, so a viewport-following display of our own is a
+question of whether the rearranging is worth it — every resize still moves
+windows, and sizes far enough from the one it was created for drop to 1x — not
+of whether the sizes can be had. Either way that would retire this entry for one
+protocol rather than answer it: what stays not planned is following the viewport
+on the Mac's *existing* display, for the two reasons above.
 
 ### Multiple sessions
 
