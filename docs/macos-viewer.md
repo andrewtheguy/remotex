@@ -127,20 +127,19 @@ behind it and blit stale pixels into a freshly allocated texture.
 
 ## Resize
 
-Three mechanisms, chosen from the `connected` message. `ViewportPolicy` holds all
+Three behaviours, chosen from the `connected` message. `ViewportPolicy` holds all
 three so they cannot spread into the model as protocol checks.
 
 | target | behaviour |
 |---|---|
 | `vnc` | follows the window continuously, debounced and deduped |
 | `rdp` with `resize` | only on **Remote → Resize to Window**; a resize forces a Deactivation-Reactivation |
-| `rxa` with `resize` | ignores viewport reports; offers **Remote → Resolution** from `displayModes` and answers with `setResolution` |
+| `rxa` | sends nothing, ever |
 
-`displayModes` is replaced wholesale on every message, because the Mac
-regenerates the list on each display reconfigure and merging would keep sizes
-that no longer exist. The authoritative answer to a `setResolution` is the
-`resize` that follows it, not an ack: a mode switch may land on a neighbouring
-listed size.
+There is no resolution menu, for any target. A remote's resolution belongs to the
+machine running it; the two exceptions above are the two protocols that hand that
+decision to the client. A Mac's size arrives here as a `resize` and is never
+answered — see `docs/mac-agent-architecture.md`.
 
 Viewport reports are clamped into `u16` before they are sent. The gateway
 *rejects* an out-of-range value rather than clamping it, and only logs the

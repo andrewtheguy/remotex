@@ -44,11 +44,9 @@ endpoints and includes a checksum to catch transcription errors.
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
 - agent to gateway: desktop size, PNG/JPEG tiles, cursor shape, pasteboard text
-  (on request or when the watched pasteboard changes), the offered display
-  resolutions, and heartbeat pongs;
+  (on request or when the watched pasteboard changes), and heartbeat pongs;
 - gateway to agent: mouse, wheel, and keyboard input, session control, clipboard
-  read requests, writes and the watch toggle, a display-resolution request, and
-  heartbeat pings.
+  read requests, writes and the watch toggle, and heartbeat pings.
 
 The gateway translates these into the same browser protocol used by RDP and
 VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
@@ -72,30 +70,74 @@ used.
 
 ## Resolution
 
-With `resize = true` on the target, the browser may set the shared display to
-one of the resolutions it advertises — a menu in the floating toolbar, not a
-viewport report. A display of this kind accepts only the sizes on its own list;
-a request that is not on it lands on the largest listed size that fits.
+The Mac's, and only the Mac's. There is no message on this wire that asks it to
+change resolution, and `resize = true` on an `rxa` target is a config error.
+Whoever is using that machine sets the mode where every other mode is set — in
+System Settings > Displays — and the agent finds out the same way for every kind
+of display: `Capture::follow_display` re-measures on the cursor tick, resizes the
+capture surface, and the new size travels as `AgentMsg::DisplaySize` ordered with
+the tiles it applies to.
 
-The agent decides whether that is allowed at all, and only permits it for a
-**virtual display in a virtual machine**: `CGDisplayVendorNumber` and
-`CGDisplayModelNumber` both zero with `CGDisplayIsBuiltin` false (a
-paravirtual framebuffer has no EDID to read an identity from), and `hw.model`
-starting with `VirtualMac` or `kern.hv_vmm_present` set. The verdict travels in
-the agent's `Hello`, and the gateway offers the browser a menu only when the
-target opted in *and* the agent agreed. On a physical Mac there is no menu and a
-request is refused: changing a real panel's mode rearranges the screen of
-whoever is sitting at it, with no undo.
+That includes the display the agent creates for itself, which is why it needs no
+mechanism of its own — see below.
 
-This does not depend on any host-side "dynamic resolution" setting — it is
-`CGDisplaySetDisplayMode` inside the guest. Such a setting is a different
-mechanism, host to guest: it pushes arbitrary sizes the guest cannot request,
-and it regenerates the advertised list when it does. The list is therefore
-re-read and re-sent on every reconfigure rather than cached.
+Some displays change size with nobody touching System Settings at all. A UTM
+guest's default screen is the host's to size: Apple Virtualization's
+`automaticallyReconfiguresDisplay` follows the VM window, so dragging that window
+pushes an arbitrary new size into the guest. The agent cannot distinguish this
+from a mode switch and does not try — it is the same poll and the same
+`DisplaySize`. It does have to survive it: a host-driven reconfigure does not
+resize the capture stream, it *kills* it (ScreenCaptureKit loses the display the
+filter names), so the session restarts capture under a backoff rather than
+treating it as the end.
 
-A mode switch runs on a blocking thread under a deadline. Once a VM's display
-stack wedges, `CGCompleteDisplayConfiguration` never returns, and the session
-must keep carrying tiles and input regardless.
+The scale is re-sent with every size, because a mode switch can change it: the
+same panel has HiDPI and 1x modes, and 1920x1080 HiDPI and 3840x2160 at 1x are
+the same pixel count presented at different sizes.
+
+## A display of our own
+
+Selecting **Virtual display** in the settings dialog shares a display the agent
+creates with the private `CGVirtualDisplay` API instead of any of the Mac's
+screens — a private 2x desktop that nobody is sitting in front of. It is created
+once at startup and released when the agent exits; the process owns it, so a
+crash cannot leave one behind. A failure to create it falls back to the Mac's
+screen with a line in the log, because a macOS release that takes the private API
+away should cost the sharpness, not the agent.
+
+Created once, and then it belongs to macOS. It appears in System Settings >
+Displays with the mode list macOS derives from the descriptor — a HiDPI entry and
+a `(low resolution)` one at each size — so it is resized exactly where every
+other display on that Mac is resized. The agent never applies a second
+configuration to it.
+
+The API reports success for configurations that do not work, so
+`virtualdisplay.rs` checks rather than trusts. The mode is listed at the
+**point** size with `hiDPI = 1`, which is what makes macOS supply twice the
+pixels; listing it at the pixel size yields the same point size with no extra
+pixels. HiDPI then engages only while pixel density — mode pixels over
+`sizeInMillimeters` — stays inside roughly 149–264 dpi, measured on macOS
+26.5.2. The display is therefore created at the top of that window, which is
+also where `maxPixels` sits, so the configured size is the largest mode that can
+be 2x and every smaller one macOS offers has density to spare. Outside that
+window macOS silently produces a 1x desktop at *twice* the requested point size,
+which is what the check after `applySettings:` is looking for.
+
+Three readings misreport such a display, and each has a workaround here.
+`CGDisplayCopyDisplayMode` returns NULL and `SCContentFilter.pointPixelScale`
+reads 1.00 even at 2x, so neither the geometry nor the backing scale can be read
+back: the size comes from `CGDisplayBounds` and the scale is *derived* from it by
+`capture::owned_scale`. `maxPixels` is twice the created size and cannot change,
+so a mode at or under that size is 2x and anything larger provably is not — which
+is what keeps a `(low resolution)` pick from being captured as a surface four
+times the size it should be. Third, `CGDisplayBounds` reports the requested size
+even for a display the WindowServer refuses to bring online, so creation also
+checks `CGDisplayIsOnline` and `CGDisplayIsActive`. That offline state is
+remembered against the display's identity and survives a reboot, so it retries
+once with a serial macOS has not seen.
+
+What this costs in practice — the ways macOS can leave such a display unusable —
+is in [`known-issues.md`](known-issues.md).
 
 ## Input
 
@@ -134,9 +176,8 @@ launchd.
 
 ## Constraints
 
-- The agent mirrors a whole display and never follows browser viewport reports.
-  A physical display is never resized at all; a virtual one can only be set to a
-  size it already advertises (see Resolution above).
+- The agent mirrors a whole display and never follows client viewport reports.
+  It never changes any display's resolution either — see Resolution above.
 - It runs only in a logged-in GUI session. It does not support the macOS login
   window or an unattended service mode.
 - Screen Recording and Accessibility grants are tied to the app's signing

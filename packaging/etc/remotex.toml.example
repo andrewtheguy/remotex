@@ -49,8 +49,9 @@ password = "change-me"
 # Dynamic resize (opt-in): drive the remote desktop size from the client's
 # window. VNC follows the window automatically (only on servers that accept
 # SetDesktopSize — the TigerVNC family). RDP resizes only when you ask, via
-# "Resize to window" (RDP reactivation is heavier than VNC's resize). For rxa it
-# means something narrower — see the rxa target below.
+# "Resize to window" (RDP reactivation is heavier than VNC's resize). Those two
+# are the only protocols that hand the desktop size to the client; rxa rejects
+# this key, because a Mac's resolution is set on the Mac.
 # Otherwise — and by default — the desktop keeps its connect-time size
 # and the client shows scrollbars.
 #resize = false
@@ -95,11 +96,10 @@ password = "change-me"
 # username/password/domain/width/height/security are all ignored here.
 # `clipboard` is supported: the agent reads and writes the Mac's pasteboard.
 #
-# `resize` does not follow the client's window here. The resolution menu requires
-# both target opt-in (`resize = true`) and agent agreement that the display is
-# resizable. It then lists the modes of a virtual display in a VM — a physical
-# Mac display is never changed from the browser, and the menu simply does not
-# appear.
+# `resize` is rejected here. The Mac's resolution is changed on the Mac, in
+# System Settings — including for the private display the agent can create for
+# itself, which appears there like any other screen. Whatever mode it is put in,
+# the agent notices and the client follows.
 # [[targets]]
 # name = "mac"
 # protocol = "rxa"

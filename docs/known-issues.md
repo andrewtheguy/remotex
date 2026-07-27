@@ -1,66 +1,79 @@
 # Known issues
 
-Active defects found during manual end-to-end testing live here until they are
-fixed and covered by a regression test. Keep resolved entries in the bottom
-section so the original reproduction and its guard are not lost.
+What a user can run into and be surprised by, including limitations imposed on
+us from outside. This is the one place for them: behaviour that is merely
+*designed* belongs in the architecture docs, and behaviour that is *planned*
+belongs in [`roadmap.md`](roadmap.md). Each entry says what is seen and points
+at wherever the mechanism is already explained rather than repeating it.
 
-## Open
+Fixed issues are not kept here. The commit that fixed one, and the test that
+holds it fixed, are the record.
 
-### RX-003 — Gateway can remain alive after its launcher is closed
+## A VM's display stack can wedge until the VM reboots
 
-- **Found:** 2026-07-25
-- **Area:** launcher integration / local server lifecycle
-- **Reproduction:** Intermittent. A gateway launched with `cargo run -- serve`
-  remained listening after the launching Codex terminal session was
-  interrupted.
-- **QA matrix:** Direct SIGINT and SIGTERM both exit successfully and release
-  the listening port. SIGHUP and closing the controlling PTY both terminate
-  the process and release the port. A local `cargo run` probe did not leave a
-  separate Cargo launcher process that could orphan the gateway.
-- **Known boundary:** The only lingering case observed so far was an
-  interrupted Codex automation session that left the gateway alive and
-  delivered no signal or controlling-terminal close. No gateway shutdown
-  failure has been reproduced when an actual shutdown event reaches it.
-- **Next investigation:** Capture the exact process-tree and signal behavior
-  of the launcher cancellation path. Keep this issue open against the launcher
-  integration; do not change gateway shutdown behavior until that path is
-  reproduced.
-- **Required guard:** A subprocess lifecycle test for any confirmed failing
-  application exit path, or a launcher test if cancellation is confirmed to
-  omit teardown.
+- **Area:** resolution changes inside an Apple Virtualization (UTM) guest.
+- **Seen:** after a number of resolution changes, every further one hangs —
+  `CGCompleteDisplayConfiguration` never returns and the calling thread spins at
+  around 40% CPU. Nothing but a reboot of the guest clears it.
+- **Not remotex's to trigger any more:** nothing here changes a display's mode,
+  so this is reached only by changing the resolution on the Mac itself. The
+  agent keeps capturing whatever the display last settled on.
+- **Guard:** none possible off a real VM.
 
-## Resolved
+## macOS can hold a virtual display's identity offline
 
-### RX-001 — Target picker renders `undefined` for the removed OS field
+- **Area:** the agent with `virtual_display = true`.
+- **Seen:** the agent logs that it created a display, but nothing can capture
+  it: it is missing from the active display list and from ScreenCaptureKit,
+  while `CGDisplayBounds` still reports exactly the size that was asked for.
+- **Cause:** the WindowServer remembers arrangement state against a display's
+  vendor, product and serial, and can decide to keep that identity offline. The
+  state survives a reboot and cannot be cleared from inside the process.
+  Observed 2026-07-27 against an identity earlier probe builds had used.
+- **Mitigation:** creation checks `CGDisplayIsOnline` and `CGDisplayIsActive`
+  rather than trusting bounds, and retries once with a serial number macOS has
+  not seen before. What is lost is the desktop arrangement saved against the old
+  identity — window positions on that display start over.
+- **Guard:** none possible in CI; it needs a real WindowServer in a state that
+  cannot be created on demand.
 
-- **Found and fixed:** 2026-07-25
-- **Area:** frontend target picker
-- **Cause:** `frontend/src/TargetPicker.tsx` still required and rendered `t.os`,
-  but the target API no longer returns an `os` field. Remote OS discovery now
-  happens only after connecting.
-- **Resolution:** Removed the stale field and rendered only protocol, host, and
-  port.
-- **QA guard:** Compared the live `/api/targets` response with the rebuilt
-  viewer and verified all five picker rows render without `undefined`.
+## macOS Screen Sharing ignores `SetDesktopSize`
 
-### RX-002 — Viewer username entry can capitalize the first character
+- **Area:** a Mac target reached over VNC (`protocol = "vnc"`) with
+  `resize = true`.
+- **Seen:** the desktop never resizes, with no error. The gateway advertises
+  DesktopSize/ExtendedDesktopSize and sends the request after the server
+  confirms support; Apple's server accepts the negotiation and does nothing with
+  the request. Observed 2026-07-23 against the test VM.
+- **Workaround:** change the resolution on the Mac itself. Nothing a client
+  sends can do it, over VNC or otherwise.
 
-- **Found and fixed:** 2026-07-25
-- **Area:** macOS viewer login
-- **Cause:** Safari/WKWebView text correction remained enabled even though the
-  input used `autoCapitalize="off"`.
-- **Resolution:** Use `autoCapitalize="none"`, `autoCorrect="off"`, and disable
-  spellcheck on the username input.
-- **QA guard:** Ordinary key-event typing in the rebuilt viewer leaves `admin`
-  lowercase and no longer shows the `Admin` correction suggestion.
+## Changing the agent's signing identity silently breaks its permissions
 
-### RX-004 — Keyboard override menu looks active for a Mac guest
+- **Area:** installing a `remotex-agent.app` built with a different code
+  signing identity than the one already granted — including an ad-hoc GitHub
+  release over a locally signed build, or the reverse.
+- **Seen:** capture and input stop working with no prompt and no obvious cause.
+  System Settings still lists `remotex-agent` under Screen Recording and
+  Accessibility with its box ticked, because the entry is matched by path, while
+  the system refuses the app behind it.
+- **Fix:** in *both* panes, remove `remotex-agent` with "−", add it back with
+  "+", and reopen the agent.
+- **Avoid:** keep one Developer ID identity for every build of the agent; see
+  [`packaging/macos/README.md`](../packaging/macos/README.md).
 
-- **Found and fixed:** 2026-07-25
-- **Area:** macOS viewer Remote menu
-- **Resolution:** For a Mac guest, the item is unchecked, disabled, and labeled
-  `macOS Keyboard Overrides (Not Applicable)`. The stored preference is kept
-  for the next Windows or Linux guest.
-- **Regression guard:**
-  `keyboardOverridesAppearInactiveForAMacWithoutChangingThePreference` in
-  `apps/remotex-viewer/Tests/AppModelTests.swift`.
+## Gateway can remain alive after its launcher is closed
+
+- **Area:** launcher integration / local server lifecycle.
+- **Seen:** intermittent. A gateway launched with `cargo run -- serve` remained
+  listening after the launching automation session was interrupted.
+- **What has been ruled out:** direct SIGINT and SIGTERM both exit and release
+  the port; SIGHUP and closing the controlling PTY both terminate the process
+  and release the port; a `cargo run` probe left no separate Cargo launcher
+  process that could orphan the gateway. No shutdown failure has been reproduced
+  when an actual shutdown event reaches the gateway.
+- **Next investigation:** capture the process tree and signal behaviour of the
+  launcher's cancellation path. Do not change gateway shutdown behaviour until
+  that path is reproduced.
+- **Required guard:** a subprocess lifecycle test for any confirmed failing exit
+  path, or a launcher test if cancellation is confirmed to omit teardown.
