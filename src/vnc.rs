@@ -563,9 +563,25 @@ async fn read_loop(
     loop {
         let msg_type = match reader.read_u8().await {
             Ok(t) => t,
+            // A clean hang-up is an event the user should be told about — a
+            // stopped server, a Mac logged out, `vncserver -kill`. Returning
+            // `Ok` here meant `run` skipped its error branch and the browser got
+            // a bare picker with no explanation, or worse, the *previous*
+            // error still sitting on it. Deliberate teardown does not come
+            // through here; it leaves through the input branch.
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 info!("vnc: server closed the connection");
-                return Ok(());
+                return Err(anyhow::anyhow!("the VNC server closed the connection"));
+            }
+            // What a host that was switched off or cut off looks like, now that
+            // the socket has keepalive on it (see [`crate::engine`]). Worth its
+            // own words: the raw form of this is "read server message:
+            // Connection timed out (os error 60)".
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                return Err(anyhow::anyhow!(
+                    "the remote host stopped answering (no reply for {}s)",
+                    engine::keepalive_budget().as_secs()
+                ));
             }
             Err(e) => return Err(anyhow::anyhow!("read server message: {e}")),
         };
@@ -1690,6 +1706,39 @@ mod tests {
         pending: Option<(u16, u16)>,
     ) -> SharedDesktop {
         Arc::new(std::sync::Mutex::new(DesktopState { size, screen, pending }))
+    }
+
+    // A server that hangs up mid-session used to end the read loop with `Ok`,
+    // which meant `run` skipped its error branch and the browser landed on a
+    // bare picker — or on whatever error was already sitting there.
+    #[tokio::test]
+    async fn a_server_that_hangs_up_is_reported_instead_of_ending_quietly() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // A clean FIN, which is what a stopped server sends.
+            drop(stream);
+        });
+
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (read_half, write_half) = client.into_split();
+        let (frame_tx, _frame_rx) = mpsc::channel(4);
+        let err = read_loop(
+            BufReader::new(read_half),
+            Arc::new(Mutex::new(write_half)),
+            shared_desktop((1280, 800), None, None),
+            Arc::new(std::sync::Mutex::new(CursorState::default())),
+            Arc::new(std::sync::Mutex::new(ClipboardState::default())),
+            false,
+            frame_tx,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("closed the connection"), "{msg}");
+        server.await.unwrap();
     }
 
     /// Payload of an ExtendedDesktopSize rect declaring one screen.
