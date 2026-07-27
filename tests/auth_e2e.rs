@@ -24,10 +24,12 @@ async fn spawn_app() -> SocketAddr {
         targets: vec![TargetConfig {
             name: "unreachable".to_owned(),
             protocol: Protocol::Vnc,
+            subtype: None,
             host: "127.0.0.1".to_owned(),
             port: 9, // discard; never connected
             username: String::new(),
             password: String::new(),
+            vnc_password: String::new(),
             domain: None,
             width: 1280,
             height: 800,

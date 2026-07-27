@@ -212,10 +212,19 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
     TargetConfig {
         name: "test-target".to_owned(),
         protocol,
+        subtype: None,
         host: "127.0.0.1".to_owned(),
         port,
-        username: "tester".to_owned(),
+        // A VNC target names no user: the fake server below offers security
+        // type None, and a username is a request for Apple's DH authentication,
+        // which it cannot answer. Both password fields carry the canary either
+        // way — neither may reach the browser.
+        username: match protocol {
+            Protocol::Vnc => String::new(),
+            _ => "tester".to_owned(),
+        },
         password: "s3cr3t-should-not-leak".to_owned(),
+        vnc_password: String::new(),
         domain: None,
         width: 1280,
         height: 800,

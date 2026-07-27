@@ -56,6 +56,33 @@ pub enum Protocol {
     Rxa,
 }
 
+/// A variant of a target's [`Protocol`]: same engine, different dialect at the
+/// far end, and different rules about what a target may say.
+///
+/// Generic by design — a protocol with more than one flavour of server names
+/// which one it is talking to here, rather than each protocol growing a key of
+/// its own. Which subtypes a protocol accepts is [`ConfigFile::parse`]'s
+/// business; today `ard` is the only one and only `vnc` takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Subtype {
+    /// macOS Screen Sharing, authenticated the way Apple Remote Desktop does:
+    /// the credentials are a *macOS account's* and the connection is named to
+    /// the Mac, which is what makes it share the screen rather than a login
+    /// window of its own (see [`crate::vnc`]). A third-party VNC server that
+    /// happens to run on a Mac is not this — it is a plain `vnc` target.
+    Ard,
+}
+
+impl Subtype {
+    /// The lowercase name, as written in the config file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Subtype::Ard => "ard",
+        }
+    }
+}
+
 impl Protocol {
     /// The protocol's standard port, used when a target omits `port`.
     pub fn default_port(self) -> u16 {
@@ -91,6 +118,17 @@ pub struct TargetConfig {
     /// Remote-desktop protocol: `"rdp"`, `"vnc"` or `"rxa"`. Required — each
     /// target must say what it speaks.
     pub protocol: Protocol,
+    /// Which flavour of [`Self::protocol`] the far end is, when the protocol has
+    /// more than one: `subtype = "ard"` on a `vnc` target is macOS Screen
+    /// Sharing. Unset means the protocol's ordinary form.
+    ///
+    /// Declared rather than sniffed from the credentials, because the two
+    /// dialects want different ones and guessing which was meant is how a
+    /// perfectly good password ends up authenticating nobody — see
+    /// [`Subtype::Ard`]. Validated against the protocol in
+    /// [`ConfigFile::parse`].
+    #[serde(default)]
+    pub subtype: Option<Subtype>,
     /// Target host.
     pub host: String,
     /// Target port. Omitted (or 0) means the protocol's standard port
@@ -98,12 +136,27 @@ pub struct TargetConfig {
     /// [`ConfigFile::parse`].
     #[serde(default)]
     pub port: u16,
-    /// Username.
+    /// Username. Required by RDP, and by a `vnc` target of [`Subtype::Ard`],
+    /// where it is a *macOS account* and [`Self::password`] is that account's —
+    /// not the Screen Sharing password. A plain `vnc` target has no use for
+    /// either and is refused both, because RFB `VncAuth` cannot carry a name.
     #[serde(default)]
     pub username: String,
-    /// Password (never leaves the server).
+    /// Password for [`Self::username`] (never leaves the server).
     #[serde(default)]
     pub password: String,
+    /// A VNC server's own password — RFB `VncAuth`, which proves knowledge of a
+    /// secret belonging to the *machine* and says nothing about who is
+    /// connecting. Named apart from [`Self::password`] because on a Mac the two
+    /// are different credentials that get you different screens: this is the
+    /// Screen Sharing password, and it is answered with a login window of the
+    /// connection's own (see [`crate::vnc`]).
+    ///
+    /// The credential of a plain `vnc` target, and the only one such a server
+    /// takes. Rejected on other protocols and on [`Subtype::Ard`] — see
+    /// [`ConfigFile::parse`].
+    #[serde(default)]
+    pub vnc_password: String,
     /// Optional domain.
     #[serde(default)]
     pub domain: Option<String>,
@@ -274,6 +327,70 @@ impl ConfigFile {
                 anyhow::ensure!(
                     target.psk.is_empty(),
                     "target {:?} is protocol {:?} but sets psk, which only \"rxa\" targets use",
+                    target.name,
+                    target.protocol.name()
+                );
+            }
+            // Which credentials a VNC target may carry is the subtype's to say,
+            // and the two sets do not overlap: `ard` authenticates an account to
+            // a Mac, plain VncAuth proves a secret the machine holds. Mixing
+            // them is how a password ends up authenticating nobody, so each is
+            // refused where it cannot be used rather than quietly ignored.
+            match (target.protocol, target.subtype) {
+                (Protocol::Vnc, Some(Subtype::Ard)) => {
+                    anyhow::ensure!(
+                        !target.username.is_empty() && !target.password.is_empty(),
+                        "target {:?} is subtype \"ard\" but has no username and password — \
+                         both are needed, and on a Mac they are an account's there",
+                        target.name
+                    );
+                    anyhow::ensure!(
+                        target.vnc_password.is_empty(),
+                        "target {:?} is subtype \"ard\" but sets vnc_password, which only a \
+                         plain \"vnc\" target uses — Apple's authentication carries the \
+                         account credentials above instead",
+                        target.name
+                    );
+                    // Rejected for the same reason `rxa` rejects it: macOS
+                    // accepts the resize negotiation and then ignores every
+                    // request, so the key would promise a control that does
+                    // nothing. A Mac's resolution is set on the Mac.
+                    anyhow::ensure!(
+                        !target.resize,
+                        "target {:?} is subtype \"ard\" and sets resize, which macOS Screen \
+                         Sharing accepts and then ignores — a Mac's resolution is changed on \
+                         the Mac",
+                        target.name
+                    );
+                }
+                (Protocol::Vnc, None) => {
+                    anyhow::ensure!(
+                        target.username.is_empty() && target.password.is_empty(),
+                        "target {:?} is protocol \"vnc\" and sets username or password, which \
+                         plain VncAuth cannot carry — use vnc_password for the VNC server's \
+                         own password, or subtype = \"ard\" if this is a Mac and those are an \
+                         account's",
+                        target.name
+                    );
+                }
+                // The protocols without subtypes are named rather than left to a
+                // catch-all, so that a second VNC subtype cannot land here and
+                // be told it belongs to another protocol. Adding one stops the
+                // build until this match says what it means.
+                (protocol @ (Protocol::Rdp | Protocol::Rxa), Some(subtype)) => anyhow::bail!(
+                    "target {:?} is protocol {:?} and sets subtype {:?}, which only \"vnc\" \
+                     targets have",
+                    target.name,
+                    protocol.name(),
+                    subtype.name()
+                ),
+                (Protocol::Rdp | Protocol::Rxa, None) => {}
+            }
+            if target.protocol != Protocol::Vnc {
+                anyhow::ensure!(
+                    target.vnc_password.is_empty(),
+                    "target {:?} is protocol {:?} but sets vnc_password, which only \"vnc\" \
+                     targets use",
                     target.name,
                     target.protocol.name()
                 );
@@ -637,7 +754,7 @@ mod tests {
             name = "mac"
             protocol = "vnc"
             host = "10.0.0.4"
-            password = "hunter2"
+            vnc_password = "hunter2"
             resize = true
             "#,
             site_passwd_line()
@@ -667,6 +784,112 @@ mod tests {
         .resolve()
         .unwrap();
         assert_eq!(config.targets[0].port, 5901);
+    }
+
+    /// A `vnc` target body, with whatever keys the case is about.
+    fn vnc_toml(extra: &str) -> String {
+        format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "mac"
+            protocol = "vnc"
+            host = "10.0.0.4"
+            {extra}
+            "#,
+            site_passwd_line()
+        )
+    }
+
+    /// The two VNC credentials are different credentials, and the subtype — not
+    /// which fields happen to be filled — says which one a target carries.
+    /// Neither is silently ignored where it cannot be used: an account password
+    /// answered as VncAuth authenticates nobody, which on a Mac shares a login
+    /// window instead of the screen.
+    #[test]
+    fn each_vnc_credential_is_refused_where_it_cannot_be_used() {
+        let err = ConfigFile::parse(&vnc_toml(r#"password = "hunter2""#)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vnc_password") && msg.contains(r#"subtype = "ard""#), "{msg}");
+        let err = ConfigFile::parse(&vnc_toml(r#"username = "andrew""#)).unwrap_err();
+        assert!(format!("{err:#}").contains("plain VncAuth cannot carry"), "{err:#}");
+
+        // A plain target takes the server's own password, and nothing at all is
+        // still a target: a VNC server may need no credential whatsoever.
+        let plain = ConfigFile::parse(&vnc_toml(r#"vnc_password = "hunter2""#)).unwrap();
+        assert_eq!(plain.targets[0].vnc_password, "hunter2");
+        assert!(plain.targets[0].subtype.is_none());
+        assert!(ConfigFile::parse(&vnc_toml("")).is_ok());
+    }
+
+    /// `ard` is a declaration about the far end, so it comes with the credentials
+    /// that declaration implies and refuses the ones it does not use.
+    #[test]
+    fn the_ard_subtype_wants_an_account_and_nothing_else() {
+        let ard = |extra: &str| ConfigFile::parse(&vnc_toml(&format!("subtype = \"ard\"\n{extra}")));
+
+        let target = &ard("username = \"andrew\"\npassword = \"hunter2\"")
+            .unwrap()
+            .targets[0];
+        assert_eq!(target.subtype, Some(Subtype::Ard));
+        assert_eq!(target.username, "andrew");
+
+        // Half a credential is no credential.
+        let err = ard(r#"username = "andrew""#).unwrap_err();
+        assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
+
+        // The machine's own password has no part in it.
+        let err = ard("username = \"andrew\"\npassword = \"h\"\nvnc_password = \"other\"")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
+
+        // Resize is rejected rather than ignored: macOS accepts the negotiation
+        // and then does nothing with the requests.
+        let err =
+            ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
+        assert!(format!("{err:#}").contains("accepts and then ignores"), "{err:#}");
+
+        // And it is a VNC subtype only.
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "pc"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            subtype = "ard"
+            username = "Administrator"
+            password = "hunter2"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("only \"vnc\" targets have"), "{msg}");
+    }
+
+    #[test]
+    fn a_vnc_password_on_a_non_vnc_target_is_rejected() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "pc"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            vnc_password = "hunter2"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
     }
 
     /// An `rxa` target body, with `psk` filled in from a freshly generated key

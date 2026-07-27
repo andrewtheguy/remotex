@@ -28,6 +28,9 @@ site_passwd = ""
 [[targets]]
 name = "example"
 protocol = "rdp"           # required: "rdp", "vnc" or "rxa"
+# Which flavour of that protocol the far end is, where a protocol has more than
+# one. Only "vnc" has any: subtype = "ard" is macOS Screen Sharing (see below).
+#subtype = "ard"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc, 52381 rxa).
 #port = 3389
@@ -35,6 +38,10 @@ host = "192.0.2.10"
 # Credentials (used server-side only; never sent to the browser).
 username = "Administrator"
 password = "change-me"
+# A VNC server's own password (RFB VncAuth) — a separate key because it is a
+# separate credential: it proves knowledge of a machine secret and names nobody.
+# VNC only, rejected elsewhere. See the VNC target below.
+#vnc_password = "change-me"
 # Optional domain (leave unset for a local account). RDP only.
 #domain = ""
 
@@ -69,14 +76,31 @@ password = "change-me"
 # falls back to latin-1 and anything outside it becomes "?".
 #clipboard = false
 
-# A VNC target only needs host and (usually) a password; username, domain,
-# width/height, and security are ignored. A Mac can use its built-in Screen
-# Sharing service through this path without installing the companion agent.
+# A VNC target needs host and, usually, one of the two passwords; domain,
+# width/height, and security are ignored. `vnc_password` is the server's own
+# password and is all a server without user accounts takes.
+# [[targets]]
+# name = "workstation-vnc"
+# protocol = "vnc"
+# host = "10.0.0.2"
+# vnc_password = "change-me"
+
+# A Mac can use its built-in Screen Sharing service through this same path,
+# without installing the companion agent — say so with subtype = "ard", and give
+# it an *account* rather than the Screen Sharing password. Apple's DH
+# authentication is the only way to tell a Mac who is connecting, and macOS
+# answers a viewer that names nobody by creating a new login window on a virtual
+# display instead of sharing its screen. So the subtype requires username and
+# password (that account's), takes no vnc_password, and rejects resize, which
+# macOS accepts and then ignores. A third-party VNC server that happens to run
+# on a Mac is not this: it is a plain "vnc" target.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
-# host = "10.0.0.2"
-# password = "change-me"
+# subtype = "ard"
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
 
 # As an optional alternative, a Mac can run the remotex agent (protocol "rxa")
 # for RealVNC-like reconnect behavior. The pre-shared key below is the

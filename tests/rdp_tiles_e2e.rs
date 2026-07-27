@@ -72,10 +72,12 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
         targets: vec![TargetConfig {
             name: "xrdp-dummy".to_owned(),
             protocol: Protocol::Rdp,
+            subtype: None,
             host: common::container_host(),
             port: rdp_port,
             username: "dummy".to_owned(),
             password: "dummy".to_owned(),
+            vnc_password: String::new(),
             domain: None,
             width: 1280,
             height: 800,

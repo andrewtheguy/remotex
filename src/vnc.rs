@@ -6,6 +6,11 @@
 //! the backend↔VNC hop is LAN, so clever wire encodings buy nothing there;
 //! the browser link is optimized by the shared tile transport instead.
 //!
+//! One security type past the baseline: **Apple's DH authentication**, used
+//! when a target sets a `username`. It is not an optimization but the
+//! difference between seeing a Mac's screen and seeing a login window it made
+//! up for you — see [`ard_authenticate`].
+//!
 //! On top of the baseline, the **Cursor pseudo-encoding** is always
 //! advertised: a server that supports it stops compositing the pointer into
 //! the framebuffer and sends the shape instead, which the browser draws
@@ -34,15 +39,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use aes::Aes128;
 use des::Des;
 use des::cipher::generic_array::GenericArray;
 use des::cipher::{BlockEncrypt as _, KeyInit as _};
+use md5::{Digest as _, Md5};
+use num_bigint::BigUint;
+use rand::Rng as _;
 use log::{debug, info, warn};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::TargetConfig;
+use crate::config::{Subtype, TargetConfig};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
@@ -53,6 +62,30 @@ use crate::vnc_clipboard;
 
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC_AUTH: u8 = 2;
+/// Apple's Diffie-Hellman authentication, the one RFB security type that
+/// carries a *user name* — see [`ard_authenticate`] for why a Mac target needs
+/// it and what happens without it.
+const SECURITY_ARD: u8 = 30;
+/// Largest DH key length accepted from the server, in bytes. macOS sends 128
+/// (a 1024-bit prime); the cap is what keeps a bogus length from turning into
+/// a huge allocation and a very slow modular exponentiation.
+const MAX_ARD_KEY_BYTES: usize = 512;
+/// Smallest DH key length accepted, in bytes. The server picks the group, and
+/// what rides inside it is an account password, so a small prime is not a
+/// server being frugal — it is a shared secret anyone watching the wire can
+/// recover.
+///
+/// 128 bytes: the 1024 bits macOS 26 sends, with no room below it. The 512-bit
+/// group Apple's own documentation calls the "older, less secure method" is
+/// therefore refused rather than downgraded to, which is the point. If a Mac old
+/// enough to still offer it ever turns up, this is what it will fail on, and the
+/// error says so — a refusal being the honest answer for a group that would put
+/// an account password behind precomputation anyone can afford.
+const MIN_ARD_KEY_BYTES: usize = 128;
+/// Apple's credential blob: `username[64]`, then `password[64]`, each
+/// null-terminated, the remainder random.
+const ARD_CREDENTIALS_LEN: usize = 128;
+const ARD_FIELD_LEN: usize = 64;
 const ENCODING_RAW: i32 = 0;
 /// Cursor pseudo-encoding: the server hands over the pointer shape (pixels +
 /// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
@@ -262,26 +295,32 @@ async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow
     reader.read_exact(&mut types).await?;
     let macos = is_macos_server(minor, &types);
 
-    let chosen = if !config.password.is_empty() && types.contains(&SECURITY_VNC_AUTH) {
-        SECURITY_VNC_AUTH
-    } else if types.contains(&SECURITY_NONE) {
-        SECURITY_NONE
-    } else if types.contains(&SECURITY_VNC_AUTH) {
-        anyhow::bail!("VNC server requires a password but the target has none configured");
-    } else {
-        anyhow::bail!(
-            "no supported VNC security type (server offers {types:?}; \
-             this client speaks None and VncAuth only)"
+    let chosen = choose_security(&types, config.subtype, &config.vnc_password)?;
+    if macos && chosen != SECURITY_ARD {
+        // Said once, at the only moment it can still be acted on, because the
+        // symptom is otherwise unreadable: a login screen that will not accept
+        // the account already signed in on that Mac.
+        warn!(
+            "vnc: this server is a Mac and the target is not subtype \"ard\" — macOS answers \
+             an anonymous viewer with a new login window on a virtual display rather than its \
+             own screen. Set subtype = \"ard\" with a macOS account's username and password \
+             to share the screen."
         );
-    };
+    }
     writer.write_all(&[chosen]).await?;
 
-    if chosen == SECURITY_VNC_AUTH {
-        let mut challenge = [0u8; 16];
-        reader.read_exact(&mut challenge).await?;
-        writer
-            .write_all(&auth_response(&config.password, &challenge))
-            .await?;
+    match chosen {
+        SECURITY_ARD => {
+            ard_authenticate(&mut reader, &mut writer, &config.username, &config.password).await?;
+        }
+        SECURITY_VNC_AUTH => {
+            let mut challenge = [0u8; 16];
+            reader.read_exact(&mut challenge).await?;
+            writer
+                .write_all(&auth_response(&config.vnc_password, &challenge))
+                .await?;
+        }
+        _ => {}
     }
 
     // SecurityResult (sent for every type in 3.8, including None).
@@ -1282,6 +1321,178 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
     response
 }
 
+/// Pick the RFB security type to answer with.
+///
+/// The target's subtype decides, not which credential fields happen to be
+/// filled: `Ard` is a declaration that the far end is a Mac and that the
+/// credentials name an account there, while a plain `vnc` target has only
+/// `vnc_password`, a secret belonging to the *machine* that tells the server
+/// nothing about who is connecting. On a Mac that difference decides which
+/// screen you get — see [`ard_authenticate`] — so a subtype the server cannot
+/// answer is an error rather than a silent fall back to the anonymous path.
+fn choose_security(
+    types: &[u8],
+    subtype: Option<Subtype>,
+    vnc_password: &str,
+) -> anyhow::Result<u8> {
+    if subtype == Some(Subtype::Ard) {
+        anyhow::ensure!(
+            types.contains(&SECURITY_ARD),
+            "the target is subtype \"ard\", whose authentication this server does not \
+             offer (types {types:?}) — it is not macOS Screen Sharing"
+        );
+        return Ok(SECURITY_ARD);
+    }
+    if !vnc_password.is_empty() && types.contains(&SECURITY_VNC_AUTH) {
+        return Ok(SECURITY_VNC_AUTH);
+    }
+    if types.contains(&SECURITY_NONE) {
+        return Ok(SECURITY_NONE);
+    }
+    anyhow::ensure!(
+        !types.contains(&SECURITY_VNC_AUTH),
+        "VNC server requires a password but the target has no vnc_password configured"
+    );
+    anyhow::bail!(
+        "no supported VNC security type (server offers {types:?}; \
+         this client speaks None, VncAuth and Apple's DH authentication)"
+    )
+}
+
+/// Apple's Diffie-Hellman authentication (RFB security type 30): the server
+/// sends a generator, a key length, the prime modulus and its public key; the
+/// answer is the credentials encrypted under the shared secret, then our own
+/// public key.
+///
+/// This is the only way to tell a Mac **who** is connecting, and that is the
+/// whole reason it is here. Authenticated with a password alone, a connection
+/// is `uid -2` — nobody — and macOS answers an anonymous viewer by creating a
+/// *new login-window session on a virtual display* rather than sharing the
+/// screen, leaving the client on a login screen it can never get past while the
+/// signed-in user's session carries on beside it. Named, the same connection
+/// resolves to that user's own session: measured on macOS 26, where
+/// `screensharingd` logged `uid 501 createLoginWindow 0` and attached to the
+/// console. So for a Mac target the credentials are the *account's*, not the
+/// Screen Sharing password's.
+async fn ard_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<()> {
+    let generator = reader.read_u16().await?;
+    let key_len = usize::from(reader.read_u16().await?);
+    anyhow::ensure!(
+        (MIN_ARD_KEY_BYTES..=MAX_ARD_KEY_BYTES).contains(&key_len),
+        "VNC server offered a {key_len}-byte DH key, outside the \
+         {MIN_ARD_KEY_BYTES}..={MAX_ARD_KEY_BYTES} accepted"
+    );
+    let mut prime = vec![0u8; key_len];
+    reader.read_exact(&mut prime).await?;
+    let mut peer_public = vec![0u8; key_len];
+    reader.read_exact(&mut peer_public).await?;
+    // A zero modulus is not a weak group but an arithmetic impossibility, and
+    // `BigUint::modpow` answers it with a panic rather than a value — so it has
+    // to be refused here, before the exchange, and not inside it.
+    anyhow::ensure!(
+        prime.iter().any(|&b| b != 0),
+        "VNC server offered a zero DH prime"
+    );
+    // And the server's public key has to be a real member of that group. The
+    // degenerate ones — 0, 1, and p-1 — each collapse the shared secret to a
+    // value anyone watching the exchange can work out for themselves, which
+    // costs the account password its only cover on the wire. Parsed twice
+    // rather than threaded into [`ard_exchange`], so the arithmetic stays a
+    // pure function of bytes and this stays where the rest of the refusals are.
+    let modulus = BigUint::from_bytes_be(&prime);
+    let peer = BigUint::from_bytes_be(&peer_public);
+    anyhow::ensure!(
+        peer > BigUint::from(1u8) && peer < modulus - 1u8,
+        "VNC server offered a degenerate DH public key"
+    );
+    debug!("vnc: Apple DH authentication as {username:?}, {}-bit prime", key_len * 8);
+
+    let mut rng = rand::rng();
+    let mut private = vec![0u8; key_len];
+    let mut filler = [0u8; ARD_CREDENTIALS_LEN];
+    rng.fill_bytes(&mut private);
+    rng.fill_bytes(&mut filler);
+
+    let (secret, public) = ard_exchange(generator, &prime, &peer_public, &private);
+    let credentials = ard_credentials(username, password, filler)?;
+    writer.write_all(&ard_encrypt(&secret, &credentials)).await?;
+    writer.write_all(&public).await?;
+    Ok(())
+}
+
+/// The Diffie-Hellman half: the shared secret and the public key to send with
+/// it, both left-padded to the server's key length.
+///
+/// The padding is not cosmetic. The secret is hashed as bytes, so a secret that
+/// happens to be numerically small has to carry its leading zeros or the two
+/// ends derive different keys — an authentication that fails once in a few
+/// hundred connections rather than never.
+fn ard_exchange(
+    generator: u16,
+    prime: &[u8],
+    peer_public: &[u8],
+    private: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    let modulus = BigUint::from_bytes_be(prime);
+    let private = BigUint::from_bytes_be(private);
+    let public = BigUint::from(generator).modpow(&private, &modulus);
+    let secret = BigUint::from_bytes_be(peer_public).modpow(&private, &modulus);
+    let pad = |value: BigUint| {
+        let bytes = value.to_bytes_be();
+        let mut padded = vec![0u8; prime.len().saturating_sub(bytes.len())];
+        padded.extend_from_slice(&bytes);
+        padded
+    };
+    (pad(secret), pad(public))
+}
+
+/// Pack the credentials the way Apple's server expects to find them: the user
+/// name at 0 and the password at 64, each null-terminated, everything else left
+/// as the random filler it arrived as (so identical credentials do not encrypt
+/// to identical ciphertext).
+fn ard_credentials(
+    username: &str,
+    password: &str,
+    filler: [u8; ARD_CREDENTIALS_LEN],
+) -> anyhow::Result<[u8; ARD_CREDENTIALS_LEN]> {
+    let mut blob = filler;
+    for (offset, field, what) in [
+        (0, username, "username"),
+        (ARD_FIELD_LEN, password, "password"),
+    ] {
+        let bytes = field.as_bytes();
+        anyhow::ensure!(
+            bytes.len() < ARD_FIELD_LEN,
+            "the target's {what} is {} bytes; Apple's DH authentication carries at most {}",
+            bytes.len(),
+            ARD_FIELD_LEN - 1
+        );
+        blob[offset..offset + bytes.len()].copy_from_slice(bytes);
+        blob[offset + bytes.len()] = 0;
+    }
+    Ok(blob)
+}
+
+/// Encrypt the credential blob under the shared secret: AES-128 in ECB mode,
+/// keyed by the MD5 of the secret. ECB is Apple's choice, not one available to
+/// us — the blob is exactly eight blocks and the server decrypts them
+/// independently.
+fn ard_encrypt(secret: &[u8], credentials: &[u8; ARD_CREDENTIALS_LEN]) -> Vec<u8> {
+    use aes::cipher::{BlockCipherEncrypt as _, KeyInit as _};
+
+    let cipher = Aes128::new(&Md5::digest(secret));
+    let mut out = credentials.to_vec();
+    for block in out.chunks_exact_mut(16) {
+        cipher.encrypt_block((&mut *block).try_into().expect("16-byte AES block"));
+    }
+    out
+}
+
 /// Parse the 12-byte RFB greeting `RFB xxx.yyy\n` into (major, minor).
 fn parse_version(greeting: &[u8; 12]) -> Option<(u32, u32)> {
     let text = std::str::from_utf8(greeting).ok()?;
@@ -1404,6 +1615,206 @@ mod tests {
             auth_response("longpas", &challenge),
             auth_response("longpass", &challenge)
         );
+    }
+
+    /// The macOS 26 offer, exactly as the test VM sent it.
+    const MACOS_TYPES: [u8; 5] = [30, 33, 36, 2, 35];
+
+    #[test]
+    fn the_subtype_decides_the_authentication() {
+        assert_eq!(choose_security(&MACOS_TYPES, Some(Subtype::Ard), "pw").unwrap(), SECURITY_ARD);
+        // The very same server, answered anonymously, because that is what a
+        // target without the subtype asked for — and it is what costs you the
+        // Mac's own screen.
+        assert_eq!(choose_security(&MACOS_TYPES, None, "pw").unwrap(), SECURITY_VNC_AUTH);
+        // A subtype the server cannot answer is a configuration error, not a
+        // reason to authenticate as nobody.
+        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), "pw")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
+    }
+
+    #[test]
+    fn security_falls_back_the_way_it_always_did() {
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "").unwrap(), SECURITY_NONE);
+        // A password with no VncAuth on offer is not a failure: an open server
+        // is still an open server.
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "pw").unwrap(), SECURITY_NONE);
+        let err = choose_security(&[SECURITY_VNC_AUTH], None, "").unwrap_err();
+        assert!(format!("{err:#}").contains("requires a password"), "{err:#}");
+        let err = choose_security(&[19], None, "pw").unwrap_err();
+        assert!(format!("{err:#}").contains("no supported VNC security type"), "{err:#}");
+    }
+
+    #[test]
+    fn ard_credentials_are_packed_where_apple_reads_them() {
+        let blob = ard_credentials("andrew", "hunter2", [0xaa; ARD_CREDENTIALS_LEN]).unwrap();
+        assert_eq!(&blob[..7], b"andrew\0");
+        assert_eq!(&blob[64..72], b"hunter2\0");
+        // Everything else is left as the random filler it came in as, so the
+        // same credentials do not encrypt to the same ciphertext twice.
+        assert!(blob[7..64].iter().all(|&b| b == 0xaa));
+        assert!(blob[72..].iter().all(|&b| b == 0xaa));
+
+        // 63 bytes plus the terminator is the whole field; 64 cannot be told
+        // apart from an unterminated one.
+        assert!(ard_credentials(&"a".repeat(63), "pw", [0; ARD_CREDENTIALS_LEN]).is_ok());
+        let err = ard_credentials(&"a".repeat(64), "pw", [0; ARD_CREDENTIALS_LEN]).unwrap_err();
+        assert!(format!("{err:#}").contains("at most 63"), "{err:#}");
+    }
+
+    #[test]
+    fn ard_encrypts_each_block_independently() {
+        // ECB, and the test is the property that names it: two identical
+        // plaintext blocks encrypt identically. CBC or CTR would not.
+        let mut credentials = [0u8; ARD_CREDENTIALS_LEN];
+        credentials[..16].copy_from_slice(&[9u8; 16]);
+        credentials[16..32].copy_from_slice(&[9u8; 16]);
+        let out = ard_encrypt(b"shared secret", &credentials);
+        assert_eq!(out.len(), ARD_CREDENTIALS_LEN);
+        assert_eq!(out[..16], out[16..32]);
+        assert_ne!(out[..16], credentials[..16], "the blob is not sent in clear");
+    }
+
+    /// A worked Diffie-Hellman exchange, small enough to check by hand: the two
+    /// sides must reach the same secret, and it must be padded to the server's
+    /// key length rather than trimmed to its own.
+    #[test]
+    fn ard_exchange_agrees_with_the_server_and_pads_to_the_key_length() {
+        // p = 4099, g = 2, and a private key on each side.
+        let prime = 4099u32.to_be_bytes();
+        let ours = [0, 0, 0, 7u8];
+        let theirs = 11u32;
+        let server_public = 2u32.pow(theirs).rem_euclid(4099).to_be_bytes();
+
+        let (secret, public) = ard_exchange(2, &prime, &server_public, &ours);
+        assert_eq!(secret.len(), prime.len(), "left-padded to the key length");
+        assert_eq!(public.len(), prime.len());
+        // What the server derives from our public key must be the same secret.
+        let mirror = ard_exchange(2, &prime, &public, &theirs.to_be_bytes()).0;
+        assert_eq!(secret, mirror);
+        // And a secret that is numerically small keeps its leading zeros: the
+        // bytes are what gets hashed, so trimming them would derive a different
+        // AES key at one end.
+        assert_eq!(secret[0], 0);
+    }
+
+    /// The whole exchange, played from the server's side: feed it what macOS
+    /// sends, then finish the key agreement with the server's own private key
+    /// and decrypt what the client wrote. Recovering the credentials proves the
+    /// field order, the padding, the key derivation and the cipher mode all at
+    /// once — nothing else in this module can say that.
+    #[tokio::test]
+    async fn a_full_dh_exchange_hands_the_server_the_credentials_back() {
+        use aes::cipher::{BlockCipherDecrypt as _, KeyInit as _};
+
+        // The group macOS sends, and now the smallest this client accepts: 128
+        // bytes of it.
+        let key_len = MIN_ARD_KEY_BYTES;
+        let prime = {
+            let mut bytes = vec![0xffu8; key_len];
+            bytes[key_len - 1] = 0x97; // 2^1024 - 105, prime
+            bytes
+        };
+        let server_private = vec![0x5au8; key_len];
+        let modulus = BigUint::from_bytes_be(&prime);
+        let server_public =
+            BigUint::from(2u16).modpow(&BigUint::from_bytes_be(&server_private), &modulus);
+
+        let mut offer = Vec::new();
+        offer.extend_from_slice(&2u16.to_be_bytes()); // generator
+        offer.extend_from_slice(&u16::try_from(key_len).unwrap().to_be_bytes());
+        offer.extend_from_slice(&prime);
+        let mut public_bytes = server_public.to_bytes_be();
+        public_bytes.splice(..0, std::iter::repeat_n(0, key_len - public_bytes.len()));
+        offer.extend_from_slice(&public_bytes);
+
+        let mut sent = Vec::new();
+        ard_authenticate(&mut offer.as_slice(), &mut sent, "andrew", "hunter2")
+            .await
+            .unwrap();
+        assert_eq!(sent.len(), ARD_CREDENTIALS_LEN + key_len);
+
+        let (ciphertext, client_public) = sent.split_at(ARD_CREDENTIALS_LEN);
+        let secret = BigUint::from_bytes_be(client_public)
+            .modpow(&BigUint::from_bytes_be(&server_private), &modulus);
+        let mut secret_bytes = secret.to_bytes_be();
+        secret_bytes.splice(..0, std::iter::repeat_n(0, key_len - secret_bytes.len()));
+        let cipher = Aes128::new(&Md5::digest(&secret_bytes));
+        let mut plain = ciphertext.to_vec();
+        for block in plain.chunks_exact_mut(16) {
+            cipher.decrypt_block((&mut *block).try_into().unwrap());
+        }
+        assert_eq!(&plain[..7], b"andrew\0");
+        assert_eq!(&plain[64..72], b"hunter2\0");
+    }
+
+    /// The server chooses the group and we have to live in it, so every way that
+    /// choice can be unusable is refused before any arithmetic: a prime small
+    /// enough to break — with an account password riding inside it — a zero one,
+    /// which `BigUint::modpow` answers with a panic rather than a number, and a
+    /// public key whose shared secret anyone could predict.
+    #[tokio::test]
+    async fn a_degenerate_dh_group_is_refused_before_the_exchange() {
+        let offer_with = |key_len: usize, prime_byte: u8, peer: &[u8]| {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&2u16.to_be_bytes());
+            bytes.extend_from_slice(&u16::try_from(key_len).unwrap().to_be_bytes());
+            bytes.extend(std::iter::repeat_n(prime_byte, key_len)); // prime
+            let mut public = vec![0u8; key_len - peer.len()];
+            public.extend_from_slice(peer);
+            bytes.extend_from_slice(&public);
+            bytes
+        };
+        let offer = |key_len: usize, prime_byte: u8| offer_with(key_len, prime_byte, &[3]);
+        let authenticate = async |bytes: Vec<u8>| {
+            let mut sent = Vec::new();
+            let result = ard_authenticate(&mut bytes.as_slice(), &mut sent, "andrew", "pw").await;
+            assert!(sent.is_empty(), "nothing may be sent under a bad group");
+            format!("{:#}", result.unwrap_err())
+        };
+
+        let too_small = authenticate(offer(MIN_ARD_KEY_BYTES - 1, 0xff)).await;
+        assert!(too_small.contains("outside the"), "{too_small}");
+        // Named for what it is rather than left to the arithmetic above: 64
+        // bytes is the 512-bit group Apple used to use, and refusing it is the
+        // reason the floor exists.
+        let legacy = authenticate(offer(64, 0xff)).await;
+        assert!(legacy.contains("outside the"), "{legacy}");
+        let too_large = authenticate(offer(MAX_ARD_KEY_BYTES + 1, 0xff)).await;
+        assert!(too_large.contains("outside the"), "{too_large}");
+        // Long enough, and still no group at all.
+        let zero = authenticate(offer(MIN_ARD_KEY_BYTES, 0)).await;
+        assert!(zero.contains("zero DH prime"), "{zero}");
+
+        // A sound group, and a public key that gives the secret away: 0 and 1
+        // fix it outright, and p-1 leaves it one of two values.
+        let p_minus_one = {
+            let mut bytes = vec![0xffu8; MIN_ARD_KEY_BYTES];
+            *bytes.last_mut().unwrap() = 0xfe;
+            bytes
+        };
+        for peer in [
+            vec![0u8],
+            vec![1u8],
+            p_minus_one,                   // leaves the secret one of two values
+            vec![0xff; MIN_ARD_KEY_BYTES], // p itself, whose secret is always 0
+        ] {
+            let msg = authenticate(offer_with(MIN_ARD_KEY_BYTES, 0xff, &peer)).await;
+            assert!(msg.contains("degenerate DH public key"), "peer {peer:02x?}: {msg}");
+        }
+        // The neighbours of those values are accepted: the check is a floor and
+        // a ceiling, not a filter on anything that looks unusual.
+        let mut sent = Vec::new();
+        ard_authenticate(
+            &mut offer_with(MIN_ARD_KEY_BYTES, 0xff, &[2]).as_slice(),
+            &mut sent,
+            "andrew",
+            "pw",
+        )
+        .await
+        .unwrap();
+        assert_eq!(sent.len(), ARD_CREDENTIALS_LEN + MIN_ARD_KEY_BYTES);
     }
 
     #[test]
