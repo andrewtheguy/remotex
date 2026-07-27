@@ -50,6 +50,13 @@ struct RemotexViewerApp: App {
                 .frame(minWidth: 900, minHeight: 640)
         }
         .defaultSize(width: 1440, height: 900)
+        // The compact bar, because the toolbar's height is the desktop's loss: the
+        // title bar arrives as a top `contentInset` on the scroll view, so every
+        // point of it is a point the remote is not shown in (and, for a guest that
+        // follows the window, not *given*). The default unified style is 52pt tall
+        // for one button; compact measures 40 and reads the same — a VNC guest
+        // that follows the window came back 12 rows taller for it.
+        .windowToolbarStyle(.unifiedCompact)
         .commandsReplaced {
             RemoteCommands(model: model)
         }

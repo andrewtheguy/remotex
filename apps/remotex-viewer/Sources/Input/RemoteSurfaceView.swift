@@ -250,8 +250,9 @@ extension NSScrollView {
     /// Three nearer sizes are wrong, and each was wrong in a way that showed:
     ///
     /// - `bounds` is the whole frame, and under a title bar that includes the
-    ///   inset AppKit adds for it (`automaticallyAdjustsContentInsets` — 52pt on
-    ///   this window). A desktop sized to it hangs its last 52pt below the fold,
+    ///   inset AppKit adds for it (`automaticallyAdjustsContentInsets` — 40pt on
+    ///   this window, the compact toolbar). A desktop sized to it hangs its last
+    ///   40pt below the fold,
     ///   which for a Linux guest is its taskbar, and unreachable: the document is
     ///   no taller than the scroll extent either.
     /// - the same overshoot is what raises scrollers after an RDP "Resize to
