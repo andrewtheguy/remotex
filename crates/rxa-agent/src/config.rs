@@ -31,13 +31,42 @@ pub struct Config {
     /// credential; without it no handshake completes.
     pub psk: String,
     /// Which display to share, as an index into the shareable-display list.
-    /// `0` is the main display.
+    /// `0` is the main display. Ignored while [`Config::virtual_display`] is on,
+    /// which shares a display of its own instead of any real one.
     #[serde(default)]
     pub display: usize,
+    /// Share a display of our own rather than the Mac's screen.
+    ///
+    /// Off by default, and deliberately not a per-session choice: a display
+    /// appearing and disappearing rearranges windows, so it is created once at
+    /// startup and lives as long as the agent. Turning it on takes the machine
+    /// out of "watch my screen" and into "give me a desktop", which is a
+    /// different enough thing to be a deliberate setting rather than something a
+    /// browser can ask for.
+    #[serde(default)]
+    pub virtual_display: bool,
+    /// The size of that display in points, as `WIDTHxHEIGHT`.
+    ///
+    /// The size it comes up at, and the largest mode macOS can render at 2x on
+    /// it: the pixel ceiling behind it is fixed at creation (see
+    /// [`crate::virtualdisplay`]). Every other size on the list System Settings
+    /// shows is below this one. Twice this many pixels get captured and encoded
+    /// per frame, which is the reason not to simply ask for the largest display
+    /// imaginable.
+    #[serde(default = "default_virtual_display_size")]
+    pub virtual_display_size: String,
 }
 
 fn default_listen() -> String {
     format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT)
+}
+
+/// 1600x1000 points — 3200x2000 pixels once doubled.
+///
+/// Chosen to be a comfortable desktop without making every full frame a
+/// 6.4-megapixel encode.
+fn default_virtual_display_size() -> String {
+    "1600x1000".to_owned()
 }
 
 impl Config {
@@ -56,7 +85,33 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         rxa_proto::psk::parse(&self.psk).map_err(|e| anyhow::anyhow!("invalid psk: {e}"))?;
         self.socket_addr()?;
+        self.virtual_display_points()?;
         Ok(())
+    }
+
+    /// The virtual display's size in points.
+    ///
+    /// Validated even when `virtual_display` is off, so switching it on later
+    /// cannot be the moment a typo in the size is discovered.
+    pub fn virtual_display_points(&self) -> anyhow::Result<(u32, u32)> {
+        let text = self.virtual_display_size.trim();
+        let (w, h) = text
+            .split_once(['x', 'X'])
+            .with_context(|| format!("virtual_display_size must be WIDTHxHEIGHT, got {text:?}"))?;
+        let parse = |value: &str, axis: &str| -> anyhow::Result<u32> {
+            let n: u32 = value.trim().parse().with_context(|| {
+                format!("virtual_display_size {axis} must be a whole number, got {value:?}")
+            })?;
+            // Twice this is the pixel size, and the protocol carries pixels as
+            // u16 — so anything past 32767 points cannot be described to the
+            // gateway at all.
+            anyhow::ensure!(
+                (320..=32_767).contains(&n),
+                "virtual_display_size {axis} must be between 320 and 32767 points, got {n}"
+            );
+            Ok(n)
+        };
+        Ok((parse(w, "width")?, parse(h, "height")?))
     }
 
     /// The parsed listen address.
@@ -152,6 +207,8 @@ pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBu
         listen: default_listen(),
         psk: rxa_proto::psk::generate(),
         display: 0,
+        virtual_display: false,
+        virtual_display_size: default_virtual_display_size(),
     };
     config.save(&path)?;
     Ok((config, path, true))
@@ -201,12 +258,24 @@ listen = "{listen}"
 
 psk = "{psk}"
 
-# Which display to share (0 is the main one).
+# Which display to share (0 is the main one). Ignored while virtual_display is
+# on, which shares a display of its own instead of a real one.
 display = {display}
+
+# Share a display of our own — a private 2x desktop that no one is sitting in
+# front of — instead of mirroring the Mac's screen. It exists for as long as the
+# agent runs, and the browser can size it with "Resize to window".
+virtual_display = {virtual_display}
+
+# That display's size in points, WIDTHxHEIGHT. Also the largest it will take:
+# "Resize to window" moves within a range reaching down to about 62% of it.
+virtual_display_size = "{virtual_display_size}"
 "#,
         listen = config.listen,
         psk = config.psk,
         display = config.display,
+        virtual_display = config.virtual_display,
+        virtual_display_size = config.virtual_display_size,
     )
 }
 
@@ -259,6 +328,8 @@ mod tests {
             listen: default_listen(),
             psk: rxa_proto::psk::generate(),
             display: 0,
+            virtual_display: false,
+            virtual_display_size: default_virtual_display_size(),
         }
     }
 
@@ -406,6 +477,8 @@ mod tests {
             listen: "10.0.0.1:1234".to_owned(),
             psk: rxa_proto::psk::generate(),
             display: 3,
+            virtual_display: true,
+            virtual_display_size: "1440x900".to_owned(),
         };
         assert_eq!(Config::parse(&render(&config)).unwrap(), config);
     }

@@ -1100,9 +1100,6 @@ fn translate_input(
         }
         // Intercepted by the input loop (request_resize) before translation.
         ClientMsg::Viewport { .. } => Vec::new(),
-        // Only the Mac agent offers a menu of fixed resolutions; VNC follows the
-        // viewport instead, so the browser never sends this here.
-        ClientMsg::SetResolution { .. } => Vec::new(),
         // Intercepted by the input loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Intercepted by the input loop (the clipboard bridge, which needs the

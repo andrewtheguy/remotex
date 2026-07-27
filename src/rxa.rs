@@ -120,7 +120,6 @@ pub async fn run(
             &mut announced,
             &mut clipboard_snapshot,
             config.clipboard,
-            config.resize,
         )
         .await
         {
@@ -165,9 +164,6 @@ struct Session {
     /// framebuffer is twice the desktop it shows. Clients divide by it, and it
     /// travels with every size the agent reports.
     scale: f32,
-    /// Whether the Mac will change its display resolution on request — true
-    /// only for a virtual display, which is the agent's call, not ours.
-    resizable: bool,
 }
 
 /// TCP connect → Noise handshake → read the agent's `Hello`.
@@ -188,13 +184,12 @@ async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Sessio
 
         // `Hello` is the agent's first frame; anything else means we are not
         // talking to an agent that agrees with us about the protocol.
-        let (width, height, resizable, scale) = match AgentMsg::decode(&reader.recv().await?)? {
+        let (width, height, scale) = match AgentMsg::decode(&reader.recv().await?)? {
             AgentMsg::Hello {
                 version,
                 agent_version,
                 w,
                 h,
-                resizable,
                 scale,
             } => {
                 anyhow::ensure!(
@@ -203,11 +198,8 @@ async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Sessio
                     rxa_proto::VERSION
                 );
                 let scale = rxa_proto::msg::scale_ratio(scale);
-                info!(
-                    "rxa: agent {agent_version} at {dest}, screen {w}x{h} at {scale}x, \
-                     resizable={resizable}"
-                );
-                (w, h, resizable, scale)
+                info!("rxa: agent {agent_version} at {dest}, screen {w}x{h} at {scale}x");
+                (w, h, scale)
             }
             // Most likely a missing Screen Recording grant — say what the agent
             // said rather than "unexpected message".
@@ -220,7 +212,6 @@ async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Sessio
             width,
             height,
             scale,
-            resizable,
         })
     })
     .await
@@ -238,7 +229,6 @@ async fn pump(
     announced: &mut Option<Announced>,
     clipboard_snapshot: &mut Option<ClipboardSnapshot>,
     clipboard: bool,
-    resize: bool,
 ) -> anyhow::Result<()> {
     let Session {
         reader,
@@ -246,17 +236,7 @@ async fn pump(
         mut width,
         mut height,
         mut scale,
-        resizable,
     } = session;
-
-    // Both halves have to agree before the browser is offered a resolution
-    // menu: the target opted in (`resize = true`) and the Mac says its display
-    // can take it. Either one alone would produce a control that does nothing.
-    let resize = resize && resizable;
-    // The last menu sent to the browser, so a reattaching browser can be given
-    // one without waiting for the next reconfigure — the same reason `announced`
-    // exists for the desktop size.
-    let mut modes: Vec<(u16, u16)> = Vec::new();
 
     // Nothing to discover: the agent only builds for macOS, so reaching one at
     // all settles it.
@@ -347,21 +327,6 @@ async fn pump(
                             return Ok(());
                         }
                     }
-                    // Dropped for a target that didn't opt in, or an agent that
-                    // said it was not resizable: offering a menu the engine will
-                    // then refuse to act on is worse than offering none.
-                    AgentMsg::DisplayModes { modes: offered } => {
-                        if resize {
-                            modes = offered.clone();
-                            if frame_tx
-                                .send(ServerMsg::DisplayModes { modes: offered })
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
-                            }
-                        }
-                    }
                     // A second Hello on a live link (the agent restarted its
                     // stream) carries the current size; treat it as a resize.
                     AgentMsg::Hello { w, h, scale: reported, .. } => {
@@ -440,9 +405,9 @@ async fn pump(
                 let Some(msg) = input else {
                     return Ok(()); // the session layer tore this engine down
                 };
-                // A reattaching browser has a blank canvas, an empty menu and
-                // no idea what the remote runs: re-announce all three before
-                // asking the agent to repaint.
+                // A reattaching browser has a blank canvas and no idea what the
+                // remote runs: re-announce both before asking the agent to
+                // repaint.
                 if matches!(msg, ClientMsg::Refresh) {
                     if frame_tx
                         .send(ServerMsg::Resize { w: width, h: height, scale })
@@ -454,16 +419,8 @@ async fn pump(
                     if frame_tx.send(ServerMsg::RemoteOs { macos: true }).await.is_err() {
                         return Ok(());
                     }
-                    if !modes.is_empty()
-                        && frame_tx
-                            .send(ServerMsg::DisplayModes { modes: modes.clone() })
-                            .await
-                            .is_err()
-                    {
-                        return Ok(());
-                    }
                 }
-                if let Some(out) = to_agent(&msg, clipboard, resize) {
+                if let Some(out) = to_agent(&msg, clipboard) {
                     writer.send(&out.encode()).await?;
                 }
             }
@@ -519,13 +476,17 @@ impl Drop for AbortOnDrop {
 /// Translate browser input into an agent message.
 ///
 /// `None` for messages this engine has nothing to send for:
-/// [`ClientMsg::Viewport`] because a Mac's display takes sizes off a fixed list
-/// rather than following a viewport (the browser picks one with
-/// [`ClientMsg::SetResolution`] instead), `Connect`/`Disconnect` because the
-/// session layer handles those and never forwards them, and the clipboard pair
-/// and `SetResolution` when the target did not opt in — the browser hides those
-/// controls then, so this is the belt to that UI's braces.
-fn to_agent(msg: &ClientMsg, clipboard: bool, resize: bool) -> Option<GatewayMsg> {
+/// `Connect`/`Disconnect` because the session layer handles those and never
+/// forwards them, the clipboard pair when the target did not opt in — the
+/// browser hides those controls then, so this is the belt to that UI's braces —
+/// and `Viewport` always.
+///
+/// `Viewport` is dropped because the Mac's resolution is the Mac's. Whatever it
+/// is sharing — a real screen, or a display the agent created for the purpose —
+/// the mode is chosen on that machine, in System Settings, and this engine only
+/// ever reports the size back. A client that wants a different shape scales what
+/// it gets into its window.
+fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
     Some(match msg {
         ClientMsg::MouseMove { x, y } => GatewayMsg::PointerMove {
             x: clamp_u16(*x),
@@ -573,10 +534,8 @@ fn to_agent(msg: &ClientMsg, clipboard: bool, resize: bool) -> Option<GatewayMsg
         ClientMsg::Clipboard { text } if clipboard => GatewayMsg::Clipboard {
             text: text.clone(),
         },
-        ClientMsg::SetResolution { w, h } if resize => GatewayMsg::SetDisplaySize { w: *w, h: *h },
         ClientMsg::ClipboardRequest
         | ClientMsg::Clipboard { .. }
-        | ClientMsg::SetResolution { .. }
         | ClientMsg::Viewport { .. }
         | ClientMsg::Connect { .. }
         | ClientMsg::Disconnect => {
@@ -618,12 +577,12 @@ mod tests {
     #[test]
     fn pointer_moves_carry_clamped_framebuffer_coordinates() {
         assert_eq!(
-            to_agent(&ClientMsg::MouseMove { x: 1279, y: 799 }, false, false),
+            to_agent(&ClientMsg::MouseMove { x: 1279, y: 799 }, false),
             Some(GatewayMsg::PointerMove { x: 1279, y: 799 })
         );
         // A drag off the canvas edge pins to the edge instead of vanishing.
         assert_eq!(
-            to_agent(&ClientMsg::MouseMove { x: -5, y: 70_000 }, false, false),
+            to_agent(&ClientMsg::MouseMove { x: -5, y: 70_000 }, false),
             Some(GatewayMsg::PointerMove { x: 0, y: u16::MAX })
         );
     }
@@ -639,7 +598,7 @@ mod tests {
                 to_agent(&ClientMsg::MouseButton {
                     button,
                     pressed: true
-                }, false, false),
+                }, false),
                 Some(GatewayMsg::PointerButton {
                     button: expected,
                     pressed: true
@@ -650,7 +609,7 @@ mod tests {
             to_agent(&ClientMsg::MouseButton {
                 button: MouseButton::Left,
                 pressed: false
-            }, false, false),
+            }, false),
             Some(GatewayMsg::PointerButton {
                 button: 0,
                 pressed: false
@@ -663,7 +622,7 @@ mod tests {
     #[test]
     fn wheel_deltas_pass_through_unmodified() {
         assert_eq!(
-            to_agent(&ClientMsg::Wheel { dx: 0.0, dy: -2.5 }, false, false),
+            to_agent(&ClientMsg::Wheel { dx: 0.0, dy: -2.5 }, false),
             Some(GatewayMsg::Wheel { dx: 0.0, dy: -2.5 })
         );
     }
@@ -675,7 +634,7 @@ mod tests {
                 code: "KeyA".to_owned(),
                 pressed: true,
                 caps: true,
-            }, false, false),
+            }, false),
             Some(GatewayMsg::Key {
                 code: "KeyA".to_owned(),
                 pressed: true,
@@ -689,7 +648,7 @@ mod tests {
                 code: "MediaPlayPause".to_owned(),
                 pressed: false,
                 caps: false,
-            }, false, false),
+            }, false),
             Some(GatewayMsg::Key {
                 code: "MediaPlayPause".to_owned(),
                 pressed: false,
@@ -700,47 +659,25 @@ mod tests {
 
     #[test]
     fn refresh_asks_the_agent_for_a_full_repaint() {
-        assert_eq!(to_agent(&ClientMsg::Refresh, false, false), Some(GatewayMsg::Refresh));
+        assert_eq!(to_agent(&ClientMsg::Refresh, false), Some(GatewayMsg::Refresh));
     }
 
-    // Viewport reports mean nothing to a display that only takes sizes off a
-    // list — even with resize on, where the browser sends SetResolution
-    // instead — and the session layer never forwards Connect/Disconnect.
+    // A viewport report is never a resolution request here: the Mac's mode is
+    // chosen on the Mac. And the session layer never forwards
+    // Connect/Disconnect.
     #[test]
     fn messages_with_no_agent_equivalent_are_dropped() {
-        for resize in [false, true] {
-            assert_eq!(
-                to_agent(&ClientMsg::Viewport { w: 2560, h: 1440 }, false, resize),
-                None,
-                "viewport reports are never forwarded (resize={resize})"
-            );
-        }
+        assert_eq!(to_agent(&ClientMsg::Viewport { w: 2560, h: 1440 }, false), None);
         assert_eq!(
             to_agent(
                 &ClientMsg::Connect {
                     target: "mac".to_owned()
                 },
-                false,
                 false
             ),
             None
         );
-        assert_eq!(to_agent(&ClientMsg::Disconnect, false, false), None);
-    }
-
-    // The browser only shows the resolution menu for a target that opted in,
-    // and this is the belt to that UI's braces — a stray pick from a stale tab
-    // must not reach the Mac.
-    #[test]
-    fn a_resolution_pick_reaches_the_agent_only_when_the_target_opted_in() {
-        assert_eq!(
-            to_agent(&ClientMsg::SetResolution { w: 1280, h: 800 }, false, true),
-            Some(GatewayMsg::SetDisplaySize { w: 1280, h: 800 })
-        );
-        assert_eq!(
-            to_agent(&ClientMsg::SetResolution { w: 1280, h: 800 }, false, false),
-            None
-        );
+        assert_eq!(to_agent(&ClientMsg::Disconnect, false), None);
     }
 
     // The clipboard pair is the only thing the flag gates, and it gates both
@@ -749,7 +686,7 @@ mod tests {
     #[test]
     fn clipboard_messages_reach_the_agent_only_when_the_target_opted_in() {
         assert_eq!(
-            to_agent(&ClientMsg::ClipboardRequest, true, false),
+            to_agent(&ClientMsg::ClipboardRequest, true),
             Some(GatewayMsg::ClipboardRequest)
         );
         assert_eq!(
@@ -758,20 +695,23 @@ mod tests {
                     text: "copied — 画面".to_owned()
                 },
                 true
-            , false),
+            ),
             Some(GatewayMsg::Clipboard {
                 text: "copied — 画面".to_owned()
             })
         );
 
-        assert_eq!(to_agent(&ClientMsg::ClipboardRequest, false, false), None);
+        assert_eq!(
+            to_agent(&ClientMsg::ClipboardRequest, false),
+            None
+        );
         assert_eq!(
             to_agent(
                 &ClientMsg::Clipboard {
                     text: "copied".to_owned()
                 },
                 false
-            , false),
+            ),
             None
         );
     }
@@ -783,7 +723,7 @@ mod tests {
     fn oversized_clipboard_text_never_reaches_the_agent() {
         // Two bytes per char, so this is twice the ceiling.
         let text = "é".repeat(crate::protocol::MAX_CLIPBOARD_BYTES);
-        assert_eq!(to_agent(&ClientMsg::Clipboard { text }, true, false), None);
+        assert_eq!(to_agent(&ClientMsg::Clipboard { text }, true), None);
 
         // At the ceiling it goes through untouched, so the boundary is
         // inclusive and nothing is rewritten on the way past.
@@ -793,7 +733,6 @@ mod tests {
                 text: text.clone(),
             },
             true,
-            false,
         ) {
             Some(GatewayMsg::Clipboard { text: sent }) => assert_eq!(sent, text),
             other => panic!("expected a clipboard message, got {other:?}"),

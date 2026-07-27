@@ -73,15 +73,52 @@ pub trait FrameSink: Send + Sync + 'static {
     fn failed(&self, message: String);
 }
 
+/// Which display a session shares.
+///
+/// Two kinds, because a display of our own cannot be described the way a real
+/// one is: [`crate::virtualdisplay`] displays report no CoreGraphics mode at
+/// all, so their backing scale cannot be read back from the system and has to be
+/// worked out from what we know about how the display was built.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Target {
+    /// One of the Mac's own displays, by index into the shareable list — what
+    /// `display` in the config means.
+    Index(usize),
+    /// A display we created, by id, plus the point size it was created at.
+    ///
+    /// The size is here because the mode is not ours to know: the display shows
+    /// up in System Settings like any other, so whoever is using the Mac can put
+    /// it in any mode on the list macOS derived — including the `(low
+    /// resolution)` 1x entries. See [`owned_scale`] for what the created size
+    /// settles.
+    Owned { id: u32, base_points: (u32, u32) },
+}
+
+/// The backing scale of a display of our own, currently showing `points`.
+///
+/// `maxPixels` was set to [`crate::virtualdisplay::SCALE`] times the created
+/// size and cannot be changed, so that size is exactly the largest mode macOS
+/// can put twice the pixels behind: at or under it, assume it did; over it, it
+/// provably did not and the mode is 1x.
+///
+/// Getting this wrong is expensive in one direction — reading a 3200x2000 1x
+/// mode as 2x would ask ScreenCaptureKit for a 6400x4000 surface and hand the
+/// encoder four times the pixels for an upscale of the same desktop.
+fn owned_scale(points: (f64, f64), base: (u32, u32)) -> f64 {
+    if points.0 <= f64::from(base.0) && points.1 <= f64::from(base.1) {
+        crate::virtualdisplay::SCALE
+    } else {
+        1.0
+    }
+}
+
 /// What the agent needs to know about a display before it starts streaming:
 /// the size to announce in `Hello`, and the two numbers input conversion needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Geometry {
     /// The CoreGraphics display this was measured from. Carried along because
-    /// the display index the config names is resolved here (see [`pick`]), and
-    /// [`crate::displaymode`] addresses displays by id — without this, a caller
-    /// wanting to change the shared display's mode would have to re-resolve the
-    /// index and could pick a different display than the one being captured.
+    /// the display index the config names is resolved here (see [`pick`]), so
+    /// without it a caller could not tell which display it ended up with.
     pub id: u32,
     /// Captured surface size in pixels.
     pub width: u16,
@@ -127,12 +164,12 @@ pub fn request_screen_recording() -> bool {
 /// the stream itself should not start until it does (battery, CPU) — so the
 /// geometry is probed separately. This still needs the Screen Recording grant,
 /// which makes it the natural place to discover a missing one.
-pub fn probe(display: usize) -> anyhow::Result<Geometry> {
+pub fn probe(target: Target) -> anyhow::Result<Geometry> {
     let content = SCShareableContent::get()
         .map_err(|e| anyhow::anyhow!("cannot list shareable content: {e}"))?;
     let displays = content.displays();
     anyhow::ensure!(!displays.is_empty(), "no displays available to capture");
-    Ok(geometry(pick(&displays, display)))
+    Ok(geometry(pick(&displays, target)?, target))
 }
 
 /// One entry in the shareable-display list, for the menu bar's display picker.
@@ -160,7 +197,7 @@ pub fn displays() -> anyhow::Result<Vec<DisplayInfo>> {
         .enumerate()
         .map(|(index, display)| DisplayInfo {
             index,
-            geometry: geometry(display),
+            geometry: geometry(display, Target::Index(index)),
         })
         .collect())
 }
@@ -171,6 +208,8 @@ pub struct Capture {
     shared: Arc<Shared>,
     /// The geometry the stream was configured for.
     pub geometry: Geometry,
+    /// How to re-measure that display — see [`geometry_for_target`].
+    target: Target,
 }
 
 /// How many frames are logged at `info` after a stream starts.
@@ -206,7 +245,7 @@ impl Capture {
     /// It starts set, so the first frame is a complete picture and a freshly
     /// attached browser does not wait for the screen to change.
     pub fn start(
-        display: usize,
+        target: Target,
         sink: Arc<dyn FrameSink>,
         full_repaint: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
@@ -216,8 +255,8 @@ impl Capture {
             .map_err(|e| anyhow::anyhow!("cannot list shareable content: {e}"))?;
         let displays = content.displays();
         anyhow::ensure!(!displays.is_empty(), "no displays available to capture");
-        let display = pick(&displays, display);
-        let geometry = geometry(display);
+        let display = pick(&displays, target)?;
+        let geometry = geometry(display, target);
         info!(
             "capture: display {} — {}x{} pixels at {}x, origin ({}, {})",
             display.display_id(),
@@ -265,6 +304,7 @@ impl Capture {
             stream,
             shared,
             geometry,
+            target,
         })
     }
 
@@ -281,7 +321,7 @@ impl Capture {
     /// frames keep arriving at the old dimensions, the handler never sees a size
     /// change, and nothing tells the browser anything happened; what it shows is
     /// a squashed picture of the new resolution. That holds however the mode
-    /// changed: a browser-requested switch (see [`crate::displaymode`]) or the
+    /// changed: a mode switch made on the Mac itself, or the
     /// host resizing a VM's virtual display.
     ///
     /// This does not notify anyone. It resizes the surface, and the next frame
@@ -295,7 +335,7 @@ impl Capture {
     /// would log a warning every 100ms through exactly the event this exists to
     /// handle. The poll after it sees the new mode.
     pub fn follow_display(&mut self) -> anyhow::Result<Option<Geometry>> {
-        let Some(live) = geometry_for_id(self.geometry.id) else {
+        let Some(live) = geometry_for_target(self.target, self.geometry.id) else {
             debug!(
                 "capture: display {} reports no mode; mid-reconfigure",
                 self.geometry.id
@@ -346,6 +386,34 @@ fn stream_config(width: u16, height: u16) -> SCStreamConfiguration {
         .with_queue_depth(3)
 }
 
+/// Re-measure a target the way its kind allows.
+///
+/// The owned case cannot go through [`geometry_for_id`]: `CGDisplayCopyDisplayMode`
+/// returns NULL for a display we created, so that path would report "no mode,
+/// mid-reconfigure" on every single poll and the capture surface would never
+/// follow a resize. Bounds and the scale we asked for are all it needs, and
+/// bounds *are* published for these displays.
+pub fn geometry_for_target(target: Target, id: u32) -> Option<Geometry> {
+    use objc2_core_graphics::CGDisplayBounds;
+
+    let Target::Owned { base_points, .. } = target else {
+        return geometry_for_id(id);
+    };
+    let bounds = CGDisplayBounds(id);
+    let (points_w, points_h) = (bounds.size.width, bounds.size.height);
+    if points_w <= 0.0 || points_h <= 0.0 {
+        return None;
+    }
+    let scale = owned_scale((points_w, points_h), base_points);
+    Some(Geometry {
+        id,
+        width: clamp_u16((points_w * scale).round() as u32),
+        height: clamp_u16((points_h * scale).round() as u32),
+        scale,
+        origin: (bounds.origin.x, bounds.origin.y),
+    })
+}
+
 /// Measure a display through CoreGraphics rather than ScreenCaptureKit.
 ///
 /// [`geometry`] needs an `SCDisplay`, and getting one means `SCShareableContent`
@@ -382,20 +450,44 @@ pub fn geometry_for_id(id: u32) -> Option<Geometry> {
     })
 }
 
-/// Pick a display by index, falling back to the main one rather than failing —
-/// a stale `display = 2` in the config should degrade to a working session.
-fn pick(displays: &[SCDisplay], index: usize) -> &SCDisplay {
-    displays.get(index).unwrap_or_else(|| {
-        warn!("capture: display index {index} out of range; using the main display");
-        &displays[0]
-    })
+/// Resolve a target against the shareable list.
+///
+/// An out-of-range *index* falls back to the main display rather than failing —
+/// a stale `display = 2` in the config should degrade to a working session. A
+/// missing *owned* display is an error instead: falling back there would share
+/// the screen of whoever is sitting at the Mac, having been asked for a private
+/// desktop, which is the one substitution nobody would want made silently.
+fn pick(displays: &[SCDisplay], target: Target) -> anyhow::Result<&SCDisplay> {
+    match target {
+        Target::Index(index) => Ok(displays.get(index).unwrap_or_else(|| {
+            warn!("capture: display index {index} out of range; using the main display");
+            &displays[0]
+        })),
+        Target::Owned { id, .. } => displays
+            .iter()
+            .find(|display| display.display_id() == id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the virtual display ({id}) is not in the shareable list — it may not have \
+                     been published yet"
+                )
+            }),
+    }
 }
 
 /// Measure a display: `SCDisplay` reports points, and a Retina panel captures at
 /// a multiple of that. We ask for the full pixel size so the browser gets the
 /// panel's real detail, and carry the scale so input can be converted back.
-fn geometry(display: &SCDisplay) -> Geometry {
-    let scale = backing_scale(display);
+fn geometry(display: &SCDisplay, target: Target) -> Geometry {
+    let scale = match target {
+        // Not `backing_scale`: CoreGraphics has no mode for an owned display, so
+        // it would report 1.0 and the capture would be half the pixels it should
+        // be — the exact failure `owned_scale` exists to prevent.
+        Target::Owned { base_points, .. } => {
+            owned_scale((display.width() as f64, display.height() as f64), base_points)
+        }
+        Target::Index(_) => backing_scale(display),
+    };
     let frame = display.frame();
     Geometry {
         id: display.display_id(),
@@ -639,6 +731,21 @@ mod tests {
         Rect { x, y, w, h }
     }
 
+    // The created size and everything under it is HiDPI; the 1x modes macOS
+    // offers past it are the ones that must not be captured at twice their
+    // pixels. The exact boundary is the created size itself.
+    #[test]
+    fn an_owned_display_is_2x_up_to_the_size_it_was_created_at() {
+        let base = (1600, 1000);
+        assert_eq!(owned_scale((1600.0, 1000.0), base), crate::virtualdisplay::SCALE);
+        assert_eq!(owned_scale((1344.0, 840.0), base), crate::virtualdisplay::SCALE);
+        // A "(low resolution)" pick in System Settings: the whole panel's pixels
+        // as points, which `maxPixels` proves cannot be backed at 2x.
+        assert_eq!(owned_scale((3200.0, 2000.0), base), 1.0);
+        // One axis over is enough — 1600x1200 would need 3200x2400 pixels.
+        assert_eq!(owned_scale((1600.0, 1200.0), base), 1.0);
+    }
+
     // The menu bar offers a display by the index this list reports, and a session
     // resolves that index with `probe`. If the two ever disagreed, a user would
     // tick one display and share another — so pin them against each other.
@@ -653,11 +760,14 @@ mod tests {
         assert!(!displays.is_empty(), "the list is never empty on success");
         for (i, display) in displays.iter().enumerate() {
             assert_eq!(display.index, i, "indexes must be positions in the list");
-            assert_eq!(probe(i).unwrap(), display.geometry);
+            assert_eq!(probe(Target::Index(i)).unwrap(), display.geometry);
         }
         // Out of range degrades to the main display rather than failing, which is
         // what makes a stale `display = 3` in the config survive unplugging.
-        assert_eq!(probe(displays.len() + 10).unwrap(), displays[0].geometry);
+        assert_eq!(
+            probe(Target::Index(displays.len() + 10)).unwrap(),
+            displays[0].geometry
+        );
     }
 
     #[test]
