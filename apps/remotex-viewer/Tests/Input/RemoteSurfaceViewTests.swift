@@ -131,6 +131,33 @@ struct RemoteSurfaceViewTests {
         #expect(second == harness.expectedViewport(width: 900, height: 648))
     }
 
+    /// The two above set the inset themselves, which tests our arithmetic and takes
+    /// AppKit's word for the rest. This one takes nothing on faith: automatic
+    /// insets left on, a real window and a real layout, and the assertion is that
+    /// whatever inset AppKit decided on is out of the *reported* size. Without it,
+    /// the shipped bug — the report carrying the title bar — passes every test in
+    /// this file.
+    @Test
+    func appKitInsetsForTheTitleBarOfItsOwnAccord() async throws {
+        let harness = try Harness(automaticContentInsets: true)
+        harness.resize(to: CGSize(width: 900, height: 700))
+
+        let inset = harness.scrollView.contentInsets.top
+        #expect(inset > 0, "a titled window insets its scroll view for the title bar")
+
+        // Its own number, not one written here: the title bar's height is AppKit's
+        // to decide and has changed across releases.
+        let expected = harness.expectedViewport(width: 900, height: 700 - inset)
+        #expect(harness.surface.measuredViewport() == expected)
+        // Polled to the expected value rather than taking the first report: the
+        // inset lands partway through the layout, so the report before it is a real
+        // state this passes through.
+        for _ in 0 ..< 200 where harness.model.viewportSize != expected {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(harness.model.viewportSize == expected)
+    }
+
     /// A window-only resize changes no observed state, so SwiftUI never runs
     /// `updateNSView` and the surface would keep a frame measured against the old
     /// window — leaving a remote smaller than the window off-centre in the space it
@@ -156,19 +183,20 @@ struct RemoteSurfaceViewTests {
     /// scrollable, which is a non-Retina guest's taskbar below the fold on a Retina
     /// host, with no way to scroll to it.
     @Test
-    func aBackingScaleChangeReDerivesTheDocument() async throws {
+    func aBackingScaleChangeReDerivesTheDocument() throws {
         let harness = try Harness()
+        harness.window.scale = 1
         harness.resize(to: CGSize(width: 900, height: 700))
-        harness.coordinator.apply(remoteSize: harness.remote(width: 1200, height: 900))
-        _ = try await harness.reportedViewport()
-        let correct = harness.surface.frame.size
+        // Larger than the room at either scale, so the document is the remote's own
+        // point size both times and the scale it was derived from is readable off it.
+        harness.coordinator.apply(remoteSize: DisplayMode(w: 4_000, h: 3_000))
+        #expect(harness.surface.frame.size == CGSize(width: 4_000, height: 3_000))
 
-        // What a stale scale leaves behind: a document sized for the other display.
-        harness.surface.setFrameSize(CGSize(width: 600, height: 450))
+        // Onto a Retina display: the same remote is half the points it was.
+        harness.window.scale = 2
         harness.surface.backingScaleChanged()
 
-        #expect(harness.surface.frame.size == correct)
-        #expect(correct == CGSize(width: 1200, height: 900))
+        #expect(harness.surface.frame.size == CGSize(width: 2_000, height: 1_500))
     }
 
     /// Scrolling changes what is visible, not how much room there is.
@@ -192,15 +220,21 @@ struct RemoteSurfaceViewTests {
     @MainActor
     private struct Harness {
         let model: AppModel
-        let window: NSWindow
+        let window: ScaledWindow
         let scrollView: NSScrollView
         let surface: RemoteSurfaceView
         let coordinator: RemoteSurfaceHost.Coordinator
 
-        init() throws {
+        /// `automaticContentInsets` off by default, so the room is the frame and
+        /// every size written below is the one that is measured. AppKit would
+        /// otherwise add this window's title bar as a top inset partway through the
+        /// first layout — which is a thing to test deliberately, and
+        /// `appKitInsetsForTheTitleBarOfItsOwnAccord` is where it is, rather than
+        /// having it arrive underneath every other number.
+        init(automaticContentInsets: Bool = false) throws {
             let renderer = try #require(FramebufferRenderer.make(), "needs a Metal device")
             model = Self.makeModel()
-            window = NSWindow(
+            window = ScaledWindow(
                 contentRect: CGRect(x: 0, y: 0, width: 300, height: 200),
                 styleMask: [.titled, .resizable],
                 backing: .buffered,
@@ -210,12 +244,7 @@ struct RemoteSurfaceViewTests {
             scrollView.hasVerticalScroller = true
             scrollView.hasHorizontalScroller = true
             scrollView.autohidesScrollers = true
-            // Off, so the room is the frame and every size below is the one written
-            // here. AppKit would otherwise add this window's title bar as a top
-            // inset partway through the first layout, which is a thing to test
-            // deliberately — see the two tests that set an inset themselves — not
-            // to have arriving underneath every other number.
-            scrollView.automaticallyAdjustsContentInsets = false
+            scrollView.automaticallyAdjustsContentInsets = automaticContentInsets
             surface = RemoteSurfaceView(model: model, renderer: renderer)
             scrollView.documentView = surface
             window.contentView = scrollView
@@ -280,4 +309,15 @@ struct RemoteSurfaceViewTests {
     }
 
     private struct ReportNeverArrived: Error {}
+
+    /// A window whose backing scale can be told what to be, since a test cannot
+    /// move one between displays. Nil is the display's own, so every test that does
+    /// not care reads the real thing.
+    private final class ScaledWindow: NSWindow {
+        var scale: CGFloat?
+
+        override var backingScaleFactor: CGFloat {
+            scale ?? super.backingScaleFactor
+        }
+    }
 }

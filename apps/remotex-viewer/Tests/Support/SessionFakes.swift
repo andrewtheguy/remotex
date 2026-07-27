@@ -99,9 +99,15 @@ final class FakeWebSocketTransport: WebSocketTransport {
         }
     }
 
-    /// Deliver a frame to a socket that stayed open.
+    /// Deliver a frame to a socket that stayed open. Dropped once the socket has
+    /// ended, or `cancel` clearing the queue would not be worth much: the next
+    /// frame pushed would sit in it and be handed to a `receive` after the session
+    /// let this socket go.
     func push(_ frame: WebSocketFrame) {
         let waiter = state.withLock { state -> CheckedContinuation<WebSocketFrame, any Error>? in
+            guard !state.ended, !state.cancelled else {
+                return nil
+            }
             guard let waiter = state.waiter else {
                 state.inbound.append(frame)
                 return nil
