@@ -86,11 +86,13 @@ struct RemoteCommands: Commands {
                     && model.session.screen != .desktop
             )
 
+            // Signed out only, which is why it sits under Log Out: from the picker
+            // or the desktop that is the step to take first.
             Button("Change Gateway") {
                 Task { await model.changeGateway() }
             }
             .keyboardShortcut("g", modifiers: [.command, .shift])
-            .disabled(model.session.screen == .server)
+            .disabled(!model.canChangeGateway)
 
             // The server step's Continue answers to Return already, but only while
             // the window is key and nothing else has eaten it. On the menu it is

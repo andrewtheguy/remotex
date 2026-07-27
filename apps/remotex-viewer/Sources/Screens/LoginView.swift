@@ -37,7 +37,9 @@ struct LoginView: View {
                         .keyboardShortcut(.cancelAction)
                         .buttonStyle(.link)
                         .font(.callout)
-                        .disabled(model.isBusy)
+                        // The same rule the menu item answers to, so the two
+                        // cannot disagree about when the address may move.
+                        .disabled(!model.canChangeGateway)
                     }
                 }
 

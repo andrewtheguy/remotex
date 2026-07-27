@@ -64,8 +64,9 @@ struct GatewayStepTests {
         #expect(model.session.screen == .picker)
         #expect(model.session.connectionStatus != nil)
         // The session's reconnect loop would otherwise outlive this test and land
-        // on the next one's stub, since the handler is static.
-        await model.changeGateway()
+        // on the next one's stub, since the handler is static. Log out rather than
+        // change the gateway: from the picker that is the only way out now.
+        await model.logOut()
     }
 
     @Test
@@ -191,6 +192,56 @@ struct GatewayStepTests {
 
         #expect(model.session.screen == .server)
         #expect(model.loginError == nil)
+    }
+
+    /// Once signed in the address is not a thing to change: the cookie, the claim
+    /// and the socket all belong to that gateway, so moving it is a log out
+    /// wearing another name. Both entry points ask `canChangeGateway`, and the
+    /// model refuses anyway.
+    @Test
+    func theGatewayCannotBeChangedWhileSignedIn() async {
+        let model = makeModel { request in
+            switch request.url?.path {
+            case "/api/config":
+                (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+            case "/api/auth/status":
+                (200, #"{"authenticated":true}"#)
+            case "/api/session":
+                (200, #"{"sessionId":"tok-1"}"#)
+            default:
+                (404, "{}")
+            }
+        }
+        await model.connectToGateway()
+        let address = model.gatewayAddress
+        #expect(model.session.screen == .picker)
+
+        #expect(!model.canChangeGateway)
+        await model.changeGateway()
+        #expect(model.session.screen == .picker, "the picker kept its gateway")
+
+        // And on a live desktop, which is the same rule one screen further in.
+        model.apply(
+            .control(
+                .connected(
+                    ServerMessage.Connected(
+                        name: "t",
+                        protocolName: "vnc",
+                        resize: false,
+                        clipboard: false
+                    )
+                )
+            )
+        )
+        #expect(!model.canChangeGateway)
+        await model.changeGateway()
+        #expect(model.session.screen == .desktop, "the desktop kept its gateway")
+        #expect(model.gatewayAddress == address)
+
+        // Signing out is the way back to where it can be changed.
+        await model.logOut()
+        #expect(model.session.screen == .login)
+        #expect(model.canChangeGateway)
     }
 
     /// Logging out gives up the credentials, not the address, so it stops at the

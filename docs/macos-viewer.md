@@ -58,6 +58,13 @@ can only be about who you are, which is why the address is shown but not editabl
 — **Change** goes back to step one. Logging out returns here rather than to the
 server step: it is the credentials being given up, not the address.
 
+This step is also the *only* place the address can be changed, on the link or on
+the menu (`canChangeGateway`). Everything past it belongs to one gateway — the
+login cookie is scoped to that host, the claim token was minted by it, the socket
+is attached to it — so changing the address from the picker or the desktop was a
+log out that did not say so. From there the step to take first is Log Out, which
+lands back here.
+
 Step two is skipped when the cookie is still good, so the common case is one
 button. `HTTPCookieStorage.shared` outlives the app; the gateway's auth sessions
 do not outlive *it*, so its restart ends them and any 401 drops back to login
