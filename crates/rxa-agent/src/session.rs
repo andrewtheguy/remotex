@@ -600,9 +600,18 @@ async fn pump(
                     // the agent made, and only while that is the one being
                     // shared: a Mac's own panel does not change because someone
                     // connected, and a display nobody is looking at has nothing
-                    // to match. Reconfiguring is a WindowServer round trip, so it
-                    // goes to a blocking thread; `set_scale` returns early when
-                    // the density already agrees, which is the common case.
+                    // to match. `set_scale` returns early when the density already
+                    // agrees, which is the common case.
+                    //
+                    // The reconfigure itself is a WindowServer round trip that
+                    // takes hundreds of milliseconds, so it is neither run on this
+                    // thread nor waited for on it: awaiting the blocking task here
+                    // would hold the select! loop, and with it tiles, cursor
+                    // updates and input injection, for the whole of it. Nothing in
+                    // the loop depends on the outcome — the size that follows a
+                    // successful change arrives through the display poll like any
+                    // other reconfigure — so the task only has to outlive the
+                    // message, and reports for itself.
                     GatewayMsg::HostScale { scale } => {
                         let wanted = rxa_proto::msg::scale_ratio(scale) >= 1.5;
                         match (&display, target) {
@@ -611,23 +620,20 @@ async fn pump(
                             {
                                 let display = Arc::clone(display);
                                 let points = capture::display_points(id);
-                                let done = tokio::task::spawn_blocking(move || {
-                                    display
-                                        .lock()
-                                        .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
-                                        .and_then(|display| display.set_scale(wanted, points))
-                                })
-                                .await;
-                                match done {
-                                    Ok(Ok(true)) => {
-                                        // The size change that follows arrives
-                                        // through the display poll like any other
-                                        // reconfigure, so nothing is announced here.
+                                tokio::spawn(async move {
+                                    let done = tokio::task::spawn_blocking(move || {
+                                        display
+                                            .lock()
+                                            .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
+                                            .and_then(|display| display.set_scale(wanted, points))
+                                    })
+                                    .await;
+                                    match done {
+                                        Ok(Ok(_)) => {}
+                                        Ok(Err(e)) => warn!("session: cannot set the display density: {e:#}"),
+                                        Err(e) => warn!("session: the density change did not run: {e}"),
                                     }
-                                    Ok(Ok(false)) => {}
-                                    Ok(Err(e)) => warn!("session: cannot set the display density: {e:#}"),
-                                    Err(e) => warn!("session: the density change did not run: {e}"),
-                                }
+                                });
                             }
                             // Every other case is a client reporting something
                             // true that this session cannot use.
