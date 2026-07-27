@@ -50,6 +50,21 @@ struct ClientMessageTests {
         )
     }
 
+    /// The other display message, and the opposite of `viewport`: this one asks
+    /// which screen to look at, which is the only display decision a client gets
+    /// to make. The id is opaque and uses the full u32 range.
+    @Test
+    func selectDisplayCarriesAnOpaqueId() throws {
+        try expectEncoding(
+            .selectDisplay(id: 2),
+            ["type": "selectDisplay", "id": 2]
+        )
+        try expectEncoding(
+            .selectDisplay(id: UInt32.max),
+            ["type": "selectDisplay", "id": 4_294_967_295]
+        )
+    }
+
     /// The gateway's `w`/`h` are u16 and it rejects anything wider rather than
     /// clamping, so the type carries the ceiling and the extremes must survive.
     @Test
@@ -83,6 +98,7 @@ struct ClientMessageTests {
             .disconnect,
             .clipboard(text: ""),
             .clipboardRequest,
+            .selectDisplay(id: 1),
         ]
         #expect(Set(messages.map(\.tag)) == ClientMessage.allTags)
         #expect(messages.count == ClientMessage.allTags.count)

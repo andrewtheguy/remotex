@@ -435,6 +435,10 @@ final class AppModel: GatewaySessionSink {
             session.remoteScale = scale > 0 ? CGFloat(scale) : 1
             renderer?.resize(to: size)
 
+        case .displays(let active, let displays):
+            session.displays = displays
+            session.activeDisplayID = active
+
         case .remoteOs(let macos):
             // Which Mac a Command chord belongs to just changed, so nothing may
             // stay held under the old convention.
@@ -574,6 +578,19 @@ final class AppModel: GatewaySessionSink {
     /// framebuffer that has gone wrong.
     func refresh() {
         connection?.send(.refresh)
+    }
+
+    /// Share a different one of the remote's displays (the Display menu).
+    ///
+    /// Fire and forget, and deliberately not optimistic: the answer is the
+    /// remote's next `displays`, which is what moves the checkmark. Selecting
+    /// the display already active is dropped here rather than costing the remote
+    /// a capture restart and this viewer a full repaint.
+    func selectDisplay(_ id: UInt32) {
+        guard id != session.activeDisplayID else {
+            return
+        }
+        connection?.send(.selectDisplay(id: id))
     }
 
     /// "Resize to Window": the one report that gets past `manualOnly`.

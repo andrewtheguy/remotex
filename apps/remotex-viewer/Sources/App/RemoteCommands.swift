@@ -101,5 +101,38 @@ struct RemoteCommands: Commands {
                     && model.session.screen != .desktop
             )
         }
+
+        // Which of the remote's screens to look at, one checkable item each.
+        //
+        // A menu of its own rather than a submenu under Remote, because it is the
+        // one control here that is used *during* a session and more than once —
+        // buried a level down it would be a worse version of the browser's
+        // floating panel. `ViewerApplicationDelegate` keeps a list of the
+        // top-level menus this app may have, and this title has to be on it.
+        //
+        // Only `rxa` fills it: RDP and VNC each deliver one framebuffer spanning
+        // every remote screen, so there is nothing to choose between. The menu
+        // stays rather than disappearing — a menu bar whose items come and go is
+        // harder to learn than one item that is sometimes greyed — and says why.
+        CommandMenu("Display") {
+            if model.session.displays.isEmpty {
+                Button("No Displays to Choose From") {}
+                    .disabled(true)
+            } else {
+                ForEach(model.session.displays) { display in
+                    Toggle(
+                        "\(display.label) — \(display.detail)",
+                        isOn: Binding(
+                            get: { display.id == model.session.activeDisplayID },
+                            // Only ever set to true, by picking the item: the
+                            // remote is always sharing exactly one display, so
+                            // there is no "off" to honour. Unticking the active
+                            // item asks for nothing and `selectDisplay` drops it.
+                            set: { _ in model.selectDisplay(display.id) }
+                        )
+                    )
+                }
+            }
+        }
     }
 }

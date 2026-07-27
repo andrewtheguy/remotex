@@ -17,6 +17,11 @@ enum ServerMessage: Sendable, Equatable {
     case connected(Connected)
     case remoteOs(macos: Bool)
     case clipboard(Clipboard)
+    /// The remote's displays and which of them is being shared, pushed whenever
+    /// either changes. Only `rxa` sends it: RDP and VNC each deliver one
+    /// framebuffer spanning every remote screen, so there is nothing to choose
+    /// between and the Display menu stays empty.
+    case displays(active: UInt32, displays: [DisplayInfo])
     /// A `type` this build does not know.
     ///
     /// Held as a value rather than raised as an error so a gateway that adds a
@@ -55,6 +60,31 @@ enum ServerMessage: Sendable, Equatable {
         }
     }
 
+    /// One of the remote's displays, as the Display menu lists it. The strings
+    /// are built by the remote and shown verbatim — the Mac knows how its own
+    /// displays are named, and saying it once keeps this menu and the browser's
+    /// panel reading the same.
+    struct DisplayInfo: Sendable, Equatable, Decodable, Identifiable {
+        /// Opaque here — whatever goes back in a `selectDisplay`.
+        let id: UInt32
+        /// Short enough for a menu item: "Display 2", or "Virtual display".
+        let label: String
+        /// The line beside it: "1600×1000 at 2x".
+        let detail: String
+        let main: Bool
+        /// A display the remote made for this purpose rather than one of its own
+        /// screens. Named around the Swift keyword.
+        let isVirtual: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case id
+            case label
+            case detail
+            case main
+            case isVirtual = "virtual"
+        }
+    }
+
     struct Clipboard: Sendable, Equatable, Decodable {
         let text: String
         /// When remotex observed the change. Nil is honest for content that
@@ -72,7 +102,7 @@ enum ServerMessage: Sendable, Equatable {
     /// Every tag this build understands, for the wire-contract test.
     static let allTags: Set<String> = [
         "resize", "cursor", "error", "picker", "connected", "remoteOs",
-        "clipboard",
+        "clipboard", "displays",
     ]
 }
 
@@ -112,6 +142,11 @@ extension ServerMessage: Decodable {
         let macos: Bool
     }
 
+    private struct Displays: Decodable {
+        let active: UInt32
+        let displays: [DisplayInfo]
+    }
+
     init(from decoder: any Decoder) throws {
         guard let tagged = try? decoder.container(keyedBy: TagKey.self),
               let type = try? tagged.decode(String.self, forKey: .type)
@@ -136,6 +171,9 @@ extension ServerMessage: Decodable {
                 self = .remoteOs(macos: try RemoteOs(from: decoder).macos)
             case "clipboard":
                 self = .clipboard(try Clipboard(from: decoder))
+            case "displays":
+                let payload = try Displays(from: decoder)
+                self = .displays(active: payload.active, displays: payload.displays)
             default:
                 self = .unsupported(type: type)
             }

@@ -119,7 +119,81 @@ struct AppModelTests {
         #expect(!model.session.canClipboard)
         #expect(!model.session.canResize)
         #expect(!model.session.remoteIsMac)
+        #expect(model.session.displays.isEmpty)
+        #expect(model.session.activeDisplayID == nil)
         #expect(model.windowTitle == "remotex")
+    }
+
+    /// The Display menu is the whole of what the viewer knows about the remote's
+    /// screens: it holds no list of its own and derives the checkmark from
+    /// `activeDisplayID`, so both have to survive the message intact.
+    @Test
+    func displaysArriveWithTheActiveOneMarked() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        #expect(model.session.displays.isEmpty, "nothing to pick until the remote says so")
+
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+
+        #expect(model.session.displays == twoDisplays)
+        #expect(model.session.activeDisplayID == 9)
+    }
+
+    /// The checkmark follows the remote, never the click. A selection that the
+    /// remote refused, or has not answered yet, must leave the menu agreeing with
+    /// what is actually on screen.
+    @Test
+    func selectingADisplayDoesNotMoveTheCheckmarkOnItsOwn() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
+
+        model.selectDisplay(9)
+        #expect(
+            model.session.activeDisplayID == 7,
+            "still on display 7 until the remote reports the switch"
+        )
+
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+        #expect(model.session.activeDisplayID == 9)
+    }
+
+    /// The gateway address is read from the defaults this model was handed, which
+    /// is what `--settings` relies on: a QA run must not read — or later write —
+    /// the address a real one left in `UserDefaults.standard`.
+    @Test
+    func theGatewayAddressComesFromTheDefaultsThisModelWasGiven() {
+        let defaults = UserDefaults(suiteName: "AppModelTests.\(UUID().uuidString)")!
+        // Stored as `GatewayLocation` normalizes it, trailing slash and all —
+        // this is a round trip through the same parse a real launch does.
+        defaults.set("http://10.0.0.9:52380/", forKey: "gatewayAddress")
+        let model = AppModel(
+            defaults: defaults,
+            clipboard: ClipboardSynchronizer(
+                pasteboard: NSPasteboard.withUniqueName(),
+                startsPolling: false
+            )
+        )
+        #expect(model.gatewayAddress == "http://10.0.0.9:52380/")
+    }
+
+    /// `--settings <name>` is the flag that keeps a QA run's gateway address and
+    /// login off the real ones. Parsed from an argument list rather than from
+    /// `ProcessInfo`, which a test process cannot choose.
+    @Test
+    func theSettingsFlagNamesASuiteOnlyWhenItHasOne() {
+        #expect(ViewerDefaults.settingsName(in: ["remotex-viewer"]) == nil)
+        #expect(
+            ViewerDefaults.settingsName(
+                in: ["remotex-viewer", "--settings", "qa", "--gateway", "http://x"]
+            ) == "qa"
+        )
+        // A trailing flag, or one with only spaces after it, is a mistake — and
+        // must not become a suite named "".
+        #expect(ViewerDefaults.settingsName(in: ["remotex-viewer", "--settings"]) == nil)
+        #expect(ViewerDefaults.settingsName(in: ["remotex-viewer", "--settings", "  "]) == nil)
     }
 
     /// An engine error is not a dead end: the socket stays up and the session
@@ -293,6 +367,24 @@ struct AppModelTests {
             )
         )
     }
+
+    /// A Mac with a screen somebody is at and an extra one the agent made.
+    private let twoDisplays: [ServerMessage.DisplayInfo] = [
+        .init(
+            id: 7,
+            label: "Display 1",
+            detail: "1920×1080 at 1x",
+            main: true,
+            isVirtual: false
+        ),
+        .init(
+            id: 9,
+            label: "Virtual display",
+            detail: "3200×2000 at 2x",
+            main: false,
+            isVirtual: true
+        ),
+    ]
 
     private func connected(
         protocolName: String,
