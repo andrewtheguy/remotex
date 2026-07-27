@@ -61,23 +61,6 @@ struct RemoteCommands: Commands {
             }
             .disabled(!model.canResizeNow)
 
-            // A target whose only resize path is a fixed list — the Mac agent on
-            // a virtual display — has no other way to be resized.
-            Menu("Resolution") {
-                ForEach(model.session.displayModes) { mode in
-                    Button {
-                        model.setResolution(mode)
-                    } label: {
-                        if mode == model.session.remoteSize {
-                            Label(mode.label, systemImage: "checkmark")
-                        } else {
-                            Text(mode.label)
-                        }
-                    }
-                }
-            }
-            .disabled(model.session.displayModes.isEmpty)
-
             // The escape hatch for a framebuffer that has gone wrong: re-announce
             // the size and repaint everything.
             Button("Refresh") {

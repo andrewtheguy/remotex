@@ -40,16 +40,18 @@ struct AppModelTests {
         )
     }
 
-    /// The three resize mechanisms. Only RDP gets a button; rxa answers a fixed
-    /// list instead; VNC is the only one that may be followed automatically.
+    /// The three resize behaviours. Only RDP gets a button; VNC is followed
+    /// automatically; a Mac is never resized from here at all. (`rxa` with
+    /// `resize` is included because an older gateway could still send it — the
+    /// config layer rejects it now.)
     @Test
     func resizeCapabilitiesFollowTheProtocol() {
-        let expectations: [(protocolName: String, resize: Bool, canResize: Bool, manual: Bool)] = [
-            ("rdp", true, true, true),
-            ("rxa", true, false, true),
-            ("vnc", true, false, false),
-            ("rdp", false, false, false),
-            ("vnc", false, false, false),
+        let expectations: [(protocolName: String, resize: Bool, canResize: Bool)] = [
+            ("rdp", true, true),
+            ("rxa", true, false),
+            ("vnc", true, false),
+            ("rdp", false, false),
+            ("vnc", false, false),
         ]
         for expectation in expectations {
             let model = makeModel()
@@ -67,10 +69,6 @@ struct AppModelTests {
             )
             #expect(
                 model.session.canResize == expectation.canResize,
-                "\(expectation.protocolName) resize=\(expectation.resize)"
-            )
-            #expect(
-                model.session.manualResize == expectation.manual,
                 "\(expectation.protocolName) resize=\(expectation.resize)"
             )
         }
@@ -107,7 +105,6 @@ struct AppModelTests {
         model.apply(.status(.connected))
         model.apply(.control(.connected(connected(protocolName: "rxa", resize: true, clipboard: true))))
         model.apply(.control(.resize(w: 1920, h: 1080, scale: 2)))
-        model.apply(.control(.displayModes(modes: [DisplayMode(w: 1920, h: 1080)])))
         model.apply(.control(.remoteOs(macos: true)))
 
         model.apply(.control(.picker))
@@ -119,7 +116,6 @@ struct AppModelTests {
         // The Retina Mac's density goes with it: kept, it would double the
         // viewport reported for the next target before its own resize lands.
         #expect(model.session.remoteScale == 1)
-        #expect(model.session.displayModes.isEmpty)
         #expect(!model.session.canClipboard)
         #expect(!model.session.canResize)
         #expect(!model.session.remoteIsMac)
@@ -141,29 +137,6 @@ struct AppModelTests {
 
         #expect(model.session.pendingTarget == nil)
         #expect(model.session.connectError == "connect failed")
-    }
-
-    @Test
-    func displayModesAreReplacedRatherThanMerged() {
-        let model = makeModel()
-        model.apply(.control(.displayModes(modes: [
-            DisplayMode(w: 1920, h: 1080),
-            DisplayMode(w: 1280, h: 800),
-        ])))
-        // A display reconfigure regenerates the list; a size that is gone from it
-        // must not linger in the menu.
-        model.apply(.control(.displayModes(modes: [DisplayMode(w: 1280, h: 800)])))
-        #expect(model.session.displayModes == [DisplayMode(w: 1280, h: 800)])
-    }
-
-    @Test
-    func setResolutionRefusesAModeTheRemoteNoLongerOffers() {
-        let model = makeModel()
-        model.apply(.control(.displayModes(modes: [DisplayMode(w: 1280, h: 800)])))
-        // No connection is attached, so the observable effect is that neither call
-        // traps — what is pinned is that the guard exists at all.
-        model.setResolution(DisplayMode(w: 1280, h: 800))
-        model.setResolution(DisplayMode(w: 3840, h: 2160))
     }
 
     /// Clearing the framebuffer drops the size, which is what puts the "waiting

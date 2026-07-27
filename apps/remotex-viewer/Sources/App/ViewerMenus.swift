@@ -44,6 +44,33 @@ enum ViewerMenus {
         return menu
     }
 
+    /// Put the Edit menu into `mainMenu` unless `current` is already in it, and
+    /// return the one that is there now — to hold for the next check, and to hand
+    /// the sweep as its exemption.
+    ///
+    /// Installing it once at launch looked like it had done nothing, and very
+    /// nearly had: SwiftUI rebuilds the whole bar from its own model of it — when
+    /// the first window comes up, and again whenever `commandsReplaced`
+    /// re-evaluates — and an item this app inserted is not in that model. The menu
+    /// was in the bar for about a second after launch and then gone, so every text
+    /// field went back to beeping at Command-V.
+    ///
+    /// Membership is checked by object identity, for the same reason the sweep's
+    /// exemption is: an item titled "Edit" in a rebuilt bar is not evidence that
+    /// this menu survived it.
+    static func ensureEditMenu(in mainMenu: NSMenu, current: NSMenu?) -> NSMenu {
+        if let current, mainMenu.items.contains(where: { $0.submenu === current }) {
+            return current
+        }
+        let menu = makeEditMenu()
+        let item = NSMenuItem()
+        item.title = menu.title
+        item.submenu = menu
+        // After the application menu, where a Mac app's Edit menu goes.
+        mainMenu.insertItem(item, at: min(1, mainMenu.items.count))
+        return menu
+    }
+
     /// Clear every key equivalent in `menu`, except in `exempt` and below it.
     ///
     /// Idempotent, which is what keeps it safe to run from a change notification:

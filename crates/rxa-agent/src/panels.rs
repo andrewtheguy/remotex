@@ -66,13 +66,29 @@ const BUTTON_WIDTH: f64 = 100.0;
 pub struct Draft {
     pub listen: String,
     pub psk: String,
-    pub display: usize,
+    pub display: Selection,
+    /// The virtual display's size, `WIDTHxHEIGHT` in points. Kept whatever the
+    /// selection is, so switching to a real display and back does not lose it.
+    pub virtual_size: String,
 }
 
-/// One entry for the dialog's display menu: the index the config stores, and how
-/// to describe it.
+/// What the display menu can be set to.
+///
+/// A display of the agent's own is one of the entries rather than a checkbox
+/// beside them, because it is not an extra property of a shared screen — it
+/// replaces the screen being shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    /// One of the Mac's own displays, by index into the shareable list.
+    Real(usize),
+    /// A display the agent creates for itself.
+    Virtual,
+}
+
+/// One entry for the dialog's display menu: what picking it selects, and how to
+/// describe it.
 pub struct DisplayChoice {
-    pub index: usize,
+    pub selection: Selection,
     pub label: String,
 }
 
@@ -98,14 +114,14 @@ pub fn config(
         NSAlertStyle::Informational,
     );
 
-    let rows = 3.0;
+    let rows = 4.0;
     let height = rows * ROW_HEIGHT + (rows - 1.0) * ROW_GAP;
     let view = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(NSPoint::ZERO, NSSize::new(WIDTH, height)),
     );
     // AppKit's origin is bottom-left, so rows are laid out upwards and named
-    // downwards: listen on top, then display, then the key.
+    // downwards: listen on top, then display, its size, then the key.
     let row = |n: f64| (rows - 1.0 - n) * (ROW_HEIGHT + ROW_GAP);
 
     view.addSubview(&label(mtm, "Listen address", row(0.0)));
@@ -128,16 +144,34 @@ pub fn config(
     // nothing selected would silently save a different screen than the one shown.
     let selected = displays
         .iter()
-        .position(|choice| choice.index == current.display)
+        .position(|choice| choice.selection == current.display)
         .unwrap_or(0);
     display.selectItemAtIndex(selected as isize);
     view.addSubview(&display);
 
-    view.addSubview(&label(mtm, "Pre-shared key", row(2.0)));
+    // Only meaningful for the virtual entry, and left enabled regardless: a
+    // field that greys out as the menu above it changes is more startling than
+    // one whose value simply does not apply yet.
+    view.addSubview(&label(mtm, "Virtual size", row(2.0)));
+    let virtual_size = field(
+        mtm,
+        &current.virtual_size,
+        row(2.0),
+        WIDTH - CONTROL_X,
+        false,
+    );
+    virtual_size.setToolTip(Some(&NSString::from_str(
+        "The size the virtual display comes up at, in points, WIDTHxHEIGHT — and \
+         the largest mode macOS can render on it at 2x. Change its resolution \
+         afterwards in System Settings > Displays.",
+    )));
+    view.addSubview(&virtual_size);
+
+    view.addSubview(&label(mtm, "Pre-shared key", row(3.0)));
     let psk = field(
         mtm,
         &current.psk,
-        row(2.0),
+        row(3.0),
         WIDTH - CONTROL_X - BUTTON_WIDTH - 6.0,
         true,
     );
@@ -157,7 +191,7 @@ pub fn config(
     // Exactly the row, like every other control here: anything hanging outside
     // the accessory view's bounds is at the mercy of the alert's layout.
     regenerate.setFrame(NSRect::new(
-        NSPoint::new(WIDTH - BUTTON_WIDTH, row(2.0)),
+        NSPoint::new(WIDTH - BUTTON_WIDTH, row(3.0)),
         NSSize::new(BUTTON_WIDTH, ROW_HEIGHT),
     ));
     // A new key lands in the field rather than in the file: nothing is saved
@@ -180,11 +214,12 @@ pub fn config(
     let chosen = usize::try_from(display.indexOfSelectedItem())
         .ok()
         .and_then(|position| displays.get(position))
-        .map_or(current.display, |choice| choice.index);
+        .map_or(current.display, |choice| choice.selection);
     Some(Draft {
         listen: listen.stringValue().to_string().trim().to_owned(),
         psk: psk.stringValue().to_string().trim().to_owned(),
         display: chosen,
+        virtual_size: virtual_size.stringValue().to_string().trim().to_owned(),
     })
 }
 

@@ -77,6 +77,8 @@ impl Settings {
             listen: next.listen.trim().to_owned(),
             psk: next.psk.trim().to_owned(),
             display: next.display,
+            virtual_display: next.virtual_display,
+            virtual_display_size: next.virtual_display_size.trim().to_owned(),
         };
         let mut saved = self.saved.lock().unwrap();
         if next == *saved {
@@ -106,6 +108,8 @@ mod tests {
             listen: format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT),
             psk: rxa_proto::psk::generate(),
             display: 0,
+            virtual_display: false,
+            virtual_display_size: "1600x1000".to_owned(),
         };
         config.save(&path).unwrap();
         (Settings::new(config, path.clone()), path, dir)
@@ -217,9 +221,12 @@ mod tests {
             listen: "  127.0.0.1:9002\n".to_owned(),
             psk: format!(" {psk}\n"),
             display: 0,
+            virtual_display: true,
+            virtual_display_size: " 1440x900 ".to_owned(),
         };
         assert!(settings.apply(next).unwrap());
         assert_eq!(settings.saved().listen, "127.0.0.1:9002");
         assert_eq!(settings.saved().psk, psk);
+        assert_eq!(settings.saved().virtual_display_size, "1440x900");
     }
 }

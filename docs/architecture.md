@@ -95,14 +95,15 @@ Browser-to-server traffic is JSON:
 
 - session control: connect or disconnect;
 - input: mouse movement/buttons, wheel, and DOM keyboard codes;
-- display control: viewport size, a pick from the offered remote resolutions,
-  and a full-refresh request;
+- display control: viewport size and a full-refresh request;
 - clipboard: send text to the remote, or request the remote's text.
 
-Viewport reports affect only engines configured for resize. RDP resize is
-explicit from the UI; VNC resize follows the browser when the server advertises
-the extension; `rxa` ignores viewport size entirely and resizes only to a size
-the Mac itself offered, which the browser picks from a menu.
+Viewport reports affect only engines configured for resize, and there is no
+other way for a client to ask for a size — no menu of resolutions, for any
+protocol. RDP resize is explicit from the UI; VNC resize follows the browser
+when the server advertises the extension. Those two protocols hand the desktop
+size to the client; every other remote's resolution is set on the remote, `rxa`
+included, and reaches the client only as a `resize`.
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine so a new canvas does not
@@ -204,10 +205,11 @@ repaint on recovery. Input generated while disconnected is discarded. Initial
 connection and authentication failures return to the picker instead of
 retrying indefinitely.
 
-With `resize = true`, the agent offers the resolutions its display advertises
-and the browser picks one — but only when the agent reports that display as
-resizable, which it does only for a virtual display in a VM. A physical Mac
-display is never changed from the browser. See
+Nothing on this wire asks the Mac to change resolution, and `resize = true` on
+an `rxa` target is a config error. The Mac's mode is changed on the Mac — in
+System Settings, including for the private display the agent can create for
+itself, which appears there like any other screen — and the agent reports the
+new size when it sees it. See
 [`mac-agent-architecture.md`](mac-agent-architecture.md).
 
 RXA has a separate application ping/pong between the gateway and agent to detect
@@ -264,7 +266,7 @@ refuses to open a session against if it does not recognise. Additive control
 messages do not bump it: clients must ignore tags they do not know.
 
 The viewer has one protocol-engine branch, and only one: which of the three
-resize mechanisms a target uses. Everything else follows from the control
+resize behaviours a target uses. Everything else follows from the control
 messages, so any other difference belongs to an engine adapter.
 
 See [`macos-viewer.md`](macos-viewer.md) for its protocol, rendering, keyboard,
@@ -278,8 +280,7 @@ sections. See [`install.md`](install.md) and
 
 Protocol-specific fields are validated during startup. In particular, `rxa`
 requires a checksum-valid PSK; incompatible fields are rejected rather than
-silently accepted. Whether an `rxa` target's `resize` can do anything is the
-agent's call, not the config loader's, so that one is taken at face value here.
+silently accepted, `resize` on an `rxa` target among them.
 
 Unit tests cover protocol, config, authentication, key mapping, and engine
 helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and

@@ -117,24 +117,6 @@ struct ServerMessageTests {
         )
     }
 
-    @Test
-    func displayModesDecodeInOrderAndEmpty() throws {
-        #expect(
-            try ServerMessage.decode(
-                #"{"type":"displayModes","modes":[{"w":1290,"h":830},{"w":1024,"h":768}]}"#
-            ) == .displayModes(modes: [
-                DisplayMode(w: 1290, h: 830),
-                DisplayMode(w: 1024, h: 768),
-            ])
-        )
-        // An empty list is how "there is nothing to offer" travels, so it must
-        // decode to an empty menu rather than failing.
-        #expect(
-            try ServerMessage.decode(#"{"type":"displayModes","modes":[]}"#)
-                == .displayModes(modes: [])
-        )
-    }
-
     /// A gateway that grows a control message must not break an older viewer:
     /// the frame becomes a value the receive loop can step over, not an error.
     @Test

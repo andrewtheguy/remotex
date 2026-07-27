@@ -35,14 +35,12 @@ export default function RemoteDesktop({
     pendingTarget,
     size,
     canResize,
-    displayModes,
     canClipboard,
     remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
-    setResolution,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
@@ -89,9 +87,6 @@ export default function RemoteDesktop({
           onLogout={onLogout}
           onSwitchTarget={switchTarget}
           onResizeToWindow={canResize ? resizeToWindow : undefined}
-          displayModes={displayModes}
-          remoteSize={size}
-          onSetResolution={setResolution}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}
           canClipboard={canClipboard}

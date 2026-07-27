@@ -91,10 +91,9 @@ final class FramebufferRenderer: NSObject, MTKViewDelegate {
 
     /// Adopt a new remote size.
     ///
-    /// A no-op when the size already matches: an rxa `setResolution` answered
-    /// with the size already in use would otherwise throw away a perfectly good
-    /// framebuffer, and the gateway deliberately suppresses a redundant `resize`
-    /// for exactly that reason.
+    /// A no-op when the size already matches: a `resize` that repeats the size
+    /// already in use would otherwise throw away a perfectly good framebuffer,
+    /// and a reconnect to an unchanged desktop re-announces one.
     func resize(to next: DisplayMode) {
         guard size != next else {
             return

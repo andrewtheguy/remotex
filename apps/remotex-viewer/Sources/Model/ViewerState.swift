@@ -22,17 +22,14 @@ enum ViewerConnectionStatus: String {
     case takenOver
 }
 
-/// One entry of the remote's resolution menu, in the remote's own pixels.
+/// A remote desktop size, in the remote's own pixels.
 ///
-/// `UInt16` because that is what `setResolution` is on the wire, and the gateway
-/// rejects an out-of-range value rather than clamping it — so a mode that could
+/// `UInt16` because that is what `viewport` is on the wire, and the gateway
+/// rejects an out-of-range value rather than clamping it — so a size that could
 /// not be sent back is not representable here either.
-struct DisplayMode: Equatable, Identifiable, Hashable, Sendable, Decodable {
+struct DisplayMode: Equatable, Hashable, Sendable, Decodable {
     var w: UInt16
     var h: UInt16
-
-    var id: String { "\(w)x\(h)" }
-    var label: String { "\(w) × \(h)" }
 }
 
 /// What the viewer knows about the session it is attached to.
@@ -51,9 +48,6 @@ struct ViewerSessionState: Equatable {
     /// Decides only whether a local Command shortcut stays Command or becomes
     /// remote Control.
     var remoteIsMac = false
-    /// The resolutions the remote offers. Empty for every target without a
-    /// menu — only a Mac agent on a virtual display fills this in.
-    var displayModes: [DisplayMode] = []
     /// The remote's current size in framebuffer pixels, from the last `resize`.
     /// Nil before the first one, which is the "waiting for the remote desktop"
     /// state.
@@ -65,12 +59,8 @@ struct ViewerSessionState: Equatable {
     /// `RemoteGeometry`.
     var remoteScale: CGFloat = 1
     /// Whether to offer "Resize to Window": RDP only. VNC follows the viewport
-    /// on its own, and rxa answers a resolution menu instead.
+    /// on its own, and a Mac's resolution is set on that Mac.
     var canResize = false
-    /// Whether to *suppress* automatic viewport reports. True for RDP (a resize
-    /// forces an expensive Deactivation-Reactivation) and for rxa (which ignores
-    /// viewport reports entirely).
-    var manualResize = false
     var canClipboard = false
     /// The target a connect is waiting on, so the picker can show progress until
     /// the gateway answers with `connected` — or with an error.

@@ -414,13 +414,6 @@ export function useRemoteDesktop(
   // the floating menu shows a "Resize to window" button and automatic viewport
   // reports are suppressed. VNC resizes automatically, so it stays false.
   const [canResize, setCanResize] = useState(false);
-  // The resolutions the remote will accept, largest first. Non-empty only for
-  // an rxa target with `resize = true` whose Mac shares a virtual display —
-  // the agent decides that, so the browser learns it from `displayModes`
-  // rather than from the protocol name. Empty means no menu.
-  const [displayModes, setDisplayModes] = useState<{ w: number; h: number }[]>(
-    [],
-  );
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
@@ -787,18 +780,15 @@ export function useRemoteDesktop(
           setConnectError(null);
           setPendingTarget(null);
           setMode("desktop");
-          // RDP resizes only on request (heavy reactivation) and rxa only to a
-          // size off the Mac's own list; VNC follows the viewport
-          // automatically. In manual mode the report below is suppressed, so
-          // the desktop keeps its connect-time size until the user asks.
-          const manual =
-            (msg.protocol === "rdp" || msg.protocol === "rxa") && msg.resize;
-          manualResizeRef.current = manual;
-          // Only RDP gets the "Resize to window" button: rxa cannot take an
-          // arbitrary size, so it offers a menu of resolutions instead, which
-          // arrives separately as `displayModes`.
-          setCanResize(msg.protocol === "rdp" && msg.resize);
-          setDisplayModes([]);
+          // Three behaviours, decided here and nowhere else. VNC follows the
+          // viewport automatically. RDP resizes only when asked, because its
+          // reactivation is heavy — so viewport reports are suppressed and the
+          // menu's "Resize to window" is the one caller. Everything else,
+          // including every Mac, keeps whatever size the remote is at: its
+          // resolution is set on the remote.
+          const manual = msg.protocol === "rdp" && msg.resize;
+          manualResizeRef.current = manual || msg.protocol === "rxa";
+          setCanResize(manual);
           setCanClipboard(msg.clipboard);
           // A freshly-started engine needs the current viewport; the report is
           // sent here (once the protocol is known), undeduped.
@@ -840,12 +830,6 @@ export function useRemoteDesktop(
           // forwards the physical `code` it saw. The macOS viewer is the client
           // that acts on this.
           break;
-        case "displayModes":
-          // The remote's resolution menu, replaced wholesale: the list is
-          // regenerated on the Mac whenever its display is reconfigured, so
-          // merging into the old one would keep sizes that no longer exist.
-          setDisplayModes(msg.modes);
-          break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
           // ended): show the picker. Drop any retained framebuffer so a later
@@ -854,7 +838,6 @@ export function useRemoteDesktop(
           setMode("picker");
           manualResizeRef.current = false;
           setCanResize(false);
-          setDisplayModes([]);
           setCanClipboard(false);
           setRemoteClipboard(null);
           lastFromRemoteRef.current = null;
@@ -944,15 +927,6 @@ export function useRemoteDesktop(
   // socket is down. The engine answers with a `resize` control message.
   const resizeToWindow = useCallback(() => {
     resizeToWindowRef.current?.();
-  }, []);
-
-  // Set the remote desktop to one of the resolutions `displayModes` offered
-  // (the floating menu's Resolution section). A no-op while the socket is down.
-  // The engine answers with a `resize` control message once the remote display
-  // has actually changed — which can be a neighbouring size if the list moved
-  // underneath the menu, so nothing here assumes the pick was honoured exactly.
-  const setResolution = useCallback((w: number, h: number) => {
-    sendRef.current({ type: "setResolution", w, h });
   }, []);
 
   // Inject a key chord from the floating toolbar — keys the browser swallows
@@ -1256,14 +1230,12 @@ export function useRemoteDesktop(
     pendingTarget,
     size,
     canResize,
-    displayModes,
     canClipboard,
     remoteClipboard,
     takeOver,
     connect,
     switchTarget,
     resizeToWindow,
-    setResolution,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,

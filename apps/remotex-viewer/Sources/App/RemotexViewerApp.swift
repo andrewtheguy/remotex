@@ -5,17 +5,26 @@ import SwiftUI
 @MainActor
 private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     /// The one menu whose chords are kept — see `ViewerMenus.makeEditMenu`. Held
-    /// so the sweep below can recognise it by identity.
+    /// so the sweep below can recognise it by identity, and so a rebuilt bar can
+    /// be told apart from one that still has ours in it.
     private var editMenu: NSMenu?
 
+    /// Set while `enforceMenuBarRules` is running, in case a notification is ever
+    /// delivered inside a menu mutation rather than after one: re-entering the
+    /// check mid-insert would find the menu not yet in the bar and insert a second.
+    private var isEnforcingMenuBarRules = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // No item in this menu bar carries a key equivalent — the Edit menu below
-        // excepted — and the rule is enforced as items arrive rather than once over
-        // what is there at launch: AppKit builds the View menu holding Enter Full
-        // Screen only when a window can go full screen, which is later than this, and
-        // it arrives with Control-Command-F on it. That chord is delivered to this app
-        // like any other, so a focused desktop captures it and the guest gets it
-        // instead — the item would name a shortcut that does something else entirely.
+        // Both menu bar rules are enforced as items arrive rather than once over what
+        // is there at launch, because the bar this app hands out is not the last one
+        // it gets. AppKit builds the View menu holding Enter Full Screen only when a
+        // window can go full screen, which is later than this, and it arrives with
+        // Control-Command-F on it: that chord is delivered to this app like any other,
+        // so a focused desktop captures it and the guest gets it instead — the item
+        // would name a shortcut that does something else entirely. SwiftUI, for its
+        // part, rebuilds the whole bar from its own model when the first window comes
+        // up, which drops the Edit menu inserted below. Each rebuild is another
+        // arrival, and both rules are re-applied over it.
         // `RemoteCommands` says the rest of why; this is the half of it that AppKit's
         // own items can only be held to here.
         for name in [NSMenu.didAddItemNotification, NSMenu.didChangeItemNotification] {
@@ -25,15 +34,7 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    // From the menu bar down rather than from the menu that posted:
-                    // `Notification` cannot cross into the actor, and starting at the
-                    // root also keeps a context menu — AppKit's to spell, and whose
-                    // chords the text field handles rather than the item — out of
-                    // reach. The bar is a dozen items; walking it is free.
-                    ViewerMenus.stripKeyEquivalents(
-                        from: NSApp.mainMenu,
-                        except: self?.editMenu
-                    )
+                    self?.enforceMenuBarRules()
                 }
             }
         }
@@ -46,22 +47,27 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
             for item in mainMenu.items.dropFirst() where item.title != "Remote" {
                 mainMenu.removeItem(item)
             }
-            self.installEditMenu(in: mainMenu)
-            ViewerMenus.stripKeyEquivalents(from: mainMenu, except: self.editMenu)
+            self.enforceMenuBarRules()
         }
     }
 
-    /// Put the editing chords back, right after the application menu.
-    private func installEditMenu(in mainMenu: NSMenu) {
-        let menu = ViewerMenus.makeEditMenu()
-        let item = NSMenuItem()
-        item.title = menu.title
-        item.submenu = menu
-        // Assigned before the insert, not after: inserting posts the change
-        // notification the sweep runs from, and it has to already know which menu
-        // to leave its chords on.
-        editMenu = menu
-        mainMenu.insertItem(item, at: min(1, mainMenu.items.count))
+    /// The Edit menu is in the bar, and nothing outside it carries a chord.
+    ///
+    /// Idempotent, which is what makes it safe to run from a change notification —
+    /// the work it does posts more of them. `ViewerMenus.ensureEditMenu` says why
+    /// the menu has to be put back rather than installed once.
+    private func enforceMenuBarRules() {
+        guard !isEnforcingMenuBarRules, let mainMenu = NSApp.mainMenu else {
+            return
+        }
+        isEnforcingMenuBarRules = true
+        defer { isEnforcingMenuBarRules = false }
+        editMenu = ViewerMenus.ensureEditMenu(in: mainMenu, current: editMenu)
+        // From the menu bar down rather than from the menu that posted: `Notification`
+        // cannot cross into the actor, and starting at the root also keeps a context
+        // menu — AppKit's to spell, and whose chords the text field handles rather
+        // than the item — out of reach. The bar is a dozen items; walking it is free.
+        ViewerMenus.stripKeyEquivalents(from: mainMenu, except: editMenu)
     }
 }
 

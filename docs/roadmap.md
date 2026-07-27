@@ -1,11 +1,18 @@
 # Roadmap
 
-Active defects and their required regression guards are tracked in
+Defects, and the limitations imposed on us from outside, are tracked in
 [`known-issues.md`](known-issues.md).
 
 ## Planned
 
 ### A display of our own for `rxa`
+
+The first of the three routes below is **implemented**, behind the agent's
+`virtual_display` setting (see
+[`mac-agent-architecture.md`](mac-agent-architecture.md)). What is still open is
+whether it should ever be the default, which is the question at the end of this
+section — and the two routes not taken, kept because the private one can be
+withdrawn by any macOS release.
 
 Both clients now present a remote at its own size, scaling by the ratio between
 the two densities, so a Retina host no longer draws a 1x guest at half size — it
@@ -43,18 +50,14 @@ routes, none of them free:
   change which configuration works, and this would be load-bearing for the whole
   `rxa` display path.
 
-  Such a display also resizes on demand, which the host-provided one in a guest
-  cannot. Re-applying settings to a live display takes any point size exactly —
-  1234×789 as readily as 1280×800 — keeps the same `displayID`, settles in
-  130–580 ms, and keeps its 2x backing across the change (confirmed by native
-  capture, not inferred from bounds). Two creation-time fields set the limits.
-  `sizeInMillimeters` cannot be changed afterwards, and HiDPI holds only while
-  density stays in that window, so shrinking past roughly 57% of the original
-  width silently gives a 1x display at twice the requested point size; growing
-  back recovers it, but a different density window needs a new display, and so a
-  new `displayID`. `maxPixels` is a hard ceiling — beyond it the result is
-  silently halved. Every resize is a real reconfiguration, and it rearranges
-  windows.
+  Such a display is also a normal display to the rest of macOS: it appears in
+  System Settings > Displays with the mode list macOS derives from the
+  descriptor — a HiDPI entry and a `(low resolution)` one at each size — so
+  whoever is using that Mac changes its resolution there, like any other screen.
+  (Re-applying settings from the process would also take any point size exactly,
+  keeping the same `displayID` and settling in 130–580 ms, but there is no reason
+  to: resolution is the Mac's, and every reconfiguration rearranges the windows
+  on it.)
 
   Nothing about the route is VM-specific. It was measured in the guest because
   that is the test machine; these are the same calls BetterDisplay drives on
@@ -168,37 +171,30 @@ unlock.
 
 ## Not planned
 
-### Viewport-following resize for `rxa`
+### Resolution control from a client
 
-`resize = true` on an `rxa` target offers the browser the resolutions the Mac's
-display advertises, and only when that display is a virtual one in a VM (see
-`docs/mac-agent-architecture.md`). What it will never do is follow the browser
-viewport the way RDP and VNC do.
+`resize = true` drives the desktop size from the client's window, and only two
+protocols get it: VNC, which follows continuously because `SetDesktopSize` is
+cheap, and RDP, on request, because its Deactivation-Reactivation is not.
+Those are the two whose protocols hand the desktop size to the client.
 
-Two reasons. On a **physical** display there is nothing to resize but the panel
-in front of a person: it would rearrange their windows and leave the machine
-altered after the browser disconnects. On the **host-provided virtual** display
-of a VM guest the guest cannot take an arbitrary size at all — it switches
-between the modes the host advertises, so following the viewport would mean a
-mode switch on every window drag, each landing on a neighbouring size nobody
-asked for, and each risking the display-stack wedge that only a VM reboot
-clears. That is a property of that paravirtual framebuffer, not of virtual
-displays in general.
+Nothing else will get it, and no client will ever offer a *menu* of resolutions.
+A remote's resolution belongs to the machine running it. On a physical display
+there is nothing to resize but the panel in front of a person: it would rearrange
+their windows and leave the machine altered after the client disconnects. On a
+Mac — including one sharing a display the agent created for itself, which shows
+up in System Settings like any other screen — the mode is chosen there, and the
+agent reports whatever it lands on.
 
-A viewport that does not match the Mac's display is presented at the remote's own
-size and scaled to fit the window, which is what makes following it unnecessary
-rather than merely unwise.
+A VM guest makes the point twice over. Its default screen is not even the
+guest's: Apple Virtualization sizes it from the host, and UTM leaves
+`automaticallyReconfiguresDisplay` on, so it follows the VM window and lands on
+sizes nothing inside the guest asked for. A remotex client competing for that
+same decision would be a third party to it.
 
-What is *not* settled here is a display of our own. An isolated, session-sized
-desktop needs one, and the routes to it are real enough to be written down — see
-"A display of our own for `rxa`" under Planned. The arbitrary-size objection does
-not carry over to it: a `CGVirtualDisplay` does take any size on demand, keeping
-its scale and its `displayID`, so a viewport-following display of our own is a
-question of whether the rearranging is worth it — every resize still moves
-windows, and sizes far enough from the one it was created for drop to 1x — not
-of whether the sizes can be had. Either way that would retire this entry for one
-protocol rather than answer it: what stays not planned is following the viewport
-on the Mac's *existing* display, for the two reasons above.
+A client whose window does not match the remote presents the remote at its own
+size and scales it to fit, which is what makes following unnecessary rather than
+merely unwise.
 
 ### Multiple sessions
 

@@ -11,8 +11,8 @@ HTTP and WebSocket protocol directly — there is no embedded web view — and o
 - Command translation that follows the remote (Control shortcuts for a non-Mac,
   unchanged Command shortcuts for a Mac);
 - native `NSPasteboard` synchronization;
-- Remote menu commands for refresh, resize, resolution, clipboard, target
-  switching, takeover, and logout.
+- Remote menu commands for refresh, resize, clipboard, target switching,
+  takeover, and logout.
 
 The viewer and the gateway are separate artifacts and do not have to be released
 together. `GET /api/config` carries a `protocolVersion` the viewer checks before

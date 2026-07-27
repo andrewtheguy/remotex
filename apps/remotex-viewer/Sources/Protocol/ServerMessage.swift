@@ -17,10 +17,6 @@ enum ServerMessage: Sendable, Equatable {
     case connected(Connected)
     case remoteOs(macos: Bool)
     case clipboard(Clipboard)
-    /// Replaced wholesale, never merged — the Mac regenerates the list on every
-    /// display reconfigure, so merging keeps sizes that no longer exist. An
-    /// empty list means there is no menu to offer.
-    case displayModes(modes: [DisplayMode])
     /// A `type` this build does not know.
     ///
     /// Held as a value rather than raised as an error so a gateway that adds a
@@ -76,7 +72,7 @@ enum ServerMessage: Sendable, Equatable {
     /// Every tag this build understands, for the wire-contract test.
     static let allTags: Set<String> = [
         "resize", "cursor", "error", "picker", "connected", "remoteOs",
-        "clipboard", "displayModes",
+        "clipboard",
     ]
 }
 
@@ -116,10 +112,6 @@ extension ServerMessage: Decodable {
         let macos: Bool
     }
 
-    private struct DisplayModes: Decodable {
-        let modes: [DisplayMode]
-    }
-
     init(from decoder: any Decoder) throws {
         guard let tagged = try? decoder.container(keyedBy: TagKey.self),
               let type = try? tagged.decode(String.self, forKey: .type)
@@ -144,8 +136,6 @@ extension ServerMessage: Decodable {
                 self = .remoteOs(macos: try RemoteOs(from: decoder).macos)
             case "clipboard":
                 self = .clipboard(try Clipboard(from: decoder))
-            case "displayModes":
-                self = .displayModes(modes: try DisplayModes(from: decoder).modes)
             default:
                 self = .unsupported(type: type)
             }

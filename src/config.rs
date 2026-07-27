@@ -258,14 +258,18 @@ impl ConfigFile {
                 );
                 rxa_proto::psk::parse(psk)
                     .map_err(|e| anyhow::anyhow!("target {:?} has an invalid psk: {e}", target.name))?;
-                // `resize` is accepted here but means something narrower than it
-                // does for RDP/VNC, and the agent — not this file — is what
-                // enforces it: the browser gets a menu of the resolutions the
-                // Mac's display advertises, and only when that display is a
-                // virtual one. On a physical Mac the agent reports itself
-                // unresizable and the menu never appears, because changing a
-                // real panel's mode rearranges the screen of whoever is sitting
-                // at it.
+                // Rejected rather than ignored. A Mac's resolution is the Mac's:
+                // there is no message on the rxa wire that asks it to change,
+                // and the agent's own display — the one it can create for itself
+                // — appears in System Settings like any other screen and is
+                // changed there. Accepting the key would promise a control that
+                // no longer exists in either client.
+                anyhow::ensure!(
+                    !target.resize,
+                    "target {:?} is protocol \"rxa\" and sets resize, which only \"rdp\" and \
+                     \"vnc\" targets use — a Mac's resolution is changed on the Mac",
+                    target.name
+                );
             } else {
                 anyhow::ensure!(
                     target.psk.is_empty(),
@@ -745,17 +749,15 @@ mod tests {
         assert!(msg.contains("psk") && msg.contains("rxa"), "{msg}");
     }
 
-    // Whether a resize can actually happen is the agent's call (a virtual
-    // display, in a VM), so the config layer takes the opt-in at face value
-    // rather than second-guessing a Mac it cannot see.
+    // Nothing in the rxa protocol carries a resize request, so the flag would be
+    // a promise the wire cannot keep. Rejected on sight rather than ignored.
     #[test]
-    fn resize_is_accepted_on_an_rxa_target() {
+    fn resize_on_an_rxa_target_is_rejected() {
         let psk = rxa_proto::psk::generate();
-        let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
-            .unwrap()
-            .resolve()
-            .unwrap();
-        assert!(config.targets[0].resize);
+        let err = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("resize") && msg.contains("rxa"), "{msg}");
     }
 
     #[test]

@@ -19,11 +19,11 @@ export type ClientMsg =
   // already on at connect time). Synthetic sends without a real event pass
   // false — they express case through an explicit Shift code instead.
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
+  // The only way to ask for a remote size, and deliberately not paired with a
+  // menu of resolutions: a remote's resolution belongs to the machine running
+  // it. The two engines that act on this are the two whose protocols hand that
+  // decision to the client — VNC continuously, RDP on request.
   | { type: "viewport"; w: number; h: number }
-  // The user's pick from the resolution menu a `displayModes` message offered.
-  // Distinct from "viewport": a Mac's virtual display only accepts sizes off a
-  // fixed list, so it is resized on request rather than followed continuously.
-  | { type: "setResolution"; w: number; h: number }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it.
@@ -101,14 +101,7 @@ export type ControlMsg =
   // The remote's clipboard text: either the reply to a "clipboardRequest" or
   // an unprompted push when the remote's clipboard changed. Requested replies
   // populate the panel without silently copying; pushes retain automatic sync.
-  | ({ type: "clipboard"; requested: boolean } & ClipboardSnapshot)
-  // The resolutions the remote display accepts, largest first — the floating
-  // menu's Resolution section, answered with "setResolution". Only the rxa
-  // engine sends this, and only for a target whose Mac shares a virtual
-  // display. Re-sent whenever the list changes (every reconfigure), so the
-  // browser replaces its menu rather than merging; an empty list means there is
-  // nothing to offer.
-  | { type: "displayModes"; modes: { w: number; h: number }[] };
+  | ({ type: "clipboard"; requested: boolean } & ClipboardSnapshot);
 
 export interface TileMsg {
   x: number;

@@ -127,20 +127,19 @@ behind it and blit stale pixels into a freshly allocated texture.
 
 ## Resize
 
-Three mechanisms, chosen from the `connected` message. `ViewportPolicy` holds all
+Three behaviours, chosen from the `connected` message. `ViewportPolicy` holds all
 three so they cannot spread into the model as protocol checks.
 
 | target | behaviour |
 |---|---|
 | `vnc` | follows the window continuously, debounced and deduped |
 | `rdp` with `resize` | only on **Remote → Resize to Window**; a resize forces a Deactivation-Reactivation |
-| `rxa` with `resize` | ignores viewport reports; offers **Remote → Resolution** from `displayModes` and answers with `setResolution` |
+| `rxa` | sends nothing, ever |
 
-`displayModes` is replaced wholesale on every message, because the Mac
-regenerates the list on each display reconfigure and merging would keep sizes
-that no longer exist. The authoritative answer to a `setResolution` is the
-`resize` that follows it, not an ack: a mode switch may land on a neighbouring
-listed size.
+There is no resolution menu, for any target. A remote's resolution belongs to the
+machine running it; the two exceptions above are the two protocols that hand that
+decision to the client. A Mac's size arrives here as a `resize` and is never
+answered — see `docs/mac-agent-architecture.md`.
 
 Viewport reports are clamped into `u16` before they are sent. The gateway
 *rejects* an out-of-range value rather than clamping it, and only logs the
@@ -199,6 +198,16 @@ field in the app answered Command-V with a beep. It does not reopen the problem
 the rule is about: a focused desktop takes the chord in the monitor before the
 menu bar is offered it, and with no text field in the responder chain the item is
 disabled. The sweep skips this menu by object identity, not by title.
+
+Installing it is not a launch-time step, and looked like one until it was measured:
+SwiftUI rebuilds the whole menu bar from its own model of it when the first window
+comes up, and a menu this app inserted is not in that model. The bar carried Edit
+for about a second after launch and then went back to `View` in its place, so the
+fix for the beeping read as no change at all. `ViewerMenus.ensureEditMenu` puts the
+menu back whenever the bar no longer holds the one the delegate is holding, off the
+same change notifications the sweep runs from — the bar the app hands out is not
+the last one it gets, and both rules have to outlive a rebuild.
+
 For a non-Mac remote, standard Mac Command shortcuts map to remote Control
 shortcuts. A bare Command taps remote Meta, and other Command chords are sent as
 remote Meta chords. For a Mac remote, Command remains Meta for every chord, so

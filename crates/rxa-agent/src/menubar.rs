@@ -237,11 +237,17 @@ define_class!(
             let mtm = MainThreadMarker::from(self);
             let settings = &self.ivars().settings;
             let saved = settings.saved();
-            let choices = display_choices(saved.display);
+            let selection = if saved.virtual_display {
+                panels::Selection::Virtual
+            } else {
+                panels::Selection::Real(saved.display)
+            };
+            let choices = display_choices(selection);
             let mut draft = panels::Draft {
-                listen: saved.listen,
-                psk: saved.psk,
-                display: saved.display,
+                listen: saved.listen.clone(),
+                psk: saved.psk.clone(),
+                display: selection,
+                virtual_size: saved.virtual_display_size.clone(),
             };
 
             loop {
@@ -251,7 +257,15 @@ define_class!(
                 let next = config::Config {
                     listen: edited.listen.clone(),
                     psk: edited.psk.clone(),
-                    display: edited.display,
+                    // Which real display stays whatever it was while the virtual
+                    // one is chosen, so switching back does not land on display 0
+                    // rather than the screen the user had picked.
+                    display: match edited.display {
+                        panels::Selection::Real(index) => index,
+                        panels::Selection::Virtual => saved.display,
+                    },
+                    virtual_display: edited.display == panels::Selection::Virtual,
+                    virtual_display_size: edited.virtual_size.clone(),
                 };
                 match settings.apply(next) {
                     // Nothing changed, so there is nothing to restart into and no
@@ -736,12 +750,16 @@ pub fn run(
 ///   unplugged monitor). It is appended, and stays selected, so opening the dialog
 ///   and pressing Save does not silently move the agent to another screen. The
 ///   agent falls back to the main display meanwhile — see [`capture::probe`].
-fn display_choices(current: usize) -> Vec<panels::DisplayChoice> {
+///
+/// A display of the agent's own is one more entry, always offered and always
+/// last: choosing it is choosing not to share any of the real ones, which is
+/// what the menu is for (see [`crate::virtualdisplay`]).
+fn display_choices(current: panels::Selection) -> Vec<panels::DisplayChoice> {
     let mut choices: Vec<panels::DisplayChoice> = match capture::displays() {
         Ok(displays) => displays
             .iter()
             .map(|display| panels::DisplayChoice {
-                index: display.index,
+                selection: panels::Selection::Real(display.index),
                 label: format!(
                     "Display {} · {}×{} at {}x",
                     display.index + 1,
@@ -756,12 +774,20 @@ fn display_choices(current: usize) -> Vec<panels::DisplayChoice> {
             Vec::new()
         }
     };
-    if !choices.iter().any(|choice| choice.index == current) {
+    if let panels::Selection::Real(index) = current
+        && !choices
+            .iter()
+            .any(|choice| choice.selection == panels::Selection::Real(index))
+    {
         choices.push(panels::DisplayChoice {
-            index: current,
-            label: format!("Display {} · not attached", current + 1),
+            selection: panels::Selection::Real(index),
+            label: format!("Display {} · not attached", index + 1),
         });
     }
+    choices.push(panels::DisplayChoice {
+        selection: panels::Selection::Virtual,
+        label: "Virtual display · a private desktop at 2x".to_owned(),
+    });
     choices
 }
 

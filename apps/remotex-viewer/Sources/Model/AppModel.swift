@@ -7,7 +7,7 @@ import Observation
 /// `ViewerScreen` used to be *reported by the page* over the host bridge. It is
 /// now derived here, which is the substance of the port: `picker` and `connected`
 /// come from the gateway's session layer, and everything the Remote menu enables
-/// or disables follows from them plus `resize`, `remoteOs`, and `displayModes`.
+/// or disables follows from them plus `resize` and `remoteOs`.
 @MainActor
 @Observable
 final class AppModel: GatewaySessionSink {
@@ -378,7 +378,6 @@ final class AppModel: GatewaySessionSink {
             session.pendingTarget = nil
             session.protocolName = nil
             session.remoteIsMac = false
-            session.displayModes = []
             session.remoteSize = nil
             // Back to the default density, with the size: it is the next
             // target's first `resize` that says what its is, and until then a
@@ -387,7 +386,6 @@ final class AppModel: GatewaySessionSink {
             // any resize has arrived.
             session.remoteScale = 1
             session.canResize = false
-            session.manualResize = false
             session.canClipboard = false
             remoteCursor = nil
             // Cleared with the rest of what belonged to that target: view only is an
@@ -405,16 +403,18 @@ final class AppModel: GatewaySessionSink {
             session.protocolName = payload.protocolName
             session.pendingTarget = nil
             session.connectError = nil
-            // The three resize mechanisms, as `useRemoteDesktop.ts` picks between
+            // The three resize behaviours, as `useRemoteDesktop.ts` picks between
             // them. RDP resizes only on request because a resize forces a heavy
-            // Deactivation-Reactivation; rxa ignores viewport reports and offers a
-            // fixed list instead; VNC is the only one that follows the window.
+            // Deactivation-Reactivation; rxa never resizes, because a Mac's
+            // resolution is set on that Mac; VNC follows the window.
             viewportPolicy = ViewportPolicy(
                 protocolName: payload.protocolName,
                 resize: payload.resize
             )
-            session.manualResize = viewportPolicy.manualOnly
-            session.canResize = payload.protocolName == "rdp" && payload.resize
+            // The two are the same question here: the only target that
+            // suppresses automatic reports and can still be resized is the one
+            // whose menu item does the asking.
+            session.canResize = viewportPolicy.manualOnly
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
             // A freshly started engine knows nothing about this window, and both
@@ -442,11 +442,6 @@ final class AppModel: GatewaySessionSink {
                 releaseInput()
             }
             session.remoteIsMac = macos
-
-        case .displayModes(let modes):
-            // Replaced wholesale: the Mac regenerates this on every display
-            // reconfigure, so merging keeps sizes that no longer exist.
-            session.displayModes = modes
 
         case .error(let message):
             // Not fatal — the session returns to the picker, which is where this
@@ -587,17 +582,6 @@ final class AppModel: GatewaySessionSink {
             return
         }
         sendViewport(manual: true)
-    }
-
-    /// Apply one of the resolutions the remote offered. Unlike `resizeToWindow`
-    /// this is a pick off a fixed list — a Mac's virtual display takes nothing
-    /// else — so an entry the gateway no longer offers is dropped here rather
-    /// than sent and refused.
-    func setResolution(_ mode: DisplayMode) {
-        guard session.displayModes.contains(mode) else {
-            return
-        }
-        connection?.send(.setResolution(w: mode.w, h: mode.h))
     }
 
     func sendPointer(x: Int32, y: Int32) {
