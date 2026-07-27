@@ -98,12 +98,29 @@ pub struct TargetConfig {
     /// [`ConfigFile::parse`].
     #[serde(default)]
     pub port: u16,
-    /// Username.
+    /// Username. Required by RDP; for VNC it selects Apple's DH authentication
+    /// (RFB security type 30), which is the only way to tell a Mac who is
+    /// connecting — and on a Mac that decides whether you get its screen or a
+    /// login window of your own (see [`crate::vnc`]). So on a `vnc` target
+    /// against macOS this is a *macOS account*, and `password` below is that
+    /// account's, not the Screen Sharing password. Left empty for VNC servers
+    /// that have no notion of users.
     #[serde(default)]
     pub username: String,
-    /// Password (never leaves the server).
+    /// Password for [`Self::username`] (never leaves the server).
     #[serde(default)]
     pub password: String,
+    /// A VNC server's own password — RFB `VncAuth`, which proves knowledge of a
+    /// secret belonging to the *machine* and says nothing about who is
+    /// connecting. Named apart from [`Self::password`] because on a Mac the two
+    /// are different credentials that get you different screens: this is the
+    /// Screen Sharing password, and it is answered with a login window of the
+    /// connection's own (see [`crate::vnc`]).
+    ///
+    /// VNC only, and the only credential a VNC server without user accounts
+    /// takes. Rejected on other protocols — see [`ConfigFile::parse`].
+    #[serde(default)]
+    pub vnc_password: String,
     /// Optional domain.
     #[serde(default)]
     pub domain: Option<String>,
@@ -274,6 +291,28 @@ impl ConfigFile {
                 anyhow::ensure!(
                     target.psk.is_empty(),
                     "target {:?} is protocol {:?} but sets psk, which only \"rxa\" targets use",
+                    target.name,
+                    target.protocol.name()
+                );
+            }
+            if target.protocol == Protocol::Vnc {
+                // A `password` on its own would be read as an account password
+                // with no account to go with it, and the connection would fall
+                // through to VncAuth with a value the user meant for something
+                // else. Which of the two was intended is a question only they
+                // can answer, so ask at startup rather than guess at connect.
+                anyhow::ensure!(
+                    target.password.is_empty() || !target.username.is_empty(),
+                    "target {:?} is protocol \"vnc\" and sets password without username — \
+                     use vnc_password for the VNC server's own password, or add the username \
+                     the password belongs to (on a Mac, an account there)",
+                    target.name
+                );
+            } else {
+                anyhow::ensure!(
+                    target.vnc_password.is_empty(),
+                    "target {:?} is protocol {:?} but sets vnc_password, which only \"vnc\" \
+                     targets use",
                     target.name,
                     target.protocol.name()
                 );
@@ -637,7 +676,7 @@ mod tests {
             name = "mac"
             protocol = "vnc"
             host = "10.0.0.4"
-            password = "hunter2"
+            vnc_password = "hunter2"
             resize = true
             "#,
             site_passwd_line()
@@ -667,6 +706,65 @@ mod tests {
         .resolve()
         .unwrap();
         assert_eq!(config.targets[0].port, 5901);
+    }
+
+    /// The two VNC credentials are different credentials, and which one a value
+    /// is decides what the far end learns about the connection. A `password`
+    /// with nobody to attach it to is the mistake worth catching: on a Mac it
+    /// would authenticate as nobody and share a login window instead of the
+    /// screen.
+    #[test]
+    fn a_vnc_password_without_a_username_must_say_which_password_it_is() {
+        let vnc = |extra: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "mac"
+                protocol = "vnc"
+                host = "10.0.0.4"
+                {extra}
+                "#,
+                site_passwd_line()
+            ))
+        };
+        let err = vnc(r#"password = "hunter2""#).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vnc_password") && msg.contains("username"), "{msg}");
+
+        // Either answer is accepted: the server's own password, or an account.
+        assert_eq!(
+            vnc(r#"vnc_password = "hunter2""#).unwrap().targets[0].vnc_password,
+            "hunter2"
+        );
+        let named = vnc("username = \"andrew\"\npassword = \"hunter2\"").unwrap();
+        assert_eq!(named.targets[0].username, "andrew");
+
+        // And nothing at all is still a target: a VNC server may need no
+        // credential whatsoever.
+        assert!(vnc("").is_ok());
+    }
+
+    #[test]
+    fn a_vnc_password_on_a_non_vnc_target_is_rejected() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "pc"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            vnc_password = "hunter2"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
     }
 
     /// An `rxa` target body, with `psk` filled in from a freshly generated key

@@ -2962,6 +2962,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "remotex"
 version = "0.0.39"
 dependencies = [
+ "aes 0.9.1",
  "anyhow",
  "axum",
  "base64",
@@ -2975,7 +2976,10 @@ dependencies = [
  "ironrdp-tls",
  "ironrdp-tokio",
  "log",
+ "md-5 0.11.0",
+ "num-bigint 0.4.8",
  "png",
+ "rand 0.10.2",
  "rpassword",
  "rxa-proto",
  "serde",

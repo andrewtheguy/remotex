@@ -28,6 +28,7 @@ async fn spawn_app() -> SocketAddr {
             port: 9, // discard; never connected
             username: String::new(),
             password: String::new(),
+            vnc_password: String::new(),
             domain: None,
             width: 1280,
             height: 800,

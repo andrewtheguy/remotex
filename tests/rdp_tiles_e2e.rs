@@ -76,6 +76,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             port: rdp_port,
             username: "dummy".to_owned(),
             password: "dummy".to_owned(),
+            vnc_password: String::new(),
             domain: None,
             width: 1280,
             height: 800,

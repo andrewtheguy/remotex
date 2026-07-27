@@ -60,6 +60,15 @@ bcrypt = "0.19"
 rpassword = "7"
 # Classic VNC authentication (src/vnc.rs): DES over the RFB challenge.
 des = "0.8"
+# Apple's DH authentication for VNC (src/vnc.rs), which is what names the user
+# to a Mac: modular exponentiation over the server's prime, MD5 of the shared
+# secret as an AES-128 key, and random bytes for the private key and the
+# credential blob's filler. All four are already in the tree behind ironrdp and
+# rustls, so this costs no new dependency.
+num-bigint = "0.4"
+md-5 = "0.11"
+aes = "0.9"
+rand = "0.10"
 # zlib for RFB's Extended Clipboard, whose Provide payload is deflated
 # (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no
 # new dependency.
