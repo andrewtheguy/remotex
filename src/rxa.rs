@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 
 use crate::config::TargetConfig;
-use crate::engine::{clamp_u16, host_port};
+use crate::engine::{self, clamp_u16, host_port};
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, MouseButton, ServerMsg, Tile, clipboard_fits,
 };
@@ -169,7 +169,7 @@ struct Session {
 async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Session> {
     let dest = host_port(&config.host, config.port);
     timeout(CONNECT_TIMEOUT, async {
-        let mut stream = crate::engine::tcp_connect(&dest).await?;
+        let mut stream = engine::tcp_connect(&dest).await?;
 
         let transport = rxa_proto::noise::initiate(&mut stream, psk)
             .await

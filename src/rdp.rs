@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::config::TargetConfig;
-use crate::engine::{clamp_u16, host_port};
+use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, MouseButton, STRIP_ROWS, ServerMsg, Tile, UNSCALED,
@@ -95,9 +95,27 @@ pub async fn run(
     // it outlives `connect`, which is where the backend is handed over.
     let (clip_tx, clip_rx) = mpsc::unbounded_channel();
 
-    let (connection_result, framed) = match connect(&config, clip_tx).await {
-        Ok(v) => v,
-        Err(e) => {
+    // Bounded, because negotiation, the TLS upgrade and CredSSP below can each
+    // stall on a host that accepts the connection and then says nothing — which no
+    // socket timeout catches, and which leaves the client on "Connecting…".
+    let connected =
+        tokio::time::timeout(engine::HANDSHAKE_TIMEOUT, connect(&config, clip_tx)).await;
+    let (connection_result, framed) = match connected {
+        Err(_) => {
+            let dest = host_port(&config.host, config.port);
+            warn!("rdp: handshake with {dest} timed out");
+            let _ = frame_tx
+                .send(ServerMsg::Error {
+                    message: format!(
+                        "RDP connect failed: {dest} did not finish the handshake within {}s",
+                        engine::HANDSHAKE_TIMEOUT.as_secs()
+                    ),
+                })
+                .await;
+            return;
+        }
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
             warn!("rdp: connect failed: {e:#}");
             let _ = frame_tx
                 .send(ServerMsg::Error {
@@ -162,7 +180,7 @@ async fn connect(
     let server_name = config.host.clone();
     let dest = host_port(&config.host, config.port);
 
-    let stream = crate::engine::tcp_connect(&dest).await?;
+    let stream = engine::tcp_connect(&dest).await?;
     let client_addr = stream
         .local_addr()
         .map_err(|e| anyhow::anyhow!("get local address: {e}"))?;

@@ -43,7 +43,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::TargetConfig;
-use crate::engine::{clamp_u16, host_port};
+use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS,
@@ -153,9 +153,25 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    let connected = match connect(&config).await {
-        Ok(v) => v,
-        Err(e) => {
+    // Bounded, because the RFB handshake below can stall on a host that accepts
+    // the connection and then says nothing — which no socket timeout catches, and
+    // which leaves the client on "Connecting…" with nothing to read.
+    let connected = match tokio::time::timeout(engine::HANDSHAKE_TIMEOUT, connect(&config)).await {
+        Err(_) => {
+            let dest = host_port(&config.host, config.port);
+            warn!("vnc: handshake with {dest} timed out");
+            let _ = frame_tx
+                .send(ServerMsg::Error {
+                    message: format!(
+                        "VNC connect failed: {dest} did not finish the handshake within {}s",
+                        engine::HANDSHAKE_TIMEOUT.as_secs()
+                    ),
+                })
+                .await;
+            return;
+        }
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
             warn!("vnc: connect failed: {e:#}");
             let _ = frame_tx
                 .send(ServerMsg::Error {
@@ -228,7 +244,7 @@ struct Connected {
 /// pseudo-encodings).
 async fn connect(config: &TargetConfig) -> anyhow::Result<Connected> {
     let dest = host_port(&config.host, config.port);
-    let stream = crate::engine::tcp_connect(&dest).await?;
+    let stream = engine::tcp_connect(&dest).await?;
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
