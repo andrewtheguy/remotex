@@ -257,7 +257,7 @@ pub fn displays(owned: Option<Target>) -> anyhow::Result<Vec<DisplayInfo>> {
     // Numbered over the Mac's own screens only, so the agent's display appearing
     // among them does not shift what "Display 2" means.
     let mut number = 0;
-    Ok(displays
+    let mut listed: Vec<DisplayInfo> = displays
         .iter()
         .map(|display| {
             let id = display.display_id();
@@ -287,7 +287,16 @@ pub fn displays(owned: Option<Target>) -> anyhow::Result<Vec<DisplayInfo>> {
                 is_owned,
             }
         })
-        .collect())
+        .collect();
+    // A display of ours goes last, however macOS orders the shareable list —
+    // which on the test VM put it *first*, having decided it was the main
+    // display. The Mac's own screens are what someone is expecting to find at the
+    // top of a menu; ours is the addition, and it reads as one at the end.
+    //
+    // A stable sort, so the Mac's own screens keep the order they were numbered
+    // in and "Display 2" stays the second entry.
+    listed.sort_by_key(|display| display.is_owned);
+    Ok(listed)
 }
 
 /// A running capture stream. Dropping this stops the capture.
@@ -894,6 +903,19 @@ mod tests {
                 display.summary().starts_with(&display.label),
                 "the settings dialog's line leads with the label: {}",
                 display.summary()
+            );
+        }
+
+        // A display of ours is listed last whatever order macOS reports, because
+        // it is the addition rather than what someone came to find. Vacuous with
+        // no owned display in play — which is the case on any machine running
+        // this test — but it is the invariant the sort exists for, and it fails
+        // loudly on a machine that does have one.
+        let first_owned = displays.iter().position(|display| display.is_owned);
+        if let Some(first_owned) = first_owned {
+            assert!(
+                displays[first_owned..].iter().all(|display| display.is_owned),
+                "no screen of the Mac's own may come after one of ours"
             );
         }
     }
