@@ -175,16 +175,23 @@ ever be 2x and every smaller one macOS offers has density to spare. Outside that
 window macOS silently produces a 1x desktop at *twice* the requested point size,
 which is what the check after `applySettings:` is looking for.
 
-Three readings misreport such a display, and each has a workaround here.
-`CGDisplayCopyDisplayMode` returns NULL and `SCContentFilter.pointPixelScale`
-reads 1.00 even at 2x, so neither the geometry nor the backing scale can be read
-back: the size comes from `CGDisplayBounds` and the scale is *derived* from it by
-`capture::owned_scale`. `maxPixels` is twice the created size and cannot change,
-so a mode at or under that size is 2x and anything larger provably is not — which
-is what keeps a `(low resolution)` pick from being captured as a surface four
-times the size it should be. Third, `CGDisplayBounds` reports the requested size
-even for a display the WindowServer refuses to bring online, so creation also
-checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
+Two readings misreport such a display, and each has a workaround here.
+`SCContentFilter.pointPixelScale` reads 1.00 even at 2x, so the capture size is
+set from what was asked for rather than derived from it. And `CGDisplayBounds`
+reports the requested size even for a display the WindowServer refuses to bring
+online, so creation also checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
+
+`CGDisplayCopyDisplayMode` is *not* one of them, though this document and the code
+both said so for a while. It works on these displays and reports the truth —
+`3800x2400 px / 1900x1200 pt` at 2x, `1900x1200 px / 1900x1200 pt` for the same
+display at 1x — so `capture::owned_display_scale` reads the backing scale from it
+exactly as it does for a real screen. The heuristic that stood in for it,
+`capture::owned_scale`, is now only the fallback for a macOS that publishes no
+mode, because it could not see the case that matters: macOS lists a `(low
+resolution)` 1x entry beside each HiDPI one *at the same point size*, and from
+points alone those are one number. Whichever entry macOS restored for the identity
+decided whether the agent's reported density was right, which is why it looked
+random.
 
 ## Its identity, and what macOS remembers against it
 

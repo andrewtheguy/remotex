@@ -20,9 +20,14 @@
 //!   fixes — so bounds at or under the created size mean HiDPI engaged. That is
 //!   the check [`await_hidpi_bounds`] makes, by the same rule
 //!   [`crate::capture::owned_scale`] reads a live mode with.
-//! - `CGDisplayCopyDisplayMode` returns NULL and `CGDisplayCopyAllDisplayModes`
-//!   returns nothing, so the usual geometry reads do not work here at all —
-//!   which is why `capture.rs` has a separate path for these displays.
+//! - `CGDisplayCopyDisplayMode` **does** work, and is the one reading that does
+//!   not lie: measured on macOS 26.5.2 it returns `3800x2400 px / 1900x1200 pt`
+//!   at 2x and `1900x1200 px / 1900x1200 pt` for the same display at 1x, so
+//!   pixels over points is the true backing scale. An earlier note here claimed
+//!   it returned NULL for these displays; it does not, and believing that cost a
+//!   heuristic that could not see a `(low resolution)` mode at all — see
+//!   [`crate::capture::owned_scale`]. `CGDisplayCopyAllDisplayModes` works too,
+//!   and lists both entries at each point size.
 //! - `SCContentFilter.pointPixelScale` reports 1.00 on a genuine 2x display, so
 //!   capture size must be set from what we asked for, never derived from it.
 //!
