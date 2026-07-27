@@ -32,8 +32,9 @@ struct TargetPickerView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 10) {
-                        ForEach(model.targets) { target in
-                            row(target)
+                        ForEach(Array(model.targets.enumerated()), id: \.element.id) {
+                            index, target in
+                            row(target, ordinal: index + 1)
                         }
                     }
                     .frame(width: 420)
@@ -51,9 +52,18 @@ struct TargetPickerView: View {
         .background(.background)
     }
 
-    private func row(_ target: TargetInfo) -> some View {
+    /// `ordinal` is the row's 1-based place in the list, which is also its
+    /// shortcut: ⌘1 picks the first target, ⌘2 the second. Nine of them, because
+    /// ⌘0 is not the tenth of anything — past that the list needs the mouse.
+    ///
+    /// Shown on the row as well as bound, so a keyboard-only pass over this screen
+    /// does not have to be memorised.
+    private func row(_ target: TargetInfo, ordinal: Int) -> some View {
         let pending = model.session.pendingTarget
         let isPending = pending == target.name
+        let shortcut = (1 ... 9).contains(ordinal)
+            ? KeyboardShortcut(KeyEquivalent(Character("\(ordinal)")), modifiers: .command)
+            : nil
         return Button {
             model.connect(to: target.name)
         } label: {
@@ -70,12 +80,17 @@ struct TargetPickerView: View {
                     Text("Connecting…")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                } else if shortcut != nil {
+                    Text("⌘\(ordinal)")
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(.rect)
         }
+        .keyboardShortcut(shortcut)
         .buttonStyle(.plain)
         .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 10))
         // Every row locks, not just the chosen one: there is one session slot,

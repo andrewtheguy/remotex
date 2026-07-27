@@ -33,6 +33,8 @@ struct LoginView: View {
                         Button("Change") {
                             Task { await model.changeGateway() }
                         }
+                        // Escape, as going back a step is everywhere else.
+                        .keyboardShortcut(.cancelAction)
                         .buttonStyle(.link)
                         .font(.callout)
                         .disabled(model.isBusy)
@@ -86,7 +88,13 @@ struct LoginView: View {
                 .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { focus = .username }
+        // Deferred a turn, as on the server step: set straight from `onAppear` the
+        // assignment is dropped, and then the username is typed into whatever had
+        // focus instead — or into the password field, which is what Tab reaches
+        // first from nowhere.
+        .onAppear {
+            DispatchQueue.main.async { focus = .username }
+        }
     }
 
     private func signIn() {

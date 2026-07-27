@@ -59,7 +59,13 @@ struct ServerView: View {
                 .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { focused = true }
+        // Deferred a turn rather than set straight from `onAppear`: assigning focus
+        // while SwiftUI is still installing the view is dropped, and this screen is
+        // re-entered — "Change Gateway" comes back to it — so the field would have
+        // no focus and typing an address would go nowhere.
+        .onAppear {
+            DispatchQueue.main.async { focused = true }
+        }
     }
 
     private func connect() {

@@ -72,12 +72,38 @@ struct RemoteCommands: Commands {
 
             Divider()
 
+            // Both steps back out of the session, and both are on the menu with a
+            // shortcut so the whole way in — server, login, picker — can be walked
+            // from the keyboard. The picker's own Log Out button is deliberately
+            // left bare: the same key on a button and a menu item in one responder
+            // chain is an ambiguous shortcut.
             Button("Log Out") {
                 Task { await model.logOut() }
             }
+            .keyboardShortcut("l", modifiers: [.command, .shift])
             .disabled(
                 model.session.screen != .picker
                     && model.session.screen != .desktop
+            )
+
+            Button("Change Gateway") {
+                Task { await model.changeGateway() }
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+            .disabled(model.session.screen == .server)
+
+            // The server step's Continue answers to Return already, but only while
+            // the window is key and nothing else has eaten it. On the menu it is
+            // reachable no matter where focus sits, which is what a keyboard-only
+            // pass — or a script driving one — needs.
+            Button("Connect to Gateway") {
+                Task { await model.connectToGateway() }
+            }
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(
+                model.session.screen != .server
+                    || model.isBusy
+                    || model.gatewayAddress.isEmpty
             )
         }
     }
