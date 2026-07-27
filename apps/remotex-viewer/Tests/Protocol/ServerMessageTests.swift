@@ -11,8 +11,8 @@ struct ServerMessageTests {
     @Test
     func resizeAndErrorDecode() throws {
         #expect(
-            try ServerMessage.decode(#"{"type":"resize","w":1280,"h":800}"#)
-                == .resize(w: 1280, h: 800)
+            try ServerMessage.decode(#"{"type":"resize","w":1280,"h":800,"scale":1.0}"#)
+                == .resize(w: 1280, h: 800, scale: 1)
         )
         #expect(
             try ServerMessage.decode(#"{"type":"error","message":"boom"}"#)
@@ -149,12 +149,15 @@ struct ServerMessageTests {
     /// real drift. Reported as such and dropped, rather than silently ignored.
     @Test
     func aKnownTypeWithABadPayloadIsReportedAsMalformed() {
-        expectMalformed(#"{"type":"resize","w":1280}"#, type: "resize")
+        expectMalformed(#"{"type":"resize","w":1280,"scale":1.0}"#, type: "resize")
+        // Including a size with no density: the two are only useful together, and
+        // guessing 1x for a Retina Mac would draw its desktop at twice its size.
+        expectMalformed(#"{"type":"resize","w":1280,"h":800}"#, type: "resize")
         expectMalformed(#"{"type":"connected","name":"mac"}"#, type: "connected")
         expectMalformed(#"{"type":"clipboard","text":"hi"}"#, type: "clipboard")
         // The gateway's w/h are u16. A wider value could not have been sent by
         // one, and is not something to silently truncate.
-        expectMalformed(#"{"type":"resize","w":70000,"h":10}"#, type: "resize")
+        expectMalformed(#"{"type":"resize","w":70000,"h":10,"scale":1.0}"#, type: "resize")
     }
 
     @Test

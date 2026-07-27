@@ -546,6 +546,7 @@ mod tests {
 
     use super::*;
     use crate::config::Security;
+    use crate::protocol::UNSCALED;
 
     /// A scripted engine: each spawn hands its channel ends to the test, which
     /// plays the engine role directly (no task, no sockets).
@@ -764,15 +765,21 @@ mod tests {
         expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx) = hooks.try_recv().expect("engine spawned on connect");
 
-        frame_tx.send(ServerMsg::Resize { w: 10, h: 20 }).await.unwrap();
+        frame_tx
+            .send(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED })
+            .await
+            .unwrap();
         assert!(matches!(
             recv(&mut att.events).await,
-            AttachEvent::Msg(ServerMsg::Resize { w: 10, h: 20 })
+            AttachEvent::Msg(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED })
         ));
 
         // Detached: frames are dropped, the engine keeps running.
         mgr.detach(att.id);
-        frame_tx.send(ServerMsg::Resize { w: 1, h: 1 }).await.unwrap();
+        frame_tx
+            .send(ServerMsg::Resize { w: 1, h: 1, scale: UNSCALED })
+            .await
+            .unwrap();
         // Wait for the pump to consume (and drop) the detached frame — a
         // reattach racing ahead of it would legitimately receive the frame.
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -789,10 +796,13 @@ mod tests {
         let mut att = mgr.attach(&token).unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "no second engine while one runs");
-        frame_tx.send(ServerMsg::Resize { w: 30, h: 40 }).await.unwrap();
+        frame_tx
+            .send(ServerMsg::Resize { w: 30, h: 40, scale: UNSCALED })
+            .await
+            .unwrap();
         assert!(matches!(
             recv(&mut att.events).await,
-            AttachEvent::Msg(ServerMsg::Resize { w: 30, h: 40 })
+            AttachEvent::Msg(ServerMsg::Resize { w: 30, h: 40, scale: UNSCALED })
         ));
     }
 
@@ -927,10 +937,13 @@ mod tests {
         expect_connected(&mut att_b.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "takeover reuses the running engine");
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
-        frame_tx.send(ServerMsg::Resize { w: 5, h: 6 }).await.unwrap();
+        frame_tx
+            .send(ServerMsg::Resize { w: 5, h: 6, scale: UNSCALED })
+            .await
+            .unwrap();
         assert!(matches!(
             recv(&mut att_b.events).await,
-            AttachEvent::Msg(ServerMsg::Resize { w: 5, h: 6 })
+            AttachEvent::Msg(ServerMsg::Resize { w: 5, h: 6, scale: UNSCALED })
         ));
     }
 

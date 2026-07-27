@@ -99,17 +99,20 @@ pub async fn run(
     };
 
     let mut backoff = BACKOFF_MIN;
-    // The size the browser has been told about, carried across reconnects: a
-    // `Resize` costs the frontend its canvas contents, so a silent reconnect to
-    // an unchanged desktop must not announce one.
-    let mut announced: Option<(u16, u16)> = None;
+    // What the browser has been told about the desktop, carried across
+    // reconnects: a `Resize` costs the frontend its canvas contents, so a silent
+    // reconnect to an unchanged display must not announce one.
+    let mut announced: Option<Announced> = None;
     // The agent supplies the activity time. Keep the last snapshot across a
     // silent agent reconnect so an otherwise-identical Fetch does not lose a
     // timestamp merely because the transport link changed underneath it.
     let mut clipboard_snapshot: Option<ClipboardSnapshot> = None;
     loop {
         let size = (session.width, session.height);
-        info!("rxa: session up, desktop {}x{}", size.0, size.1);
+        info!(
+            "rxa: session up, desktop {}x{} at {}x",
+            size.0, size.1, session.scale
+        );
         match pump(
             session,
             &mut input_rx,
@@ -146,12 +149,22 @@ pub async fn run(
     }
 }
 
+/// The desktop geometry as the browser last heard it: pixel size and the density
+/// those pixels are drawn at. The density belongs here because it changes on its
+/// own — the same panel has HiDPI and 1x modes — and an unannounced change would
+/// leave the desktop presented at half or twice its size.
+type Announced = (u16, u16, f32);
+
 /// An established, handshaken link to the agent.
 struct Session {
     reader: FrameReader<OwnedReadHalf>,
     writer: FrameWriter<OwnedWriteHalf>,
     width: u16,
     height: u16,
+    /// The shared display's backing scale: 2.0 for a Retina Mac, whose
+    /// framebuffer is twice the desktop it shows. Clients divide by it, and it
+    /// travels with every size the agent reports.
+    scale: f32,
     /// Whether the Mac will change its display resolution on request — true
     /// only for a virtual display, which is the agent's call, not ours.
     resizable: bool,
@@ -175,24 +188,26 @@ async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Sessio
 
         // `Hello` is the agent's first frame; anything else means we are not
         // talking to an agent that agrees with us about the protocol.
-        let (width, height, resizable) = match AgentMsg::decode(&reader.recv().await?)? {
+        let (width, height, resizable, scale) = match AgentMsg::decode(&reader.recv().await?)? {
             AgentMsg::Hello {
                 version,
                 agent_version,
                 w,
                 h,
                 resizable,
+                scale,
             } => {
                 anyhow::ensure!(
                     version == rxa_proto::VERSION,
                     "agent speaks rxa version {version}, this build speaks {}",
                     rxa_proto::VERSION
                 );
+                let scale = rxa_proto::msg::scale_ratio(scale);
                 info!(
-                    "rxa: agent {agent_version} at {dest}, screen {w}x{h}, \
+                    "rxa: agent {agent_version} at {dest}, screen {w}x{h} at {scale}x, \
                      resizable={resizable}"
                 );
-                (w, h, resizable)
+                (w, h, resizable, scale)
             }
             // Most likely a missing Screen Recording grant — say what the agent
             // said rather than "unexpected message".
@@ -204,6 +219,7 @@ async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Sessio
             writer,
             width,
             height,
+            scale,
             resizable,
         })
     })
@@ -219,7 +235,7 @@ async fn pump(
     session: Session,
     input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: &mpsc::Sender<ServerMsg>,
-    announced: &mut Option<(u16, u16)>,
+    announced: &mut Option<Announced>,
     clipboard_snapshot: &mut Option<ClipboardSnapshot>,
     clipboard: bool,
     resize: bool,
@@ -229,6 +245,7 @@ async fn pump(
         mut writer,
         mut width,
         mut height,
+        mut scale,
         resizable,
     } = session;
 
@@ -254,15 +271,19 @@ async fn pump(
     // On the initial connect, and afterwards only when the Mac came back a
     // different size. Unchanged, the browser keeps the canvas it already has and
     // the reconnect stays invisible beyond a pause in frames.
-    if *announced != Some((width, height)) {
+    if *announced != Some((width, height, scale)) {
         if frame_tx
-            .send(ServerMsg::Resize { w: width, h: height })
+            .send(ServerMsg::Resize {
+                w: width,
+                h: height,
+                scale,
+            })
             .await
             .is_err()
         {
             return Ok(()); // browser link already gone
         }
-        *announced = Some((width, height));
+        *announced = Some((width, height, scale));
     }
 
     // `FrameReader::recv` is not cancel-safe, so it cannot live in the
@@ -317,11 +338,12 @@ async fn pump(
                             return Ok(());
                         }
                     }
-                    AgentMsg::DisplaySize { w, h } => {
-                        info!("rxa: display reconfigured to {w}x{h}");
+                    AgentMsg::DisplaySize { w, h, scale: reported } => {
+                        scale = rxa_proto::msg::scale_ratio(reported);
+                        info!("rxa: display reconfigured to {w}x{h} at {scale}x");
                         (width, height) = (w, h);
-                        *announced = Some((w, h));
-                        if frame_tx.send(ServerMsg::Resize { w, h }).await.is_err() {
+                        *announced = Some((w, h, scale));
+                        if frame_tx.send(ServerMsg::Resize { w, h, scale }).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -342,10 +364,11 @@ async fn pump(
                     }
                     // A second Hello on a live link (the agent restarted its
                     // stream) carries the current size; treat it as a resize.
-                    AgentMsg::Hello { w, h, .. } => {
+                    AgentMsg::Hello { w, h, scale: reported, .. } => {
+                        scale = rxa_proto::msg::scale_ratio(reported);
                         (width, height) = (w, h);
-                        *announced = Some((w, h));
-                        if frame_tx.send(ServerMsg::Resize { w, h }).await.is_err() {
+                        *announced = Some((w, h, scale));
+                        if frame_tx.send(ServerMsg::Resize { w, h, scale }).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -421,7 +444,11 @@ async fn pump(
                 // no idea what the remote runs: re-announce all three before
                 // asking the agent to repaint.
                 if matches!(msg, ClientMsg::Refresh) {
-                    if frame_tx.send(ServerMsg::Resize { w: width, h: height }).await.is_err() {
+                    if frame_tx
+                        .send(ServerMsg::Resize { w: width, h: height, scale })
+                        .await
+                        .is_err()
+                    {
                         return Ok(());
                     }
                     if frame_tx.send(ServerMsg::RemoteOs { macos: true }).await.is_err() {

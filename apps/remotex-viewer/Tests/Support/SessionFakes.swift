@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -254,7 +255,7 @@ final class RecordingSink: GatewaySessionSink {
 
     private static func label(_ message: ServerMessage) -> String {
         switch message {
-        case .resize(let w, let h): "resize(\(w)x\(h))"
+        case .resize(let w, let h, let scale): "resize(\(w)x\(h)@\(scale)x)"
         case .cursor: "cursor"
         case .error(let message): "error(\(message))"
         case .picker: "picker"
@@ -264,6 +265,91 @@ final class RecordingSink: GatewaySessionSink {
         case .displayModes(let modes): "displayModes(\(modes.count))"
         case .unsupported(let type): "unsupported(\(type))"
         }
+    }
+}
+
+/// A real model attached to a scripted socket, waiting in the picker.
+///
+/// The setup for any test whose subject is what reaches the *wire*: the model, the
+/// connection and the outbound queue are all the shipped ones, and only the socket
+/// under them is scripted.
+@MainActor
+struct AttachedSession {
+    let model: AppModel
+    let socket: FakeWebSocketTransport
+    /// The synchronizer's pasteboard, so a test can put something on it to be
+    /// pushed. Its own, never the user's.
+    let pasteboard: NSPasteboard
+
+    static func attached(suite: String) async throws -> AttachedSession {
+        let socket = FakeWebSocketTransport(closeAfterDraining: false)
+        let pasteboard = NSPasteboard.withUniqueName()
+        let model = AppModel(
+            defaults: UserDefaults(suiteName: "\(suite).\(UUID().uuidString)")!,
+            clipboard: ClipboardSynchronizer(
+                pasteboard: pasteboard,
+                startsPolling: false
+            )
+        )
+        await model.beginSession(
+            over: FakeGateway(claims: [.claimed("tok")], sockets: [socket])
+        )
+        // `start` returns once the claim is under way, not once the socket is up,
+        // and opening one discards whatever was queued before it. Waiting here is
+        // what keeps a test measuring its own subject rather than that race.
+        for _ in 0..<200 where model.session.connectionStatus != .connected {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(model.session.connectionStatus == .connected)
+        return AttachedSession(model: model, socket: socket, pasteboard: pasteboard)
+    }
+
+    func connect(
+        protocolName: String,
+        resize: Bool = true,
+        clipboard: Bool = false
+    ) {
+        model.apply(
+            .control(
+                .connected(
+                    ServerMessage.Connected(
+                        name: "t",
+                        protocolName: protocolName,
+                        resize: resize,
+                        clipboard: clipboard
+                    )
+                )
+            )
+        )
+    }
+
+    /// The frames the socket has been sent, decoded, in order.
+    ///
+    /// A frame that will not decode is recorded as a failure rather than dropped.
+    /// What these suites mostly assert is that something was *not* sent, and a
+    /// silent gap here is the one thing that could make such an assertion pass for
+    /// the wrong reason: the frame went out, and only this harness lost it.
+    var sent: [[String: Any]] {
+        socket.sentFrames.compactMap { frame in
+            guard let data = frame.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data)
+                      as? [String: Any]
+            else {
+                Issue.record("outbound frame is not a JSON object: \(frame)")
+                return nil
+            }
+            return json
+        }
+    }
+
+    func sent(ofType type: String) -> [[String: Any]] {
+        sent.filter { $0["type"] as? String == type }
+    }
+
+    /// Long enough for the viewport debounce to have fired and the queue to have
+    /// drained, for the assertions that something was *not* sent.
+    func settle() async throws {
+        try await Task.sleep(for: .milliseconds(400))
     }
 }
 

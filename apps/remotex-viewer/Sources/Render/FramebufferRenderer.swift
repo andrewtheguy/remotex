@@ -4,10 +4,11 @@ import OSLog
 
 /// Holds the remote framebuffer as one Metal texture and blits it to the view.
 ///
-/// The texture is exactly the remote's size and so is the drawable, which makes
-/// the blit one texel per device pixel with no scaling anywhere. Tiles are
-/// written into it with `replaceRegion`; there is no delta state to keep, since
-/// every tile overwrites its rectangle outright.
+/// The texture is exactly the remote's size and so is the drawable, so nothing is
+/// scaled in here — a remote is presented at its own point size and the layer
+/// resamples the drawable for the display it is on (see `FramebufferView`). Tiles
+/// are written into the texture with `replaceRegion`; there is no delta state to
+/// keep, since every tile overwrites its rectangle outright.
 @MainActor
 final class FramebufferRenderer: NSObject, MTKViewDelegate {
     let device: any MTLDevice

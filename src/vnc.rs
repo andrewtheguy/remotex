@@ -48,7 +48,7 @@ use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS,
-    ServerMsg, Tile, clipboard_fits,
+    ServerMsg, Tile, UNSCALED, clipboard_fits,
 };
 use crate::vnc_clipboard;
 
@@ -173,6 +173,7 @@ pub async fn run(
         .send(ServerMsg::Resize {
             w: width,
             h: height,
+            scale: UNSCALED,
         })
         .await
         .is_err()
@@ -402,7 +403,11 @@ async fn active_loop(
                     // well without duplicating the framebuffer here.
                     let size = desktop.lock().unwrap().size;
                     if frame_tx
-                        .send(ServerMsg::Resize { w: size.0, h: size.1 })
+                        .send(ServerMsg::Resize {
+                            w: size.0,
+                            h: size.1,
+                            scale: UNSCALED,
+                        })
                         .await
                         .is_err()
                     {
@@ -998,7 +1003,11 @@ async fn apply_resize(
     }
     info!("vnc: desktop resized to {}x{}", new.0, new.1);
     frame_tx
-        .send(ServerMsg::Resize { w: new.0, h: new.1 })
+        .send(ServerMsg::Resize {
+            w: new.0,
+            h: new.1,
+            scale: UNSCALED,
+        })
         .await
         .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
     Ok(true)
@@ -1761,7 +1770,7 @@ mod tests {
 
         assert!(resized);
         assert_eq!(desktop.lock().unwrap().size, (800, 600));
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 800, h: 600 })));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 800, h: 600, scale: UNSCALED })));
         assert!(written(&writer).await.is_empty(), "nothing left to request");
     }
 
@@ -1801,7 +1810,7 @@ mod tests {
         // A real change updates the state and reaches the browser.
         assert!(apply_resize(&desktop, (640, 480), &tx).await.unwrap());
         assert_eq!(desktop.lock().unwrap().size, (640, 480));
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 640, h: 480 })));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
 
         // A zero dimension is a protocol violation, not a resize.
         assert!(apply_resize(&desktop, (0, 480), &tx).await.is_err());

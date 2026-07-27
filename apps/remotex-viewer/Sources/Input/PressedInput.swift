@@ -28,6 +28,13 @@ struct PressedInput: Equatable {
         }
     }
 
+    /// Whether this button is recorded as held. Asked before forwarding a release
+    /// that arrives with input otherwise closed — see `AppModel.sendMouseButton`,
+    /// which is the one caller that may send past its own gate.
+    func isHeld(_ button: MouseButton) -> Bool {
+        buttons.contains(button)
+    }
+
     mutating func record(button: MouseButton, pressed: Bool) {
         if pressed {
             buttons.insert(button)

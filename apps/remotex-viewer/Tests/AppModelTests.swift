@@ -106,7 +106,7 @@ struct AppModelTests {
         let model = makeModel()
         model.apply(.status(.connected))
         model.apply(.control(.connected(connected(protocolName: "rxa", resize: true, clipboard: true))))
-        model.apply(.control(.resize(w: 1920, h: 1080)))
+        model.apply(.control(.resize(w: 1920, h: 1080, scale: 2)))
         model.apply(.control(.displayModes(modes: [DisplayMode(w: 1920, h: 1080)])))
         model.apply(.control(.remoteOs(macos: true)))
 
@@ -116,6 +116,9 @@ struct AppModelTests {
         #expect(model.session.connectedTarget == nil)
         #expect(model.session.protocolName == nil)
         #expect(model.session.remoteSize == nil)
+        // The Retina Mac's density goes with it: kept, it would double the
+        // viewport reported for the next target before its own resize lands.
+        #expect(model.session.remoteScale == 1)
         #expect(model.session.displayModes.isEmpty)
         #expect(!model.session.canClipboard)
         #expect(!model.session.canResize)
@@ -171,7 +174,7 @@ struct AppModelTests {
         let model = makeModel()
         model.apply(.status(.connected))
         model.apply(.control(.connected(connected(protocolName: "vnc"))))
-        model.apply(.control(.resize(w: 800, h: 600)))
+        model.apply(.control(.resize(w: 800, h: 600, scale: 1)))
         #expect(!model.showsStatusOverlay)
 
         model.apply(.clearFramebuffer)
@@ -191,7 +194,7 @@ struct AppModelTests {
         model.apply(.control(.connected(connected(protocolName: "rxa"))))
         #expect(!model.canCaptureKeyboardNow, "no frame yet")
 
-        model.apply(.control(.resize(w: 800, h: 600)))
+        model.apply(.control(.resize(w: 800, h: 600, scale: 1)))
         #expect(model.canCaptureKeyboardNow)
 
         model.apply(.status(.reconnecting))

@@ -37,14 +37,19 @@ use remotex::config::{AppConfig, Protocol, Security, TargetConfig};
 use remotex::protocol::Tile;
 use remotex::server;
 use remotex::session::REATTACH_GRACE_PERIOD;
-use rxa_proto::msg::{AgentMsg, CursorImage, GatewayMsg, format};
+use rxa_proto::msg::{AgentMsg, CursorImage, GatewayMsg, SCALE_ONE, format};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-/// The fake agent's screen size.
+/// The fake agent's screen size, in captured pixels.
 const AGENT_W: u16 = 320;
 const AGENT_H: u16 = 240;
+
+/// This agent shares a Retina display, so its pixels are twice its desktop's
+/// points — the case a client has to hear about to present the desktop at its own
+/// size rather than at twice it.
+const AGENT_SCALE: u16 = 2 * SCALE_ONE;
 
 /// The resolutions a resizable fake agent offers, largest first — the shape a
 /// real virtual display's list has (see `crates/rxa-agent/src/displaymode.rs`).
@@ -152,6 +157,7 @@ async fn serve_fake_agent(
                 w: AGENT_W,
                 h: AGENT_H,
                 resizable,
+                scale: AGENT_SCALE,
             }
             .encode(),
         )
@@ -240,7 +246,16 @@ async fn serve_fake_agent(
             // is the same thing from the gateway's side.
             GatewayMsg::SetDisplaySize { w, h } => {
                 let _ = input_tx.send(GatewayMsg::SetDisplaySize { w, h });
-                writer.send(&AgentMsg::DisplaySize { w, h }.encode()).await?;
+                writer
+                    .send(
+                        &AgentMsg::DisplaySize {
+                            w,
+                            h,
+                            scale: AGENT_SCALE,
+                        }
+                        .encode(),
+                    )
+                    .await?;
                 writer
                     .send(
                         &AgentMsg::DisplayModes {
@@ -422,8 +437,10 @@ async fn expect_paint(ws: &mut Ws) -> Paint {
 fn assert_first_paint(paint: &Paint) {
     assert_eq!(
         paint.resize.as_deref(),
-        Some(format!(r#"{{"type":"resize","w":{AGENT_W},"h":{AGENT_H}}}"#).as_str()),
-        "the initial connect must announce the desktop size"
+        Some(
+            format!(r#"{{"type":"resize","w":{AGENT_W},"h":{AGENT_H},"scale":2.0}}"#).as_str()
+        ),
+        "the initial connect must announce the desktop size and the density it is drawn at"
     );
     assert_paint_pixels(paint);
 }

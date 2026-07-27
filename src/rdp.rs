@@ -43,7 +43,7 @@ use crate::config::TargetConfig;
 use crate::engine::{clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, MouseButton, STRIP_ROWS, ServerMsg, Tile,
+    ClientMsg, ClipboardSnapshot, MouseButton, STRIP_ROWS, ServerMsg, Tile, UNSCALED,
 };
 use crate::rdp_clipboard::{self, ClipboardEvent};
 
@@ -115,6 +115,7 @@ pub async fn run(
         .send(ServerMsg::Resize {
             w: desktop.width,
             h: desktop.height,
+            scale: UNSCALED,
         })
         .await
         .is_err()
@@ -320,7 +321,11 @@ async fn active_loop(
                 // repaint from the server-owned framebuffer.
                 if matches!(input, ClientMsg::Refresh) {
                     frame_tx
-                        .send(ServerMsg::Resize { w: desktop.width, h: desktop.height })
+                        .send(ServerMsg::Resize {
+                            w: desktop.width,
+                            h: desktop.height,
+                            scale: UNSCALED,
+                        })
                         .await
                         .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                     frame_tx
@@ -573,7 +578,11 @@ async fn active_loop(
                         last_pos.1.min(desktop.height.saturating_sub(1)),
                     );
                     frame_tx
-                        .send(ServerMsg::Resize { w: desktop.width, h: desktop.height })
+                        .send(ServerMsg::Resize {
+                            w: desktop.width,
+                            h: desktop.height,
+                            scale: UNSCALED,
+                        })
                         .await
                         .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                 }

@@ -58,6 +58,13 @@ can only be about who you are, which is why the address is shown but not editabl
 — **Change** goes back to step one. Logging out returns here rather than to the
 server step: it is the credentials being given up, not the address.
 
+This step is also the *only* place the address can be changed, on the link or on
+the menu (`canChangeGateway`). Everything past it belongs to one gateway — the
+login cookie is scoped to that host, the claim token was minted by it, the socket
+is attached to it — so changing the address from the picker or the desktop was a
+log out that did not say so. From there the step to take first is Log Out, which
+lands back here.
+
 Step two is skipped when the cookie is still good, so the common case is one
 button. `HTTPCookieStorage.shared` outlives the app; the gateway's auth sessions
 do not outlive *it*, so its restart ends them and any 401 drops back to login
@@ -85,10 +92,18 @@ cheap to do because the gateway repaints in full whenever a client attaches.
 ## Rendering
 
 One `MTLTexture` at exactly the remote's size, with the drawable pinned to the
-same size, so the blit is one texel per device pixel with no scaling. Tiles are
-written in with `replaceRegion`; there is no delta encoding, so each tile
-overwrites its rectangle outright. A remote larger than the window scrolls; it is
-never scaled to fit. Zoom is out of scope.
+same size, so nothing is scaled in the renderer. Tiles are written in with
+`replaceRegion`; there is no delta encoding, so each tile overwrites its
+rectangle outright. A remote larger than the window scrolls; it is never scaled to
+fit, and zoom is out of scope.
+
+The framebuffer *view* is laid out at the remote's own point size — its pixels
+over the density `resize` reports — so the layer resamples the drawable for
+whichever display the window is on. Equal densities land on one texel per device
+pixel; a 1x remote on a Retina Mac is magnified rather than drawn at half its
+physical size, and a Retina remote on a 1x display is reduced rather than drawn at
+twice it. Nothing is re-derived when the window changes display, only
+`layer.contentsScale`.
 
 Two ordering facts the port depends on, both covered by tests because neither can
 be inferred by reading:
@@ -163,6 +178,15 @@ before application menu equivalents, while a connected desktop is painting. A
 responder chain, so Command chords would never reach the remote. macOS virtual
 keycodes map to the same physical DOM `code` values the protocol uses.
 
+It cuts the other way too, and decides what the **Remote** menu may carry: while
+the desktop is painting and focused, every Command chord AppKit delivers goes
+to the remote, so a key equivalent on one of those items fires only
+on the screens where nothing is captured — and types into the guest on the one
+where the item usually matters. No item on that menu carries one, by rule. The
+four that did (Refresh, Log Out, Change Gateway, Connect to Gateway) were there to
+drive the app from the keyboard in a test, which is not reason enough to ship a
+chord whose meaning depends on which screen is up. The picker's own ⌘1…⌘9 target
+picks stay: nothing is captured there, and they are printed on the rows.
 For a non-Mac remote, standard Mac Command shortcuts map to remote Control
 shortcuts. A bare Command taps remote Meta, and other Command chords are sent as
 remote Meta chords. For a Mac remote, Command remains Meta for every chord, so

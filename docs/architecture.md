@@ -239,11 +239,16 @@ Each tab stores its session token in `sessionStorage`, allowing network
 reconnects to reclaim the same slot without prompting for takeover. A busy slot
 waits for an explicit takeover; an evicted tab waits for an explicit reclaim.
 
-Desktop rendering is 1:1 in device pixels and uses scrollbars when the remote
-desktop is larger than the viewport. Touch devices use fit-to-width rendering
-with pinch zoom, pan, a virtual cursor, and multi-finger gestures. View
-transforms affect presentation and input coordinate mapping, not framebuffer
-resolution.
+Desktop rendering presents the remote at its own size — `resize` carries the
+density the remote draws at, and the canvas is that many framebuffer pixels per
+CSS pixel — and uses scrollbars when the desktop is larger than the viewport. The
+ratio between that density and the display's is what scales the picture: equal
+densities are 1:1 in device pixels, a coarser remote is magnified, a denser one
+reduced. A window moved between displays of different scale needs no
+re-derivation. Viewport reports are in the remote's pixels for the same reason.
+Touch devices use fit-to-width rendering with pinch zoom, pan, a virtual cursor,
+and multi-finger gestures. View transforms affect presentation and input
+coordinate mapping, not framebuffer resolution.
 
 ### Native macOS viewer
 

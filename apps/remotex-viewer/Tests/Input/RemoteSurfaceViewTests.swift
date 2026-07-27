@@ -10,7 +10,7 @@ struct RemoteSurfaceViewTests {
     /// size, which is at least the remote's and would report the desktop's
     /// current size back as the space available for it.
     @Test
-    func theViewportIsTheVisibleAreaInDevicePixels() throws {
+    func theViewportIsTheVisibleAreaInRemotePixels() throws {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 640, height: 480))
 
@@ -43,7 +43,7 @@ struct RemoteSurfaceViewTests {
     func nothingIsMeasuredBeforeTheFirstLayout() throws {
         let renderer = try #require(FramebufferRenderer.make(), "needs a Metal device")
         let model = Harness.makeModel()
-        let scrollView = NSScrollView(frame: .zero)
+        let scrollView = RemoteScrollView(frame: .zero)
         let surface = RemoteSurfaceView(model: model, renderer: renderer)
         scrollView.documentView = surface
         let coordinator = RemoteSurfaceHost.Coordinator(model: model)
@@ -110,7 +110,7 @@ struct RemoteSurfaceViewTests {
         )
         // And the document is floored on the same room, so a remote that fits it
         // exactly cannot overflow and raise a scroller.
-        harness.coordinator.apply(remoteSize: harness.remote(width: 900, height: 648))
+        harness.apply(remote: harness.remote(width: 900, height: 648))
         #expect(harness.surface.frame.size == CGSize(width: 900, height: 648))
     }
 
@@ -159,44 +159,131 @@ struct RemoteSurfaceViewTests {
     }
 
     /// A window-only resize changes no observed state, so SwiftUI never runs
-    /// `updateNSView` and the surface would keep a frame measured against the old
-    /// window — leaving a remote smaller than the window off-centre in the space it
-    /// grew into, with input mapped against the stale frame.
+    /// `updateNSView`; the room has to be re-measured and re-reported anyway, and a
+    /// remote smaller than the window has to stay in the middle of the space it grew
+    /// into rather than sitting where it was.
     @Test
-    func growingTheWindowGrowsTheSurfaceUnderASmallerRemote() async throws {
+    func growingTheWindowLeavesASmallerRemoteCentred() async throws {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 600, height: 400))
-        harness.coordinator.apply(remoteSize: harness.remote(width: 400, height: 300))
+        harness.apply(remote: harness.remote(width: 400, height: 300))
         let before = try await harness.reportedViewport()
 
         harness.resize(to: CGSize(width: 900, height: 700))
-        _ = try await harness.reportedViewport(otherThan: before)
+        let after = try await harness.reportedViewport(otherThan: before)
 
-        #expect(harness.surface.frame.size == CGSize(width: 900, height: 700))
+        #expect(after == harness.expectedViewport(width: 900, height: 700))
+        // The document is the remote and nothing more — padding it out to the window
+        // is what used to raise a scroller on the axis that fit — so being centred is
+        // the clip view's doing, and it is read off the clip.
+        #expect(harness.surface.frame.size == CGSize(width: 400, height: 300))
+        let clip = harness.scrollView.contentView
+        #expect(clip.bounds.origin.x == (400 - clip.bounds.width) / 2)
+        #expect(clip.bounds.origin.y == (300 - clip.bounds.height) / 2)
     }
 
-    /// The same hole as the resize above, reached the other way: moving the window
-    /// between displays of different scale changes no observed state either, so
-    /// `updateNSView` never runs and the document keeps a frame derived from the
-    /// scale it left behind. The framebuffer *does* lay itself out at the new one —
-    /// so a remote at 2× inside a 1× document overflows into space that is not even
-    /// scrollable, which is a non-Retina guest's taskbar below the fold on a Retina
-    /// host, with no way to scroll to it.
+    /// The reference is Microsoft Remote Desktop: a desktop that does not fit gets a
+    /// scroller on the axis it overflows, *beside* the picture, and nothing on the
+    /// axis that fits. Ours raised both — the document was padded out to the room, so
+    /// the horizontal scroller's 17pt made it overflow vertically too — and with
+    /// them a white corner box the reference never shows.
     @Test
-    func aBackingScaleChangeReDerivesTheDocument() throws {
+    func aRemoteWiderThanTheWindowScrollsOnThatAxisAlone() throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 900, height: 700))
+        // 19pt too wide and well short vertically: the `rxa` near-miss.
+        // No window resize and no tile of our own: a desktop that arrives larger than
+        // the window has to raise its own scrollbar, which is what it did not do.
+        harness.apply(remote: harness.remote(width: 919, height: 500))
+
+        #expect(harness.scrollView.visibleBars.horizontal)
+        #expect(!harness.scrollView.visibleBars.vertical)
+        // The scroller took its width out of the room it is drawn beside, and the
+        // desktop is centred in what is left.
+        let clip = harness.scrollView.contentView
+        #expect(clip.frame.height < 700)
+        #expect(clip.bounds.origin.y == (500 - clip.bounds.height) / 2)
+    }
+
+    /// The black band above every desktop, and its last rows below the fold.
+    ///
+    /// AppKit asks the clip view where the document may sit while the clip is still
+    /// the whole frame — the title bar's inset has not been taken off yet — so the
+    /// centring answer is for a clip 52pt taller than the real one, and the origin it
+    /// keeps is half that. Nothing asked again once the clip was resized.
+    ///
+    /// Automatic insets on, because the inset *is* the trigger: with the room and the
+    /// frame the same size there is nothing to centre wrongly.
+    @Test
+    func aDesktopThatFillsTheWindowSitsFlushAgainstIt() throws {
+        let harness = try Harness(automaticContentInsets: true)
+        harness.resize(to: CGSize(width: 900, height: 700))
+        #expect(harness.scrollView.contentInsets.top > 0, "the title bar insets the room")
+
+        // What an engine that follows the window comes back with: exactly the room.
+        harness.apply(remote: try #require(harness.surface.measuredViewport()))
+
+        #expect(harness.scrollView.contentView.bounds.origin == .zero)
+        #expect(!harness.scrollView.visibleBars.horizontal)
+        #expect(!harness.scrollView.visibleBars.vertical)
+    }
+
+    /// A desktop that fits shows none at all — the state every engine that follows
+    /// the window settles in, and the one the reference client shows bare.
+    @Test
+    func aRemoteThatFitsShowsNoScrollers() throws {
+        let harness = try Harness()
+        harness.resize(to: CGSize(width: 900, height: 700))
+        harness.apply(remote: harness.remote(width: 900, height: 700))
+
+        #expect(!harness.scrollView.visibleBars.horizontal)
+        #expect(!harness.scrollView.visibleBars.vertical)
+    }
+
+    /// Moving the window between displays of different scale is the case that used
+    /// to double or halve the desktop: the layout was in the host's device pixels,
+    /// so a 1x guest on a Retina display came out at half its size and a document
+    /// derived from the scale left behind overflowed into space that was not even
+    /// scrollable. The desktop is laid out in the *remote's* points now, so the move
+    /// is the host's to absorb and there is nothing here to re-derive.
+    @Test
+    func theHostsDisplayDensityChangesNothing() throws {
         let harness = try Harness()
         harness.window.scale = 1
         harness.resize(to: CGSize(width: 900, height: 700))
-        // Larger than the room at either scale, so the document is the remote's own
-        // point size both times and the scale it was derived from is readable off it.
-        harness.coordinator.apply(remoteSize: DisplayMode(w: 4_000, h: 3_000))
-        #expect(harness.surface.frame.size == CGSize(width: 4_000, height: 3_000))
+        // Larger than the room, so the document is the remote's own point size and
+        // any scale it had been derived from would be readable off it.
+        harness.apply(remote: DisplayMode(w: 4_000, h: 3_000))
+        let document = harness.surface.frame.size
+        let reported = harness.surface.measuredViewport()
+        #expect(document == CGSize(width: 4_000, height: 3_000))
 
-        // Onto a Retina display: the same remote is half the points it was.
+        // Onto a Retina display. Same desktop, same size, same request.
         harness.window.scale = 2
-        harness.surface.backingScaleChanged()
+        harness.resize(to: CGSize(width: 900, height: 700))
+
+        #expect(harness.surface.frame.size == document)
+        #expect(harness.surface.measuredViewport() == reported)
+    }
+
+    /// A Retina remote draws two framebuffer pixels per point of its own desktop,
+    /// so it is presented at half its pixel size — on a Retina host that is one
+    /// texel per device pixel, and on a 1x one it is scaled down rather than shown
+    /// at twice the size it is meant to be. The window here is deliberately 1x so
+    /// that a layout derived from the *host* instead could not pass.
+    @Test
+    func aRetinaRemoteIsLaidOutAtItsOwnPointSize() throws {
+        let harness = try Harness()
+        harness.window.scale = 1
+        harness.resize(to: CGSize(width: 900, height: 700))
+        harness.apply(remote: DisplayMode(w: 4_000, h: 3_000), guestScale: 2)
 
         #expect(harness.surface.frame.size == CGSize(width: 2_000, height: 1_500))
+        // And the room is reported in the remote's pixels, which is what a desktop
+        // that fills a 900x700pt window at that density would have to be.
+        #expect(
+            harness.surface.measuredViewport() == DisplayMode(w: 1_800, h: 1_400)
+        )
     }
 
     /// Scrolling changes what is visible, not how much room there is.
@@ -221,7 +308,7 @@ struct RemoteSurfaceViewTests {
     private struct Harness {
         let model: AppModel
         let window: ScaledWindow
-        let scrollView: NSScrollView
+        let scrollView: RemoteScrollView
         let surface: RemoteSurfaceView
         let coordinator: RemoteSurfaceHost.Coordinator
 
@@ -240,10 +327,7 @@ struct RemoteSurfaceViewTests {
                 backing: .buffered,
                 defer: false
             )
-            scrollView = NSScrollView(frame: .zero)
-            scrollView.hasVerticalScroller = true
-            scrollView.hasHorizontalScroller = true
-            scrollView.autohidesScrollers = true
+            scrollView = RemoteScrollView(frame: .zero)
             scrollView.automaticallyAdjustsContentInsets = automaticContentInsets
             surface = RemoteSurfaceView(model: model, renderer: renderer)
             scrollView.documentView = surface
@@ -279,18 +363,24 @@ struct RemoteSurfaceViewTests {
             scrollView.layoutSubtreeIfNeeded()
         }
 
-        /// A remote whose size in *points* on this window's display is
-        /// `width`×`height` — the same points-to-pixels rule, read the other way.
+        /// What the host does on a `resize`, both halves of it together.
+        func apply(remote: DisplayMode, guestScale: CGFloat = 1) {
+            coordinator.apply(remoteSize: remote, guestScale: guestScale)
+        }
+
+        /// A remote whose desktop is `width`×`height` of its own points — the same
+        /// rule as the report below, read the other way.
         func remote(width: CGFloat, height: CGFloat) -> DisplayMode {
             expectedViewport(width: width, height: height)
         }
 
-        /// Points to pixels through the same rule the surface uses, so a display
-        /// with any backing scale gives the same answer.
+        /// Room in points to the remote pixels it is reported as, through the same
+        /// rule the surface uses. The surface's density rather than the window's, so
+        /// which display the tests run on cannot change the answer.
         func expectedViewport(width: CGFloat, height: CGFloat) -> DisplayMode {
             RemoteGeometry.viewport(
                 clip: CGSize(width: width, height: height),
-                backingScale: window.backingScaleFactor
+                guestScale: surface.guestScale
             )
         }
 

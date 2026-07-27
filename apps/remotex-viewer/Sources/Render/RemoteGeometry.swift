@@ -5,11 +5,25 @@ import Foundation
 ///
 /// Pure and separate because this is where "clicks land in the wrong place" bugs
 /// live, and none of it needs a window or a GPU to check.
+///
+/// Everything here is in the *remote's* terms: its pixels, and its own points —
+/// `guestScale` framebuffer pixels to one of them, which is what `resize` carries
+/// (1 for VNC, RDP and a 1x Mac; 2 for a Retina Mac). The host display's backing
+/// scale appears nowhere on purpose. A remote is laid out at its own point size
+/// and the host resamples that to whatever screen the window is on, so a desktop
+/// keeps its physical size when the window moves between a Retina display and a
+/// 1x one — and nothing here has to be re-derived when it does.
 enum RemoteGeometry {
-    /// The remote's size in points, for a view showing it at one texel per
-    /// device pixel.
-    static func pointSize(of remote: DisplayMode, backingScale: CGFloat) -> CGSize {
-        let scale = backingScale > 0 ? backingScale : 1
+    /// The remote's size in points: its own logical size, whatever display the
+    /// window showing it is on.
+    ///
+    /// A view of this size holding a framebuffer-sized drawable is what scales the
+    /// remote — up on a host denser than the remote (a 1x guest on a Retina Mac,
+    /// blurry as every remote desktop client is), down on a host coarser than it (a
+    /// Retina guest on a 1x display, which would otherwise be drawn at twice its
+    /// size).
+    static func pointSize(of remote: DisplayMode, guestScale: CGFloat) -> CGSize {
+        let scale = guestScale > 0 ? guestScale : 1
         return CGSize(width: CGFloat(remote.w) / scale, height: CGFloat(remote.h) / scale)
     }
 
@@ -33,15 +47,22 @@ enum RemoteGeometry {
         )
     }
 
-    /// The viewport to report for a visible area of `size` points.
+    /// The viewport to report for a visible area of `size` points: the size the
+    /// remote desktop would have to be to fill it exactly, in *remote* pixels.
     ///
-    /// Device pixels, floored at 1 and capped at 65535 per axis: the gateway's
+    /// The room times the remote's own density, so a remote that follows the
+    /// window comes back with a desktop that fits and is presented one point per
+    /// point. Reporting the host's device pixels instead — which this did before
+    /// clients scaled their output — asks a remote to grow to the host's density
+    /// and lay its UI out at half size on a Retina screen.
+    ///
+    /// Floored at 1 and capped at 65535 per axis: the gateway's
     /// `w`/`h` are u16 and it *rejects* an out-of-range report rather than
     /// clamping it, logging and dropping the frame — so an unclamped report does
     /// not resize anything and leaves nothing to find. Zero is refused too; a
     /// zero-size desktop is nobody's intent.
-    static func viewport(clip size: CGSize, backingScale: CGFloat) -> DisplayMode {
-        let scale = backingScale > 0 ? backingScale : 1
+    static func viewport(clip size: CGSize, guestScale: CGFloat) -> DisplayMode {
+        let scale = guestScale > 0 ? guestScale : 1
         return DisplayMode(
             w: pixels(size.width * scale),
             h: pixels(size.height * scale)

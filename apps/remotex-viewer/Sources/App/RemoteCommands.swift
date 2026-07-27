@@ -1,9 +1,40 @@
+import AppKit
 import SwiftUI
 
 struct RemoteCommands: Commands {
     @Bindable var model: AppModel
 
     var body: some Commands {
+        // `commandsReplaced` takes the standard app menu down with the rest, Quit
+        // included, and an app you can only leave by closing its window is not one.
+        // Put back deliberately, and — like every item below — without a chord: the
+        // Command-Q the muscle memory reaches for belongs to the guest while a
+        // desktop is focused, so advertising it on this item would be advertising a
+        // shortcut that does something else. View only, or moving focus off the
+        // desktop, is what makes the menu reachable from the keyboard again.
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit remotex") {
+                NSApp.terminate(nil)
+            }
+        }
+
+        // Deliberately nothing for full screen. AppKit adds Enter Full Screen to a
+        // View menu of its own and does not give the group up when it is replaced
+        // here — claiming `.sidebar` left the app with two items for the one action —
+        // so its item is left where it is, and `ViewerApplicationDelegate` takes the
+        // Control-Command-F off it. AppKit's flips its own title between Enter and
+        // Exit from window state, which is more than an item declared here could say.
+
+        // No item here carries a key equivalent, and that is a rule rather than an
+        // omission. While the desktop is painting and focused, `KeyboardCapture`
+        // takes every Command chord the system delivers and sends it to the remote —
+        // so a shortcut on this menu fires only on the screens where nothing is
+        // captured, and types into the guest on the one where the item usually
+        // matters. The ones that were here existed to drive the app from the keyboard
+        // in a test, which is not reason enough to ship a chord whose meaning depends
+        // on which screen is up. View only does not change that: it suspends capture,
+        // so a chord would work while it is on and type into the guest while it is
+        // off, which is the same dependence with another name.
         CommandMenu("Remote") {
             Toggle(
                 model.macOSKeyboardOverridesLabel,
@@ -52,7 +83,6 @@ struct RemoteCommands: Commands {
             Button("Refresh") {
                 model.refresh()
             }
-            .keyboardShortcut("r", modifiers: [.command, .shift])
             .disabled(model.session.screen != .desktop)
 
             Button("Switch Target") {
@@ -72,39 +102,28 @@ struct RemoteCommands: Commands {
 
             Divider()
 
-            // Both steps back out of the session, and both are on the menu with a
-            // shortcut so the whole way in — server, login, picker — can be walked
-            // from the keyboard. The picker's own Log Out button is deliberately
-            // left bare: the same key on a button and a menu item in one responder
-            // chain is an ambiguous shortcut.
+            // Both steps back out of the session.
             Button("Log Out") {
                 Task { await model.logOut() }
             }
-            .keyboardShortcut("l", modifiers: [.command, .shift])
             .disabled(
                 model.session.screen != .picker
                     && model.session.screen != .desktop
             )
 
+            // Signed out only, which is why it sits under Log Out: from the picker
+            // or the desktop that is the step to take first.
+            //
+            // The last item on this menu, and deliberately the last of the way *in*
+            // as well. Connect to Gateway was here too, which is the server step's own
+            // Continue button under another name: this item is what lands on that
+            // step, the field it offers is the address, and the button beside the
+            // field is how the address is adopted. Nothing was reachable through the
+            // menu copy that the screen it belongs to does not already offer.
             Button("Change Gateway") {
                 Task { await model.changeGateway() }
             }
-            .keyboardShortcut("g", modifiers: [.command, .shift])
-            .disabled(model.session.screen == .server)
-
-            // The server step's Continue answers to Return already, but only while
-            // the window is key and nothing else has eaten it. On the menu it is
-            // reachable no matter where focus sits, which is what a keyboard-only
-            // pass — or a script driving one — needs.
-            Button("Connect to Gateway") {
-                Task { await model.connectToGateway() }
-            }
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(
-                model.session.screen != .server
-                    || model.isBusy
-                    || model.gatewayAddress.isEmpty
-            )
+            .disabled(!model.canChangeGateway)
         }
     }
 }

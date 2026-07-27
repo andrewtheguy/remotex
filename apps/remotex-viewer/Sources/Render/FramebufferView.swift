@@ -3,8 +3,10 @@ import MetalKit
 /// The `MTKView` the framebuffer is blitted into. Deliberately dumb: the
 /// renderer owns the texture and decides when to redraw.
 ///
-/// Sized to the remote in points while its drawable is sized to the remote in
-/// pixels, so the blit is one texel per device pixel with no scaling.
+/// Sized to the remote's own point size while its drawable stays the remote's
+/// pixel size, so this is also where the remote is scaled to the host: the layer
+/// resamples a framebuffer-sized drawable into whatever the window's display makes
+/// of those points. One texel per device pixel only when the two densities agree.
 final class FramebufferView: MTKView {
     init(renderer: FramebufferRenderer) {
         super.init(frame: .zero, device: renderer.device)
@@ -31,12 +33,15 @@ final class FramebufferView: MTKView {
     }
 
     /// Moving the window between displays of different scale changes
-    /// `backingScaleFactor` without any resize notification. The drawable is
-    /// unaffected — it tracks the remote, not the screen — but the point size the
-    /// surface lays this out at is not, so the surface is asked to re-measure.
+    /// `backingScaleFactor` without any resize notification, and the layer has to
+    /// be told or it keeps rasterizing for the display it left.
+    ///
+    /// Nothing else follows from it: neither the drawable (which tracks the remote)
+    /// nor this view's point size (the remote's own — see `RemoteGeometry`) depends
+    /// on the host's density, so the desktop keeps its size across the move and the
+    /// layer just resamples it for the new screen.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         layer?.contentsScale = window?.backingScaleFactor ?? 1
-        (superview as? RemoteSurfaceView)?.backingScaleChanged()
     }
 }

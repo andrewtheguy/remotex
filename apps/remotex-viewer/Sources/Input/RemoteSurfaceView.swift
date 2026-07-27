@@ -39,14 +39,43 @@ final class RemoteSurfaceView: NSView {
         fatalError("RemoteSurfaceView is not loaded from a nib")
     }
 
-    /// The remote's size, or nil while there is nothing to show. Set by the host
-    /// when the model's `remoteSize` changes.
+    /// The remote's size in framebuffer pixels, or nil while there is nothing to
+    /// show. Set by the host when the model's `remoteSize` changes.
     var remoteSize: DisplayMode? {
         didSet {
             guard remoteSize != oldValue else {
                 return
             }
             needsLayout = true
+        }
+    }
+
+    /// The remote's own density: framebuffer pixels per point of *its* desktop,
+    /// from the same `resize` as `remoteSize`. Never this window's backing scale —
+    /// see `RemoteGeometry`.
+    var guestScale: CGFloat = 1 {
+        didSet {
+            guard guestScale != oldValue else {
+                return
+            }
+            needsLayout = true
+        }
+    }
+
+    /// View only: the pointer over the desktop controls nothing, so it is drawn as
+    /// the ordinary arrow instead of the remote's shape.
+    ///
+    /// Not cosmetic. For a remote that composites its own pointer into the
+    /// framebuffer — RDP, and VNC without the Cursor pseudo-encoding — ours is
+    /// deliberately *transparent*, so two are not drawn for one; with the remote's
+    /// no longer following the mouse, keeping that would leave nothing on screen to
+    /// point with.
+    var isViewOnly = false {
+        didSet {
+            guard isViewOnly != oldValue else {
+                return
+            }
+            window?.invalidateCursorRects(for: self)
         }
     }
 
@@ -58,8 +87,7 @@ final class RemoteSurfaceView: NSView {
             return
         }
         framebuffer.isHidden = false
-        let scale = window?.backingScaleFactor ?? 1
-        let size = RemoteGeometry.pointSize(of: remoteSize, backingScale: scale)
+        let size = RemoteGeometry.pointSize(of: remoteSize, guestScale: guestScale)
         // Centred in whatever margin there is, so a remote smaller than the window
         // does not sit in a corner.
         framebuffer.frame = CGRect(
@@ -70,20 +98,7 @@ final class RemoteSurfaceView: NSView {
         )
     }
 
-    /// Set by `RemoteSurfaceHost.Coordinator`. Every point size in this view's
-    /// geometry is derived from the window's backing scale, and the host owns all
-    /// of them, so a change is its to answer.
-    var onBackingScaleChange: (() -> Void)?
-
-    /// The window moved to a display with a different scale — or into a window at
-    /// all — so the point size the framebuffer occupies changed even though the
-    /// remote did not.
-    func backingScaleChanged() {
-        needsLayout = true
-        onBackingScaleChange?()
-    }
-
-    /// The room available for the remote desktop in device pixels, or nil while
+    /// The room available for the remote desktop in *remote* pixels, or nil while
     /// there is none to measure.
     ///
     /// `roomForDocument`, and deliberately none of the three nearer measurements:
@@ -100,10 +115,7 @@ final class RemoteSurfaceView: NSView {
         guard visible.width >= 1, visible.height >= 1 else {
             return nil
         }
-        return RemoteGeometry.viewport(
-            clip: visible,
-            backingScale: window?.backingScaleFactor ?? 1
-        )
+        return RemoteGeometry.viewport(clip: visible, guestScale: guestScale)
     }
 
     /// The remote pixel under a point in this view's coordinates, or nil when
@@ -151,7 +163,7 @@ final class RemoteSurfaceView: NSView {
         guard !framebuffer.frame.isEmpty else {
             return
         }
-        addCursorRect(framebuffer.frame, cursor: cursor)
+        addCursorRect(framebuffer.frame, cursor: isViewOnly ? .arrow : cursor)
     }
 
     func apply(cursor next: NSCursor) {
@@ -211,7 +223,7 @@ final class RemoteSurfaceView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard let model, model.session.canCaptureKeyboard else {
+        guard let model, model.canSendInput else {
             return
         }
         guard let delta = WheelMapping.delta(
@@ -223,6 +235,19 @@ final class RemoteSurfaceView: NSView {
         }
         model.sendWheel(dx: delta.dx, dy: delta.dy)
     }
+
+    // MARK: - Keyboard
+
+    /// Swallowed, silently.
+    ///
+    /// Keys that belong to the remote never arrive here: `KeyboardCapture` takes
+    /// them from a local event monitor, ahead of the responder chain. Anything that
+    /// does arrive is a key nobody wants — capture is suspended (view only, or no
+    /// frame yet), and the menu bar has already had its shot at the chords — and the
+    /// only thing left down the chain is the window's `noResponder`, which beeps.
+    /// One beep per keystroke is a poor answer to typing at a desktop that is
+    /// deliberately not listening.
+    override func keyDown(with event: NSEvent) {}
 
     private func report(motion event: NSEvent) {
         guard let model,
@@ -255,8 +280,9 @@ extension NSScrollView {
     /// Three nearer sizes are wrong, and each was wrong in a way that showed:
     ///
     /// - `bounds` is the whole frame, and under a title bar that includes the
-    ///   inset AppKit adds for it (`automaticallyAdjustsContentInsets` — 52pt on
-    ///   this window). A desktop sized to it hangs its last 52pt below the fold,
+    ///   inset AppKit adds for it (`automaticallyAdjustsContentInsets` — 40pt on
+    ///   this window, the compact toolbar). A desktop sized to it hangs its last
+    ///   40pt below the fold,
     ///   which for a Linux guest is its taskbar, and unreachable: the document is
     ///   no taller than the scroll extent either.
     /// - the same overshoot is what raises scrollers after an RDP "Resize to

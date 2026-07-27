@@ -26,8 +26,9 @@ enum ClientMessage: Sendable, Equatable {
     /// observe on its own — false on a synthetic send, which expresses case with
     /// an explicit `ShiftLeft` instead.
     case key(code: String, pressed: Bool, caps: Bool)
-    /// How much room the viewer has, in device pixels. Followed continuously by
-    /// VNC, acted on only by request for RDP, ignored entirely by rxa.
+    /// How much room the viewer has, in the *remote's* pixels — its room in points
+    /// times the density the remote draws at. Followed continuously by VNC, acted on
+    /// only by request for RDP, ignored entirely by rxa.
     case viewport(w: UInt16, h: UInt16)
     /// The user's pick from a `displayModes` menu. Not a spelling of `viewport`:
     /// a Mac's virtual display takes nothing but sizes off a fixed list.

@@ -30,7 +30,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// for a change that would break a client compiled against the old shape; a
 /// purely additive control message is not one, because clients are required to
 /// ignore tags they don't know.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
 /// browser link, the gateway and the Mac agent cannot drift apart on it (the
@@ -120,10 +120,16 @@ pub enum ClientMsg {
         pressed: bool,
         caps: bool,
     },
-    /// The browser viewport, in device pixels — the size the browser wants
-    /// the remote desktop to be. Engines that can drive the remote
-    /// size act on it (VNC `SetDesktopSize`); the rest ignore it and the
-    /// frontend keeps its scrollbars.
+    /// The size the client wants the remote desktop to be, in remote pixels:
+    /// the room it has, times the density the remote draws at
+    /// ([`ServerMsg::Resize`]'s `scale`). Engines that can drive the remote size
+    /// act on it (VNC `SetDesktopSize`); the rest ignore it and the client keeps
+    /// its scrollbars.
+    ///
+    /// Not the client's own device pixels, which is what this carried before
+    /// clients scaled their output: a desktop sized to those is a desktop drawn
+    /// at the host's density rather than its own, which on a Retina host is every
+    /// remote's UI at half size.
     Viewport { w: u16, h: u16 },
     /// Set the remote desktop to one of the resolutions the engine offered in
     /// [`ServerMsg::DisplayModes`] — the user's pick from a menu, not a
@@ -290,6 +296,16 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
     Ok(out)
 }
 
+/// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
+/// points of the desktop it shows: every engine but `rxa`, which reports the
+/// density of the Mac display it captures.
+///
+/// A remote with no density of its own is presented one point per pixel, which is
+/// what a VNC or RDP desktop expects — its own DPI settings decide how large its
+/// UI is, and a client must not second-guess them by drawing the whole desktop at
+/// half size because the host screen happens to be Retina.
+pub const UNSCALED: f32 = 1.0;
+
 /// Server -> browser: screen updates and session status.
 ///
 /// Most variants come from the protocol engine (tiles, resize, error); the two
@@ -299,8 +315,17 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
     Tile(Tile),
-    /// The remote desktop resolution changed.
-    Resize { w: u16, h: u16 },
+    /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
+    /// `scale` is how many of them the remote draws per point of its *own*
+    /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, RDP,
+    /// and a 1x Mac), 2.0 for a Retina Mac.
+    ///
+    /// The two travel together because a client cannot present either without
+    /// the other: it shows the desktop at `w / scale` points and lets the host
+    /// resample that to its own display, which is what keeps a remote the same
+    /// physical size on a 1x screen and a Retina one. A size that arrived without
+    /// its density would be presented at the wrong size until the next message.
+    Resize { w: u16, h: u16, scale: f32 },
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that
     /// composites the cursor into the framebuffer (RDP, and VNC servers that
@@ -375,7 +400,7 @@ pub enum WireFrame {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ControlMsg<'a> {
-    Resize { w: u16, h: u16 },
+    Resize { w: u16, h: u16, scale: f32 },
     /// `image` is a base64 PNG (the browser wraps it in a `data:` URL), null
     /// when the remote hid the pointer.
     Cursor {
@@ -418,7 +443,11 @@ impl ServerMsg {
     pub fn encode(&self) -> WireFrame {
         match self {
             ServerMsg::Tile(tile) => WireFrame::Binary(tile.to_frame()),
-            ServerMsg::Resize { w, h } => WireFrame::Text(control(&ControlMsg::Resize { w: *w, h: *h })),
+            ServerMsg::Resize { w, h, scale } => WireFrame::Text(control(&ControlMsg::Resize {
+                w: *w,
+                h: *h,
+                scale: *scale,
+            })),
             ServerMsg::Cursor(shape) => WireFrame::Text(control(&match shape {
                 Some(c) => ControlMsg::Cursor {
                     image: Some(base64::engine::general_purpose::STANDARD.encode(&c.png)),
@@ -550,8 +579,10 @@ mod tests {
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.
     #[test]
     fn control_messages_encode_to_tagged_camelcase_text() {
-        match (ServerMsg::Resize { w: 1280, h: 800 }).encode() {
-            WireFrame::Text(json) => assert_eq!(json, r#"{"type":"resize","w":1280,"h":800}"#),
+        match (ServerMsg::Resize { w: 1280, h: 800, scale: UNSCALED }).encode() {
+            WireFrame::Text(json) => {
+                assert_eq!(json, r#"{"type":"resize","w":1280,"h":800,"scale":1.0}"#)
+            }
             other => panic!("resize should be a text frame: {other:?}"),
         }
         match (ServerMsg::Error { message: "boom".to_owned() }).encode() {

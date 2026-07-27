@@ -33,6 +33,38 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// View only: the session stays attached and painting, and nothing the user
+    /// does reaches the remote — no key, no pointer, no wheel, and no clipboard.
+    ///
+    /// What it is *for* is `KeyboardCapture`. That monitor takes every Command chord
+    /// the system delivers to this app, so a focused desktop means this Mac has no
+    /// shortcuts of its own — not even Quit; this is the switch that suspends it. The
+    /// pointer and the clipboard follow because a mode that gave the keyboard back
+    /// while still driving the remote with the mouse would be a confusing half of an
+    /// idea.
+    ///
+    /// The clipboard goes with the rest because nothing on that link is
+    /// user-initiated: the synchronizer polls this Mac's pasteboard and pushes
+    /// whatever it finds, so leaving it up would keep writing to the remote while
+    /// the toggle said otherwise. That it is off is what the disabled Clipboard
+    /// button next to this one shows.
+    ///
+    /// Not remembered anywhere: not in defaults, unlike the keyboard overrides —
+    /// that is a convention this Mac keeps — and not across a target switch either.
+    /// A session is answered for as it starts, by the picker's checkbox or the
+    /// toolbar's toggle, and the answer goes back with the target it was about.
+    var isViewOnly = false {
+        didSet {
+            guard isViewOnly != oldValue else {
+                return
+            }
+            // Whatever is held was pressed while input was still going through, and
+            // the paths that would have released it are the ones just closed.
+            releaseInput()
+            updateClipboardEnablement()
+        }
+    }
+
     private(set) var gateway: GatewayLocation
     private(set) var branding = "remotex"
     private(set) var session = ViewerSessionState()
@@ -63,8 +95,8 @@ final class AppModel: GatewaySessionSink {
     private var connection: GatewayConnection?
     @ObservationIgnored
     private var pressed = PressedInput()
-    /// The room available for the remote desktop, in device pixels, as the surface
-    /// last measured it. Nil until a surface exists.
+    /// The room available for the remote desktop, in the remote's own pixels, as
+    /// the surface last measured it. Nil until a surface exists.
     ///
     /// Observed, unlike the rest of the session plumbing below, because
     /// `canResizeNow` reads it: the first measurement is what enables "Resize to
@@ -119,8 +151,21 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// Whether anything the user does may reach the remote. The single gate every
+    /// outbound input path is written against, and the whole of what view only
+    /// means.
+    var canSendInput: Bool {
+        session.canCaptureKeyboard && !isViewOnly
+    }
+
+    /// Whether `KeyboardCapture` takes key events for the remote at all.
+    ///
+    /// False in view only, and that is the point of the mode rather than a
+    /// consequence of it: capture is a local event monitor that swallows every
+    /// Command chord the system hands this app, so while it is up this Mac's keyboard
+    /// belongs to the guest. Suspending it is the only way to get the chords back.
     var canCaptureKeyboardNow: Bool {
-        session.canCaptureKeyboard && session.remoteSize != nil
+        canSendInput && session.remoteSize != nil
     }
 
     var macOSKeyboardOverridesActive: Bool {
@@ -137,6 +182,20 @@ final class AppModel: GatewaySessionSink {
     /// window to report.
     var canResizeNow: Bool {
         session.canResize && viewportSize != nil
+    }
+
+    /// Whether the address may still be changed — only while signed out, which
+    /// here means the credentials step.
+    ///
+    /// The gateway is the ground everything after it stands on: the login cookie
+    /// is scoped to that host, the claim token was minted by it, and the socket is
+    /// attached to it. Moving it out from under a live session meant tearing all
+    /// three down as a side effect of a menu item, so the way out of a session is
+    /// now the one that says so — Log Out, which lands on the step this is offered
+    /// from. On the server step there is nothing to change *to*: it is already the
+    /// step that asks.
+    var canChangeGateway: Bool {
+        session.screen == .login && !isBusy
     }
 
     /// The interstitial covers the connection lifecycle and the claim conflicts,
@@ -205,8 +264,13 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
-    /// Back to the server step, to point somewhere else.
+    /// Back to the server step, to point somewhere else. Refused once signed in
+    /// — see `canChangeGateway` — so neither entry point can strand a live
+    /// session on a gateway the viewer has stopped talking to.
     func changeGateway() async {
+        guard canChangeGateway else {
+            return
+        }
         await teardown()
         session = ViewerSessionState(screen: .server)
         targets = []
@@ -322,10 +386,20 @@ final class AppModel: GatewaySessionSink {
             session.remoteIsMac = false
             session.displayModes = []
             session.remoteSize = nil
+            // Back to the default density, with the size: it is the next
+            // target's first `resize` that says what its is, and until then a
+            // Retina Mac's 2 would double the viewport reported for whatever
+            // was picked next — including the report `connected` sends before
+            // any resize has arrived.
+            session.remoteScale = 1
             session.canResize = false
             session.manualResize = false
             session.canClipboard = false
             remoteCursor = nil
+            // Cleared with the rest of what belonged to that target: view only is an
+            // answer about the session being left, not a setting the next pick
+            // inherits, and the picker's checkbox says as much by starting clear.
+            isViewOnly = false
             viewportPolicy = ViewportPolicy()
             updateClipboardEnablement()
             clipboard.failPendingFetch()
@@ -358,9 +432,13 @@ final class AppModel: GatewaySessionSink {
             connection?.resetViewportMemo()
             sendViewport(manual: false)
 
-        case .resize(let w, let h):
+        case .resize(let w, let h, let scale):
             let size = DisplayMode(w: w, h: h)
             session.remoteSize = size
+            // The texture is the remote's pixels; the density only decides how
+            // large those pixels are drawn (`RemoteGeometry`), so the renderer
+            // never hears about it.
+            session.remoteScale = scale > 0 ? CGFloat(scale) : 1
             renderer?.resize(to: size)
 
         case .remoteOs(let macos):
@@ -418,6 +496,7 @@ final class AppModel: GatewaySessionSink {
             enabled: session.screen == .desktop
                 && session.connectionStatus == .connected
                 && session.canClipboard
+                && !isViewOnly
         )
     }
 
@@ -443,7 +522,7 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
-    /// The surface measured how much room it has, in device pixels.
+    /// The surface measured how much room it has, in the remote's pixels.
     ///
     /// Debounced rather than sent straight through: a window drag reports on every
     /// frame, and VNC acts on every report it receives.
@@ -528,28 +607,43 @@ final class AppModel: GatewaySessionSink {
     }
 
     func sendPointer(x: Int32, y: Int32) {
-        guard session.canCaptureKeyboard else {
+        guard canSendInput else {
             return
         }
         connection?.send(.mouseMove(x: x, y: y))
     }
 
     func sendWheel(dx: Float, dy: Float) {
-        guard session.canCaptureKeyboard else {
+        guard canSendInput else {
             return
         }
         connection?.send(.wheel(dx: dx, dy: dy))
     }
 
+    /// Gated here as well as in `KeyboardCapture`, which is the only caller: this
+    /// is where "nothing reaches the remote" is a property of the model rather than
+    /// of one event monitor. Unlike a mouse button there is no exception for a
+    /// release, because there is nothing left to release — switching view only on
+    /// let go of everything held.
     func sendKey(code: String, pressed isPressed: Bool, caps: Bool) {
+        guard canSendInput else {
+            return
+        }
         pressed.record(code: code, pressed: isPressed)
         connection?.send(.key(code: code, pressed: isPressed, caps: caps))
     }
 
     func sendMouseButton(_ button: MouseButton, pressed isPressed: Bool) {
-        // A release is always forwarded, even off the desktop: a button recorded
-        // as held has to be able to come back up.
-        guard session.canCaptureKeyboard || !isPressed else {
+        // A release gets past the gate, but only for a button this client recorded
+        // as held — which is the whole case the exception is for: a press that did
+        // go through, whose mouseUp lands after the screen changed under it.
+        //
+        // Held is the part that has to be checked rather than assumed. Switching
+        // view only on releases everything first, so the physical mouseUp that
+        // follows is for a button the remote has already been told about; forwarding
+        // it would be the one input event to get past the toggle, on a path whose
+        // own tests say nothing does.
+        guard canSendInput || (!isPressed && pressed.isHeld(button)) else {
             return
         }
         pressed.record(button: button, pressed: isPressed)

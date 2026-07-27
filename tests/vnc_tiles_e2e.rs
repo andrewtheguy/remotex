@@ -186,7 +186,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                         // desktop, not the (RDP-oriented) configured 1280x800.
                         assert_eq!(
                             text,
-                            format!(r#"{{"type":"resize","w":{DESKTOP_W},"h":{DESKTOP_H}}}"#)
+                            format!(r#"{{"type":"resize","w":{DESKTOP_W},"h":{DESKTOP_H},"scale":1.0}}"#)
                         );
                         got_resize = true;
                     }
@@ -242,7 +242,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if text.contains(r#""type":"resize""#) {
                         assert_eq!(
                             text,
-                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H}}}"#)
+                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H},"scale":1.0}}"#)
                         );
                         resized = true;
                     }
@@ -296,7 +296,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if text.contains(r#""type":"resize""#) {
                         assert_eq!(
                             text,
-                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H}}}"#),
+                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H},"scale":1.0}}"#),
                             "reattach must announce the session's current size"
                         );
                         reannounced = true;
