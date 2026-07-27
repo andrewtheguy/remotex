@@ -771,7 +771,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             recv(&mut att.events).await,
-            AttachEvent::Msg(ServerMsg::Resize { w: 10, h: 20, .. })
+            AttachEvent::Msg(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED })
         ));
 
         // Detached: frames are dropped, the engine keeps running.
@@ -802,7 +802,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             recv(&mut att.events).await,
-            AttachEvent::Msg(ServerMsg::Resize { w: 30, h: 40, .. })
+            AttachEvent::Msg(ServerMsg::Resize { w: 30, h: 40, scale: UNSCALED })
         ));
     }
 
@@ -943,7 +943,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             recv(&mut att_b.events).await,
-            AttachEvent::Msg(ServerMsg::Resize { w: 5, h: 6, .. })
+            AttachEvent::Msg(ServerMsg::Resize { w: 5, h: 6, scale: UNSCALED })
         ));
     }
 

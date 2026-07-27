@@ -1770,7 +1770,7 @@ mod tests {
 
         assert!(resized);
         assert_eq!(desktop.lock().unwrap().size, (800, 600));
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 800, h: 600, .. })));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 800, h: 600, scale: UNSCALED })));
         assert!(written(&writer).await.is_empty(), "nothing left to request");
     }
 
@@ -1810,7 +1810,7 @@ mod tests {
         // A real change updates the state and reaches the browser.
         assert!(apply_resize(&desktop, (640, 480), &tx).await.unwrap());
         assert_eq!(desktop.lock().unwrap().size, (640, 480));
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 640, h: 480, .. })));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
 
         // A zero dimension is a protocol violation, not a resize.
         assert!(apply_resize(&desktop, (0, 480), &tx).await.is_err());
