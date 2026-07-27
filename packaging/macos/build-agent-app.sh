@@ -381,7 +381,7 @@ Everything after that is in the menu bar item, which is the agent's whole
 interface — there are no subcommands. Open it for:
 
     Copy Pre-Shared Key  to paste the key into the gateway's rxa target
-    Settings...          listen address, display and key, in one dialog
+    Settings...          listen address, displays and key, in one dialog
 
 It also needs Screen Recording and Accessibility, and asks for whichever is
 missing: the icon warns and the menu offers the right Privacy pane. Read the

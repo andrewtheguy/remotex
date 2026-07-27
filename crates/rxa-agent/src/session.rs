@@ -175,7 +175,12 @@ pub async fn serve(
     // not agent state: the person at the far end picks a screen for as long as
     // they are looking at it, and the next connection starts from the same
     // place rather than from wherever the last one wandered off to.
-    let target = capture::Target::Real(capture::main_display());
+    //
+    // Through `resolve` rather than straight to `Target::Real`, because macOS
+    // can make the display we created the main one — it did on the test VM, with
+    // the Mac's own panel arranged to its left — and measuring our own display as
+    // a real one reads its scale as 1x.
+    let target = resolve(capture::main_display(), owned);
 
     // The size has to be known before `Attach`, so it is probed without starting
     // a stream. This is also where a missing Screen Recording grant surfaces.
@@ -229,6 +234,20 @@ pub async fn serve(
         cursor_tracker,
     )
     .await
+}
+
+/// The target for a display id, given the display this agent made (if any).
+///
+/// The one place that mapping happens, because getting it wrong is quiet:
+/// [`capture::Target::Owned`] is what carries the created point size, and
+/// without it the backing scale of our own display is read through
+/// `CGDisplayCopyDisplayMode`, which returns nothing for it and so reads 1x. The
+/// list would then advertise a 2x display while capture took half the pixels.
+fn resolve(id: u32, owned: Option<capture::Target>) -> capture::Target {
+    match owned {
+        Some(owned) if owned.id() == id => owned,
+        _ => capture::Target::Real(id),
+    }
 }
 
 /// Build the display list to report, resolving `owned` so the agent's own
@@ -514,10 +533,8 @@ async fn pump(
                     // Which display, unlike what resolution, is the client's to
                     // choose — see the message's own documentation.
                     GatewayMsg::SelectDisplay { id } => {
-                        let next = if owned.map(capture::Target::id) == Some(id) {
-                            owned
-                        } else if displays_sent.iter().any(|display| display.id == id) {
-                            Some(capture::Target::Real(id))
+                        let next = if displays_sent.iter().any(|display| display.id == id) {
+                            Some(resolve(id, owned))
                         } else {
                             // An id from a list this session has since replaced,
                             // or one that was never on it. Not an `AgentMsg::Error`
