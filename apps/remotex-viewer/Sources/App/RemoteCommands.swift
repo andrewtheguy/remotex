@@ -1,9 +1,30 @@
+import AppKit
 import SwiftUI
 
 struct RemoteCommands: Commands {
     @Bindable var model: AppModel
 
     var body: some Commands {
+        // `commandsReplaced` takes the standard app menu down with the rest, Quit
+        // included, and an app you can only leave by closing its window is not one.
+        // Put back deliberately, and — like every item below — without a chord: the
+        // Command-Q the muscle memory reaches for belongs to the guest while a
+        // desktop is focused, so advertising it on this item would be advertising a
+        // shortcut that does something else. View only, or moving focus off the
+        // desktop, is what makes the menu reachable from the keyboard again.
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit remotex") {
+                NSApp.terminate(nil)
+            }
+        }
+
+        // Deliberately nothing for full screen. AppKit adds Enter Full Screen to a
+        // View menu of its own and does not give the group up when it is replaced
+        // here — claiming `.sidebar` left the app with two items for the one action —
+        // so its item is left where it is, and `ViewerApplicationDelegate` takes the
+        // Control-Command-F off it. AppKit's flips its own title between Enter and
+        // Exit from window state, which is more than an item declared here could say.
+
         // No item here carries a key equivalent, and that is a rule rather than an
         // omission. While the desktop is painting and focused, `KeyboardCapture`
         // takes every Command chord the system delivers and sends it to the remote —

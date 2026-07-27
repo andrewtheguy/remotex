@@ -5,6 +5,30 @@ import SwiftUI
 @MainActor
 private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // No item in this menu bar carries a key equivalent, and the rule is enforced
+        // as items arrive rather than once over what is there at launch: AppKit builds
+        // the View menu holding Enter Full Screen only when a window can go full
+        // screen, which is later than this, and it arrives with Control-Command-F on
+        // it. That chord is delivered to this app like any other, so a focused desktop
+        // captures it and the guest gets it instead — the item would name a shortcut
+        // that does something else entirely. `RemoteCommands` says the rest of why;
+        // this is the half of it that AppKit's own items can only be held to here.
+        for name in [NSMenu.didAddItemNotification, NSMenu.didChangeItemNotification] {
+            NotificationCenter.default.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    // From the menu bar down rather than from the menu that posted:
+                    // `Notification` cannot cross into the actor, and starting at the
+                    // root also keeps a context menu — AppKit's to spell, and whose
+                    // chords the text field handles rather than the item — out of
+                    // reach. The bar is a dozen items; walking it is free.
+                    Self.stripKeyEquivalents(from: NSApp.mainMenu)
+                }
+            }
+        }
         DispatchQueue.main.async {
             guard let mainMenu = NSApp.mainMenu else {
                 return
@@ -14,6 +38,23 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
             for item in mainMenu.items.dropFirst() where item.title != "Remote" {
                 mainMenu.removeItem(item)
             }
+            Self.stripKeyEquivalents(from: mainMenu)
+        }
+    }
+
+    /// Idempotent, which is what keeps it safe to run from a change notification:
+    /// clearing an equivalent posts one of those in turn, and an item that has none
+    /// already is left alone. A modifier mask with no character is inert.
+    private static func stripKeyEquivalents(from menu: NSMenu?) {
+        guard let menu else {
+            return
+        }
+        for item in menu.items {
+            if !item.keyEquivalent.isEmpty {
+                item.keyEquivalent = ""
+                item.keyEquivalentModifierMask = []
+            }
+            stripKeyEquivalents(from: item.submenu)
         }
     }
 }
