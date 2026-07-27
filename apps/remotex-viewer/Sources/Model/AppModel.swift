@@ -630,9 +630,16 @@ final class AppModel: GatewaySessionSink {
     }
 
     func sendMouseButton(_ button: MouseButton, pressed isPressed: Bool) {
-        // A release is always forwarded, even off the desktop: a button recorded
-        // as held has to be able to come back up.
-        guard canSendInput || !isPressed else {
+        // A release gets past the gate, but only for a button this client recorded
+        // as held — which is the whole case the exception is for: a press that did
+        // go through, whose mouseUp lands after the screen changed under it.
+        //
+        // Held is the part that has to be checked rather than assumed. Switching
+        // view only on releases everything first, so the physical mouseUp that
+        // follows is for a button the remote has already been told about; forwarding
+        // it would be the one input event to get past the toggle, on a path whose
+        // own tests say nothing does.
+        guard canSendInput || (!isPressed && pressed.isHeld(button)) else {
             return
         }
         pressed.record(button: button, pressed: isPressed)

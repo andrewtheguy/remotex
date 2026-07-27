@@ -78,6 +78,49 @@ struct ViewOnlyTests {
         #expect(buttons.last?["pressed"] as? Bool == false)
     }
 
+    /// The release that follows the toggle is the one input event that could still
+    /// get out: `sendMouseButton` lets a release past its own gate so a button
+    /// recorded as held can come back up, and switching view only on has already
+    /// sent that release and forgotten the button. The physical mouseUp arriving
+    /// after it is for a button the remote has been told about twice over.
+    @Test
+    func thePhysicalMouseUpAfterTheToggleIsNotForwarded() async throws {
+        let session = try await Self.interactive()
+        let model = session.model
+        model.sendMouseButton(.left, pressed: true)
+        try await session.settle()
+
+        model.isViewOnly = true
+        try await session.settle()
+        #expect(session.sent(ofType: "mouseButton").count == 2, "the press and its release")
+
+        // What AppKit delivers next: the button really did come up.
+        model.sendMouseButton(.left, pressed: false)
+        try await session.settle()
+
+        #expect(session.sent(ofType: "mouseButton").count == 2, "and nothing after it")
+    }
+
+    /// The same exception, doing its job. Off the desktop with nothing having
+    /// released for us, a button recorded as held still has to be able to come up —
+    /// a modifier or a button left down on the remote is this client's worst
+    /// failure, and closing the path outright would be how that happens.
+    @Test
+    func aHeldButtonStillComesUpOffTheDesktop() async throws {
+        let session = try await Self.interactive()
+        let model = session.model
+        model.sendMouseButton(.left, pressed: true)
+        model.apply(.control(.picker))
+        try await session.settle()
+
+        model.sendMouseButton(.left, pressed: false)
+        try await session.settle()
+
+        let buttons = session.sent(ofType: "mouseButton")
+        #expect(buttons.count == 2)
+        #expect(buttons.last?["pressed"] as? Bool == false)
+    }
+
     /// Capture itself is suspended, which is the point of the mode: the monitor
     /// swallows every Command chord the system delivers to this app — Quit included —
     /// so while it is up this Mac has no shortcuts of its own. Handing input back is

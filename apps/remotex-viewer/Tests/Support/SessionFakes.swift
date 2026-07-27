@@ -324,12 +324,21 @@ struct AttachedSession {
     }
 
     /// The frames the socket has been sent, decoded, in order.
+    ///
+    /// A frame that will not decode is recorded as a failure rather than dropped.
+    /// What these suites mostly assert is that something was *not* sent, and a
+    /// silent gap here is the one thing that could make such an assertion pass for
+    /// the wrong reason: the frame went out, and only this harness lost it.
     var sent: [[String: Any]] {
         socket.sentFrames.compactMap { frame in
-            guard let data = frame.data(using: .utf8) else {
+            guard let data = frame.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data)
+                      as? [String: Any]
+            else {
+                Issue.record("outbound frame is not a JSON object: \(frame)")
                 return nil
             }
-            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            return json
         }
     }
 
