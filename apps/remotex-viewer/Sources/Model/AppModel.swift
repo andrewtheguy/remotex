@@ -322,6 +322,12 @@ final class AppModel: GatewaySessionSink {
             session.remoteIsMac = false
             session.displayModes = []
             session.remoteSize = nil
+            // Back to the default density, with the size: it is the next
+            // target's first `resize` that says what its is, and until then a
+            // Retina Mac's 2 would double the viewport reported for whatever
+            // was picked next — including the report `connected` sends before
+            // any resize has arrived.
+            session.remoteScale = 1
             session.canResize = false
             session.manualResize = false
             session.canClipboard = false

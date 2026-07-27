@@ -116,6 +116,9 @@ struct AppModelTests {
         #expect(model.session.connectedTarget == nil)
         #expect(model.session.protocolName == nil)
         #expect(model.session.remoteSize == nil)
+        // The Retina Mac's density goes with it: kept, it would double the
+        // viewport reported for the next target before its own resize lands.
+        #expect(model.session.remoteScale == 1)
         #expect(model.session.displayModes.isEmpty)
         #expect(!model.session.canClipboard)
         #expect(!model.session.canResize)
