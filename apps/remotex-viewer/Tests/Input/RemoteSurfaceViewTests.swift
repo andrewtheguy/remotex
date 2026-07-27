@@ -192,9 +192,9 @@ struct RemoteSurfaceViewTests {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 900, height: 700))
         // 19pt too wide and well short vertically: the `rxa` near-miss.
+        // No window resize and no tile of our own: a desktop that arrives larger than
+        // the window has to raise its own scrollbar, which is what it did not do.
         harness.apply(remote: harness.remote(width: 919, height: 500))
-        harness.scrollView.tile()
-        harness.scrollView.layoutSubtreeIfNeeded()
 
         #expect(harness.scrollView.visibleBars.horizontal)
         #expect(!harness.scrollView.visibleBars.vertical)
@@ -212,8 +212,6 @@ struct RemoteSurfaceViewTests {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 900, height: 700))
         harness.apply(remote: harness.remote(width: 900, height: 700))
-        harness.scrollView.tile()
-        harness.scrollView.layoutSubtreeIfNeeded()
 
         #expect(!harness.scrollView.visibleBars.horizontal)
         #expect(!harness.scrollView.visibleBars.vertical)

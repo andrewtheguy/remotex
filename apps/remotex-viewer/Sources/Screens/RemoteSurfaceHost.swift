@@ -101,14 +101,10 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             // runs `updateNSView`, and the document would keep a size measured
             // against the old window — which is the other half of why this exists.
             scrollView.onTile = { [weak self, weak surface] in
-                guard let self, let surface, !self.isLayingOut else {
+                guard let surface else {
                     return
                 }
-                self.isLayingOut = true
-                defer { self.isLayingOut = false }
-                self.apply(remoteSize: surface.remoteSize, guestScale: surface.guestScale)
-                surface.needsLayout = true
-                self.report(from: surface)
+                self?.apply(remoteSize: surface.remoteSize, guestScale: surface.guestScale)
             }
             // Deliberately nothing for the window changing display. Every point
             // size here is the remote's own, so a host scale change has no geometry
@@ -131,10 +127,21 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             model.reportViewport(measured)
         }
 
+        /// Size the document to the remote, lay the scrollbars out around it, and
+        /// report the room that is left.
+        ///
+        /// Re-entrant by nature and guarded once, here: this is called *from* the
+        /// scroll view's layout, and it re-tiles at the end because the document's
+        /// size is the other thing the scrollbars depend on. Without that tile a
+        /// desktop that arrived larger than the window got no scrollbar until the
+        /// window was resized by hand — a `resize` message changes the document and
+        /// nothing else, and AppKit does not lay the scroll view out for it.
         func apply(remoteSize: DisplayMode?, guestScale: CGFloat) {
-            guard let surface else {
+            guard let surface, !isLayingOut else {
                 return
             }
+            isLayingOut = true
+            defer { isLayingOut = false }
             // The pointer is sized in the remote's points too, so a density change
             // has to re-derive it from a `cursor` message that has not itself
             // changed — which means stepping past the dedupe in `apply(cursor:)`.
@@ -159,6 +166,9 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                 remoteSize.map { RemoteGeometry.pointSize(of: $0, guestScale: guestScale) }
                     ?? surface.enclosingScrollView?.roomForDocument ?? .zero
             )
+            scrollView?.tile()
+            surface.needsLayout = true
+            report(from: surface)
         }
 
         /// The doubly-optional `appliedCursor` is the point: "no message yet" and
