@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import Login from "./Login.tsx";
-import { postNativeHostEvent, useNativeHost } from "./nativeHost.ts";
 import RemoteDesktop from "./RemoteDesktop.tsx";
 import { SESSION_KEY } from "./useRemoteDesktop.ts";
 
@@ -11,7 +10,6 @@ type AuthState = "checking" | "unauthenticated" | "authenticated";
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
-  const nativeHost = useNativeHost();
   // Deployment branding (login screen, interstitials, tab title). Defaults to
   // "remotex" and stays there until GET /api/config answers — a public route,
   // so it resolves before login.
@@ -34,26 +32,6 @@ export default function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!nativeHost || authState === "authenticated") {
-      return;
-    }
-    postNativeHostEvent({
-      type: "state",
-      state: {
-        screen: authState === "checking" ? "checking" : "login",
-        connectionStatus: null,
-        connectedTarget: null,
-        remoteIsMac: false,
-        displayModes: [],
-        remoteSize: null,
-        canResize: false,
-        canClipboard: false,
-        canCaptureKeyboard: false,
-      },
-    });
-  }, [authState, nativeHost]);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,7 +77,6 @@ export default function App() {
   return (
     <RemoteDesktop
       branding={branding}
-      nativeHost={nativeHost}
       onLogout={logout}
       onUnauthorized={unauthorized}
     />

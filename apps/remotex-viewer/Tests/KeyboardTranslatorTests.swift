@@ -144,6 +144,31 @@ struct KeyboardTranslatorTests {
         )
     }
 
+    /// The chord above ends with Command released, so the next bare tap is a fresh
+    /// one. The flag that suppresses the synthetic tap during a chord was only
+    /// cleared on the path that does *not* forward a Command release, so the tap
+    /// after any forwarded chord was swallowed — one Windows key press lost per
+    /// Command chord, recovered only by the tap after it.
+    @Test
+    func aBareCommandTapStillWorksAfterAForwardedChord() {
+        var translator = KeyboardTranslator()
+        _ = translator.translate(event(.flagsChanged, 0x37, [.command], sideMask: 0x0008))
+        _ = translator.translate(event(.keyDown, 0x0C, [.command]))
+        _ = translator.translate(event(.keyUp, 0x0C, [.command]))
+        _ = translator.translate(event(.flagsChanged, 0x37, []))
+
+        #expect(
+            translator.translate(event(.flagsChanged, 0x37, [.command], sideMask: 0x0008)).isEmpty
+        )
+        #expect(
+            translator.translate(event(.flagsChanged, 0x37, []))
+                == [
+                    TranslatedKeyEvent(code: "MetaLeft", pressed: true, caps: false),
+                    TranslatedKeyEvent(code: "MetaLeft", pressed: false, caps: false),
+                ]
+        )
+    }
+
     @Test
     func releasingOneModifierKeepsOnlyTheOtherSidePressed() {
         let pairs: [

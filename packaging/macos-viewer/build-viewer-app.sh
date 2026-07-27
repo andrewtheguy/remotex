@@ -48,16 +48,11 @@ version="$(
   exit 1
 }
 
-# An unbundled `swift run` has no Info.plist, so ProductInfo carries the same
-# value for development. Refuse to package a bridge that would reject itself.
-development_version="$(
-  sed -n 's/.*developmentVersion = "\([^"]*\)".*/\1/p' \
-    apps/remotex-viewer/Sources/ProductInfo.swift
-)"
-[ "$development_version" = "$version" ] || {
-  echo "viewer development version $development_version does not match $version" >&2
-  exit 1
-}
+# Nothing to cross-check against the source any more: the version below is the
+# only one the viewer has, substituted into `CFBundleShortVersionString`, and
+# `ProductInfo.version` reads it back out of the bundle. An unbundled build has no
+# Info.plist and reports `0.0.0-unbundled` rather than a second copy of this that
+# a bump could leave behind.
 
 echo ">> building remotex-viewer ($configuration)"
 swift build --package-path apps/remotex-viewer -c "$configuration"

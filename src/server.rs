@@ -17,6 +17,7 @@ use crate::{
     auth::{self, AuthSessions},
     config::AppConfig,
     error::{ApiResult, AppError},
+    protocol,
     session::SessionManager,
     ws,
 };
@@ -180,15 +181,21 @@ async fn logout_handler(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConfigResponse {
     branding: String,
+    /// [`protocol::PROTOCOL_VERSION`] — what the macOS viewer checks before it
+    /// opens a session, since it ships separately from this binary.
+    protocol_version: u32,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
-/// browser tab title carry the deployment's branding before authentication.
+/// browser tab title carry the deployment's branding before authentication, and
+/// so a separately-shipped client can refuse a wire protocol it cannot speak.
 async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         branding: state.config.branding.clone(),
+        protocol_version: protocol::PROTOCOL_VERSION,
     })
 }
 
@@ -255,4 +262,22 @@ async fn claim_handler(
 ) -> ApiResult<Json<ClaimResponse>> {
     let session_id = state.sessions.claim(req.force, req.session_id.as_deref())?;
     Ok(Json(ClaimResponse { session_id }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact `/api/config` body. Pinned because the macOS viewer decodes it
+    /// with a hand-written `Codable` and refuses a `protocolVersion` it doesn't
+    /// recognise: a rename here would read to it as an unreachable gateway.
+    #[test]
+    fn config_response_serializes_camel_case() {
+        let json = serde_json::to_string(&ConfigResponse {
+            branding: "remotex".to_owned(),
+            protocol_version: 1,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"branding":"remotex","protocolVersion":1}"#);
+    }
 }

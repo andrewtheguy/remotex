@@ -14,17 +14,17 @@ struct ClipboardSynchronizerTests {
             pasteboard: pasteboard,
             startsPolling: false
         )
-        var commands: [[String: Any]] = []
-        clipboard.sendCommand = { commands.append($0) }
+        var commands: [ClientMessage] = []
+        clipboard.send = { commands.append($0) }
 
         clipboard.update(enabled: true)
-        #expect(commandTypes(commands) == ["clipboard"])
-        #expect(commands.first?["text"] as? String == "first")
+        #expect(commands.map(\.tag) == ["clipboard"])
+        #expect(clipboardText(commands.first) == "first")
 
         write("second", to: pasteboard)
         clipboard.pollPasteboard()
-        #expect(commandTypes(commands) == ["clipboard", "clipboard"])
-        #expect(commands.last?["text"] as? String == "second")
+        #expect(commands.map(\.tag) == ["clipboard", "clipboard"])
+        #expect(clipboardText(commands.last) == "second")
 
         clipboard.pollPasteboard()
         #expect(commands.count == 2)
@@ -41,8 +41,8 @@ struct ClipboardSynchronizerTests {
             pasteboard: pasteboard,
             startsPolling: false
         )
-        var commands: [[String: Any]] = []
-        clipboard.sendCommand = { commands.append($0) }
+        var commands: [ClientMessage] = []
+        clipboard.send = { commands.append($0) }
         clipboard.update(enabled: true)
         commands.removeAll()
 
@@ -54,7 +54,7 @@ struct ClipboardSynchronizerTests {
         clipboard.receiveRemotePush("older remote")
         #expect(pasteboard.string(forType: .string) == "newer local")
         #expect(commands.count == 1)
-        #expect(commands.first?["text"] as? String == "newer local")
+        #expect(clipboardText(commands.first) == "newer local")
     }
 
     @Test
@@ -69,7 +69,7 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { "request" }
         )
-        clipboard.sendCommand = { _ in }
+        clipboard.send = { _ in }
         clipboard.update(enabled: true)
 
         clipboard.receiveRemotePush("remote")
@@ -106,7 +106,7 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { "fetch-1" }
         )
-        clipboard.sendCommand = { _ in }
+        clipboard.send = { _ in }
         clipboard.update(enabled: true)
         clipboard.requestFreshSnapshot()
 
@@ -138,8 +138,8 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { "fetch-2" }
         )
-        var commands: [[String: Any]] = []
-        clipboard.sendCommand = { commands.append($0) }
+        var commands: [ClientMessage] = []
+        clipboard.send = { commands.append($0) }
         clipboard.update(enabled: true)
         commands.removeAll()
         clipboard.requestFreshSnapshot()
@@ -158,8 +158,8 @@ struct ClipboardSynchronizerTests {
         clipboard.reveal()
         clipboard.draft = "edited ☕"
         #expect(clipboard.sendDraft())
-        #expect(commandTypes(commands) == ["clipboard"])
-        #expect(commands.first?["text"] as? String == "edited ☕")
+        #expect(commands.map(\.tag) == ["clipboard"])
+        #expect(clipboardText(commands.first) == "edited ☕")
 
         clipboard.draft = "copy draft"
         #expect(clipboard.copy())
@@ -182,8 +182,8 @@ struct ClipboardSynchronizerTests {
             pasteboard: pasteboard,
             startsPolling: false
         )
-        var commands: [[String: Any]] = []
-        clipboard.sendCommand = { commands.append($0) }
+        var commands: [ClientMessage] = []
+        clipboard.send = { commands.append($0) }
 
         write(
             String(repeating: "a", count: ClipboardSynchronizer.maximumBytes + 1),
@@ -203,7 +203,7 @@ struct ClipboardSynchronizerTests {
             to: pasteboard
         )
         clipboard.pollPasteboard()
-        #expect(commandTypes(commands) == ["clipboard"])
+        #expect(commands.map(\.tag) == ["clipboard"])
     }
 
     // A remote clipboard too large to transfer is reported, not mirrored: there
@@ -221,8 +221,8 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { "fetch-oversized" }
         )
-        var commands: [[String: Any]] = []
-        clipboard.sendCommand = { commands.append($0) }
+        var commands: [ClientMessage] = []
+        clipboard.send = { commands.append($0) }
         clipboard.update(enabled: true)
         commands.removeAll()
 
@@ -255,7 +255,7 @@ struct ClipboardSynchronizerTests {
         #expect(clipboard.unavailableMessage == "Remote clipboard was too large to transfer")
         clipboard.draft = "typed by hand"
         #expect(clipboard.sendDraft())
-        #expect(commands.last?["text"] as? String == "typed by hand")
+        #expect(clipboardText(commands.last) == "typed by hand")
     }
 
     // An unsolicited oversized copy is panel state only: it must never reach the
@@ -272,7 +272,7 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { "fetch-then-push" }
         )
-        clipboard.sendCommand = { _ in }
+        clipboard.send = { _ in }
         clipboard.update(enabled: true)
         clipboard.requestFreshSnapshot()
         _ = clipboard.receiveFetchResult(
@@ -307,7 +307,7 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { "fetch-3" }
         )
-        clipboard.sendCommand = { _ in }
+        clipboard.send = { _ in }
         clipboard.update(enabled: true)
         clipboard.requestFreshSnapshot()
 
@@ -334,7 +334,7 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { requestIDs.removeFirst() }
         )
-        clipboard.sendCommand = { _ in }
+        clipboard.send = { _ in }
         clipboard.update(enabled: true)
 
         clipboard.requestFreshSnapshot()
@@ -396,7 +396,7 @@ struct ClipboardSynchronizerTests {
             startsPolling: false,
             makeRequestID: { "limit" }
         )
-        clipboard.sendCommand = { _ in }
+        clipboard.send = { _ in }
         clipboard.update(enabled: true)
         clipboard.requestFreshSnapshot()
         clipboard.fetchUnavailable(requestID: "limit")
@@ -418,7 +418,11 @@ struct ClipboardSynchronizerTests {
         pasteboard.setString(text, forType: .string)
     }
 
-    private func commandTypes(_ commands: [[String: Any]]) -> [String] {
-        commands.compactMap { $0["type"] as? String }
+    /// The text a `clipboard` message carries, or nil for anything else.
+    private func clipboardText(_ message: ClientMessage?) -> String? {
+        guard case .clipboard(let text) = message else {
+            return nil
+        }
+        return text
     }
 }

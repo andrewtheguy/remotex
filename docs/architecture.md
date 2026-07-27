@@ -245,17 +245,25 @@ with pinch zoom, pan, a virtual cursor, and multi-finger gestures. View
 transforms affect presentation and input coordinate mapping, not framebuffer
 resolution.
 
-### Native macOS host
+### Native macOS viewer
 
-The optional macOS 26 viewer hosts this entire SPA in `WKWebView`; it does not
-replace authentication, the session state machine, the WebSocket, or canvas
-rendering. An exact-version native-host bridge replaces only the floating menu,
-DOM keyboard path, and browser Clipboard API with native SwiftUI/AppKit
-integrations. Commands return to the same `ClientMsg` WebSocket path, so the
-viewer has no protocol-engine branches.
+The optional macOS 26 viewer is a second client of the same protocol, not a shell
+around this one. It speaks `/api/*` and `/ws` itself: its own login and target
+picker, its own claim/attach/reconnect state machine, Metal framebuffer
+rendering, AppKit input, and `NSPasteboard`. Nothing web is involved, and the SPA
+is unaffected by it.
 
-See [`macos-viewer.md`](macos-viewer.md) for the bridge, keyboard, clipboard,
-navigation, and packaging design.
+Because the two artifacts ship separately, `GET /api/config` carries a
+`protocolVersion` (`PROTOCOL_VERSION` in `src/protocol.rs`) that the viewer
+refuses to open a session against if it does not recognise. Additive control
+messages do not bump it: clients must ignore tags they do not know.
+
+The viewer has one protocol-engine branch, and only one: which of the three
+resize mechanisms a target uses. Everything else follows from the control
+messages, so any other difference belongs to an engine adapter.
+
+See [`macos-viewer.md`](macos-viewer.md) for its protocol, rendering, keyboard,
+clipboard, and packaging design.
 
 ## Configuration and testing
 

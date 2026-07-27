@@ -25,11 +25,15 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<!-- A gateway is commonly reached directly over plain HTTP on a private
-	     network. This exception is scoped to content inside WKWebView; native
-	     URL loading is not granted an unrestricted transport exception. -->
+	     network, and the viewer now speaks to it with URLSession rather than
+	     inside a WKWebView, so the web-content-scoped exception no longer
+	     applies to anything. ATS treats ws:// as http://, so the session socket
+	     needs this too. Not scoped with NSExceptionDomains because the address
+	     is whatever the user types on the login screen and cannot be enumerated
+	     here. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
 </dict>

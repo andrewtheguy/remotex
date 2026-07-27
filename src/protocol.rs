@@ -21,6 +21,17 @@ use serde::{Deserialize, Serialize};
 /// produce one huge WebSocket message.
 pub const STRIP_ROWS: u16 = 64;
 
+/// The revision of everything in this file: [`ClientMsg`], [`ControlMsg`], and
+/// the [`Tile`] frame layout. Served from `GET /api/config` so a client that
+/// isn't shipped with the gateway can refuse a version it cannot speak.
+///
+/// The SPA doesn't check it — it is served by this same binary, so it cannot
+/// disagree. The macOS viewer is a separate artifact and does. Bump this only
+/// for a change that would break a client compiled against the old shape; a
+/// purely additive control message is not one, because clients are required to
+/// ignore tags they don't know.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
 /// browser link, the gateway and the Mac agent cannot drift apart on it (the
 /// agent crate can't see this file). Re-exported here because every other
