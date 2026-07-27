@@ -76,7 +76,6 @@ impl Settings {
         let next = Config {
             listen: next.listen.trim().to_owned(),
             psk: next.psk.trim().to_owned(),
-            display: next.display,
             virtual_display: next.virtual_display,
             virtual_display_size: next.virtual_display_size.trim().to_owned(),
         };
@@ -107,7 +106,6 @@ mod tests {
         let config = Config {
             listen: format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT),
             psk: rxa_proto::psk::generate(),
-            display: 0,
             virtual_display: false,
             virtual_display_size: "1600x1000".to_owned(),
         };
@@ -132,7 +130,7 @@ mod tests {
         let (settings, path, _dir) = settings("edit");
         let mut next = settings.saved();
         next.listen = "127.0.0.1:9001".to_owned();
-        next.display = 2;
+        next.virtual_display = true;
 
         assert!(settings.apply(next.clone()).unwrap(), "a change was saved");
         assert_eq!(settings.saved(), next);
@@ -144,7 +142,7 @@ mod tests {
             settings.running().listen,
             format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT)
         );
-        assert_eq!(settings.running().display, 0);
+        assert!(!settings.running().virtual_display);
     }
 
     // The dialog hands back all three values whether or not they were touched, so
@@ -220,7 +218,6 @@ mod tests {
         let next = Config {
             listen: "  127.0.0.1:9002\n".to_owned(),
             psk: format!(" {psk}\n"),
-            display: 0,
             virtual_display: true,
             virtual_display_size: " 1440x900 ".to_owned(),
         };

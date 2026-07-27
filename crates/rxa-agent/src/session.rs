@@ -30,7 +30,9 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
-use rxa_proto::msg::{AgentMsg, GatewayMsg, MAX_CLIPBOARD_BYTES, SCALE_ONE, clipboard_fits};
+use rxa_proto::msg::{
+    AgentMsg, DisplayEntry, GatewayMsg, MAX_CLIPBOARD_BYTES, SCALE_ONE, clipboard_fits,
+};
 use rxa_proto::next_clipboard_time;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -52,6 +54,15 @@ const OUT_BACKLOG: usize = 64;
 
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
+
+/// How often the set of attached displays is re-listed, so a screen plugged in
+/// mid-session reaches the client's menu without a reconnect.
+///
+/// Far slower than [`CURSOR_POLL`], which shares the same tick: listing means
+/// `SCShareableContent::get`, a round trip to a system service, where the cursor
+/// poll is a local read. Plugging a monitor in is not a thing that needs
+/// answering within 100 ms.
+const DISPLAY_POLL: Duration = Duration::from_secs(2);
 
 /// Waits before each attempt to restart a capture stream that died, and with
 /// their length, the number of attempts.
@@ -147,7 +158,7 @@ impl FrameSink for Sink {
 pub async fn serve(
     stream: TcpStream,
     psk: [u8; 32],
-    target: capture::Target,
+    owned: Option<capture::Target>,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
     let mut stream = stream;
@@ -159,6 +170,12 @@ pub async fn serve(
         .map_err(|e| anyhow::anyhow!("handshake: {e}"))?;
     let (read_half, write_half) = stream.into_split();
     let (reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
+
+    // Every session starts on the main display. A selection is session state,
+    // not agent state: the person at the far end picks a screen for as long as
+    // they are looking at it, and the next connection starts from the same
+    // place rather than from wherever the last one wandered off to.
+    let target = capture::Target::Real(capture::main_display());
 
     // The size has to be known before `Attach`, so it is probed without starting
     // a stream. This is also where a missing Screen Recording grant surfaces.
@@ -190,7 +207,85 @@ pub async fn serve(
         )
         .await?;
 
-    pump(reader, writer, geometry, target, cursor_tracker).await
+    // Next to `Hello`, so a client has the menu before it has a picture.
+    let displays = display_list(owned);
+    writer
+        .send(
+            &AgentMsg::Displays {
+                active: geometry.id,
+                displays: displays.clone(),
+            }
+            .encode(),
+        )
+        .await?;
+
+    pump(
+        reader,
+        writer,
+        geometry,
+        target,
+        owned,
+        displays,
+        cursor_tracker,
+    )
+    .await
+}
+
+/// Build the display list to report, resolving `owned` so the agent's own
+/// display is measured with [`capture::owned_scale`] rather than as a real one.
+fn display_list(owned: Option<capture::Target>) -> Vec<DisplayEntry> {
+    match capture::displays(owned) {
+        Ok(displays) => displays
+            .into_iter()
+            .map(|display| DisplayEntry {
+                id: display.geometry.id,
+                label: display.label,
+                detail: display.detail,
+                w: display.geometry.width,
+                h: display.geometry.height,
+                scale: wire_scale(display.geometry.scale),
+                flags: (u8::from(display.is_main) * DisplayEntry::MAIN)
+                    | (u8::from(display.is_owned) * DisplayEntry::OWNED),
+            })
+            .collect(),
+        // An empty list is the honest answer for a client: it hides the picker
+        // rather than offering a display that cannot be named. Anything that
+        // would actually stop a session — a missing grant above all — has
+        // already been reported by `probe`.
+        Err(e) => {
+            warn!("session: cannot list displays: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
+/// Tear down whatever is streaming and start again on `target`.
+///
+/// The teardown order is the same one the session's own exit path uses and is
+/// not incidental: dropping the receiver is what lets an encoder parked on a
+/// full output channel finish, so joining before that would deadlock exactly
+/// when it matters most.
+///
+/// On failure nothing is left running, and the caller decides whether to fall
+/// back to the display it came from or give up.
+fn switch_capture(
+    target: capture::Target,
+    full_repaint: &Arc<AtomicBool>,
+    capture: &mut Option<Capture>,
+    out_rx: &mut Option<mpsc::Receiver<Out>>,
+    encoder_thread: &mut Option<std::thread::JoinHandle<()>>,
+) -> anyhow::Result<capture::Geometry> {
+    *capture = None;
+    *out_rx = None;
+    if let Some(thread) = encoder_thread.take() {
+        let _ = thread.join();
+    }
+    let (started, rx, thread) = start_pipeline(target, Arc::clone(full_repaint))?;
+    let live = started.geometry;
+    *capture = Some(started);
+    *out_rx = Some(rx);
+    *encoder_thread = Some(thread);
+    Ok(live)
 }
 
 async fn pump(
@@ -198,8 +293,12 @@ async fn pump(
     mut writer: FrameWriter<OwnedWriteHalf>,
     geometry: capture::Geometry,
     target: capture::Target,
+    owned: Option<capture::Target>,
+    // What `serve` has already reported, so the poll below starts quiet.
+    displays: Vec<DisplayEntry>,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
+    let mut target = target;
     // `FrameReader::recv` is not cancel-safe, so it gets its own task.
     let (gateway_tx, mut gateway_rx) = mpsc::channel(32);
     let read_task = tokio::spawn(read_loop(reader, gateway_tx));
@@ -217,6 +316,11 @@ async fn pump(
     let mut cursor_tick = interval(CURSOR_POLL);
     cursor_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heard = Instant::now();
+
+    // What the client was last told about the displays, so the poll below can
+    // stay quiet while nothing has changed.
+    let mut displays_sent = displays;
+    let mut displays_polled = Instant::now();
 
     // Pasteboard watch state. `None` means not watching, and the gateway only
     // turns it on for a target that opted in — so the default costs nothing and
@@ -320,6 +424,10 @@ async fn pump(
 
                         let live = started.geometry;
                         info!("session: capture restarted at {}x{}", live.width, live.height);
+                        // The display it came back on, which is not always the
+                        // one it went down on: a screen that was unplugged
+                        // rather than reconfigured falls back to the main one.
+                        target = target.resolved(live.id);
                         injector = Injector::new(live.scale, live.origin);
                         cursor_tracker.set_scale(live.scale);
                         capture = Some(started);
@@ -355,6 +463,7 @@ async fn pump(
                                     // dividing input by a stale scale — is worse
                                     // than a redundant DisplaySize.
                                     let live = started.geometry;
+                                    target = target.resolved(live.id);
                                     // The scale counts as a change of its own: a
                                     // mode switch can keep the pixel count and
                                     // change how those pixels should be presented,
@@ -393,6 +502,109 @@ async fn pump(
                         // Re-send the cached pointer shape: a browser attaching
                         // now would otherwise have none until it changed.
                         cursor_seen = cursor::UNSEEN;
+                        // And the display list, for the same reason: a browser
+                        // reattaching to a running session missed the one sent
+                        // beside `Hello`, and would show no picker at all.
+                        displays_sent = display_list(owned);
+                        writer.send(&AgentMsg::Displays {
+                            active: target.id(),
+                            displays: displays_sent.clone(),
+                        }.encode()).await?;
+                    }
+                    // Which display, unlike what resolution, is the client's to
+                    // choose — see the message's own documentation.
+                    GatewayMsg::SelectDisplay { id } => {
+                        let next = if owned.map(capture::Target::id) == Some(id) {
+                            owned
+                        } else if displays_sent.iter().any(|display| display.id == id) {
+                            Some(capture::Target::Real(id))
+                        } else {
+                            // An id from a list this session has since replaced,
+                            // or one that was never on it. Not an `AgentMsg::Error`
+                            // — the gateway treats those as fatal, and a menu one
+                            // tick out of date is not worth ending a session over.
+                            warn!("session: display {id} is not one of ours; ignoring");
+                            None
+                        };
+                        match next {
+                            Some(next) if next != target => {
+                                info!("session: switching to display {id}");
+                                if capture.is_none() {
+                                    // Nothing is streaming yet, so there is
+                                    // nothing to restart: `Attach` will start on
+                                    // this target and announce its size itself.
+                                    target = next;
+                                } else {
+                                    let previous = target;
+                                    let live = match switch_capture(
+                                        next,
+                                        &full_repaint,
+                                        &mut capture,
+                                        &mut out_rx,
+                                        &mut encoder_thread,
+                                    ) {
+                                        Ok(live) => {
+                                            target = next.resolved(live.id);
+                                            live
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "session: cannot capture display {id}: {e:#}; \
+                                                 staying on {}",
+                                                previous.id()
+                                            );
+                                            // Putting the old stream back is not
+                                            // optional: it was torn down to make
+                                            // room, and leaving it down would
+                                            // freeze the desktop with no way back
+                                            // short of a reconnect.
+                                            match switch_capture(
+                                                previous,
+                                                &full_repaint,
+                                                &mut capture,
+                                                &mut out_rx,
+                                                &mut encoder_thread,
+                                            ) {
+                                                Ok(live) => live,
+                                                Err(e) => {
+                                                    let message = format!(
+                                                        "lost the capture stream while switching \
+                                                         display: {e}"
+                                                    );
+                                                    warn!("session: {message}");
+                                                    writer
+                                                        .send(&AgentMsg::Error { message }.encode())
+                                                        .await?;
+                                                    break Ok(());
+                                                }
+                                            }
+                                        }
+                                    };
+                                    // Ordered exactly as a capture restart is: the
+                                    // size before any tile drawn at it, and input
+                                    // conversion re-derived before the first click
+                                    // on the new display arrives.
+                                    injector = Injector::new(live.scale, live.origin);
+                                    cursor_tracker.set_scale(live.scale);
+                                    cursor_seen = cursor::UNSEEN;
+                                    full_repaint.store(true, Ordering::Relaxed);
+                                    writer.send(&AgentMsg::DisplaySize {
+                                        w: live.width,
+                                        h: live.height,
+                                        scale: wire_scale(live.scale),
+                                    }.encode()).await?;
+                                }
+                                displays_sent = display_list(owned);
+                            }
+                            // Already there, or refused above. Either way the list
+                            // still goes back, so a checkmark that moved
+                            // optimistically lands on what is actually active.
+                            _ => {}
+                        }
+                        writer.send(&AgentMsg::Displays {
+                            active: target.id(),
+                            displays: displays_sent.clone(),
+                        }.encode()).await?;
                     }
                     GatewayMsg::Refresh => {
                         full_repaint.store(true, Ordering::Relaxed);
@@ -504,6 +716,23 @@ async fn pump(
                         "no traffic from the gateway for {}s",
                         last_heard.elapsed().as_secs()
                     ));
+                }
+                // Displays come and go while a session is up — a monitor plugged
+                // in, a lid closed, the agent's own display appearing a moment
+                // after it was created. On its own slower schedule, because
+                // listing them is a round trip to a system service where
+                // everything else on this tick is a local read.
+                if displays_polled.elapsed() >= DISPLAY_POLL {
+                    displays_polled = Instant::now();
+                    let live = display_list(owned);
+                    if live != displays_sent {
+                        info!("session: the display list changed ({} attached)", live.len());
+                        displays_sent = live;
+                        writer.send(&AgentMsg::Displays {
+                            active: target.id(),
+                            displays: displays_sent.clone(),
+                        }.encode()).await?;
+                    }
                 }
                 if let Some((generation, shape)) = cursor_tracker.changed_since(cursor_seen) {
                     cursor_seen = generation;

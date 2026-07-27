@@ -75,15 +75,21 @@ pub trait FrameSink: Send + Sync + 'static {
 
 /// Which display a session shares.
 ///
-/// Two kinds, because a display of our own cannot be described the way a real
-/// one is: [`crate::virtualdisplay`] displays report no CoreGraphics mode at
-/// all, so their backing scale cannot be read back from the system and has to be
-/// worked out from what we know about how the display was built.
+/// Both arms name a `CGDirectDisplayID`, which is also what a client selects by
+/// ([`rxa_proto::msg::DisplayEntry::id`]). Position in the shareable list is
+/// deliberately not an identity: attaching or unplugging a screen renumbers
+/// every display after it, so a target held across that would quietly become a
+/// different screen.
+///
+/// Two kinds all the same, because a display of our own cannot be *described*
+/// the way a real one is: [`crate::virtualdisplay`] displays report no
+/// CoreGraphics mode at all, so their backing scale cannot be read back from the
+/// system and has to be worked out from what we know about how the display was
+/// built.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
-    /// One of the Mac's own displays, by index into the shareable list — what
-    /// `display` in the config means.
-    Index(usize),
+    /// One of the Mac's own displays, by CoreGraphics display id.
+    Real(u32),
     /// A display we created, by id, plus the point size it was created at.
     ///
     /// The size is here because the mode is not ours to know: the display shows
@@ -92,6 +98,35 @@ pub enum Target {
     /// resolution)` 1x entries. See [`owned_scale`] for what the created size
     /// settles.
     Owned { id: u32, base_points: (u32, u32) },
+}
+
+impl Target {
+    /// The display id this target names, whichever kind it is.
+    pub fn id(self) -> u32 {
+        match self {
+            Target::Real(id) | Target::Owned { id, .. } => id,
+        }
+    }
+
+    /// The target as [`pick`] actually resolved it, given the display the stream
+    /// ended up on.
+    ///
+    /// A real display that has been unplugged falls back to the main one, so the
+    /// id asked for and the id being captured can differ — and what a client is
+    /// told is active has to be the one that is true. An owned target never
+    /// falls back, so it is returned unchanged.
+    pub fn resolved(self, id: u32) -> Self {
+        match self {
+            Target::Real(_) => Target::Real(id),
+            owned => owned,
+        }
+    }
+}
+
+/// The Mac's main display — where every session starts, and what an unresolvable
+/// selection falls back to.
+pub fn main_display() -> u32 {
+    unsafe { CGMainDisplayID() }
 }
 
 /// The backing scale of a display of our own, currently showing `points`.
@@ -137,6 +172,8 @@ unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     /// Raise the Screen Recording prompt if it has not been answered yet.
     fn CGRequestScreenCaptureAccess() -> bool;
+    /// The display the menu bar is on. Needs no Screen Recording grant.
+    fn CGMainDisplayID() -> u32;
 }
 
 /// Whether Screen Recording is granted, checked without prompting.
@@ -172,32 +209,83 @@ pub fn probe(target: Target) -> anyhow::Result<Geometry> {
     Ok(geometry(pick(&displays, target)?, target))
 }
 
-/// One entry in the shareable-display list, for the menu bar's display picker.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One display the agent could share, named the way both clients and the
+/// settings dialog show it.
+///
+/// The two strings are built here rather than in each client so a menu item in
+/// the viewer, a row in the browser panel and a line in the agent's own settings
+/// all read the same, and so that nothing outside this module has to know how
+/// macOS numbers displays.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DisplayInfo {
-    /// Index into the list, which is what `display` in the config means.
-    pub index: usize,
+    /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
+    pub label: String,
+    /// The line under it: `"1600×1000 at 2x"`.
+    pub detail: String,
     /// The CoreGraphics display id lives in [`Geometry::id`], so two identical
     /// panels are still tellable apart.
     pub geometry: Geometry,
+    /// The Mac's main display — where a session starts.
+    pub is_main: bool,
+    /// The display the agent created for itself.
+    pub is_owned: bool,
 }
 
-/// The displays the agent could share, in the order [`probe`] indexes them.
+impl DisplayInfo {
+    /// `"Display 2 · 1440×900 at 1x"`, for the agent's own read-only list.
+    pub fn summary(&self) -> String {
+        format!("{} · {}", self.label, self.detail)
+    }
+}
+
+/// The displays the agent could share.
+///
+/// `owned` is the display the agent created, if it created one; it is in this
+/// list like any other display, but only the caller knows which id is ours and
+/// [`owned_scale`] is the only way to measure it correctly.
 ///
 /// Needs the Screen Recording grant like everything else in this module, so a
 /// caller that gets an error here should say so rather than showing an empty
 /// list — "no displays" and "not allowed to look" are very different problems.
-pub fn displays() -> anyhow::Result<Vec<DisplayInfo>> {
+pub fn displays(owned: Option<Target>) -> anyhow::Result<Vec<DisplayInfo>> {
     let content = SCShareableContent::get()
         .map_err(|e| anyhow::anyhow!("cannot list shareable content: {e}"))?;
     let displays = content.displays();
     anyhow::ensure!(!displays.is_empty(), "no displays available to capture");
+    let main = main_display();
+    let owned_id = owned.map(Target::id);
+    // Numbered over the Mac's own screens only, so the agent's display appearing
+    // among them does not shift what "Display 2" means.
+    let mut number = 0;
     Ok(displays
         .iter()
-        .enumerate()
-        .map(|(index, display)| DisplayInfo {
-            index,
-            geometry: geometry(display, Target::Index(index)),
+        .map(|display| {
+            let id = display.display_id();
+            let is_owned = owned_id == Some(id);
+            let target = match owned {
+                Some(target) if is_owned => target,
+                _ => Target::Real(id),
+            };
+            let geometry = geometry(display, target);
+            let label = if is_owned {
+                "Virtual display".to_owned()
+            } else {
+                number += 1;
+                format!("Display {number}")
+            };
+            DisplayInfo {
+                detail: format!(
+                    "{}×{} at {}x",
+                    geometry.width,
+                    geometry.height,
+                    // Trims 2.0 to "2" while leaving a fractional scale readable.
+                    (geometry.scale * 100.0).round() / 100.0
+                ),
+                label,
+                geometry,
+                is_main: id == main,
+                is_owned,
+            }
         })
         .collect())
 }
@@ -452,17 +540,25 @@ pub fn geometry_for_id(id: u32) -> Option<Geometry> {
 
 /// Resolve a target against the shareable list.
 ///
-/// An out-of-range *index* falls back to the main display rather than failing —
-/// a stale `display = 2` in the config should degrade to a working session. A
-/// missing *owned* display is an error instead: falling back there would share
-/// the screen of whoever is sitting at the Mac, having been asked for a private
-/// desktop, which is the one substitution nobody would want made silently.
+/// A *real* display that has gone falls back to the main one rather than failing
+/// — a screen unplugged mid-session should degrade to a working session, and the
+/// client learns which display it landed on from the next `Displays`. A missing
+/// *owned* display is an error instead: falling back there would share the screen
+/// of whoever is sitting at the Mac, having been asked for a private desktop,
+/// which is the one substitution nobody would want made silently.
 fn pick(displays: &[SCDisplay], target: Target) -> anyhow::Result<&SCDisplay> {
     match target {
-        Target::Index(index) => Ok(displays.get(index).unwrap_or_else(|| {
-            warn!("capture: display index {index} out of range; using the main display");
-            &displays[0]
-        })),
+        Target::Real(id) => Ok(displays
+            .iter()
+            .find(|display| display.display_id() == id)
+            .unwrap_or_else(|| {
+                warn!("capture: display {id} is not attached; using the main display");
+                let main = main_display();
+                displays
+                    .iter()
+                    .find(|display| display.display_id() == main)
+                    .unwrap_or(&displays[0])
+            })),
         Target::Owned { id, .. } => displays
             .iter()
             .find(|display| display.display_id() == id)
@@ -486,7 +582,7 @@ fn geometry(display: &SCDisplay, target: Target) -> Geometry {
         Target::Owned { base_points, .. } => {
             owned_scale((display.width() as f64, display.height() as f64), base_points)
         }
-        Target::Index(_) => backing_scale(display),
+        Target::Real(_) => backing_scale(display),
     };
     let frame = display.frame();
     Geometry {
@@ -746,28 +842,60 @@ mod tests {
         assert_eq!(owned_scale((1600.0, 1200.0), base), 1.0);
     }
 
-    // The menu bar offers a display by the index this list reports, and a session
-    // resolves that index with `probe`. If the two ever disagreed, a user would
-    // tick one display and share another — so pin them against each other.
+    // A client picks a display by the id this list reports, and a session
+    // resolves that id with `probe`. If the two ever disagreed, a user would tick
+    // one display and share another — so pin them against each other.
     #[test]
-    fn the_display_list_indexes_the_same_way_probe_does() {
-        let Ok(displays) = displays() else {
+    fn every_listed_display_is_the_one_probe_resolves_by_id() {
+        let Ok(displays) = displays(None) else {
             // No Screen Recording grant (or no window server at all), which is
             // the normal state for a `cargo test` run over SSH.
             eprintln!("cannot list displays in this session; skipping");
             return;
         };
         assert!(!displays.is_empty(), "the list is never empty on success");
-        for (i, display) in displays.iter().enumerate() {
-            assert_eq!(display.index, i, "indexes must be positions in the list");
-            assert_eq!(probe(Target::Index(i)).unwrap(), display.geometry);
+        for display in &displays {
+            let id = display.geometry.id;
+            assert_eq!(probe(Target::Real(id)).unwrap(), display.geometry);
         }
-        // Out of range degrades to the main display rather than failing, which is
-        // what makes a stale `display = 3` in the config survive unplugging.
         assert_eq!(
-            probe(Target::Index(displays.len() + 10)).unwrap(),
-            displays[0].geometry
+            displays.iter().filter(|display| display.is_main).count(),
+            1,
+            "exactly one display is the main one"
         );
+
+        // An id that is not attached degrades to the main display rather than
+        // failing, so a screen unplugged mid-session leaves a working one.
+        let absent = displays
+            .iter()
+            .map(|display| display.geometry.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let main = displays
+            .iter()
+            .find(|display| display.is_main)
+            .expect("one main display");
+        assert_eq!(probe(Target::Real(absent)).unwrap(), main.geometry);
+    }
+
+    // Labels are what both clients put in a menu, so the numbering is part of the
+    // contract rather than a detail of this function.
+    #[test]
+    fn labels_number_the_macs_own_screens_from_one() {
+        let Ok(displays) = displays(None) else {
+            eprintln!("cannot list displays in this session; skipping");
+            return;
+        };
+        for (i, display) in displays.iter().enumerate() {
+            assert_eq!(display.label, format!("Display {}", i + 1));
+            assert!(!display.is_owned);
+            assert!(
+                display.summary().starts_with(&display.label),
+                "the settings dialog's line leads with the label: {}",
+                display.summary()
+            );
+        }
     }
 
     #[test]

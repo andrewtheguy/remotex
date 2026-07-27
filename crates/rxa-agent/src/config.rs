@@ -30,19 +30,18 @@ pub struct Config {
     /// Pre-shared key, matching the gateway target's `psk`. This is the entire
     /// credential; without it no handshake completes.
     pub psk: String,
-    /// Which display to share, as an index into the shareable-display list.
-    /// `0` is the main display. Ignored while [`Config::virtual_display`] is on,
-    /// which shares a display of its own instead of any real one.
-    #[serde(default)]
-    pub display: usize,
-    /// Share a display of our own rather than the Mac's screen.
+    /// Give the Mac an extra display, of the agent's own making.
     ///
-    /// Off by default, and deliberately not a per-session choice: a display
-    /// appearing and disappearing rearranges windows, so it is created once at
-    /// startup and lives as long as the agent. Turning it on takes the machine
-    /// out of "watch my screen" and into "give me a desktop", which is a
-    /// different enough thing to be a deliberate setting rather than something a
-    /// browser can ask for.
+    /// Not "share a display of our own instead of the Mac's screen", which is
+    /// what this used to mean and was never what the API does:
+    /// `CGVirtualDisplay` *adds* a monitor next to the ones already attached. So
+    /// this only decides whether that display exists — which of them a session
+    /// shares is chosen from the viewer or the browser, per session, and is no
+    /// business of this file.
+    ///
+    /// Off by default, and still a setting rather than something a client can
+    /// ask for: a display appearing and disappearing rearranges the windows on
+    /// it, so it is created once at startup and lives as long as the agent.
     #[serde(default)]
     pub virtual_display: bool,
     /// The size of that display in points, as `WIDTHxHEIGHT`.
@@ -210,7 +209,6 @@ pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBu
     let config = Config {
         listen: default_listen(),
         psk: rxa_proto::psk::generate(),
-        display: 0,
         virtual_display: false,
         virtual_display_size: default_virtual_display_size(),
     };
@@ -247,9 +245,9 @@ fn render(config: &Config) -> String {
     format!(
         r#"# remotex-agent configuration.
 #
-# Managed from the menu bar item — Pre-Shared Key, Listen Address and Display all
-# write this file, and each write rewrites it completely. Hand edits to these
-# comments will not survive the next one.
+# Managed from the menu bar item — Settings and Pre-Shared Key both write this
+# file, and each write rewrites it completely. Hand edits to these comments will
+# not survive the next one.
 #
 # The psk below is the entire credential: the gateway authenticates with it and
 # nothing else, which is what makes a reconnect need no login. The *same* key
@@ -262,13 +260,14 @@ listen = "{listen}"
 
 psk = "{psk}"
 
-# Which display to share (0 is the main one). Ignored while virtual_display is
-# on, which shares a display of its own instead of a real one.
-display = {display}
-
-# Share a display of our own — a private 2x desktop that no one is sitting in
-# front of — instead of mirroring the Mac's screen. It exists for as long as the
-# agent runs, and it appears in System Settings > Displays like any other screen.
+# There is no setting for which display to share: that is picked per session
+# from the viewer or the browser, out of every display attached to this Mac.
+#
+# Give this Mac an extra display of the agent's own making — a private 2x desktop
+# that no one is sitting in front of. It is an *addition*, not a replacement: the
+# Mac's own screens stay shareable, and this one simply joins the list. It exists
+# for as long as the agent runs, and it appears in System Settings > Displays
+# like any other screen.
 virtual_display = {virtual_display}
 
 # The size that display comes up at, in points, WIDTHxHEIGHT — and the largest
@@ -278,7 +277,6 @@ virtual_display_size = "{virtual_display_size}"
 "#,
         listen = config.listen,
         psk = config.psk,
-        display = config.display,
         virtual_display = config.virtual_display,
         virtual_display_size = config.virtual_display_size,
     )
@@ -332,7 +330,6 @@ mod tests {
         Config {
             listen: default_listen(),
             psk: rxa_proto::psk::generate(),
-            display: 0,
             virtual_display: false,
             virtual_display_size: default_virtual_display_size(),
         }
@@ -342,17 +339,19 @@ mod tests {
     fn minimal_config_listens_on_the_rxa_port_everywhere() {
         let config = Config::parse(&with_psk("")).unwrap();
         assert_eq!(config.listen, format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT));
-        assert_eq!(config.display, 0, "the main display by default");
+        assert!(!config.virtual_display, "no extra display unless asked for");
     }
 
     #[test]
     fn full_config_parses() {
         let psk = rxa_proto::psk::generate();
         let config =
-            Config::parse(&format!("listen = \"192.168.1.5:9000\"\npsk = \"{psk}\"\ndisplay = 1"))
-                .unwrap();
+            Config::parse(&format!(
+                "listen = \"192.168.1.5:9000\"\npsk = \"{psk}\"\nvirtual_display = true"
+            ))
+            .unwrap();
         assert_eq!(config.listen, "192.168.1.5:9000");
-        assert_eq!(config.display, 1);
+        assert!(config.virtual_display);
         assert_eq!(config.psk_bytes(), rxa_proto::psk::parse(&psk).unwrap());
     }
 
@@ -441,7 +440,7 @@ mod tests {
 
         // Overwriting an existing file is the common case: every edit does it.
         config.listen = "127.0.0.1:9999".to_owned();
-        config.display = 2;
+        config.virtual_display = true;
         config.psk = rxa_proto::psk::generate();
         config.save(&path).unwrap();
         assert_eq!(mode(&path), 0o600, "the rename must not widen the mode");
@@ -481,7 +480,6 @@ mod tests {
         let config = Config {
             listen: "10.0.0.1:1234".to_owned(),
             psk: rxa_proto::psk::generate(),
-            display: 3,
             virtual_display: true,
             virtual_display_size: "1440x900".to_owned(),
         };
