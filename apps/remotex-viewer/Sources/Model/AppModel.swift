@@ -37,8 +37,8 @@ final class AppModel: GatewaySessionSink {
     /// does reaches the remote — no key, no pointer, no wheel, and no clipboard.
     ///
     /// What it is *for* is `KeyboardCapture`. That monitor takes every Command chord
-    /// bar Quit, Close and Settings for the guest, so a desktop in front means this
-    /// Mac has no shortcuts of its own; this is the switch that suspends it. The
+    /// the system delivers to this app, so a focused desktop means this Mac has no
+    /// shortcuts of its own — not even Quit; this is the switch that suspends it. The
     /// pointer and the clipboard follow because a mode that gave the keyboard back
     /// while still driving the remote with the mouse would be a confusing half of an
     /// idea.
@@ -162,8 +162,8 @@ final class AppModel: GatewaySessionSink {
     ///
     /// False in view only, and that is the point of the mode rather than a
     /// consequence of it: capture is a local event monitor that swallows every
-    /// Command chord bar Quit, Close and Settings, so while it is up this Mac's
-    /// keyboard belongs to the guest. Suspending it is what gives the chords back.
+    /// Command chord the system hands this app, so while it is up this Mac's keyboard
+    /// belongs to the guest. Suspending it is the only way to get the chords back.
     var canCaptureKeyboardNow: Bool {
         canSendInput && session.remoteSize != nil
     }

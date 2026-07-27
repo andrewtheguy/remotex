@@ -6,12 +6,14 @@ struct RemoteCommands: Commands {
     var body: some Commands {
         // No item here carries a key equivalent, and that is a rule rather than an
         // omission. While the desktop is painting and focused, `KeyboardCapture`
-        // takes every Command chord bar Quit, Close and Settings and sends it to
-        // the remote — so a shortcut on this menu fires only on the screens where
-        // nothing is captured, and types into the guest on the one where the item
-        // usually matters. The ones that were here existed to drive the app from
-        // the keyboard in a test, which is not reason enough to ship a chord whose
-        // meaning depends on which screen is up.
+        // takes every Command chord the system delivers and sends it to the remote —
+        // so a shortcut on this menu fires only on the screens where nothing is
+        // captured, and types into the guest on the one where the item usually
+        // matters. The ones that were here existed to drive the app from the keyboard
+        // in a test, which is not reason enough to ship a chord whose meaning depends
+        // on which screen is up. View only does not change that: it suspends capture,
+        // so a chord would work while it is on and type into the guest while it is
+        // off, which is the same dependence with another name.
         CommandMenu("Remote") {
             Toggle(
                 model.macOSKeyboardOverridesLabel,

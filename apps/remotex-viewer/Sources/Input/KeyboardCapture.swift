@@ -137,13 +137,16 @@ final class KeyboardCapture {
             releaseAll()
             return false
         }
-        if event.modifierFlags.contains(.command),
-           let code = KeyboardTranslator.domCode(for: event.keyCode),
-           ["KeyQ", "KeyW", "Comma"].contains(code)
-        {
-            return false
-        }
-
+        // Nothing is held back from here on. Command-Q, Command-W and Command-Comma
+        // used to be handed to the app, which made the meaning of a chord depend on
+        // which one it was: two of the three had nothing left to act on them anyway
+        // once the standard menus were stripped, and Quit was a keystroke that
+        // ended the session while the user was typing at the guest. The view only
+        // toggle is the way to get the whole keyboard back now, so the rule is the
+        // simple one — a focused desktop gets every chord this Mac is given, and
+        // what the system keeps for itself (Command-Tab, Command-Space, the screen
+        // shot chords, anything bound in System Settings) it never delivers here to
+        // begin with.
         let mapCommandToControl = model.macOSKeyboardOverridesActive
         if event.type == .keyDown,
            KeyboardTranslator.domCode(for: event.keyCode) == "KeyV",

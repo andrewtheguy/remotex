@@ -79,9 +79,9 @@ struct ViewOnlyTests {
     }
 
     /// Capture itself is suspended, which is the point of the mode: the monitor
-    /// swallows every Command chord bar Quit, Close and Settings, so while it is up
-    /// this Mac has no shortcuts of its own. Handing input back is not a side effect
-    /// of view only — it is what view only is for.
+    /// swallows every Command chord the system delivers to this app — Quit included —
+    /// so while it is up this Mac has no shortcuts of its own. Handing input back is
+    /// not a side effect of view only, it is what view only is for.
     @Test
     func capturingIsSuspendedSoTheChordsComeBack() async throws {
         let session = try await Self.interactive()
