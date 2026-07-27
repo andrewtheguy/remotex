@@ -37,9 +37,10 @@ struct LoginView: View {
                         .keyboardShortcut(.cancelAction)
                         .buttonStyle(.link)
                         .font(.callout)
-                        // The same rule the menu item answers to, so the two
-                        // cannot disagree about when the address may move.
-                        .disabled(!model.canChangeGateway)
+                        // This link is the only way back to the server step; the
+                        // screen it is on is half of `changeGateway`'s own guard,
+                        // so all that is left to say here is not mid-request.
+                        .disabled(model.isBusy)
                     }
                 }
 

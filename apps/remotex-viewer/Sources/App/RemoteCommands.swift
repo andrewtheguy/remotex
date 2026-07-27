@@ -102,7 +102,14 @@ struct RemoteCommands: Commands {
 
             Divider()
 
-            // Both steps back out of the session.
+            // The way out of a session, and the last item on this menu.
+            //
+            // Nothing here for the way *in*. Connect to Gateway went first — the
+            // server step's own Continue button under another name — and Change
+            // Gateway followed it for the same reason: the only screen it was ever
+            // enabled on is the login step, which shows the address with a Change
+            // link beside it. A menu item that can only fire while the button that
+            // does the same thing is on screen is a second name for that button.
             Button("Log Out") {
                 Task { await model.logOut() }
             }
@@ -110,20 +117,6 @@ struct RemoteCommands: Commands {
                 model.session.screen != .picker
                     && model.session.screen != .desktop
             )
-
-            // Signed out only, which is why it sits under Log Out: from the picker
-            // or the desktop that is the step to take first.
-            //
-            // The last item on this menu, and deliberately the last of the way *in*
-            // as well. Connect to Gateway was here too, which is the server step's own
-            // Continue button under another name: this item is what lands on that
-            // step, the field it offers is the address, and the button beside the
-            // field is how the address is adopted. Nothing was reachable through the
-            // menu copy that the screen it belongs to does not already offer.
-            Button("Change Gateway") {
-                Task { await model.changeGateway() }
-            }
-            .disabled(!model.canChangeGateway)
         }
     }
 }

@@ -58,12 +58,14 @@ can only be about who you are, which is why the address is shown but not editabl
 — **Change** goes back to step one. Logging out returns here rather than to the
 server step: it is the credentials being given up, not the address.
 
-This step is also the *only* place the address can be changed, on the link or on
-the menu (`canChangeGateway`). Everything past it belongs to one gateway — the
-login cookie is scoped to that host, the claim token was minted by it, the socket
-is attached to it — so changing the address from the picker or the desktop was a
-log out that did not say so. From there the step to take first is Log Out, which
-lands back here.
+This step is also the *only* place the address can be changed, and that link is
+the only way to it — a **Change Gateway** menu item was enabled on this screen and
+nowhere else, which made it a second name for a button already on screen.
+Everything past this step belongs to one gateway — the login cookie is scoped to
+that host, the claim token was minted by it, the socket is attached to it — so
+changing the address from the picker or the desktop was a log out that did not say
+so, and `changeGateway` refuses from anywhere but here. From there the step to
+take first is Log Out, which lands back here.
 
 Step two is skipped when the cookie is still good, so the common case is one
 button. `HTTPCookieStorage.shared` outlives the app; the gateway's auth sessions
@@ -187,6 +189,16 @@ four that did (Refresh, Log Out, Change Gateway, Connect to Gateway) were there 
 drive the app from the keyboard in a test, which is not reason enough to ship a
 chord whose meaning depends on which screen is up. The picker's own ⌘1…⌘9 target
 picks stay: nothing is captured there, and they are printed on the rows.
+
+The **Edit** menu is the one exemption, and `ViewerMenus` builds it rather than
+SwiftUI: Command-C, Command-V, Command-X and Command-A are not built into
+`NSTextField` or `NSTextView` — on macOS they are Edit menu key equivalents, and
+the responder chain is only offered `copy:`/`paste:` because a menu item sent
+them. Stripping the standard menus took the whole mechanism with it, so every text
+field in the app answered Command-V with a beep. It does not reopen the problem
+the rule is about: a focused desktop takes the chord in the monitor before the
+menu bar is offered it, and with no text field in the responder chain the item is
+disabled. The sweep skips this menu by object identity, not by title.
 For a non-Mac remote, standard Mac Command shortcuts map to remote Control
 shortcuts. A bare Command taps remote Meta, and other Command chords are sent as
 remote Meta chords. For a Mac remote, Command remains Meta for every chord, so

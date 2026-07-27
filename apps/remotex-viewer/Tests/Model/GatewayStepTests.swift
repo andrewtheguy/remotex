@@ -196,8 +196,8 @@ struct GatewayStepTests {
 
     /// Once signed in the address is not a thing to change: the cookie, the claim
     /// and the socket all belong to that gateway, so moving it is a log out
-    /// wearing another name. Both entry points ask `canChangeGateway`, and the
-    /// model refuses anyway.
+    /// wearing another name. The link that calls this is on the credentials step
+    /// only, and the model refuses from anywhere else anyway.
     @Test
     func theGatewayCannotBeChangedWhileSignedIn() async {
         let model = makeModel { request in
@@ -216,7 +216,6 @@ struct GatewayStepTests {
         let address = model.gatewayAddress
         #expect(model.session.screen == .picker)
 
-        #expect(!model.canChangeGateway)
         await model.changeGateway()
         #expect(model.session.screen == .picker, "the picker kept its gateway")
 
@@ -233,7 +232,6 @@ struct GatewayStepTests {
                 )
             )
         )
-        #expect(!model.canChangeGateway)
         await model.changeGateway()
         #expect(model.session.screen == .desktop, "the desktop kept its gateway")
         #expect(model.gatewayAddress == address)
@@ -241,7 +239,8 @@ struct GatewayStepTests {
         // Signing out is the way back to where it can be changed.
         await model.logOut()
         #expect(model.session.screen == .login)
-        #expect(model.canChangeGateway)
+        await model.changeGateway()
+        #expect(model.session.screen == .server)
     }
 
     /// Logging out gives up the credentials, not the address, so it stops at the
