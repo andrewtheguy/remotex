@@ -73,16 +73,20 @@ holds it fixed, are the record.
   and so from the display picker in both clients — while `CGDisplayBounds` still
   reports exactly the size that was asked for.
 - **Cause:** the WindowServer remembers arrangement state against a display's
-  vendor, product and serial, and can decide to keep that identity offline. The
-  state survives a reboot and cannot be cleared from inside the process.
-  Observed 2026-07-27 against an identity earlier probe builds had used.
-- **Mitigation:** creation checks `CGDisplayIsOnline` and `CGDisplayIsActive`
-  rather than trusting bounds, and retries once with a serial number macOS has
-  not seen before. What is lost is the arrangement saved against the old identity
-  — the position, the mode and the window positions on that display all start
-  over, which is exactly the state a stable identity exists to keep (see
-  [`mac-agent-architecture.md`](mac-agent-architecture.md)). This is the one
-  remembered state nothing in the process can talk macOS out of.
+  vendor, product and serial — as it does for any monitor — and can decide to keep
+  that identity offline. The state survives a reboot and cannot be cleared from
+  inside the process. Observed 2026-07-27 against an identity earlier probe builds
+  had used, which is the condition most likely to produce it: several descriptors
+  claiming one identity.
+- **Reported, not worked around:** creation checks `CGDisplayIsOnline` and
+  `CGDisplayIsActive` rather than trusting bounds, and says so in the log and to
+  the client. The agent deliberately does *not* mint a new identity to escape it
+  — that would produce a working display by discarding the arrangement the
+  identity stands for, which is the one thing a real monitor never does to you
+  (see [`mac-agent-architecture.md`](mac-agent-architecture.md)).
+- **Fix:** on the Mac, where display arrangement lives — System Settings >
+  Displays, resetting the arrangement. The same place you would go for a panel
+  that came back dark.
 - **Guard:** none possible in CI; it needs a real WindowServer in a state that
   cannot be created on demand.
 

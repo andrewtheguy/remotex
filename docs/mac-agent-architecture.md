@@ -187,48 +187,39 @@ times the size it should be. Third, `CGDisplayBounds` reports the requested size
 even for a display the WindowServer refuses to bring online, so creation also
 checks `CGDisplayIsOnline` and `CGDisplayIsActive`.
 
-## A stable identity, and what it carries
+## Its identity, and what macOS remembers against it
 
-The display is created with a fixed identity — the same vendor, product and
-serial every launch — and macOS files an arrangement against exactly that. On the
-next launch it re-applies **all** of it: where the display sat, what mode it is
-in, whether it is the primary, and the modes of the screens around it. Measured
-on the test VM against an identity it had seen before:
+The display reports a fixed vendor, product and serial, for the same reason a
+monitor does: those are burned into the hardware. macOS files an arrangement
+against them — position, mode, whether the display is the primary, and the modes
+of the screens beside it — and restores all of it when that identity reappears.
+That is what makes a monitor you plug back in come back where you left it, and it
+is the behaviour to have rather than one to work around. An identity that changed
+between launches would be a new display every time, and would forget the lot.
 
-```text
-before: [1 @ (0,0) 1280x800 MAIN]
-after : [ours @ (0,0) 1600x1000 MAIN] [1 @ (-1024,0) 1024x640]
-```
+So the agent takes the arrangement macOS gives it as given. It measures what it
+finds, reports that, and never applies a second configuration. Two things follow,
+and both are only surprising if you expected the agent to be in charge:
 
-Ours came back as the primary display, and the Mac's own panel came back moved
-and resized. With a serial macOS has never seen the same descriptor lands at
-`(1280,0)` and changes nothing — which was tried, and is not what this does.
+- **A session can start on this display.** It starts on whichever display the Mac
+  calls main, and if the arrangement makes ours primary, that is ours. Overriding
+  it would mean overruling a System Settings choice.
+- **The configured size is an initial size.** `virtual_display_initial_size` is
+  what the display is created at the first time a Mac sees it; afterwards the
+  remembered mode wins, and editing the setting will not move a display that has
+  already been arranged. What the value fixes permanently is the *ceiling*, since
+  `maxPixels` and `sizeInMillimeters` cannot change after creation.
 
-Restoring the arrangement is the point rather than a side effect. That state is
-whatever was last set in System Settings by the person using the Mac, including
-which display is primary and where the windows on it were; a display that came
-back somewhere else on every agent restart would be the invasive one. So the
-agent takes the arrangement macOS hands it and reports what it finds, and a
-session starting on the main display starts on whichever display the Mac
-currently calls main.
+The one remembered state that is a genuine problem is an arrangement that holds
+the identity **offline**. Nothing in the process can clear it, and the agent
+reports it rather than minting a new identity to escape it — escaping it would
+discard the arrangement, which is the one thing a monitor never does. The fix is
+on the Mac, in System Settings, as it would be for a panel that came back dark;
+see [`known-issues.md`](known-issues.md).
 
-It is also the reason the configured size is an **initial** size:
-`virtual_display_initial_size` is the size this display is created at the first
-time a Mac sees it, and after that the remembered mode wins. Editing the setting
-will not move a display that has already been arranged, and the agent never
-applies a second configuration to one — see Resolution above, and the VM display
-stack in [`known-issues.md`](known-issues.md) for why asking twice is unwise. What
-the setting fixes permanently is the *ceiling*, because `maxPixels` and
-`sizeInMillimeters` cannot be changed after creation.
-
-The one thing the arrangement can do that nothing here can undo is remember the
-display as **offline**, which is in [`known-issues.md`](known-issues.md); that is
-what `create` retries once with an unseen identity for.
-
-There is no API alternative to any of this. Nothing on
+There is no API for any of this in either direction: nothing on
 `CGVirtualDisplayDescriptor` or `CGVirtualDisplaySettings` places a display,
-declines the primary role, or clears remembered state — the identity is the only
-lever there is.
+declines the primary role, or clears remembered state.
 
 ## Input
 

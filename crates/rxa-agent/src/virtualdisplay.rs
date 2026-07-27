@@ -116,26 +116,10 @@ impl VirtualDisplay {
     /// twice the requested size is worse than no display of our own, and the
     /// caller can fall back to the Mac's real screen and say so.
     pub fn create(points: (u32, u32)) -> anyhow::Result<Self> {
-        match Self::create_with_serial(points, STABLE_SERIAL) {
-            Ok(display) => Ok(display),
-            // A remembered arrangement can leave one identity permanently
-            // offline (see `apply`), and nothing inside the process can clear
-            // it. A serial macOS has never seen has no arrangement to remember,
-            // so one retry with a fresh one gets a working display — at the cost
-            // of the window positions saved against the old identity.
-            Err(e) if e.downcast_ref::<Offline>().is_some() => {
-                let serial = fresh_serial();
-                warn!(
-                    "virtualdisplay: {e}; retrying as a display macOS has not seen before \
-                     (serial {serial})"
-                );
-                Self::create_with_serial(points, serial)
-            }
-            Err(e) => Err(e),
-        }
+        Self::create_with_identity(points, SERIAL)
     }
 
-    fn create_with_serial(points: (u32, u32), serial: u32) -> anyhow::Result<Self> {
+    fn create_with_identity(points: (u32, u32), serial: u32) -> anyhow::Result<Self> {
         let points = (points.0.max(MIN_POINTS), points.1.max(MIN_POINTS));
         // Worked out once and used three ways: the descriptor's ceiling, the
         // physical size that places the mode in the density window, and the log
@@ -201,7 +185,7 @@ impl VirtualDisplay {
         };
         if shown != points {
             // Not a problem, and worth a line: it is the remembered arrangement
-            // `STABLE_SERIAL` exists to preserve, doing its job.
+            // [`SERIAL`] exists to preserve, doing its job.
             info!(
                 "virtualdisplay: display {id} came up at {}x{} points rather than the {}x{} it was \
                  created at — macOS remembered the mode this identity was last set to",
@@ -244,7 +228,7 @@ impl VirtualDisplay {
 /// [`SCALE`], and return it — or `None` if the deadline passes first.
 ///
 /// Not "until it reports the size we asked for". macOS remembers a mode against a
-/// display identity and [`STABLE_SERIAL`] reuses one on purpose, so a display
+/// display identity and [`SERIAL`] is fixed on purpose, so a display
 /// whose resolution has been changed on the Mac comes back at *that* mode: the
 /// remembered arrangement working as intended, and the whole point of a resolution
 /// the guest owns. Demanding the created size here rejected exactly that, and the
@@ -293,39 +277,37 @@ impl Drop for VirtualDisplay {
     }
 }
 
-/// The identity the agent normally creates its display with.
+/// The serial number this display always reports.
 ///
-/// Stable on purpose, and it is worth being precise about how much this decides,
-/// because it is more than window positions. macOS files an arrangement against
-/// vendor, product and serial and re-applies **all** of it when the identity
-/// reappears: where the display sits, what mode it is in, whether it is the
-/// primary, and the modes of the screens around it. Measured on the test VM
-/// against an identity it had seen before:
+/// Fixed, for the same reason a monitor's is: it is burned into the hardware, and
+/// macOS files an arrangement against vendor, product and serial so that a screen
+/// you plug back in comes back where you left it — same position, same mode, still
+/// the primary if that is how you set it up. A display whose identity changed
+/// between launches would be a new monitor every time, and would forget all of it.
 ///
-/// ```text
-/// before: [1 @ (0,0) 1280x800 MAIN]
-/// after : [ours @ (0,0) 1600x1000 MAIN] [1 @ (-1024,0) 1024x640]
-/// ```
+/// So there is nothing here to work around. The arrangement macOS restores is the
+/// one last set in System Settings by whoever uses that Mac, and the agent takes
+/// it as given: it reports the geometry it finds and never applies a second
+/// configuration. Everything downstream follows from that — `active` on the wire
+/// is whichever display the Mac currently calls main, and the configured size is
+/// only ever an *initial* one (see
+/// [`crate::config::Config::virtual_display_initial_size`]), because after the
+/// first launch the remembered mode is what the display comes up in.
 ///
-/// Ours came back as the primary display and the Mac's own panel came back
-/// moved and resized — because that is the arrangement that machine had been left
-/// in. With a serial macOS has never seen, the same descriptor lands at
-/// `(1280,0)` and changes nothing.
-///
-/// Restoring it is the point rather than a side effect: that arrangement is
-/// whatever was last set in System Settings, by the person using the Mac, and a
-/// display that came back somewhere else every launch would be the invasive one.
-/// It is also why the configured size is only ever the size this display is
-/// *first* created at — see [`crate::config::Config::virtual_display_initial_size`]. What
-/// it costs is recorded in `docs/known-issues.md`: an arrangement can also be
-/// remembered as *offline*, which is the one state nothing here can talk macOS
-/// out of, and the reason `create` retries once with an identity it has not seen.
-const STABLE_SERIAL: u32 = 1;
+/// The one state this cannot undo is an arrangement remembered as *offline* — see
+/// [`Offline`], which is reported rather than routed around, and
+/// `docs/known-issues.md`.
+const SERIAL: u32 = 1;
 
 /// A display that was created but that the WindowServer will not bring online.
 ///
-/// Its own type because [`VirtualDisplay::create`] recovers from precisely this
-/// and nothing else.
+/// Reported rather than worked around, and that is the same answer a real display
+/// gets. macOS files arrangement state against a monitor's identity and can decide
+/// to keep one offline; the resolution is on the Mac, in System Settings, exactly
+/// as it would be for a panel that came back dark. The agent used to mint a new
+/// identity here instead, which did produce a working display — by throwing away
+/// the arrangement that identity stood for, which is the one thing a monitor never
+/// does to you.
 #[derive(Debug)]
 struct Offline {
     id: u32,
@@ -337,27 +319,16 @@ impl std::fmt::Display for Offline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "display {} was created but is not usable (online={}, active={}) — the \
-             WindowServer is holding a remembered arrangement against this display identity",
+            "display {} was created but macOS will not bring it online (online={}, \
+             active={}) — it is holding arrangement state against this display's \
+             identity, which only the Mac can clear: open System Settings > Displays, \
+             or reset the display arrangement there",
             self.id, self.online, self.active
         )
     }
 }
 
 impl std::error::Error for Offline {}
-
-/// A serial number macOS has not seen before, so it carries no remembered state.
-///
-/// The clock rather than a random-number dependency: uniqueness across runs on
-/// one machine is all this needs.
-fn fresh_serial() -> u32 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
-        .unwrap_or(2)
-        // 0 and 1 mean "unset" and "the stable identity"; never collide with them.
-        .max(2)
-}
 
 /// Look up a private class, with an error that names it.
 fn class(name: &str) -> anyhow::Result<&'static AnyClass> {
