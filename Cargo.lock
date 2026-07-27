@@ -2960,7 +2960,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.34"
+version = "0.0.35"
 dependencies = [
  "anyhow",
  "axum",
@@ -3200,7 +3200,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rxa-agent"
-version = "0.0.34"
+version = "0.0.35"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3223,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "rxa-proto"
-version = "0.0.34"
+version = "0.0.35"
 dependencies = [
  "base64",
  "getrandom 0.3.4",
