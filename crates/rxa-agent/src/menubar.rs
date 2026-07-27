@@ -702,6 +702,30 @@ pub fn run(
     );
 
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+    // Visible on purpose, at every launch, because the item's visibility is not
+    // this process's to remember. macOS persists it per item — as
+    // `NSStatusItem VisibleCC Item-0` in this app's preferences, written by
+    // Control Center, which owns third-party menu bar items — and on the test VM
+    // it was written `0`, to the second, by a settings save's `exec` restart. The
+    // icon vanished, stayed gone across a reboot, and came back for no launch
+    // path, while the item object was created successfully every time and this
+    // module logged that it was ready.
+    //
+    // Which is the worst state this app has, because the icon is its only
+    // interface. An invisible agent cannot be quit — Quit is in the menu that is
+    // not there — and cannot be killed either, since `KeepAlive` restarts it, and
+    // it goes on holding the port, so the next copy the user opens meets "already
+    // in use" from a copy they cannot see.
+    item.setVisible(true);
+    // And say so if it still is not, rather than reporting "ready" for an item
+    // nobody can see. Being wrong about this cost an afternoon.
+    if !item.isVisible() {
+        warn!(
+            "menu bar: the status item is hidden and would not come back — the agent has no \
+             interface at all. Stop it with `launchctl bootout gui/$(id -u)/{}`.",
+            loginitem::LABEL
+        );
+    }
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("remotex-agent"));
     // Enablement is decided item by item (see `Controller::info`), not inferred.
     menu.setAutoenablesItems(false);
