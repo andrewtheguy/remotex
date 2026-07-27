@@ -566,6 +566,7 @@ mod tests {
             name: name.to_owned(),
             protocol,
             host: "127.0.0.1".to_owned(),
+            subtype: None,
             port: 1,
             username: String::new(),
             password: String::new(),

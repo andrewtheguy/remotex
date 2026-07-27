@@ -24,6 +24,7 @@ async fn spawn_app() -> SocketAddr {
         targets: vec![TargetConfig {
             name: "unreachable".to_owned(),
             protocol: Protocol::Vnc,
+            subtype: None,
             host: "127.0.0.1".to_owned(),
             port: 9, // discard; never connected
             username: String::new(),

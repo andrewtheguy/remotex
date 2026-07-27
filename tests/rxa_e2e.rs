@@ -374,6 +374,7 @@ async fn spawn_app_with(port: u16, psk: &str, clipboard: bool) -> SocketAddr {
         targets: vec![TargetConfig {
             name: "mac".to_owned(),
             protocol: Protocol::Rxa,
+            subtype: None,
             host: "127.0.0.1".to_owned(),
             port,
             username: String::new(),

@@ -717,6 +717,7 @@ mod tests {
         TargetConfig {
             name: "mac".to_owned(),
             protocol: crate::config::Protocol::Rxa,
+            subtype: None,
             host: "127.0.0.1".to_owned(),
             port,
             username: String::new(),

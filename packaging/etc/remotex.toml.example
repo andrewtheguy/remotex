@@ -28,6 +28,9 @@ site_passwd = ""
 [[targets]]
 name = "example"
 protocol = "rdp"           # required: "rdp", "vnc" or "rxa"
+# Which flavour of that protocol the far end is, where a protocol has more than
+# one. Only "vnc" has any: subtype = "ard" is macOS Screen Sharing (see below).
+#subtype = "ard"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc, 52381 rxa).
 #port = 3389
@@ -83,14 +86,18 @@ password = "change-me"
 # vnc_password = "change-me"
 
 # A Mac can use its built-in Screen Sharing service through this same path,
-# without installing the companion agent — but give it an *account* rather than
-# the Screen Sharing password. Apple's DH authentication (which `username`
-# selects) is the only way to tell a Mac who is connecting, and macOS answers a
-# viewer that names nobody by creating a new login window on a virtual display
-# instead of sharing its screen. The password here is that account's.
+# without installing the companion agent — say so with subtype = "ard", and give
+# it an *account* rather than the Screen Sharing password. Apple's DH
+# authentication is the only way to tell a Mac who is connecting, and macOS
+# answers a viewer that names nobody by creating a new login window on a virtual
+# display instead of sharing its screen. So the subtype requires username and
+# password (that account's), takes no vnc_password, and rejects resize, which
+# macOS accepts and then ignores. A third-party VNC server that happens to run
+# on a Mac is not this: it is a plain "vnc" target.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
+# subtype = "ard"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"

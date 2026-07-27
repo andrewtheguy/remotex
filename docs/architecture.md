@@ -203,16 +203,23 @@ requests raw 32-bit true-colour pixels, converts them to RGB, and supports the
 Cursor pseudo-encoding. This path can connect directly to macOS Screen Sharing;
 the companion agent is not required for Mac targets.
 
-A Mac target wants one thing more: a `username`, which selects Apple's DH
-authentication (RFB security type 30) and makes the credentials the *macOS
-account's* rather than the Screen Sharing password. What that buys is the Mac's
-own screen. A password alone authenticates nobody in particular — macOS logs the
-connection as `uid -2` — and macOS answers an anonymous viewer by creating a new
-login-window session on a virtual display, so the client lands on a login screen
-that will not take the account already signed in on the console, while that
-session carries on unshared beside it. Named, the same connection resolves to
-that user's session. Connecting to a Mac without a username is allowed and
-warned about once, in the log, at the moment it can still be changed.
+A Mac target says so: `subtype = "ard"`, which selects Apple's DH authentication
+(RFB security type 30) and makes the credentials the *macOS account's* rather
+than the Screen Sharing password. What that buys is the Mac's own screen. A
+password alone authenticates nobody in particular — macOS logs the connection as
+`uid -2` — and macOS answers an anonymous viewer by creating a new login-window
+session on a virtual display, so the client lands on a login screen that will not
+take the account already signed in on the console, while that session carries on
+unshared beside it. Named, the same connection resolves to that user's session.
+
+The subtype is declared rather than inferred from which credential fields are
+filled, because the two dialects want different ones and guessing is how a good
+password ends up authenticating nobody. It therefore requires `username` and
+`password`, rejects `vnc_password`, and rejects `resize` — macOS accepts the
+resize negotiation and then ignores every request, so the key would promise a
+control that does nothing. A plain `vnc` target is the mirror image: it takes
+`vnc_password` only. Reaching a Mac as a plain target is allowed and warned about
+once, in the log, at the moment it can still be changed.
 
 With `resize = true`, it advertises DesktopSize/ExtendedDesktopSize and sends
 `SetDesktopSize` after the server confirms support. Non-raw encodings are not

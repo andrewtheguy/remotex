@@ -110,8 +110,9 @@ holds it fixed, are the record.
 
 ## macOS Screen Sharing ignores `SetDesktopSize`
 
-- **Area:** a Mac target reached over VNC (`protocol = "vnc"`) with
-  `resize = true`.
+- **Area:** a Mac target reached over VNC as a *plain* `vnc` target with
+  `resize = true`. A target that declares what it is (`subtype = "ard"`) has the
+  key refused at startup instead, so this is only reachable by not declaring it.
 - **Seen:** the desktop never resizes, with no error. The gateway advertises
   DesktopSize/ExtendedDesktopSize and sends the request after the server
   confirms support; Apple's server accepts the negotiation and does nothing with

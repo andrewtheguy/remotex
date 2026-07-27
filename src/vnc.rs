@@ -51,7 +51,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::TargetConfig;
+use crate::config::{Subtype, TargetConfig};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
@@ -289,15 +289,16 @@ async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow
     reader.read_exact(&mut types).await?;
     let macos = is_macos_server(minor, &types);
 
-    let chosen = choose_security(&types, &config.username, &config.vnc_password)?;
+    let chosen = choose_security(&types, config.subtype, &config.vnc_password)?;
     if macos && chosen != SECURITY_ARD {
         // Said once, at the only moment it can still be acted on, because the
         // symptom is otherwise unreadable: a login screen that will not accept
         // the account already signed in on that Mac.
         warn!(
-            "vnc: authenticating to a Mac without a username — macOS answers an anonymous \
-             viewer with a new login window on a virtual display rather than its own screen. \
-             Set `username` (and the account's password) on this target to share the screen."
+            "vnc: this server is a Mac and the target is not subtype \"ard\" — macOS answers \
+             an anonymous viewer with a new login window on a virtual display rather than its \
+             own screen. Set subtype = \"ard\" with a macOS account's username and password \
+             to share the screen."
         );
     }
     writer.write_all(&[chosen]).await?;
@@ -1316,18 +1317,23 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
 
 /// Pick the RFB security type to answer with.
 ///
-/// A configured `username` is the request for Apple's DH authentication, and
-/// nothing else can carry one: `vnc_password` proves knowledge of a secret that
-/// belongs to the *machine*, so the far end learns nothing about who is
-/// connecting. On a Mac that difference decides which screen you get — see
-/// [`ard_authenticate`] — so a username that cannot be used is an error rather
-/// than a silent fall back to the anonymous path.
-fn choose_security(types: &[u8], username: &str, vnc_password: &str) -> anyhow::Result<u8> {
-    if !username.is_empty() {
+/// The target's subtype decides, not which credential fields happen to be
+/// filled: `Ard` is a declaration that the far end is a Mac and that the
+/// credentials name an account there, while a plain `vnc` target has only
+/// `vnc_password`, a secret belonging to the *machine* that tells the server
+/// nothing about who is connecting. On a Mac that difference decides which
+/// screen you get — see [`ard_authenticate`] — so a subtype the server cannot
+/// answer is an error rather than a silent fall back to the anonymous path.
+fn choose_security(
+    types: &[u8],
+    subtype: Option<Subtype>,
+    vnc_password: &str,
+) -> anyhow::Result<u8> {
+    if subtype == Some(Subtype::Ard) {
         anyhow::ensure!(
             types.contains(&SECURITY_ARD),
-            "the target sets a username, which only Apple's DH authentication carries, \
-             and this server does not offer it (types {types:?})"
+            "the target is subtype \"ard\", whose authentication this server does not \
+             offer (types {types:?}) — it is not macOS Screen Sharing"
         );
         return Ok(SECURITY_ARD);
     }
@@ -1609,27 +1615,28 @@ mod tests {
     const MACOS_TYPES: [u8; 5] = [30, 33, 36, 2, 35];
 
     #[test]
-    fn a_username_asks_for_apples_dh_authentication() {
-        assert_eq!(choose_security(&MACOS_TYPES, "andrew", "pw").unwrap(), SECURITY_ARD);
-        // Without one, the same server is answered anonymously — which is the
-        // behaviour that costs you the Mac's own screen, and is still what a
-        // target with only a password has asked for.
-        assert_eq!(choose_security(&MACOS_TYPES, "", "pw").unwrap(), SECURITY_VNC_AUTH);
-        // A username no server can carry is a configuration error, not a
+    fn the_subtype_decides_the_authentication() {
+        assert_eq!(choose_security(&MACOS_TYPES, Some(Subtype::Ard), "pw").unwrap(), SECURITY_ARD);
+        // The very same server, answered anonymously, because that is what a
+        // target without the subtype asked for — and it is what costs you the
+        // Mac's own screen.
+        assert_eq!(choose_security(&MACOS_TYPES, None, "pw").unwrap(), SECURITY_VNC_AUTH);
+        // A subtype the server cannot answer is a configuration error, not a
         // reason to authenticate as nobody.
-        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], "andrew", "pw").unwrap_err();
-        assert!(format!("{err:#}").contains("does not offer it"), "{err:#}");
+        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), "pw")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
     }
 
     #[test]
     fn security_falls_back_the_way_it_always_did() {
-        assert_eq!(choose_security(&[SECURITY_NONE], "", "").unwrap(), SECURITY_NONE);
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "").unwrap(), SECURITY_NONE);
         // A password with no VncAuth on offer is not a failure: an open server
         // is still an open server.
-        assert_eq!(choose_security(&[SECURITY_NONE], "", "pw").unwrap(), SECURITY_NONE);
-        let err = choose_security(&[SECURITY_VNC_AUTH], "", "").unwrap_err();
+        assert_eq!(choose_security(&[SECURITY_NONE], None, "pw").unwrap(), SECURITY_NONE);
+        let err = choose_security(&[SECURITY_VNC_AUTH], None, "").unwrap_err();
         assert!(format!("{err:#}").contains("requires a password"), "{err:#}");
-        let err = choose_security(&[19], "", "pw").unwrap_err();
+        let err = choose_security(&[19], None, "pw").unwrap_err();
         assert!(format!("{err:#}").contains("no supported VNC security type"), "{err:#}");
     }
 

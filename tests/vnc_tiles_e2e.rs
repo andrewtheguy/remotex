@@ -64,6 +64,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         targets: vec![TargetConfig {
             name: "tigervnc-dummy".to_owned(),
             protocol: Protocol::Vnc,
+            subtype: None,
             host: common::container_host(),
             port: vnc_port,
             username: String::new(),

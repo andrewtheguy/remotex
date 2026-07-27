@@ -212,6 +212,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
     TargetConfig {
         name: "test-target".to_owned(),
         protocol,
+        subtype: None,
         host: "127.0.0.1".to_owned(),
         port,
         // A VNC target names no user: the fake server below offers security

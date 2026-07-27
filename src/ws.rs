@@ -247,6 +247,7 @@ mod tests {
         let target = TargetConfig {
             name: "fake".to_owned(),
             protocol: Protocol::Vnc,
+            subtype: None,
             host: "127.0.0.1".to_owned(),
             port: 1,
             username: String::new(),
