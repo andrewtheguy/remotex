@@ -3,17 +3,13 @@ import Testing
 @testable import RemotexViewer
 
 struct ProductInfoTests {
+    /// There is no version to pin any more — the bundle's is the workspace's, put
+    /// there by `build-viewer-app.sh` — but a build that is *not* bundled has to
+    /// say so rather than name a release it is not.
     @Test
-    func developmentVersionMatchesTheWorkspace() throws {
-        let cargo = try String(
-            contentsOf: repositoryRoot.appending(path: "Cargo.toml"),
-            encoding: .utf8
-        )
-        let version = try firstCapture(
-            #"(?m)^version = "([^"]+)"$"#,
-            in: cargo
-        )
-        #expect(ProductInfo.developmentVersion == version)
+    func anUnbundledBuildClaimsNoRelease() {
+        // These tests run unbundled, so this is that path.
+        #expect(ProductInfo.version == "0.0.0-unbundled")
     }
 
     /// The viewer ships separately from the gateway, so the only thing keeping
