@@ -72,9 +72,11 @@ pub fn keepalive_budget() -> Duration {
 /// without a FIN — powered off, or cut from the network — leaves the engine
 /// blocked on a read forever, and the client holds a frozen desktop with nothing
 /// to say. What it proves is narrow but real: that the peer's *kernel* is still
-/// answering. A remote whose kernel answers while its server process is wedged
-/// still reads as an idle desktop, and neither RFB nor IronRDP offers a probe to
-/// close that gap (`docs/known-issues.md`).
+/// answering. For RDP and VNC that is the whole of it — a server process that
+/// wedges behind a kernel which still answers reads as an idle desktop, and
+/// neither RFB nor IronRDP offers a probe to close that gap. [`crate::rxa`] asks
+/// the agent process as well, so for that engine this is the outer of two
+/// guarantees rather than the only one (`docs/known-issues.md`).
 pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
     let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(dest))
         .await

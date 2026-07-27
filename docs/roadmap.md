@@ -103,8 +103,9 @@ state that the current independent tile protocol avoids.
 
 Socket keepalive bounds host death and network partition
 ([`architecture.md`](architecture.md)), but it is answered by the peer's kernel,
-so a remote that is hung while still on the network reads as an idle desktop
-([`known-issues.md`](known-issues.md)). RFB has exactly one message a conformant
+so for RDP and VNC a server that is hung while still on the network reads as an
+idle desktop ([`known-issues.md`](known-issues.md)) — RXA's ping/pong already
+closes that half for the agent. RFB has exactly one message a conformant
 server must answer regardless of change: a **non-incremental**
 `FramebufferUpdateRequest`. A 1×1 one at the origin is therefore a ~10-byte probe,
 and `update_request` already builds the shape — it would need the region

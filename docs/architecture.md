@@ -154,9 +154,11 @@ somebody clicks at a desktop that has frozen, unacknowledged data makes the
 retransmission budget own the socket instead, and that runs to about fifteen
 minutes. macOS has no equivalent option.
 
-What this proves is narrow: that the peer's kernel is still answering. A remote
-whose kernel answers while its server process is wedged still reads as an idle
-desktop — see [`known-issues.md`](known-issues.md).
+What this proves is narrow: that the peer's kernel is still answering. For RDP and
+VNC that is all there is, so a remote whose kernel answers while its server
+process is wedged still reads as an idle desktop. RXA asks the agent process
+itself as well, which closes that half for it — see
+[`known-issues.md`](known-issues.md) for what each one still misses.
 
 ## Engines
 

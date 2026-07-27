@@ -9,19 +9,22 @@ at wherever the mechanism is already explained rather than repeating it.
 Fixed issues are not kept here. The commit that fixed one, and the test that
 holds it fixed, are the record.
 
-## A remote that is hung but still on the network looks live
+## An RDP or VNC server that is hung but still on the network looks live
 
-- **Area:** all three engines.
+- **Area:** `protocol = "rdp"` and `protocol = "vnc"`. Not `rxa`, which asks the
+  agent process itself — see the entry below for what that still misses.
 - **Seen:** the desktop stops updating and stays on screen. No error, no return
   to the picker — the client cannot tell it from a desktop nobody is touching.
   Switching target by hand is the only way out.
-- **Cause:** liveness is the kernel's to report, and TCP keepalive probes are
-  answered by the peer's *kernel* with no involvement from the server process.
-  So a wedged `Xvnc`, a sleeping display, a `SIGSTOP`ped server, or a VM that was
-  *suspended* rather than powered off all keep answering. Neither protocol offers
-  a way to ask better: RFB has no ping, and IronRDP's Heartbeat PDU is
-  server-to-client only while its Refresh Rect PDU may not be sent unless the
-  server advertised `refreshRectSupport`, which the connector does not expose.
+- **Cause:** for these two, liveness is the kernel's to report, and TCP keepalive
+  probes are answered by the peer's *kernel* with no involvement from the server
+  process. So a wedged `Xvnc`, a sleeping display, a `SIGSTOP`ped server, or a VM
+  that was *suspended* rather than powered off all keep answering. Neither
+  protocol offers a way to ask better: RFB has no ping, and IronRDP's Heartbeat
+  PDU is server-to-client only while its Refresh Rect PDU may not be sent unless
+  the server advertised `refreshRectSupport`, which the connector does not
+  expose. A probe that would close the RFB half is in
+  [`roadmap.md`](roadmap.md).
 - **Mitigation:** what *is* bounded is host death and network partition, at about
   25 seconds (30 on Linux for a socket with traffic outstanding) — see the socket
   policy in [`architecture.md`](architecture.md). A remote that is switched off,
@@ -30,6 +33,26 @@ holds it fixed, are the record.
   without closing, which means root or a container network — by hand:
   `docker network disconnect <net> <container>` (or `podman`) against a
   `tests/vnc-dummy` container mid-session, then expect the picker in ~25s.
+
+## An `rxa` agent can answer while its capture has stopped
+
+- **Area:** `protocol = "rxa"`.
+- **Seen:** the desktop stops updating with the session still reported as live.
+  Rarer than the RDP/VNC case above, and narrower.
+- **Cause:** the ping/pong between gateway and agent is answered by the agent
+  *process*, so it catches a Mac whose agent has wedged or gone — which is what
+  keepalive alone cannot do. What it does not prove is that pixels are still
+  flowing: the agent answers pings from its message loop while capture delivers on
+  its own queues, so a capture stream that is alive but producing nothing — a
+  wedged WindowServer, a display that has stopped delivering — leaves the link
+  provably healthy and the picture frozen. A capture pipeline that *ends* is a
+  different case and is reported.
+- **Mitigation:** none beyond the above. Switching target re-attaches and starts
+  a fresh capture stream.
+- **Guard:** none. Unlike the entry above this has not been reproduced
+  deliberately — it is the gap the ping/pong leaves by construction, recorded so
+  a frozen `rxa` desktop with a healthy link is not mistaken for the RDP/VNC
+  case, which has a different cause and a different bound.
 
 ## A VM's display stack can wedge until the VM reboots
 
