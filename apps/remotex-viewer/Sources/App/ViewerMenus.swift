@@ -134,8 +134,18 @@ enum ViewerMenus {
     }
 
     /// The actions the items above send, which is also how they are recognised.
-    static let resizeToWindowAction = Selector(("resizeToWindowFromMenu:"))
-    static let resizeToDisplayAction = Selector(("resizeToDisplayFromMenu:"))
+    ///
+    /// `#selector` rather than a string, and the difference is not only the
+    /// compiler warning it silences: renaming either method on `ResizeMenuTarget`
+    /// is now a build error instead of two menu items that still appear, still
+    /// validate, and quietly do nothing when clicked. The `@objc(…)` names there
+    /// pin the selector, so this stays the same string it always was.
+    static let resizeToWindowAction = #selector(
+        ResizeMenuTarget.resizeToWindowFromMenu(_:)
+    )
+    static let resizeToDisplayAction = #selector(
+        ResizeMenuTarget.resizeToDisplayFromMenu(_:)
+    )
 
     /// Clear every key equivalent in `menu`, except in `exempt` and below it.
     ///
