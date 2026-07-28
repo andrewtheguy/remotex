@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createSender } from "./outbound.ts";
 import {
   type ClientMsg,
   type ClipboardSnapshot,
@@ -524,12 +525,10 @@ export function useRemoteDesktop(
     );
   }, [canvasRef, overlayRef, pointerRef]);
 
-  const sendRef = useRef((msg: ClientMsg) => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
-    }
-  });
+  // The single choke point for everything sent to the server, including the
+  // touch gesture layer's synthesized events. Pointer motion is coalesced here
+  // while the socket is backed up; see `createSender`.
+  const sendRef = useRef(createSender(() => wsRef.current));
 
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
@@ -649,7 +648,7 @@ export function useRemoteDesktop(
         return;
       }
       lastViewport = { w: msg.w, h: msg.h };
-      ws.send(JSON.stringify(msg));
+      sendRef.current(msg);
     };
     // The manual "Resize to window" action: report the viewport even in
     // manual-resize mode. Dedup still applies, so re-clicking at the same
@@ -684,7 +683,7 @@ export function useRemoteDesktop(
         return;
       }
       lastHostScale = scale;
-      ws.send(JSON.stringify({ type: "hostScale", scale } satisfies ClientMsg));
+      sendRef.current({ type: "hostScale", scale });
     };
 
     const open = (sessionId: string) => {
@@ -1141,7 +1140,7 @@ export function useRemoteDesktop(
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return Promise.resolve(null);
       }
-      ws.send(JSON.stringify({ type: "clipboardRequest" } satisfies ClientMsg));
+      sendRef.current({ type: "clipboardRequest" });
       return new Promise((resolve) => {
         let timer: ReturnType<typeof setTimeout>;
         const waiter = (snapshot: ClipboardSnapshot | null) => {
