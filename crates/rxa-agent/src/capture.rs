@@ -263,9 +263,9 @@ pub struct DisplayInfo {
 }
 
 impl DisplayInfo {
-    /// `"Display 2 · 1440×900 at 1x"`, for the agent's own read-only list.
+    /// `"Display 2 — 1440×900 at 1x"`, matching the viewer's menu item.
     pub fn summary(&self) -> String {
-        format!("{} · {}", self.label, self.detail)
+        format!("{} — {}", self.label, self.detail)
     }
 }
 

@@ -185,6 +185,13 @@ struct Ivars {
     ticks: Cell<u32>,
     /// The last permissions read, shared between the icon and the menu.
     permissions: Cell<Permissions>,
+    /// The display this agent made, if it made one.
+    ///
+    /// Held only so the settings dialog can name it. Without it every display is
+    /// measured and numbered as one of the Mac's own, and the agent's own screen
+    /// was listed as "Display 2" — indistinguishable from a panel somebody is
+    /// sitting at, in the one dialog whose checkbox decides whether it exists.
+    owned: Option<capture::Target>,
 }
 
 define_class!(
@@ -237,7 +244,7 @@ define_class!(
             let mtm = MainThreadMarker::from(self);
             let settings = &self.ivars().settings;
             let saved = settings.saved();
-            let attached = display_summary();
+            let attached = display_summary(self.ivars().owned);
             let mut draft = panels::Draft {
                 listen: saved.listen.clone(),
                 private_key: saved.private_key.clone(),
@@ -651,6 +658,7 @@ pub fn run(
     settings: Arc<settings::Settings>,
     log_path: Option<PathBuf>,
     screen_recording_at_launch: bool,
+    owned: Option<capture::Target>,
 ) -> ! {
     let mtm = MainThreadMarker::new().expect("menubar::run must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -675,6 +683,7 @@ pub fn run(
             // the timer has ever fired, and it must not claim health it has not
             // checked.
             permissions: Cell::new(Permissions::read(screen_recording_at_launch)),
+            owned,
         },
     );
 
@@ -757,12 +766,13 @@ pub fn run(
 /// once created, so it comes back from [`capture::displays`] like any other —
 /// and if it is missing from this list after being switched on, that is worth
 /// seeing rather than papering over.
-fn display_summary() -> Vec<String> {
-    // `None`: this runs on the main thread with no session in sight, so the
-    // agent's own display — if there is one — is measured as a real display
-    // would be. Its bounds are right either way; only the derived backing scale
-    // can read low, which is a cosmetic difference in one line of a dialog.
-    match capture::displays(None) {
+fn display_summary(owned: Option<capture::Target>) -> Vec<String> {
+    // `owned` so the agent's own display is *named* rather than numbered in with
+    // the Mac's screens: `capture::displays` labels it "Virtual display" only
+    // when it is told which id is ours, and passing `None` here listed it as
+    // "Display 2". Which of these a client can be asked to resize depends on
+    // exactly that difference, so the dialog has to show it.
+    match capture::displays(owned) {
         Ok(displays) => displays
             .iter()
             .map(capture::DisplayInfo::summary)
