@@ -63,7 +63,7 @@ actor GatewayConnection {
     /// The tiles the gateway has told this client to remember, by slot.
     ///
     /// Encoded payloads rather than decoded pixels: a decoded 320x64 tile is 80 KB
-    /// where its PNG is a few hundred bytes, and re-decoding on a reference is
+    /// where its WebP is a few hundred bytes, and re-decoding on a reference is
     /// cheaper than the transfer it replaced. Fixed length because the wire says
     /// how many slots there are, so a gateway cannot grow it; and this client never
     /// evicts — the gateway names the slot to overwrite, which keeps the two ends

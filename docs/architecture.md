@@ -19,9 +19,9 @@ axum server ── session slot ── protocol engine
                                   └─ rxa via optional remotex-agent on macOS
 ```
 
-RDP and VNC are decoded in the gateway, then emitted as PNG tiles. The optional
-macOS agent already emits browser-ready PNG/JPEG tiles, so the gateway relays
-them without re-encoding.
+RDP and VNC are decoded in the gateway, then emitted as WebP tiles. The optional
+macOS agent already emits browser-ready WebP tiles, so the gateway relays them
+without re-encoding.
 
 ## Constraints
 
@@ -101,8 +101,17 @@ without it a truncated frame would parse cleanly as a complete but smaller batch
 A non-zero `flags` is *rejected* rather than ignored, which is what makes the byte
 usable for an additive change later.
 
-Payload formats are PNG and JPEG (`format` 1 and 2); the macOS agent chooses per
-tile and the gateway relays those bytes without decoding them.
+The payload format is WebP (`format` 3), and it is the only value the byte takes:
+one container covers the lossless screen content the gateway's engines encode and
+the lossy tiles the macOS agent classifies, so the choice between them never
+reaches the wire. The byte survives as the seam a second codec would arrive
+through. `format` 1 and 2 were PNG and JPEG, retired together in protocol
+version 4 — a client built against 3 rejects a v4 frame rather than mis-decoding
+it, and the `protocolVersion` check refuses the session before that can happen.
+
+Cursor shapes are the exception: they stay PNG on the JSON control channel, where
+a few hundred bytes a handful of times a session buys nothing from a codec change,
+and where the macOS agent's shapes arrive already encoded by AppKit.
 
 `slot` is the tile cache. `TILE` means "draw this, and keep it in slot N";
 `TILE_REF` means "draw what you have in slot N here", in seven bytes instead of a
@@ -224,7 +233,7 @@ VNC case, and narrower, but the same symptom.
 
 IronRDP handles TLS and optional NLA/CredSSP. The engine maintains a decoded
 framebuffer, converts dirty rectangles to RGB, and sends them to the browser as
-PNG tiles at most 64 rows tall. Input uses fast-path PDUs after mapping DOM codes
+WebP tiles at most 64 rows tall. Input uses fast-path PDUs after mapping DOM codes
 to scancodes.
 
 Before anything is encoded, the rectangle is compared against a *shadow copy* of

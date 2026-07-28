@@ -103,7 +103,8 @@ What the viewer does keep is a **tile cache**: the gateway may send a record tha
 names a slot instead of a payload, meaning "redraw what you have in slot N here".
 The cache is a fixed 256-entry array of *encoded* payloads, re-decoded on a
 reference — a tenth of the memory of keeping decoded pixels, for the same bytes
-saved on the wire. The viewer never evicts anything: the gateway names the slot to
+saved on the wire (a decoded 320x64 tile is 80 KB; its WebP is a few hundred
+bytes). The viewer never evicts anything: the gateway names the slot to
 overwrite. A reference to a slot it does not hold, or a cached tile that will not
 decode, sends `cacheReset` and is dropped rather than drawn.
 

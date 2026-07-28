@@ -19,7 +19,7 @@ src/rxa.rs                              crates/rxa-agent
     │                                      │
     └──── Noise-encrypted rxa over TCP ────┤
                                            ├─ ScreenCaptureKit capture
-                                           ├─ PNG/JPEG tile encoder
+                                           ├─ WebP tile encoder
                                            ├─ Core Graphics input injection
                                            └─ menu bar UI and SMAppService
 
@@ -66,8 +66,9 @@ the gateway via `remotex rxa-pubkey` and a line in its startup log.
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
 - agent to gateway: desktop size, the display list and which display is being
-  shared, PNG/JPEG tiles, cursor shape, pasteboard text (on request or when the
-  watched pasteboard changes), and heartbeat pongs;
+  shared, WebP tiles, cursor shape (an RGBA PNG — the one payload still PNG,
+  because AppKit hands it over already encoded), pasteboard text (on request or
+  when the watched pasteboard changes), and heartbeat pongs;
 - gateway to agent: mouse, wheel, and keyboard input, session control, a display
   selection, a size and a density for a display the agent made, clipboard read
   requests, writes and the watch toggle, and heartbeat pings.
@@ -113,8 +114,11 @@ Resolution below for the one it does not.
 
 The agent captures one selected physical display. ScreenCaptureKit frame metadata
 identifies changed regions; those regions are snapped **outward** onto a fixed
-320×64 grid, deduplicated across the frame, and encoded in order. PNG is used for
-flat or lossless-friendly content and JPEG for image-like content.
+320×64 grid, deduplicated across the frame, and encoded in order. Every payload is
+WebP; a per-tile classifier picks lossless for flat or text-like content and lossy
+for image-like content, which is a choice *inside* one container and so never
+reaches the wire. Before WebP those were two containers, PNG and JPEG, and the
+format byte carried the answer to the browser.
 
 The grid is there because the reported regions are *coarse*. Measured on the test
 Mac, 65% of all bytes reaching the browser were full-width 64-row strips at ~62 KB

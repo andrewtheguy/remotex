@@ -93,7 +93,7 @@ impl Rect {
 
     /// This rectangle split into pieces at most [`CELL_H`] rows tall, top down.
     ///
-    /// Payloads have to stay bounded — one PNG of a whole 4K desktop is neither a
+    /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
     /// useful unit of progress nor a comfortable WebSocket frame — and a client
     /// draws the pieces exactly as it draws any other tiles.
     pub fn bands(&self) -> impl Iterator<Item = Rect> + '_ {

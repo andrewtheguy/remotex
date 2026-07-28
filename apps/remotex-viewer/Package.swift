@@ -18,7 +18,12 @@ let package = Package(
         .testTarget(
             name: "RemotexViewerTests",
             dependencies: ["RemotexViewer"],
-            path: "Tests"
+            path: "Tests",
+            // Real WebP tile payloads, produced by the gateway's own encoder
+            // (`write_swift_webp_fixtures` in src/protocol.rs). Checked in because
+            // ImageIO can read WebP but cannot write it, so these tests cannot
+            // encode their own the way they used to.
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

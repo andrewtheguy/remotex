@@ -114,10 +114,21 @@ this item:
 
 1. downscale through `SCStreamConfiguration`, which is still the only answer for a
    remote whose *changing* area is genuinely large;
-2. replace PNG with WebP lossless, which is the next codec step and is smaller on
-   exactly this content — flat colour, hard edges, text. It touches `rxa-proto`'s
-   format byte, so the agent and gateway must be deployed together;
-3. move to VideoToolbox H.264 and browser WebCodecs.
+2. ~~replace PNG with WebP lossless~~ — **done**, protocol version 4. It replaced
+   JPEG too, so the wire carries one codec and one format value. Measured on real
+   screenshots rather than generated fixtures, WebP lossless at the effort a hot
+   path can afford is **0.64-0.81x** PNG's bytes on a working window and 0.83-0.88x
+   on a photographic wallpaper — so the win is largest on exactly the content the
+   RDP and VNC engines carry, and smallest on what the agent's classifier sends down
+   its lossy branch anyway. Higher effort reaches 0.53x but costs 20-70x the encode
+   time, which an engine's protocol-read loop cannot spend. The lossy half is a
+   clearer win still: 0.50-0.70x JPEG's bytes at 2.5x its time on the deployment
+   host. See `webp_cost_against_png_cost` in `src/protocol.rs`, and note what it
+   says about generated fixtures — the first version of that bench overstated WebP
+   by 60x by measuring periodic content;
+3. move to VideoToolbox H.264 and browser WebCodecs. The `TILE` record's format
+   byte is the seam this arrives through, which is why it was kept when the codec
+   collapsed to one value.
 
 H.264 is still last because it creates a second browser decode path and adds
 stream state that the independent tile protocol avoids.

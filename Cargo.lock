@@ -3230,7 +3230,6 @@ dependencies = [
  "anyhow",
  "env_logger",
  "file-rotate",
- "jpeg-encoder",
  "log",
  "objc2",
  "objc2-app-kit",
@@ -3238,12 +3237,12 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-service-management",
- "png",
  "rxa-proto",
  "screencapturekit",
  "serde",
  "tokio",
  "toml",
+ "webp",
  "xxhash-rust",
 ]
 

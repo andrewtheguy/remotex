@@ -20,7 +20,9 @@ use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-const TILE_FORMAT_PNG: u8 = 1;
+/// `Tile::FORMAT_WEBP`, spelled out rather than imported: this test is a
+/// stand-in for a client, and a client only has the number.
+const TILE_FORMAT_WEBP: u8 = 3;
 
 /// Wait until xrdp actually answers RDP on the published port.
 ///
@@ -101,12 +103,12 @@ fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u32 {
     let tiles = stream.paint(frame);
     assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
     for tile in &tiles {
-        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
+        assert_eq!(tile.format, TILE_FORMAT_WEBP, "unexpected tile format byte");
         assert!(tile.w > 0 && tile.h > 0, "empty tile {}x{}", tile.w, tile.h);
         assert_eq!(
-            &tile.payload[..8],
-            b"\x89PNG\r\n\x1a\n",
-            "payload is not a PNG stream"
+            (&tile.payload[..4], &tile.payload[8..12]),
+            (b"RIFF".as_slice(), b"WEBP".as_slice()),
+            "payload is not a WebP stream"
         );
     }
     tiles.len() as u32

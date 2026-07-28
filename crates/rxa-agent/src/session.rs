@@ -1067,24 +1067,40 @@ fn encode_loop(rx: std::sync::mpsc::Receiver<Captured>, tx: mpsc::Sender<Out>) {
         let out = match msg {
             Captured::Resized(w, h) => vec![Out::Resized(w, h)],
             Captured::Failed(message) => vec![Out::Failed(message)],
-            Captured::Tiles(tiles) => tiles
-                .into_iter()
-                .filter_map(|tile| {
-                    match encode::encode_tile(tile.rect.w, tile.rect.h, &tile.rgb) {
-                        Ok(encoded) => Some(Out::Tile {
-                            format: encoded.format,
-                            rect: tile.rect,
-                            data: encoded.data,
-                        }),
-                        Err(e) => {
-                            // One bad tile is a dropped rectangle, not a dead
-                            // session; the next repaint covers it.
-                            warn!("encoder: dropping a tile: {e:#}");
-                            None
+            Captured::Tiles(tiles) => {
+                // Counted per batch rather than per tile: the classifier's split is
+                // the only thing about it that can be judged from outside, and one
+                // line a frame says whether it is finding what it should. Every
+                // payload is a WebP either way, so nothing downstream can tell.
+                let mut lossy = 0usize;
+                let out: Vec<_> = tiles
+                    .into_iter()
+                    .filter_map(|tile| {
+                        match encode::encode_tile(tile.rect.w, tile.rect.h, &tile.rgb) {
+                            Ok(encoded) => {
+                                if !encoded.lossless {
+                                    lossy += 1;
+                                }
+                                Some(Out::Tile {
+                                    format: encoded.format,
+                                    rect: tile.rect,
+                                    data: encoded.data,
+                                })
+                            }
+                            Err(e) => {
+                                // One bad tile is a dropped rectangle, not a dead
+                                // session; the next repaint covers it.
+                                warn!("encoder: dropping a tile: {e:#}");
+                                None
+                            }
                         }
-                    }
-                })
-                .collect(),
+                    })
+                    .collect();
+                if lossy > 0 {
+                    debug!("encoder: {} tile(s), {lossy} photographic", out.len());
+                }
+                out
+            }
         };
         for item in out {
             // Blocking is the point: back-pressure from a slow browser reaches

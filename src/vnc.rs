@@ -886,7 +886,7 @@ async fn extended_cut_text(
 }
 
 /// Read one FramebufferUpdate rectangle — raw pixels compared against what the
-/// browser holds and forwarded as PNG tiles, or one of the resize
+/// browser holds and forwarded as WebP tiles, or one of the resize
 /// pseudo-encodings. Returns whether the desktop was resized.
 async fn read_rect(
     reader: &mut Reader,
@@ -1591,7 +1591,7 @@ fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
 /// Repack a cursor's BGRX pixels into RGBA, folding the RFB 1-bit mask into
 /// the alpha channel: rows are padded to whole bytes and scanned MSB first,
 /// with a set bit meaning opaque. Pixels outside the mask are cleared to fully
-/// transparent black rather than just alpha-zeroed, so PNG's filtering has a
+/// transparent black rather than just alpha-zeroed, so the cursor PNG's filtering has a
 /// flat area to compress and no stale colour can bleed through a viewer that
 /// ignores alpha.
 fn masked_bgrx_to_rgba(bgrx: &[u8], mask: &[u8], w: u16) -> Vec<u8> {

@@ -1,7 +1,7 @@
 //! Framing: application messages over the Noise transport.
 //!
 //! A Noise transport message caps at 65535 bytes on the wire (65519 of
-//! plaintext, after the 16-byte AEAD tag), and a full-screen JPEG keyframe is
+//! plaintext, after the 16-byte AEAD tag), and a full-screen keyframe is
 //! far larger than that. Rather than inventing a chunking flag in the message
 //! definitions, this module treats the Noise transport as a **reliable byte
 //! stream**: writes are split into ≤65519-byte Noise messages transparently,

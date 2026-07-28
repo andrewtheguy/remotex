@@ -2,23 +2,41 @@
 //!
 //! Screen content is two very different things sharing one framebuffer. A menu,
 //! a code editor, a terminal: a handful of flat colours and hard edges, where
-//! PNG is both *smaller* and sharper than JPEG. A photo, a video, a map: a
-//! continuous gradient where PNG barely compresses and JPEG wins by an order of
-//! magnitude. Picking per tile gets both.
+//! lossless compression is both *smaller* and sharper than lossy. A photo, a
+//! video, a map: a continuous gradient where lossless barely compresses and lossy
+//! wins by an order of magnitude. Picking per tile gets both.
 //!
 //! The classifier has to be cheap enough to run on every tile of every frame, so
 //! it samples rather than scanning: a strided subset of pixels into a small
-//! bitset of distinct colours. Few distinct colours means UI or text, so PNG;
-//! many means photographic, so JPEG.
+//! bitset of distinct colours. Few distinct colours means UI or text, so
+//! lossless; many means photographic, so lossy.
 //!
-//! The gateway relays the result without looking inside, so the format byte
-//! chosen here is what the browser's `createImageBitmap` is told.
+//! Both are WebP, which is why that choice never leaves this file. It used to pick
+//! between two *containers* — PNG and JPEG — and the format byte carried the
+//! answer all the way to the browser's `createImageBitmap`. Now the container is
+//! the same either way, the format byte has one value, and a misclassification
+//! costs quality on one tile rather than sending a codec the other end has to
+//! branch on.
 
 use rxa_proto::msg::format;
 
-/// JPEG quality. 80 keeps photographic tiles visually clean while staying well
-/// under PNG's size for the same content; text never reaches this path.
-const JPEG_QUALITY: u8 = 80;
+/// Lossy quality. 80 keeps photographic tiles visually clean while staying well
+/// under the lossless size for the same content; text never reaches this path.
+const LOSSY_QUALITY: f32 = 80.0;
+
+/// libwebp's speed/size dial, and — in lossless mode — the effort dial `quality`
+/// becomes. Both at the cheap end, for the same reason the gateway's are
+/// (`WEBP_LOSSLESS_METHOD` in `src/protocol.rs`, which records the measurements):
+/// the compression above `method = 0` costs 20-80x the encode time for another
+/// 10 points of ratio.
+///
+/// This thread is not an engine's protocol-read loop — encoding here happens on a
+/// dedicated thread (see `session.rs`) — but the budget is no larger for it. A
+/// Retina frame is a dozen cells, and at `method = 2` one 320x64 cell measured
+/// 4.1ms, so a frame would spend 40ms in the encoder and the desktop would feel
+/// like it.
+const WEBP_METHOD: i32 = 0;
+const LOSSLESS_EFFORT: f32 = 20.0;
 
 /// Sample at most this many pixels when classifying a tile. A 64-row full-width
 /// Retina strip is ~220k pixels; looking at 1024 of them decides the question
@@ -31,18 +49,28 @@ const CLASSIFY_SAMPLES: usize = 1024;
 /// delicate.
 const PHOTO_COLOUR_THRESHOLD: usize = 96;
 
-/// Tiles below this many pixels always go to PNG: JPEG's own header costs more
-/// than the payload at that size, and a tiny tile is usually a cursor-sized
-/// piece of UI anyway.
-const MIN_JPEG_PIXELS: usize = 32 * 32;
+/// Tiles below this many pixels are always lossless: the lossy path's own header
+/// costs more than the payload at that size, and a tiny tile is usually a
+/// cursor-sized piece of UI anyway.
+///
+/// Cited by `CELL_W`'s documentation in `src/protocol.rs`, which needs a cell to
+/// stay comfortably above it so the classifier has something to judge.
+const MIN_LOSSY_PIXELS: usize = 32 * 32;
 
-/// An encoded tile payload and the format byte that describes it.
+/// An encoded tile payload, the format byte that describes it, and whether the
+/// pixels survived.
 pub struct Encoded {
     pub format: u8,
     pub data: Vec<u8>,
+    /// Which side of the classifier this came out of.
+    ///
+    /// Nothing on the wire needs it — both cases are WebP — but without it the
+    /// classifier's decision would be unobservable from outside this module, and
+    /// the tests that pin it would have nothing to assert on.
+    pub lossless: bool,
 }
 
-/// Encode packed RGB888 as PNG or JPEG, whichever suits the content.
+/// Encode packed RGB888 as WebP, lossless or lossy to suit the content.
 pub fn encode_tile(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Encoded> {
     let expected = usize::from(w) * usize::from(h) * 3;
     anyhow::ensure!(
@@ -50,29 +78,24 @@ pub fn encode_tile(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Encoded> {
         "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
         rgb.len()
     );
-    if is_photographic(w, h, rgb) {
-        Ok(Encoded {
-            format: format::JPEG,
-            data: encode_jpeg(w, h, rgb)?,
-        })
-    } else {
-        Ok(Encoded {
-            format: format::PNG,
-            data: encode_png(w, h, rgb)?,
-        })
-    }
+    let lossless = !is_photographic(w, h, rgb);
+    Ok(Encoded {
+        format: format::WEBP,
+        data: encode_webp(w, h, rgb, lossless)?,
+        lossless,
+    })
 }
 
 /// Cheap content classifier: count distinct colours over a strided sample.
 ///
 /// Colours are quantised to 5 bits per channel before counting. Without that, a
 /// smooth UI gradient — a window title bar, a selection highlight — reads as
-/// hundreds of "distinct" colours and gets sent to JPEG, where its hard text
-/// edges turn to mush. Quantising collapses the gradient while leaving genuinely
-/// photographic content well over the threshold.
+/// hundreds of "distinct" colours and gets sent to the lossy path, where its hard
+/// text edges turn to mush. Quantising collapses the gradient while leaving
+/// genuinely photographic content well over the threshold.
 fn is_photographic(w: u16, h: u16, rgb: &[u8]) -> bool {
     let pixels = usize::from(w) * usize::from(h);
-    if pixels < MIN_JPEG_PIXELS {
+    if pixels < MIN_LOSSY_PIXELS {
         return false;
     }
     // 15-bit quantised colour: 32768 possible values, one bit each. On the
@@ -98,27 +121,34 @@ fn is_photographic(w: u16, h: u16, rgb: &[u8]) -> bool {
     false
 }
 
-/// Same encoder and compression level the gateway uses for RDP/VNC tiles, so
-/// a PNG tile from the agent is indistinguishable from one it produced itself.
-fn encode_png(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(rgb)?;
-    writer.finish()?;
-    Ok(out)
-}
-
-fn encode_jpeg(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let encoder = jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY);
-    encoder
-        .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
-        .map_err(|e| anyhow::anyhow!("JPEG encode failed: {e}"))?;
-    Ok(out)
+/// Same encoder and settings the gateway uses for RDP/VNC tiles, so a lossless
+/// tile from the agent is indistinguishable from one it produced itself.
+///
+/// Two hazards in the `webp` crate that the shape of this function answers:
+/// `Encoder::from_rgb` *panics* on a buffer shorter than `w * h * 3`, so
+/// `encode_tile`'s length check above is load-bearing rather than tidy; and
+/// `Encoder::encode` and `encode_lossless` both `unwrap()` internally, so
+/// `encode_advanced` is the only entry point that can report a failure.
+///
+/// No dimension check, unlike the gateway's: every caller here is a cell from
+/// `split_cells`, so a side is at most `CELL_W`/`CELL_H` and cannot approach
+/// WebP's 16383-pixel limit. Widening those constants past it would need one.
+fn encode_webp(w: u16, h: u16, rgb: &[u8], lossless: bool) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(w > 0 && h > 0, "cannot encode a {w}x{h} tile");
+    let mut config = webp::WebPConfig::new()
+        .map_err(|()| anyhow::anyhow!("libwebp rejected its own default config"))?;
+    config.lossless = i32::from(lossless);
+    config.quality = if lossless { LOSSLESS_EFFORT } else { LOSSY_QUALITY };
+    config.method = WEBP_METHOD;
+    // No libwebp worker thread: this thread is already the one keeping the capture
+    // path clear, and a thread per tile would cost more than the work it splits.
+    config.thread_level = 0;
+    let encoded = webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
+        .encode_advanced(&config)
+        .map_err(|e| anyhow::anyhow!("WebP encode failed for {w}x{h}: {e:?}"))?;
+    // Copied out rather than held: `WebPMemory` is neither `Send` nor `Sync`, and
+    // this payload is sent to another thread.
+    Ok(encoded.to_vec())
 }
 
 #[cfg(test)]
@@ -143,22 +173,44 @@ mod tests {
         rgb
     }
 
-    /// Photographic: a wide, noisy, continuous-tone field.
+    /// Photographic: a continuous-tone field with real *noise* in it.
+    ///
+    /// It used to be three linear ramps of `x` and `y`, which had the distinct-colour
+    /// count of a photograph and none of its incompressibility. That was invisible
+    /// while the lossless codec was PNG at `Compression::Fast`, which cannot exploit
+    /// a ramp — but WebP's predictor transform can, and does: on the old fixture
+    /// lossless came out *five times smaller* than lossy, so the test asserting
+    /// otherwise failed the moment the codec changed. A fixture that is only
+    /// photographic by one metric proves nothing about a codec that reads another.
     fn photo(w: u16, h: u16) -> Vec<u8> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
         for y in 0..h {
             for x in 0..w {
-                let r = (u32::from(x) * 7 + u32::from(y) * 3) % 256;
-                let g = (u32::from(x) * 3 + u32::from(y) * 11 + 40) % 256;
-                let b = (u32::from(x) * 13 + u32::from(y) * 5 + 90) % 256;
-                rgb.extend_from_slice(&[r as u8, g as u8, b as u8]);
+                // A smooth base so it still looks like a photograph to the
+                // classifier, plus enough noise that prediction cannot win.
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                // Enough to defeat exact prediction, small enough that the field
+                // still has the local correlation a photograph has — pure white
+                // noise is section 4 of the gateway's bench, not a photograph.
+                let jitter = ((state >> 56) as i32 - 128) / 5;
+                let base = [
+                    u32::from(x) * 7 + u32::from(y) * 3,
+                    u32::from(x) * 3 + u32::from(y) * 11 + 40,
+                    u32::from(x) * 13 + u32::from(y) * 5 + 90,
+                ];
+                for channel in base {
+                    rgb.push(((channel as i32 % 256 + jitter).clamp(0, 255)) as u8);
+                }
             }
         }
         rgb
     }
 
-    /// A smooth two-colour gradient — the case that must *not* go to JPEG,
-    /// because a title bar's text sits on top of exactly this.
+    /// A smooth two-colour gradient — the case that must *not* go to the lossy
+    /// path, because a title bar's text sits on top of exactly this.
     fn ui_gradient(w: u16, h: u16) -> Vec<u8> {
         let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
         for y in 0..h {
@@ -170,25 +222,35 @@ mod tests {
         rgb
     }
 
-    #[test]
-    fn flat_ui_goes_to_png() {
-        let (w, h) = (320, 64);
-        let tile = encode_tile(w, h, &flat_ui(w, h)).unwrap();
-        assert_eq!(tile.format, format::PNG);
-        assert_eq!(&tile.data[..8], b"\x89PNG\r\n\x1a\n");
+    /// Every payload is a WebP now, so the container no longer says which branch
+    /// ran — the `lossless` flag does, and this checks both agree with the bytes.
+    fn assert_is_webp(data: &[u8]) {
+        assert_eq!(&data[..4], b"RIFF");
+        assert_eq!(&data[8..12], b"WEBP");
     }
 
     #[test]
-    fn photographic_content_goes_to_jpeg() {
+    fn flat_ui_is_encoded_losslessly() {
+        let (w, h) = (320, 64);
+        let tile = encode_tile(w, h, &flat_ui(w, h)).unwrap();
+        assert_eq!(tile.format, format::WEBP);
+        assert!(tile.lossless);
+        assert_is_webp(&tile.data);
+    }
+
+    #[test]
+    fn photographic_content_is_encoded_lossily() {
         let (w, h) = (320, 64);
         let tile = encode_tile(w, h, &photo(w, h)).unwrap();
-        assert_eq!(tile.format, format::JPEG);
-        // SOI marker.
-        assert_eq!(&tile.data[..2], &[0xFF, 0xD8]);
+        assert_eq!(tile.format, format::WEBP);
+        assert!(!tile.lossless);
+        // Same container as the lossless branch, which is the point: the client
+        // needs no signal to tell them apart.
+        assert_is_webp(&tile.data);
     }
 
     // The reason the classifier quantises: a smooth UI gradient has many raw
-    // colours but is not photographic, and JPEG would ruin the text on it.
+    // colours but is not photographic, and lossy would ruin the text on it.
     #[test]
     fn a_smooth_ui_gradient_is_not_mistaken_for_a_photo() {
         let (w, h) = (320, 64);
@@ -196,50 +258,62 @@ mod tests {
     }
 
     #[test]
-    fn tiny_tiles_always_use_png() {
-        // JPEG's fixed overhead would dominate, and small tiles are UI.
+    fn tiny_tiles_are_always_lossless() {
+        // The lossy path's fixed overhead would dominate, and small tiles are UI.
         let rgb = photo(16, 16);
         let tile = encode_tile(16, 16, &rgb).unwrap();
-        assert_eq!(tile.format, format::PNG);
+        assert!(tile.lossless);
     }
 
-    // Each codec has to actually beat the other on its own content, or the
+    // Each branch has to actually beat the other on its own content, or the
     // classifier is just burning CPU to no purpose.
     #[test]
-    fn each_codec_wins_on_the_content_it_is_chosen_for() {
+    fn each_branch_wins_on_the_content_it_is_chosen_for() {
         let (w, h) = (320, 64);
         let raw = usize::from(w) * usize::from(h) * 3;
 
         let ui = flat_ui(w, h);
-        let ui_png = encode_png(w, h, &ui).unwrap().len();
-        let ui_jpeg = encode_jpeg(w, h, &ui).unwrap().len();
+        let ui_lossless = encode_webp(w, h, &ui, true).unwrap().len();
+        let ui_lossy = encode_webp(w, h, &ui, false).unwrap().len();
         assert!(
-            ui_png < ui_jpeg,
-            "PNG should beat JPEG on flat UI: {ui_png} vs {ui_jpeg}"
+            ui_lossless < ui_lossy,
+            "lossless should beat lossy on flat UI: {ui_lossless} vs {ui_lossy}"
         );
 
         let pic = photo(w, h);
-        let pic_png = encode_png(w, h, &pic).unwrap().len();
-        let pic_jpeg = encode_jpeg(w, h, &pic).unwrap().len();
+        let pic_lossless = encode_webp(w, h, &pic, true).unwrap().len();
+        let pic_lossy = encode_webp(w, h, &pic, false).unwrap().len();
         assert!(
-            pic_jpeg < pic_png,
-            "JPEG should beat PNG on photographic content: {pic_jpeg} vs {pic_png}"
+            pic_lossy < pic_lossless,
+            "lossy should beat lossless on photographic content: {pic_lossy} vs {pic_lossless}"
         );
-        assert!(pic_jpeg * 4 < raw, "JPEG should compress a photo well");
+        assert!(pic_lossy * 4 < raw, "lossy should compress a photo well");
     }
 
     #[test]
-    fn png_output_roundtrips_to_the_original_pixels() {
+    fn the_lossless_branch_roundtrips_to_the_original_pixels() {
         let (w, h) = (64, 32);
         let rgb = flat_ui(w, h);
-        let data = encode_png(w, h, &rgb).unwrap();
-        let decoder = png::Decoder::new(std::io::Cursor::new(data.as_slice()));
-        let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
-        let info = reader.next_frame(&mut buf).unwrap();
-        assert_eq!((info.width, info.height), (u32::from(w), u32::from(h)));
-        assert_eq!(info.color_type, png::ColorType::Rgb);
-        assert_eq!(&buf[..info.buffer_size()], rgb.as_slice());
+        let data = encode_webp(w, h, &rgb, true).unwrap();
+        let image = webp::Decoder::new(&data).decode().expect("payload decodes");
+        assert_eq!((image.width(), image.height()), (u32::from(w), u32::from(h)));
+        // An RGB source must not gain an alpha channel: both clients discard alpha
+        // on the stated grounds that tiles are opaque, so one that carried it would
+        // decode to the wrong pixels rather than fail.
+        assert!(!image.is_alpha());
+        assert_eq!(&*image, rgb.as_slice());
+    }
+
+    // And the other branch must *not* roundtrip, or `LOSSY_QUALITY` is being
+    // ignored and every photographic tile is paying lossless prices.
+    #[test]
+    fn the_lossy_branch_really_is_lossy() {
+        let (w, h) = (64, 64);
+        let rgb = photo(w, h);
+        let data = encode_webp(w, h, &rgb, false).unwrap();
+        let image = webp::Decoder::new(&data).decode().expect("payload decodes");
+        assert_eq!((image.width(), image.height()), (u32::from(w), u32::from(h)));
+        assert_ne!(&*image, rgb.as_slice());
     }
 
     #[test]
@@ -250,13 +324,22 @@ mod tests {
     }
 
     // Every tile shape the capture path can produce must encode. A 1-pixel-tall
-    // strip is the tail of a rect whose height is not a multiple of STRIP_ROWS.
+    // strip is the tail of a rect whose height is not a multiple of CELL_H.
     #[test]
-    fn every_strip_shape_the_capture_path_produces_encodes() {
-        for (w, h) in [(1, 1), (1, 64), (3456, 1), (3456, 64), (320, 22)] {
+    fn every_cell_shape_the_capture_path_produces_encodes() {
+        for (w, h) in [(1, 1), (1, 64), (320, 1), (320, 64), (320, 22)] {
             let rgb = vec![128u8; usize::from(w) * usize::from(h) * 3];
             let tile = encode_tile(w, h, &rgb).unwrap();
             assert!(!tile.data.is_empty(), "{w}x{h} produced no payload");
+            assert_is_webp(&tile.data);
         }
+    }
+
+    #[test]
+    fn a_zero_sized_tile_is_rejected_rather_than_handed_to_libwebp() {
+        // libwebp fails these deep inside with BAD_DIMENSION, and
+        // `Encoder::from_rgb` panics outright on a buffer shorter than w*h*3.
+        assert!(encode_tile(0, 4, &[]).is_err());
+        assert!(encode_tile(4, 0, &[]).is_err());
     }
 }
