@@ -115,6 +115,7 @@ fn check_tile_frame(frame: &[u8]) {
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
 async fn tiles_arrive_as_binary_frames_after_resize_text() {
+    common::init_logging();
     let runtime = common::container_runtime();
     let (_container, rdp_port) =
         common::start_dummy_server(runtime, "remotex-e2e-xrdp", "xrdp-dummy", 3389);

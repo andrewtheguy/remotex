@@ -34,7 +34,7 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
-    protocol::{ClientMsg, WireFrame},
+    protocol::{ClientMsg, ServerMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager},
 };
@@ -62,6 +62,67 @@ const HEARTBEAT_TIMINGS: HeartbeatTimings = HeartbeatTimings {
 #[derive(Deserialize)]
 pub struct WsParams {
     session: Option<String>,
+}
+
+/// What one attachment cost on the wire, logged when it ends.
+///
+/// This link — backend to a possibly weak-signal WAN browser — is the bottleneck
+/// the binary tile transport optimizes, and the repo has no benchmark harness, so
+/// this line is the only measurement of it that exists. Two things it reports that
+/// a plain byte total cannot:
+///
+/// - **frames separately from bytes**, because a transport change can move one
+///   without the other (many small frames and one large frame carrying the same
+///   pixels cost very different amounts in per-frame overhead and in client-side
+///   decode scheduling);
+/// - **the largest single frame**, which is the number a client's WebSocket message
+///   ceiling is measured against — the macOS viewer raises `maximumMessageSize`
+///   because exceeding it kills the whole socket rather than dropping one frame.
+#[derive(Default)]
+struct Totals {
+    binary_frames: u64,
+    binary_bytes: u64,
+    text_frames: u64,
+    text_bytes: u64,
+    largest_binary: u64,
+    /// `(format, w, h)` of the tile in the largest binary frame, for context on
+    /// what that ceiling is actually being spent on.
+    largest_tile: Option<(u8, u16, u16)>,
+}
+
+impl Totals {
+    fn binary(&mut self, len: usize, tile: Option<(u8, u16, u16)>) {
+        let len = len as u64;
+        self.binary_frames += 1;
+        self.binary_bytes += len;
+        if len > self.largest_binary {
+            self.largest_binary = len;
+            self.largest_tile = tile;
+        }
+    }
+
+    fn text(&mut self, len: usize) {
+        self.text_frames += 1;
+        self.text_bytes += len as u64;
+    }
+}
+
+impl std::fmt::Display for Totals {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} binary frames / {} bytes, {} text frames / {} bytes, largest binary {} bytes",
+            self.binary_frames,
+            self.binary_bytes,
+            self.text_frames,
+            self.text_bytes,
+            self.largest_binary
+        )?;
+        if let Some((format, w, h)) = self.largest_tile {
+            write!(f, " ({w}x{h} format {format})")?;
+        }
+        Ok(())
+    }
 }
 
 pub async fn handler(
@@ -97,13 +158,11 @@ async fn session(
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (attach_id, mut events) = (attachment.id, attachment.events);
 
-    // Outbound: session events -> browser. Byte counters are logged at the end
-    // of the attachment so the transport can be measured in the field (this
-    // link — backend to a possibly weak-signal WAN browser — is the bottleneck
-    // the binary tile transport optimizes). Ends on eviction (explicit close)
-    // or engine death.
+    // Outbound: session events -> browser. Wire counters are logged at the end of
+    // the attachment so the transport can be measured in the field (see
+    // [`Totals`]). Ends on eviction (explicit close) or engine death.
     let mut outbound = tokio::spawn(async move {
-        let (mut tiles, mut tile_bytes, mut text_bytes) = (0u64, 0u64, 0u64);
+        let mut totals = Totals::default();
         let mut heartbeat = interval(heartbeat_timings.interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -134,14 +193,19 @@ async fn session(
                     break;
                 }
             };
+            // Read before encoding: only the tile variant produces a binary frame,
+            // and `encode` consumes the shape the dimensions come from.
+            let tile = match &msg {
+                ServerMsg::Tile(tile) => Some((tile.format, tile.w, tile.h)),
+                _ => None,
+            };
             let frame = match msg.encode() {
                 WireFrame::Binary(bytes) => {
-                    tiles += 1;
-                    tile_bytes += bytes.len() as u64;
+                    totals.binary(bytes.len(), tile);
                     Message::Binary(bytes.into())
                 }
                 WireFrame::Text(json) => {
-                    text_bytes += json.len() as u64;
+                    totals.text(json.len());
                     Message::Text(json.into())
                 }
             };
@@ -149,7 +213,7 @@ async fn session(
                 break; // browser gone
             }
         }
-        info!("ws: outbound totals: {tiles} tiles / {tile_bytes} bytes binary, {text_bytes} bytes text");
+        info!("ws: outbound totals: {totals}");
     });
 
     // Inbound: browser input -> protocol engine. Also ends when the outbound

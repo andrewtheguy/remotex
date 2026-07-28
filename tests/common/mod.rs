@@ -100,6 +100,21 @@ pub type Ws = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+/// Let the gateway log during an opted-in e2e run.
+///
+/// The point is the per-attachment wire totals (`ws: outbound totals:`,
+/// `src/ws.rs`): they are the only measurement of the browser link this repo has,
+/// and without this they could only be read off a hand-driven live session. A
+/// container run is repeatable, so it is the baseline a transport change gets
+/// compared against — visible with `-- --ignored --nocapture` and `RUST_LOG=info`.
+///
+/// Silent unless `RUST_LOG` asks for output, and idempotent because several tests
+/// in one binary may call it.
+#[allow(dead_code)]
+pub fn init_logging() {
+    let _ = env_logger::try_init();
+}
+
 /// Open the session WebSocket with a claim token and the login cookie.
 #[allow(dead_code)]
 pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
