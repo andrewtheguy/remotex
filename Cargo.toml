@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.46"
+version = "0.0.47"
 
 [package]
 name = "remotex"
@@ -45,14 +45,41 @@ log = "0.4"
 env_logger = "0.11"
 futures-util = "0.3"
 toml = "1"
-# Tile payload compression for the browser transport (see src/protocol.rs).
+# Cursor shapes only, since tiles moved to WebP: `encode_cursor_png` in
+# src/protocol.rs. A shape is a few hundred bytes on the JSON control channel, and
+# the macOS agent's arrive already PNG-encoded from AppKit, which cannot write WebP.
 png = "0.18"
+# WebP, the codec that replaced PNG and JPEG on the tile path (see src/protocol.rs). Not pure
+# Rust: libwebp-sys compiles vendored libwebp C with `cc`. That is not a new class
+# of requirement here — `ring` and `libz-sys` already do the same on every runner
+# — and it costs nothing at runtime, because there is no cross-compilation
+# (packaging/build-tarball.sh is a native `cargo build --release` per runner) and
+# packaging/Dockerfile only COPYs the finished binary in.
+#
+# `default-features = false` drops its `img` feature, which would otherwise pull
+# the whole `image` crate in for a convenience constructor we do not use.
+webp = { version = "0.3.1", default-features = false }
+# A direct dependency only to turn on libwebp's x86 SIMD. `webp` does not re-export
+# its sys crate's features, and cargo unifies features across the graph, so naming
+# libwebp-sys here is what reaches them.
+#
+# This makes the x86_64 build **x86-64-v3**, deliberately. libwebp-sys applies
+# `-msse4.1`/`-mavx2` to its whole `cc::Build` rather than per-file
+# (`setup_build` in its build.rs), so the objects are not runtime-dispatched: the
+# binary requires those instructions. Every machine this runs on is Coffee Lake or
+# newer (SSE4.1, AVX2, FMA, BMI2; no AVX-512), and this is a personal project, so
+# the portability the default gives up buys real encode time back on the one
+# codec that sits on the engine's hot path. arm64 needs nothing here — `neon` is
+# already on by default.
+libwebp-sys = { version = "0.9", features = ["sse41", "avx2"] }
 # Content hashing on the tile path: which pixels changed, and whether a payload
 # has been sent before. Not a checksum for integrity, so it is not cryptographic
 # — but it is 64-bit rather than 32, because a collision here means permanently
 # wrong pixels rather than a retry. xxh3 over blake2/sha2 because this runs on
-# every tile of every frame, and pure Rust because nothing else in the tree pulls
-# a C toolchain into the release matrix.
+# every tile of every frame. Pure Rust, which is a nice property but not the
+# reason it was chosen: `ring` (via rustls and snow) and `libz-sys` (via flate2
+# and png) already compile C on every runner, so a C dependency here would have
+# cost nothing new either.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cursor shapes ride the JSON control channel as base64 PNG (see
 # src/protocol.rs) — small and rare enough not to warrant a binary frame kind.
@@ -105,6 +132,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+# The codec the agent used for photographic tiles before WebP. A dev-dependency
+# rather than gone, because `webp_cost_against_png_cost` measures against it: the
+# reason JPEG was dropped is a ratio, and a ratio nobody can re-run is an anecdote.
+jpeg-encoder = { version = "0.7", features = ["simd"] }
 # `tokio::time::pause()` for the rxa engine's reconnect-backoff tests: waiting
 # out a real 1-second backoff in a unit test is a second of nothing.
 tokio = { version = "1", features = ["test-util"] }

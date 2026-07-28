@@ -5,8 +5,9 @@
 //! docs/architecture.md):
 //!
 //! - **Screen updates** are binary WebSocket frames, each one a *batch* of
-//!   records rather than a single tile — see [`batch`]. A payload is an encoded
-//!   image (PNG, or JPEG from the macOS agent) that the client decodes natively.
+//!   records rather than a single tile — see [`batch`]. A payload is a WebP
+//!   image the client decodes natively — lossless for screen content, lossy for
+//!   the photographic tiles the macOS agent classifies as such.
 //!   Binary replaced base64 RGBA inside JSON text, which inflated the
 //!   bottleneck backend->browser link by ~4.3x (4 bytes/px, +33% base64);
 //!   batching then replaced one frame per tile, which cost a WebSocket frame, a
@@ -14,7 +15,8 @@
 //! - **Control messages** (`resize`, `error`, `cursor`, …) are rare and small;
 //!   they stay JSON text frames with a `type` tag. `cursor` carries a base64
 //!   PNG — a pointer shape is a couple of hundred bytes and changes a handful
-//!   of times a session, so it is not worth a second binary frame kind.
+//!   of times a session, so it is not worth a second binary frame kind, and it
+//!   is the one place PNG survives the move to WebP (see [`CursorShape`]).
 //!
 //! Ordering between the two is the WebSocket's, and it is load-bearing: a
 //! `resize` reallocates the client's canvas, so a tile that arrived before it
@@ -40,8 +42,13 @@ pub const STRIP_ROWS: u16 = 64;
 /// against the old shape; a purely additive control message is not one, because
 /// clients are required to ignore tags they don't know.
 ///
-/// 3 is the batch envelope: binary frames stopped being one tile each.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 3 was the batch envelope: binary frames stopped being one tile each. 4 is
+/// WebP: one codec replaced PNG *and* JPEG, so a `TILE` record's format byte has
+/// exactly one valid value. That byte alone cannot protect a stale client —
+/// rejecting an unknown format drops the whole frame silently, which looks like a
+/// dead session rather than a version mismatch — so this is what makes the failure
+/// legible.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
 /// browser link, the gateway and the Mac agent cannot drift apart on it (the
@@ -304,14 +311,22 @@ pub mod batch {
 /// both look free until measured:
 ///
 /// - **Narrower** is expensive fast. 128 wide costs 2.01× on the same content and
-///   needs fewer than half its cells skippable to break even. PNG pays a fixed
-///   per-stream cost and loses horizontal redundancy in every one of them.
+///   needs fewer than half its cells skippable to break even. An encoder pays a
+///   fixed per-stream cost and loses horizontal redundancy in every one of them.
 /// - **Shorter is not the cheap axis.** 3200×16 costs 1.56–2.57×, often worse than
-///   any narrowing, because PNG's filters predict from the row *above*: a short
-///   stream throws away vertical prediction exactly as a narrow one throws away
+///   any narrowing, because filters predict from the row *above*: a short stream
+///   throws away vertical prediction exactly as a narrow one throws away
 ///   horizontal. Neither axis is free.
 ///
-/// 20480 px also stays far clear of the agent's `MIN_JPEG_PIXELS` (32×32), so its
+/// Those ratios were measured with PNG, which is no longer the codec
+/// ([`encode_webp`]). They are left as they were because the *shape* of the
+/// argument is what chose 320, and WebP does not change it — it too pays a fixed
+/// per-stream cost, and `webp_cost_against_png_cost` measures that cost as the
+/// dominant term at small sizes rather than a marginal one. Re-deriving the exact
+/// break-even under WebP would only be worth it if the cell size were up for
+/// revision.
+///
+/// 20480 px also stays far clear of the agent's `MIN_LOSSY_PIXELS` (32×32), so its
 /// per-tile codec classifier still has enough pixels to judge.
 ///
 /// # Where this does *not* apply
@@ -331,17 +346,20 @@ pub const CELL_W: u16 = 320;
 pub const CELL_H: u16 = STRIP_ROWS;
 
 /// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
-/// [`batch`] frame. The payload is an image stream the client decodes natively —
-/// PNG or JPEG, named by the `format` byte so `createImageBitmap` gets the right
-/// MIME type.
+/// [`batch`] frame. The payload is a WebP stream the client decodes natively.
 ///
-/// The RDP and VNC engines decode a framebuffer and PNG-compress it here
-/// ([`Tile::from_rgb`]); the macOS agent chooses PNG or JPEG per tile on the
-/// Mac and the gateway relays those bytes untouched ([`Tile::encoded`]), which
-/// is why the format travels with the tile instead of being a constant.
+/// The RDP and VNC engines decode a framebuffer and compress it here
+/// ([`Tile::from_rgb`], always lossless); the macOS agent encodes on the Mac and
+/// the gateway relays those bytes untouched ([`Tile::encoded`]), choosing lossless
+/// or lossy per tile from the content.
+///
+/// The `format` byte therefore has one valid value today. It is kept rather than
+/// dropped because it is the seam a second payload kind would arrive through —
+/// `docs/roadmap.md` puts H.264 next — and one byte per tile is not worth
+/// reclaiming and then re-adding.
 #[derive(Debug, Clone)]
 pub struct Tile {
-    /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`].
+    /// Payload codec. Always [`Tile::FORMAT_WEBP`]; see the note above.
     pub format: u8,
     pub x: u16,
     pub y: u16,
@@ -352,10 +370,17 @@ pub struct Tile {
 }
 
 impl Tile {
-    pub const FORMAT_PNG: u8 = 1;
-    pub const FORMAT_JPEG: u8 = 2;
+    /// WebP, lossless or lossy — the container is the same either way, so the
+    /// client needs no signal to tell them apart and the classifier's choice never
+    /// reaches the wire.
+    ///
+    /// 3 rather than reusing 1: 1 and 2 meant PNG and JPEG, and a value a stale
+    /// client *recognises* is worse than one it rejects. Reusing 1 would have it
+    /// hand WebP bytes to a PNG decoder, fail per tile, and ask for a cache reset
+    /// on every one — a reset storm rather than a clean refusal.
+    pub const FORMAT_WEBP: u8 = 3;
 
-    /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
+    /// Build a tile from packed RGB888 pixels, WebP-compressing the payload.
     pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
         let expected = usize::from(w) * usize::from(h) * 3;
         anyhow::ensure!(
@@ -363,9 +388,9 @@ impl Tile {
             "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
             rgb.len()
         );
-        let data = encode_png(w, h, png::ColorType::Rgb, rgb)?;
+        let data = encode_webp(w, h, rgb)?;
         Ok(Self {
-            format: Self::FORMAT_PNG,
+            format: Self::FORMAT_WEBP,
             x,
             y,
             w,
@@ -435,6 +460,12 @@ pub struct CursorShape {
     pub hx: u16,
     pub hy: u16,
     /// PNG-encoded RGBA image (the alpha channel carries the cursor mask).
+    ///
+    /// Still PNG after tiles moved to WebP, and deliberately: a shape is a few
+    /// hundred bytes sent a handful of times a session, so the codec saves nothing
+    /// measurable — while the macOS agent's shapes come out of AppKit
+    /// (`NSBitmapImageRep`, which cannot write WebP) and are relayed here
+    /// unmodified, so switching would mean re-encoding them for no gain.
     pub png: Vec<u8>,
 }
 
@@ -447,23 +478,117 @@ impl CursorShape {
             "cursor payload is {} bytes, expected {expected} for {w}x{h} RGBA",
             rgba.len()
         );
-        let png = encode_png(w, h, png::ColorType::Rgba, rgba)?;
+        let png = encode_cursor_png(w, h, rgba)?;
         Ok(Self { w, h, hx, hy, png })
     }
 }
 
-/// PNG-encode packed 8-bit pixels. Fast compression: the win over raw is
-/// already large for screen content, and this runs on the session's hot path.
-fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
+/// PNG-encode a cursor's packed RGBA8888 pixels.
+///
+/// The only PNG left in the gateway. Tiles are WebP ([`encode_webp`]); this stays
+/// because [`CursorShape::png`] rides the JSON control channel as base64 and the
+/// agent's own shapes arrive as PNG from AppKit.
+fn encode_cursor_png(w: u16, h: u16, rgba: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
-    encoder.set_color(color);
+    encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Fast);
     let mut writer = encoder.write_header()?;
-    writer.write_image_data(pixels)?;
+    writer.write_image_data(rgba)?;
     writer.finish()?;
     Ok(out)
+}
+
+/// WebP's maximum dimension in either axis, from the format itself (14 bits).
+///
+/// PNG had no such limit, so this is a new way for an encode to fail. It is
+/// unreachable in practice — a `u16` framebuffer could in principle be wider, and
+/// no desktop is — but the failure would land inside an engine's protocol-read
+/// loop, so it is checked here and reported rather than left to libwebp's
+/// `VP8_ENC_ERROR_BAD_DIMENSION`.
+const WEBP_MAX_DIMENSION: u16 = 16383;
+
+/// The lossless effort libwebp is asked for, chosen by measurement.
+///
+/// `method` is its speed/size dial and `quality`, in lossless mode, is an effort
+/// dial rather than a fidelity one. Both are pinned at the cheap end because these
+/// encodes are synchronous on an engine's own protocol-read loop, and because the
+/// extra compression above them does not pay for itself:
+///
+/// Bytes against `png::Compression::Fast`, from `webp_cost_against_png_cost` on two
+/// real screenshots — one a working window, one a desktop mostly covered by a
+/// photographic wallpaper. Content matters more than shape does:
+///
+/// | config | UI window | photo wallpaper | time vs PNG-Fast |
+/// |---|---|---|---|
+/// | `m0 q20` | **0.64-0.81x** | 0.83-0.88x | 5-34x |
+/// | `m2 q50` | 0.53-0.73x | 0.66-0.77x | 19-72x |
+///
+/// So the swap buys 19-36% of tile bytes on the content the RDP and VNC engines
+/// mostly carry, and rather less on a photograph — which is the right way round,
+/// since a photograph is what the macOS agent's classifier sends down its lossy
+/// branch instead. The 27-47% on offer at `m2` costs an order of magnitude more
+/// time: 3.1ms for one 320x64 cell, which an engine's read loop cannot spend.
+///
+/// Two things the same tables say, for whoever revisits this:
+///
+/// - **The cost is mostly fixed per encode, not per pixel.** A 16x16 tile costs
+///   60µs and a 320x64 one — 80x the pixels — costs 402µs. That is what makes the
+///   *ratio* worst on small rectangles even though their absolute cost is trivial,
+///   and it is a second reason the gateway does not snap damage onto a grid (see
+///   [`CELL_W`]).
+/// - **Higher effort is nearly free at the smallest sizes**, for that same reason:
+///   at 16x16, `m2 q50` costs 87µs against `m0 q20`'s 60µs and gives 0.53x rather
+///   than 0.76x. The crossover is sharp — by 64x20 the same swap costs 3.5x the
+///   time for 7% more compression — so a size-tiered effort is a real but *bounded*
+///   win, worth having only below roughly 512 pixels. Left out of this change so the
+///   codec swap can be validated on its own.
+///
+/// Timings are from an arm64 Mac. The x86-64 host the gateway is deployed to came
+/// out faster in every ratio (5.4x rather than 6.8x at 320x64), with byte counts
+/// identical, as they must be.
+const WEBP_LOSSLESS_METHOD: i32 = 0;
+const WEBP_LOSSLESS_EFFORT: f32 = 20.0;
+
+/// WebP-encode packed RGB888 losslessly.
+///
+/// Every caller is a screen tile, so this is lossless without a choice: the
+/// gateway's engines decode a framebuffer and must reproduce it exactly. Only the
+/// macOS agent encodes lossily, on the Mac, from content it classified.
+///
+/// Two hazards in the `webp` crate that the shape of this function is answering:
+/// `Encoder::from_rgb` *panics* on a buffer shorter than `w * h * 3`, so the length
+/// check above every call is load-bearing rather than tidy; and `Encoder::encode`
+/// and `encode_lossless` both `unwrap()` internally, so `encode_advanced` is the
+/// only entry point that can report failure — which matters because
+/// `[profile.release] panic = "abort"` makes a panic here unrecoverable.
+fn encode_webp(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(w > 0 && h > 0, "cannot encode a {w}x{h} tile");
+    anyhow::ensure!(
+        w <= WEBP_MAX_DIMENSION && h <= WEBP_MAX_DIMENSION,
+        "tile {w}x{h} exceeds WebP's {WEBP_MAX_DIMENSION}px limit"
+    );
+    let expected = usize::from(w) * usize::from(h) * 3;
+    anyhow::ensure!(
+        rgb.len() == expected,
+        "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
+        rgb.len()
+    );
+    let mut config = webp::WebPConfig::new()
+        .map_err(|()| anyhow::anyhow!("libwebp rejected its own default config"))?;
+    config.lossless = 1;
+    config.quality = WEBP_LOSSLESS_EFFORT;
+    config.method = WEBP_LOSSLESS_METHOD;
+    // No libwebp worker thread. A tile is small and this runs on the engine's read
+    // loop, so a thread per tile would cost more than the work it splits.
+    config.thread_level = 0;
+    let encoded = webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
+        .encode_advanced(&config)
+        .map_err(|e| anyhow::anyhow!("WebP encode failed for {w}x{h}: {e:?}"))?;
+    // Copied out rather than held: `WebPMemory` is neither `Send` nor `Sync`, and
+    // a tile crosses tasks on its way to the socket.
+    Ok(encoded.to_vec())
 }
 
 /// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
@@ -1027,7 +1152,7 @@ mod tests {
     #[test]
     fn tile_record_layout_is_op_format_slot_le_coords_len_payload() {
         let tile = Tile {
-            format: Tile::FORMAT_PNG,
+            format: Tile::FORMAT_WEBP,
             x: 0x0102,
             y: 0x0304,
             w: 2,
@@ -1037,7 +1162,7 @@ mod tests {
         let mut out = Vec::new();
         tile.write_record(batch::NO_SLOT, &mut out);
         assert_eq!(out[0], batch::OP_TILE);
-        assert_eq!(out[1], Tile::FORMAT_PNG);
+        assert_eq!(out[1], Tile::FORMAT_WEBP);
         assert_eq!(&out[2..4], &[0xFF, 0xFF]); // slot: NO_SLOT
         assert_eq!(&out[4..6], &[0x02, 0x01]); // x, little-endian
         assert_eq!(&out[6..8], &[0x04, 0x03]); // y
@@ -1066,39 +1191,32 @@ mod tests {
     }
 
     // The pass-through path: the macOS agent's already-encoded bytes reach the
-    // browser byte for byte, with the format byte it chose.
+    // browser byte for byte. The gateway never looks inside a payload, so this is
+    // the one place the wire carries bytes this crate did not produce.
     #[test]
     fn encoded_tile_passes_the_payload_and_format_through_untouched() {
-        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
-        let tile = Tile::encoded(Tile::FORMAT_JPEG, 0x0102, 0x0304, 320, 64, jpeg.clone());
+        let webp = vec![
+            b'R', b'I', b'F', b'F', 0x10, 0, 0, 0, b'W', b'E', b'B', b'P', b'V', b'P', b'8', b'L',
+        ];
+        let tile = Tile::encoded(Tile::FORMAT_WEBP, 0x0102, 0x0304, 320, 64, webp.clone());
         let mut out = Vec::new();
         tile.write_record(batch::NO_SLOT, &mut out);
         assert_eq!(out[0], batch::OP_TILE);
-        assert_eq!(out[1], Tile::FORMAT_JPEG);
+        assert_eq!(out[1], Tile::FORMAT_WEBP);
         assert_eq!(&out[4..6], &[0x02, 0x01]); // x, little-endian
         assert_eq!(&out[6..8], &[0x04, 0x03]); // y
         assert_eq!(&out[8..10], &[0x40, 0x01]); // w = 320
         assert_eq!(&out[10..12], &[64, 0]); // h
-        assert_eq!(&out[batch::TILE_HEADER_LEN..], jpeg.as_slice());
-
-        // A PNG the agent encoded itself takes the same path, differing only in
-        // the format byte — the gateway looks inside neither.
-        let png = vec![0x89, b'P', b'N', b'G'];
-        let tile = Tile::encoded(Tile::FORMAT_PNG, 0, 0, 1, 1, png.clone());
-        let mut out = Vec::new();
-        tile.write_record(batch::NO_SLOT, &mut out);
-        assert_eq!(out[1], Tile::FORMAT_PNG);
-        assert_eq!(&out[batch::TILE_HEADER_LEN..], png.as_slice());
+        assert_eq!(&out[batch::TILE_HEADER_LEN..], webp.as_slice());
     }
 
-    // from_rgb still stamps PNG, so RDP and VNC are unaffected by the new field.
     #[test]
-    fn from_rgb_still_marks_its_payload_as_png() {
+    fn from_rgb_marks_its_payload_as_webp() {
         let tile = Tile::from_rgb(0, 0, 2, 2, &[0u8; 12]).unwrap();
-        assert_eq!(tile.format, Tile::FORMAT_PNG);
+        assert_eq!(tile.format, Tile::FORMAT_WEBP);
         let mut out = Vec::new();
         tile.write_record(batch::NO_SLOT, &mut out);
-        assert_eq!(out[1], Tile::FORMAT_PNG);
+        assert_eq!(out[1], Tile::FORMAT_WEBP);
     }
 
     /// A desktop-like strip: horizontal gradient, repeated rows.
@@ -1113,26 +1231,29 @@ mod tests {
         rgb
     }
 
+    /// Also the guard on the shipped config: a `lossless` flag that libwebp did
+    /// not honour would show up here and nowhere else, and the failure mode is
+    /// silent — slightly wrong pixels that no other test looks at.
     #[test]
-    fn screen_content_compresses_to_png_and_roundtrips() {
+    fn screen_content_compresses_and_roundtrips_losslessly() {
         let (w, h) = (320, 64);
         let rgb = gradient_rgb(w, h);
         let tile = Tile::from_rgb(7, 9, w, h, &rgb).unwrap();
         assert!(
             tile.data.len() < rgb.len() / 4,
-            "PNG should compress a gradient well: {} vs raw {}",
+            "WebP should compress a gradient well: {} vs raw {}",
             tile.data.len(),
             rgb.len()
         );
 
-        // Decode the PNG back and verify the pixels survived.
-        let decoder = png::Decoder::new(std::io::Cursor::new(tile.data.as_slice()));
-        let mut reader = decoder.read_info().unwrap();
-        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
-        let info = reader.next_frame(&mut buf).unwrap();
-        assert_eq!((info.width, info.height), (u32::from(w), u32::from(h)));
-        assert_eq!(info.color_type, png::ColorType::Rgb);
-        assert_eq!(&buf[..info.buffer_size()], rgb.as_slice());
+        let image = webp::Decoder::new(&tile.data).decode().expect("payload decodes");
+        assert_eq!((image.width(), image.height()), (u32::from(w), u32::from(h)));
+        // An RGB source must not come back with an alpha channel: the viewer's
+        // decoder discards alpha on the stated grounds that tiles are opaque
+        // (`TileDecoder.swift`), so a payload carrying it would decode to the
+        // wrong pixels rather than fail.
+        assert!(!image.is_alpha());
+        assert_eq!(&*image, rgb.as_slice());
     }
 
     // The binary tile record's reason to exist: it must beat the old
@@ -1155,12 +1276,35 @@ mod tests {
     }
 
     #[test]
-    fn tiny_tile_is_still_a_valid_png() {
-        // 2x2 of "noise" — PNG's fixed overhead dominates here, which is
+    fn tiny_tile_is_still_a_valid_webp() {
+        // 2x2 of "noise" — the container's fixed overhead dominates here, which is
         // accepted: one decode path beats saving a few dozen bytes.
         let rgb = [1u8, 200, 3, 250, 5, 90, 7, 160, 9, 30, 11, 220];
         let tile = Tile::from_rgb(0, 0, 2, 2, &rgb).unwrap();
-        assert_eq!(&tile.data[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&tile.data[..4], b"RIFF");
+        assert_eq!(&tile.data[8..12], b"WEBP");
+    }
+
+    // WebP cannot describe a tile wider or taller than 16383, where PNG could.
+    // Unreachable from any real desktop, but the failure would land inside an
+    // engine's protocol-read loop, so it has to be an error and not a panic.
+    #[test]
+    fn a_tile_beyond_webps_dimension_limit_is_rejected() {
+        let w = WEBP_MAX_DIMENSION + 1;
+        let rgb = vec![0u8; usize::from(w) * 3];
+        let err = Tile::from_rgb(0, 0, w, 1, &rgb).unwrap_err().to_string();
+        assert!(err.contains("16383"), "unhelpful error: {err}");
+        // The limit itself still encodes, so the bound is not off by one.
+        let rgb = vec![0u8; usize::from(WEBP_MAX_DIMENSION) * 3];
+        assert!(Tile::from_rgb(0, 0, WEBP_MAX_DIMENSION, 1, &rgb).is_ok());
+    }
+
+    #[test]
+    fn a_zero_sized_tile_is_rejected_rather_than_handed_to_libwebp() {
+        // The `webp` crate does not reject these; libwebp fails them deep inside
+        // with BAD_DIMENSION, and `Encoder::from_rgb` panics on a short buffer.
+        assert!(Tile::from_rgb(0, 0, 0, 4, &[]).is_err());
+        assert!(Tile::from_rgb(0, 0, 4, 0, &[]).is_err());
     }
 
     #[test]
@@ -1185,6 +1329,137 @@ mod tests {
         rgb
     }
 
+    /// Uniform noise: the one case with no structure for either codec to exploit,
+    /// and therefore the honest worst case for encode *time*.
+    fn noise_rgb(w: u16, h: u16) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..usize::from(w) * usize::from(h) * 3)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// A real screen, decoded to packed RGB888 from the PNG at
+    /// `REMOTEX_BENCH_IMAGE`.
+    ///
+    /// **There is deliberately no synthetic fallback**, and that is the most
+    /// important thing in this module for anyone extending the bench below. The
+    /// obvious generated fixtures — [`flat_ui_rgb`], [`gradient_rgb`], the agent's
+    /// `photo` — are all exactly *periodic*, and WebP lossless resolves any of them
+    /// to about a hundred bytes at any size, because its backward references match
+    /// the whole image against its first period. Measured that way WebP appears to
+    /// beat PNG by 60× on a 3200×64 strip, which is fiction. Those fixtures are
+    /// fine for [`encode_cost_against_hash_cost`], which compares PNG against
+    /// itself, and worthless for comparing one codec to another.
+    ///
+    /// So this reads real pixels. Any screenshot of a desktop will do:
+    ///
+    /// ```sh
+    /// ssh mac screencapture -x -t png /tmp/shot.png
+    /// scp 'mac:/tmp/shot.png' tmp/bench/shot.png
+    /// REMOTEX_BENCH_IMAGE=tmp/bench/shot.png \
+    ///   cargo test --release --lib -- --ignored --nocapture webp_cost
+    /// ```
+    fn screenshot_rgb() -> Option<(u16, u16, Vec<u8>, String)> {
+        let path = std::env::var("REMOTEX_BENCH_IMAGE").ok()?;
+        let file = std::fs::File::open(&path).expect("REMOTEX_BENCH_IMAGE is not readable");
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+            .read_info()
+            .expect("REMOTEX_BENCH_IMAGE is not a PNG");
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).expect("PNG did not decode");
+        assert_eq!(info.bit_depth, png::BitDepth::Eight, "expected an 8-bit PNG");
+        let rgb = match info.color_type {
+            png::ColorType::Rgb => buf[..info.buffer_size()].to_vec(),
+            png::ColorType::Rgba => buf[..info.buffer_size()]
+                .chunks_exact(4)
+                .flat_map(|px| [px[0], px[1], px[2]])
+                .collect(),
+            other => panic!("expected an RGB or RGBA PNG, got {other:?}"),
+        };
+        let (w, h) = (info.width as u16, info.height as u16);
+        assert_eq!(rgb.len(), usize::from(w) * usize::from(h) * 3);
+        Some((w, h, rgb, path))
+    }
+
+    /// Cut one `w`×`h` tile out of a `sw`-wide RGB888 image at `(x, y)`.
+    fn crop_rgb(src: &[u8], sw: u16, x: u16, y: u16, w: u16, h: u16) -> Vec<u8> {
+        let stride = usize::from(sw) * 3;
+        let mut out = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for row in 0..usize::from(h) {
+            let start = (usize::from(y) + row) * stride + usize::from(x) * 3;
+            out.extend_from_slice(&src[start..start + usize::from(w) * 3]);
+        }
+        out
+    }
+
+    /// Up to `limit` `w`×`h` tiles spread evenly over the image, and how many the
+    /// image holds in total — a strided sample of what a full repaint would send.
+    fn sample_tiles(
+        src: &[u8],
+        sw: u16,
+        sh: u16,
+        w: u16,
+        h: u16,
+        limit: usize,
+    ) -> (Vec<Vec<u8>>, usize) {
+        let (cols, rows) = (usize::from(sw / w), usize::from(sh / h));
+        let total = cols * rows;
+        let step = total.div_ceil(limit.max(1)).max(1);
+        let tiles = (0..total)
+            .step_by(step)
+            .map(|i| {
+                let (cx, cy) = (i % cols, i / cols);
+                crop_rgb(src, sw, (cx as u16) * w, (cy as u16) * h, w, h)
+            })
+            .collect();
+        (tiles, total)
+    }
+
+    /// WebP-encode packed RGB888 with a hand-built config.
+    ///
+    /// `encode_advanced` is the only encode entry point in the `webp` crate that
+    /// returns a `Result`: `Encoder::encode` and `Encoder::encode_lossless` both
+    /// `unwrap()` internally, and `[profile.release] panic = "abort"` makes that
+    /// unrecoverable. `Encoder::from_rgb` panics on a buffer shorter than
+    /// `w * h * 3`, so the length is asserted before it is handed over.
+    ///
+    /// In lossless mode libwebp reads `quality` as an effort dial, not a fidelity
+    /// one, and `method` is the speed/size trade (0 selects its low-effort path).
+    fn webp_rgb(w: u16, h: u16, rgb: &[u8], lossless: bool, quality: f32, method: i32) -> Vec<u8> {
+        assert_eq!(rgb.len(), usize::from(w) * usize::from(h) * 3);
+        let mut config = webp::WebPConfig::new().expect("libwebp rejected its own defaults");
+        config.lossless = i32::from(lossless);
+        config.quality = quality;
+        config.method = method;
+        // No worker thread: these encodes run on an engine's protocol-read loop,
+        // where spawning a thread per small tile would cost more than it saves.
+        config.thread_level = 0;
+        webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
+            .encode_advanced(&config)
+            .map(|mem| mem.to_vec())
+            .unwrap_or_else(|e| panic!("webp encode failed for {w}x{h}: {e:?}"))
+    }
+
+    /// Decode and compare, so a "lossless" config that is quietly lossy cannot be
+    /// printed as a win.
+    fn assert_webp_roundtrips(w: u16, h: u16, rgb: &[u8], encoded: &[u8], label: &str) {
+        let image = webp::Decoder::new(encoded)
+            .decode()
+            .unwrap_or_else(|| panic!("{label}: {w}x{h} payload did not decode"));
+        assert_eq!(
+            (image.width(), image.height()),
+            (u32::from(w), u32::from(h)),
+            "{label}: {w}x{h} decoded to the wrong size"
+        );
+        assert!(!image.is_alpha(), "{label}: an RGB source gained an alpha channel");
+        assert_eq!(&*image, rgb, "{label}: {w}x{h} did not roundtrip losslessly");
+    }
+
     /// What a change-detection hash costs against what it skips, and what a
     /// narrower cell costs when its pixels really did change.
     ///
@@ -1201,8 +1476,14 @@ mod tests {
     ///    in the case where it wins nothing, so it sets the skip rate the grid has
     ///    to achieve before it is worth having at all.
     ///
-    /// Run it in **release**: `png` at `Compression::Fast` is several times slower
-    /// in a debug build, which would flatter the hash and slander the grid.
+    /// Run it in **release**: an encode is several times slower in a debug build,
+    /// which would flatter the hash and slander the grid.
+    ///
+    /// The prose below still says PNG, and the ratios in [`CELL_W`]'s documentation
+    /// were measured with it, but `Tile::from_rgb` is WebP now — so a fresh run
+    /// prints WebP's numbers. Both are what the tile path actually costs at the time
+    /// of running, which is what this measures; see [`CELL_W`] for why the cell size
+    /// was not re-derived.
     ///
     /// ```sh
     /// cargo test --release --lib -- --ignored --nocapture encode_cost
@@ -1278,5 +1559,464 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Write the WebP fixtures the macOS viewer's tests decode.
+    ///
+    /// They are checked in rather than generated in Swift because **ImageIO cannot
+    /// write WebP** — `CGImageDestinationCopyTypeIdentifiers()` has no
+    /// `org.webmproject.webp`, though `CGImageSource` reads it, which is why the
+    /// viewer itself is unaffected. Those tests used to encode their own payloads
+    /// through `CGImageDestination` precisely so no encoder's choices got frozen
+    /// into a fixture; that is no longer available, so the encoder that produces
+    /// them is this one — the same one production uses, which is the next best
+    /// thing and arguably better: it is the real wire payload.
+    ///
+    /// Run after changing [`encode_webp`]'s config, or when a test needs a shape or
+    /// colour that is not here yet (it will say so by name):
+    ///
+    /// ```sh
+    /// cargo test --lib -- --ignored --nocapture swift_webp_fixtures
+    /// ```
+    #[test]
+    #[ignore = "writes files into the viewer's test bundle; run explicitly"]
+    fn write_swift_webp_fixtures() {
+        let dir = std::path::Path::new("apps/remotex-viewer/Tests/Fixtures");
+        std::fs::create_dir_all(dir).expect("fixture directory");
+
+        // Solid 2x2s for `tileRecord`, whose `red:` argument selects between them.
+        // The other two channels are fixed, so a test comparing decoded bytes is
+        // comparing the thing it named.
+        for red in [0x11u8, 0x22, 0xFF] {
+            let rgb: Vec<u8> = std::iter::repeat_n([red, 0x20, 0x40], 4).flatten().collect();
+            let name = format!("solid-2x2-{red:02x}.webp");
+            std::fs::write(dir.join(&name), encode_webp(2, 2, &rgb).unwrap()).unwrap();
+            println!("wrote {name}");
+        }
+
+        // Top half red, bottom half blue: the asymmetry is the point, since it is
+        // what catches a decoder that flips rows. Also stands in for a payload
+        // whose size disagrees with its record header.
+        let mut rgb = Vec::new();
+        for y in 0..8u16 {
+            for _ in 0..8 {
+                rgb.extend_from_slice(if y < 4 { &[0xFF, 0x00, 0x00] } else { &[0x00, 0x00, 0xFF] });
+            }
+        }
+        std::fs::write(dir.join("topdown-8x8.webp"), encode_webp(8, 8, &rgb).unwrap()).unwrap();
+        println!("wrote topdown-8x8.webp");
+
+        // The two layouts ImageIO can hand back for a WebP: three channels, and
+        // four when the bitstream carries alpha. `TileDecoder` has to normalise both
+        // to four bytes per pixel, and this is the only place the alpha case exists
+        // — nothing in production encodes it, which is exactly why it is a fixture.
+        let opaque: Vec<u8> = std::iter::repeat_n([0x30u8, 0x60, 0x90], 16).flatten().collect();
+        std::fs::write(dir.join("opaque-4x4.webp"), encode_webp(4, 4, &opaque).unwrap()).unwrap();
+        println!("wrote opaque-4x4.webp");
+
+        let rgba: Vec<u8> = std::iter::repeat_n([0x30u8, 0x60, 0x90, 0x80], 16).flatten().collect();
+        let mut config = webp::WebPConfig::new().unwrap();
+        config.lossless = 1;
+        config.quality = WEBP_LOSSLESS_EFFORT;
+        config.method = WEBP_LOSSLESS_METHOD;
+        config.thread_level = 0;
+        let alpha = webp::Encoder::from_rgba(&rgba, 4, 4)
+            .encode_advanced(&config)
+            .expect("alpha fixture encodes");
+        std::fs::write(dir.join("alpha-4x4.webp"), &*alpha).unwrap();
+        println!("wrote alpha-4x4.webp");
+
+        // A *lossy* payload, which no other fixture is: the agent's classifier sends
+        // photographic tiles down that branch, and lossy WebP is a VP8 bitstream
+        // where everything else here is VP8L. Two different decoders on the other
+        // side, and only one of them was being exercised — so a viewer that could
+        // not read VP8 would have shown blank tiles on exactly the content the
+        // classifier picks, with every test passing.
+        let mut rgb = Vec::new();
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let jitter = ((state >> 56) as i32 - 128) / 5;
+                // Ramps chosen so that neither wraps across 64 pixels: red climbs
+                // with x and green with y, monotonically, which is what lets the
+                // Swift side check the orientation from two corners.
+                for base in [i32::from(x) * 3, i32::from(y) * 3 + 30, 100] {
+                    rgb.push((base + jitter).clamp(0, 255) as u8);
+                }
+            }
+        }
+        let mut lossy_config = webp::WebPConfig::new().unwrap();
+        lossy_config.lossless = 0;
+        lossy_config.quality = 80.0;
+        lossy_config.method = WEBP_LOSSLESS_METHOD;
+        lossy_config.thread_level = 0;
+        let lossy = webp::Encoder::from_rgb(&rgb, 64, 64)
+            .encode_advanced(&lossy_config)
+            .expect("lossy fixture encodes");
+        // Not `assert_ne!` against the source pixels: those are raw RGB and this is
+        // an encoded container, so they differ however the config was set — a
+        // lossless encode would have passed that check just as well. The chunk
+        // identifier is the thing that actually distinguishes the two bitstreams.
+        assert_eq!(&lossy[12..16], b"VP8 ", "the lossy fixture is not a lossy bitstream");
+        std::fs::write(dir.join("lossy-64x64.webp"), &*lossy).unwrap();
+        println!("wrote lossy-64x64.webp");
+
+        // Every fixture is read back and checked against what its name claims,
+        // because the Swift side cannot tell the difference. `alpha-4x4` in
+        // particular is only worth having if the bitstream really does carry alpha:
+        // uniform alpha is exactly the sort of thing an encoder may decide to drop,
+        // and a fixture that silently became opaque would leave `TileDecoder`'s
+        // four-bytes-per-pixel normalisation untested while looking covered.
+        //
+        // The codec chunk is checked for the same reason: `VP8L` and `VP8 ` are two
+        // different bitstreams decoded by two different paths on the other side, so a
+        // config change that silently flipped one is a fixture that stops covering
+        // what its test claims.
+        for (name, w, h, wants_alpha, chunk) in [
+            ("solid-2x2-11.webp", 2u32, 2u32, false, b"VP8L"),
+            ("solid-2x2-22.webp", 2, 2, false, b"VP8L"),
+            ("solid-2x2-ff.webp", 2, 2, false, b"VP8L"),
+            ("topdown-8x8.webp", 8, 8, false, b"VP8L"),
+            ("opaque-4x4.webp", 4, 4, false, b"VP8L"),
+            ("alpha-4x4.webp", 4, 4, true, b"VP8L"),
+            ("lossy-64x64.webp", 64, 64, false, b"VP8 "),
+        ] {
+            let bytes = std::fs::read(dir.join(name)).unwrap();
+            assert!(bytes.len() >= 16, "{name} is too short to be a WebP");
+            assert_eq!(&bytes[..4], b"RIFF", "{name} is not a RIFF container");
+            assert_eq!(&bytes[8..12], b"WEBP", "{name} is not a WebP");
+            assert_eq!(&bytes[12..16], chunk, "{name} is not the codec its test expects");
+            let image = webp::Decoder::new(&bytes)
+                .decode()
+                .unwrap_or_else(|| panic!("{name} does not decode"));
+            assert_eq!((image.width(), image.height()), (w, h), "{name} is the wrong size");
+            assert_eq!(image.is_alpha(), wants_alpha, "{name}'s alpha channel is not as named");
+        }
+    }
+
+    /// What WebP costs against PNG on this protocol's own content, in bytes and in
+    /// time. The decision record for replacing the tile codec.
+    ///
+    /// A sibling of [`encode_cost_against_hash_cost`] rather than an extension of
+    /// it: that test's numbers are quoted verbatim in [`CELL_W`]'s documentation and
+    /// have to stay readable on their own.
+    ///
+    /// Ignored and mostly assertion-free for the same reasons as its sibling — it
+    /// prints, it does not judge, because a timing assertion on a shared machine is
+    /// a flaky test. The one thing it *does* assert is that every payload from a
+    /// lossless config decodes back to the original pixels: a config that is
+    /// quietly lossy would otherwise print as the winner.
+    ///
+    /// Run it in **release**. `png` at `Compression::Fast` is several times slower
+    /// in a debug build, so a debug run flatters WebP and decides nothing:
+    ///
+    /// ```sh
+    /// cargo test --release --lib -- --ignored --nocapture webp_cost
+    /// ```
+    ///
+    /// Measured on **real screen pixels** ([`screenshot_rgb`]), tiled the way an
+    /// engine would tile them, because generated fixtures give answers off by
+    /// orders of magnitude — see that function for what went wrong the first time.
+    ///
+    /// Three questions, in the order they have to be answered:
+    ///
+    /// 1. **Which lossless config?** Section 1 sweeps `method` × effort at one shape.
+    /// 2. **Does it hold across shapes?** Section 2 re-runs the shortlist over the
+    ///    whole shape range, summing a sampled tiling of the screenshot — so the
+    ///    byte column is a repaint total, not one lucky tile. Gateway damage is
+    ///    *small*: RDP's median is 1295 px, 92% of it under one cell (see
+    ///    [`CELL_W`]), and those encodes run synchronously on the engine's
+    ///    protocol-read loop, so the small end is the binding case, not the
+    ///    3200-wide strip.
+    /// 3. **Can JPEG go?** Section 3 puts WebP lossy against `jpeg-encoder` at the
+    ///    quality the agent ships. If WebP is competitive the wire drops to one
+    ///    codec. Section 4 repeats both against uniform noise, the worst case
+    ///    either codec can be handed.
+    #[test]
+    #[ignore = "prints timings; run explicitly in release"]
+    fn webp_cost_against_png_cost() {
+        use std::time::Instant;
+
+        /// How many times to repeat a pass over a tile sample.
+        ///
+        /// Budgeted in *pixels*, not passes: one pass already encodes every tile in
+        /// the sample, so a wide shape needs very few repeats to be timed as well as
+        /// a small one needs many. Fixing the repeat count instead makes the slowest
+        /// config at the widest shape dominate the whole run.
+        fn passes_for(tiles: usize, w: u16, h: u16) -> u32 {
+            let per_pass = tiles as u64 * u64::from(w) * u64::from(h);
+            (4_000_000 / per_pass.max(1)).clamp(1, 50) as u32
+        }
+
+        fn time<T>(runs: u32, mut f: impl FnMut() -> T) -> std::time::Duration {
+            let started = Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(f());
+            }
+            started.elapsed() / runs
+        }
+
+        let Some((sw, sh, screen, path)) = screenshot_rgb() else {
+            println!(
+                "\nSkipped: set REMOTEX_BENCH_IMAGE to a PNG screenshot. Generated\n\
+                 fixtures are periodic and would overstate WebP by ~60x — see\n\
+                 screenshot_rgb's documentation."
+            );
+            return;
+        };
+        println!("\n=== source: {path}, {sw}x{sh} ===");
+
+        // Gateway-realistic rects first (small and numerous), then the agent's cell,
+        // then a wide strip. Widths beyond the screenshot are skipped, not clamped.
+        const SHAPES: [(u16, u16); 8] = [
+            (16, 16),
+            (32, 40),
+            (64, 20),
+            (120, 11),
+            (240, 64),
+            (320, 64),
+            (640, 64),
+            (1600, 64),
+        ];
+        /// `(method, effort)` pairs carried into section 2: fastest, middle, and the
+        /// crate's own default effort.
+        const SHORTLIST: [(i32, f32); 3] = [(0, 20.0), (2, 50.0), (4, 75.0)];
+        /// Tiles per shape. A 16×16 tiling of a 1600×1000 screen is 6250 tiles, and
+        /// timing every one of them at 15 configs would take minutes for a ratio the
+        /// sample already settles. Every table below prints the sample and the total.
+        const SAMPLE: usize = 24;
+
+        println!("\n=== 1. lossless config sweep at 320x64, against png::Compression::Fast ===");
+        let (cells, total) = sample_tiles(&screen, sw, sh, 320, 64, SAMPLE);
+        let runs = passes_for(cells.len(), 320, 64);
+        let png: usize = cells.iter().map(|c| png_fast(320, 64, c).len()).sum();
+        let png_time = time(runs, || {
+            cells.iter().map(|c| png_fast(320, 64, c).len()).sum::<usize>()
+        });
+        println!(
+            "  {} of {total} tiles, {png} png bytes, {:.1}µs/tile",
+            cells.len(),
+            png_time.as_secs_f64() * 1e6 / cells.len() as f64
+        );
+        println!("  config      bytes   vs png   µs/tile   vs png");
+        for method in [0, 1, 2, 3, 4] {
+            for effort in [20.0f32, 50.0, 75.0] {
+                let bytes: usize = cells
+                    .iter()
+                    .map(|c| {
+                        let data = webp_rgb(320, 64, c, true, effort, method);
+                        assert_webp_roundtrips(320, 64, c, &data, "lossless sweep");
+                        data.len()
+                    })
+                    .sum();
+                let took = time(runs, || {
+                    cells
+                        .iter()
+                        .map(|c| webp_rgb(320, 64, c, true, effort, method).len())
+                        .sum::<usize>()
+                });
+                println!(
+                    "  m{method} q{effort:<3.0}  {bytes:>7}  {:>6.2}x  {:>7.1}  {:>6.2}x",
+                    bytes as f64 / png as f64,
+                    took.as_secs_f64() * 1e6 / cells.len() as f64,
+                    took.as_secs_f64() / png_time.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+        }
+
+        println!("\n=== 2. the shortlist across every shape (sampled repaint totals) ===");
+        println!("  shape      tiles     png B  µs/tile   config     B   vs png  µs/tile   vs png");
+        for (w, h) in SHAPES {
+            if w > sw || h > sh {
+                println!("  {w}x{h}: larger than the screenshot, skipped");
+                continue;
+            }
+            let (tiles, total) = sample_tiles(&screen, sw, sh, w, h, SAMPLE);
+            let runs = passes_for(tiles.len(), w, h);
+            let png: usize = tiles.iter().map(|t| png_fast(w, h, t).len()).sum();
+            let png_time = time(runs, || {
+                tiles.iter().map(|t| png_fast(w, h, t).len()).sum::<usize>()
+            });
+            let per_tile = |d: std::time::Duration| d.as_secs_f64() * 1e6 / tiles.len() as f64;
+            let mut shape = format!("{w}x{h}");
+            let mut count = format!("{}/{total}", tiles.len());
+            for (method, effort) in SHORTLIST {
+                let bytes: usize = tiles
+                    .iter()
+                    .map(|t| {
+                        let data = webp_rgb(w, h, t, true, effort, method);
+                        assert_webp_roundtrips(w, h, t, &data, "shape sweep");
+                        data.len()
+                    })
+                    .sum();
+                let took = time(runs, || {
+                    tiles
+                        .iter()
+                        .map(|t| webp_rgb(w, h, t, true, effort, method).len())
+                        .sum::<usize>()
+                });
+                println!(
+                    "  {shape:<9} {count:>7} {png:>9} {:>8.1}   m{method} q{effort:<3.0} \
+                     {bytes:>7}  {:>6.2}x {:>8.1}  {:>6.2}x",
+                    per_tile(png_time),
+                    bytes as f64 / png as f64,
+                    per_tile(took),
+                    took.as_secs_f64() / png_time.as_secs_f64().max(f64::EPSILON),
+                );
+                // The png columns belong to the shape, not to each config row.
+                shape.clear();
+                count.clear();
+            }
+        }
+
+        println!("\n=== 3. lossy: WebP q80 against jpeg-encoder q80, on the same tiles ===");
+        println!("  shape      tiles    jpeg B  µs/tile   config     B  vs jpeg  µs/tile  vs jpeg");
+        for (w, h) in [(320u16, 64u16), (640, 64)] {
+            let (tiles, total) = sample_tiles(&screen, sw, sh, w, h, SAMPLE);
+            let runs = passes_for(tiles.len(), w, h);
+            let jpeg: usize = tiles.iter().map(|t| jpeg_q80(w, h, t).len()).sum();
+            let jpeg_time = time(runs, || {
+                tiles.iter().map(|t| jpeg_q80(w, h, t).len()).sum::<usize>()
+            });
+            let per_tile = |d: std::time::Duration| d.as_secs_f64() * 1e6 / tiles.len() as f64;
+            let mut shape = format!("{w}x{h}");
+            let mut count = format!("{}/{total}", tiles.len());
+            for method in [0, 2, 4] {
+                let bytes: usize = tiles
+                    .iter()
+                    .map(|t| webp_rgb(w, h, t, false, 80.0, method).len())
+                    .sum();
+                let took = time(runs, || {
+                    tiles
+                        .iter()
+                        .map(|t| webp_rgb(w, h, t, false, 80.0, method).len())
+                        .sum::<usize>()
+                });
+                println!(
+                    "  {shape:<9} {count:>7} {jpeg:>9} {:>8.1}   m{method} q80  {bytes:>7}  \
+                     {:>6.2}x {:>8.1}  {:>6.2}x",
+                    per_tile(jpeg_time),
+                    bytes as f64 / jpeg as f64,
+                    per_tile(took),
+                    took.as_secs_f64() / jpeg_time.as_secs_f64().max(f64::EPSILON),
+                );
+                shape.clear();
+                count.clear();
+            }
+        }
+
+        // Whether the agent's classifier still earns its keep, which the codec swap
+        // put back in question. Its premise is "many distinct colours means lossy is
+        // much smaller", and that was measured against PNG — which cannot exploit a
+        // smooth ramp, where WebP lossless can. So on real screen content: how many
+        // tiles would the lossy branch actually make smaller, and by how much at
+        // best? An oracle rather than the classifier itself, so this needs no copy
+        // of it: the gap between "always lossless" and "best of the two per tile" is
+        // the most any classifier could win.
+        println!("\n=== 3b. is a lossy branch worth having on real screen content? ===");
+        for (w, h) in [(320u16, 64u16)] {
+            let (tiles, total) = sample_tiles(&screen, sw, sh, w, h, SAMPLE);
+            let mut lossless_total = 0usize;
+            let mut lossy_total = 0usize;
+            let mut oracle_total = 0usize;
+            let mut lossy_wins = 0usize;
+            for tile in &tiles {
+                let lossless = webp_rgb(w, h, tile, true, WEBP_LOSSLESS_EFFORT, WEBP_LOSSLESS_METHOD)
+                    .len();
+                let lossy = webp_rgb(w, h, tile, false, 80.0, WEBP_LOSSLESS_METHOD).len();
+                lossless_total += lossless;
+                lossy_total += lossy;
+                oracle_total += lossless.min(lossy);
+                if lossy < lossless {
+                    lossy_wins += 1;
+                }
+            }
+            println!("  {w}x{h}, {} of {total} tiles", tiles.len());
+            println!("    always lossless   {lossless_total:>8}");
+            println!("    always lossy      {lossy_total:>8}  ({:.2}x)", lossy_total as f64 / lossless_total as f64);
+            println!(
+                "    best of the two   {oracle_total:>8}  ({:.2}x)  — lossy smaller on {lossy_wins}/{} tiles",
+                oracle_total as f64 / lossless_total as f64,
+                tiles.len()
+            );
+        }
+
+        println!("\n=== 4. worst case: uniform noise, nothing for either codec to find ===");
+        for (w, h) in [(320u16, 64u16)] {
+            let rgb = noise_rgb(w, h);
+            let runs = passes_for(1, w, h);
+            let png = png_fast(w, h, &rgb);
+            let png_time = time(runs, || png_fast(w, h, &rgb));
+            println!(
+                "  {w}x{h} ({} raw): png {} bytes, {:.1}µs",
+                rgb.len(),
+                png.len(),
+                png_time.as_secs_f64() * 1e6
+            );
+            for (method, effort) in SHORTLIST {
+                let data = webp_rgb(w, h, &rgb, true, effort, method);
+                assert_webp_roundtrips(w, h, &rgb, &data, "noise");
+                let took = time(runs, || webp_rgb(w, h, &rgb, true, effort, method));
+                println!(
+                    "    lossless m{method} q{effort:<3.0} {:>7} {:>6.2}x  {:>8.1}µs  {:>6.2}x",
+                    data.len(),
+                    data.len() as f64 / png.len() as f64,
+                    took.as_secs_f64() * 1e6,
+                    took.as_secs_f64() / png_time.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+            let jpeg = jpeg_q80(w, h, &rgb);
+            let jpeg_time = time(runs, || jpeg_q80(w, h, &rgb));
+            println!(
+                "    jpeg q80          {:>7}          {:>8.1}µs",
+                jpeg.len(),
+                jpeg_time.as_secs_f64() * 1e6
+            );
+            for method in [0, 2, 4] {
+                let data = webp_rgb(w, h, &rgb, false, 80.0, method);
+                let took = time(runs, || webp_rgb(w, h, &rgb, false, 80.0, method));
+                println!(
+                    "    lossy    m{method} q80  {:>7} {:>6.2}x  {:>8.1}µs  {:>6.2}x  (vs jpeg)",
+                    data.len(),
+                    data.len() as f64 / jpeg.len() as f64,
+                    took.as_secs_f64() * 1e6,
+                    took.as_secs_f64() / jpeg_time.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+        }
+    }
+
+    /// The codec this protocol used before WebP, at the compression it used, as the
+    /// baseline the bench measures against.
+    ///
+    /// Spelled out here rather than reached through `Tile::from_rgb`, which is what
+    /// it originally did — and which silently stopped being a baseline the moment
+    /// `from_rgb` became WebP itself. The symptom was a table of `1.00x` ratios and
+    /// byte-identical columns across seven shapes, which is at least loud; a bench
+    /// whose control group is the thing under test is worth guarding against.
+    fn png_fast(w: u16, h: u16, rgb: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(rgb).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    /// The agent's current lossy encoder at the quality it ships (`LOSSY_QUALITY`
+    /// in `crates/rxa-agent/src/encode.rs`), so section 3 above compares against
+    /// what is actually deployed rather than a default.
+    fn jpeg_q80(w: u16, h: u16, rgb: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        jpeg_encoder::Encoder::new(&mut out, 80)
+            .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
+            .expect("jpeg encode failed");
+        out
     }
 }

@@ -394,7 +394,7 @@ mod tests {
         let stamp = [x.to_le_bytes(), y.to_le_bytes()].concat();
         data[..stamp.len().min(bytes)].copy_from_slice(&stamp[..stamp.len().min(bytes)]);
         ServerMsg::Tile(Tile {
-            format: Tile::FORMAT_PNG,
+            format: Tile::FORMAT_WEBP,
             x,
             y,
             w,
@@ -406,7 +406,7 @@ mod tests {
     /// The same payload as some other tile, at `(x, y)` — what the cache is for.
     fn repeat(x: u16, y: u16, bytes: usize) -> ServerMsg {
         ServerMsg::Tile(Tile {
-            format: Tile::FORMAT_PNG,
+            format: Tile::FORMAT_WEBP,
             x,
             y,
             w: 320,
@@ -714,7 +714,7 @@ mod tests {
         let mut wire = Wire::default();
         wire.encode(vec![repeat(0, 0, 900)]);
         let frames = wire.encode(vec![ServerMsg::Tile(Tile {
-            format: Tile::FORMAT_PNG,
+            format: Tile::FORMAT_WEBP,
             x: 0,
             y: 0,
             w: 64,

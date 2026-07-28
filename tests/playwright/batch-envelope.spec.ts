@@ -27,6 +27,11 @@ const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
 const NO_SLOT = 0xffff;
 const SLOT_COUNT = 256;
+const TILE_FORMAT_WEBP = 3;
+// `PROTOCOL_VERSION` in src/protocol.rs. 4 is the WebP swap: a `TILE` record's
+// format byte has one valid value, so a client built against 3 would reject every
+// frame — which is why the version, not the byte, is what has to disagree first.
+const PROTOCOL_VERSION = 4;
 
 interface Record {
   op: number;
@@ -157,8 +162,10 @@ test.describe("v3 batch envelope", () => {
           expect(record.slot).toBeLessThan(SLOT_COUNT);
           continue;
         }
-        // 1 = PNG, 2 = JPEG. The Mac agent picks per tile.
-        expect([1, 2]).toContain(record.format);
+        // 3 = WebP, and the only value there is: one codec covers the gateway's
+        // lossless screen content and the agent's lossy tiles alike, so the
+        // classifier's choice never reaches the wire. 1 and 2 meant PNG and JPEG.
+        expect(record.format).toBe(TILE_FORMAT_WEBP);
         // Either a slot inside the cache, or "do not remember this".
         if (record.slot !== NO_SLOT) {
           expect(record.slot).toBeLessThan(SLOT_COUNT);
@@ -191,6 +198,6 @@ test.describe("v3 batch envelope", () => {
       const response = await fetch("/api/config");
       return (await response.json()) as { protocolVersion: number };
     });
-    expect(config.protocolVersion).toBe(3);
+    expect(config.protocolVersion).toBe(PROTOCOL_VERSION);
   });
 });

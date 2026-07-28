@@ -21,11 +21,11 @@ struct TileFrameTests {
     func aWellFormedRecordDecodes() throws {
         let payload: [UInt8] = [0xDE, 0xAD, 0xBE, 0xEF]
         let tiles = try #require(
-            tileRecords(batch(tile(format: 2, slot: 5, x: 16, y: 320, w: 1280, h: 64, payload: payload)))
+            tileRecords(batch(tile(slot: 5, x: 16, y: 320, w: 1280, h: 64, payload: payload)))
         )
         #expect(tiles.count == 1)
         let tile = tiles[0]
-        #expect(tile.format == .jpeg)
+        #expect(tile.format == .webp)
         #expect(tile.slot == 5)
         #expect(tile.x == 16)
         #expect(tile.y == 320)
@@ -57,7 +57,7 @@ struct TileFrameTests {
         let tiles = try #require(
             tileRecords(
                 batch(
-                    tile(format: 1, x: 0xFFFF, y: 0xFFFF, w: 0xFFFF, h: 0xFFFF, payload: [0x01])
+                    tile(x: 0xFFFF, y: 0xFFFF, w: 0xFFFF, h: 0xFFFF, payload: [0x01])
                 )
             )
         )
@@ -105,9 +105,13 @@ struct TileFrameTests {
         }
     }
 
+    /// The retired codecs included: 1 was PNG and 2 was JPEG, and a gateway that
+    /// still sent either would be one this build cannot render. Rejecting the frame
+    /// is the intended outcome — `GatewayClient`'s `protocolVersion` check is what
+    /// turns that into a legible refusal before a session even opens.
     @Test
     func anUnknownFormatIsRejected() {
-        for format: UInt8 in [0x00, 0x03, 0xFF] {
+        for format: UInt8 in [0x00, 0x01, 0x02, 0x04, 0xFF] {
             #expect(BatchFrame.decode(batch(tile(format: format, w: 8, h: 8))) == nil)
         }
     }
@@ -143,7 +147,7 @@ struct TileFrameTests {
     /// image is `TileDecoder`'s question, not this one's.
     @Test
     func aRecordWithNoPayloadDecodesToAnEmptyPayload() throws {
-        let decoded = try #require(tileRecords(batch(tile(format: 1, w: 8, h: 8))))
+        let decoded = try #require(tileRecords(batch(tile(w: 8, h: 8))))
         #expect(decoded[0].payload.isEmpty)
     }
 
@@ -153,7 +157,7 @@ struct TileFrameTests {
     @Test
     func aSliceWithANonZeroStartIndexDecodesTheSameWay() throws {
         let payload: [UInt8] = [0x11, 0x22, 0x33]
-        let whole = batch(tile(format: 1, x: 7, y: 9, w: 64, h: 32, payload: payload))
+        let whole = batch(tile(x: 7, y: 9, w: 64, h: 32, payload: payload))
         var padded = Data(repeating: 0xAA, count: 5)
         padded.append(whole)
         let slice = padded.dropFirst(5)
@@ -235,7 +239,7 @@ struct TileFrameTests {
     /// One `TILE` record, as bytes.
     private func tile(
         op: UInt8 = BatchFrame.opTile,
-        format: UInt8 = 1,
+        format: UInt8 = TileFormat.webp.rawValue,
         slot: UInt16 = BatchFrame.noSlot,
         x: UInt16 = 0,
         y: UInt16 = 0,

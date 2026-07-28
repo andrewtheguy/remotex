@@ -876,7 +876,7 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
 /// nothing upstream filters. Both come back as `None` here and cost nothing but a
 /// pack and a `memcmp`.
 ///
-/// The pack happens either way; only the PNG encode is skipped, and the encode is
+/// The pack happens either way; only the WebP encode is skipped, and the encode is
 /// where the time goes (~8–10× the hash it replaced, measured in
 /// `protocol::tests::encode_cost_against_hash_cost`).
 async fn send_tiles(

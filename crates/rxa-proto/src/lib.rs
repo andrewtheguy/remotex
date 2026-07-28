@@ -39,7 +39,15 @@ pub const PROLOGUE: &[u8] = b"rxa/2";
 /// Protocol version carried in [`msg::AgentMsg::Hello`]. Redundant with
 /// [`PROLOGUE`] (a mismatch already fails the handshake) but cheap, and it
 /// gives the gateway something to log.
-pub const VERSION: u16 = 6;
+///
+/// 7 is WebP: [`msg::format`] lost `PNG` and `JPEG`. Nothing structural moved, but
+/// an old agent's format byte would be read as the new codec, so the version is
+/// what stops a mismatched pair rather than the byte. `src/rxa.rs` compares this
+/// for exact equality and names both numbers, so the failure is a log line instead
+/// of a blank desktop. [`PROLOGUE`] deliberately does *not* change with it —
+/// framing and the handshake are unaffected, and a prologue mismatch reads as a
+/// key problem, which would send someone chasing the wrong thing.
+pub const VERSION: u16 = 7;
 
 /// The protocol's default TCP port, adjacent to the web server's 52380.
 pub const DEFAULT_PORT: u16 = 52381;

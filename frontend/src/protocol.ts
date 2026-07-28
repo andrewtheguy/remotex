@@ -166,9 +166,10 @@ export interface TileMsg {
   slot: number;
   // An encoded image stream, in `mime`.
   data: Uint8Array;
-  // What `data` is, for the Blob handed to createImageBitmap. The RDP and VNC
-  // engines always send PNG; the macOS agent picks per tile.
-  mime: "image/png" | "image/jpeg";
+  // What `data` is, for the Blob handed to createImageBitmap. One codec: WebP
+  // covers both the lossless screen content the gateway's engines send and the
+  // lossy tiles the macOS agent classifies, so the choice never reaches the wire.
+  mime: "image/webp";
 }
 
 // "Draw what you have in `slot` at (x, y)" — seven bytes instead of a payload.
@@ -188,10 +189,12 @@ const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
-// The format byte, as the MIME type `createImageBitmap` needs for its Blob.
+// The format byte, as the MIME type `createImageBitmap` needs for its Blob. One
+// entry, and 3 rather than 1: `Tile::FORMAT_WEBP`. 1 and 2 meant PNG and JPEG, and
+// leaving this map without them is what makes a gateway/SPA mismatch a rejected
+// frame instead of WebP bytes handed to a PNG decoder.
 const MIME_BY_FORMAT: Record<number, TileMsg["mime"] | undefined> = {
-  1: "image/png",
-  2: "image/jpeg",
+  3: "image/webp",
 };
 export const NO_SLOT = 0xffff;
 // How many tiles the server may ask this client to remember. Part of the wire

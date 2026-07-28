@@ -20,7 +20,9 @@ use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-const TILE_FORMAT_PNG: u8 = 1;
+/// `Tile::FORMAT_WEBP`, spelled out rather than imported: this test is a
+/// stand-in for a client, and a client only has the number.
+const TILE_FORMAT_WEBP: u8 = 3;
 
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
@@ -100,17 +102,25 @@ fn check_tile_frame(
     assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
     let mut area = 0u64;
     for tile in tiles {
-        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
+        assert_eq!(tile.format, TILE_FORMAT_WEBP, "unexpected tile format byte");
         let (x, y, w, h) = (tile.x, tile.y, tile.w, tile.h);
         assert!(w > 0 && h > 0, "empty tile {w}x{h}");
         assert!(
             u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
             "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
         );
+        // Length first: a malformed payload is exactly what these markers are here
+        // to catch, and slicing a short one would panic on the index instead of
+        // reporting what was wrong.
+        assert!(
+            tile.payload.len() >= 12,
+            "payload is {} bytes, too short to be a WebP",
+            tile.payload.len()
+        );
         assert_eq!(
-            &tile.payload[..8],
-            b"\x89PNG\r\n\x1a\n",
-            "payload is not a PNG stream"
+            (&tile.payload[..4], &tile.payload[8..12]),
+            (b"RIFF".as_slice(), b"WEBP".as_slice()),
+            "payload is not a WebP stream"
         );
         area += u64::from(w) * u64::from(h);
     }

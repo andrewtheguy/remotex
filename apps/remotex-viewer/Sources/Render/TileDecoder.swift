@@ -25,11 +25,15 @@ actor TileDecoder {
     /// Decode one tile, or nil if the payload is unusable.
     ///
     /// Everything goes through a `CGContext` rather than reading the decoded
-    /// image's own bytes, because those bytes differ per payload: JPEG decodes as
-    /// three-channel RGB, while PNG arrives as RGB, RGBA, grayscale, or
-    /// palette-indexed depending on what encoded it. Drawing into a context of a
-    /// known layout normalizes all of them, and it is the only place the row
+    /// image's own bytes, because those bytes differ per payload: WebP's lossy
+    /// bitstream decodes as three-channel RGB while its lossless one can carry an
+    /// alpha channel, and ImageIO is free to hand back either. Drawing into a
+    /// context of a known layout normalizes both, and it is the only place the row
     /// order can be fixed.
+    ///
+    /// This never reads `frame.format`, and did not when there were two codecs:
+    /// ImageIO identifies a payload from its own container. So the format byte is
+    /// checked at `BatchFrame.decode` and used for nothing here.
     func decode(_ frame: TileFrame) -> DecodedTile? {
         let w = Int(frame.w)
         let h = Int(frame.h)
@@ -57,8 +61,10 @@ actor TileDecoder {
             // noneSkipFirst | byteOrder32Little is byte order B,G,R,X — a
             // byte-for-byte match for .bgra8Unorm, so the upload needs no
             // swizzle. Alpha is discarded rather than premultiplied because
-            // screen tiles are opaque by construction (`Tile::from_rgb` encodes
-            // ColorType::Rgb, and the agent encodes opaque PNG/JPEG).
+            // screen tiles are opaque by construction: both ends encode from
+            // packed RGB888 with no alpha channel to carry (`encode_webp` in
+            // `src/protocol.rs`, `encode.rs` in the agent), and the gateway's own
+            // roundtrip test asserts a payload does not come back with one.
             //
             // Device RGB, not sRGB: it skips a colour-match transform per tile,
             // and the texture format applies no transfer function either, which

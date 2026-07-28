@@ -1,8 +1,18 @@
 import Foundation
 
+/// A tile payload's codec, from the `TILE` record's format byte.
+///
+/// One case: WebP covers both the lossless screen content the gateway's engines
+/// send and the lossy tiles the macOS agent classifies, and both decode through
+/// the same ImageIO path. `Tile::FORMAT_WEBP` in `src/protocol.rs`.
+///
+/// The raw value is 3 because 1 and 2 meant PNG and JPEG. Keeping them out is what
+/// makes a gateway newer than this build fail at `BatchFrame.decode` — a refusal —
+/// rather than handing bytes to a decoder that will mangle them. Note the version
+/// check in `GatewayClient` is what catches that case *first* and legibly; this is
+/// the backstop.
 enum TileFormat: UInt8, Sendable, Equatable {
-    case png = 1
-    case jpeg = 2
+    case webp = 3
 }
 
 /// One dirty rectangle of the framebuffer, as one `TILE` record inside a batch

@@ -7,7 +7,7 @@
 //! differences that are the entire reason this engine exists:
 //!
 //! **Tiles pass straight through.** The agent encodes each dirty rectangle as
-//! PNG or JPEG on the Mac and this engine relays the bytes into
+//! WebP on the Mac and this engine relays the bytes into
 //! [`Tile::encoded`] without decoding a pixel. There is no framebuffer here and
 //! no strip loop; the agent already split the work.
 //!
@@ -149,7 +149,7 @@ struct Carried {
 /// Worth having because ScreenCaptureKit reports damage *coarsely*. Measured on
 /// the test Mac at 3200x2000 with nobody touching it, 15 to 21 of the 32
 /// full-width strips that cover the desktop come back dirty on every capture
-/// frame, each one a ~95 KB PNG. Most of that is unchanged pixels.
+/// frame, each one a ~95 KB payload. Most of that is unchanged pixels.
 ///
 /// The gateway cannot look inside an agent tile — not decoding one is the entire
 /// point of this engine — so the only thing it can compare is the encoded bytes.
@@ -523,6 +523,20 @@ async fn pump(
                 last_seen = Instant::now();
                 match msg {
                     AgentMsg::Tile { format, x, y, w, h, data } => {
+                        // The one payload on this link the gateway cannot inspect, so
+                        // the format byte is checked instead of trusted. An
+                        // unrecognised value would reach a client that rejects the
+                        // *whole batch* it arrives in — a blank region with nothing in
+                        // any log — where dropping one tile here costs a rectangle
+                        // until the next repaint covers it.
+                        //
+                        // Unreachable while both halves ship together, which
+                        // rxa_proto::VERSION enforces at the handshake. This is for
+                        // the case where they do not.
+                        if format != rxa_proto::msg::format::WEBP {
+                            warn!("rxa: dropping a {w}x{h} tile with unknown format byte {format}");
+                            continue;
+                        }
                         if !carried.relayed.is_new((x, y, w, h), &data) {
                             continue; // the browser is already showing these pixels
                         }
@@ -1039,6 +1053,77 @@ mod tests {
             }
         }
         assert_eq!(errors, 1, "exactly one report, after the last link");
+    }
+
+    // A tile whose format byte this build does not know costs that one tile, not
+    // the batch it would have travelled in.
+    //
+    // Worth a test even though `rxa_proto::VERSION` makes it unreachable between a
+    // matched pair, because the consequence is invisible: both clients drop an
+    // entire frame on an unknown format byte, so the symptom would be a region of
+    // stale pixels with nothing in any log to explain it.
+    #[tokio::test]
+    async fn a_tile_with_an_unknown_format_byte_is_dropped_and_the_next_one_still_arrives() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let paired = pairing(port);
+        let (agent_private, gateway_public) = (paired.agent_private, paired.gateway_public);
+
+        let agent = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let transport = rxa_proto::noise::respond(&mut stream, &agent_private, &gateway_public)
+                .await
+                .unwrap();
+            let (read_half, write_half) = stream.into_split();
+            let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
+            writer
+                .send(
+                    &AgentMsg::Hello {
+                        version: rxa_proto::VERSION,
+                        agent_version: "fake-agent".to_owned(),
+                        w: 800,
+                        h: 600,
+                        scale: rxa_proto::msg::SCALE_ONE,
+                    }
+                    .encode(),
+                )
+                .await
+                .unwrap();
+            match GatewayMsg::decode(&reader.recv().await.unwrap()).unwrap() {
+                GatewayMsg::Attach => {}
+                other => panic!("expected Attach, got {other:?}"),
+            }
+            // 1 was PNG before this protocol version, so it is exactly the byte a
+            // stale agent would send.
+            for (format, data) in [(1u8, vec![0x89, b'P', b'N', b'G']), (
+                rxa_proto::msg::format::WEBP,
+                vec![b'R', b'I', b'F', b'F'],
+            )] {
+                writer
+                    .send(
+                        &AgentMsg::Tile { format, x: 7, y: 9, w: 4, h: 4, data }.encode(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            // Hold the link open long enough for both to be pumped.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let (frame_tx, mut frame_rx) = mpsc::channel(16);
+        run_with(paired.target, FAST_RETRY, input_rx, frame_tx).await;
+        agent.await.unwrap();
+
+        let tiles: Vec<_> = std::iter::from_fn(|| frame_rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ServerMsg::Tile(tile) => Some(tile),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tiles.len(), 1, "the unknown format byte should cost one tile");
+        assert_eq!(tiles[0].format, Tile::FORMAT_WEBP);
+        assert_eq!(tiles[0].data, b"RIFF");
     }
 
     /// A target that opted into nothing, which is the default and what most of
