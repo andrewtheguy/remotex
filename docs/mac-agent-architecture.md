@@ -367,6 +367,15 @@ An agent with no `gateway_public_key` is unpaired: it listens, refuses every
 connection, and says so in its menu. That is the state a first launch lands in,
 since the agent has to be running before its public key can be read off it.
 
+An identity can also be *imported*, which is how it outlives the Mac that minted
+it: a re-imaged machine, or one replacing another, takes the private key its
+gateways' `agent_public_key` entries already match, so nothing is re-paired. The
+settings dialog has an Import… button, and `remotex-agent
+--import-private-key` reads the key from stdin — never an argument, so it stays
+out of shell history and out of `ps`. Both validate the key by role as well as
+checksum before writing it, and neither can display a private key: the dialog
+accepts one and shows only the public half it derives.
+
 Only one gateway may be connected. A new connection replaces the old one when it
 completes its handshake, not when it is accepted: a peer that cannot prove it
 holds the paired key is refused without the running session noticing, so nothing

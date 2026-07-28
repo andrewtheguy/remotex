@@ -53,6 +53,20 @@ agent_public_key = "rxap..."
 The agent listens on port 52381 by default. One `[rxa].private_key` serves every
 `rxa` target: it is the server's identity, not a per-Mac credential.
 
+## Moving an identity to another Mac
+
+A Mac's identity is its private key, so a reinstall or a replacement machine can
+keep the public key the gateway already has instead of being re-paired. Use
+**Import…** in Settings, or over SSH:
+
+```sh
+pbpaste | remotex-agent --import-private-key      # prints the resulting public key
+```
+
+The key is read from stdin rather than passed as an argument, so it stays out of
+shell history and out of `ps`. Nothing else in the config changes, and the public
+key it prints should match what the gateway already has.
+
 ## Permissions
 
 Grant `remotex-agent` both permissions under **System Settings → Privacy &

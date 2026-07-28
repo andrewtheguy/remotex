@@ -265,6 +265,41 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBuf)> {
     Ok((config, path))
 }
 
+/// Replace this Mac's identity with an existing private key, keeping every other
+/// setting.
+///
+/// The point is that an identity can outlive the machine it was made on: a Mac
+/// that is re-imaged, restored from a backup, or replaced keeps the public key
+/// every gateway already has, so nothing has to be re-paired. Without this the
+/// only identity a Mac could have was one it minted itself, and losing the disk
+/// meant editing every gateway that knew it.
+///
+/// Creates the config if there is none, so a freshly installed Mac can be given
+/// its predecessor's identity before it has ever been launched — then discards
+/// the key that creation minted, which is the one thing here that would
+/// otherwise be a silent waste.
+///
+/// Returns the config as saved, so the caller can report the public key that
+/// results — the value to check against the gateway.
+pub fn import_private_key(explicit: Option<&Path>, private_key: &str) -> anyhow::Result<Config> {
+    let private_key = private_key.trim();
+    // Checked before anything is read or written, and by kind as well as
+    // checksum: the neighbouring `rxap` and `rxgs` are exactly what a hurried
+    // paste reaches for, and either would otherwise be written and then rejected
+    // at the next launch.
+    rxa_proto::key::parse_private(rxa_proto::key::Role::Agent, private_key)
+        .map_err(|e| anyhow::anyhow!("not an agent private key: {e}"))?;
+
+    let (mut config, path, _) = load_or_create(explicit)?;
+    if config.private_key.trim() == private_key {
+        // Not an error: re-running an import is how somebody makes sure it took.
+        return Ok(config);
+    }
+    config.private_key = private_key.to_owned();
+    config.save(&path)?;
+    Ok(config)
+}
+
 /// Load the config, creating it with a freshly minted identity if it is absent.
 ///
 /// There is no install script to write this file (the app registers itself — see
@@ -604,6 +639,106 @@ mod tests {
         let (again, _, created) = load_or_create(Some(&path)).unwrap();
         assert!(!created);
         assert_eq!(again.private_key, config.private_key);
+    }
+
+    // The point of importing: an identity outlives the Mac that made it, so a
+    // re-imaged or replaced machine keeps the public key its gateways already
+    // have and nothing is re-paired.
+    #[test]
+    fn importing_a_key_replaces_the_identity_and_keeps_every_other_setting() {
+        let dir = TempDir::new("import");
+        let path = dir.join("config.toml");
+        let mut original = sample();
+        original.listen = "127.0.0.1:9100".to_owned();
+        original.virtual_display = true;
+        original.virtual_display_initial_size = "1920x1200".to_owned();
+        original.save(&path).unwrap();
+
+        // The identity being restored, as another Mac (or a backup) holds it.
+        let incoming = key::generate_private(Role::Agent);
+        let imported = import_private_key(Some(&path), &incoming).unwrap();
+
+        assert_eq!(imported.private_key, incoming);
+        assert_eq!(
+            imported.public_key(),
+            key::public_text_of(Role::Agent, &incoming).unwrap(),
+            "the public key must be the imported key's, which is what the gateway knows"
+        );
+        // Everything else survives: an import is not a reset.
+        assert_eq!(imported.listen, "127.0.0.1:9100");
+        assert!(imported.virtual_display);
+        assert_eq!(imported.virtual_display_initial_size, "1920x1200");
+        assert_eq!(imported.gateway_public_key, original.gateway_public_key);
+        assert_eq!(load(Some(&path)).unwrap().0, imported, "not persisted");
+        assert_eq!(mode(&path), 0o600, "the import must not widen the mode");
+    }
+
+    // Surrounding whitespace comes with any paste, and the key is trimmed rather
+    // than stored as one the parser only just tolerates.
+    #[test]
+    fn an_imported_key_is_trimmed() {
+        let dir = TempDir::new("import-trim");
+        let path = dir.join("config.toml");
+        sample().save(&path).unwrap();
+        let incoming = key::generate_private(Role::Agent);
+        let imported = import_private_key(Some(&path), &format!("  {incoming}\n")).unwrap();
+        assert_eq!(imported.private_key, incoming);
+    }
+
+    // Re-running an import is how somebody checks it took, so it has to be a
+    // no-op rather than an error.
+    #[test]
+    fn importing_the_key_already_in_place_is_not_an_error() {
+        let dir = TempDir::new("import-same");
+        let path = dir.join("config.toml");
+        let original = sample();
+        original.save(&path).unwrap();
+        let again = import_private_key(Some(&path), &original.private_key).unwrap();
+        assert_eq!(again, original);
+    }
+
+    // A Mac that has never been launched can still be given its predecessor's
+    // identity — which is the case this exists for.
+    #[test]
+    fn importing_into_a_missing_config_creates_it_with_the_imported_key() {
+        let dir = TempDir::new("import-fresh");
+        let path = dir.join("nested/config.toml");
+        let incoming = key::generate_private(Role::Agent);
+        let imported = import_private_key(Some(&path), &incoming).unwrap();
+        assert_eq!(imported.private_key, incoming);
+        assert!(!imported.is_paired(), "still nothing to pair with");
+        assert_eq!(load(Some(&path)).unwrap().0.private_key, incoming);
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    // Checked by kind as well as by checksum, and *before* anything is written:
+    // the neighbouring `rxap` and `rxgs` are what a hurried paste reaches for,
+    // and either written through would be a config rejected at the next launch.
+    #[test]
+    fn importing_the_wrong_kind_of_key_is_refused_and_changes_nothing() {
+        let dir = TempDir::new("import-wrong");
+        let path = dir.join("config.toml");
+        let original = sample();
+        original.save(&path).unwrap();
+
+        let own_public = original.public_key();
+        let gateway_private = key::generate_private(Role::Gateway);
+        for (bad, expect) in [
+            (own_public.as_str(), "an agent public key"),
+            (gateway_private.as_str(), "a gateway private key"),
+            ("rxasnonsense", "characters"),
+            ("", "must start with"),
+        ] {
+            let err = import_private_key(Some(&path), bad).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("not an agent private key"), "{bad:?} gave {msg}");
+            assert!(msg.contains(expect), "{bad:?} gave {msg}");
+            assert_eq!(
+                load(Some(&path)).unwrap().0,
+                original,
+                "{bad:?} must leave the file untouched"
+            );
+        }
     }
 
     // Saving is how every menu-bar edit lands, so a saved config has to read

@@ -28,12 +28,15 @@
 //! file, the log, the two Privacy panes, the login item, and Quit. Anything the
 //! agent can be asked to do is done there.
 //!
-//! The flags below are launch modes, plus `--public-key`. No *operation* has a
-//! flag: a permission read from a terminal is the *terminal's* permission (see
-//! [`report_permissions`]). `--public-key` is not an exception to that so much
-//! as the thing the rule was about — the private key is still never printed, and
-//! its public half is not a credential, so putting it in somebody's shell
-//! history costs nothing and saves walking to the Mac to read it off a menu.
+//! The flags below are launch modes, plus the two that read and write this Mac's
+//! identity. No *operation* has a flag: a permission read from a terminal is the
+//! *terminal's* permission (see [`report_permissions`]).
+//!
+//! The identity flags are not exceptions to that so much as the thing the rule
+//! was about, which is a *secret* in somebody's shell history. `--public-key`
+//! prints the half that is not a secret. `--import-private-key` takes one that
+//! is — from stdin, never an argument, so it reaches neither the history nor
+//! `ps`. The private key is still never printed, by anything.
 //!
 //! ## Two permissions
 //!
@@ -132,6 +135,20 @@ fn main() -> anyhow::Result<()> {
     // with silence.
     if args.public_key {
         let (config, _, _) = loaded?;
+        println!("{}", config.public_key());
+        return Ok(());
+    }
+
+    // Same reasoning, and the same place in the launch: a config edit, not a
+    // launch. Drops `loaded` because the import re-reads and rewrites the file
+    // itself — and because on a Mac with no config yet, the identity that load
+    // just minted is the one being replaced.
+    if args.import_private_key {
+        drop(loaded);
+        let key = read_private_key_from_stdin()?;
+        let config = config::import_private_key(args.config.as_deref(), &key)?;
+        // The public half, because that is the value to check against whatever
+        // the gateway already has — the point of importing rather than minting.
         println!("{}", config.public_key());
         return Ok(());
     }
@@ -729,6 +746,37 @@ fn report_permissions() -> bool {
     screen_recording_at_launch
 }
 
+/// Read the key `--import-private-key` imports.
+///
+/// From stdin and nowhere else. As an argument it would be in the shell's
+/// history and visible in `ps` to every user on the machine; this way
+/// `pbpaste | … --import-private-key` or a redirect from a file leaves neither
+/// trace.
+///
+/// The whole of stdin, not a line: a key pasted into a terminal, piped from
+/// `pbpaste`, or read from a file that ends without a newline all have to work,
+/// and none of them is distinguishable here.
+fn read_private_key_from_stdin() -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::io::Read as _;
+
+    // Said before the read, or a terminal with nothing piped into it looks like
+    // a hang rather than a prompt.
+    if std::io::stdin().is_terminal() {
+        eprintln!("Paste this Mac's private key (rxas…), then press Ctrl-D:");
+    }
+    let mut key = String::new();
+    std::io::stdin()
+        .read_to_string(&mut key)
+        .context("failed to read the private key from stdin")?;
+    anyhow::ensure!(
+        !key.trim().is_empty(),
+        "no private key on stdin — pipe one in, e.g. \
+         `pbpaste | remotex-agent --import-private-key`"
+    );
+    Ok(key)
+}
+
 fn print_first_run(path: &Path, public_key: &str) {
     println!();
     println!("Set up {}, with a fresh identity.", path.display());
@@ -760,6 +808,7 @@ struct Args {
     no_register: bool,
     no_menu: bool,
     public_key: bool,
+    import_private_key: bool,
 }
 
 impl Args {
@@ -777,6 +826,11 @@ impl Args {
                 "--no-register" => parsed.no_register = true,
                 "--no-menu" => parsed.no_menu = true,
                 "--public-key" => parsed.public_key = true,
+                // Deliberately takes no value: the key arrives on stdin. As an
+                // argument it would be in the shell's history and in `ps` for
+                // every user on the machine, which is the whole of why the agent
+                // has no key operations on the command line otherwise.
+                "--import-private-key" => parsed.import_private_key = true,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -810,6 +864,15 @@ Options:
       --public-key     Print this Mac's public key and exit, without serving.
                        Creates the config first if there is none, so a fresh Mac
                        can be paired over SSH. The private key is never printed
+      --import-private-key
+                       Replace this Mac's identity with a private key read from
+                       stdin, keeping every other setting, then print the
+                       resulting public key and exit. For giving a re-imaged or
+                       replacement Mac the identity its gateways already know,
+                       so nothing has to be re-paired. The key is taken from
+                       stdin rather than an argument so it stays out of shell
+                       history and out of `ps`:
+                           pbpaste | remotex-agent --import-private-key
   -h, --help           Show this help
   -V, --version        Show the version
 
@@ -855,6 +918,7 @@ mod tests {
         assert!(parse(&["--no-register"]).unwrap().no_register);
         assert!(parse(&["--no-menu"]).unwrap().no_menu);
         assert!(parse(&["--public-key"]).unwrap().public_key);
+        assert!(parse(&["--import-private-key"]).unwrap().import_private_key);
     }
 
     #[test]
@@ -887,6 +951,7 @@ mod tests {
             "--no-register",
             "--no-menu",
             "--public-key",
+            "--import-private-key",
             "--help",
             "--version",
         ] {

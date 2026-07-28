@@ -64,11 +64,16 @@ const CONTROL_X: f64 = LABEL_WIDTH + 8.0;
 /// A single line of label text, so a caption can be centred against its control
 /// rather than sitting at the top of a 24pt frame.
 const LABEL_HEIGHT: f64 = 17.0;
-/// The two key buttons, on a row of their own under both key rows: **Copy**
-/// (this Mac's public key) and **Regenerate identity**. Under rather than beside
-/// so each key keeps the full width — a key that scrolls is a key somebody
+/// The key buttons, on a row of their own under both key rows: **Copy** (this
+/// Mac's public key), **Import…** and **Regenerate identity**. Under rather than
+/// beside so each key keeps the full width — a key that scrolls is a key somebody
 /// copies half of by hand, which is also what [`WIDTH`] is sized for.
+///
+/// In the order they are reached for, left to right: reading this Mac's key out
+/// is the routine visit, and the two that replace its identity are together at
+/// the far end.
 const COPY_WIDTH: f64 = 78.0;
+const IMPORT_WIDTH: f64 = 84.0;
 const REGENERATE_WIDTH: f64 = 144.0;
 const BUTTON_GAP: f64 = 8.0;
 
@@ -293,9 +298,11 @@ pub fn config(
     // temporary.
     let actions = KeyActions::new(mtm, public_key.clone(), &current.private_key);
     // Right-aligned as one group under the keys, in the order they are reached
-    // for: read this Mac's key, or — rarely — replace it.
+    // for: read this Mac's key, or — rarely — replace it, with one it had before
+    // or with a new one.
     let regenerate_x = WIDTH - REGENERATE_WIDTH;
-    let copy_x = regenerate_x - BUTTON_GAP - COPY_WIDTH;
+    let import_x = regenerate_x - BUTTON_GAP - IMPORT_WIDTH;
+    let copy_x = import_x - BUTTON_GAP - COPY_WIDTH;
 
     let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(6), COPY_WIDTH);
     copy.setToolTip(Some(&NSString::from_str(
@@ -303,6 +310,22 @@ pub fn config(
          the gateway's rxa target.",
     )));
     view.addSubview(&copy);
+
+    let import = button(
+        mtm,
+        "Import…",
+        &actions,
+        sel!(importIdentity:),
+        import_x,
+        row(6),
+        IMPORT_WIDTH,
+    );
+    import.setToolTip(Some(&NSString::from_str(
+        "Give this Mac an identity it has held before — after a reinstall, or when it \
+         replaces another Mac — so the gateways that already know that public key need \
+         no change. Asks for the private key; this dialog never shows one.",
+    )));
+    view.addSubview(&import);
 
     let regenerate = button(
         mtm,
@@ -445,6 +468,51 @@ define_class!(
             }
         }
 
+        /// Take an identity this Mac has held before, or one belonging to the Mac
+        /// it is replacing.
+        ///
+        /// Write-only, and that is the whole shape of it: this dialog accepts a
+        /// private key and has no way to show one. The field comes up empty
+        /// rather than holding the key in force, so what is typed can only ever
+        /// be a replacement — there is nothing here to read back out.
+        ///
+        /// Validated by kind as well as checksum before it is accepted, so the
+        /// mistake this catches is the likely one: `rxap` is this Mac's own
+        /// public key, one row up and one Copy away.
+        #[unsafe(method(importIdentity:))]
+        fn import_identity(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let Some(entered) = prompt(
+                mtm,
+                "Import an identity",
+                "Paste this Mac's private key (rxas…). It replaces the identity below, \
+                 and the gateway keeps working only if the key you paste is one it \
+                 already knows — that is what importing is for.\n\nNothing is saved \
+                 until you press Save.",
+                "Import",
+            ) else {
+                return;
+            };
+            let private_key = match rxa_proto::key::parse_private(
+                rxa_proto::key::Role::Agent,
+                &entered,
+            ) {
+                Ok(_) => entered,
+                Err(e) => {
+                    error(mtm, "That is not an agent private key", &format!("{e}"));
+                    return;
+                }
+            };
+            let public_key =
+                rxa_proto::key::public_text_of(rxa_proto::key::Role::Agent, &private_key)
+                    .expect("just parsed");
+            let ivars = self.ivars();
+            *ivars.private_key.borrow_mut() = private_key;
+            ivars
+                .public_key
+                .setStringValue(&NSString::from_str(&public_key));
+        }
+
         /// Mint a new identity for this Mac, after asking.
         ///
         /// Asking, because the cost is not local: every gateway paired with this
@@ -554,6 +622,39 @@ fn confirm(mtm: MainThreadMarker, title: &str, body: &str, verb: &str) -> bool {
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     alert.addButtonWithTitle(&NSString::from_str(verb));
     alert.runModal() != NSAlertFirstButtonReturn
+}
+
+/// Ask for one value, on its own, and hand back what was typed.
+///
+/// A second modal over the settings dialog rather than another row in it: what it
+/// takes is a *secret*, and the row it would sit in is the one place this dialog
+/// deliberately never shows one. A field that appears only when asked for, empty
+/// every time, and is gone again on OK cannot be mistaken for a display of the
+/// key in force.
+///
+/// Returns `None` on Cancel, and never an empty string — nothing is a cancel by
+/// another name.
+fn prompt(mtm: MainThreadMarker, title: &str, body: &str, verb: &str) -> Option<String> {
+    let alert = alert(mtm, title, body, NSAlertStyle::Informational);
+    let field = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
+    field.setFrame(NSRect::new(
+        NSPoint::ZERO,
+        NSSize::new(WIDTH, ROW_HEIGHT),
+    ));
+    // Monospaced like the key rows behind it: a key is compared character by
+    // character, including one being pasted in.
+    field.setFont(NSFont::userFixedPitchFontOfSize(12.0).as_deref());
+    alert.setAccessoryView(Some(&field));
+    alert.addButtonWithTitle(&NSString::from_str(verb));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    // Or the paste has nowhere to land and the panel looks inert.
+    alert.window().setInitialFirstResponder(Some(&field));
+
+    if alert.runModal() != NSAlertFirstButtonReturn {
+        return None;
+    }
+    let value = field.stringValue().to_string().trim().to_owned();
+    (!value.is_empty()).then_some(value)
 }
 
 /// One of the key row's buttons: same target, same row, different width.
