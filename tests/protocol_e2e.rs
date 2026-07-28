@@ -454,6 +454,50 @@ async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
     expect_tile(&mut ws_b).await;
 }
 
+/// Logging out ends the desktop, and the login after it starts from the picker.
+///
+/// The counterpart to `detach_keeps_the_engine_and_reattach_repaints` below: losing a
+/// browser keeps the engine for its reattach grace, and logging out must not, because
+/// the credential that opened the session is gone. It used to take the detach path —
+/// closing the socket was all the browser did — so the target stayed connected and a
+/// login inside the grace period silently resumed the desktop.
+///
+/// End to end over HTTP on purpose. The unit tests in `src/session.rs` cover
+/// `log_out` itself and pass whether or not `logout_handler` ever calls it, so this
+/// is the one that fails if the handler stops.
+#[tokio::test]
+async fn logging_out_ends_the_desktop_and_the_next_login_starts_at_the_picker() {
+    let vnc_port = spawn_fake_vnc().await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
+
+    // A live desktop: claim, attach, pick the target, and see it paint.
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+    expect_tile(&mut ws).await;
+
+    let request = format!(
+        "POST /api/auth/logout HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+         Cookie: {cookie}\r\nContent-Length: 0\r\n\r\n"
+    );
+    let (status, _, _) = common::http_request(addr, &request).await;
+    assert_eq!(status, 200);
+
+    // The socket that was watching the desktop is let go, rather than left
+    // attached to a slot whose claim has been released.
+    assert_eq!(expect_close(&mut ws).await, Some(4001));
+
+    // The whole point: log in again and there is no desktop to inherit. Without the
+    // teardown this reports `connected` and paints the session that was logged out
+    // of, for as long as the reattach grace period lasts.
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    expect_picker(&mut ws).await;
+}
+
 #[tokio::test]
 async fn detach_keeps_the_engine_and_reattach_repaints() {
     let vnc_port = spawn_fake_vnc().await;

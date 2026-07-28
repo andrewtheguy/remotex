@@ -319,10 +319,29 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .flatten();
+    // A display appearing at the global origin takes the pointer with it: the Mac's
+    // own screen moves aside to make room, so a pointer nobody touched ends up
+    // inside the new display's rectangle and vanishes from the screen the person is
+    // actually looking at. Measured on a redeploy — the agent came up and the
+    // pointer was on the new display before any client had connected.
+    //
+    // Same recovery as the end of a session, and it has to be here as well as
+    // there: this one happens with nobody connected, so no session teardown will
+    // ever come along to fix it.
+    if let Some(display) = virtual_display.as_ref() {
+        input::PointerHome::for_new_display(display.id()).restore();
+    }
     // Creating the display does not select it. It is an *additional* screen —
     // that is the whole of what `CGVirtualDisplay` does — so it joins the list a
     // client picks from rather than replacing what the Mac already has. Every
     // session starts on the main display; the choice after that is the viewer's.
+    //
+    // Which does not mean the Mac's own screen keeps that role. macOS places the
+    // new display, and on the test VM it placed it at the global origin — making it
+    // the main display and pushing the Mac's own screen to its left. Where it lands
+    // is the user's to change in System Settings > Displays, so nothing here moves
+    // it; what the agent does own is not *stranding the pointer* on it, which is
+    // `input::PointerHome` (see `session::pump`).
     let owned = virtual_display
         .as_ref()
         .map(|display| capture::Target::Owned {

@@ -416,6 +416,59 @@ impl SessionManager {
         }
     }
 
+    /// End everything the slot holds — engine, target selection, claim, and any
+    /// attached browser. What logging out means.
+    ///
+    /// The third of three ways a session can end, and the distinction is the whole
+    /// point of having it:
+    ///
+    /// - [`Self::disconnect`] ("switch target") ends the engine and keeps the claim,
+    ///   because the same browser is about to pick again.
+    /// - [`Self::detach`] keeps the *engine* for [`REATTACH_GRACE_PERIOD`], because a
+    ///   browser whose socket closed may be coming back — a reload, a blip, a laptop
+    ///   lid.
+    /// - a log out is neither. The login that authorised the session is gone, so
+    ///   nothing about it should outlive the request.
+    ///
+    /// Logging out used to take the `detach` path by default, because closing the
+    /// socket is all the browser did and that is indistinguishable from a browser
+    /// that crashed. So the remote stayed connected for the full grace period and a
+    /// login inside that minute silently resumed the desktop instead of showing the
+    /// picker — the session survived the credential that opened it.
+    ///
+    /// Takes no attachment id and checks nothing about who is calling. One login,
+    /// one slot, one person (see CLAUDE.md — multi-session is out of scope, not
+    /// deferred), so there is no other session this could end by mistake; and a log
+    /// out that only worked from the tab holding the socket would miss the case
+    /// where the socket is already down, which is exactly when the grace period is
+    /// already counting.
+    pub fn log_out(self: &Arc<Self>) {
+        let evicted = {
+            let mut st = self.state.lock().unwrap();
+            st.claim = None;
+            // Same reason as every other path that changes the attachment: a
+            // detached-engine timer from an earlier close must not act on what is
+            // left here.
+            st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
+            let had_engine = st.engine.take().is_some();
+            st.selected = None;
+            if had_engine {
+                info!("session: logged out; engine stopped");
+            }
+            st.client.take()
+        };
+        // Evicted rather than `Picker`: the claim this socket attached with is gone,
+        // so leaving it attached would leave it holding a slot it no longer has. The
+        // browser that logged out is unmounting anyway; another tab sharing the
+        // cookie is logged out too, and its next request lands it on the login
+        // screen.
+        if let Some(client) = evicted {
+            tokio::spawn(async move {
+                let _ = client.event_tx.send(AttachEvent::Evicted).await;
+            });
+        }
+    }
+
     /// End the current engine immediately when the WebSocket heartbeat expires.
     /// Unlike an orderly close, the heartbeat timeout has already consumed the
     /// reattach grace period while waiting for a pong.
@@ -918,6 +971,52 @@ mod tests {
         mgr.connect(att.id, "other").unwrap();
         expect_connected(&mut att.events, "other").await;
         assert!(hooks.try_recv().is_ok(), "reconnect spawns a fresh engine");
+    }
+
+    /// The bug this method exists for: logging out left the engine to the detach
+    /// path, so the desktop was still there a moment later and the next login
+    /// resumed it. A log out has to end the engine *and* the selection, or the
+    /// attach after it reports `Connected` instead of `Picker`.
+    #[tokio::test]
+    async fn logging_out_stops_the_engine_and_the_next_login_lands_on_the_picker() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+
+        mgr.log_out();
+
+        assert!(input_rx.is_closed(), "logging out closes the engine input channel");
+        // The attached socket does not stay attached to a slot whose claim is gone.
+        assert!(matches!(recv(&mut att.events).await, AttachEvent::Evicted));
+        // And the token it attached with is spent, so nothing can reattach on it.
+        assert!(mgr.attach(&token).is_err(), "the claim is released");
+
+        // The whole point: a fresh login gets the picker, not the desktop it just
+        // logged out of.
+        let next = mgr.claim(false, None).unwrap();
+        let mut again = mgr.attach(&next).unwrap();
+        expect_picker(&mut again.events).await;
+        assert!(hooks.try_recv().is_err(), "no engine survived the log out");
+    }
+
+    /// A log out with nothing running must not panic or evict a socket that is not
+    /// there — it is reachable from the picker, and from a browser whose socket has
+    /// already closed.
+    #[tokio::test]
+    async fn logging_out_with_no_session_running_is_harmless() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        mgr.log_out();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        // And again while attached but in the picker state.
+        mgr.log_out();
+        assert!(matches!(recv(&mut att.events).await, AttachEvent::Evicted));
+        assert!(hooks.try_recv().is_err(), "no engine was ever spawned");
     }
 
     #[tokio::test]
