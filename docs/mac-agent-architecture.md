@@ -265,7 +265,8 @@ the framebuffer, or stop being resampled.
 
 The same argument, applied to the other property, with one difference that
 decides the whole shape: a reconfigure relays every window on that desktop, and a
-guest's display stack can wedge after enough of them ([`known-issues.md`](known-issues.md)).
+guest's display stack can wedge after enough of them, until the guest is
+rebooted.
 So this is RDP's shape rather than VNC's — the floating menu's and the viewer's
 **Resize to window**, pressed, never a window drag followed forty times.
 
@@ -351,9 +352,9 @@ the agent to be in charge:
 The one remembered state that is a genuine problem is an arrangement that holds
 the identity **offline**. Nothing in the process can clear it, and the agent
 reports it rather than minting a new identity to escape it — escaping it would
-discard the arrangement, which is the one thing a monitor never does. The fix is
-on the Mac, in System Settings, as it would be for a panel that came back dark;
-see [`known-issues.md`](known-issues.md).
+discard the arrangement, which is the one thing a monitor never does. That state survives a reboot and cannot be cleared from inside the
+process, so the fix is on the Mac, in System Settings, as it would be for a panel
+that came back dark.
 
 There is no API for any of this in either direction: nothing on
 `CGVirtualDisplayDescriptor` or `CGVirtualDisplaySettings` places a display,

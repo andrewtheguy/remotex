@@ -1,7 +1,10 @@
 # Roadmap
 
-Defects, and the limitations imposed on us from outside, are tracked in
-[`known-issues.md`](known-issues.md).
+What is merely *designed* belongs in the architecture docs; what is *planned*
+belongs here. A defect that has been fixed needs no entry anywhere — the commit
+that fixed it, and the test that holds it fixed, are the record. The limitations
+imposed on us from outside are recorded beside the mechanism they constrain, which
+is the only place they can be read in context.
 
 ## Planned
 
@@ -124,7 +127,7 @@ stream state that the independent tile protocol avoids.
 Socket keepalive bounds host death and network partition
 ([`architecture.md`](architecture.md)), but it is answered by the peer's kernel,
 so for RDP and VNC a server that is hung while still on the network reads as an
-idle desktop ([`known-issues.md`](known-issues.md)) — RXA's ping/pong already
+idle desktop, with no error and no return to the picker — RXA's ping/pong already
 closes that half for the agent. RFB has exactly one message a conformant
 server must answer regardless of change: a **non-incremental**
 `FramebufferUpdateRequest`. A 1×1 one at the origin is therefore a ~10-byte probe,

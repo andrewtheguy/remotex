@@ -699,8 +699,8 @@ async fn pump(
                     // once the desktop has settled. Waiting instead would let a
                     // person mashing the button queue one WindowServer round trip
                     // per press — which is exactly the shape that wedges a guest's
-                    // display stack until it is rebooted (`docs/known-issues.md`),
-                    // and would park a blocking-pool thread per press if it did.
+                    // display stack until it is rebooted, and would park a
+                    // blocking-pool thread per press if it did.
                     GatewayMsg::ResizeDisplay { w, h } => {
                         // `None` is a resize asked of a Mac's own screen, or of a
                         // display this session is not sharing. Ignored rather than

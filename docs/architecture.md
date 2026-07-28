@@ -203,9 +203,20 @@ minutes. macOS has no equivalent option.
 
 What this proves is narrow: that the peer's kernel is still answering. For RDP and
 VNC that is all there is, so a remote whose kernel answers while its server
-process is wedged still reads as an idle desktop. RXA asks the agent process
-itself as well, which closes that half for it — see
-[`known-issues.md`](known-issues.md) for what each one still misses.
+process is wedged still reads as an idle desktop: a hung `Xvnc`, a `SIGSTOP`ped
+server, a sleeping display, or a VM that was *suspended* rather than powered off
+all keep answering, and the client cannot tell any of them from a desktop nobody
+is touching. Neither protocol offers a way to ask better — RFB has no ping, and
+IronRDP's Heartbeat PDU is server-to-client only — so switching target by hand is
+the way out. A probe that would close the RFB half is in
+[`roadmap.md`](roadmap.md).
+
+RXA asks the agent process itself as well, which closes that half for it: a Mac
+whose agent has wedged or gone is reported. What that still does not prove is that
+pixels are flowing. The agent answers pings from its message loop while capture
+delivers on its own queues, so a capture stream that is alive but producing nothing
+leaves the link provably healthy and the picture frozen — rarer than the RDP and
+VNC case, and narrower, but the same symptom.
 
 ## Engines
 
@@ -280,7 +291,11 @@ once, in the log, at the moment it can still be changed.
 
 With `resize = true`, it advertises DesktopSize/ExtendedDesktopSize and sends
 `SetDesktopSize` after the server confirms support. Non-raw encodings are not
-implemented.
+implemented. macOS Screen Sharing is the one server known to accept that
+negotiation and then ignore the request: a Mac reached as a plain `vnc` target
+never resizes, with no error, and the only way to change it is on the Mac itself.
+(An `ard` target refuses the key at startup instead, so this is only reachable by
+not declaring what the target is.)
 
 With `clipboard = true`, `ServerCutText` is forwarded to the browser as it
 arrives and also fills a per-session buffer that answers a later fetch, and a
