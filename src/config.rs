@@ -170,13 +170,23 @@ pub struct TargetConfig {
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
-    /// Dynamic resize: drive the remote desktop size from the browser viewport.
+    /// Dynamic resize: drive the remote desktop size from the client's window.
     /// VNC (`SetDesktopSize`, TigerVNC-family servers) resizes automatically as
     /// the viewport changes. RDP negotiates the Display Control channel and
     /// resizes only when the user asks (the floating menu's "Resize to window"),
-    /// since RDP's Deactivation-Reactivation is heavier than VNC's resize. Off
-    /// by default; without it (or on servers that can't resize) the desktop
-    /// keeps its connect-time size and the browser shows scrollbars.
+    /// since RDP's Deactivation-Reactivation is heavier than VNC's resize.
+    ///
+    /// `rxa` is the third shape and the narrowest: on request, like RDP, and only
+    /// while the display being shared is one the *agent made* for the purpose. A
+    /// Mac's own panel is never resized because somebody connected to it, so this
+    /// key does nothing at all for an agent configured without a private display
+    /// (`virtual_display` in the agent's own config), and the control disappears
+    /// again the moment a client switches to a real screen. That half cannot be
+    /// checked from here, which is why this is accepted for `rxa` rather than
+    /// validated.
+    ///
+    /// Off by default; without it (or on servers that can't resize) the desktop
+    /// keeps its connect-time size and the client shows scrollbars.
     #[serde(default)]
     pub resize: bool,
     /// Clipboard bridge: let the browser read and write this target's
@@ -311,18 +321,16 @@ impl ConfigFile {
                 );
                 rxa_proto::psk::parse(psk)
                     .map_err(|e| anyhow::anyhow!("target {:?} has an invalid psk: {e}", target.name))?;
-                // Rejected rather than ignored. A Mac's resolution is the Mac's:
-                // there is no message on the rxa wire that asks it to change,
-                // and the agent's own display — the one it can create for itself
-                // — appears in System Settings like any other screen and is
-                // changed there. Accepting the key would promise a control that
-                // neither client offers.
-                anyhow::ensure!(
-                    !target.resize,
-                    "target {:?} is protocol \"rxa\" and sets resize, which only \"rdp\" and \
-                     \"vnc\" targets use — a Mac's resolution is changed on the Mac",
-                    target.name
-                );
+                // Deliberately nothing about `resize` here, where there used to be
+                // a rejection. It is accepted for "rxa" now, and there is nothing
+                // left to check from this side: what the agent can resize is a
+                // display it *made* for the purpose, and whether it made one lives
+                // in that Mac's own config file. So this key is only the
+                // operator's half of the permission; the display's half is settled
+                // per session, from the `displays` list, in both clients and again
+                // in the agent. On a Mac with no such display the key is inert and
+                // no control appears — which is a thing to document on
+                // `TargetConfig::resize`, not to refuse a correct config over.
             } else {
                 anyhow::ensure!(
                     target.psk.is_empty(),
@@ -351,10 +359,14 @@ impl ConfigFile {
                          account credentials above instead",
                         target.name
                     );
-                    // Rejected for the same reason `rxa` rejects it: macOS
-                    // accepts the resize negotiation and then ignores every
-                    // request, so the key would promise a control that does
-                    // nothing. A Mac's resolution is set on the Mac.
+                    // Still rejected, and no longer for the reason `rxa` used to
+                    // reject it — `rxa` accepts it now. The difference is what is
+                    // behind the protocol: an agent can make a display for a
+                    // client to resize, while a Mac reached over Screen Sharing
+                    // has only its own screens, whose resolution is set on the
+                    // Mac. Apple's server accepts the resize negotiation and then
+                    // ignores every request, so the key would promise a control
+                    // that does nothing at all.
                     anyhow::ensure!(
                         !target.resize,
                         "target {:?} is subtype \"ard\" and sets resize, which macOS Screen \
@@ -972,15 +984,19 @@ mod tests {
         assert!(msg.contains("psk") && msg.contains("rxa"), "{msg}");
     }
 
-    // Nothing in the rxa protocol carries a resize request, so the flag would be
-    // a promise the wire cannot keep. Rejected on sight rather than ignored.
+    // Accepted, and only half of what enables the control: the other half is that
+    // the display being shared is one the agent made, which is a per-session fact
+    // this file cannot see. A Mac whose agent has no such display gets an inert
+    // flag rather than an error — refusing here would reject a config that is
+    // correct for every Mac but that one.
     #[test]
-    fn resize_on_an_rxa_target_is_rejected() {
+    fn resize_is_accepted_on_an_rxa_target() {
         let psk = rxa_proto::psk::generate();
-        let err = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
-            .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("resize") && msg.contains("rxa"), "{msg}");
+        let config = ConfigFile::parse(&rxa_toml(&format!("psk = \"{psk}\"\nresize = true")))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(config.targets[0].resize);
     }
 
     #[test]

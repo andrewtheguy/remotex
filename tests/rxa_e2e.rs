@@ -282,6 +282,30 @@ async fn serve_fake_agent(
                     clipboard_changed_at_ms.map(|timestamp| timestamp.saturating_add(1));
                 let _ = input_tx.send(GatewayMsg::Clipboard { text });
             }
+            // The real agent clamps this into the envelope its display was
+            // created with and then says nothing — the new size arrives later,
+            // through the poll that announces any mode change. Neither the clamp
+            // nor the delay is what this file can test; what it can test is that
+            // the request arrived in *points* and that the size which comes back
+            // reaches the browser. So this one honours the request exactly and
+            // answers immediately.
+            GatewayMsg::ResizeDisplay { w, h } => {
+                let _ = input_tx.send(GatewayMsg::ResizeDisplay { w, h });
+                writer
+                    .send(
+                        &AgentMsg::DisplaySize {
+                            w: w.saturating_mul(2),
+                            h: h.saturating_mul(2),
+                            scale: AGENT_SCALE,
+                        }
+                        .encode(),
+                    )
+                    .await?;
+                // The whole surface is new after a mode change, so the real agent
+                // repaints it — and the size must be announced before the pixels
+                // drawn at it, which is the ordering worth reproducing.
+                paint(&mut writer).await?;
+            }
             // Everything else is browser input on its way to the Mac. The real
             // agent injects it; here it is recorded so a test can assert on what
             // actually crossed the wire.
@@ -358,15 +382,20 @@ where
 
 /// Start the real axum server with a single `rxa` target pointed at `port`.
 async fn spawn_app(port: u16, psk: &str) -> SocketAddr {
-    spawn_app_with(port, psk, false).await
+    spawn_app_with(port, psk, false, false).await
 }
 
 /// As [`spawn_app`], with the target's clipboard bridge opted in or out.
 async fn spawn_app_with_clipboard(port: u16, psk: &str, clipboard: bool) -> SocketAddr {
-    spawn_app_with(port, psk, clipboard).await
+    spawn_app_with(port, psk, clipboard, false).await
 }
 
-async fn spawn_app_with(port: u16, psk: &str, clipboard: bool) -> SocketAddr {
+/// As [`spawn_app`], with the target's `resize` opted in or out.
+async fn spawn_app_with_resize(port: u16, psk: &str, resize: bool) -> SocketAddr {
+    spawn_app_with(port, psk, false, resize).await
+}
+
+async fn spawn_app_with(port: u16, psk: &str, clipboard: bool, resize: bool) -> SocketAddr {
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,
@@ -384,9 +413,9 @@ async fn spawn_app_with(port: u16, psk: &str, clipboard: bool) -> SocketAddr {
             width: 1280,
             height: 800,
             security: Security::Auto,
-            // Rejected by the config layer for an rxa target: a Mac's
-            // resolution is changed on the Mac.
-            resize: false,
+            // The operator's half of the permission to resize the display the
+            // agent made. Off for every test but the one about it.
+            resize,
             clipboard,
             psk: psk.to_owned(),
         }],
@@ -890,6 +919,69 @@ async fn a_mode_change_on_the_mac_reaches_the_browser() {
         Some(format!(r#"{{"type":"resize","w":{w},"h":{h},"scale":2.0}}"#).as_str())
     );
     assert_paint_pixels(&repaint);
+}
+
+// The unit the two ends disagree in, driven through the real socket. A client's
+// viewport is remote *pixels* — its window times the density the gateway
+// announced — and a display mode is *points*, so the gateway divides on the way
+// through. Nothing downstream can catch this being wrong: the agent would happily
+// resize to twice what was asked for, the browser would show it, and the only
+// symptom is a Mac desktop that is the wrong size.
+#[tokio::test]
+async fn a_viewport_reaches_the_agent_as_display_points() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
+    let addr = spawn_app_with_resize(port, &psk_text, true).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    // A 640x400-point window, reported by a client drawing a 2x remote.
+    ws.send(Message::text(r#"{"type":"viewport","w":1280,"h":800}"#))
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::ResizeDisplay { w: 640, h: 400 },
+        "halved by the scale the gateway announced, not passed through"
+    );
+
+    // And the size the Mac lands on comes back the way every other mode change
+    // does, so the client is told in pixels what it asked for in its own units.
+    let repaint = expect_paint(&mut ws).await;
+    assert_eq!(
+        repaint.resize.as_deref(),
+        Some(r#"{"type":"resize","w":1280,"h":800,"scale":2.0}"#)
+    );
+}
+
+// The other half of the gate. `resize` is the operator's permission, and without
+// it the request stops at the gateway — the clients hide the control too, so this
+// is the belt to their braces.
+#[tokio::test]
+async fn a_viewport_stops_at_the_gateway_when_the_target_did_not_opt_in() {
+    let psk_text = rxa_proto::psk::generate();
+    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
+    let addr = spawn_app_with_resize(port, &psk_text, false).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    // Sent *before* a message that does travel, so the assertion below proves the
+    // viewport was dropped rather than merely slower than the test.
+    for text in [
+        r#"{"type":"viewport","w":1280,"h":800}"#,
+        r#"{"type":"mouseMove","x":10,"y":20}"#,
+    ] {
+        ws.send(Message::text(text)).await.unwrap();
+    }
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::PointerMove { x: 10, y: 20 },
+        "the viewport should not have reached the agent at all"
+    );
 }
 
 /// The one display list a client is expected to render, with `active` marked.
