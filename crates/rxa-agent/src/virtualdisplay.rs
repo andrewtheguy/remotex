@@ -8,8 +8,9 @@
 //!
 //! ## The API is private, and it lies about the result
 //!
-//! There is no entitlement and no compatibility promise; see
-//! `docs/roadmap.md`. What matters more day to day is that a *wrong*
+//! There is no entitlement and no compatibility promise, which is why a failure
+//! to create one costs the sharpness and nothing else (see
+//! `docs/mac-agent-architecture.md`). What matters more day to day is that a *wrong*
 //! configuration does not fail — it silently produces a 1x display, and three
 //! of the obvious ways to check report success anyway:
 //!

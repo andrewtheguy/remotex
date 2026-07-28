@@ -6,132 +6,37 @@ that fixed it, and the test that holds it fixed, are the record. The limitations
 imposed on us from outside are recorded beside the mechanism they constrain, which
 is the only place they can be read in context.
 
-## Planned
-
-### A display of our own for `rxa`
-
-The first of the three routes below is **implemented**, behind the agent's
-**Add a private 2x display** setting (see
-[`mac-agent-architecture.md`](mac-agent-architecture.md)). `CGVirtualDisplay`
-adds a monitor beside a Mac's own screens rather than replacing one, so the
-setting decides only whether that display exists; which display a session shares
-is a separate, per-session choice made from either client. What is still open is
-whether it should ever be the default — and the two routes not taken, kept
-because the private one can be withdrawn by any macOS release.
-
-Both clients present a remote at its own size, scaling by the ratio between the
-two densities, so a 1x guest on a Retina host is drawn magnified, which is soft.
-What a display of our own would add is the pixels to be sharp with: ask for a
-display of the viewport's device-pixel size marked as scale 2, and its logical
-size is the window's point size, so the blit is one texel per device pixel *and*
-physically right with nothing resampled. Three routes, none of them free:
-
-- **`CGVirtualDisplay` (private CoreGraphics/SkyLight).** What BetterDisplay and
-  similar tools use: arbitrary pixel size and a HiDPI backing store, with no
-  entitlement to request. Measured on the test VM (macOS 26.5.2, Apple
-  Virtualization guest) it does work there. Listing one mode at the *point* size
-  with `hiDPI = 1`, `maxPixels` at twice that size, and `sizeInMillimeters` sized
-  to put the density near 200 dpi (about `maxPixels / 9`), gives a 1600×1000 pt
-  display backed by 3200×2000 real pixels — sharp, on a guest whose own
-  paravirtual framebuffer advertises no HiDPI mode at any size. ScreenCaptureKit
-  lists and captures it at full resolution, and the display is process-scoped:
-  released object, display gone.
-
-  What makes the route treacherous rather than merely unsupported is that two
-  readings misreport such a display. `CGDisplayBounds` shows the intended point
-  size even when the backing store is 1x, so a wrong configuration looks right
-  until something captures native pixels. `SCContentFilter.pointPixelScale`
-  reports 1.00 on a genuine 2x display, so capture size has to be set explicitly
-  instead of derived from the filter. (A third was listed here and was wrong:
-  `CGDisplayCopyDisplayMode` does work on these displays and reports the true
-  backing scale — see [`mac-agent-architecture.md`](mac-agent-architecture.md).
-  `NSScreen.backingScaleFactor` is the one that takes its place, reporting 2.00
-  for a display that is genuinely 1x.) And of five plausible descriptor
-  configurations only one produced 2x, because the HiDPI flag does not command
-  it: what decides is pixel density, `modePixels / sizeInMillimeters`, which has
-  to land in a window of roughly
-  145–300 dpi. At a fixed 1000×700 pt mode, 134 and 318 dpi both came up 1x,
-  while 149 through 264 dpi came up 2x. Outside that window the display appears
-  at twice the requested point size at 1x — a desktop with unreadable UI rather
-  than a merely soft one. A major release could keep every symbol and still
-  change which configuration works, and this would be load-bearing for the whole
-  `rxa` display path.
-
-  Such a display is also a normal display to the rest of macOS: it appears in
-  System Settings > Displays with the mode list macOS derives from the
-  descriptor — a HiDPI entry and a `(low resolution)` one at each size — so
-  whoever is using that Mac changes its resolution there, like any other screen.
-  Re-applying settings from the process takes any point size exactly and can flip
-  the density, keeping the same `displayID` and settling in 130–580 ms; the agent
-  uses that for density only, and the size question is the section below.
-
-  Nothing about the route is VM-specific. It was measured in the guest because
-  that is the test machine; these are the same calls BetterDisplay drives on
-  physical hardware, so it is available on either. Which machines create one is
-  configuration.
-
-- **DriverKit virtual framebuffer.** The supported route. Needs an Apple-granted
-  DriverKit entitlement and a system extension the user approves, which is a
-  heavier install than the rest of the agent put together, and the entitlement is
-  not a given.
-- **Host-side, and only for a VM.** An Apple Virtualization guest's scale is
-  already the host's to decide:
-  `VZMacGraphicsDisplayConfiguration(widthInPixels:heightInPixels:pixelsPerInch:)`
-  — a high `pixelsPerInch` gives a HiDPI display — and on macOS 14+
-  `automaticallyReconfiguresDisplay` makes the guest's display follow the VM
-  window. That is the VM app's configuration (UTM, in the test setup), not
-  something an agent inside the guest can drive, so it settles the development
-  machine and nothing else.
-
-What is still to be decided: whether a display of our own should ever be the
-**default**. Sharing it turns `rxa` from screen sharing into a separate desktop —
-nobody's windows get rearranged by a connection, which is the upside, and it
-stops being "what is on that Mac's screen", which is the point of `rxa` today,
-and leaves a desktop nobody is looking at once the viewer goes away. Since it is
-an extra display rather than a replacement, whoever is connecting makes that
-trade per session, which is a large part of why it need not be settled here.
-
-It also only helps `rxa`: a Linux or Windows box cannot be handed a display from
-here, so for those the scaled presentation is the whole answer.
-
 ## Deferred pending measurements
 
-### Retina performance for `rxa`
+### Downscaled capture
 
-Largely overtaken by protocol v3, which was measured rather than guessed and went
-a different way than the ladder below anticipated. What shipped instead:
+A display is captured at its full pixel size, so a Retina panel hands the encoder
+four times the pixels of the same desktop at 1x. `SCStreamConfiguration`'s `width`
+and `height` can ask ScreenCaptureKit for fewer, trading sharpness for encode time
+and bytes. Nothing already in place substitutes for it: the frame rate is already
+capped, `VirtualDisplay::set_size` changes a desktop's *resolution* rather than
+sampling it and only for a display of our own, and per-cell change detection and
+the tile cache answer pixels that did *not* change.
 
-- per-cell change detection in the agent, and a shadow copy of what the client
-  holds in the RDP and VNC engines, so unchanged pixels are never encoded;
-- a 320×64 grid in the agent, so one change in a full-width strip costs one cell —
-  which is step 2 of the ladder below, arrived at from the opposite direction (the
-  tiles got *finer*, and the gate is what paid for it);
-- batching, so a repaint is one frame rather than one per tile;
-- a slot-indexed tile cache, so content the client already has costs seven bytes.
+That last one is why this waits rather than ships. It leaves downscaling as the
+lever for a remote whose *changing* area is genuinely large — full-screen video, a
+window dragged across a 2x panel — and the measurement it needs is that case:
+encode time as a share of the frame budget while most of the screen is moving. No
+workload here has pushed hard enough to produce it.
 
-An idle Retina desktop went from 290 MB in 30 s to nothing at all. What is left of
-this item:
+### H.264 through the tile format byte
 
-1. downscale through `SCStreamConfiguration`, which is still the only answer for a
-   remote whose *changing* area is genuinely large;
-2. ~~replace PNG with WebP lossless~~ — **done**, protocol version 4. It replaced
-   JPEG too, so the wire carries one codec and one format value. Measured on real
-   screenshots rather than generated fixtures, WebP lossless at the effort a hot
-   path can afford is **0.64-0.81x** PNG's bytes on a working window and 0.83-0.88x
-   on a photographic wallpaper — so the win is largest on exactly the content the
-   RDP and VNC engines carry, and smallest on what the agent's classifier sends down
-   its lossy branch anyway. Higher effort reaches 0.53x but costs 20-70x the encode
-   time, which an engine's protocol-read loop cannot spend. The lossy half is a
-   clearer win still: 0.50-0.70x JPEG's bytes at 2.5x its time on the deployment
-   host. See `webp_cost_against_png_cost` in `src/protocol.rs`, and note what it
-   says about generated fixtures — the first version of that bench overstated WebP
-   by 60x by measuring periodic content;
-3. move to VideoToolbox H.264 and browser WebCodecs. The `TILE` record's format
-   byte is the seam this arrives through, which is why it was kept when the codec
-   collapsed to one value.
+VideoToolbox to encode, browser WebCodecs to decode, as a second payload kind
+rather than a replacement. The `TILE` record's `format` byte is the seam it arrives
+through, which is why the byte was kept when the codec collapsed to a single value
+(`src/protocol.rs`).
 
-H.264 is still last because it creates a second browser decode path and adds
-stream state that the independent tile protocol avoids.
+It is behind everything else here because it costs more than a codec swap did: a
+second decode path in *both* clients, and stream state — reference frames, keyframe
+cadence, a decoder that cannot be handed tiles out of order — which the independent
+tile protocol deliberately does not have. It is not an `rxa`-only item either: the
+RDP and VNC engines would carry it too. The trigger is the same large moving area
+the section above addresses far more cheaply, which is the order to try them in.
 
 ### Application-level liveness for VNC
 

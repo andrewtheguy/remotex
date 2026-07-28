@@ -21,8 +21,8 @@
 //!   finish out of order, and the same region *is* commonly dirty in consecutive
 //!   frames — so an older tile could land on top of a newer one and leave stale
 //!   pixels on screen until something else redraws them. Ordering is worth more
-//!   than the parallelism until measurement says otherwise; the fallback ladder
-//!   in docs/roadmap.md starts with downscaling instead.
+//!   than the parallelism until measurement says otherwise, and the cheaper lever
+//!   for the same problem is downscaled capture (docs/roadmap.md).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

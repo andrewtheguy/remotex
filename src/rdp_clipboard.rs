@@ -29,7 +29,8 @@
 //! ## Scope
 //!
 //! `CF_UNICODETEXT` only. The browser protocol carries a `text` string, so
-//! HTML, bitmaps and file lists have nowhere to go — see docs/roadmap.md.
+//! HTML, bitmaps and file lists have nowhere to go, and nothing is planned for
+//! them.
 
 use ironrdp::cliprdr::backend::CliprdrBackend;
 use ironrdp::cliprdr::pdu::{
