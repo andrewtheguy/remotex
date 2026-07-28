@@ -1561,26 +1561,6 @@ mod tests {
         }
     }
 
-    /// What WebP costs against PNG on this protocol's own content, in bytes and in
-    /// time. The decision record for replacing the tile codec.
-    ///
-    /// A sibling of [`encode_cost_against_hash_cost`] rather than an extension of
-    /// it: that test's numbers are quoted verbatim in [`CELL_W`]'s documentation and
-    /// have to stay readable on their own.
-    ///
-    /// Ignored and mostly assertion-free for the same reasons as its sibling — it
-    /// prints, it does not judge, because a timing assertion on a shared machine is
-    /// a flaky test. The one thing it *does* assert is that every payload from a
-    /// lossless config decodes back to the original pixels: a config that is
-    /// quietly lossy would otherwise print as the winner.
-    ///
-    /// Run it in **release**. `png` at `Compression::Fast` is several times slower
-    /// in a debug build, so a debug run flatters WebP and decides nothing:
-    ///
-    /// ```sh
-    /// cargo test --release --lib -- --ignored --nocapture webp_cost
-    /// ```
-    ///
     /// Write the WebP fixtures the macOS viewer's tests decode.
     ///
     /// They are checked in rather than generated in Swift because **ImageIO cannot
@@ -1676,7 +1656,11 @@ mod tests {
         let lossy = webp::Encoder::from_rgb(&rgb, 64, 64)
             .encode_advanced(&lossy_config)
             .expect("lossy fixture encodes");
-        assert_ne!(&*lossy, rgb.as_slice(), "the lossy fixture is not lossy");
+        // Not `assert_ne!` against the source pixels: those are raw RGB and this is
+        // an encoded container, so they differ however the config was set — a
+        // lossless encode would have passed that check just as well. The chunk
+        // identifier is the thing that actually distinguishes the two bitstreams.
+        assert_eq!(&lossy[12..16], b"VP8 ", "the lossy fixture is not a lossy bitstream");
         std::fs::write(dir.join("lossy-64x64.webp"), &*lossy).unwrap();
         println!("wrote lossy-64x64.webp");
 
@@ -1686,18 +1670,25 @@ mod tests {
         // uniform alpha is exactly the sort of thing an encoder may decide to drop,
         // and a fixture that silently became opaque would leave `TileDecoder`'s
         // four-bytes-per-pixel normalisation untested while looking covered.
-        for (name, w, h, wants_alpha) in [
-            ("solid-2x2-11.webp", 2u32, 2u32, false),
-            ("solid-2x2-22.webp", 2, 2, false),
-            ("solid-2x2-ff.webp", 2, 2, false),
-            ("topdown-8x8.webp", 8, 8, false),
-            ("opaque-4x4.webp", 4, 4, false),
-            ("alpha-4x4.webp", 4, 4, true),
-            ("lossy-64x64.webp", 64, 64, false),
+        //
+        // The codec chunk is checked for the same reason: `VP8L` and `VP8 ` are two
+        // different bitstreams decoded by two different paths on the other side, so a
+        // config change that silently flipped one is a fixture that stops covering
+        // what its test claims.
+        for (name, w, h, wants_alpha, chunk) in [
+            ("solid-2x2-11.webp", 2u32, 2u32, false, b"VP8L"),
+            ("solid-2x2-22.webp", 2, 2, false, b"VP8L"),
+            ("solid-2x2-ff.webp", 2, 2, false, b"VP8L"),
+            ("topdown-8x8.webp", 8, 8, false, b"VP8L"),
+            ("opaque-4x4.webp", 4, 4, false, b"VP8L"),
+            ("alpha-4x4.webp", 4, 4, true, b"VP8L"),
+            ("lossy-64x64.webp", 64, 64, false, b"VP8 "),
         ] {
             let bytes = std::fs::read(dir.join(name)).unwrap();
+            assert!(bytes.len() >= 16, "{name} is too short to be a WebP");
             assert_eq!(&bytes[..4], b"RIFF", "{name} is not a RIFF container");
             assert_eq!(&bytes[8..12], b"WEBP", "{name} is not a WebP");
+            assert_eq!(&bytes[12..16], chunk, "{name} is not the codec its test expects");
             let image = webp::Decoder::new(&bytes)
                 .decode()
                 .unwrap_or_else(|| panic!("{name} does not decode"));
@@ -1706,6 +1697,26 @@ mod tests {
         }
     }
 
+    /// What WebP costs against PNG on this protocol's own content, in bytes and in
+    /// time. The decision record for replacing the tile codec.
+    ///
+    /// A sibling of [`encode_cost_against_hash_cost`] rather than an extension of
+    /// it: that test's numbers are quoted verbatim in [`CELL_W`]'s documentation and
+    /// have to stay readable on their own.
+    ///
+    /// Ignored and mostly assertion-free for the same reasons as its sibling — it
+    /// prints, it does not judge, because a timing assertion on a shared machine is
+    /// a flaky test. The one thing it *does* assert is that every payload from a
+    /// lossless config decodes back to the original pixels: a config that is
+    /// quietly lossy would otherwise print as the winner.
+    ///
+    /// Run it in **release**. `png` at `Compression::Fast` is several times slower
+    /// in a debug build, so a debug run flatters WebP and decides nothing:
+    ///
+    /// ```sh
+    /// cargo test --release --lib -- --ignored --nocapture webp_cost
+    /// ```
+    ///
     /// Measured on **real screen pixels** ([`screenshot_rgb`]), tiled the way an
     /// engine would tile them, because generated fixtures give answers off by
     /// orders of magnitude — see that function for what went wrong the first time.

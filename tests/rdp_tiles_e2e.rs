@@ -105,6 +105,14 @@ fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u32 {
     for tile in &tiles {
         assert_eq!(tile.format, TILE_FORMAT_WEBP, "unexpected tile format byte");
         assert!(tile.w > 0 && tile.h > 0, "empty tile {}x{}", tile.w, tile.h);
+        // Length first: a malformed payload is exactly what these markers are here
+        // to catch, and slicing a short one would panic on the index instead of
+        // reporting what was wrong.
+        assert!(
+            tile.payload.len() >= 12,
+            "payload is {} bytes, too short to be a WebP",
+            tile.payload.len()
+        );
         assert_eq!(
             (&tile.payload[..4], &tile.payload[8..12]),
             (b"RIFF".as_slice(), b"WEBP".as_slice()),

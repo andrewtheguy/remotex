@@ -109,6 +109,14 @@ fn check_tile_frame(
             u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
             "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
         );
+        // Length first: a malformed payload is exactly what these markers are here
+        // to catch, and slicing a short one would panic on the index instead of
+        // reporting what was wrong.
+        assert!(
+            tile.payload.len() >= 12,
+            "payload is {} bytes, too short to be a WebP",
+            tile.payload.len()
+        );
         assert_eq!(
             (&tile.payload[..4], &tile.payload[8..12]),
             (b"RIFF".as_slice(), b"WEBP".as_slice()),
