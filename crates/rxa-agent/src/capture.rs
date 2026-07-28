@@ -357,6 +357,70 @@ pub struct Capture {
 /// answers "is ScreenCaptureKit delivering anything, and what?" immediately.
 const FRAMES_TO_LOG: u64 = 3;
 
+/// What was last sent for each strip, so a strip whose pixels did not change
+/// costs neither an encode nor a place on the wire.
+///
+/// This exists because ScreenCaptureKit's dirty rects are *coarse*. Measured on
+/// the test Mac at 3200x2000 with nobody touching the screen, 15 to 21 of the 32
+/// full-width strips covering it come back dirty on every frame, and each one is
+/// then packed to RGB and PNG-encoded at ~95 KB. Almost all of that is pixels the
+/// viewer is already showing.
+///
+/// The gateway drops the repeats it can recognise, but it can only compare
+/// *encoded* payloads — by which point the PNG has been built and pushed across
+/// the LAN. Hashing the source pixels here skips both, so this is a CPU saving as
+/// much as a bandwidth one: the hash reads the same bytes the packer would have,
+/// once, and then nothing else happens.
+///
+/// 64-bit rather than 32 because a collision is not a retry: it is a strip left
+/// showing stale pixels until something else changes it.
+#[derive(Default)]
+struct StripMemo {
+    sent: std::collections::HashMap<(u16, u16, u16, u16), u64>,
+}
+
+impl StripMemo {
+    /// Whether this strip's pixels differ from the last ones sent for it,
+    /// recording them either way.
+    fn is_new(&mut self, pixels: &[u8], stride: usize, rect: Rect) -> bool {
+        let Some(digest) = strip_digest(pixels, stride, rect) else {
+            // The strip does not fit the surface — a bug elsewhere. Send it rather
+            // than remember a digest of something that was never sent.
+            return true;
+        };
+        let key = (rect.x, rect.y, rect.w, rect.h);
+        self.sent.insert(key, digest) != Some(digest)
+    }
+
+    /// Forget everything, because a full repaint is about to be sent.
+    ///
+    /// Every path that empties a viewer's canvas arrives here through
+    /// `full_repaint`: the first frame after `Attach`, a `Refresh` from the
+    /// gateway, a surface resize, and the sink dropping a frame it could not
+    /// queue. That is what makes this one call enough.
+    fn forget(&mut self) {
+        self.sent.clear();
+    }
+}
+
+/// Hash a strip's source pixels, or `None` if it does not fit the surface.
+///
+/// Reads the BGRA rows in place: the point is to answer "did this change?" without
+/// paying for the RGB pack, so this must not copy. The dimensions go into the
+/// digest too, so two differently-shaped strips cannot match by hashing the same
+/// bytes.
+fn strip_digest(pixels: &[u8], stride: usize, rect: Rect) -> Option<u64> {
+    let w = usize::from(rect.w);
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    hasher.update(&rect.w.to_le_bytes());
+    hasher.update(&rect.h.to_le_bytes());
+    for row in 0..usize::from(rect.h) {
+        let start = (usize::from(rect.y) + row) * stride + usize::from(rect.x) * 4;
+        hasher.update(pixels.get(start..start + w * 4)?);
+    }
+    Some(hasher.digest())
+}
+
 /// State shared with the capture callback.
 struct Shared {
     sink: Arc<dyn FrameSink>,
@@ -369,6 +433,8 @@ struct Shared {
     /// Last surface size seen, so a change is reported once rather than per
     /// frame.
     last_size: Mutex<(u16, u16)>,
+    /// See [`StripMemo`]. Locked once per frame, around the strip loop.
+    strips: Mutex<StripMemo>,
 }
 
 impl Capture {
@@ -417,6 +483,7 @@ impl Capture {
             frames_seen: std::sync::atomic::AtomicU64::new(0),
             full_repaint,
             last_size: Mutex::new((geometry.width, geometry.height)),
+            strips: Mutex::new(StripMemo::default()),
         });
 
         // The delegate is how ScreenCaptureKit reports an *unexpected* stop —
@@ -804,18 +871,34 @@ impl Handler {
         }
 
         let mut tiles = Vec::new();
-        for rect in dirty {
-            for strip in split_strips(rect) {
-                tiles.push(RawTile {
-                    rect: strip,
-                    rgb: extract_rgb(pixels, stride, strip),
-                });
+        let mut unchanged = 0usize;
+        {
+            let mut memo = self.0.strips.lock().unwrap();
+            // A full repaint may be arriving at a canvas with nothing on it, so
+            // nothing may be withheld from one.
+            if full {
+                memo.forget();
+            }
+            for rect in dirty {
+                for strip in split_strips(rect) {
+                    // Hashing the source rows first is the whole point: a strip
+                    // ScreenCaptureKit called dirty but did not change costs one
+                    // read of its pixels, not a pack plus a PNG.
+                    if memo.is_new(pixels, stride, strip) {
+                        tiles.push(RawTile {
+                            rect: strip,
+                            rgb: extract_rgb(pixels, stride, strip),
+                        });
+                    } else {
+                        unchanged += 1;
+                    }
+                }
             }
         }
         if nth < FRAMES_TO_LOG {
             info!(
                 "capture: frame {nth} status {status:?} — surface {surface_w}x{surface_h}, \
-                 stride {stride}, full_repaint {full}, {} tile(s)",
+                 stride {stride}, full_repaint {full}, {} tile(s), {unchanged} unchanged",
                 tiles.len()
             );
         }
@@ -1035,6 +1118,96 @@ mod tests {
             strips.iter().map(|s| u32::from(s.h)).sum::<u32>(),
             150,
             "the strips must cover the rect exactly"
+        );
+    }
+
+    /// A `stride`-padded BGRA surface whose pixels are a function of `seed`.
+    fn surface(w: usize, h: usize, stride: usize, seed: u8) -> Vec<u8> {
+        let mut pixels = vec![0u8; stride * h];
+        for row in 0..h {
+            for col in 0..w {
+                let at = row * stride + col * 4;
+                let v = (row * w + col) as u8 ^ seed;
+                pixels[at..at + 4].copy_from_slice(&[v, v.wrapping_add(1), v.wrapping_add(2), 255]);
+            }
+        }
+        pixels
+    }
+
+    // The point of the memo: a strip ScreenCaptureKit called dirty but did not
+    // change is answered without packing or encoding it.
+    #[test]
+    fn the_strip_memo_skips_unchanged_pixels_and_passes_changed_ones() {
+        let (w, h, stride) = (8, 8, 40);
+        let before = surface(w, h, stride, 0);
+        let after = surface(w, h, stride, 0x5A);
+        let strip = rect(0, 0, 8, 8);
+        let mut memo = StripMemo::default();
+
+        assert!(memo.is_new(&before, stride, strip), "never seen before");
+        assert!(!memo.is_new(&before, stride, strip), "identical pixels");
+        assert!(memo.is_new(&after, stride, strip), "the pixels changed");
+        assert!(!memo.is_new(&after, stride, strip), "and now that one repeats");
+    }
+
+    // Padding bytes are not pixels. A digest that walked the buffer straight
+    // through would fold them in and report a change whenever they moved.
+    #[test]
+    fn the_strip_digest_ignores_row_padding() {
+        let (w, h) = (8, 4);
+        let mut padded = surface(w, h, 40, 0);
+        let tight = surface(w, h, w * 4, 0);
+        let strip = rect(0, 0, 8, 4);
+        assert_eq!(
+            strip_digest(&padded, 40, strip),
+            strip_digest(&tight, w * 4, strip),
+            "the same pixels at two strides are the same picture"
+        );
+        // Scribble in the padding only: still the same picture.
+        for row in 0..h {
+            padded[row * 40 + w * 4] = 0xFF;
+        }
+        assert_eq!(
+            strip_digest(&padded, 40, strip),
+            strip_digest(&tight, w * 4, strip)
+        );
+    }
+
+    // Two strips of different shapes must not match by hashing the same bytes.
+    #[test]
+    fn the_strip_digest_covers_the_strips_shape() {
+        let pixels = surface(8, 8, 32, 0);
+        assert_ne!(
+            strip_digest(&pixels, 32, rect(0, 0, 8, 4)),
+            strip_digest(&pixels, 32, rect(0, 0, 4, 8)),
+            "same byte count, different shape"
+        );
+    }
+
+    // A strip that runs past the surface is a bug elsewhere. The safe answer is to
+    // send it, not to remember a digest of pixels that were never read.
+    #[test]
+    fn a_strip_outside_the_surface_is_never_remembered() {
+        let pixels = surface(4, 4, 16, 0);
+        let outside = rect(0, 8, 4, 4);
+        assert_eq!(strip_digest(&pixels, 16, outside), None);
+        let mut memo = StripMemo::default();
+        assert!(memo.is_new(&pixels, 16, outside));
+        assert!(memo.is_new(&pixels, 16, outside), "still not remembered");
+    }
+
+    // A full repaint may be arriving at a canvas with nothing on it.
+    #[test]
+    fn forgetting_makes_every_strip_paintable_again() {
+        let pixels = surface(8, 8, 32, 0);
+        let strip = rect(0, 0, 8, 8);
+        let mut memo = StripMemo::default();
+        assert!(memo.is_new(&pixels, 32, strip));
+        assert!(!memo.is_new(&pixels, 32, strip));
+        memo.forget();
+        assert!(
+            memo.is_new(&pixels, 32, strip),
+            "a repaint must reach a blank canvas even with unchanged pixels"
         );
     }
 

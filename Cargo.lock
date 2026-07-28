@@ -3225,6 +3225,7 @@ dependencies = [
  "serde",
  "tokio",
  "toml",
+ "xxhash-rust",
 ]
 
 [[package]]
