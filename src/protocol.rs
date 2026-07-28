@@ -991,4 +991,116 @@ mod tests {
     fn tile_with_wrong_payload_length_is_rejected() {
         assert!(Tile::from_rgb(0, 0, 2, 2, &[0u8; 5]).is_err());
     }
+
+    /// Flat UI: a few colours and hard edges, which is what most of a desktop is.
+    /// Deliberately the same shape of content as the agent's classifier test, so
+    /// the two halves of the system are judged on the same material.
+    fn flat_ui_rgb(w: u16, h: u16) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for y in 0..h {
+            for x in 0..w {
+                if (y / 16) % 2 == 0 && (x / 7) % 3 == 0 {
+                    rgb.extend_from_slice(&[20, 20, 24]); // "text"
+                } else {
+                    rgb.extend_from_slice(&[246, 246, 248]);
+                }
+            }
+        }
+        rgb
+    }
+
+    /// What a change-detection hash costs against what it skips, and what a
+    /// narrower cell costs when its pixels really did change.
+    ///
+    /// Ignored and assertion-free on purpose: it prints, it does not judge. There
+    /// is no benchmark harness here and a timing assertion on a shared machine is
+    /// a flaky test — but these numbers decide two real design questions, so
+    /// guessing at them is worse than a test nobody runs by accident:
+    ///
+    /// 1. **Does a change-detection gate pay for itself?** Only if hashing is much
+    ///    cheaper than the encode it skips.
+    /// 2. **How wide should a cell be?** A narrower cell skips more often but pays
+    ///    PNG's per-stream overhead more times, and gets less redundancy to
+    ///    compress within each stream. The ratio printed here is what a grid costs
+    ///    in the case where it wins nothing, so it sets the skip rate the grid has
+    ///    to achieve before it is worth having at all.
+    ///
+    /// Run it in **release**: `png` at `Compression::Fast` is several times slower
+    /// in a debug build, which would flatter the hash and slander the grid.
+    ///
+    /// ```sh
+    /// cargo test --release --lib -- --ignored --nocapture encode_cost
+    /// ```
+    #[test]
+    #[ignore = "prints timings; run explicitly in release"]
+    fn encode_cost_against_hash_cost() {
+        use std::time::Instant;
+
+        // A full-width Retina strip, the unit the rxa agent ships today.
+        let (sw, sh) = (3200u16, 64u16);
+        let runs = 20;
+
+        for (label, make) in [
+            ("flat UI ", flat_ui_rgb as fn(u16, u16) -> Vec<u8>),
+            ("gradient", gradient_rgb as fn(u16, u16) -> Vec<u8>),
+        ] {
+            let strip = make(sw, sh);
+
+            let started = Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(xxhash_rust::xxh3::xxh3_64(&strip));
+            }
+            let hash = started.elapsed() / runs;
+
+            let started = Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(Tile::from_rgb(0, 0, sw, sh, &strip).unwrap());
+            }
+            let whole = started.elapsed() / runs;
+            let strip_bytes = Tile::from_rgb(0, 0, sw, sh, &strip).unwrap().data.len();
+
+            println!(
+                "\n{label}  {sw}x{sh} strip: {strip_bytes} bytes, encode {whole:?}, \
+                 hash {hash:?} ({:.0}x cheaper)",
+                whole.as_secs_f64() / hash.as_secs_f64().max(f64::EPSILON),
+            );
+            println!("  cell      tiles  bytes   vs strip  encode     vs strip  break-even");
+
+            // Both axes, because they are not equivalent: PNG filters and
+            // compresses *along rows*, so cutting the width throws away redundancy
+            // inside every stream, while cutting the height keeps each row whole
+            // and only pays the per-stream overhead again.
+            for (cw, ch) in [
+                (3200u16, 32u16),
+                (3200, 16),
+                (800, 64),
+                (640, 64),
+                (320, 64),
+                (320, 32),
+                (256, 64),
+                (128, 64),
+            ] {
+                let tiles = usize::from(sw / cw) * usize::from(sh / ch);
+                let cell = make(cw, ch);
+                let started = Instant::now();
+                for _ in 0..runs {
+                    for _ in 0..tiles {
+                        std::hint::black_box(Tile::from_rgb(0, 0, cw, ch, &cell).unwrap());
+                    }
+                }
+                let split = started.elapsed() / runs;
+                let cell_bytes = Tile::from_rgb(0, 0, cw, ch, &cell).unwrap().data.len();
+                let total = cell_bytes * tiles;
+                // How many tiles may change before sending tiles costs more than
+                // sending the whole strip. Below this the grid wins.
+                let break_even = (strip_bytes as f64 / cell_bytes as f64).min(tiles as f64);
+                println!(
+                    "  {cw:>4}x{ch:<3}  {tiles:>5}  {total:>6}  {:>7.2}x  {split:>9?}  \
+                     {:>6.2}x  {break_even:>5.1}/{tiles}",
+                    total as f64 / strip_bytes as f64,
+                    split.as_secs_f64() / whole.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+        }
+    }
 }
