@@ -9,7 +9,9 @@ import OSLog
 enum SessionEvent: Sendable {
     case status(ViewerConnectionStatus)
     case control(ServerMessage)
-    case tile(DecodedTile)
+    /// One binary frame's worth of tiles, in wire order. Delivered whole so the
+    /// renderer asks for one redraw per frame rather than one per tile.
+    case tiles([DecodedTile])
     case clearFramebuffer
     case releaseInput
     case failPendingClipboardFetch
@@ -334,8 +336,14 @@ actor GatewayConnection {
         }
         // In order, and each awaited: a later tile has to overwrite an earlier one
         // that covers the same pixels.
+        //
+        // An undecodable record is dropped alone rather than taking its batch with
+        // it — the rest decoded, and the pixels they cover would otherwise stay
+        // stale until something repaints them.
+        var decoded = [DecodedTile]()
+        decoded.reserveCapacity(frames.count)
         for frame in frames {
-            guard let decoded = await decoder.decode(frame) else {
+            guard let tile = await decoder.decode(frame) else {
                 log.warning(
                     """
                     undecodable \(String(describing: frame.format), privacy: .public) tile \
@@ -344,8 +352,14 @@ actor GatewayConnection {
                 )
                 continue
             }
-            await publish(.tile(decoded))
+            decoded.append(tile)
         }
+        // An empty batch is well formed and means nothing to paint, so it must not
+        // reach the renderer and ask for a redraw of nothing.
+        guard !decoded.isEmpty else {
+            return
+        }
+        await publish(.tiles(decoded))
     }
 
     // MARK: - Outbound

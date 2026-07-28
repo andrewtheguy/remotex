@@ -218,7 +218,8 @@ final class RecordingSink: GatewaySessionSink {
             switch event {
             case .status(let status): "status:\(status.rawValue)"
             case .control(let message): "control:\(Self.label(message))"
-            case .tile(let tile): "tile:\(tile.x),\(tile.y),\(tile.w)x\(tile.h)"
+            case .tiles(let tiles):
+                "tiles:" + tiles.map { "\($0.x),\($0.y),\($0.w)x\($0.h)" }.joined(separator: "|")
             case .clearFramebuffer: "clear"
             case .releaseInput: "release"
             case .failPendingClipboardFetch: "failFetch"
@@ -353,9 +354,31 @@ struct AttachedSession {
     }
 }
 
-/// A real single-colour PNG tile frame, header and all. Encoded rather than
-/// hand-rolled so the decode under test is the same one production runs.
+/// A batch frame carrying one tile, which is what most of these tests want.
 func tileFrame(
+    x: UInt16,
+    y: UInt16,
+    size: UInt16 = 2,
+    red: UInt8 = 0xFF
+) throws -> Data {
+    batchFrame([try tileRecord(x: x, y: y, size: size, red: red)])
+}
+
+/// A batch frame wrapping `records`, whose count the header reports honestly.
+func batchFrame(_ records: [Data]) -> Data {
+    var frame = Data([BatchFrame.frameKind, 0])
+    let count = UInt16(records.count)
+    frame.append(UInt8(count & 0xFF))
+    frame.append(UInt8(count >> 8))
+    for record in records {
+        frame.append(record)
+    }
+    return frame
+}
+
+/// One real single-colour PNG `TILE` record, header and all. Encoded rather than
+/// hand-rolled so the decode under test is the same one production runs.
+func tileRecord(
     x: UInt16,
     y: UInt16,
     size: UInt16 = 2,
@@ -389,7 +412,6 @@ func tileFrame(
     CGImageDestinationAddImage(destination, image, nil)
     #expect(CGImageDestinationFinalize(destination))
 
-    // One TILE record in a batch frame carrying exactly one record.
     var record = Data([BatchFrame.opTile, TileFormat.png.rawValue])
     for value in [BatchFrame.noSlot, x, y, size, size] {
         record.append(UInt8(value & 0xFF))
@@ -400,8 +422,5 @@ func tileFrame(
         record.append(UInt8((length >> shift) & 0xFF))
     }
     record.append(encoded as Data)
-
-    var frame = Data([BatchFrame.frameKind, 0, 1, 0])
-    frame.append(record)
-    return frame
+    return record
 }

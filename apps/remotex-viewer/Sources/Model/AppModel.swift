@@ -403,8 +403,8 @@ final class AppModel: GatewaySessionSink {
             updateClipboardEnablement()
         case .control(let message):
             handle(message)
-        case .tile(let tile):
-            renderer?.upload(tile)
+        case .tiles(let tiles):
+            renderer?.upload(tiles)
         case .clearFramebuffer:
             // Dropping the size is what puts the "waiting for the remote
             // desktop" interstitial back up; the gateway always repaints in full.

@@ -30,17 +30,89 @@ struct GatewayConnectionTests {
         await connection.start()
         await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
 
-        let interesting = sink.trace.filter { $0.hasPrefix("control:") || $0.hasPrefix("tile:") }
+        let interesting = sink.trace.filter { $0.hasPrefix("control:") || $0.hasPrefix("tiles:") }
         #expect(
             interesting == [
                 "control:connected(mac)",
                 "control:resize(64x64@2.0x)",
-                "tile:0,0,2x2",
-                "tile:8,16,2x2",
+                "tiles:0,0,2x2",
+                "tiles:8,16,2x2",
                 "control:remoteOs(true)",
-                "tile:32,48,2x2",
+                "tiles:32,48,2x2",
                 "control:picker",
             ]
+        )
+        await connection.stop()
+    }
+
+    /// A batch reaches the sink as one event, in wire order.
+    ///
+    /// One event per frame is what lets the renderer ask for a single redraw per
+    /// frame; delivering tile by tile would put that back to one per tile, and no
+    /// pixel assertion downstream could tell the difference.
+    @Test
+    func aBatchReachesTheSinkAsOneEventInWireOrder() async throws {
+        let batch = batchFrame([
+            try tileRecord(x: 0, y: 0),
+            try tileRecord(x: 8, y: 0),
+            try tileRecord(x: 16, y: 32),
+        ])
+        let transport = FakeWebSocketTransport(
+            inbound: [
+                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
+                .binary(batch),
+                .text(#"{"type":"picker"}"#),
+            ],
+            closeCode: nil
+        )
+        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
+        let sink = RecordingSink()
+        let connection = GatewayConnection(gateway: gateway, sink: sink)
+
+        await connection.start()
+        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
+
+        #expect(
+            sink.trace.filter { $0.hasPrefix("tiles:") }
+                == ["tiles:0,0,2x2|8,0,2x2|16,32,2x2"]
+        )
+        await connection.stop()
+    }
+
+    /// One record this build cannot decode must not cost the rest of its batch:
+    /// those tiles decoded, and the pixels they cover would stay stale until
+    /// something else happened to repaint them.
+    @Test
+    func anUndecodableRecordIsDroppedWithoutItsBatch() async throws {
+        // A structurally valid record whose payload is not an image.
+        var garbage = Data([BatchFrame.opTile, TileFormat.png.rawValue])
+        for value: UInt16 in [BatchFrame.noSlot, 8, 8, 2, 2] {
+            garbage.append(UInt8(value & 0xFF))
+            garbage.append(UInt8(value >> 8))
+        }
+        garbage.append(contentsOf: [0x03, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE])
+        let batch = batchFrame([
+            try tileRecord(x: 0, y: 0),
+            garbage,
+            try tileRecord(x: 16, y: 0),
+        ])
+        let transport = FakeWebSocketTransport(
+            inbound: [
+                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
+                .binary(batch),
+                .text(#"{"type":"picker"}"#),
+            ],
+            closeCode: nil
+        )
+        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
+        let sink = RecordingSink()
+        let connection = GatewayConnection(gateway: gateway, sink: sink)
+
+        await connection.start()
+        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
+
+        #expect(
+            sink.trace.filter { $0.hasPrefix("tiles:") } == ["tiles:0,0,2x2|16,0,2x2"]
         )
         await connection.stop()
     }
@@ -223,7 +295,7 @@ struct GatewayConnectionTests {
         await connection.start()
         await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
 
-        let delivered = sink.trace.filter { $0.hasPrefix("control:") || $0.hasPrefix("tile:") }
+        let delivered = sink.trace.filter { $0.hasPrefix("control:") || $0.hasPrefix("tiles:") }
         #expect(delivered == ["control:unsupported(aNewMessage)", "control:picker"])
         await connection.stop()
     }

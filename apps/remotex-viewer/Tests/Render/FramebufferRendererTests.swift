@@ -18,7 +18,7 @@ struct FramebufferRendererTests {
         #expect(renderer.snapshot() == nil, "no tile has landed yet")
 
         // A 2x2 red block at (4, 2).
-        renderer.upload(tile(x: 4, y: 2, w: 2, h: 2, blue: 0x00, green: 0x00, red: 0xFF))
+        renderer.upload([tile(x: 4, y: 2, w: 2, h: 2, blue: 0x00, green: 0x00, red: 0xFF)])
 
         let pixels = try #require(renderer.snapshot())
         #expect(pixels.count == 8 * 8 * 4)
@@ -40,8 +40,11 @@ struct FramebufferRendererTests {
     func alaterTileOverwritesAnEarlierOne() throws {
         let renderer = try #require(FramebufferRenderer.make())
         renderer.resize(to: DisplayMode(w: 4, h: 4))
-        renderer.upload(tile(x: 0, y: 0, w: 4, h: 4, blue: 0xFF, green: 0x00, red: 0x00))
-        renderer.upload(tile(x: 0, y: 0, w: 2, h: 2, blue: 0x00, green: 0xFF, red: 0x00))
+        // One batch, so this covers ordering *within* a frame as well.
+        renderer.upload([
+            tile(x: 0, y: 0, w: 4, h: 4, blue: 0xFF, green: 0x00, red: 0x00),
+            tile(x: 0, y: 0, w: 2, h: 2, blue: 0x00, green: 0xFF, red: 0x00),
+        ])
 
         let pixels = try #require(renderer.snapshot())
         #expect(Array(pixels[0 ..< 4]) == [0x00, 0xFF, 0x00, 0xFF], "overwritten")
@@ -56,11 +59,13 @@ struct FramebufferRendererTests {
     func aTileOutsideTheFramebufferIsDroppedRatherThanAborting() throws {
         let renderer = try #require(FramebufferRenderer.make())
         renderer.resize(to: DisplayMode(w: 4, h: 4))
-        renderer.upload(tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33))
+        renderer.upload([tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33)])
 
-        renderer.upload(tile(x: 3, y: 0, w: 4, h: 1, blue: 0, green: 0, red: 0))
-        renderer.upload(tile(x: 0, y: 3, w: 1, h: 4, blue: 0, green: 0, red: 0))
-        renderer.upload(tile(x: 9, y: 9, w: 1, h: 1, blue: 0, green: 0, red: 0))
+        renderer.upload([
+            tile(x: 3, y: 0, w: 4, h: 1, blue: 0, green: 0, red: 0),
+            tile(x: 0, y: 3, w: 1, h: 4, blue: 0, green: 0, red: 0),
+            tile(x: 9, y: 9, w: 1, h: 1, blue: 0, green: 0, red: 0),
+        ])
 
         let pixels = try #require(renderer.snapshot())
         #expect(Array(pixels[0 ..< 4]) == [0x11, 0x22, 0x33, 0xFF], "nothing was written")
@@ -73,7 +78,7 @@ struct FramebufferRendererTests {
     func resizingToTheSameSizeKeepsThePixels() throws {
         let renderer = try #require(FramebufferRenderer.make())
         renderer.resize(to: DisplayMode(w: 4, h: 4))
-        renderer.upload(tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33))
+        renderer.upload([tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33)])
 
         renderer.resize(to: DisplayMode(w: 4, h: 4))
 
@@ -85,7 +90,7 @@ struct FramebufferRendererTests {
     func resizingToADifferentSizeStartsFromNothing() throws {
         let renderer = try #require(FramebufferRenderer.make())
         renderer.resize(to: DisplayMode(w: 4, h: 4))
-        renderer.upload(tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33))
+        renderer.upload([tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33)])
 
         renderer.resize(to: DisplayMode(w: 8, h: 8))
 
@@ -99,15 +104,40 @@ struct FramebufferRendererTests {
     func clearingDropsTheFramebuffer() throws {
         let renderer = try #require(FramebufferRenderer.make())
         renderer.resize(to: DisplayMode(w: 4, h: 4))
-        renderer.upload(tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33))
+        renderer.upload([tile(x: 0, y: 0, w: 4, h: 4, blue: 0x11, green: 0x22, red: 0x33)])
 
         renderer.clear()
 
         #expect(renderer.size == nil)
         #expect(renderer.snapshot() == nil)
         // A tile arriving after a clear has nowhere to go, and must not crash.
-        renderer.upload(tile(x: 0, y: 0, w: 4, h: 4, blue: 0, green: 0, red: 0))
+        renderer.upload([tile(x: 0, y: 0, w: 4, h: 4, blue: 0, green: 0, red: 0)])
         #expect(renderer.snapshot() == nil)
+    }
+
+    /// A frame's worth of tiles costs one redraw request, however many tiles it
+    /// carries.
+    ///
+    /// The pixels are identical either way, so nothing in `snapshot()` can see
+    /// this, and a paused `MTKView` would coalesce a burst of requests anyway —
+    /// but only if they all land inside one refresh interval, which is a race. The
+    /// point of asking once is that it does not depend on that.
+    @Test
+    func aBatchCostsOneRedrawRequestHoweverManyTilesItCarries() throws {
+        let renderer = try #require(FramebufferRenderer.make())
+        renderer.resize(to: DisplayMode(w: 16, h: 16))
+        let before = renderer.displayRequests
+
+        renderer.upload((0 ..< 8).map { i in
+            tile(x: UInt16(i * 2), y: 0, w: 2, h: 2, blue: 0x11, green: 0x22, red: 0x33)
+        })
+
+        #expect(renderer.displayRequests == before + 1)
+
+        // And a second batch is a second request, so this is counting batches
+        // rather than measuring nothing at all.
+        renderer.upload([tile(x: 0, y: 4, w: 2, h: 2, blue: 0, green: 0, red: 0)])
+        #expect(renderer.displayRequests == before + 2)
     }
 
     /// The blit has to preserve orientation: the framebuffer's top-left texel
@@ -124,10 +154,12 @@ struct FramebufferRendererTests {
         renderer.resize(to: DisplayMode(w: 2, h: 2))
         // Distinct quadrants: top-left red, top-right green, bottom-left blue,
         // bottom-right white.
-        renderer.upload(tile(x: 0, y: 0, w: 1, h: 1, blue: 0x00, green: 0x00, red: 0xFF))
-        renderer.upload(tile(x: 1, y: 0, w: 1, h: 1, blue: 0x00, green: 0xFF, red: 0x00))
-        renderer.upload(tile(x: 0, y: 1, w: 1, h: 1, blue: 0xFF, green: 0x00, red: 0x00))
-        renderer.upload(tile(x: 1, y: 1, w: 1, h: 1, blue: 0xFF, green: 0xFF, red: 0xFF))
+        renderer.upload([
+            tile(x: 0, y: 0, w: 1, h: 1, blue: 0x00, green: 0x00, red: 0xFF),
+            tile(x: 1, y: 0, w: 1, h: 1, blue: 0x00, green: 0xFF, red: 0x00),
+            tile(x: 0, y: 1, w: 1, h: 1, blue: 0xFF, green: 0x00, red: 0x00),
+            tile(x: 1, y: 1, w: 1, h: 1, blue: 0xFF, green: 0xFF, red: 0xFF),
+        ])
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,

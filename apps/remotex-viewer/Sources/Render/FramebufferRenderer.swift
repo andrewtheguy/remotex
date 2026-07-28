@@ -102,7 +102,7 @@ final class FramebufferRenderer: NSObject, MTKViewDelegate {
         hasContent = false
         texture = makeTexture(next)
         view?.drawableSize = CGSize(width: Int(next.w), height: Int(next.h))
-        view?.setNeedsDisplay(view?.bounds ?? .zero)
+        requestDisplay()
     }
 
     /// Drop everything on screen. Cheap to obey: the gateway always repaints in
@@ -113,10 +113,27 @@ final class FramebufferRenderer: NSObject, MTKViewDelegate {
         size = nil
         texture = nil
         hasContent = false
-        view?.setNeedsDisplay(view?.bounds ?? .zero)
+        requestDisplay()
     }
 
-    func upload(_ tile: DecodedTile) {
+    /// Write one frame's tiles into the framebuffer and ask for a single redraw.
+    ///
+    /// The redraw is requested once for the whole batch, not once per tile. An
+    /// `MTKView` would coalesce a burst either way — it is paused and redraws on
+    /// demand — but "either way" depends on the burst arriving inside one refresh
+    /// interval, which is a race. Asking once makes one repaint one draw by
+    /// construction.
+    ///
+    /// Tiles are applied in order, because a later one overwriting an earlier one
+    /// is how the wire expresses a region being painted twice.
+    func upload(_ tiles: [DecodedTile]) {
+        for tile in tiles {
+            write(tile)
+        }
+        requestDisplay()
+    }
+
+    private func write(_ tile: DecodedTile) {
         guard let texture else {
             return
         }
@@ -148,8 +165,19 @@ final class FramebufferRenderer: NSObject, MTKViewDelegate {
             )
         }
         hasContent = true
-        // MTKView is paused and redraws on demand, so a burst of strips collapses
-        // into one draw at the next refresh. No dirty-rect bookkeeping, no timer.
+    }
+
+    /// Ask for a redraw of the whole view. No dirty-rect bookkeeping and no timer:
+    /// the view is paused, so this is the only thing that draws.
+    ///
+    /// The count is a test seam. Whether a batch cost one redraw or twenty is
+    /// invisible to `snapshot()` — the pixels are identical either way — and there
+    /// is no view at all in a headless test, so the request itself is the only
+    /// thing left to observe.
+    private(set) var displayRequests = 0
+
+    private func requestDisplay() {
+        displayRequests += 1
         view?.setNeedsDisplay(view?.bounds ?? .zero)
     }
 

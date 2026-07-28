@@ -754,31 +754,49 @@ export function useRemoteDesktop(
 
     // One binary frame carries however many tiles were ready at once.
     //
+    // Every record decodes concurrently and the batch is drawn in one pass, so a
+    // repaint costs one paint instead of one per tile, and the decodes overlap
+    // instead of queueing behind each other. Order still holds: `Promise.all`
+    // keeps the array in wire order, and the draws are a synchronous loop, so a
+    // later tile covering an earlier one still wins.
+    //
     // A malformed batch is dropped whole rather than partly applied: half a
     // repaint leaves the canvas in a state nothing will correct, where dropping
-    // it costs one refresh.
+    // it costs one refresh. A single *undecodable record* is different — it is
+    // dropped alone, because abandoning its batch would drop tiles that decoded
+    // perfectly well and leave the region they cover stale.
     const drawBatch = async (data: ArrayBuffer) => {
       const tiles = decodeBatchFrame(data);
       if (!tiles) {
         return;
       }
-      for (const tile of tiles) {
-        await drawTile(tile);
+      paintBatch(tiles, await Promise.all(tiles.map(decodeTile)));
+    };
+
+    // Every bitmap is closed whether or not it was drawn: with no canvas to draw
+    // into there is nothing to paint, but the decoded images still have to go.
+    const paintBatch = (tiles: TileMsg[], bitmaps: (ImageBitmap | null)[]) => {
+      const ctx = ctxRef.current;
+      for (let i = 0; i < bitmaps.length; i += 1) {
+        const bitmap = bitmaps[i];
+        if (!bitmap) {
+          continue;
+        }
+        ctx?.drawImage(bitmap, tiles[i].x, tiles[i].y);
+        bitmap.close();
       }
     };
 
-    const drawTile = async (tile: TileMsg) => {
-      const ctx = ctxRef.current;
-      if (!ctx) {
-        return;
+    const decodeTile = async (tile: TileMsg): Promise<ImageBitmap | null> => {
+      try {
+        return await createImageBitmap(
+          new Blob([tile.data as Uint8Array<ArrayBuffer>], {
+            type: tile.mime,
+          }),
+        );
+      } catch {
+        return null;
       }
-      const bitmap = await createImageBitmap(
-        new Blob([tile.data as Uint8Array<ArrayBuffer>], {
-          type: tile.mime,
-        }),
-      );
-      ctx.drawImage(bitmap, tile.x, tile.y);
-      bitmap.close();
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
