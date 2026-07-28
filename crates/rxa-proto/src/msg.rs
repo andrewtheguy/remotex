@@ -178,8 +178,12 @@ pub enum AgentMsg {
     /// modes, and which one it is in decides how the pixels below should be
     /// presented.
     ///
-    /// This is the only direction resolution travels on this wire. The Mac owns
-    /// its own resolution; nothing here asks it to change.
+    /// Every cause reports here, and there is only the one path: a mode picked in
+    /// System Settings, a VM host resizing the guest's panel, and a client's
+    /// [`GatewayMsg::ResizeDisplay`] are all announced by the same poll, in the
+    /// same message, indistinguishably. So a request that was clamped is reported
+    /// as what it became rather than what was asked for, and a request that
+    /// changed nothing is not reported at all.
     DisplaySize { w: u16, h: u16, scale: u16 },
     /// Every display the agent could share, and which one it is sharing now.
     ///
@@ -456,24 +460,51 @@ pub enum GatewayMsg {
     ///
     /// The agent answers with a `DisplaySize` for the new display and a fresh
     /// `Displays` naming it active, or — for an `id` it cannot resolve — an
-    /// [`AgentMsg::Error`] while it keeps capturing what it already had. Nothing
-    /// here changes a display's *mode*; this only picks which one is shared.
+    /// [`AgentMsg::Error`] while it keeps capturing what it already had. This
+    /// only picks which display is shared; changing one's mode is
+    /// [`GatewayMsg::ResizeDisplay`].
     SelectDisplay { id: u32 },
     /// The density of the screen the *client's* window is on, in [`SCALE_ONE`]
     /// hundredths — 100 for a 1x screen, 200 for a Retina one. Sent when a
     /// session starts and again whenever the client's window changes screen.
     ///
-    /// This is the one message that asks the Mac to change a display rather than
-    /// describing what the client is doing, and it is deliberately narrow: only a
-    /// display the *agent made* can act on it, and only its density. The Mac's own
-    /// screens ignore it — nobody's physical panel should change because someone
-    /// connected — and no message changes a display's resolution (see
-    /// [`GatewayMsg::SelectDisplay`]).
+    /// One of the two messages that ask the Mac to change a display rather than
+    /// describing what the client is doing, and both are narrow in the same way:
+    /// only a display the *agent made* can act on them. The Mac's own screens
+    /// ignore both — nobody's physical panel should change because someone
+    /// connected. The other is [`GatewayMsg::ResizeDisplay`].
     ///
     /// Acting on it costs nothing when the two already agree, and saves three
     /// quarters of the pixels when they do not: a 2x guest viewed from a 1x screen
     /// is four times the framebuffer for a picture the client immediately halves.
     HostScale { scale: u16 },
+    /// Resize the shared display to `w`x`h` **points** — the RDP-shaped "Resize
+    /// to window", which a person presses rather than a window drag sends. Every
+    /// reconfigure relays every window on that desktop, and a VM's display stack
+    /// can wedge after enough of them (`docs/known-issues.md`), so this is a
+    /// button and never a follow.
+    ///
+    /// **Points, and it is the only field on this wire that is.**
+    /// [`AgentMsg::DisplaySize`], [`DisplayEntry::w`] and every tile rectangle are
+    /// captured *pixels*, and so is the client's own viewport report — the gateway
+    /// divides that by the scale it last announced before it reaches here. The
+    /// division belongs there: the client multiplied its window by the scale the
+    /// gateway sent it, so dividing by that same number recovers exactly the
+    /// window it meant. Dividing by the agent's *live* density instead would
+    /// recover a different size in the one window where the two have moved apart —
+    /// the tens of milliseconds around a [`GatewayMsg::HostScale`], where the
+    /// display is mid-reconfigure and publishes no mode to read a density from.
+    ///
+    /// Bounded on the Mac rather than here: a display the agent made has a pixel
+    /// ceiling and an 800x600 floor fixed at creation, and a request outside them
+    /// is clamped rather than refused.
+    ///
+    /// There is no acknowledgement, by design. Whatever size results arrives as an
+    /// [`AgentMsg::DisplaySize`] through the same poll a mode change made in System
+    /// Settings travels through, so a clamped request and a resolution somebody
+    /// changed on the Mac are reported identically — and a request that changed
+    /// nothing is not reported at all.
+    ResizeDisplay { w: u16, h: u16 },
 }
 
 impl GatewayMsg {
@@ -489,6 +520,7 @@ impl GatewayMsg {
     const T_CLIPBOARD_WATCH: u8 = 0x0a;
     const T_SELECT_DISPLAY: u8 = 0x0b;
     const T_HOST_SCALE: u8 = 0x0c;
+    const T_RESIZE_DISPLAY: u8 = 0x0d;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -541,6 +573,11 @@ impl GatewayMsg {
                 out.push(Self::T_HOST_SCALE);
                 put_u16(&mut out, *scale);
             }
+            GatewayMsg::ResizeDisplay { w, h } => {
+                out.push(Self::T_RESIZE_DISPLAY);
+                put_u16(&mut out, *w);
+                put_u16(&mut out, *h);
+            }
         }
         out
     }
@@ -576,6 +613,10 @@ impl GatewayMsg {
             },
             Self::T_SELECT_DISPLAY => GatewayMsg::SelectDisplay { id: r.u32()? },
             Self::T_HOST_SCALE => GatewayMsg::HostScale { scale: r.u16()? },
+            Self::T_RESIZE_DISPLAY => GatewayMsg::ResizeDisplay {
+                w: r.u16()?,
+                h: r.u16()?,
+            },
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -872,6 +913,15 @@ mod tests {
             // refused, exactly as it is for a display's own scale.
             GatewayMsg::HostScale { scale: 150 },
             GatewayMsg::HostScale { scale: 0 },
+            GatewayMsg::ResizeDisplay { w: 1280, h: 800 },
+            // Both bounds belong to the agent, so a zero from a client whose
+            // window has not laid out yet and a size no display could hold both
+            // travel intact and are clamped where the limits are known.
+            GatewayMsg::ResizeDisplay { w: 0, h: 0 },
+            GatewayMsg::ResizeDisplay {
+                w: u16::MAX,
+                h: u16::MAX,
+            },
         ]
     }
 
@@ -904,7 +954,7 @@ mod tests {
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 12, "twelve gateway message types");
+        assert_eq!(gateway.len(), 13, "thirteen gateway message types");
     }
 
     // The count on the wire is the peer's claim about what follows. A body that
