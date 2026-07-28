@@ -86,17 +86,21 @@ struct AppModelTests {
         #expect(!model.canResizeNow, "no surface has reported a size yet")
     }
 
-    /// The pair is mutually exclusive, and the menu shows both either way. A target
-    /// that takes a size from here resizes the remote; every other one resizes this
-    /// window, which is the only side that can move for it.
+    /// The two directions are independent, and the menu shows both either way.
+    /// Pushing the window's size to the remote needs a target that takes one;
+    /// pulling the remote's size into the window needs only a remote that will
+    /// hold still — so a target that allows the first allows both, and VNC, which
+    /// follows the window unasked, is the single row where the second is greyed.
     @Test
-    func exactlyOneOfTheTwoResizeDirectionsIsEverAvailable() {
-        let expectations: [(protocolName: String, resize: Bool, toWindow: Bool)] = [
-            ("rdp", true, true),
-            ("rxa", false, false),
-            ("vnc", true, false),
-            ("vnc", false, false),
-            ("rdp", false, false),
+    func onlyAFollowingRemoteCannotBeFittedTo() {
+        let expectations: [(protocolName: String, resize: Bool, toWindow: Bool, toDisplay: Bool)] = [
+            ("rdp", true, true, true),
+            ("rxa", false, false, true),
+            ("vnc", true, false, false),
+            // The gateway drops this one's reports, so its desktop holds still
+            // and can be fitted to like any other.
+            ("vnc", false, false, true),
+            ("rdp", false, false, true),
         ]
         for expectation in expectations {
             let model = makeModel()
@@ -116,7 +120,7 @@ struct AppModelTests {
 
             let label: Comment = "\(expectation.protocolName) resize=\(expectation.resize)"
             #expect(model.canResizeNow == expectation.toWindow, label)
-            #expect(model.canResizeToDisplay == !expectation.toWindow, label)
+            #expect(model.canResizeToDisplay == expectation.toDisplay, label)
         }
     }
 
@@ -470,12 +474,13 @@ struct AppModelTests {
         model.apply(.control(.displays(active: 99, displays: twoDisplays)))
         #expect(!model.session.canResize)
 
-        // And the pair of menu items keeps flipping together, which is the
-        // invariant `canResizeToDisplay` states.
+        // "Resize to Window" is what flips with the shared display. Its neighbour
+        // does not: no rxa display follows this window, so fitting the window to
+        // whichever one is being shared is always a thing that can be asked for.
         model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
         model.apply(.control(.displays(active: 9, displays: twoDisplays)))
         #expect(model.session.canResize)
-        #expect(!model.canResizeToDisplay)
+        #expect(model.canResizeToDisplay)
         model.apply(.control(.displays(active: 7, displays: twoDisplays)))
         #expect(!model.session.canResize)
         #expect(model.canResizeToDisplay)

@@ -25,6 +25,24 @@ struct ViewportPolicy: Equatable {
     /// being shared turns out to be one the agent made.
     var ignoresViewport = false
 
+    /// The remote takes this window's size on its own, unasked, and keeps taking
+    /// it: a VNC target the operator opted in, and nothing else.
+    ///
+    /// Read only by "Resize to Display", the item that sizes the *window* to the
+    /// desktop. That direction is meaningful for every other target — including
+    /// the ones that also take a size from here, since a desktop can be left at a
+    /// size the window does not match and either end may be the one the user
+    /// wants to move. It is meaningless only here: a following desktop resizes to
+    /// match the window the moment the window moves, so fitting the window to the
+    /// desktop aims at something that moves as it is aimed at.
+    ///
+    /// Stored rather than read off the two flags above, which cannot tell this
+    /// apart: `manualOnly` and `ignoresViewport` are both false for an RDP or VNC
+    /// target *without* `resize` too. Those still report — the reports are simply
+    /// dropped at the gateway (`src/rdp.rs`, `src/vnc.rs`) — so their desktops
+    /// hold still to be measured, and this is false for them.
+    private(set) var followsWindow = false
+
     /// The target's `resize`, for an rxa target only.
     ///
     /// Held rather than acted on: it is the operator's half of the permission and
@@ -51,6 +69,7 @@ struct ViewportPolicy: Equatable {
     init(protocolName: String, resize: Bool) {
         ignoresViewport = protocolName == "rxa"
         manualOnly = protocolName == "rdp" && resize
+        followsWindow = protocolName == "vnc" && resize
         rxaResizeAllowed = protocolName == "rxa" && resize
     }
 

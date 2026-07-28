@@ -216,26 +216,21 @@ final class AppModel: GatewaySessionSink {
         session.canResize && viewportSize != nil
     }
 
-    /// "Resize to Display" is the other direction: a remote whose size is not this
-    /// client's to set is met by sizing the *window* to it instead.
+    /// "Resize to Display" is the other direction: the *window* is sized to the
+    /// desktop, and nothing goes on the wire.
     ///
-    /// Mutually exclusive with the item above, and by the same fact rather than by
-    /// arrangement — `session.canResize` is exactly "the remote takes a size from
-    /// here", so at most one of the two can be the one that moves. Both stay in the
-    /// menu regardless, one of them greyed, because which direction a target allows
-    /// is worth reading off the menu rather than discovering by its absence.
+    /// Not the complement of the item above, deliberately. A target that resizes
+    /// on request — RDP with `resize`, or rxa while sharing a display the agent
+    /// made — can still be sitting at a size this window does not match, and
+    /// meeting that from either end is a choice worth leaving to the user rather
+    /// than deciding for them. So both items are live for those.
     ///
-    /// A VNC target is the case to know about: it takes the window's size
-    /// continuously rather than on request, so `canResize` is false and this is the
-    /// enabled half — where it finds the desktop already fitting and does nothing.
-    ///
-    /// For an rxa target with `resize` the pair flips *during* a session, as the
-    /// user switches between the Mac's own screens and the display the agent made:
-    /// this one is enabled for a real screen, whose resolution is not ours to set,
-    /// and the one above takes over for the agent's. That is the same invariant
-    /// holding, now answered per display rather than once per connection.
+    /// VNC is the one case this is wrong for, and the only thing greying it: a
+    /// desktop that follows the window resizes to match the window this would be
+    /// fitting to it, so the item would aim at something that moves as it is aimed
+    /// at. `session.followsWindow` is exactly that case and nothing else.
     var canResizeToDisplay: Bool {
-        session.screen == .desktop && session.remoteSize != nil && !session.canResize
+        session.screen == .desktop && session.remoteSize != nil && !session.followsWindow
     }
 
     /// The interstitial covers the connection lifecycle and the claim conflicts,
@@ -440,6 +435,7 @@ final class AppModel: GatewaySessionSink {
             // any resize has arrived.
             session.remoteScale = 1
             session.canResize = false
+            session.followsWindow = false
             session.canClipboard = false
             // The previous target's screens are not the next one's. Left in
             // place they would fill the Display menu for a target that has none,
@@ -473,11 +469,7 @@ final class AppModel: GatewaySessionSink {
                 protocolName: payload.protocolName,
                 resize: payload.resize
             )
-            // Still the same question as `manualOnly`: the only target that
-            // suppresses automatic reports and can still be resized is the one
-            // whose menu item does the asking. Re-asked on every `displays`,
-            // because for rxa the answer can change mid-session.
-            session.canResize = viewportPolicy.manualOnly
+            publishViewportPolicy()
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
             // A freshly started engine knows nothing about this window, and both
@@ -519,8 +511,8 @@ final class AppModel: GatewaySessionSink {
                 virtualDisplay: displays.first { $0.id == active }?.isVirtual ?? false
             )
             // Harmless for RDP and VNC, whose policy the call above cannot touch:
-            // it writes back the value that is already there.
-            session.canResize = viewportPolicy.manualOnly
+            // it writes back the values that are already there.
+            publishViewportPolicy()
             // A different display is being shared, and the density was only ever
             // reported *at* the previous one — the agent acts on it for the display
             // it is currently sharing, so a switch onto one the agent made would
@@ -624,6 +616,18 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// Copy the policy onto the session, where the two Remote-menu items can see
+    /// it: `ViewportPolicy` is `@ObservationIgnored`, so a computed property
+    /// reading it directly would never invalidate a menu.
+    ///
+    /// Called wherever the policy changes. For RDP and VNC that is `connected`
+    /// and only `connected`; for rxa every `displays` can still move it, which is
+    /// why this is a method rather than two lines written once.
+    private func publishViewportPolicy() {
+        session.canResize = viewportPolicy.manualOnly
+        session.followsWindow = viewportPolicy.followsWindow
+    }
+
     /// The surface exists for the picker as well as the desktop — it has to, so the
     /// framebuffer survives a trip to the picker and back — so a window resized
     /// while choosing a target measures and records, but has nothing to report to:
@@ -719,11 +723,10 @@ final class AppModel: GatewaySessionSink {
         sendViewport(manual: true)
     }
 
-    /// "Resize to Display": the window takes the remote's size, because the remote
-    /// will not take the window's.
+    /// "Resize to Display": the window takes the remote's size.
     ///
     /// Nothing goes on the wire — this is entirely local, which is why it is
-    /// available for the targets the item above is not.
+    /// available alongside the item above rather than instead of it.
     func resizeToDisplay() {
         guard canResizeToDisplay else {
             return

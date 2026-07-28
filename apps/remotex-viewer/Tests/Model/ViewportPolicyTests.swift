@@ -16,6 +16,26 @@ struct ViewportPolicyTests {
         )
     }
 
+    /// And it is the only one, which is what "Resize to Display" reads: fitting
+    /// the window to the desktop is meaningless only against a desktop that fits
+    /// itself to the window. Every other target holds still to be measured,
+    /// including the ones that will also take a size from here — and including a
+    /// VNC target the operator did not opt in, whose reports the gateway drops.
+    @Test
+    func onlyAnOptedInVncFollowsTheWindow() {
+        #expect(ViewportPolicy(protocolName: "vnc", resize: true).followsWindow)
+        #expect(!ViewportPolicy(protocolName: "vnc", resize: false).followsWindow)
+        #expect(!ViewportPolicy(protocolName: "rdp", resize: true).followsWindow)
+        #expect(!ViewportPolicy(protocolName: "rdp", resize: false).followsWindow)
+        #expect(!ViewportPolicy(protocolName: "rxa", resize: true).followsWindow)
+
+        // Not even the display an rxa target *can* resize: it is resized when
+        // asked, never by the window moving.
+        var policy = ViewportPolicy(protocolName: "rxa", resize: true)
+        policy.sharing(virtualDisplay: true)
+        #expect(!policy.followsWindow)
+    }
+
     /// An RDP resize forces a Deactivation-Reactivation — expensive and visible —
     /// so it happens only when the user asks for it.
     @Test
