@@ -6,10 +6,12 @@
 //! the only thing standing between a failed launch and an app that appears to do
 //! nothing when opened.
 //!
-//! It is deliberately `NSAlert` and nothing more. A settings *window* would be a
-//! window controller, a nib, and a Dock icon's worth of behaviour the agent has
-//! spent real effort not having (see the module docs in `main.rs`), for a
-//! handful of fields. An alert with an accessory view is a handful of fields.
+//! Settings is an `NSPanel`, with a title bar and content owned completely here.
+//! It used to be an `NSAlert` with an accessory view, but an alert reserves room
+//! for its application icon and moves that icon above the title when the
+//! accessory is wide. Hiding the image does not recover the reserved room. A
+//! normal panel has no alert-icon slot, so the useful explanation and the form
+//! both fit without trying to alter AppKit's private alert layout.
 //!
 //! ## Every panel activates the app first
 //!
@@ -36,14 +38,16 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSButton, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSTextAlignment, NSTextField, NSView,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
+    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSModalResponseCancel,
+    NSModalResponseOK, NSPanel, NSTextAlignment, NSTextField, NSView,
+    NSWindowButton, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
-/// Width of an accessory view, in points.
+/// Width of the settings form, in points.
 ///
 /// What sets it is the key rows: a 50-character key has to fit on one line in a
 /// 12pt monospaced font, because one that scrolls is one somebody copies half of
@@ -54,12 +58,21 @@ use objc2_foundation::{
 /// character of the key was cut off.
 const WIDTH: f64 = 540.0;
 
+/// The ordinary window chrome is outside this rectangle; these are the panel's
+/// content margins and its bottom action row.
+const PANEL_MARGIN: f64 = 20.0;
+const PANEL_WIDTH: f64 = WIDTH + PANEL_MARGIN * 2.0;
+const PANEL_TOP_MARGIN: f64 = 16.0;
+const PANEL_BOTTOM_MARGIN: f64 = 12.0;
+const PANEL_BUTTON_HEIGHT: f64 = 32.0;
+const PANEL_BUTTON_WIDTH: f64 = 90.0;
+const PANEL_CONTENT_GAP: f64 = 12.0;
+
 /// One row of the settings dialog: label on the left, control on the right.
 ///
-/// These are tight, and the reason is the bottom of the panel: an `NSAlert` sizes
-/// itself around its accessory view, so every point here is a point Save moves
-/// down — and on a 1x 800x600 screen, which the test Mac has, ten rows and three
-/// headings at comfortable spacing put Save under the Dock and out of reach.
+/// Kept compact for the 1x 800x600 test Mac, where a tall panel can put its
+/// actions behind the Dock. Unlike the old alert, the panel spends no vertical
+/// space on an application icon.
 const ROW_HEIGHT: f64 = 22.0;
 const ROW_GAP: f64 = 8.0;
 /// Wide enough for the longest caption, "This Mac's public key", which at 490
@@ -76,8 +89,8 @@ const HEADING_GAP: f64 = 3.0;
 /// Between the last row of one section and the next heading. Wider than
 /// [`ROW_GAP`] by enough to group without needing a rule drawn between them.
 const SECTION_GAP: f64 = 14.0;
-/// How many rows [`config`] lays out, headings included.
-const ROWS: usize = 10;
+/// How many rows [`config`] lays out, headings and their explanations included.
+const ROWS: usize = 13;
 /// The key buttons, on a row of their own directly under **this Mac's public
 /// key**: **Copy**, **Import…** and **Regenerate identity**. Under rather than
 /// beside so the key keeps the full width — a key that scrolls is a key somebody
@@ -146,17 +159,25 @@ pub fn config(
     displays: &[String],
     in_force: &InForce,
 ) -> Option<Draft> {
-    // One line, and that is a budget rather than a style: this is an NSAlert, so
-    // every line of body text pushes all ten rows down, and the whole panel has to
-    // fit a small screen — the test Mac's is 800x600, where the sections alone
-    // pushed Save off the bottom. What pairing *is* was two paragraphs here and is
-    // now the Pairing heading plus the two key rows' tooltips, which is where
-    // somebody reading that row will look for it.
-    let mut body = String::from(
-        "Saving restarts the agent; the gateway reconnects on its own.",
+    let (network_copy, network_copy_height) = section_copy(
+        mtm,
+        "Connections arrive at this address. Saving any setting restarts the agent \
+         and drops the current connection; the gateway reconnects on its own.",
+    );
+    let (displays_copy, displays_copy_height) = section_copy(
+        mtm,
+        "The viewer's Display menu shows the choices below. Selecting one changes \
+         which screen the session shows. The optional virtual display adds a \
+         separate screen for remote use; it is the only one the viewer can resize.",
+    );
+    let mut pairing_copy = String::from(
+        "Pairing uses two public keys, one in each direction; neither is secret. \
+         Copy this Mac's key to `agent_public_key` on the gateway, then paste the \
+         gateway key printed by `remotex rxa-pubkey` below.",
     );
     if current.gateway_public_key.trim().is_empty() {
-        body.push_str("\n\n⚠︎ Unpaired: no gateway key is set, so every connection is refused.");
+        pairing_copy
+            .push_str("\n\n⚠︎ Unpaired: no gateway key is set, so every connection is refused.");
     }
     // Said out loud rather than left in a tooltip, because the difference
     // between the saved pairing and the running one is the difference between a
@@ -164,27 +185,19 @@ pub fn config(
     // new values, so they normally agree; they differ only when that did not
     // happen — a re-exec that failed, or a file edited by hand.
     if !in_force.matches(current) {
-        body.push_str(
+        pairing_copy.push_str(
             "\n\n⚠︎ The keys below are the ones in the config file, and they never took \
              effect: this agent is still using the previous pairing. Quit remotex-agent \
              and open it again to start using these.",
         );
     }
-    // The emoji is in the title, which is the whole of how it gets to the left of
-    // it: a string, and nothing else.
-    //
-    // Where AppKit's own icon goes is not ours to set. An NSAlert this wide lays it
-    // out *above* the title rather than beside it, decided from the accessory
-    // view's width. Both ways of arguing with that were tried on the test Mac and
-    // neither is worth what it costs: `setSize` on the image did not change what it
-    // drew at, and giving it a blank image hid the icon while the alert kept the
-    // gap — so it bought an `unsafe setIcon` and recovered no space at all.
-    let alert = alert(mtm, "⚙️ remotex-agent Settings", &body, NSAlertStyle::Informational);
+    let (pairing_copy, pairing_copy_height) = section_copy(mtm, &pairing_copy);
 
     // Three sections, because the settings answer three unrelated questions —
     // where to listen, what to share, and who may connect — and read as one
-    // undifferentiated column of eight rows otherwise. Each is a heading with its
-    // own rows under it.
+    // undifferentiated column of eight rows otherwise. Each heading is followed
+    // by enough plain-language copy to explain the decision its controls make;
+    // the tooltips retain the details for individual fields.
     //
     // Every row's height and the gap that follows it, in order. Only the display
     // list is taller than one row, and only because it grows with the number of
@@ -193,14 +206,17 @@ pub fn config(
     let rows: [(f64, f64); ROWS] = [
         // Network
         (LABEL_HEIGHT, HEADING_GAP),
+        (network_copy_height, ROW_GAP),
         (ROW_HEIGHT, SECTION_GAP), // listen address
         // Displays
         (LABEL_HEIGHT, HEADING_GAP),
+        (displays_copy_height, ROW_GAP),
         (list_height, ROW_GAP),    // what this Mac can share
         (ROW_HEIGHT, ROW_GAP),     // add a virtual display
         (ROW_HEIGHT, SECTION_GAP), // its initial size
         // Pairing
         (LABEL_HEIGHT, HEADING_GAP),
+        (pairing_copy_height, ROW_GAP),
         (ROW_HEIGHT, ROW_GAP), // this Mac's public key
         (ROW_HEIGHT, ROW_GAP), // and what can be done to it
         (ROW_HEIGHT, 0.0),     // the gateway's public key
@@ -222,11 +238,21 @@ pub fn config(
     let row = |n: usize| tops[n];
 
     view.addSubview(&heading(mtm, "Network", row(0)));
-    view.addSubview(&label(mtm, "Listen address", row(1)));
-    let listen = field(mtm, &current.listen, row(1), WIDTH - CONTROL_X, false);
+    network_copy.setFrame(NSRect::new(
+        NSPoint::new(0.0, row(1)),
+        NSSize::new(WIDTH, network_copy_height),
+    ));
+    view.addSubview(&network_copy);
+    view.addSubview(&label(mtm, "Listen address", row(2)));
+    let listen = field(mtm, &current.listen, row(2), WIDTH - CONTROL_X, false);
     view.addSubview(&listen);
 
-    view.addSubview(&heading(mtm, "Displays", row(2)));
+    view.addSubview(&heading(mtm, "Displays", row(3)));
+    displays_copy.setFrame(NSRect::new(
+        NSPoint::new(0.0, row(4)),
+        NSSize::new(WIDTH, displays_copy_height),
+    ));
+    view.addSubview(&displays_copy);
     // Read-only, and that is the design rather than a shortcut: which display a
     // session shares is picked in the viewer or the browser, by whoever is
     // looking at it, and can change several times while this dialog is closed.
@@ -238,16 +264,16 @@ pub fn config(
     // agent made is named "Virtual display" — which is the distinction the
     // checkbox below decides, and which this list used to hide by numbering it in
     // with the rest (see `menubar::display_summary`).
-    view.addSubview(&label(mtm, "Can share", row(3)));
+    view.addSubview(&label(mtm, "Viewer choices", row(5)));
     let list = NSTextField::labelWithString(&NSString::from_str(&displays.join("\n")), mtm);
     list.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(3)),
+        NSPoint::new(CONTROL_X, row(5)),
         NSSize::new(WIDTH - CONTROL_X, list_height),
     ));
     list.setToolTip(Some(&NSString::from_str(
-        "Every display this Mac can share, the Mac's own screens and the virtual \
-         one together. Which of them a session shares is chosen from the remotex \
-         viewer or the browser, not here.",
+        "The same choices shown in the viewer's Display menu. The viewer's \
+         checkmark marks the screen this Mac is sharing now; this list only \
+         reports which choices are available.",
     )));
     view.addSubview(&list);
 
@@ -265,7 +291,7 @@ pub fn config(
         )
     };
     virtual_display.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(4)),
+        NSPoint::new(CONTROL_X, row(6)),
         NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
     ));
     virtual_display.setState(if current.virtual_display {
@@ -290,8 +316,8 @@ pub fn config(
     // 150pt label, and "initial" stays because it is load-bearing: this is the
     // size the display is *created* at, and macOS remembers whatever it is
     // changed to afterwards.
-    view.addSubview(&label(mtm, "Its initial size", row(5)));
-    let virtual_size = field(mtm, &current.virtual_size, row(5), WIDTH - CONTROL_X, false);
+    view.addSubview(&label(mtm, "Its initial size", row(7)));
+    let virtual_size = field(mtm, &current.virtual_size, row(7), WIDTH - CONTROL_X, false);
     virtual_size.setToolTip(Some(&NSString::from_str(
         "The size the virtual display is created at the first time this Mac sees \
          it, in points, WIDTHxHEIGHT, no smaller than 800x600 — and the largest \
@@ -317,26 +343,31 @@ pub fn config(
     }
     size_enabler.arm(virtual_display.clone());
 
-    view.addSubview(&heading(mtm, "Pairing", row(6)));
-    // Shown whole, and a label rather than a field: this is derived from the
-    // private key and there is nothing to type into it, so there is no state to
-    // lock and no white box to suggest otherwise. Whole because it is not a
-    // secret — which is the entire reason the protocol stopped using a shared
-    // one — and because reading it against the gateway's copy is the common
-    // visit to this dialog. Copy is still there, being exact where a drag-select
-    // over 50 monospaced characters is not.
-    view.addSubview(&label(mtm, "This Mac's public key", row(7)));
-    let public_key = NSTextField::labelWithString(&NSString::from_str(&current.public_key()), mtm);
-    public_key.setFont(NSFont::userFixedPitchFontOfSize(12.0).as_deref());
-    public_key.setSelectable(true);
-    public_key.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(7)),
-        NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
+    view.addSubview(&heading(mtm, "Pairing", row(8)));
+    pairing_copy.setFrame(NSRect::new(
+        NSPoint::new(0.0, row(9)),
+        NSSize::new(WIDTH, pairing_copy_height),
     ));
+    view.addSubview(&pairing_copy);
+    // Shown whole in a read-only field: this is derived from the private key and
+    // there is nothing to type into it. Whole because it is not a secret — which
+    // is the entire reason the protocol stopped using a shared one — and because
+    // reading it against the gateway's copy is the common visit to this dialog.
+    // One click selects all 50 characters, and Copy remains the exact one-step
+    // route to the pasteboard.
+    view.addSubview(&label(mtm, "This Mac's public key", row(10)));
+    let public_key = SelectAllField::new(
+        mtm,
+        &current.public_key(),
+        NSRect::new(
+            NSPoint::new(CONTROL_X, row(10)),
+            NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
+        ),
+    );
     public_key.setToolTip(Some(&NSString::from_str(
         "Paste this as `agent_public_key` on the matching [[targets]] entry in the \
          gateway's remotex.toml. Not a secret — the private key it comes from never \
-         leaves this Mac.",
+         leaves this Mac. Click once to select the entire key.",
     )));
     view.addSubview(&public_key);
 
@@ -346,11 +377,11 @@ pub fn config(
     // Below the buttons, not above them: all three of those act on the key above
     // *them*, and with this field in between they read as the gateway key's —
     // which is alarming on Regenerate identity and wrong on all three.
-    view.addSubview(&label(mtm, "Gateway public key", row(9)));
+    view.addSubview(&label(mtm, "Gateway public key", row(12)));
     let gateway = field(
         mtm,
         &current.gateway_public_key,
-        row(9),
+        row(12),
         WIDTH - CONTROL_X,
         true,
     );
@@ -362,8 +393,8 @@ pub fn config(
 
     // Owns both buttons' actions and the private key behind the label above.
     // `buttonWithTitle:target:action:` holds its target weakly, so this has to
-    // outlive `runModal` below — which is why it is a named local and not a
-    // temporary.
+    // outlive `runModalForWindow` below — which is why it is a named local and
+    // not a temporary.
     let actions = KeyActions::new(mtm, public_key.clone(), &current.private_key);
     // Right-aligned as one group under the keys, in the order they are reached
     // for: read this Mac's key, or — rarely — replace it, with one it had before
@@ -372,7 +403,7 @@ pub fn config(
     let import_x = regenerate_x - BUTTON_GAP - IMPORT_WIDTH;
     let copy_x = import_x - BUTTON_GAP - COPY_WIDTH;
 
-    let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(8), COPY_WIDTH);
+    let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(11), COPY_WIDTH);
     copy.setToolTip(Some(&NSString::from_str(
         "Put this Mac's public key on the clipboard, to paste as `agent_public_key` on \
          the gateway's rxa target.",
@@ -385,7 +416,7 @@ pub fn config(
         &actions,
         sel!(importIdentity:),
         import_x,
-        row(8),
+        row(11),
         IMPORT_WIDTH,
     );
     import.setToolTip(Some(&NSString::from_str(
@@ -401,7 +432,7 @@ pub fn config(
         &actions,
         sel!(regenerateIdentity:),
         regenerate_x,
-        row(8),
+        row(11),
         REGENERATE_WIDTH,
     );
     // Confirmed rather than disabled behind an unlock step: there is no field to
@@ -416,9 +447,62 @@ pub fn config(
     view.addSubview(&regenerate);
     actions.arm(copy.clone());
 
-    alert.setAccessoryView(Some(&view));
-    alert.addButtonWithTitle(&NSString::from_str("Save"));
-    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    // Settings owns a normal panel instead of borrowing the rigid layout of an
+    // alert. In particular there is no application-icon view, hidden or
+    // otherwise, and therefore no empty icon slot above this wide form.
+    let button_y = PANEL_BOTTOM_MARGIN;
+    let form_y = button_y + PANEL_BUTTON_HEIGHT + PANEL_CONTENT_GAP;
+    let panel_height = form_y + height + PANEL_TOP_MARGIN;
+    let content = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::ZERO, NSSize::new(PANEL_WIDTH, panel_height)),
+    );
+    view.setFrameOrigin(NSPoint::new(PANEL_MARGIN, form_y));
+    content.addSubview(&view);
+
+    let modal = SettingsModal::new(mtm);
+    let save_x = PANEL_WIDTH - PANEL_MARGIN - PANEL_BUTTON_WIDTH;
+    let cancel_x = save_x - BUTTON_GAP - PANEL_BUTTON_WIDTH;
+    let save = modal_button(
+        mtm,
+        "Save",
+        &modal,
+        sel!(saveSettings:),
+        save_x,
+        button_y,
+        "\r",
+    );
+    let cancel = modal_button(
+        mtm,
+        "Cancel",
+        &modal,
+        sel!(cancelSettings:),
+        cancel_x,
+        button_y,
+        "\u{1b}",
+    );
+    content.addSubview(&save);
+    content.addSubview(&cancel);
+
+    activate(mtm);
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        NSRect::new(NSPoint::ZERO, NSSize::new(PANEL_WIDTH, panel_height)),
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    panel.setTitle(&NSString::from_str("remotex-agent Settings"));
+    panel.setContentView(Some(&content));
+    // A close is a cancellation, including while the panel is inside AppKit's
+    // modal loop. Replacing the standard close button's action avoids a closed
+    // window leaving that loop alive with nothing on screen.
+    if let Some(close) = panel.standardWindowButton(NSWindowButton::CloseButton) {
+        unsafe {
+            close.setTarget(Some(&modal.as_object()));
+            close.setAction(Some(sel!(cancelSettings:)));
+        }
+    }
     // Without this nothing is focused and the first keystroke goes nowhere, which
     // reads as a dialog that has ignored you. The gateway field when there is no
     // pairing yet: on a fresh Mac that is the one thing left to do.
@@ -427,14 +511,18 @@ pub fn config(
     } else {
         &listen
     };
-    alert.window().setInitialFirstResponder(Some(first));
+    panel.setInitialFirstResponder(Some(first));
+    panel.center();
+    panel.makeKeyAndOrderFront(None);
 
-    if alert.runModal() != NSAlertFirstButtonReturn {
+    let response = NSApplication::sharedApplication(mtm).runModalForWindow(&panel);
+    panel.orderOut(None);
+    if response != NSModalResponseOK {
         return None;
     }
     Some(Draft {
         listen: listen.stringValue().to_string().trim().to_owned(),
-        // From the actions, not the label: the label shows the *public* half,
+        // From the actions, not the field: the field shows the *public* half,
         // and Regenerate may have replaced what it was derived from.
         private_key: actions.private_key(),
         gateway_public_key: gateway.stringValue().to_string().trim().to_owned(),
@@ -489,6 +577,95 @@ pub fn error(mtm: MainThreadMarker, title: &str, body: &str) {
     alert.runModal();
 }
 
+/// Ends the settings panel's modal loop with the action the user chose.
+///
+/// Save, Cancel, Return, Escape and the title-bar close button all meet here, so
+/// there is one answer from every normal way to dismiss a window.
+struct SettingsModalIvars;
+
+define_class!(
+    // SAFETY:
+    // - NSObject has no subclassing requirements.
+    // - `SettingsModal` does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "RxaSettingsModal"]
+    #[ivars = SettingsModalIvars]
+    struct SettingsModal;
+
+    unsafe impl NSObjectProtocol for SettingsModal {}
+
+    impl SettingsModal {
+        #[unsafe(method(saveSettings:))]
+        fn save_settings(&self, _sender: Option<&AnyObject>) {
+            NSApplication::sharedApplication(MainThreadMarker::from(self))
+                .stopModalWithCode(NSModalResponseOK);
+        }
+
+        #[unsafe(method(cancelSettings:))]
+        fn cancel_settings(&self, _sender: Option<&AnyObject>) {
+            NSApplication::sharedApplication(MainThreadMarker::from(self))
+                .stopModalWithCode(NSModalResponseCancel);
+        }
+    }
+);
+
+impl SettingsModal {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SettingsModalIvars);
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn as_object(&self) -> Retained<AnyObject> {
+        let this: Retained<Self> = self.retain();
+        // Safety: upcasting a subclass of NSObject to AnyObject.
+        unsafe { Retained::cast_unchecked(this) }
+    }
+}
+
+/// A public key that looks and behaves like the read-only value it is.
+///
+/// A selectable label makes copying possible but makes the common operation a
+/// careful drag across 50 characters. A click here gives the field focus and
+/// selects the whole value, ready for Command-C; typing cannot change it.
+struct SelectAllFieldIvars;
+
+define_class!(
+    // SAFETY:
+    // - NSTextField supports subclassing.
+    // - `SelectAllField` does not implement `Drop`.
+    #[unsafe(super(NSTextField))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "RxaSelectAllField"]
+    #[ivars = SelectAllFieldIvars]
+    struct SelectAllField;
+
+    unsafe impl NSObjectProtocol for SelectAllField {}
+
+    impl SelectAllField {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &AnyObject) {
+            let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+            // SAFETY: `self` is the control being selected, and AppKit accepts a
+            // nil sender for this standard action.
+            unsafe { self.selectText(None) };
+        }
+    }
+);
+
+impl SelectAllField {
+    fn new(mtm: MainThreadMarker, value: &str, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SelectAllFieldIvars);
+        let this: Retained<Self> =
+            unsafe { msg_send![super(this), initWithFrame: frame] };
+        this.setStringValue(&NSString::from_str(value));
+        this.setFont(NSFont::userFixedPitchFontOfSize(12.0).as_deref());
+        this.setEditable(false);
+        this.setSelectable(true);
+        this
+    }
+}
+
 /// How long Copy says it copied.
 const COPIED_FOR: f64 = 1.2;
 
@@ -498,8 +675,8 @@ const COPIED_FOR: f64 = 1.2;
 /// A whole class for two buttons, because an `NSButton` action has to be a
 /// selector on an Objective-C object — there is nowhere to hang a Rust closure.
 struct KeyActionsIvars {
-    /// The label showing the public key, updated in place by a regenerate.
-    public_key: Retained<NSTextField>,
+    /// The read-only field showing the public key, updated by a regenerate.
+    public_key: Retained<SelectAllField>,
     /// The private key the label is derived from. Authoritative throughout:
     /// there is no field it could disagree with, because it is never displayed.
     private_key: RefCell<String>,
@@ -524,9 +701,8 @@ define_class!(
     unsafe impl NSObjectProtocol for KeyActions {}
 
     impl KeyActions {
-        /// This Mac's public key. The label shows it whole, so this only saves a
-        /// drag-select — but an exact one, over 50 monospaced characters where
-        /// three left behind would fail as a checksum on the gateway.
+        /// This Mac's public key. The field shows it whole and selects it on a
+        /// click; this button is the exact one-step path to the pasteboard.
         #[unsafe(method(copyKey:))]
         fn copy_key(&self, _sender: Option<&AnyObject>) {
             let wrote = crate::pasteboard::write(&self.public_key());
@@ -624,7 +800,7 @@ define_class!(
 impl KeyActions {
     fn new(
         mtm: MainThreadMarker,
-        public_key: Retained<NSTextField>,
+        public_key: Retained<SelectAllField>,
         private_key: &str,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(KeyActionsIvars {
@@ -830,12 +1006,38 @@ fn button(
             mtm,
         )
     };
-    // Exactly the row, like every other control here: anything hanging outside
-    // the accessory view's bounds is at the mercy of the alert's layout.
+    // Exactly the row, like every other control here: nothing hangs outside the
+    // settings form's bounds.
     button.setFrame(NSRect::new(
         NSPoint::new(x, y),
         NSSize::new(width, ROW_HEIGHT),
     ));
+    button
+}
+
+/// Save or Cancel at the bottom of the settings panel.
+fn modal_button(
+    mtm: MainThreadMarker,
+    title: &str,
+    target: &SettingsModal,
+    action: objc2::runtime::Sel,
+    x: f64,
+    y: f64,
+    key_equivalent: &str,
+) -> Retained<NSButton> {
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str(title),
+            Some(&target.as_object()),
+            Some(action),
+            mtm,
+        )
+    };
+    button.setFrame(NSRect::new(
+        NSPoint::new(x, y),
+        NSSize::new(PANEL_BUTTON_WIDTH, PANEL_BUTTON_HEIGHT),
+    ));
+    button.setKeyEquivalent(&NSString::from_str(key_equivalent));
     button
 }
 
@@ -851,6 +1053,25 @@ fn alert(
     alert.setMessageText(&NSString::from_str(title));
     alert.setInformativeText(&NSString::from_str(body));
     alert
+}
+
+/// Explanatory copy directly below one section heading.
+fn section_copy(mtm: MainThreadMarker, text: &str) -> (Retained<NSTextField>, f64) {
+    let copy = NSTextField::wrappingLabelWithString(&NSString::from_str(text), mtm);
+    copy.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    copy.setPreferredMaxLayoutWidth(WIDTH);
+    let height = copy
+        .cell()
+        .map(|cell| {
+            cell.cellSizeForBounds(NSRect::new(
+                NSPoint::ZERO,
+                NSSize::new(WIDTH, 10_000.0),
+            ))
+            .height
+            .ceil()
+        })
+        .unwrap_or(LABEL_HEIGHT);
+    (copy, height)
 }
 
 /// A section heading: bold, and starting at the left edge rather than in the
@@ -875,8 +1096,7 @@ fn heading(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField> {
 ///
 /// Its frame is one line tall and offset into the row, not the row's full height:
 /// a label draws its text at the top of whatever frame it is given, so a 24pt one
-/// would sit visibly above the field it names — and a frame taller than the row
-/// risks being clipped by the alert's own layout.
+/// would sit visibly above the field it names.
 fn label(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     label.setAlignment(NSTextAlignment::Right);
