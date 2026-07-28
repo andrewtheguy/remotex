@@ -27,7 +27,7 @@
 //! the menu is gone. The cursor timer keeps firing throughout, because it is
 //! registered in `NSRunLoopCommonModes` (see [`crate::menubar`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
@@ -36,10 +36,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSButton, NSControlStateValueOff, NSControlStateValueOn, NSFont,
-    NSTextAlignment, NSTextField, NSView,
+    NSApplicationActivationPolicy, NSButton, NSColor, NSControlStateValueOff,
+    NSControlStateValueOn, NSFont, NSTextAlignment, NSTextField, NSView,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+};
 
 /// Width of an accessory view, in points.
 ///
@@ -216,24 +218,28 @@ pub fn config(
     )));
     view.addSubview(&virtual_size);
 
-    // Read-only until Edit says otherwise. The key is the whole credential and
-    // it is already right: the overwhelmingly common visit to this dialog reads
-    // it to put it on a gateway, and a field one keystroke away from silently
-    // becoming a *different* key — with the agent then answering nobody — is a
-    // poor thing to leave under a cursor. Copy needs no unlocking for the same
-    // reason: reading it is the safe half.
+    // Locked until Edit says otherwise, and it looks locked: a grey fill instead
+    // of a field's white one, an abbreviated key, and no selection. The key is
+    // the whole credential and it is already right — the overwhelmingly common
+    // visit to this dialog reads it onto a gateway, and a field one keystroke
+    // away from silently becoming a *different* key, with the agent then
+    // answering nobody, is a poor thing to leave under a cursor.
+    //
+    // Abbreviated because the way to take a key out of here is Copy. Shown whole
+    // it invites a drag-select, which on a 49-character key in a field that
+    // barely fits it is how three characters get left behind — and a key that is
+    // wrong by three characters fails as a checksum, with nothing to say which
+    // half was mistyped. Copy is exact, and it is the only way out while locked.
     view.addSubview(&label(mtm, "Pre-shared key", row(4)));
-    let psk = field(mtm, &current.psk, row(4), WIDTH - CONTROL_X, true);
-    psk.setEditable(false);
-    // Not implied by the line above, and worth having on its own: the key stays
-    // selectable, so it can still be read out or partly copied by hand.
-    psk.setSelectable(true);
+    let psk = field(mtm, &abbreviate(&current.psk), row(4), WIDTH - CONTROL_X, true);
     view.addSubview(&psk);
 
-    // Owns all three buttons' actions. `buttonWithTitle:target:action:` holds its
-    // target weakly, so this has to outlive `runModal` below — which is why it is
-    // a named local and not a temporary.
-    let actions = KeyActions::new(mtm, psk.clone());
+    // Owns all three buttons' actions, and the real key behind that abbreviation.
+    // `buttonWithTitle:target:action:` holds its target weakly, so this has to
+    // outlive `runModal` below — which is why it is a named local and not a
+    // temporary.
+    let actions = KeyActions::new(mtm, psk.clone(), &current.psk);
+    actions.set_locked(true);
     // Right-aligned as one group under the field, in the order they are reached
     // for: read it, then unlock, then replace.
     let regenerate_x = WIDTH - REGENERATE_WIDTH;
@@ -242,14 +248,16 @@ pub fn config(
 
     let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(5), COPY_WIDTH);
     copy.setToolTip(Some(&NSString::from_str(
-        "Put the key on the clipboard, to paste as `psk` on the gateway's rxa target.",
+        "Put the whole key on the clipboard, to paste as `psk` on the gateway's rxa \
+         target. The field above shows an abbreviation of it.",
     )));
     view.addSubview(&copy);
 
     let edit = button(mtm, "Edit", &actions, sel!(unlockKey:), edit_x, row(5), EDIT_WIDTH);
     edit.setToolTip(Some(&NSString::from_str(
-        "Unlock the key for typing, and enable Regenerate. Changing it means changing \
-         the gateway's copy to match, or nothing can connect.",
+        "Show the key in full and unlock it for typing, and enable Regenerate. \
+         Changing it means changing the gateway's copy to match, or nothing can \
+         connect.",
     )));
     view.addSubview(&edit);
 
@@ -272,7 +280,7 @@ pub fn config(
          press Save.",
     )));
     view.addSubview(&regenerate);
-    actions.arm(edit.clone(), regenerate.clone());
+    actions.arm(copy.clone(), edit.clone(), regenerate.clone());
 
     alert.setAccessoryView(Some(&view));
     alert.addButtonWithTitle(&NSString::from_str("Save"));
@@ -286,7 +294,9 @@ pub fn config(
     }
     Some(Draft {
         listen: listen.stringValue().to_string().trim().to_owned(),
-        psk: psk.stringValue().to_string().trim().to_owned(),
+        // Never the field's text: while locked that is an abbreviation, and
+        // saving it would replace the credential with an ellipsis.
+        psk: actions.key(),
         virtual_display: virtual_display.state() == NSControlStateValueOn,
         virtual_size: virtual_size.stringValue().to_string().trim().to_owned(),
     })
@@ -312,19 +322,30 @@ pub fn error(mtm: MainThreadMarker, title: &str, body: &str) {
     alert.runModal();
 }
 
-/// The key row's three buttons' target: copy it, unlock it, replace it.
+/// How long Copy says it copied.
+const COPIED_FOR: f64 = 1.2;
+
+/// The key row's three buttons' target: copy it, unlock it, replace it — and the
+/// keeper of the real key, which is not what the field shows while locked.
 ///
 /// A whole class for three buttons, because an `NSButton` action has to be a
 /// selector on an Objective-C object — there is nowhere to hang a Rust closure.
 struct KeyActionsIvars {
     psk: Retained<NSTextField>,
-    /// What Edit unlocks, and Edit itself. Filled in by [`KeyActions::arm`]
-    /// rather than at construction: each of these buttons takes *this* object as
-    /// its target, so none of them can exist before it does.
-    unlocks: RefCell<Option<Unlocks>>,
+    /// The key itself. Authoritative while locked, when the field holds an
+    /// abbreviation of it; from Edit onwards the field is authoritative, because
+    /// the user may have typed or regenerated something else. [`KeyActions::key`]
+    /// is the one place that decides which.
+    full: RefCell<String>,
+    locked: Cell<bool>,
+    /// The row's buttons. Filled in by [`KeyActions::arm`] rather than at
+    /// construction: each of them takes *this* object as its target, so none of
+    /// them can exist before it does.
+    buttons: RefCell<Option<Buttons>>,
 }
 
-struct Unlocks {
+struct Buttons {
+    copy: Retained<NSButton>,
     edit: Retained<NSButton>,
     regenerate: Retained<NSButton>,
 }
@@ -344,12 +365,25 @@ define_class!(
     unsafe impl NSObjectProtocol for KeyActions {}
 
     impl KeyActions {
-        /// The field's value, not the saved one: what is on screen is what the
-        /// user believes they are copying, and after a Regenerate the two differ.
+        /// The whole key, never the field's text — which is an abbreviation
+        /// while locked, and would be a credential three characters short.
         #[unsafe(method(copyKey:))]
         fn copy_key(&self, _sender: Option<&AnyObject>) {
-            let key = self.ivars().psk.stringValue().to_string();
-            crate::pasteboard::write(key.trim());
+            let wrote = crate::pasteboard::write(&self.key());
+            // Nothing else changes on screen when this works, and a clipboard is
+            // not somewhere you can look to check. Without a word from the
+            // button, the way to find out whether it copied is to paste it
+            // somewhere and see — which for a credential means putting it
+            // somewhere it should not be.
+            self.say(if wrote { "Copied" } else { "Failed" });
+        }
+
+        /// Put the button back, a moment later. See [`KeyActions::say`].
+        #[unsafe(method(restoreCopy:))]
+        fn restore_copy(&self, _timer: Option<&AnyObject>) {
+            if let Some(buttons) = self.ivars().buttons.borrow().as_ref() {
+                buttons.copy.setTitle(&NSString::from_str("Copy"));
+            }
         }
 
         /// One way, and only for as long as this dialog is up: Cancel discards
@@ -357,12 +391,16 @@ define_class!(
         #[unsafe(method(unlockKey:))]
         fn unlock_key(&self, _sender: Option<&AnyObject>) {
             let ivars = self.ivars();
-            ivars.psk.setEditable(true);
-            if let Some(unlocks) = ivars.unlocks.borrow().as_ref() {
-                unlocks.regenerate.setEnabled(true);
+            // In full now: it can be read carefully, and it has to be what any
+            // typing starts from.
+            let full = ivars.full.borrow().clone();
+            ivars.psk.setStringValue(&NSString::from_str(&full));
+            self.set_locked(false);
+            if let Some(buttons) = ivars.buttons.borrow().as_ref() {
+                buttons.regenerate.setEnabled(true);
                 // Nothing left for it to do, and leaving it live would suggest
                 // there were a way back other than Cancel.
-                unlocks.edit.setEnabled(false);
+                buttons.edit.setEnabled(false);
             }
             // Otherwise the click that unlocked the field leaves focus on a
             // button, and the next keystroke goes nowhere.
@@ -371,6 +409,8 @@ define_class!(
             }
         }
 
+        /// Only reachable after Edit, so the field is showing a whole key and is
+        /// the authority on it — no need to touch `full`.
         #[unsafe(method(regenerate:))]
         fn regenerate(&self, _sender: Option<&AnyObject>) {
             let psk = rxa_proto::psk::generate();
@@ -380,17 +420,84 @@ define_class!(
 );
 
 impl KeyActions {
-    fn new(mtm: MainThreadMarker, psk: Retained<NSTextField>) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, psk: Retained<NSTextField>, key: &str) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(KeyActionsIvars {
             psk,
-            unlocks: RefCell::new(None),
+            full: RefCell::new(key.trim().to_owned()),
+            locked: Cell::new(true),
+            buttons: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Hand over the buttons Edit acts on, once they exist.
-    fn arm(&self, edit: Retained<NSButton>, regenerate: Retained<NSButton>) {
-        *self.ivars().unlocks.borrow_mut() = Some(Unlocks { edit, regenerate });
+    /// Hand over the buttons the actions act on, once they exist.
+    fn arm(&self, copy: Retained<NSButton>, edit: Retained<NSButton>, regenerate: Retained<NSButton>) {
+        *self.ivars().buttons.borrow_mut() = Some(Buttons { copy, edit, regenerate });
+    }
+
+    /// Dress the field for locked or unlocked.
+    ///
+    /// The background is the whole of it visually: a text field is white because
+    /// it is somewhere to type, and this one is not until Edit. Selection goes
+    /// with it — a drag-select of an abbreviation is a key that fails its
+    /// checksum at the gateway for a reason nothing on screen explains, so while
+    /// locked the only way to take the key out is Copy.
+    fn set_locked(&self, locked: bool) {
+        let ivars = self.ivars();
+        ivars.locked.set(locked);
+        let field = &ivars.psk;
+        field.setEditable(!locked);
+        field.setSelectable(!locked);
+        let background = if locked {
+            NSColor::windowBackgroundColor()
+        } else {
+            NSColor::textBackgroundColor()
+        };
+        field.setBackgroundColor(Some(&background));
+    }
+
+    /// The key as it stands: the stored one while locked, the field's from Edit
+    /// onwards.
+    fn key(&self) -> String {
+        let ivars = self.ivars();
+        if ivars.locked.get() {
+            ivars.full.borrow().clone()
+        } else {
+            ivars.psk.stringValue().to_string().trim().to_owned()
+        }
+    }
+
+    /// Let the Copy button report, by becoming the report for a moment.
+    ///
+    /// `NSRunLoopCommonModes`, because this dialog is a modal run loop and a
+    /// timer left in the default mode would not fire until the dialog closed —
+    /// see [`crate::menubar`], which registers its cursor timer for the same
+    /// reason. The timer is not kept: it fires once and releases its target,
+    /// where holding it here would be this object holding a timer holding this
+    /// object. Two clicks in quick succession therefore restore on the first
+    /// one's schedule, which costs a fifth of a second of a button saying
+    /// "Copy" while it might have said "Copied".
+    fn say(&self, title: &str) {
+        let Some(button) = self
+            .ivars()
+            .buttons
+            .borrow()
+            .as_ref()
+            .map(|buttons| buttons.copy.clone())
+        else {
+            return;
+        };
+        button.setTitle(&NSString::from_str(title));
+        let timer = unsafe {
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                COPIED_FOR,
+                &self.as_object(),
+                sel!(restoreCopy:),
+                None,
+                false,
+            )
+        };
+        unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
     }
 
     fn as_object(&self) -> Retained<AnyObject> {
@@ -398,6 +505,28 @@ impl KeyActions {
         // Safety: upcasting a subclass of NSObject to AnyObject.
         unsafe { Retained::cast_unchecked(this) }
     }
+}
+
+/// A key short enough to be glanced at rather than read, and still enough of it
+/// to tell two apart.
+///
+/// Both ends, not just the head: a key is copied to compare against one already
+/// on a gateway, and the tail is what says they are the same key rather than the
+/// same prefix. The ellipsis is the point — nobody mistakes this for something to
+/// transcribe.
+fn abbreviate(key: &str) -> String {
+    const HEAD: usize = 12;
+    const TAIL: usize = 4;
+    let chars: Vec<char> = key.chars().collect();
+    // Nothing to gain by abbreviating something already this short — and a
+    // "shortening" that is longer than the original would be a strange thing to
+    // show for a key somebody has hand-edited into nonsense.
+    if chars.len() <= HEAD + TAIL + 1 {
+        return key.to_owned();
+    }
+    let head: String = chars[..HEAD].iter().collect();
+    let tail: String = chars[chars.len() - TAIL..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 /// One of the key row's buttons: same target, same row, different width.
@@ -482,4 +611,39 @@ fn field(
 /// See the module docs.
 fn activate(mtm: MainThreadMarker) {
     NSApplication::sharedApplication(mtm).activate();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the locked field shows. The rest of this module needs a window
+    /// server; this part is a string, and it is the part that could quietly go
+    /// wrong — an abbreviation that is a *plausible* key is one somebody
+    /// transcribes.
+    #[test]
+    fn an_abbreviated_key_cannot_be_mistaken_for_one() {
+        let key = rxa_proto::psk::generate();
+        let short = abbreviate(&key);
+
+        assert!(short.contains('…'), "{short}");
+        assert!(short.len() < key.len(), "{short} is no shorter than the key");
+        assert_ne!(short, key);
+        // Both ends, because comparing against a gateway's copy is what this is
+        // for: a prefix alone cannot tell two keys apart, and every key here
+        // shares the same one.
+        assert!(key.starts_with(&short[..short.find('…').unwrap()]), "{short}");
+        let tail = &short[short.find('…').unwrap() + '…'.len_utf8()..];
+        assert!(key.ends_with(tail), "{short}");
+        assert!(key.starts_with(rxa_proto::psk::PREFIX), "the shared prefix");
+    }
+
+    /// Nothing worth hiding, and a "shortening" longer than its input would be a
+    /// strange thing to show for a key somebody has hand-edited into nonsense.
+    #[test]
+    fn something_already_short_is_left_alone() {
+        for value in ["", "rxap", "not-a-key"] {
+            assert_eq!(abbreviate(value), value);
+        }
+    }
 }
