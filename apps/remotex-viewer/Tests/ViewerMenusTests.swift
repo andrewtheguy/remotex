@@ -89,6 +89,153 @@ struct ViewerMenusTests {
         #expect(mainMenu.items.filter { $0.title == "Edit" }.count == 2)
     }
 
+    /// AppKit's View menu is built long after the Edit menu goes in, and it is
+    /// inserted ahead of it — which left the bar reading View, Edit. The Edit menu
+    /// belongs immediately after the application menu wherever else things land.
+    @Test
+    func theEditMenuIsMovedBackAfterTheAppMenu() {
+        let mainMenu = NSMenu()
+        mainMenu.addItem(withTitle: "remotex-viewer", action: nil, keyEquivalent: "")
+        let installed = ViewerMenus.ensureEditMenu(in: mainMenu, current: nil)
+        #expect(mainMenu.items.map(\.title) == ["remotex-viewer", "Edit"])
+
+        // AppKit puts its View menu in front of ours, as it does at launch.
+        mainMenu.insertItem(
+            withTitle: "View",
+            action: nil,
+            keyEquivalent: "",
+            at: 1
+        )
+        #expect(mainMenu.items.map(\.title) == ["remotex-viewer", "View", "Edit"])
+
+        let again = ViewerMenus.ensureEditMenu(in: mainMenu, current: installed)
+
+        #expect(again === installed, "the same menu, moved rather than rebuilt")
+        #expect(mainMenu.items.map(\.title) == ["remotex-viewer", "Edit", "View"])
+
+        // Run from a change notification, and moving an item posts one.
+        _ = ViewerMenus.ensureEditMenu(in: mainMenu, current: installed)
+        #expect(mainMenu.items.map(\.title) == ["remotex-viewer", "Edit", "View"])
+    }
+
+    /// The two resize items go into AppKit's View menu above its full-screen
+    /// item, because a `CommandMenu("View")` is dropped by SwiftUI — see
+    /// `RemoteCommands`.
+    @Test
+    func theResizeItemsGoAboveFullScreen() {
+        let mainMenu = NSMenu()
+        let view = NSMenu(title: "View")
+        view.addItem(
+            withTitle: "Enter Full Screen",
+            action: #selector(NSWindow.toggleFullScreen(_:)),
+            keyEquivalent: ""
+        )
+        mainMenu.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = view
+        let target = NSObject()
+
+        ViewerMenus.ensureResizeItems(in: mainMenu, target: target)
+
+        #expect(
+            view.items.map(\.title) == [
+                "Resize to Window", "Resize to Display", "", "Enter Full Screen",
+            ]
+        )
+        #expect(view.items[2].isSeparatorItem)
+        #expect(view.items[0].action == ViewerMenus.resizeToWindowAction)
+        #expect(view.items[1].action == ViewerMenus.resizeToDisplayAction)
+        // A menu item's target is weak, so this is the object the delegate holds.
+        #expect(view.items[0].target === target)
+    }
+
+    /// Run from a change notification, and inserting three items posts three.
+    @Test
+    func ensuringTheResizeItemsTwiceLeavesOnePair() {
+        let mainMenu = NSMenu()
+        let view = NSMenu(title: "View")
+        view.addItem(
+            withTitle: "Enter Full Screen",
+            action: #selector(NSWindow.toggleFullScreen(_:)),
+            keyEquivalent: ""
+        )
+        mainMenu.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = view
+        let target = NSObject()
+
+        ViewerMenus.ensureResizeItems(in: mainMenu, target: target)
+        ViewerMenus.ensureResizeItems(in: mainMenu, target: target)
+
+        #expect(view.items.filter { $0.title == "Resize to Window" }.count == 1)
+        #expect(view.items.filter { $0.isSeparatorItem }.count == 1)
+    }
+
+    /// SwiftUI rebuilds the bar and hands back menus this app has never seen, so
+    /// the items have to go back into the new one — recognised by their action,
+    /// since there is no object left to compare.
+    @Test
+    func theResizeItemsGoBackIntoARebuiltBar() {
+        let mainMenu = NSMenu()
+        let first = NSMenu(title: "View")
+        first.addItem(
+            withTitle: "Enter Full Screen",
+            action: #selector(NSWindow.toggleFullScreen(_:)),
+            keyEquivalent: ""
+        )
+        mainMenu.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = first
+        let target = NSObject()
+        ViewerMenus.ensureResizeItems(in: mainMenu, target: target)
+
+        // Rebuilt: a different NSMenu, with AppKit's item back in it and ours gone.
+        mainMenu.removeAllItems()
+        let rebuilt = NSMenu(title: "View")
+        rebuilt.addItem(
+            withTitle: "Enter Full Screen",
+            action: #selector(NSWindow.toggleFullScreen(_:)),
+            keyEquivalent: ""
+        )
+        mainMenu.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = rebuilt
+
+        ViewerMenus.ensureResizeItems(in: mainMenu, target: target)
+
+        #expect(rebuilt.items.map(\.title).prefix(2) == ["Resize to Window", "Resize to Display"])
+    }
+
+    /// The menu is found by the full-screen item, not by its title: this app has
+    /// been bitten by two menus answering to "View", and the title also flips to
+    /// Exit Full Screen with the window.
+    @Test
+    func theItemsFollowTheFullScreenItemWhateverItsMenuIsCalled() {
+        let mainMenu = NSMenu()
+        let decoy = NSMenu(title: "View")
+        decoy.addItem(withTitle: "Something Else", action: nil, keyEquivalent: "")
+        mainMenu.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = decoy
+        let real = NSMenu(title: "Ansicht")
+        real.addItem(
+            withTitle: "Exit Full Screen",
+            action: #selector(NSWindow.toggleFullScreen(_:)),
+            keyEquivalent: ""
+        )
+        mainMenu.addItem(withTitle: "Ansicht", action: nil, keyEquivalent: "").submenu = real
+
+        ViewerMenus.ensureResizeItems(in: mainMenu, target: NSObject())
+
+        #expect(decoy.items.map(\.title) == ["Something Else"], "the decoy is left alone")
+        #expect(real.items.map(\.title).prefix(2) == ["Resize to Window", "Resize to Display"])
+    }
+
+    /// Until AppKit's item exists — which for a window that cannot go full screen
+    /// is never — there is no menu to add to, and none is invented.
+    @Test
+    func aBarWithoutAFullScreenItemGainsNothing() {
+        let mainMenu = NSMenu()
+        let view = NSMenu(title: "View")
+        view.addItem(withTitle: "Something Else", action: nil, keyEquivalent: "")
+        mainMenu.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = view
+
+        ViewerMenus.ensureResizeItems(in: mainMenu, target: NSObject())
+
+        #expect(view.items.map(\.title) == ["Something Else"])
+        #expect(mainMenu.items.count == 1)
+    }
+
     /// The rest of the bar keeps none of its chords, at any depth — AppKit's own
     /// Control-Command-F on Enter Full Screen arrives long after launch, and a
     /// focused desktop would capture it and hand it to the guest.

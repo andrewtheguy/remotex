@@ -20,6 +20,29 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     /// be told apart from one that still has ours in it.
     private var editMenu: NSMenu?
 
+    /// What the View menu's resize items send to.
+    ///
+    /// Held here because an `NSMenuItem`'s target is weak: nothing else in the bar
+    /// would keep it alive. Set from `RemotexViewerApp` rather than built here —
+    /// `NSApplicationDelegateAdaptor` creates this delegate, and there is no model
+    /// to bind to until the scene does.
+    private var resizeMenuTarget: ResizeMenuTarget?
+
+    /// Give the delegate the model its View menu items act on.
+    ///
+    /// Called from the scene, because that is where the model is. Enforces the bar
+    /// once afterwards rather than waiting: AppKit's full-screen item usually
+    /// arrives later and its arrival would run this anyway, but on a launch where
+    /// it is already in the bar nothing else would post a notification and the
+    /// items would be missing until something unrelated changed.
+    func bind(model: AppModel) {
+        guard resizeMenuTarget == nil else {
+            return
+        }
+        resizeMenuTarget = ResizeMenuTarget(model: model)
+        enforceMenuBarRules()
+    }
+
     /// Set while `enforceMenuBarRules` is running, in case a notification is ever
     /// delivered inside a menu mutation rather than after one: re-entering the
     /// check mid-insert would find the menu not yet in the bar and insert a second.
@@ -87,6 +110,9 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
         isEnforcingMenuBarRules = true
         defer { isEnforcingMenuBarRules = false }
         editMenu = ViewerMenus.ensureEditMenu(in: mainMenu, current: editMenu)
+        if let resizeMenuTarget {
+            ViewerMenus.ensureResizeItems(in: mainMenu, target: resizeMenuTarget)
+        }
         // From the menu bar down rather than from the menu that posted: `Notification`
         // cannot cross into the actor, and starting at the root also keeps a context
         // menu — AppKit's to spell, and whose chords the text field handles rather
@@ -130,6 +156,10 @@ struct RemotexViewerApp: App {
         WindowGroup {
             RootView(model: model)
                 .frame(minWidth: 900, minHeight: 640)
+                // The View menu's resize items are AppKit's and need a target —
+                // see `ViewerMenus.ensureResizeItems`. This is the first point
+                // where both the delegate and the model exist.
+                .task { applicationDelegate.bind(model: model) }
         }
         .defaultSize(width: 1440, height: 900)
         // The compact bar, because the toolbar's height is the desktop's loss: the

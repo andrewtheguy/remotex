@@ -18,12 +18,24 @@ struct RemoteCommands: Commands {
             }
         }
 
-        // Deliberately nothing for full screen. AppKit adds Enter Full Screen to a
-        // View menu of its own and does not give the group up when it is replaced
-        // here — claiming `.sidebar` left the app with two items for the one action —
-        // so its item is left where it is, and `ViewerApplicationDelegate` takes the
-        // Control-Command-F off it. AppKit's flips its own title between Enter and
-        // Exit from window state, which is more than an item declared here could say.
+        // Nothing here for full screen — and nothing for the two resize items that
+        // sit beside it either. Both are AppKit's, for the same reason.
+        //
+        // AppKit adds Enter Full Screen to a View menu of its own and does not give
+        // the group up when it is replaced here — claiming `.sidebar` left the app
+        // with two items for the one action — so its item is left where it is, and
+        // `ViewerApplicationDelegate` takes the Control-Command-F off it. AppKit's
+        // flips its own title between Enter and Exit from window state, which is
+        // more than an item declared here could say.
+        //
+        // The resize items belong in that same menu, above that item: all three
+        // answer one question, which is how big the remote should be relative to
+        // this window. They are inserted from AppKit by
+        // `ViewerMenus.ensureResizeItems`, because declaring them here as a
+        // `CommandMenu("View")` was tried and does not work — SwiftUI drops the
+        // items and the bar comes up with *two* View menus, each holding nothing
+        // but AppKit's full-screen item. Same lesson as the Edit menu, and the same
+        // remedy.
 
         // No item here carries a key equivalent, and that is a rule rather than an
         // omission. While the desktop is painting and focused, `KeyboardCapture`
@@ -61,26 +73,6 @@ struct RemoteCommands: Commands {
                 model.clipboard.togglePanel()
             }
             .disabled(!model.clipboard.isEnabled || model.clipboard.isFetching)
-
-            // The two directions a size mismatch can be settled, and they are not
-            // alternatives: the first pushes this window's size to a remote that
-            // takes one (RDP with `resize`, rxa on a display the agent made), the
-            // second pulls the remote's size into this window and sends nothing.
-            // A target that allows the first allows both, and which end to move is
-            // the user's call. VNC is the exception and greys the second, because a
-            // desktop that already follows the window cannot be fitted to it.
-            // A greyed item stays in the menu on purpose — which way a target
-            // allows is worth reading off the pair rather than inferring from an
-            // item that is not there.
-            Button("Resize to Window") {
-                model.resizeToWindow()
-            }
-            .disabled(!model.canResizeNow)
-
-            Button("Resize to Display") {
-                model.resizeToDisplay()
-            }
-            .disabled(!model.canResizeToDisplay)
 
             // The escape hatch for a framebuffer that has gone wrong: re-announce
             // the size and repaint everything.
