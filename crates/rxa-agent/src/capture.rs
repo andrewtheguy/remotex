@@ -891,13 +891,15 @@ impl Handler {
 
         // The cells this frame's damage touches, deduplicated: ScreenCaptureKit can
         // report overlapping rects, and snapping outward makes two nearby rects land
-        // on the same cell often. Ordered by position so a frame's tiles arrive
+        // on the same cell often. Keyed by `(y, x)` so a frame's tiles arrive
         // top-down — the cells are disjoint, so this is for legibility rather than
-        // correctness.
-        let cells: std::collections::BTreeSet<(u16, u16)> = dirty
+        // correctness — and holding the whole `Rect` rather than re-deriving it from
+        // the key keeps `split_cells` the only place that knows how an edge cell is
+        // clipped.
+        let cells: std::collections::BTreeMap<(u16, u16), Rect> = dirty
             .iter()
             .flat_map(|rect| split_cells(*rect, surface_w, surface_h))
-            .map(|cell| (cell.y, cell.x))
+            .map(|cell| ((cell.y, cell.x), cell))
             .collect();
 
         let mut tiles = Vec::new();
@@ -909,13 +911,7 @@ impl Handler {
             if full {
                 memo.forget();
             }
-            for (y, x) in cells {
-                let cell = Rect {
-                    x,
-                    y,
-                    w: CELL_W.min(surface_w - x),
-                    h: CELL_H.min(surface_h - y),
-                };
+            for cell in cells.into_values() {
                 // Hashing the source rows first is the whole point: a cell
                 // ScreenCaptureKit called dirty but did not change costs one read
                 // of its pixels, not a pack plus a PNG.

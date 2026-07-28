@@ -196,13 +196,14 @@ impl Wire {
                     self.totals.text(json.len());
                     frames.push(WireFrame::Text(json));
                 }
-                None => {
-                    let ServerMsg::Tile(tile) = msg else {
-                        // `text_frame` returns None for tiles alone.
-                        unreachable!("only a tile has no text encoding");
-                    };
-                    self.push(tile, &mut frames);
-                }
+                // Only a tile has no text encoding. Matched rather than assumed:
+                // this runs on the socket's own task, so a variant added later
+                // without a `text_frame` arm should cost that one message, not the
+                // whole attachment.
+                None => match msg {
+                    ServerMsg::Tile(tile) => self.push(tile, &mut frames),
+                    other => log::warn!("wire: dropping {other:?}, which has no encoding"),
+                },
             }
         }
         self.flush(&mut frames);

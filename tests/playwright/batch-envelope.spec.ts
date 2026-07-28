@@ -42,6 +42,8 @@ interface Batch {
   records: Record[];
   /** Whether the records exactly filled the frame. */
   exact: boolean;
+  /** The first record op this parser did not recognize, if any. */
+  badOp?: number;
 }
 
 // Parse a batch frame the same way `decodeBatchFrame` does, but independently:
@@ -51,8 +53,10 @@ function parseBatch(payload: Buffer): Batch {
   const records: Record[] = [];
   let at = BATCH_HEADER_LEN;
   let exact = true;
+  let badOp: number | undefined;
   while (at < payload.length) {
-    if (payload.readUInt8(at) === OP_TILE_REF) {
+    const op = payload.readUInt8(at);
+    if (op === OP_TILE_REF) {
       if (at + TILE_REF_LEN > payload.length) {
         exact = false;
         break;
@@ -61,20 +65,37 @@ function parseBatch(payload: Buffer): Batch {
       at += TILE_REF_LEN;
       continue;
     }
+    // An op this parser does not know stops it here, which is where the bad byte
+    // is. Reading on as if it were a TILE would take a payload length out of
+    // somebody else's bytes and fail somewhere further along that looks like a
+    // truncated frame instead. Both real parsers reject rather than guess:
+    // `decodeBatchFrame` drops the whole frame, and `batch_records` in
+    // tests/common/mod.rs refuses the op by name.
+    if (op !== OP_TILE) {
+      badOp = op;
+      exact = false;
+      break;
+    }
     if (at + TILE_HEADER_LEN > payload.length) {
       exact = false;
       break;
     }
     const payloadLen = payload.readUInt32LE(at + 12);
     records.push({
-      op: payload.readUInt8(at),
+      op,
       format: payload.readUInt8(at + 1),
       slot: payload.readUInt16LE(at + 2),
       payloadLen,
     });
     at += TILE_HEADER_LEN + payloadLen;
   }
-  return { flags: payload.readUInt8(1), count, records, exact: exact && at === payload.length };
+  return {
+    flags: payload.readUInt8(1),
+    count,
+    records,
+    exact: exact && at === payload.length,
+    badOp,
+  };
 }
 
 test.describe("v3 batch envelope", () => {
@@ -124,6 +145,10 @@ test.describe("v3 batch envelope", () => {
         batch.records.length,
         "the header's record count must match the records present",
       ).toBe(batch.count);
+      expect(
+        batch.badOp,
+        "every record op must be one this build knows",
+      ).toBeUndefined();
       expect(batch.exact, "records must exactly fill the frame").toBe(true);
       for (const record of batch.records) {
         if (record.op === OP_TILE_REF) {
@@ -132,7 +157,6 @@ test.describe("v3 batch envelope", () => {
           expect(record.slot).toBeLessThan(SLOT_COUNT);
           continue;
         }
-        expect(record.op).toBe(OP_TILE);
         // 1 = PNG, 2 = JPEG. The Mac agent picks per tile.
         expect([1, 2]).toContain(record.format);
         // Either a slot inside the cache, or "do not remember this".

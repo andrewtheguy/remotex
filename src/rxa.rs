@@ -114,11 +114,17 @@ const AGENT_BUFFER: usize = 32;
 
 /// The state that outlives one agent link.
 ///
-/// All four survive a silent reconnect for the same reason: the *browser* did not
-/// go anywhere. What it has been told about the desktop, what it is currently
-/// showing, which displays its menu lists, and when it last saw the remote
+/// `announced`, `displays` and `clipboard` survive a silent reconnect for the same
+/// reason: the *browser* did not go anywhere. What it has been told about the
+/// desktop, which displays its menu lists, and when it last saw the remote
 /// clipboard change are all still true on the other side of a dropped TCP
 /// connection.
+///
+/// `relayed` is the exception, and lives here only to be carried between the
+/// pumps rather than across them: every new link starts it from nothing
+/// ([`RelayMemo::forget`] at the top of [`pump`]). A browser that attached during
+/// the outage had its `Refresh` discarded with the rest of the stale input, so
+/// nothing else would tell the memo that canvas is now blank.
 #[derive(Default)]
 struct Carried {
     /// What the browser has been told about the desktop. A `Resize` costs the

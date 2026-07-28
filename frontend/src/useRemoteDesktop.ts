@@ -791,6 +791,15 @@ export function useRemoteDesktop(
       resetAsked = false;
       const jobs = records.map(resolveRecord);
       paintBatch(jobs, await Promise.all(jobs.map(decodeJob)));
+      // Emptied once, after the batch, rather than the moment a reference misses.
+      // Clearing mid-pass would throw away slots this batch's own earlier records
+      // filled, so a reference naming one of them — legal, and something the
+      // gateway emits within a single batch — would be dropped for company. By
+      // here nothing left reads the cache, and the next batch arrives holding
+      // nothing, which is what the server's own reset will agree with.
+      if (resetAsked) {
+        tileCache.fill(null);
+      }
     };
 
     // What a record turns into once the cache has had its say: a payload to
@@ -853,7 +862,6 @@ export function useRemoteDesktop(
         return;
       }
       resetAsked = true;
-      tileCache.fill(null);
       sendRef.current({ type: "cacheReset" });
     };
 

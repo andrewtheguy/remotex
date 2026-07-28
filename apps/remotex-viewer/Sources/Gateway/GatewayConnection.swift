@@ -376,6 +376,15 @@ actor GatewayConnection {
             }
             decoded.append(tile)
         }
+        // Emptied once, after the batch, rather than the moment a reference misses.
+        // Clearing mid-pass would throw away slots this batch's own earlier records
+        // filled, so a reference naming one of them — legal, and something the
+        // gateway emits within a single batch — would be dropped for company. By
+        // here nothing left reads the cache, and the next batch arrives holding
+        // nothing, which is what the server's own reset will agree with.
+        if askedForReset {
+            tileCache = Array(repeating: nil, count: Int(BatchFrame.slotCount))
+        }
         // An empty batch is well formed and means nothing to paint, so it must not
         // reach the renderer and ask for a redraw of nothing.
         guard !decoded.isEmpty else {
@@ -424,7 +433,6 @@ actor GatewayConnection {
             return
         }
         askedForReset = true
-        tileCache = Array(repeating: nil, count: Int(BatchFrame.slotCount))
         outbound.enqueue(.cacheReset)
     }
 

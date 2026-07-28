@@ -117,6 +117,111 @@ struct GatewayConnectionTests {
         await connection.stop()
     }
 
+    /// The tile cache's whole claim, from the side that has to honour it: seven
+    /// bytes become the pixels a slot already holds, at a new position.
+    ///
+    /// Asserted on the decoded bytes and not only on geometry, because resolving a
+    /// reference to the wrong slot would put the same rectangle in the trace. Both
+    /// lifetimes are covered: a slot filled by an earlier batch, which is what the
+    /// cache exists for, and one filled earlier in the reference's own batch, which
+    /// the gateway emits because records are applied in order.
+    @Test
+    func aReferenceRedrawsTheCachedPixelsAtItsOwnPosition() async throws {
+        let stored = batchFrame([try tileRecord(x: 0, y: 0, red: 0x11, slot: 3)])
+        let reused = batchFrame([
+            referenceRecord(slot: 3, x: 8, y: 16),
+            try tileRecord(x: 0, y: 32, red: 0x22, slot: 4),
+            referenceRecord(slot: 4, x: 24, y: 32),
+        ])
+        let transport = FakeWebSocketTransport(
+            inbound: [
+                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
+                .binary(stored),
+                .binary(reused),
+                .text(#"{"type":"picker"}"#),
+            ],
+            closeCode: nil
+        )
+        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
+        let sink = RecordingSink()
+        let connection = GatewayConnection(gateway: gateway, sink: sink)
+
+        await connection.start()
+        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
+
+        #expect(
+            sink.trace.filter { $0.hasPrefix("tiles:") } == [
+                "tiles:0,0,2x2",
+                "tiles:8,16,2x2|0,32,2x2|24,32,2x2",
+            ]
+        )
+
+        let painted = sink.events.compactMap { event -> [DecodedTile]? in
+            if case .tiles(let tiles) = event { tiles } else { nil }
+        }
+        try #require(painted.count == 2)
+        let cached = try #require(painted[0].first)
+        let second = painted[1]
+        #expect(!cached.bgra.isEmpty)
+        #expect(second[0].bgra == cached.bgra, "slot 3's bytes, at 8,16")
+        #expect(second[2].bgra == second[1].bgra, "slot 4's, filled this same batch")
+        #expect(second[1].bgra != cached.bgra, "different colours, so different slots")
+        await connection.stop()
+    }
+
+    /// A reference into a slot this client does not hold cannot be recovered from
+    /// here: the gateway believes the slot is full, and nothing else would ever
+    /// correct that. So the client says so — once per batch, because fifty stale
+    /// references are one disagreement, not fifty.
+    @Test
+    func referencesIntoAnEmptyCacheAskForOneResetPerBatch() async throws {
+        let batch = batchFrame([
+            try tileRecord(x: 0, y: 0, slot: 1),
+            referenceRecord(slot: 9, x: 8, y: 0), // never filled
+            referenceRecord(slot: 10, x: 16, y: 0), // nor this
+            referenceRecord(slot: 1, x: 24, y: 0), // filled by this very batch
+        ])
+        let transport = FakeWebSocketTransport(
+            inbound: [
+                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
+                .binary(batch),
+                .text(#"{"type":"picker"}"#),
+            ],
+            closeAfterDraining: false
+        )
+        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
+        let sink = RecordingSink()
+        let connection = GatewayConnection(gateway: gateway, sink: sink)
+
+        await connection.start()
+        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
+
+        // A sentinel behind whatever the batch enqueued: the outbound queue is
+        // FIFO, so a `refresh` that reached the socket means every reset the batch
+        // asked for has too. Waiting on a count instead would be asserting that
+        // nothing more arrived, over a wall clock — true on a fast machine and a
+        // flake on a slow one.
+        connection.send(.refresh)
+        await sink.wait { _ in transport.sentFrames.contains { $0.contains("refresh") } }
+
+        let sent = try transport.sentFrames.map { frame in
+            try #require(
+                JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any]
+            )
+        }
+        #expect(
+            sent.compactMap { $0["type"] as? String }
+                .filter { $0 == "cacheReset" || $0 == "refresh" } == ["cacheReset", "refresh"]
+        )
+        // And the record naming a slot this batch filled itself still painted: the
+        // cache is emptied after the pass over the records, not in the middle of
+        // one, or a miss would take a hit down with it.
+        #expect(
+            sink.trace.filter { $0.hasPrefix("tiles:") } == ["tiles:0,0,2x2|24,0,2x2"]
+        )
+        await connection.stop()
+    }
+
     @Test
     func aClaimedSlotOpensASocketWithItsOwnToken() async throws {
         let transport = FakeWebSocketTransport(

@@ -376,13 +376,27 @@ func batchFrame(_ records: [Data]) -> Data {
     return frame
 }
 
+/// A `TILE_REF` record: seven bytes naming a slot and where to redraw it.
+func referenceRecord(slot: UInt16, x: UInt16, y: UInt16) -> Data {
+    var record = Data([BatchFrame.opTileRef])
+    for value in [slot, x, y] {
+        record.append(UInt8(value & 0xFF))
+        record.append(UInt8(value >> 8))
+    }
+    return record
+}
+
 /// One real single-colour PNG `TILE` record, header and all. Encoded rather than
 /// hand-rolled so the decode under test is the same one production runs.
+///
+/// `slot` defaults to "do not remember this", so a test only names one when the
+/// cache is what it is about.
 func tileRecord(
     x: UInt16,
     y: UInt16,
     size: UInt16 = 2,
-    red: UInt8 = 0xFF
+    red: UInt8 = 0xFF,
+    slot: UInt16 = BatchFrame.noSlot
 ) throws -> Data {
     let side = Int(size)
     var pixels = [UInt8]()
@@ -413,7 +427,7 @@ func tileRecord(
     #expect(CGImageDestinationFinalize(destination))
 
     var record = Data([BatchFrame.opTile, TileFormat.png.rawValue])
-    for value in [BatchFrame.noSlot, x, y, size, size] {
+    for value in [slot, x, y, size, size] {
         record.append(UInt8(value & 0xFF))
         record.append(UInt8(value >> 8))
     }
