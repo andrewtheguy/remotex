@@ -202,19 +202,21 @@ pub fn config(
     //
     // "Initial" is in the label rather than only the tooltip, because the field
     // otherwise reads as the display's current resolution — which it stops being
-    // the moment anyone changes that display in System Settings.
+    // the moment anyone changes that display, in System Settings or with a
+    // client's Resize to window.
     view.addSubview(&label(mtm, "Initial size", row(3)));
     let virtual_size = field(mtm, &current.virtual_size, row(3), WIDTH - CONTROL_X, false);
     virtual_size.setToolTip(Some(&NSString::from_str(
         "The size the virtual display is created at the first time this Mac sees \
          it, in points, WIDTHxHEIGHT, no smaller than 800x600 — and the largest \
-         mode macOS can ever render on it at 2x.\n\nSet it here and leave that \
-         display alone in System Settings > Displays. It can be resized there \
-         like any other screen, but every size is listed twice — HiDPI and \
-         \"(low resolution)\" — and one much smaller than this drops out of HiDPI \
-         either way, so it comes back soft or oversized. macOS remembers that and \
-         restores it, and editing this will not move a display already arranged \
-         there.",
+         mode macOS can ever render on it at 2x.\n\nTo change its size later, use \
+         \"Resize to window\" in the browser or the viewer, which asks this \
+         display to match the window it is being shown in. It can also be resized \
+         in System Settings > Displays like any other screen, but every size is \
+         listed twice there — HiDPI and \"(low resolution)\" — and one much \
+         smaller than this drops out of HiDPI either way, so it comes back soft \
+         or oversized. macOS remembers whichever size it ends up at and restores \
+         it, so editing this will not move a display already arranged.",
     )));
     view.addSubview(&virtual_size);
 

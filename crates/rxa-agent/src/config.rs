@@ -52,14 +52,15 @@ pub struct Config {
     /// whatever is picked there against the display's identity and restores it on
     /// the next launch — so this value stops being what the display comes up at,
     /// and changing it will not move a display that has already been arranged.
-    /// (Nothing here ever asks for a resolution twice; see
-    /// [`crate::virtualdisplay`] for why, and `docs/known-issues.md` for the VM
-    /// display stack that makes it unwise.)
     ///
-    /// **Set the size here, and then leave that display alone in System
-    /// Settings.** macOS will resize it — it is an ordinary display to the rest
-    /// of the system — but nothing in that panel says which of its offers are
-    /// worth taking, and the agent cannot undo one afterwards:
+    /// **Set the size here, and then resize that display from the client rather
+    /// than in System Settings.** Either client's **Resize to window** asks the
+    /// agent to match the window it is being viewed in, on a target with
+    /// `resize = true`, and it is the safe way to change this display's size: it
+    /// stays inside the bounds below and keeps the density the display is in.
+    /// macOS will resize it too — it is an ordinary display to the rest of the
+    /// system — but nothing in that panel says which of its offers are worth
+    /// taking, and neither the agent nor a client can undo one afterwards:
     ///
     /// - every size is listed twice, once HiDPI and once `(low resolution)`, and
     ///   the second is a 1x desktop that reads as the same choice in the list;
@@ -75,12 +76,12 @@ pub struct Config {
     /// to it (`GatewayMsg::HostScale`), so a hand-picked 1x or 2x is undone by
     /// the next connection from a screen that disagrees.
     ///
-    /// What this value fixes forever is the *ceiling*: `maxPixels` and
-    /// `sizeInMillimeters` are set from it at creation and cannot be changed,
-    /// so this is the largest mode macOS can render on it at 2x, and every
-    /// smaller size it offers has density to spare. Twice this many pixels get
-    /// captured and encoded per frame, which is the reason not to ask for the
-    /// largest display imaginable.
+    /// What this value fixes forever is the *envelope*: `maxPixels` and
+    /// `sizeInMillimeters` are set from it at creation and cannot be changed, so
+    /// this is the largest mode macOS can render on it at 2x, every smaller size
+    /// it offers has density to spare, and it is the ceiling a Resize to window
+    /// clamps to. Twice this many pixels get captured and encoded per frame,
+    /// which is the reason not to ask for the largest display imaginable.
     #[serde(default = "default_virtual_display_initial_size")]
     pub virtual_display_initial_size: String,
 }
@@ -308,13 +309,18 @@ virtual_display = {virtual_display}
 # WIDTHxHEIGHT, no smaller than 800x600 — and the largest mode macOS can ever
 # render on it at 2x.
 #
-# Initial, not current. Set the size here, and then leave that display alone in
-# System Settings > Displays. macOS will resize it there like any other screen,
-# but it lists every size twice — HiDPI and "(low resolution)" — and a display
+# Initial, not current. To change the size afterwards, use "Resize to window" in
+# the browser or the viewer — on a gateway target with resize = true, it asks this
+# display to match the window it is being viewed in, staying under the size above
+# and keeping the density it is in.
+#
+# You can also resize it in System Settings > Displays, like any other screen, but
+# that panel lists every size twice — HiDPI and "(low resolution)" — and a display
 # shrunk much below this one drops out of HiDPI whichever entry is picked, so it
-# comes back soft or oversized at a size nobody chose. macOS then remembers that
-# against the display and restores it at the next launch, and editing this value
-# will not move a display that has already been arranged.
+# comes back soft or oversized at a size nobody chose. macOS remembers whatever it
+# ends up at, however it got there, and restores it at the next launch — which is
+# also why editing this value will not move a display that has already been
+# arranged.
 #
 # Its density needs no help either: whichever client is connected reports the
 # screen it is on and this display matches it, 1x or 2x, on its own.

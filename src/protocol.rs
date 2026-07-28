@@ -133,10 +133,13 @@ pub enum ClientMsg {
     ///
     /// This is the only way a client asks for a size, and there is deliberately
     /// no menu of resolutions beside it: a remote's resolution belongs to the
-    /// machine running it. The two engines that act on this are the two whose
-    /// protocols hand that decision to the client — VNC's `SetDesktopSize`
-    /// (TigerVNC-family servers), continuously, and RDP's Display Control
-    /// channel, on the user's request.
+    /// machine running it. Three engines act on it, each where its protocol hands
+    /// that decision to the client — VNC's `SetDesktopSize` (TigerVNC-family
+    /// servers), continuously; RDP's Display Control channel, on the user's
+    /// request; and `rxa`, also on request and narrower still, because a Mac's
+    /// own panel is never resized because somebody connected. What `rxa` resizes
+    /// is a display the agent *made* to be looked at from here, so the control
+    /// appears only while that display is the one being shared.
     Viewport { w: u16, h: u16 },
     /// The density of the screen this client's window is on, in hundredths —
     /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
@@ -390,7 +393,10 @@ pub enum ServerMsg {
     /// profile the session is bound to; `protocol` (`"rdp"`/`"vnc"`/`"rxa"`) and
     /// `resize` let the browser choose its resize behaviour — VNC resizes
     /// automatically with the viewport, RDP only on the user's request (the
-    /// floating menu's "Resize to window"). `clipboard` says whether this
+    /// floating menu's "Resize to window"). For `rxa` these two settle only half
+    /// of it: `resize` is the target's permission, and whether the control
+    /// actually appears also depends on the display being shared being one the
+    /// agent made, which arrives later in [`ServerMsg::Displays`]. `clipboard` says whether this
     /// target opted into the clipboard bridge, which is what enables the
     /// floating menu's Clipboard button.
     Connected {

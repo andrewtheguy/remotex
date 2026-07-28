@@ -159,6 +159,14 @@ fn owned_display_scale(id: u32, points: (f64, f64), base: (u32, u32)) -> f64 {
 /// density look random from the outside. Only [`owned_display_scale`]'s mode
 /// read separates them; this is the degraded answer when there is no mode.
 ///
+/// Since [`crate::virtualdisplay::VirtualDisplay::set_size`] exists, the blind
+/// spot also covers a case remotex *causes* rather than merely observes: a client
+/// can resize the display below roughly 57% of the created width, where the mode
+/// leaves the HiDPI window and comes back 1x at a size this still calls 2x. That
+/// makes the mode read load-bearing rather than merely preferred, which is the
+/// reason it is tried first and this is only reached where a macOS publishes no
+/// mode for these displays at all.
+///
 /// Getting this wrong is expensive in one direction — reading a 3200x2000 1x
 /// mode as 2x would ask ScreenCaptureKit for a 6400x4000 surface and hand the
 /// encoder four times the pixels for an upscale of the same desktop.
@@ -657,9 +665,12 @@ fn backing_scale(display: &SCDisplay) -> f64 {
 /// A display's current size in **points**, from its bounds.
 ///
 /// Bounds rather than a mode, because this is asked of a display of our own and
-/// bounds are the one reading always published for those. Points is what
-/// [`crate::virtualdisplay::VirtualDisplay::set_scale`] needs: it re-lists the
-/// same logical size at a different density, so the desktop keeps its layout.
+/// bounds are the one reading always published for those. Points is the unit both
+/// of that display's settable properties are expressed in:
+/// [`crate::virtualdisplay::VirtualDisplay::set_scale`] re-lists the same logical
+/// size at a different density so the desktop keeps its layout, and
+/// [`crate::virtualdisplay::VirtualDisplay::set_size`] compares against this to
+/// know whether it has anything to do at all.
 pub(crate) fn display_points(id: u32) -> (u32, u32) {
     use objc2_core_graphics::CGDisplayBounds;
 
@@ -674,10 +685,12 @@ pub(crate) fn display_scale(id: u32) -> f64 {
 /// Pixels per point from a display's current CoreGraphics mode, or `None` when
 /// it publishes no mode to read.
 ///
-/// The distinction matters for a display of our own: "no mode" is the case
-/// [`owned_display_scale`] has to fall back for, and it is not the same answer
-/// as "1x".
-fn mode_scale(id: u32) -> Option<f64> {
+/// The distinction matters for a display of our own, in two places, and both need
+/// "no mode" kept apart from "1x": it is the case [`owned_display_scale`] has to
+/// fall back for, and the case
+/// [`crate::virtualdisplay::VirtualDisplay::set_size`] refuses to guess at rather
+/// than resize a display to a density nobody asked for.
+pub(crate) fn mode_scale(id: u32) -> Option<f64> {
     use objc2_core_graphics::{CGDisplayCopyDisplayMode, CGDisplayMode};
 
     let mode = CGDisplayCopyDisplayMode(id)?;

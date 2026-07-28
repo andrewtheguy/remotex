@@ -154,17 +154,48 @@ impl FrameSink for Sink {
     }
 }
 
+/// The display the agent made, behind the mutex that keeps two reconfigures from
+/// racing each other.
+type DisplayHandle = Arc<std::sync::Mutex<crate::virtualdisplay::VirtualDisplay>>;
+
 /// The display the agent made, in the two forms a session needs it.
 ///
 /// One parameter rather than two because they are never meaningfully apart: a
 /// session either has a display of its own or it does not. `target` is what
 /// resolves a client's display id to a capture target; `handle` is the object
-/// whose density [`rxa_proto::msg::GatewayMsg::HostScale`] can set, behind the
-/// mutex that keeps two reconfigures from racing.
+/// whose density [`rxa_proto::msg::GatewayMsg::HostScale`] and size
+/// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`] can set.
 #[derive(Clone, Default)]
 pub struct Owned {
     pub target: Option<capture::Target>,
-    pub handle: Option<Arc<std::sync::Mutex<crate::virtualdisplay::VirtualDisplay>>>,
+    pub handle: Option<DisplayHandle>,
+}
+
+/// The display to reconfigure for a client's request, or `None` if there is not
+/// one to reconfigure.
+///
+/// Both gates at once, and they are separate questions: this agent has a display
+/// of its own *and* that display is the one this session is sharing. A Mac's own
+/// panel is set on the Mac, and a display nobody is looking at has nothing to
+/// match — so a request naming either is dropped rather than answered.
+///
+/// Shared by [`rxa_proto::msg::GatewayMsg::HostScale`] and
+/// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`], which differ in what they do
+/// with the handle rather than in who may have one. Returns a clone because
+/// every caller hands it to a task that outlives the message.
+fn shared_owned_display(
+    display: Option<&DisplayHandle>,
+    target: capture::Target,
+    owned: Option<capture::Target>,
+) -> Option<DisplayHandle> {
+    match (display, target) {
+        (Some(display), capture::Target::Owned { id, .. })
+            if Some(id) == owned.map(capture::Target::id) =>
+        {
+            Some(Arc::clone(display))
+        }
+        _ => None,
+    }
 }
 
 /// Serve one gateway connection until it hangs up or fails.
@@ -614,34 +645,77 @@ async fn pump(
                     // message, and reports for itself.
                     GatewayMsg::HostScale { scale } => {
                         let wanted = rxa_proto::msg::scale_ratio(scale) >= 1.5;
-                        match (&display, target) {
-                            (Some(display), capture::Target::Owned { id, .. })
-                                if Some(id) == owned.map(capture::Target::id) =>
-                            {
-                                let display = Arc::clone(display);
-                                let points = capture::display_points(id);
-                                tokio::spawn(async move {
-                                    let done = tokio::task::spawn_blocking(move || {
-                                        display
-                                            .lock()
-                                            .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
-                                            .and_then(|display| display.set_scale(wanted, points))
-                                    })
-                                    .await;
-                                    match done {
-                                        Ok(Ok(_)) => {}
-                                        Ok(Err(e)) => warn!("session: cannot set the display density: {e:#}"),
-                                        Err(e) => warn!("session: the density change did not run: {e}"),
-                                    }
-                                });
-                            }
-                            // Every other case is a client reporting something
-                            // true that this session cannot use.
-                            _ => {}
+                        // `None` is a client reporting something true that this
+                        // session cannot use.
+                        if let Some(display) =
+                            shared_owned_display(display.as_ref(), target, owned)
+                        {
+                            tokio::spawn(async move {
+                                let done = tokio::task::spawn_blocking(move || {
+                                    display
+                                        .lock()
+                                        .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
+                                        .and_then(|display| display.set_scale(wanted))
+                                })
+                                .await;
+                                match done {
+                                    Ok(Ok(_)) => {}
+                                    Ok(Err(e)) => warn!("session: cannot set the display density: {e:#}"),
+                                    Err(e) => warn!("session: the density change did not run: {e}"),
+                                }
+                            });
                         }
                     }
-                    // Which display, unlike what resolution, is the client's to
-                    // choose — see the message's own documentation.
+                    // The size of the client's window, gated exactly as the
+                    // density above is and for the same two reasons, and detached
+                    // for the same reason too — this reconfigure is the slower of
+                    // the pair, since it waits for the WindowServer to settle
+                    // before releasing the lock.
+                    //
+                    // The one deliberate difference is `try_lock`. A held lock
+                    // means a reconfigure is already running, and dropping this
+                    // request is the right answer: the display cannot be two sizes
+                    // at once, and whoever pressed the button can press it again
+                    // once the desktop has settled. Waiting instead would let a
+                    // person mashing the button queue one WindowServer round trip
+                    // per press — which is exactly the shape that wedges a guest's
+                    // display stack until it is rebooted (`docs/known-issues.md`),
+                    // and would park a blocking-pool thread per press if it did.
+                    GatewayMsg::ResizeDisplay { w, h } => {
+                        // `None` is a resize asked of a Mac's own screen, or of a
+                        // display this session is not sharing. Ignored rather than
+                        // answered with an `Error`, which the gateway treats as
+                        // fatal: a button that did nothing must never be what ends
+                        // a session.
+                        if let Some(display) =
+                            shared_owned_display(display.as_ref(), target, owned)
+                        {
+                            let points = (u32::from(w), u32::from(h));
+                            tokio::spawn(async move {
+                                let done = tokio::task::spawn_blocking(move || {
+                                    match display.try_lock() {
+                                        Ok(display) => display.set_size(points).map(Some),
+                                        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+                                        Err(std::sync::TryLockError::Poisoned(_)) => {
+                                            Err(anyhow::anyhow!("the display lock is poisoned"))
+                                        }
+                                    }
+                                })
+                                .await;
+                                match done {
+                                    Ok(Ok(Some(_))) => {}
+                                    Ok(Ok(None)) => debug!(
+                                        "session: a display reconfigure is already running; dropping this resize"
+                                    ),
+                                    Ok(Err(e)) => warn!("session: cannot resize the display: {e:#}"),
+                                    Err(e) => warn!("session: the resize did not run: {e}"),
+                                }
+                            });
+                        }
+                    }
+                    // Which display to look at is the client's to choose, and
+                    // separately from how large to make it — see the messages'
+                    // own documentation.
                     GatewayMsg::SelectDisplay { id } => {
                         let next = if displays_sent.iter().any(|display| display.id == id) {
                             Some(resolve(id, owned))

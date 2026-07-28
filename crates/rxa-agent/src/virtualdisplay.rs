@@ -31,26 +31,39 @@
 //! - `SCContentFilter.pointPixelScale` reports 1.00 on a genuine 2x display, so
 //!   capture size must be set from what we asked for, never derived from it.
 //!
-//! ## Created once, and then it is macOS's
+//! ## Created once, and then it belongs to whoever is looking through it
 //!
-//! Nothing here resizes the display, because nothing outside the Mac decides its
-//! resolution. It is created at the configured size and appears in System
-//! Settings > Displays like any other screen, with the mode list macOS derives
-//! from the descriptor — including a `(low resolution)` 1x entry beside each
-//! HiDPI one. Whoever is using the Mac changes it there; the agent notices the
-//! new size the same way it notices one on a real display, and tells the gateway
-//! (`capture::Capture::follow_display`).
+//! The display appears in System Settings > Displays like any other screen, with
+//! the mode list macOS derives from the descriptor — including a
+//! `(low resolution)` 1x entry beside each HiDPI one — and whoever is using the
+//! Mac can change it there. Two of its properties can also be set from here, and
+//! the reason is the same for both: nobody sits in front of this display, so it
+//! has no right density and no right size of its own, only the right ones for the
+//! window someone is looking at it through. [`VirtualDisplay::set_scale`] follows
+//! the client's screen automatically; [`VirtualDisplay::set_size`] follows the
+//! client's window when the person asks. Whatever the cause, the agent notices
+//! the new geometry the same way it notices one on a real display and tells the
+//! gateway (`capture::Capture::follow_display`) — one announcement path for every
+//! cause.
 //!
-//! What the descriptor fixes forever is the room that list has to work in.
+//! What the descriptor fixes forever is the room all of that has to work in.
 //! `sizeInMillimeters` and `maxPixels` cannot be changed afterwards, and HiDPI
 //! engages only while pixel density — mode pixels over physical size — stays
 //! inside a window measured at roughly 149 to 264 dpi on macOS 26.5.2. The
 //! display is created with its density at the *top* of that window ([`MAX_DPI`]),
-//! which is also where `maxPixels` sits, so the configured size is the largest
-//! mode that can be 2x and everything macOS offers below it has density to
-//! spare.
+//! which is also where `maxPixels` sits. So the configured size is the largest
+//! mode that can be 2x, and it bounds a resize in both directions at once:
+//!
+//! - **Up**, hard. Past `maxPixels` nothing refuses — `applySettings:` returns YES
+//!   and silently halves the result — so [`size_in_envelope`] clamps there or
+//!   nowhere.
+//! - **Down**, softly. Everything below has density to spare until roughly 57% of
+//!   the created width, where the mode walks out of the bottom of the window and
+//!   comes back 1x whichever entry is asked for. Recovering 2x below that would
+//!   need a *new* display, hence a new `displayID` and a new identity for macOS to
+//!   file an arrangement against, so it is reported rather than prevented.
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{msg_send, sel};
@@ -238,11 +251,12 @@ impl VirtualDisplay {
 
     /// Put the display at [`SCALE`] or at 1x, keeping the point size it is in.
     ///
-    /// The one thing about this display that is not the Mac's to decide, because
-    /// it is the one thing no one at the Mac is choosing *for*: a display nobody
-    /// sits in front of has no right density of its own, only the right density
-    /// for whoever is looking through it. So a client's screen sets it — see
-    /// [`rxa_proto::msg::GatewayMsg::HostScale`].
+    /// One of two things about this display that are not the Mac's to decide,
+    /// because they are the two no one at the Mac is choosing *for*: a display
+    /// nobody sits in front of has no right density of its own, only the right
+    /// density for whoever is looking through it. So a client's screen sets it —
+    /// see [`rxa_proto::msg::GatewayMsg::HostScale`]. Its size is the other; see
+    /// [`VirtualDisplay::set_size`].
     ///
     /// Point size is deliberately preserved: the desktop keeps its layout and only
     /// the pixels behind it change, so windows are not rearranged by a client
@@ -250,10 +264,17 @@ impl VirtualDisplay {
     /// `hiDPI = 0` at the current point size gives `1900x1200 px / 1900x1200 pt`
     /// and `hiDPI = 1` gives it back at `3800x2400 px`, on the same `displayID`.
     ///
+    /// The point size is read here rather than passed in, so that both readings
+    /// this needs are taken under the caller's lock. Passed in, it was measured
+    /// before the lock and could be stale by the time the mode is applied — with
+    /// nothing else changing the size that was harmless, but a
+    /// [`VirtualDisplay::set_size`] running just ahead of this one would have its
+    /// resize silently undone by the older number.
+    ///
     /// Returns whether anything was asked of the WindowServer: `Ok(false)` means
     /// the display was already at that density, which is the common case and is
     /// not worth a reconfigure — every apply relays the desktop's windows.
-    pub fn set_scale(&self, want_hidpi: bool, current_points: (u32, u32)) -> anyhow::Result<bool> {
+    pub fn set_scale(&self, want_hidpi: bool) -> anyhow::Result<bool> {
         let now = crate::capture::display_scale(self.id);
         // Compared against the midpoint rather than for equality: `now` is a
         // ratio of two integers read back from a mode, and the question is only
@@ -261,24 +282,164 @@ impl VirtualDisplay {
         if (now >= 1.5) == want_hidpi {
             return Ok(false);
         }
-        let settings = settings_at(current_points, want_hidpi)?;
+        let points = crate::capture::display_points(self.id);
+        let settings = settings_at(points, want_hidpi)?;
         let applied: bool = unsafe { msg_send![&*self.handle.0, applySettings: &*settings] };
         anyhow::ensure!(
             applied,
             "applySettings: refused {}x{} at {}",
-            current_points.0,
-            current_points.1,
+            points.0,
+            points.1,
             if want_hidpi { "2x" } else { "1x" }
         );
         info!(
             "virtualdisplay: display {} is now {} at {}x{} points",
             self.id,
             if want_hidpi { "2x" } else { "1x" },
-            current_points.0,
-            current_points.1
+            points.0,
+            points.1
         );
         Ok(true)
     }
+
+    /// Resize the display to `points`, keeping the density it is in.
+    ///
+    /// The second thing about this display that is not the Mac's to decide, and
+    /// for the same reason as the first ([`VirtualDisplay::set_scale`]): a desktop
+    /// nobody sits in front of has no right size of its own, only the right size
+    /// for the window someone is looking at it through. Unlike density, this is
+    /// asked for rather than followed — a person presses a button, a window drag
+    /// does not — because every apply relays every window on the desktop. See
+    /// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`].
+    ///
+    /// `points` is clamped into the envelope creation fixed (see
+    /// [`size_in_envelope`]) rather than refused, because there is no way to
+    /// refuse: past `maxPixels` the WindowServer answers YES and halves the
+    /// result.
+    ///
+    /// The density is read live and re-applied rather than assumed, so a resize
+    /// does not quietly undo the one a client's `HostScale` set. What it cannot
+    /// preserve is a density the new size cannot hold: below roughly 57% of the
+    /// created width the mode falls out of the HiDPI window and comes back 1x
+    /// whichever entry is asked for. That is applied rather than clamped away.
+    /// Clamping to keep 2x would answer a request for a window-sized desktop with
+    /// a size nobody asked for, and 2x below that floor is not obtainable at any
+    /// size that could be substituted — so the honest answer is the asked-for size
+    /// at the density it can hold. [`crate::capture::mode_scale`] then reports the
+    /// truth and both clients present it correctly, softer.
+    ///
+    /// Returns whether anything was asked of the WindowServer. `Ok(false)` is the
+    /// display already being that size — the common case for a button pressed
+    /// twice on a window that did not move — and skipping it is not an
+    /// optimisation: a guest's display stack can wedge after enough mode changes
+    /// and need a reboot to clear (`docs/known-issues.md`).
+    pub fn set_size(&self, points: (u32, u32)) -> anyhow::Result<bool> {
+        let want = size_in_envelope(points, self.base_points);
+        // Whether the request was clamped and whether it changes anything are two
+        // questions, and a window dragged past the envelope answers yes to the
+        // first and no to the second on every press after the first. Reported
+        // together so the log never says a size was clamped without also saying
+        // what came of it — the pair read separately is how "it clamped again"
+        // gets mistaken for "it resized again".
+        let clamped = if want == points {
+            String::new()
+        } else {
+            format!(
+                " (asked for {}x{}, clamped into the {}x{} envelope its descriptor fixed at \
+                 creation)",
+                points.0, points.1, self.base_points.0, self.base_points.1
+            )
+        };
+        if want == crate::capture::display_points(self.id) {
+            debug!(
+                "virtualdisplay: display {} is already {}x{} points; not reconfiguring{clamped}",
+                self.id, want.0, want.1
+            );
+            return Ok(false);
+        }
+
+        // Required, not defaulted. `display_scale` answers 1x for a display with
+        // no mode to read, and a display has none for a few tens of milliseconds
+        // around any reconfigure — so defaulting here would turn "resized just
+        // after a density change" into "silently dropped to 1x", which nothing
+        // would put back: a client sends `HostScale` once per screen change and
+        // both clients dedupe it.
+        let hidpi = crate::capture::mode_scale(self.id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "display {} publishes no mode to read a density from — it is mid-reconfigure, so \
+                 this resize is dropped rather than guessed at",
+                self.id
+            )
+        })? >= 1.5;
+
+        let settings = settings_at(want, hidpi)?;
+        let applied: bool = unsafe { msg_send![&*self.handle.0, applySettings: &*settings] };
+        anyhow::ensure!(
+            applied,
+            "applySettings: refused {}x{} points at {}",
+            want.0,
+            want.1,
+            if hidpi { "2x" } else { "1x" }
+        );
+
+        // Equality, unlike creation's [`await_hidpi_bounds`]: there any remembered
+        // mode inside the envelope is a right answer, here one size was asked for a
+        // moment ago and anything else is the silent halving `maxPixels` does —
+        // which the clamp above should have made unreachable, so seeing it means
+        // the envelope is not what this code thinks it is. Warned rather than
+        // failed: the display is in whatever mode it is in either way, and the poll
+        // that announces geometry will find it.
+        match await_bounds(self.id, |size| size == want) {
+            Some(_) => info!(
+                "virtualdisplay: display {} is now {}x{} points at {}{clamped}",
+                self.id,
+                want.0,
+                want.1,
+                if hidpi { "2x" } else { "1x" }
+            ),
+            None => {
+                let bounds = CGDisplayBounds(self.id);
+                warn!(
+                    "virtualdisplay: display {} was asked for {}x{} points and is {}x{} after \
+                     {SETTLE_TIMEOUT_MS} ms",
+                    self.id,
+                    want.0,
+                    want.1,
+                    bounds.size.width as u32,
+                    bounds.size.height as u32
+                );
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// The point size a resize can actually land on, given the envelope the
+/// descriptor fixed at creation.
+///
+/// Pure, and split out for the same reason [`backable_at_scale`] is: the rule is
+/// testable without a WindowServer and the `applySettings:` around it is not.
+///
+/// Both bounds are hard, and they fail in opposite directions. Past `created`
+/// nothing refuses — `maxPixels` silently *halves* the result while
+/// `applySettings:` still returns YES — so the ceiling is enforced here or not at
+/// all. Under [`MIN_WIDTH_POINTS`]x[`MIN_HEIGHT_POINTS`] nothing refuses either,
+/// and a client with a 300-point window would be handed a desktop smaller than
+/// the dialogs macOS puts on it.
+///
+/// Per axis, and the aspect ratio is deliberately not preserved: the client asked
+/// for its window's shape, and a desktop clamped on one axis is letterboxed by the
+/// client exactly as any other answer would be.
+///
+/// `max` then `min` rather than `u32::clamp`, which panics when the bounds cross.
+/// They cannot today — [`VirtualDisplay::create`] floors the created size at these
+/// same two constants — and this order's bias is toward the ceiling, which is the
+/// bound whose violation is the silent one.
+fn size_in_envelope(want: (u32, u32), created: (u32, u32)) -> (u32, u32) {
+    (
+        want.0.max(MIN_WIDTH_POINTS).min(created.0),
+        want.1.max(MIN_HEIGHT_POINTS).min(created.1),
+    )
 }
 
 /// Poll until `CGDisplayBounds` reports a size the created display can back at
@@ -296,11 +457,24 @@ impl VirtualDisplay {
 /// created size macOS can put twice the pixels behind the mode, and past it it
 /// provably cannot. That is where a 1x display lands, at twice the request.
 fn await_hidpi_bounds(id: u32, points: (u32, u32)) -> Option<(u32, u32)> {
+    await_bounds(id, |size| backable_at_scale(size, points))
+}
+
+/// Poll `CGDisplayBounds` until it reports a size `accept` likes, and return it —
+/// or `None` once [`SETTLE_TIMEOUT_MS`] passes.
+///
+/// One loop for two questions, because they differ only in what counts as settled
+/// and a second copy of the deadline would drift from this one. The two are not
+/// interchangeable: creation accepts anything inside the envelope (see
+/// [`await_hidpi_bounds`]), while [`VirtualDisplay::set_size`] demands the size it
+/// asked for — a ceiling test there would be satisfied by the *old*, smaller
+/// bounds on the very first poll of a display that is growing.
+fn await_bounds(id: u32, accept: impl Fn((u32, u32)) -> bool) -> Option<(u32, u32)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(SETTLE_TIMEOUT_MS);
     loop {
         let bounds = CGDisplayBounds(id);
         let size = (bounds.size.width as u32, bounds.size.height as u32);
-        if backable_at_scale(size, points) {
+        if accept(size) {
             return Some(size);
         }
         if std::time::Instant::now() >= deadline {
@@ -342,14 +516,20 @@ impl Drop for VirtualDisplay {
 /// the primary if that is how you set it up. A display whose identity changed
 /// between launches would be a new monitor every time, and would forget all of it.
 ///
-/// So there is nothing here to work around. The arrangement macOS restores is the
-/// one last set in System Settings by whoever uses that Mac, and the agent takes
-/// it as given: it reports the geometry it finds and never applies a second
-/// configuration. Everything downstream follows from that — `active` on the wire
-/// is whichever display the Mac currently calls main, and the configured size is
-/// only ever an *initial* one (see
+/// So there is nothing here to work around. The arrangement macOS restores at
+/// startup is taken as given: the agent reports the geometry it finds and never
+/// applies a second configuration of its own accord. Everything downstream follows
+/// from that — `active` on the wire is whichever display the Mac currently calls
+/// main, and the configured size is only ever an *initial* one (see
 /// [`crate::config::Config::virtual_display_initial_size`]), because after the
 /// first launch the remembered mode is what the display comes up in.
+///
+/// A client's [`VirtualDisplay::set_size`] then lands in exactly that remembered
+/// mode, which is the intended consequence rather than a leak: a resize asked for
+/// from a viewer sticks the way one made in System Settings sticks, and comes back
+/// after a restart the way a monitor comes back where you left it. Nothing reverts
+/// it on disconnect, and nothing writes it to the config file — the setting stays
+/// the envelope, and the display keeps the size it was last put in.
 ///
 /// The one state this cannot undo is an arrangement remembered as *offline* — see
 /// [`Offline`], which is reported rather than routed around, and
@@ -525,5 +705,71 @@ mod tests {
         assert!(!backable_at_scale((0, 0), (1600, 1000)));
         assert!(!backable_at_scale((1600, 0), (1600, 1000)));
         assert!(!backable_at_scale((0, 1000), (1600, 1000)));
+    }
+
+    // The ceiling `maxPixels` enforces by silently halving, so a request past it
+    // is brought back here or discovered later as a mysteriously half-size
+    // desktop that `applySettings:` said yes to.
+    #[test]
+    fn a_resize_past_the_created_size_is_clamped_to_it() {
+        let created = (1600, 1000);
+        assert_eq!(size_in_envelope((1920, 1200), created), created);
+        // One axis over is enough, and only that axis moves: the aspect ratio is
+        // the client's window's, not something to preserve on its behalf.
+        assert_eq!(size_in_envelope((1601, 900), created), (1600, 900));
+        assert_eq!(size_in_envelope((1200, 1001), created), (1200, 1000));
+        // The largest thing a u16 of points can say still lands on the ceiling.
+        assert_eq!(size_in_envelope((65_535, 65_535), created), created);
+    }
+
+    #[test]
+    fn a_resize_under_the_floor_is_clamped_up_to_it() {
+        let created = (1600, 1000);
+        assert_eq!(
+            size_in_envelope((320, 200), created),
+            (MIN_WIDTH_POINTS, MIN_HEIGHT_POINTS)
+        );
+        // A client whose window has not laid out yet reports nothing at all.
+        assert_eq!(size_in_envelope((0, 0), created), (800, 600));
+        assert_eq!(size_in_envelope((1200, 100), created), (1200, 600));
+    }
+
+    #[test]
+    fn a_resize_inside_the_envelope_is_left_alone() {
+        let created = (1600, 1000);
+        assert_eq!(size_in_envelope((1280, 800), created), (1280, 800));
+        // Both bounds are inclusive, so neither is an off-by-one.
+        assert_eq!(size_in_envelope(created, created), created);
+        assert_eq!(size_in_envelope((800, 600), created), (800, 600));
+    }
+
+    // What ties the clamp to the rest of the module: every size a resize can
+    // reach is one the display can put SCALE times the pixels behind, so a resize
+    // is never what makes `capture::owned_scale` read a mode as 1x.
+    #[test]
+    fn every_size_a_resize_can_reach_is_inside_the_hidpi_ceiling() {
+        let created = (1600, 1000);
+        for want in [
+            (0, 0),
+            (1, 1),
+            (640, 480),
+            (1280, 800),
+            (1600, 1000),
+            (9999, 9999),
+        ] {
+            assert!(
+                backable_at_scale(size_in_envelope(want, created), created),
+                "{want:?}"
+            );
+        }
+    }
+
+    // `create` floors the created size at the same two constants, so the bounds
+    // cannot cross today. If they ever did, the ceiling must win: past it the
+    // WindowServer lies about what it did, under the floor the desktop is merely
+    // small.
+    #[test]
+    fn the_ceiling_wins_if_the_two_bounds_ever_crossed() {
+        assert_eq!(size_in_envelope((1000, 1000), (400, 300)), (400, 300));
     }
 }

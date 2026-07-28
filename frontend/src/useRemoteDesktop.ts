@@ -377,6 +377,13 @@ async function postClaim(force: boolean): Promise<Response | null> {
 // per point. Touch asks for CSS pixels floored per axis at 1024x768 (the mobile
 // bounds — see CAN_PINCH_ZOOM), where fit-to-width decides the presentation
 // instead.
+//
+// The multiplication is exactly what the rxa engine divides back out to reach a
+// display mode's points, and that is the consumer where getting it wrong is
+// visible as a wrongly-sized Mac desktop rather than as scrollbars here. It is
+// self-consistent by construction: applyCanvasCss lays the canvas out at
+// `w / scale` CSS px, so `clientWidth × scale` recovers the pixels that produced
+// that layout.
 function viewportMsg(
   guestScale: number,
 ): Extract<ClientMsg, { type: "viewport" }> {
@@ -656,6 +663,13 @@ export function useRemoteDesktop(
     // Which display the remote is sharing, as its last `displays` reported it.
     // Only so a switch can be told from the first list of a session.
     let sharedDisplay: number | null = null;
+    // The rxa half of "may this target be resized": the target's own `resize`
+    // flag. On its own it enables nothing, because what the agent can resize is a
+    // display it *made* — so the button appears only once a `displays` says that
+    // is the display being shared, and goes away again on a switch to a real
+    // screen. A closure variable rather than state: `handleDisplays` reads it on
+    // every list and must not re-run this effect to do so.
+    let rxaResize = false;
     const sendHostScale = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
@@ -785,12 +799,64 @@ export function useRemoteDesktop(
     const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);
+      // Whether "Resize to window" is offered is a question about *this*
+      // display, not only about the target: only a display the agent made can be
+      // resized from here, and the user can switch onto and off one mid-session
+      // from the Display panel. Read off the message rather than the `displays`
+      // state set a line above, which this render has not seen yet. An `active`
+      // the list does not name — a screen unplugged between the two, which this
+      // message allows — reads as not virtual, so the button disappears rather
+      // than offering to resize a display nobody here can identify.
+      if (rxaResize) {
+        const active = msg.displays.find(
+          (display) => display.id === msg.active,
+        );
+        setCanResize(active?.virtual === true);
+      }
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
       if (switched) {
         lastHostScale = null;
         sendHostScale();
       }
+    };
+
+    const handleConnected = (
+      msg: Extract<ControlMsg, { type: "connected" }>,
+    ) => {
+      // A target session started (picker connect, reattach, or takeover of a
+      // live desktop): switch to the desktop.
+      setConnectError(null);
+      setPendingTarget(null);
+      setMode("desktop");
+      // Three behaviours, and only two of them are settled here. VNC follows the
+      // viewport automatically. RDP resizes only when asked, because its
+      // reactivation is heavy — so viewport reports are suppressed and the menu's
+      // "Resize to window" is the one caller. rxa is only-when-asked too, but
+      // *whether it may be asked* is a fact about the display being shared rather
+      // than about the target, so it is settled in `handleDisplays`: a Mac's own
+      // panel is never resized because somebody connected, and only a display the
+      // agent made for the purpose can be.
+      const manual = msg.protocol === "rdp" && msg.resize;
+      rxaResize = msg.protocol === "rxa" && msg.resize;
+      // Suppressing the automatic senders is unconditional for rxa, whatever the
+      // target allows: even a display made to be looked at from here is not
+      // dragged around by this window, and the report three lines down is one of
+      // the sends this has to stop.
+      manualResizeRef.current = manual || msg.protocol === "rxa";
+      // For rxa this starts false and stays false until the first `displays`.
+      setCanResize(manual);
+      setCanClipboard(msg.clipboard);
+      // A freshly-started engine needs the current viewport; the report is sent
+      // here (once the protocol is known), undeduped.
+      lastViewport = null;
+      sendViewport();
+      // And this screen's density, which is what lets a display the agent made
+      // come up matching the window it is about to be shown in rather than at
+      // whatever density it was left at.
+      lastHostScale = null;
+      sharedDisplay = null;
+      sendHostScale();
     };
 
     const mirrorRemoteClipboard = (text: string) => {
@@ -841,34 +907,9 @@ export function useRemoteDesktop(
           setConnectError(msg.message);
           setPendingTarget(null);
           break;
-        case "connected": {
-          // A target session started (picker connect, reattach, or takeover of
-          // a live desktop): switch to the desktop.
-          setConnectError(null);
-          setPendingTarget(null);
-          setMode("desktop");
-          // Three behaviours, decided here and nowhere else. VNC follows the
-          // viewport automatically. RDP resizes only when asked, because its
-          // reactivation is heavy — so viewport reports are suppressed and the
-          // menu's "Resize to window" is the one caller. Everything else,
-          // including every Mac, keeps whatever size the remote is at: its
-          // resolution is set on the remote.
-          const manual = msg.protocol === "rdp" && msg.resize;
-          manualResizeRef.current = manual || msg.protocol === "rxa";
-          setCanResize(manual);
-          setCanClipboard(msg.clipboard);
-          // A freshly-started engine needs the current viewport; the report is
-          // sent here (once the protocol is known), undeduped.
-          lastViewport = null;
-          sendViewport();
-          // And this screen's density, which is what lets a display the agent
-          // made come up matching the window it is about to be shown in rather
-          // than at whatever density it was left at.
-          lastHostScale = null;
-          sharedDisplay = null;
-          sendHostScale();
+        case "connected":
+          handleConnected(msg);
           break;
-        }
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
           // into the browser's OS clipboard. Opening/revealing the panel is a
@@ -913,6 +954,7 @@ export function useRemoteDesktop(
           setPendingTarget(null);
           setMode("picker");
           manualResizeRef.current = false;
+          rxaResize = false;
           setCanResize(false);
           setCanClipboard(false);
           setDisplays([]);

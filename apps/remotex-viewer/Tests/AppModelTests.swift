@@ -40,10 +40,12 @@ struct AppModelTests {
         )
     }
 
-    /// The three resize behaviours. Only RDP gets a button; VNC is followed
-    /// automatically; a Mac is never resized from here at all. (`rxa` with
-    /// `resize` is included because an older gateway could still send it — the
-    /// config layer rejects it now.)
+    /// The three resize behaviours, as a `connected` alone settles them. Only RDP
+    /// gets a button here; VNC is followed automatically. The `rxa` row is the
+    /// interesting one: `resize` is the target's permission and grants nothing by
+    /// itself, so the button stays off until a display list says the display being
+    /// shared is one the agent made — see
+    /// `resizingAnRxaTargetFollowsTheSharedDisplay`.
     @Test
     func resizeCapabilitiesFollowTheProtocol() {
         let expectations: [(protocolName: String, resize: Bool, canResize: Bool)] = [
@@ -84,17 +86,21 @@ struct AppModelTests {
         #expect(!model.canResizeNow, "no surface has reported a size yet")
     }
 
-    /// The pair is mutually exclusive, and the menu shows both either way. A target
-    /// that takes a size from here resizes the remote; every other one resizes this
-    /// window, which is the only side that can move for it.
+    /// The two directions are independent, and the menu shows both either way.
+    /// Pushing the window's size to the remote needs a target that takes one;
+    /// pulling the remote's size into the window needs only a remote that will
+    /// hold still — so a target that allows the first allows both, and VNC, which
+    /// follows the window unasked, is the single row where the second is greyed.
     @Test
-    func exactlyOneOfTheTwoResizeDirectionsIsEverAvailable() {
-        let expectations: [(protocolName: String, resize: Bool, toWindow: Bool)] = [
-            ("rdp", true, true),
-            ("rxa", false, false),
-            ("vnc", true, false),
-            ("vnc", false, false),
-            ("rdp", false, false),
+    func onlyAFollowingRemoteCannotBeFittedTo() {
+        let expectations: [(protocolName: String, resize: Bool, toWindow: Bool, toDisplay: Bool)] = [
+            ("rdp", true, true, true),
+            ("rxa", false, false, true),
+            ("vnc", true, false, false),
+            // The gateway drops this one's reports, so its desktop holds still
+            // and can be fitted to like any other.
+            ("vnc", false, false, true),
+            ("rdp", false, false, true),
         ]
         for expectation in expectations {
             let model = makeModel()
@@ -114,7 +120,7 @@ struct AppModelTests {
 
             let label: Comment = "\(expectation.protocolName) resize=\(expectation.resize)"
             #expect(model.canResizeNow == expectation.toWindow, label)
-            #expect(model.canResizeToDisplay == !expectation.toWindow, label)
+            #expect(model.canResizeToDisplay == expectation.toDisplay, label)
         }
     }
 
@@ -447,6 +453,51 @@ struct AppModelTests {
             isVirtual: true
         ),
     ]
+
+    /// The other half of the rxa gate, and the half that moves during a session:
+    /// the user switches displays from the Display menu, and only the one the
+    /// agent made is this window's to resize.
+    @Test
+    func resizingAnRxaTargetFollowsTheSharedDisplay() {
+        let model = makeModel()
+        model.apply(.control(.connected(connected(protocolName: "rxa", resize: true))))
+        #expect(!model.session.canResize, "nothing yet says which display")
+
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+        #expect(model.session.canResize, "the display the agent made")
+
+        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
+        #expect(!model.session.canResize, "a Mac's own screen is set on the Mac")
+
+        // An `active` the list does not name — a screen unplugged between the
+        // two. Greyed rather than offering to resize a display nobody can name.
+        model.apply(.control(.displays(active: 99, displays: twoDisplays)))
+        #expect(!model.session.canResize)
+
+        // "Resize to Window" is what flips with the shared display. Its neighbour
+        // does not: no rxa display follows this window, so fitting the window to
+        // whichever one is being shared is always a thing that can be asked for.
+        model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+        #expect(model.session.canResize)
+        #expect(model.canResizeToDisplay)
+        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
+        #expect(!model.session.canResize)
+        #expect(model.canResizeToDisplay)
+    }
+
+    /// Without the target's permission no display list enables anything: the two
+    /// gates are independent, and a Mac's agent-made display does not grant what
+    /// the operator withheld.
+    @Test
+    func anRxaTargetWithoutResizeStaysUnresizable() {
+        let model = makeModel()
+        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        for active in [UInt32(9), 7, 9] {
+            model.apply(.control(.displays(active: active, displays: twoDisplays)))
+            #expect(!model.session.canResize, "active=\(active)")
+        }
+    }
 
     private func connected(
         protocolName: String,

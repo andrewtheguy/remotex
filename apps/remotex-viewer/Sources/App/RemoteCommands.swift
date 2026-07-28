@@ -62,13 +62,16 @@ struct RemoteCommands: Commands {
             }
             .disabled(!model.clipboard.isEnabled || model.clipboard.isFetching)
 
-            // The two directions a size mismatch can be settled, and exactly one of
-            // them is ever the one that can move: a remote that takes a size from
-            // here (RDP with `resize`) gets the first, and every other target gets
-            // the second, which resizes this window and sends nothing. The greyed
-            // one stays in the menu on purpose — which way a target allows is worth
-            // reading off the pair rather than inferring from an item that is not
-            // there.
+            // The two directions a size mismatch can be settled, and they are not
+            // alternatives: the first pushes this window's size to a remote that
+            // takes one (RDP with `resize`, rxa on a display the agent made), the
+            // second pulls the remote's size into this window and sends nothing.
+            // A target that allows the first allows both, and which end to move is
+            // the user's call. VNC is the exception and greys the second, because a
+            // desktop that already follows the window cannot be fitted to it.
+            // A greyed item stays in the menu on purpose — which way a target
+            // allows is worth reading off the pair rather than inferring from an
+            // item that is not there.
             Button("Resize to Window") {
                 model.resizeToWindow()
             }

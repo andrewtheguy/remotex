@@ -158,6 +158,10 @@ async fn run_with(
         }
     };
 
+    let caps = Caps {
+        clipboard: config.clipboard,
+        resize: config.resize,
+    };
     let mut backoff = retry.backoff_min;
     // What the browser has been told about the desktop, carried across
     // reconnects: a `Resize` costs the frontend its canvas contents, so a silent
@@ -184,7 +188,7 @@ async fn run_with(
             &mut announced,
             &mut displays,
             &mut clipboard_snapshot,
-            config.clipboard,
+            caps,
         )
         .await
         {
@@ -241,6 +245,23 @@ async fn run_with(
 /// own — the same panel has HiDPI and 1x modes — and an unannounced change would
 /// leave the desktop presented at half or twice its size.
 type Announced = (u16, u16, f32);
+
+/// What the target's profile opted this session into, as one value.
+///
+/// One struct rather than two bare `bool` parameters, because both are `bool` and
+/// they would sit next to each other: transposing them at a call site compiles,
+/// and the transposition writes the Mac's pasteboard for a target that never
+/// opted into the clipboard bridge. Named fields make that a type error.
+#[derive(Clone, Copy)]
+struct Caps {
+    /// `clipboard` on the target: the pasteboard bridge in both directions, and
+    /// the watcher this engine enables per attach.
+    clipboard: bool,
+    /// `resize` on the target: whether a client may ask the agent to change the
+    /// size of the display it is sharing. Only the operator's half of that — the
+    /// agent refuses any display it did not make itself.
+    resize: bool,
+}
 
 /// An established, handshaken link to the agent.
 struct Session {
@@ -316,7 +337,7 @@ async fn pump(
     // is the whole of what the client's display menu knows.
     displays: &mut Option<(u32, Vec<DisplayInfo>)>,
     clipboard_snapshot: &mut Option<ClipboardSnapshot>,
-    clipboard: bool,
+    caps: Caps,
 ) -> anyhow::Result<()> {
     let Session {
         reader,
@@ -368,7 +389,7 @@ async fn pump(
     // Sent per attach, not once per process: this runs again after every
     // reconnect, and the agent's watch state died with the old session. Only
     // for an opted-in target — the agent reads nothing unprompted otherwise.
-    if clipboard {
+    if caps.clipboard {
         writer
             .send(&GatewayMsg::ClipboardWatch { enabled: true }.encode())
             .await?;
@@ -484,7 +505,7 @@ async fn pump(
                             oversized_bytes,
                         };
                         *clipboard_snapshot = Some(snapshot.clone());
-                        if clipboard
+                        if caps.clipboard
                             && frame_tx
                                 .send(ServerMsg::Clipboard {
                                     text: snapshot.text,
@@ -543,7 +564,7 @@ async fn pump(
                         return Ok(());
                     }
                 }
-                if let Some(out) = to_agent(&msg, clipboard) {
+                if let Some(out) = to_agent(&msg, caps, scale) {
                     writer.send(&out.encode()).await?;
                 }
             }
@@ -600,21 +621,39 @@ impl Drop for AbortOnDrop {
 ///
 /// `None` for messages this engine has nothing to send for:
 /// `Connect`/`Disconnect` because the session layer handles those and never
-/// forwards them, the clipboard pair when the target did not opt in — the
-/// browser hides those controls then, so this is the belt to that UI's braces —
-/// and `Viewport` always.
+/// forwards them, and the clipboard pair and `Viewport` when the target did not
+/// opt in — the clients hide those controls then, so this is the belt to that
+/// UI's braces.
 ///
-/// `Viewport` is dropped because the Mac's resolution is the Mac's. Whatever it
-/// is sharing — a real screen, or a display the agent created for the purpose —
-/// the mode is chosen on that machine, in System Settings, and this engine only
-/// ever reports the size back. A client that wants a different shape scales what
-/// it gets into its window.
+/// `Viewport` used to be dropped unconditionally, and why it no longer is wants
+/// stating precisely, because most of the old reason still holds. A Mac's
+/// resolution is the Mac's: nobody's physical panel changes because someone
+/// connected to it, and there is still no way to ask one to. What *can* be asked
+/// for is the size of a display the agent **made** — a display that exists only to
+/// be looked at from here, and whose only user is the person asking. So the
+/// request goes through for a target whose profile allows it, and the agent
+/// refuses it for anything else.
 ///
-/// `SelectDisplay` is passed through, and the contrast with `Viewport` is the
-/// point: *which* screen to look at is the only display decision a client gets
-/// to make, because it is the only one that is about the person looking rather
-/// than about the machine.
-fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
+/// Two gates, answering different questions, which is why neither is enough
+/// alone. `resize` is the operator's — may this target be resized at all — and is
+/// checked here because it is this process's fact. "Is the shared display one I
+/// made" is the agent's, and is checked there because it is the only place that
+/// cannot be stale; this engine deliberately does not add a third from its own
+/// cached display list, which is retained across a silent agent reconnect and can
+/// therefore outlive the display it describes.
+///
+/// `w`/`h` arrive as the remote's **pixels** (see [`ClientMsg::Viewport`]) and go
+/// out as **points**, divided by the `scale` this engine last announced. That
+/// division is exact by construction — it undoes the multiplication the client
+/// did against the same number — where dividing by the agent's live density would
+/// not be, since a display publishes no mode to read for tens of milliseconds
+/// around a density change.
+///
+/// `SelectDisplay` and `HostScale` pass through too, and the three together are
+/// the whole of what a client decides: *which* screen to look at, *how dense* to
+/// draw it, and *how large* to make it. The first is about the person looking; the
+/// last two apply only to a display that exists for them.
+fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
     Some(match msg {
         ClientMsg::MouseMove { x, y } => GatewayMsg::PointerMove {
             x: clamp_u16(*x),
@@ -647,15 +686,27 @@ fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
         // Forwarded whatever display is being shared: only the agent knows
         // whether the current one is a display it made, and only it can act.
         ClientMsg::HostScale { scale } => GatewayMsg::HostScale { scale: *scale },
+        // Pixels in, points out. `scale` is guarded rather than trusted: it comes
+        // from `scale_ratio`, which already refuses nonsense, but a zero here
+        // would divide a window into infinity and the fallback that matters is
+        // "assume the two units agree", which is what every 1x target is anyway.
+        ClientMsg::Viewport { w, h } if caps.resize => {
+            let scale = if scale > 0.0 { scale } else { 1.0 };
+            let points = |px: u16| clamp_u16((f32::from(px) / scale).round() as i32);
+            GatewayMsg::ResizeDisplay {
+                w: points(*w),
+                h: points(*h),
+            }
+        }
         // The agent reads its pasteboard only when asked, so a fetch is a real
         // round trip rather than a cached value (unlike VNC, where the server
         // pushes and the engine caches).
-        ClientMsg::ClipboardRequest if clipboard => GatewayMsg::ClipboardRequest,
+        ClientMsg::ClipboardRequest if caps.clipboard => GatewayMsg::ClipboardRequest,
         // Refused rather than truncated, so the Mac's pasteboard keeps what it
         // had instead of gaining a partial copy that looks whole. The browser
         // and the viewer both refuse this themselves and say why; reaching here
         // means one of them let it through.
-        ClientMsg::Clipboard { text } if clipboard && !clipboard_fits(text) => {
+        ClientMsg::Clipboard { text } if caps.clipboard && !clipboard_fits(text) => {
             warn!(
                 "rxa: refusing {} bytes to the Mac's pasteboard, over the {} byte limit",
                 text.len(),
@@ -663,9 +714,13 @@ fn to_agent(msg: &ClientMsg, clipboard: bool) -> Option<GatewayMsg> {
             );
             return None;
         }
-        ClientMsg::Clipboard { text } if clipboard => GatewayMsg::Clipboard {
+        ClientMsg::Clipboard { text } if caps.clipboard => GatewayMsg::Clipboard {
             text: text.clone(),
         },
+        // The opted-out cases of the two gates above, plus the pair the session
+        // layer never forwards. A `Viewport` reaching here is a target whose
+        // profile says no, which is also the only state either client offers the
+        // button in — so this is the belt, not the braces.
         ClientMsg::ClipboardRequest
         | ClientMsg::Clipboard { .. }
         | ClientMsg::Viewport { .. }
@@ -832,15 +887,35 @@ mod tests {
         assert_eq!(errors, 1, "exactly one report, after the last link");
     }
 
+    /// A target that opted into nothing, which is the default and what most of
+    /// the translation below is indifferent to.
+    const NO_CAPS: Caps = Caps {
+        clipboard: false,
+        resize: false,
+    };
+    const CLIPBOARD: Caps = Caps {
+        clipboard: true,
+        resize: false,
+    };
+    const RESIZE: Caps = Caps {
+        clipboard: false,
+        resize: true,
+    };
+    /// The density in every case where the conversion is not what is under test.
+    /// A 1x remote is the one scale at which viewport pixels and display points
+    /// are the same number, so it never hides an arithmetic mistake behind an
+    /// identity — which is why the conversion has tests of its own.
+    const UNSCALED: f32 = 1.0;
+
     #[test]
     fn pointer_moves_carry_clamped_framebuffer_coordinates() {
         assert_eq!(
-            to_agent(&ClientMsg::MouseMove { x: 1279, y: 799 }, false),
+            to_agent(&ClientMsg::MouseMove { x: 1279, y: 799 }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::PointerMove { x: 1279, y: 799 })
         );
         // A drag off the canvas edge pins to the edge instead of vanishing.
         assert_eq!(
-            to_agent(&ClientMsg::MouseMove { x: -5, y: 70_000 }, false),
+            to_agent(&ClientMsg::MouseMove { x: -5, y: 70_000 }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::PointerMove { x: 0, y: u16::MAX })
         );
     }
@@ -856,7 +931,7 @@ mod tests {
                 to_agent(&ClientMsg::MouseButton {
                     button,
                     pressed: true
-                }, false),
+                }, NO_CAPS, UNSCALED),
                 Some(GatewayMsg::PointerButton {
                     button: expected,
                     pressed: true
@@ -867,7 +942,7 @@ mod tests {
             to_agent(&ClientMsg::MouseButton {
                 button: MouseButton::Left,
                 pressed: false
-            }, false),
+            }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::PointerButton {
                 button: 0,
                 pressed: false
@@ -880,7 +955,7 @@ mod tests {
     #[test]
     fn wheel_deltas_pass_through_unmodified() {
         assert_eq!(
-            to_agent(&ClientMsg::Wheel { dx: 0.0, dy: -2.5 }, false),
+            to_agent(&ClientMsg::Wheel { dx: 0.0, dy: -2.5 }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::Wheel { dx: 0.0, dy: -2.5 })
         );
     }
@@ -892,7 +967,7 @@ mod tests {
                 code: "KeyA".to_owned(),
                 pressed: true,
                 caps: true,
-            }, false),
+            }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::Key {
                 code: "KeyA".to_owned(),
                 pressed: true,
@@ -906,7 +981,7 @@ mod tests {
                 code: "MediaPlayPause".to_owned(),
                 pressed: false,
                 caps: false,
-            }, false),
+            }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::Key {
                 code: "MediaPlayPause".to_owned(),
                 pressed: false,
@@ -922,36 +997,85 @@ mod tests {
     #[test]
     fn the_hosts_density_reaches_the_agent() {
         assert_eq!(
-            to_agent(&ClientMsg::HostScale { scale: 200 }, false),
+            to_agent(&ClientMsg::HostScale { scale: 200 }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::HostScale { scale: 200 })
         );
         assert_eq!(
-            to_agent(&ClientMsg::HostScale { scale: 100 }, false),
+            to_agent(&ClientMsg::HostScale { scale: 100 }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::HostScale { scale: 100 })
         );
     }
 
     #[test]
     fn refresh_asks_the_agent_for_a_full_repaint() {
-        assert_eq!(to_agent(&ClientMsg::Refresh, false), Some(GatewayMsg::Refresh));
+        assert_eq!(to_agent(&ClientMsg::Refresh, NO_CAPS, UNSCALED), Some(GatewayMsg::Refresh));
     }
 
-    // A viewport report is never a resolution request here: the Mac's mode is
-    // chosen on the Mac. And the session layer never forwards
-    // Connect/Disconnect.
+    // The session layer never forwards Connect/Disconnect, and a viewport from a
+    // target that did not opt in is dropped rather than acted on — the opted-in
+    // case is the test below this one.
     #[test]
     fn messages_with_no_agent_equivalent_are_dropped() {
-        assert_eq!(to_agent(&ClientMsg::Viewport { w: 2560, h: 1440 }, false), None);
+        assert_eq!(
+            to_agent(&ClientMsg::Viewport { w: 2560, h: 1440 }, NO_CAPS, UNSCALED),
+            None
+        );
         assert_eq!(
             to_agent(
                 &ClientMsg::Connect {
                     target: "mac".to_owned()
                 },
-                false
+                NO_CAPS,
+                UNSCALED
             ),
             None
         );
-        assert_eq!(to_agent(&ClientMsg::Disconnect, false), None);
+        assert_eq!(to_agent(&ClientMsg::Disconnect, NO_CAPS, UNSCALED), None);
+    }
+
+    // A viewport is remote *pixels* and a display mode is *points*, so the one
+    // thing this translation must get right is the division — by the scale this
+    // engine last announced, which is the number the client multiplied its window
+    // by. Getting it wrong is invisible on a 1x target and doubles or halves the
+    // Mac's desktop on a Retina one.
+    #[test]
+    fn a_viewport_becomes_a_resize_in_display_points() {
+        // A 1440x900-point window on a 2x display: the client sent the pixels its
+        // canvas is laid out in, and the Mac must be asked for the points.
+        assert_eq!(
+            to_agent(&ClientMsg::Viewport { w: 2880, h: 1800 }, RESIZE, 2.0),
+            Some(GatewayMsg::ResizeDisplay { w: 1440, h: 900 })
+        );
+        // At 1x the two units coincide and nothing is scaled away.
+        assert_eq!(
+            to_agent(&ClientMsg::Viewport { w: 1280, h: 800 }, RESIZE, UNSCALED),
+            Some(GatewayMsg::ResizeDisplay { w: 1280, h: 800 })
+        );
+        // A fractional ratio rounds rather than truncating, so a window is never
+        // asked for one point less than it has.
+        assert_eq!(
+            to_agent(&ClientMsg::Viewport { w: 1281, h: 801 }, RESIZE, 1.5),
+            Some(GatewayMsg::ResizeDisplay { w: 854, h: 534 })
+        );
+        // A scale that never happened. `scale_ratio` already refuses nonsense, so
+        // reaching here means something upstream broke — and dividing by it would
+        // be an infinity, where assuming the units agree is merely wrong.
+        assert_eq!(
+            to_agent(&ClientMsg::Viewport { w: 1280, h: 800 }, RESIZE, 0.0),
+            Some(GatewayMsg::ResizeDisplay { w: 1280, h: 800 })
+        );
+    }
+
+    // The two flags gate different messages, and this is the test that catches
+    // them being swapped at a call site — which, while they were two bare bools
+    // sitting next to each other, compiled.
+    #[test]
+    fn the_two_capability_flags_gate_different_messages() {
+        assert_eq!(to_agent(&ClientMsg::ClipboardRequest, RESIZE, UNSCALED), None);
+        assert_eq!(
+            to_agent(&ClientMsg::Viewport { w: 1280, h: 800 }, CLIPBOARD, UNSCALED),
+            None
+        );
     }
 
     // The clipboard pair is the only thing the flag gates, and it gates both
@@ -960,7 +1084,7 @@ mod tests {
     #[test]
     fn clipboard_messages_reach_the_agent_only_when_the_target_opted_in() {
         assert_eq!(
-            to_agent(&ClientMsg::ClipboardRequest, true),
+            to_agent(&ClientMsg::ClipboardRequest, CLIPBOARD, UNSCALED),
             Some(GatewayMsg::ClipboardRequest)
         );
         assert_eq!(
@@ -968,7 +1092,8 @@ mod tests {
                 &ClientMsg::Clipboard {
                     text: "copied — 画面".to_owned()
                 },
-                true
+                CLIPBOARD,
+                UNSCALED
             ),
             Some(GatewayMsg::Clipboard {
                 text: "copied — 画面".to_owned()
@@ -976,7 +1101,7 @@ mod tests {
         );
 
         assert_eq!(
-            to_agent(&ClientMsg::ClipboardRequest, false),
+            to_agent(&ClientMsg::ClipboardRequest, NO_CAPS, UNSCALED),
             None
         );
         assert_eq!(
@@ -984,7 +1109,8 @@ mod tests {
                 &ClientMsg::Clipboard {
                     text: "copied".to_owned()
                 },
-                false
+                NO_CAPS,
+                UNSCALED
             ),
             None
         );
@@ -997,7 +1123,7 @@ mod tests {
     fn oversized_clipboard_text_never_reaches_the_agent() {
         // Two bytes per char, so this is twice the ceiling.
         let text = "é".repeat(crate::protocol::MAX_CLIPBOARD_BYTES);
-        assert_eq!(to_agent(&ClientMsg::Clipboard { text }, true), None);
+        assert_eq!(to_agent(&ClientMsg::Clipboard { text }, CLIPBOARD, UNSCALED), None);
 
         // At the ceiling it goes through untouched, so the boundary is
         // inclusive and nothing is rewritten on the way past.
@@ -1006,7 +1132,8 @@ mod tests {
             &ClientMsg::Clipboard {
                 text: text.clone(),
             },
-            true,
+            CLIPBOARD,
+            UNSCALED,
         ) {
             Some(GatewayMsg::Clipboard { text: sent }) => assert_eq!(sent, text),
             other => panic!("expected a clipboard message, got {other:?}"),

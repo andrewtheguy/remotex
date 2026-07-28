@@ -144,24 +144,34 @@ three so they cannot spread into the model as protocol checks.
 |---|---|
 | `vnc` | follows the window continuously, debounced and deduped |
 | `rdp` with `resize` | only on **Remote → Resize to Window**; a resize forces a Deactivation-Reactivation |
-| `rxa` | sends nothing, ever |
+| `rxa` with `resize` | only on **Remote → Resize to Window**, and only while the display being shared is one the agent *made* |
+| `rxa` otherwise | sends nothing, ever |
 
-There is no resolution menu, for any target. A remote's resolution belongs to the
-machine running it; the two exceptions above are the two protocols that hand that
-decision to the client. A Mac's size arrives here as a `resize` and is never
-answered — see `docs/mac-agent-architecture.md`.
+There is no resolution menu, for any target: a remote's resolution belongs to the
+machine running it, and the rows above are the cases where that machine hands the
+decision over. `rxa` is the narrowest, and the only one whose answer changes
+mid-session — a Mac's own panel is never resized from here, so switching displays
+from **Remote → Display** turns the item on and off. `ViewportPolicy` starts an
+rxa session ignoring viewports and learns the rest from the `displays` list; see
+`docs/mac-agent-architecture.md`.
 
 A size mismatch has two directions, and **Remote → Resize to Window** is only one
 of them. Below it, **Resize to Display** takes the other: the window is sized so
-the desktop fits it exactly, and nothing goes on the wire. Which of the two is the
-one that can move is decided by a single fact — a target that takes a size from
-here gets the first, and every other target gets the second — but neither is
-enabled before there is something to act on. **Resize to Display** waits for the
-desktop to have a remote size to fit the window to, and **Resize to Window** for a
-measured viewport to report; until then both are greyed, and after that exactly one
-is. Both stay in the menu either way, one greyed, because which direction a target
-allows is worth reading off the pair rather than inferring from an item that is not
-there. The arithmetic is `RemoteGeometry.windowFrame`, taken as a delta on
+the desktop fits it exactly, and nothing goes on the wire. They are not
+alternatives. A target that takes a size from here can still be sitting at a size
+this window does not match, so both items are live for RDP with `resize` and for
+rxa while an agent-made display is shared, and which end to move is the user's
+call. The rows differ only in the first: **Resize to Window** needs a target that
+takes a size on request, which for rxa is answered per display and so flips as the
+user switches between the Mac's own screens and the agent's; **Resize to Display**
+is greyed for exactly one case, a `vnc` target with `resize`, whose desktop
+follows this window already and would resize to match the window being fitted to
+it. Neither is enabled before there is something to act on — **Resize to Display**
+waits for the desktop to have a remote size, **Resize to Window** for a measured
+viewport to report. Both stay in the menu either way, greyed rather than absent,
+because which direction a target allows is worth reading off the pair rather than
+inferring from an item that is not there. The arithmetic is
+`RemoteGeometry.windowFrame`, taken as a delta on
 the room the scroll view gives the document so the title bar and insets need no
 accounting, anchored at the top-left, and held inside the screen's visible frame —
 a 1x 3840×2160 remote is 3840×2160 points, and the answer there is the largest
