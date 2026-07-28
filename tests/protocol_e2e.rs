@@ -304,7 +304,11 @@ async fn expect_tile(ws: &mut Ws) {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
-                    assert_eq!(frame[0], 0x01, "unexpected frame kind");
+                    // Parsed rather than sniffed: the envelope's own invariants
+                    // are checked on the way past. Records, not painted tiles —
+                    // this only cares that paint arrived, and a repeat of pixels
+                    // the client already has legitimately arrives as a reference.
+                    assert!(!common::batch_records(&frame).is_empty());
                     return;
                 }
                 Message::Text(text) => {

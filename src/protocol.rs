@@ -4,14 +4,22 @@
 //! Server -> browser, the transport is split by weight (see
 //! docs/architecture.md):
 //!
-//! - **Screen tiles** are binary WebSocket frames: a fixed 10-byte header
-//!   followed by an encoded image payload (PNG, or JPEG from the macOS agent).
-//!   This replaced base64 RGBA inside JSON text, which inflated the bottleneck
-//!   backend->browser link by ~4.3x (4 bytes/px, +33% base64).
+//! - **Screen updates** are binary WebSocket frames, each one a *batch* of
+//!   records rather than a single tile — see [`batch`]. A payload is an encoded
+//!   image (PNG, or JPEG from the macOS agent) that the client decodes natively.
+//!   Binary replaced base64 RGBA inside JSON text, which inflated the
+//!   bottleneck backend->browser link by ~4.3x (4 bytes/px, +33% base64);
+//!   batching then replaced one frame per tile, which cost a WebSocket frame, a
+//!   client event and a separate decode for every strip of a repaint.
 //! - **Control messages** (`resize`, `error`, `cursor`, …) are rare and small;
 //!   they stay JSON text frames with a `type` tag. `cursor` carries a base64
 //!   PNG — a pointer shape is a couple of hundred bytes and changes a handful
 //!   of times a session, so it is not worth a second binary frame kind.
+//!
+//! Ordering between the two is the WebSocket's, and it is load-bearing: a
+//! `resize` reallocates the client's canvas, so a tile that arrived before it
+//! must be *sent* before it. [`crate::wire`] is what preserves that while
+//! batching.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -22,15 +30,18 @@ use serde::{Deserialize, Serialize};
 pub const STRIP_ROWS: u16 = 64;
 
 /// The revision of everything in this file: [`ClientMsg`], [`ControlMsg`], and
-/// the [`Tile`] frame layout. Served from `GET /api/config` so a client that
+/// the [`batch`] frame layout. Served from `GET /api/config` so a client that
 /// isn't shipped with the gateway can refuse a version it cannot speak.
 ///
 /// The SPA doesn't check it — it is served by this same binary, so it cannot
-/// disagree. The macOS viewer is a separate artifact and does. Bump this only
-/// for a change that would break a client compiled against the old shape; a
-/// purely additive control message is not one, because clients are required to
-/// ignore tags they don't know.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// disagree. The macOS viewer is a separate artifact and does, and
+/// `apps/remotex-viewer/Sources/App/ProductInfo.swift` carries the number it
+/// accepts. Bump this only for a change that would break a client compiled
+/// against the old shape; a purely additive control message is not one, because
+/// clients are required to ignore tags they don't know.
+///
+/// 3 is the batch envelope: binary frames stopped being one tile each.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
 /// browser link, the gateway and the Mac agent cannot drift apart on it (the
@@ -165,6 +176,20 @@ pub enum ClientMsg {
     /// wrong, which the viewer offers as Remote > Refresh; the SPA has no such
     /// command and never sends this.
     Refresh,
+    /// "I lost the tiles you told me to remember." Empties the server's slot table
+    /// and repaints, so the next tiles arrive as payloads rather than references.
+    ///
+    /// A client sends this when it cannot decode a tile it was told to cache, or
+    /// when a reference names a slot it does not hold. Both leave the two ends
+    /// disagreeing about what the client has, and **nothing else can repair it** —
+    /// which is why this exists instead of reusing [`ClientMsg::Refresh`]. A
+    /// `Refresh` is routed to the *engine* ([`crate::session`]); the outbound task
+    /// that owns the slot table never sees it, so the engine would repaint,
+    /// the repaint's tiles would still be believed cached, references would be sent
+    /// again, and the client would miss again — a livelock at full-repaint
+    /// bandwidth. This is handled by the socket's own bridge instead, which bumps
+    /// the table's epoch *and* asks the engine to repaint.
+    CacheReset,
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
@@ -195,26 +220,125 @@ pub enum ClientMsg {
     SelectDisplay { id: u32 },
 }
 
-/// A dirty rectangle of the framebuffer, sent as one binary WebSocket frame.
-/// The payload is an image stream the browser decodes natively — PNG or JPEG,
-/// named by the `format` byte so `createImageBitmap` gets the right MIME type.
+/// The layout of a server -> client binary frame: a **batch** of records.
+///
+/// One frame carries however many screen updates were ready at once, which is
+/// what a full repaint needs — at [`CELL_W`]×[`CELL_H`] a 1600×1000 desktop is
+/// 80 cells, and 80 WebSocket frames cost 80 client events and 80 separately
+/// scheduled decodes to paint one picture.
+///
+/// ```text
+/// offset 0: u8  frame kind, always 0x02 (batch)
+/// offset 1: u8  flags, always 0 — a receiver rejects anything else
+/// offset 2: u16 record count
+/// offset 4: records, back to back
+///
+/// record = u8 op | body   (little-endian throughout)
+///
+/// 0x01 TILE      u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
+/// 0x02 TILE_REF  u16 slot | u16 x | u16 y
+/// ```
+///
+/// Why each of the header's four bytes earns its place:
+///
+/// - **kind `0x02`** retires the old `0x01` outright rather than extending it, so
+///   a client built against the single-tile frame rejects this as unknown and goes
+///   black instead of drawing garbage out of a misread header.
+/// - **flags** is one reserved byte, and receivers *reject* a non-zero value
+///   rather than ignoring it. Ignoring would make the byte useless later: a client
+///   that skips a flag it does not know cannot be told anything by it.
+/// - **record count**, even though records are self-delimiting and parsing could
+///   simply run to the end of the buffer. A truncated frame would then paint a
+///   silently short batch; with a count it is a detectable error.
+pub mod batch {
+    pub const FRAME_KIND: u8 = 0x02;
+    pub const HEADER_LEN: usize = 4;
+
+    pub const OP_TILE: u8 = 0x01;
+    pub const OP_TILE_REF: u8 = 0x02;
+
+    /// Bytes a `TILE` record costs besides its payload.
+    pub const TILE_HEADER_LEN: usize = 16;
+    /// A whole `TILE_REF` record.
+    pub const TILE_REF_LEN: usize = 7;
+
+    /// `slot` meaning "draw this and do not remember it".
+    ///
+    /// Needed so one enormous photographic tile cannot evict a screenful of
+    /// useful small ones, and so a three-pixel caret rectangle need not consume a
+    /// slot at all.
+    pub const NO_SLOT: u16 = 0xFFFF;
+
+    /// How many tile slots a client keeps.
+    ///
+    /// Part of the wire contract, not a server-side tuning knob: a client sizes
+    /// its cache by this, and a `slot` at or above it (other than [`NO_SLOT`]) is
+    /// a malformed record rather than something to grow an array for. That makes a
+    /// client's memory a function of the protocol instead of a function of what a
+    /// server chooses to send it.
+    ///
+    /// 256 because both clients cache *encoded* payloads, so the cost is bytes
+    /// received rather than pixels decoded — at the per-slot ceiling below, 8 MiB
+    /// worst case, and a small fraction of that in practice.
+    pub const SLOT_COUNT: u16 = 256;
+
+    /// The largest payload worth a slot.
+    ///
+    /// A slot spent on one screen-sized photograph is a slot not spent on the
+    /// dozens of small tiles a returning menu or a blinking caret is made of, and
+    /// large payloads are the least likely to recur byte for byte anyway.
+    pub const MAX_CACHED_BYTES: usize = 32 * 1024;
+}
+
+/// The canonical tile grid, in framebuffer pixels.
+///
+/// Origin is pinned at (0,0) and these are compile-time constants: a grid derived
+/// from the desktop size would shift the meaning of every cell whenever the
+/// desktop resized, and cells are about to become cache identities.
+///
+/// **320×64 is measured, not guessed** — see `encode_cost_against_hash_cost`
+/// below. Covering one 3200×64 strip, sending cells instead of the whole strip
+/// costs 1.36× the bytes when every cell genuinely changed, and breaks even when
+/// about 70% of them did; so it wins in every case short of near-total change.
+/// The two obvious alternatives are worse for reasons worth recording, because
+/// both look free until measured:
+///
+/// - **Narrower** is expensive fast. 128 wide costs 2.01× on the same content and
+///   needs fewer than half its cells skippable to break even. PNG pays a fixed
+///   per-stream cost and loses horizontal redundancy in every one of them.
+/// - **Shorter is not the cheap axis.** 3200×16 costs 1.56–2.57×, often worse than
+///   any narrowing, because PNG's filters predict from the row *above*: a short
+///   stream throws away vertical prediction exactly as a narrow one throws away
+///   horizontal. Neither axis is free.
+///
+/// 20480 px also stays far clear of the agent's `MIN_JPEG_PIXELS` (32×32), so its
+/// per-tile codec classifier still has enough pixels to judge.
+///
+/// # Where this does *not* apply
+///
+/// All of the above answers "if damage is split into cells, how big should a cell
+/// be". It says nothing about whether damage *should* be split into cells, and for
+/// the gateway's own engines the answer turned out to be no: RDP reports damage
+/// with a median area of 1295 pixels, 92% of it smaller than one cell, so snapping
+/// outward onto this grid cost 8.9× the bytes (see [`crate::tiles`] and
+/// `tests/rdp_bytes_probe.rs`). Those engines compare against a shadow copy of what
+/// the client holds instead, and this grid is left for damage that genuinely
+/// arrives coarse — the macOS agent's, which is reported in full-width strips of a
+/// 3200-pixel desktop.
+pub const CELL_W: u16 = 320;
+/// See [`CELL_W`]. Also the height a dirty rectangle is split at, which is what
+/// [`STRIP_ROWS`] used to mean on its own.
+pub const CELL_H: u16 = STRIP_ROWS;
+
+/// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
+/// [`batch`] frame. The payload is an image stream the client decodes natively —
+/// PNG or JPEG, named by the `format` byte so `createImageBitmap` gets the right
+/// MIME type.
 ///
 /// The RDP and VNC engines decode a framebuffer and PNG-compress it here
 /// ([`Tile::from_rgb`]); the macOS agent chooses PNG or JPEG per tile on the
 /// Mac and the gateway relays those bytes untouched ([`Tile::encoded`]), which
 /// is why the format travels with the tile instead of being a constant.
-///
-/// Frame layout (little-endian):
-///
-/// ```text
-/// offset 0: u8  frame kind, always 0x01 (tile)
-/// offset 1: u8  format: 1 = PNG, 2 = JPEG
-/// offset 2: u16 x
-/// offset 4: u16 y
-/// offset 6: u16 w
-/// offset 8: u16 h
-/// offset 10: payload (a PNG or JPEG stream)
-/// ```
 #[derive(Debug, Clone)]
 pub struct Tile {
     /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`].
@@ -228,10 +352,8 @@ pub struct Tile {
 }
 
 impl Tile {
-    pub const FRAME_KIND: u8 = 0x01;
     pub const FORMAT_PNG: u8 = 1;
     pub const FORMAT_JPEG: u8 = 2;
-    pub const HEADER_LEN: usize = 10;
 
     /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
     pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
@@ -266,18 +388,38 @@ impl Tile {
         }
     }
 
-    /// Serialize into the binary WebSocket frame described above.
-    pub fn to_frame(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(Self::HEADER_LEN + self.data.len());
-        out.push(Self::FRAME_KIND);
+    /// What this tile will cost inside a batch, payload included.
+    pub fn record_len(&self) -> usize {
+        batch::TILE_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this tile as a `TILE` record. `slot` is where the client should
+    /// remember it, or [`batch::NO_SLOT`] not to.
+    ///
+    /// Appends rather than returning a buffer because a batch is built by writing
+    /// records one after another into one allocation.
+    pub fn write_record(&self, slot: u16, out: &mut Vec<u8>) {
+        out.push(batch::OP_TILE);
         out.push(self.format);
+        out.extend_from_slice(&slot.to_le_bytes());
         out.extend_from_slice(&self.x.to_le_bytes());
         out.extend_from_slice(&self.y.to_le_bytes());
         out.extend_from_slice(&self.w.to_le_bytes());
         out.extend_from_slice(&self.h.to_le_bytes());
+        // u32, not u16: a full-width Retina strip has been measured at ~192 KB,
+        // and a length field that cannot describe the payload is not a saving.
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.data);
-        out
     }
+}
+
+/// Append a `TILE_REF` record: redraw whatever the client has in `slot` at
+/// `(x, y)`. Seven bytes in place of a payload.
+pub fn write_tile_ref(slot: u16, x: u16, y: u16, out: &mut Vec<u8>) {
+    out.push(batch::OP_TILE_REF);
+    out.extend_from_slice(&slot.to_le_bytes());
+    out.extend_from_slice(&x.to_le_bytes());
+    out.extend_from_slice(&y.to_le_bytes());
 }
 
 /// The remote pointer shape, for engines whose server does **not** composite
@@ -501,16 +643,21 @@ struct WireDisplay<'a> {
 }
 
 impl ServerMsg {
-    /// Encode for the WebSocket: tiles as binary frames, control as JSON text.
-    pub fn encode(&self) -> WireFrame {
-        match self {
-            ServerMsg::Tile(tile) => WireFrame::Binary(tile.to_frame()),
-            ServerMsg::Resize { w, h, scale } => WireFrame::Text(control(&ControlMsg::Resize {
+    /// The JSON text frame for a control message, or `None` for a tile.
+    ///
+    /// `None` rather than a panic or a placeholder because a tile genuinely has no
+    /// standalone encoding any more: it only exists as a record inside a batch,
+    /// and only [`crate::wire`] knows which slot to give it. Making that a
+    /// type-level fact is what stops a future caller sending one on its own.
+    pub fn text_frame(&self) -> Option<String> {
+        Some(match self {
+            ServerMsg::Tile(_) => return None,
+            ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,
                 scale: *scale,
-            })),
-            ServerMsg::Cursor(shape) => WireFrame::Text(control(&match shape {
+            }),
+            ServerMsg::Cursor(shape) => control(&match shape {
                 Some(c) => ControlMsg::Cursor {
                     image: Some(base64::engine::general_purpose::STANDARD.encode(&c.png)),
                     w: c.w,
@@ -525,38 +672,34 @@ impl ServerMsg {
                     hx: 0,
                     hy: 0,
                 },
-            })),
-            ServerMsg::Error { message } => WireFrame::Text(control(&ControlMsg::Error { message })),
-            ServerMsg::Picker => WireFrame::Text(control(&ControlMsg::Picker)),
+            }),
+            ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
+            ServerMsg::Picker => control(&ControlMsg::Picker),
             ServerMsg::Connected {
                 name,
                 protocol,
                 resize,
                 clipboard,
-            } => WireFrame::Text(control(&ControlMsg::Connected {
+            } => control(&ControlMsg::Connected {
                 name,
                 protocol,
                 resize: *resize,
                 clipboard: *clipboard,
-            })),
-            ServerMsg::RemoteOs { macos } => {
-                WireFrame::Text(control(&ControlMsg::RemoteOs { macos: *macos }))
-            }
-            ServerMsg::Displays { active, displays } => {
-                WireFrame::Text(control(&ControlMsg::Displays {
-                    active: *active,
-                    displays: displays
-                        .iter()
-                        .map(|display| WireDisplay {
-                            id: display.id,
-                            label: &display.label,
-                            detail: &display.detail,
-                            main: display.main,
-                            virtual_display: display.virtual_display,
-                        })
-                        .collect(),
-                }))
-            }
+            }),
+            ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
+            ServerMsg::Displays { active, displays } => control(&ControlMsg::Displays {
+                active: *active,
+                displays: displays
+                    .iter()
+                    .map(|display| WireDisplay {
+                        id: display.id,
+                        label: &display.label,
+                        detail: &display.detail,
+                        main: display.main,
+                        virtual_display: display.virtual_display,
+                    })
+                    .collect(),
+            }),
             // The last gate on the browser link, behind each engine's own: an
             // oversized value is reported as its size rather than sent, so no
             // path can put an unbounded string on this link.
@@ -567,14 +710,14 @@ impl ServerMsg {
                 oversized_bytes,
             } => {
                 let refused = (!clipboard_fits(text)).then_some(text.len() as u64);
-                WireFrame::Text(control(&ControlMsg::Clipboard {
+                control(&ControlMsg::Clipboard {
                     text: if refused.is_some() { "" } else { text },
                     changed_at_ms: *changed_at_ms,
                     requested: *requested,
                     oversized_bytes: oversized_bytes.or(refused),
-                }))
+                })
             }
-        }
+        })
     }
 }
 
@@ -660,15 +803,15 @@ mod tests {
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.
     #[test]
     fn control_messages_encode_to_tagged_camelcase_text() {
-        match (ServerMsg::Resize { w: 1280, h: 800, scale: UNSCALED }).encode() {
-            WireFrame::Text(json) => {
+        match (ServerMsg::Resize { w: 1280, h: 800, scale: UNSCALED }).text_frame() {
+            Some(json) => {
                 assert_eq!(json, r#"{"type":"resize","w":1280,"h":800,"scale":1.0}"#)
             }
-            other => panic!("resize should be a text frame: {other:?}"),
+            None => panic!("resize must be a text frame"),
         }
-        match (ServerMsg::Error { message: "boom".to_owned() }).encode() {
-            WireFrame::Text(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
-            other => panic!("error should be a text frame: {other:?}"),
+        match (ServerMsg::Error { message: "boom".to_owned() }).text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
+            None => panic!("error must be a text frame"),
         }
         match (ServerMsg::Connected {
             name: "mac".to_owned(),
@@ -676,13 +819,13 @@ mod tests {
             resize: false,
             clipboard: true,
         })
-        .encode()
+        .text_frame()
         {
-            WireFrame::Text(json) => assert_eq!(
+            Some(json) => assert_eq!(
                 json,
                 r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true}"#
             ),
-            other => panic!("connected should be a text frame: {other:?}"),
+            None => panic!("connected must be a text frame"),
         }
         match (ServerMsg::Displays {
             active: 7,
@@ -703,14 +846,14 @@ mod tests {
                 },
             ],
         })
-        .encode()
+        .text_frame()
         {
             // `virtual` on the wire: reserved in Rust, ordinary in JavaScript.
-            WireFrame::Text(json) => assert_eq!(
+            Some(json) => assert_eq!(
                 json,
                 r#"{"type":"displays","active":7,"displays":[{"id":7,"label":"Display 1","detail":"1920×1080 at 1x","main":true,"virtual":false},{"id":9,"label":"Virtual display","detail":"3200×2000 at 2x","main":false,"virtual":true}]}"#
             ),
-            other => panic!("displays should be a text frame: {other:?}"),
+            None => panic!("displays must be a text frame"),
         }
         // No displays is a shape a client must handle, not one it never sees: a
         // Mac can have every screen unplugged.
@@ -718,20 +861,20 @@ mod tests {
             active: 0,
             displays: Vec::new(),
         })
-        .encode()
+        .text_frame()
         {
-            WireFrame::Text(json) => {
+            Some(json) => {
                 assert_eq!(json, r#"{"type":"displays","active":0,"displays":[]}"#)
             }
-            other => panic!("displays should be a text frame: {other:?}"),
+            None => panic!("displays must be a text frame"),
         }
         for macos in [false, true] {
-            match (ServerMsg::RemoteOs { macos }).encode() {
-                WireFrame::Text(json) => assert_eq!(
+            match (ServerMsg::RemoteOs { macos }).text_frame() {
+                Some(json) => assert_eq!(
                     json,
                     format!(r#"{{"type":"remoteOs","macos":{macos}}}"#)
                 ),
-                other => panic!("remoteOs should be a text frame: {other:?}"),
+                None => panic!("remoteOs must be a text frame"),
             }
         }
         match (ServerMsg::Clipboard {
@@ -740,15 +883,15 @@ mod tests {
             requested: false,
             oversized_bytes: None,
         })
-        .encode()
+        .text_frame()
         {
-            WireFrame::Text(json) => {
+            Some(json) => {
                 assert_eq!(
                     json,
                     r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890,"requested":false,"oversizedBytes":null}"#
                 );
             }
-            other => panic!("clipboard should be a text frame: {other:?}"),
+            None => panic!("clipboard must be a text frame"),
         }
         match (ServerMsg::Clipboard {
             text: String::new(),
@@ -756,15 +899,15 @@ mod tests {
             requested: true,
             oversized_bytes: None,
         })
-        .encode()
+        .text_frame()
         {
-            WireFrame::Text(json) => {
+            Some(json) => {
                 assert_eq!(
                     json,
                     r#"{"type":"clipboard","text":"","changedAtMs":null,"requested":true,"oversizedBytes":null}"#
                 );
             }
-            other => panic!("clipboard should be a text frame: {other:?}"),
+            None => panic!("clipboard must be a text frame"),
         }
     }
 
@@ -785,15 +928,15 @@ mod tests {
             requested: true,
             oversized_bytes: None,
         })
-        .encode()
+        .text_frame()
         {
-            WireFrame::Text(json) => assert_eq!(
+            Some(json) => assert_eq!(
                 json,
                 format!(
                     r#"{{"type":"clipboard","text":"","changedAtMs":42,"requested":true,"oversizedBytes":{oversized}}}"#
                 )
             ),
-            other => panic!("clipboard should be a text frame: {other:?}"),
+            None => panic!("clipboard must be a text frame"),
         }
 
         // An engine that already refused it says so itself, and that size is
@@ -804,13 +947,13 @@ mod tests {
             requested: false,
             oversized_bytes: Some(209_715_200),
         })
-        .encode()
+        .text_frame()
         {
-            WireFrame::Text(json) => assert_eq!(
+            Some(json) => assert_eq!(
                 json,
                 r#"{"type":"clipboard","text":"","changedAtMs":42,"requested":false,"oversizedBytes":209715200}"#
             ),
-            other => panic!("clipboard should be a text frame: {other:?}"),
+            None => panic!("clipboard must be a text frame"),
         }
     }
 
@@ -850,19 +993,19 @@ mod tests {
     fn cursor_control_message_carries_a_base64_png_or_null() {
         let shape = CursorShape::from_rgba(1, 1, 3, 4, &[255, 0, 0, 255]).unwrap();
         let expected = base64::engine::general_purpose::STANDARD.encode(&shape.png);
-        match (ServerMsg::Cursor(Some(shape))).encode() {
-            WireFrame::Text(json) => assert_eq!(
+        match (ServerMsg::Cursor(Some(shape))).text_frame() {
+            Some(json) => assert_eq!(
                 json,
                 format!(r#"{{"type":"cursor","image":"{expected}","w":1,"h":1,"hx":3,"hy":4}}"#)
             ),
-            other => panic!("cursor should be a text frame: {other:?}"),
+            None => panic!("cursor must be a text frame"),
         }
-        match (ServerMsg::Cursor(None)).encode() {
-            WireFrame::Text(json) => assert_eq!(
+        match (ServerMsg::Cursor(None)).text_frame() {
+            Some(json) => assert_eq!(
                 json,
                 r#"{"type":"cursor","image":null,"w":0,"h":0,"hx":0,"hy":0}"#
             ),
-            other => panic!("cursor should be a text frame: {other:?}"),
+            None => panic!("cursor must be a text frame"),
         }
     }
 
@@ -871,9 +1014,18 @@ mod tests {
         assert!(CursorShape::from_rgba(2, 2, 0, 0, &[0u8; 12]).is_err());
     }
 
-    // The binary layout `protocol.ts` (decodeTileFrame) parses.
+    // A tile has no standalone frame any more, only a record inside a batch. The
+    // type says so, which is what keeps a caller from sending one on its own.
     #[test]
-    fn tile_frame_layout_is_kind_format_le_coords_payload() {
+    fn a_tile_has_no_text_encoding() {
+        let tile = Tile::from_rgb(0, 0, 1, 1, &[0, 0, 0]).unwrap();
+        assert!((ServerMsg::Tile(tile)).text_frame().is_none());
+    }
+
+    // The record layout `protocol.ts` (decodeBatchFrame) and `BatchFrame.swift`
+    // parse.
+    #[test]
+    fn tile_record_layout_is_op_format_slot_le_coords_len_payload() {
         let tile = Tile {
             format: Tile::FORMAT_PNG,
             x: 0x0102,
@@ -882,19 +1034,35 @@ mod tests {
             h: 1,
             data: vec![10, 20, 30, 40, 50, 60],
         };
-        let frame = tile.to_frame();
-        assert_eq!(frame[0], Tile::FRAME_KIND);
-        assert_eq!(frame[1], Tile::FORMAT_PNG);
-        assert_eq!(&frame[2..4], &[0x02, 0x01]); // x, little-endian
-        assert_eq!(&frame[4..6], &[0x04, 0x03]); // y
-        assert_eq!(&frame[6..8], &[2, 0]); // w
-        assert_eq!(&frame[8..10], &[1, 0]); // h
-        assert_eq!(&frame[10..], &[10, 20, 30, 40, 50, 60]);
+        let mut out = Vec::new();
+        tile.write_record(batch::NO_SLOT, &mut out);
+        assert_eq!(out[0], batch::OP_TILE);
+        assert_eq!(out[1], Tile::FORMAT_PNG);
+        assert_eq!(&out[2..4], &[0xFF, 0xFF]); // slot: NO_SLOT
+        assert_eq!(&out[4..6], &[0x02, 0x01]); // x, little-endian
+        assert_eq!(&out[6..8], &[0x04, 0x03]); // y
+        assert_eq!(&out[8..10], &[2, 0]); // w
+        assert_eq!(&out[10..12], &[1, 0]); // h
+        assert_eq!(&out[12..16], &[6, 0, 0, 0]); // payload length, u32
+        assert_eq!(&out[16..], &[10, 20, 30, 40, 50, 60]);
+        assert_eq!(out.len(), tile.record_len());
+        assert_eq!(batch::TILE_HEADER_LEN, 16);
 
-        match (ServerMsg::Tile(tile)).encode() {
-            WireFrame::Binary(bytes) => assert_eq!(bytes, frame),
-            other => panic!("tile should be a binary frame: {other:?}"),
-        }
+        // A real slot only changes those two bytes.
+        let mut out = Vec::new();
+        tile.write_record(9, &mut out);
+        assert_eq!(&out[2..4], &[9, 0]);
+    }
+
+    #[test]
+    fn tile_ref_record_is_seven_bytes_of_slot_and_position() {
+        let mut out = Vec::new();
+        write_tile_ref(0x0102, 0x0304, 0x0506, &mut out);
+        assert_eq!(out[0], batch::OP_TILE_REF);
+        assert_eq!(&out[1..3], &[0x02, 0x01]); // slot
+        assert_eq!(&out[3..5], &[0x04, 0x03]); // x
+        assert_eq!(&out[5..7], &[0x06, 0x05]); // y
+        assert_eq!(out.len(), batch::TILE_REF_LEN);
     }
 
     // The pass-through path: the macOS agent's already-encoded bytes reach the
@@ -903,21 +1071,24 @@ mod tests {
     fn encoded_tile_passes_the_payload_and_format_through_untouched() {
         let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
         let tile = Tile::encoded(Tile::FORMAT_JPEG, 0x0102, 0x0304, 320, 64, jpeg.clone());
-        let frame = tile.to_frame();
-        assert_eq!(frame[0], Tile::FRAME_KIND);
-        assert_eq!(frame[1], Tile::FORMAT_JPEG);
-        assert_eq!(&frame[2..4], &[0x02, 0x01]); // x, little-endian
-        assert_eq!(&frame[4..6], &[0x04, 0x03]); // y
-        assert_eq!(&frame[6..8], &[0x40, 0x01]); // w = 320
-        assert_eq!(&frame[8..10], &[64, 0]); // h
-        assert_eq!(&frame[Tile::HEADER_LEN..], jpeg.as_slice());
+        let mut out = Vec::new();
+        tile.write_record(batch::NO_SLOT, &mut out);
+        assert_eq!(out[0], batch::OP_TILE);
+        assert_eq!(out[1], Tile::FORMAT_JPEG);
+        assert_eq!(&out[4..6], &[0x02, 0x01]); // x, little-endian
+        assert_eq!(&out[6..8], &[0x04, 0x03]); // y
+        assert_eq!(&out[8..10], &[0x40, 0x01]); // w = 320
+        assert_eq!(&out[10..12], &[64, 0]); // h
+        assert_eq!(&out[batch::TILE_HEADER_LEN..], jpeg.as_slice());
 
         // A PNG the agent encoded itself takes the same path, differing only in
         // the format byte — the gateway looks inside neither.
         let png = vec![0x89, b'P', b'N', b'G'];
         let tile = Tile::encoded(Tile::FORMAT_PNG, 0, 0, 1, 1, png.clone());
-        assert_eq!(tile.to_frame()[1], Tile::FORMAT_PNG);
-        assert_eq!(&tile.to_frame()[Tile::HEADER_LEN..], png.as_slice());
+        let mut out = Vec::new();
+        tile.write_record(batch::NO_SLOT, &mut out);
+        assert_eq!(out[1], Tile::FORMAT_PNG);
+        assert_eq!(&out[batch::TILE_HEADER_LEN..], png.as_slice());
     }
 
     // from_rgb still stamps PNG, so RDP and VNC are unaffected by the new field.
@@ -925,7 +1096,9 @@ mod tests {
     fn from_rgb_still_marks_its_payload_as_png() {
         let tile = Tile::from_rgb(0, 0, 2, 2, &[0u8; 12]).unwrap();
         assert_eq!(tile.format, Tile::FORMAT_PNG);
-        assert_eq!(tile.to_frame()[1], Tile::FORMAT_PNG);
+        let mut out = Vec::new();
+        tile.write_record(batch::NO_SLOT, &mut out);
+        assert_eq!(out[1], Tile::FORMAT_PNG);
     }
 
     /// A desktop-like strip: horizontal gradient, repeated rows.
@@ -962,13 +1135,16 @@ mod tests {
         assert_eq!(&buf[..info.buffer_size()], rgb.as_slice());
     }
 
-    // The binary tile frame's reason to exist: it must beat the old
+    // The binary tile record's reason to exist: it must beat the old
     // base64-in-JSON baseline by a wide margin for screen-like content.
     #[test]
-    fn tile_frame_beats_old_base64_json_baseline() {
+    fn tile_record_beats_old_base64_json_baseline() {
         let (w, h) = (1280, 64);
         let rgb = gradient_rgb(w, h);
-        let frame = Tile::from_rgb(0, 0, w, h, &rgb).unwrap().to_frame();
+        let mut frame = Vec::new();
+        Tile::from_rgb(0, 0, w, h, &rgb)
+            .unwrap()
+            .write_record(batch::NO_SLOT, &mut frame);
         // Old wire cost: RGBA (4 bytes/px) -> base64 (4/3) + ~90 bytes of JSON.
         let old = usize::from(w) * usize::from(h) * 4 * 4 / 3 + 90;
         assert!(
@@ -990,5 +1166,117 @@ mod tests {
     #[test]
     fn tile_with_wrong_payload_length_is_rejected() {
         assert!(Tile::from_rgb(0, 0, 2, 2, &[0u8; 5]).is_err());
+    }
+
+    /// Flat UI: a few colours and hard edges, which is what most of a desktop is.
+    /// Deliberately the same shape of content as the agent's classifier test, so
+    /// the two halves of the system are judged on the same material.
+    fn flat_ui_rgb(w: u16, h: u16) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for y in 0..h {
+            for x in 0..w {
+                if (y / 16) % 2 == 0 && (x / 7) % 3 == 0 {
+                    rgb.extend_from_slice(&[20, 20, 24]); // "text"
+                } else {
+                    rgb.extend_from_slice(&[246, 246, 248]);
+                }
+            }
+        }
+        rgb
+    }
+
+    /// What a change-detection hash costs against what it skips, and what a
+    /// narrower cell costs when its pixels really did change.
+    ///
+    /// Ignored and assertion-free on purpose: it prints, it does not judge. There
+    /// is no benchmark harness here and a timing assertion on a shared machine is
+    /// a flaky test — but these numbers decide two real design questions, so
+    /// guessing at them is worse than a test nobody runs by accident:
+    ///
+    /// 1. **Does a change-detection gate pay for itself?** Only if hashing is much
+    ///    cheaper than the encode it skips.
+    /// 2. **How wide should a cell be?** A narrower cell skips more often but pays
+    ///    PNG's per-stream overhead more times, and gets less redundancy to
+    ///    compress within each stream. The ratio printed here is what a grid costs
+    ///    in the case where it wins nothing, so it sets the skip rate the grid has
+    ///    to achieve before it is worth having at all.
+    ///
+    /// Run it in **release**: `png` at `Compression::Fast` is several times slower
+    /// in a debug build, which would flatter the hash and slander the grid.
+    ///
+    /// ```sh
+    /// cargo test --release --lib -- --ignored --nocapture encode_cost
+    /// ```
+    #[test]
+    #[ignore = "prints timings; run explicitly in release"]
+    fn encode_cost_against_hash_cost() {
+        use std::time::Instant;
+
+        // A full-width Retina strip, the unit the rxa agent ships today.
+        let (sw, sh) = (3200u16, 64u16);
+        let runs = 20;
+
+        for (label, make) in [
+            ("flat UI ", flat_ui_rgb as fn(u16, u16) -> Vec<u8>),
+            ("gradient", gradient_rgb as fn(u16, u16) -> Vec<u8>),
+        ] {
+            let strip = make(sw, sh);
+
+            let started = Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(xxhash_rust::xxh3::xxh3_64(&strip));
+            }
+            let hash = started.elapsed() / runs;
+
+            let started = Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(Tile::from_rgb(0, 0, sw, sh, &strip).unwrap());
+            }
+            let whole = started.elapsed() / runs;
+            let strip_bytes = Tile::from_rgb(0, 0, sw, sh, &strip).unwrap().data.len();
+
+            println!(
+                "\n{label}  {sw}x{sh} strip: {strip_bytes} bytes, encode {whole:?}, \
+                 hash {hash:?} ({:.0}x cheaper)",
+                whole.as_secs_f64() / hash.as_secs_f64().max(f64::EPSILON),
+            );
+            println!("  cell      tiles  bytes   vs strip  encode     vs strip  break-even");
+
+            // Both axes, because they are not equivalent: PNG filters and
+            // compresses *along rows*, so cutting the width throws away redundancy
+            // inside every stream, while cutting the height keeps each row whole
+            // and only pays the per-stream overhead again.
+            for (cw, ch) in [
+                (3200u16, 32u16),
+                (3200, 16),
+                (800, 64),
+                (640, 64),
+                (320, 64),
+                (320, 32),
+                (256, 64),
+                (128, 64),
+            ] {
+                let tiles = usize::from(sw / cw) * usize::from(sh / ch);
+                let cell = make(cw, ch);
+                let started = Instant::now();
+                for _ in 0..runs {
+                    for _ in 0..tiles {
+                        std::hint::black_box(Tile::from_rgb(0, 0, cw, ch, &cell).unwrap());
+                    }
+                }
+                let split = started.elapsed() / runs;
+                let cell_bytes = Tile::from_rgb(0, 0, cw, ch, &cell).unwrap().data.len();
+                let total = cell_bytes * tiles;
+                // How many tiles may change before sending tiles costs more than
+                // sending the whole strip. Below this the grid wins.
+                let break_even = (strip_bytes as f64 / cell_bytes as f64).min(tiles as f64);
+                println!(
+                    "  {cw:>4}x{ch:<3}  {tiles:>5}  {total:>6}  {:>7.2}x  {split:>9?}  \
+                     {:>6.2}x  {break_even:>5.1}/{tiles}",
+                    total as f64 / strip_bytes as f64,
+                    split.as_secs_f64() / whole.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+        }
     }
 }

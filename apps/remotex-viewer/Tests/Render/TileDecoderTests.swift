@@ -29,7 +29,7 @@ struct TileDecoderTests {
 
         let tile = try #require(
             await TileDecoder().decode(
-                TileFrame(format: .png, x: 3, y: 5, w: 2, h: 2, payload: png)
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 3, y: 5, w: 2, h: 2, payload: png)
             )
         )
         #expect(tile.x == 3)
@@ -61,7 +61,7 @@ struct TileDecoderTests {
         let tile = try #require(
             await TileDecoder().decode(
                 TileFrame(
-                    format: .jpeg,
+                    format: .jpeg, slot: BatchFrame.noSlot,
                     x: 0,
                     y: 0,
                     w: UInt16(width),
@@ -88,7 +88,7 @@ struct TileDecoderTests {
         ] {
             let tile = try #require(
                 await decoder.decode(
-                    TileFrame(format: .png, x: 0, y: 0, w: 4, h: 4, payload: data)
+                    TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 4, payload: data)
                 ),
                 "\(name) should decode"
             )
@@ -108,12 +108,12 @@ struct TileDecoderTests {
         let decoder = TileDecoder()
         #expect(
             await decoder.decode(
-                TileFrame(format: .png, x: 0, y: 0, w: 8, h: 8, payload: png)
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 8, h: 8, payload: png)
             ) == nil
         )
         #expect(
             await decoder.decode(
-                TileFrame(format: .png, x: 0, y: 0, w: 4, h: 2, payload: png)
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 2, payload: png)
             ) == nil
         )
     }
@@ -123,13 +123,13 @@ struct TileDecoderTests {
         let decoder = TileDecoder()
         #expect(
             await decoder.decode(
-                TileFrame(format: .png, x: 0, y: 0, w: 4, h: 4, payload: Data())
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 4, payload: Data())
             ) == nil
         )
         #expect(
             await decoder.decode(
                 TileFrame(
-                    format: .png,
+                    format: .png, slot: BatchFrame.noSlot,
                     x: 0,
                     y: 0,
                     w: 4,
@@ -151,12 +151,12 @@ struct TileDecoderTests {
         let decoder = TileDecoder()
         #expect(
             await decoder.decode(
-                TileFrame(format: .png, x: 0, y: 0, w: 0, h: 4, payload: png)
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 0, h: 4, payload: png)
             ) == nil
         )
         #expect(
             await decoder.decode(
-                TileFrame(format: .png, x: 0, y: 0, w: 4, h: 0, payload: png)
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 0, payload: png)
             ) == nil
         )
     }

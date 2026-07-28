@@ -38,8 +38,8 @@ const KEEPALIVE_RETRIES: u32 = 3;
 ///
 /// Set above [`keepalive_budget`] so the idle case is still reported as a
 /// keepalive timeout. macOS has no equivalent option; a gateway running there
-/// keeps the retransmission budget for a busy socket — see
-/// `docs/known-issues.md`.
+/// keeps the retransmission budget for a busy socket, which runs to about fifteen
+/// minutes.
 #[cfg(target_os = "linux")]
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -80,7 +80,7 @@ pub fn keepalive_budget() -> Duration {
 /// wedges behind a kernel which still answers reads as an idle desktop, and
 /// neither RFB nor IronRDP offers a probe to close that gap. [`crate::rxa`] asks
 /// the agent process as well, so for that engine this is the outer of two
-/// guarantees rather than the only one (`docs/known-issues.md`).
+/// guarantees rather than the only one.
 pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
     let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(dest))
         .await

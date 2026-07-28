@@ -34,6 +34,9 @@ png = "0.18"
 # Pure Rust, no C dependency; `simd` matters because this runs per tile on a
 # Retina desktop.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
+# Deciding whether a strip's pixels changed at all, before paying to encode them
+# (see capture.rs). Same choice and same reasoning as the gateway's.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Input injection (CGEvent*), the pointer shape (NSCursor) and the menu bar
 # item (NSStatusItem and friends).

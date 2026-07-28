@@ -481,8 +481,8 @@ pub enum GatewayMsg {
     /// Resize the shared display to `w`x`h` **points** — the RDP-shaped "Resize
     /// to window", which a person presses rather than a window drag sends. Every
     /// reconfigure relays every window on that desktop, and a VM's display stack
-    /// can wedge after enough of them (`docs/known-issues.md`), so this is a
-    /// button and never a follow.
+    /// can wedge after enough of them until it is rebooted, so this is a button
+    /// and never a follow.
     ///
     /// **Points, and it is the only field on this wire that is.**
     /// [`AgentMsg::DisplaySize`], [`DisplayEntry::w`] and every tile rectangle are

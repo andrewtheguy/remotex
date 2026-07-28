@@ -209,7 +209,7 @@ async fn the_agents_display_follows_the_clients_window() {
     // The same oversized request again, which clamps to the size the display is
     // already in. Nothing should happen at all — and this is the assertion worth
     // having on a real VM, because a display stack that is asked to reconfigure
-    // often enough wedges until the guest is rebooted (docs/known-issues.md).
+    // often enough wedges until the guest is rebooted.
     agent
         .send(GatewayMsg::ResizeDisplay {
             w: u16::MAX,

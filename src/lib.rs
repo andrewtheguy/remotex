@@ -15,6 +15,8 @@ pub mod rdp_clipboard;
 pub mod rxa;
 pub mod server;
 pub mod session;
+pub mod tiles;
 pub mod vnc;
 pub mod vnc_clipboard;
+pub mod wire;
 pub mod ws;

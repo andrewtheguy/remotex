@@ -111,10 +111,24 @@ Resolution below for the one it does not.
 
 ## Capture and encoding
 
-The agent captures one selected physical display. ScreenCaptureKit frame
-metadata identifies changed regions; those regions are divided into tiles and
-encoded in order. PNG is used for flat or lossless-friendly content and JPEG
-for image-like content.
+The agent captures one selected physical display. ScreenCaptureKit frame metadata
+identifies changed regions; those regions are snapped **outward** onto a fixed
+320×64 grid, deduplicated across the frame, and encoded in order. PNG is used for
+flat or lossless-friendly content and JPEG for image-like content.
+
+The grid is there because the reported regions are *coarse*. Measured on the test
+Mac, 65% of all bytes reaching the browser were full-width 64-row strips at ~62 KB
+each, and most of every one was pixels the client already had. Each cell's source
+pixels are hashed before anything is packed or encoded, and a cell whose hash has
+not moved is not sent at all — so a strip that changed in one place now costs the
+cells that changed. On an untouched 3200×2000 desktop that took the idle cost from
+534 B/s to zero; the same session before any of this cost 290 MB in 30 s.
+
+Snapping outward, rather than clipping to the reported region, is what makes a
+cell's geometry the same every time — which is what both the hash above and the
+gateway's tile cache recognise a repeat by. The cost is that thin damage rounds up
+(a 34×15 cursor rect becomes one cell); measured, that was 0.7% of the bytes
+against the 65% above.
 
 Encoding is intentionally ordered on one worker. Parallel tile completion
 could allow an older tile to overwrite a newer update to the same region.
@@ -251,7 +265,8 @@ the framebuffer, or stop being resampled.
 
 The same argument, applied to the other property, with one difference that
 decides the whole shape: a reconfigure relays every window on that desktop, and a
-guest's display stack can wedge after enough of them ([`known-issues.md`](known-issues.md)).
+guest's display stack can wedge after enough of them, until the guest is
+rebooted.
 So this is RDP's shape rather than VNC's — the floating menu's and the viewer's
 **Resize to window**, pressed, never a window drag followed forty times.
 
@@ -337,9 +352,9 @@ the agent to be in charge:
 The one remembered state that is a genuine problem is an arrangement that holds
 the identity **offline**. Nothing in the process can clear it, and the agent
 reports it rather than minting a new identity to escape it — escaping it would
-discard the arrangement, which is the one thing a monitor never does. The fix is
-on the Mac, in System Settings, as it would be for a panel that came back dark;
-see [`known-issues.md`](known-issues.md).
+discard the arrangement, which is the one thing a monitor never does. That state survives a reboot and cannot be cleared from inside the
+process, so the fix is on the Mac, in System Settings, as it would be for a panel
+that came back dark.
 
 There is no API for any of this in either direction: nothing on
 `CGVirtualDisplayDescriptor` or `CGVirtualDisplaySettings` places a display,

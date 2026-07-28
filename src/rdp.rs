@@ -41,10 +41,9 @@ use tokio::time::{Duration, Instant};
 use crate::config::TargetConfig;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
-use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, MouseButton, STRIP_ROWS, ServerMsg, Tile, UNSCALED,
-};
+use crate::protocol::{ClientMsg, ClipboardSnapshot, MouseButton, ServerMsg, Tile, UNSCALED};
 use crate::rdp_clipboard::{self, ClipboardEvent};
+use crate::tiles::{Rect, Shadow};
 
 // A type-erased async stream, so the connect path (which upgrades TCP → TLS) can
 // return a single concrete framed type.
@@ -255,6 +254,9 @@ async fn active_loop(
 
     let mut desktop = connection_result.desktop_size;
     let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
+    // The pixels the browser has already been sent. Lives beside the framebuffer
+    // it shadows, and is forgotten on a repaint and on a resize.
+    let mut shadow = Shadow::new("rdp", desktop.width, desktop.height);
 
     let mut active_stage = ActiveStageBuilder {
         static_channels: connection_result.static_channels,
@@ -322,6 +324,13 @@ async fn active_loop(
                 // A (re)attached browser needs the desktop size and a full
                 // repaint from the server-owned framebuffer.
                 if matches!(input, ClientMsg::Refresh) {
+                    // A repaint means the client has nothing, so the shadow must
+                    // not claim otherwise. This covers detach, reattach and
+                    // takeover in one place, because `Refresh` is injected on
+                    // every attach — and it is what keeps the session layer's
+                    // frame dropping while nobody is attached from turning into
+                    // a permanently blank region.
+                    shadow.forget();
                     frame_tx
                         .send(ServerMsg::Resize {
                             w: desktop.width,
@@ -336,10 +345,13 @@ async fn active_loop(
                         .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
                     send_tiles(
                         &image,
-                        0,
-                        0,
-                        desktop.width.saturating_sub(1),
-                        desktop.height.saturating_sub(1),
+                        Rect {
+                            left: 0,
+                            top: 0,
+                            right: desktop.width.saturating_sub(1),
+                            bottom: desktop.height.saturating_sub(1),
+                        },
+                        &mut shadow,
                         &frame_tx,
                     )
                     .await?;
@@ -556,10 +568,13 @@ async fn active_loop(
                 ActiveStageOutput::GraphicsUpdate(region) => {
                     send_tiles(
                         &image,
-                        region.left,
-                        region.top,
-                        region.right,
-                        region.bottom,
+                        Rect {
+                            left: region.left,
+                            top: region.top,
+                            right: region.right,
+                            bottom: region.bottom,
+                        },
+                        &mut shadow,
                         &frame_tx,
                     )
                     .await?;
@@ -575,6 +590,7 @@ async fn active_loop(
                     desktop = reactivate(&mut active_stage, &mut framed, &activation_factory)
                         .await?;
                     image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
+                    shadow.resize(desktop.width, desktop.height);
                     last_pos = (
                         last_pos.0.min(desktop.width.saturating_sub(1)),
                         last_pos.1.min(desktop.height.saturating_sub(1)),
@@ -593,6 +609,7 @@ async fn active_loop(
         }
     }
 
+    shadow.report();
     Ok(())
 }
 
@@ -833,8 +850,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
-        // bridge handles them and they never reach here.
-        ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
+        // bridge handles them and they never reach here. `CacheReset` is one of
+        // them: it empties that socket's tile cache and injects its own `Refresh`.
+        ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::CacheReset => Vec::new(),
         // An RDP session is one framebuffer spanning every monitor the server
         // composed into it, and its protocol has no way to ask for one of them.
         // So this engine never sends a display list, no client offers the
@@ -848,46 +866,56 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
     }
 }
 
-/// Repack the dirty rectangle `[left..=right] × [top..=bottom]` into packed
-/// RGB strips and send each as a [`ServerMsg::Tile`] (binary WS frame with a
-/// PNG-compressed payload — see `protocol::Tile`).
+/// Send whatever part of `rect` the client does not already have, as tiles of at
+/// most [`crate::protocol::CELL_H`] rows each.
+///
+/// Comparing against `shadow` earns its keep on this engine in particular. The RDP
+/// pointer is composited into the framebuffer (`pointer_software_rendering:
+/// true`), so *every* mouse event over a still desktop produces a damage
+/// rectangle — and this engine also repaints regions that did not change, which
+/// nothing upstream filters. Both come back as `None` here and cost nothing but a
+/// pack and a `memcmp`.
+///
+/// The pack happens either way; only the PNG encode is skipped, and the encode is
+/// where the time goes (~8–10× the hash it replaced, measured in
+/// `protocol::tests::encode_cost_against_hash_cost`).
 async fn send_tiles(
     image: &DecodedImage,
-    left: u16,
-    top: u16,
-    right: u16,
-    bottom: u16,
+    rect: Rect,
+    shadow: &mut Shadow,
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
-    if right < left || bottom < top {
+    let (fb_w, fb_h) = shadow.size();
+    if rect.left >= fb_w || rect.top >= fb_h {
         return Ok(());
     }
-    let width = right - left + 1;
-    let total_h = bottom - top + 1;
-    let bpp = image.bytes_per_pixel();
-    let stride = image.stride();
-    let data = image.data();
+    let rect = Rect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right.min(fb_w - 1),
+        bottom: rect.bottom.min(fb_h - 1),
+    };
+    if rect.right < rect.left || rect.bottom < rect.top {
+        return Ok(());
+    }
 
-    let mut done = 0u16;
-    while done < total_h {
-        let h = STRIP_ROWS.min(total_h - done);
-        let y0 = top + done;
+    let mut buf = Vec::new();
+    pack_rgb(image, rect, &mut buf);
+    let Some(changed) = shadow.accept(rect, &buf) else {
+        return Ok(());
+    };
 
-        // Pack to RGB888: the framebuffer alpha is meaningless for a screen
-        // (and IronRDP may leave it 0), so it is dropped rather than shipped.
-        let mut buf = Vec::with_capacity(usize::from(width) * usize::from(h) * 3);
-        for r in 0..h {
-            let src_y = usize::from(y0 + r);
-            let start = src_y * stride + usize::from(left) * bpp;
-            let line = &data[start..start + usize::from(width) * bpp];
-            for px in line.chunks_exact(bpp) {
-                buf.extend_from_slice(&px[..3]);
-            }
-        }
-
-        let tile = Tile::from_rgb(left, y0, width, h, &buf)?;
+    for band in changed.bands() {
+        // Repacked rather than sliced out of `buf`: a band of the trimmed rectangle
+        // is narrower than the reported one, so its rows are not contiguous there.
+        pack_rgb(image, band, &mut buf);
+        let tile = Tile::from_rgb(band.left, band.top, band.w(), band.h(), &buf)?;
         debug!(
-            "rdp: tile {width}x{h} at ({left},{y0}): {} -> {} bytes",
+            "rdp: tile {}x{} at ({},{}): {} -> {} bytes",
+            band.w(),
+            band.h(),
+            band.left,
+            band.top,
             buf.len(),
             tile.data.len()
         );
@@ -895,11 +923,29 @@ async fn send_tiles(
             .send(ServerMsg::Tile(tile))
             .await
             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
-
-        done += h;
     }
 
     Ok(())
+}
+
+/// Pack `rect` out of the framebuffer into `buf` as RGB888.
+///
+/// The framebuffer alpha is meaningless for a screen (and IronRDP may leave it 0),
+/// so it is dropped rather than shipped.
+fn pack_rgb(image: &DecodedImage, rect: Rect, buf: &mut Vec<u8>) {
+    let bpp = image.bytes_per_pixel();
+    let stride = image.stride();
+    let data = image.data();
+    let w = usize::from(rect.w());
+
+    buf.clear();
+    buf.reserve(w * usize::from(rect.h()) * 3);
+    for r in 0..rect.h() {
+        let start = usize::from(rect.top + r) * stride + usize::from(rect.left) * bpp;
+        for px in data[start..start + w * bpp].chunks_exact(bpp) {
+            buf.extend_from_slice(&px[..3]);
+        }
+    }
 }
 
 /// Render an error together with its full `source()` chain, so wrappers like

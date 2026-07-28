@@ -100,13 +100,61 @@ enum ProbeCommand {
         }
     }
 
+    /// What arrived on the socket.
+    ///
+    /// Deliberately shaped like the gateway's own `Totals` line (`src/ws.rs`) so
+    /// the two can be read against each other: that side reports what it sent,
+    /// this side what a real client received. Bytes as well as counts, because a
+    /// transport change can move one without the other.
+    private struct Counts {
+        var control = 0
+        var controlBytes = 0
+        var binary = 0
+        var binaryBytes = 0
+        /// Tile records across every batch, which is the number that used to equal
+        /// `binary` one-for-one. Seeing the two apart is the whole point.
+        var records = 0
+        /// References among them: records the gateway sent as a slot and a position
+        /// because this client already had the pixels.
+        var references = 0
+        var largestBinary = 0
+        var largestTile = "none"
+
+        mutating func text(_ text: String) {
+            control += 1
+            controlBytes += text.utf8.count
+        }
+
+        mutating func binaryFrame(_ data: Data, records batch: [BatchFrame.Record]?) {
+            binary += 1
+            binaryBytes += data.count
+            records += batch?.count ?? 0
+            references += batch?.count { record in
+                if case .reference = record { true } else { false }
+            } ?? 0
+            // Both halves have to come from the *same* frame, or the summary pairs
+            // the largest frame with whatever happened to arrive last — which is
+            // the number this probe exists to report.
+            if data.count > largestBinary {
+                largestBinary = data.count
+                largestTile = batch.map { records in
+                    let shapes = records.prefix(3).map { record in
+                        switch record {
+                        case .tile(let tile): "\(tile.w)x\(tile.h) \(tile.format)"
+                        case .reference(let slot, _, _): "ref slot \(slot)"
+                        }
+                    }
+                    let more = records.count > 3 ? ", +\(records.count - 3) more" : ""
+                    return "\(records.count) records: \(shapes.joined(separator: ", "))\(more)"
+                } ?? "undecodable"
+            }
+        }
+    }
+
     private static func pump(_ transport: any WebSocketTransport, seconds: Int) async -> Bool {
         let started = ContinuousClock.now
         let deadline = started + .seconds(seconds)
-        var control = 0
-        var tiles = 0
-        var largestPayload = 0
-        var largestTile = "none"
+        var counts = Counts()
 
         let stopwatch = Task {
             try? await Task.sleep(for: .seconds(seconds))
@@ -124,55 +172,35 @@ enum ProbeCommand {
                 // Surviving past the gateway's 60s heartbeat deadline is the
                 // answer to question 1; ending before it is a failure.
                 let survived = elapsed > .seconds(60)
-                summarize(
-                    control: control,
-                    tiles: tiles,
-                    largestPayload: largestPayload,
-                    largestTile: largestTile,
-                    survivedHeartbeat: survived
-                )
+                summarize(counts, survivedHeartbeat: survived)
                 return survived
             }
             switch frame {
             case .text(let text):
-                control += 1
+                counts.text(text)
                 print("probe: control \(text.prefix(200))")
             case .binary(let data):
-                tiles += 1
-                let tile = TileFrame.decode(data)
-                if tile == nil {
+                let records = BatchFrame.decode(data)
+                if records == nil {
                     print("probe: undecodable \(data.count)-byte binary frame")
                 }
-                // Both halves have to come from the *same* frame, or the summary
-                // pairs the largest payload with whatever tile happened to arrive
-                // last — which is the number this probe exists to report.
-                if data.count > largestPayload {
-                    largestPayload = data.count
-                    largestTile = tile.map { "\($0.w)x\($0.h) \($0.format)" } ?? "undecodable"
-                }
+                counts.binaryFrame(data, records: records)
             }
         }
 
         print("probe: idled the full \(seconds)s with the socket up")
-        summarize(
-            control: control,
-            tiles: tiles,
-            largestPayload: largestPayload,
-            largestTile: largestTile,
-            survivedHeartbeat: true
-        )
+        summarize(counts, survivedHeartbeat: true)
         return true
     }
 
-    private static func summarize(
-        control: Int,
-        tiles: Int,
-        largestPayload: Int,
-        largestTile: String,
-        survivedHeartbeat: Bool
-    ) {
-        print("probe: \(control) control frames, \(tiles) tiles")
-        print("probe: largest binary frame \(largestPayload) bytes (\(largestTile))")
+    private static func summarize(_ counts: Counts, survivedHeartbeat: Bool) {
+        print(
+            "probe: \(counts.binary) binary frames / \(counts.binaryBytes) bytes "
+                + "carrying \(counts.records) tile records "
+                + "(\(counts.references) cache references), "
+                + "\(counts.control) control frames / \(counts.controlBytes) bytes"
+        )
+        print("probe: largest binary frame \(counts.largestBinary) bytes (\(counts.largestTile))")
         print("probe: default message limit is 1 MiB; this build allows \(URLSessionWebSocketTransport.maximumMessageSize)")
         print("probe: heartbeat answered by URLSession: \(survivedHeartbeat ? "yes" : "NO")")
     }

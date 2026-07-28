@@ -112,6 +112,102 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(15);
 /// instead of queueing frames here.
 const AGENT_BUFFER: usize = 32;
 
+/// The state that outlives one agent link.
+///
+/// `announced`, `displays` and `clipboard` survive a silent reconnect for the same
+/// reason: the *browser* did not go anywhere. What it has been told about the
+/// desktop, which displays its menu lists, and when it last saw the remote
+/// clipboard change are all still true on the other side of a dropped TCP
+/// connection.
+///
+/// `relayed` is the exception, and lives here only to be carried between the
+/// pumps rather than across them: every new link starts it from nothing
+/// ([`RelayMemo::forget`] at the top of [`pump`]). A browser that attached during
+/// the outage had its `Refresh` discarded with the rest of the stale input, so
+/// nothing else would tell the memo that canvas is now blank.
+#[derive(Default)]
+struct Carried {
+    /// What the browser has been told about the desktop. A `Resize` costs the
+    /// frontend its canvas contents, so a silent reconnect to an unchanged display
+    /// must not announce one.
+    announced: Option<Announced>,
+    /// The agent's last display list — the whole of what a client's display menu
+    /// knows. A browser attaching in the gap between a reconnect and the agent's
+    /// next report would otherwise find no menu at all.
+    displays: Option<(u32, Vec<DisplayInfo>)>,
+    /// The agent supplies the clipboard activity time, so holding the snapshot is
+    /// what stops an otherwise-identical Fetch losing its timestamp merely because
+    /// the transport link changed underneath it.
+    clipboard: Option<ClipboardSnapshot>,
+    /// See [`RelayMemo`].
+    relayed: RelayMemo,
+}
+
+/// What the browser was last sent for each rectangle, so an agent that re-encodes
+/// pixels it already sent does not cost the link twice.
+///
+/// Worth having because ScreenCaptureKit reports damage *coarsely*. Measured on
+/// the test Mac at 3200x2000 with nobody touching it, 15 to 21 of the 32
+/// full-width strips that cover the desktop come back dirty on every capture
+/// frame, each one a ~95 KB PNG. Most of that is unchanged pixels.
+///
+/// The gateway cannot look inside an agent tile — not decoding one is the entire
+/// point of this engine — so the only thing it can compare is the encoded bytes.
+/// That is enough: the agent's encoders are deterministic, so identical pixels at
+/// identical dimensions produce an identical payload. What it cannot catch is the
+/// same content arriving at a *different* rectangle, which is a job for a real
+/// tile cache further down the link.
+///
+/// Hashed rather than kept, because holding the payloads would cost a second copy
+/// of the screen for nothing. 64-bit rather than 32 because a collision here is
+/// not a retry: it is a rectangle left showing stale pixels until something else
+/// happens to change it.
+#[derive(Default)]
+struct RelayMemo {
+    sent: std::collections::HashMap<(u16, u16, u16, u16), u64>,
+    dropped: u64,
+    dropped_bytes: u64,
+}
+
+impl RelayMemo {
+    /// Whether this payload is new for its rectangle, recording it either way.
+    fn is_new(&mut self, rect: (u16, u16, u16, u16), data: &[u8]) -> bool {
+        let digest = xxhash_rust::xxh3::xxh3_64(data);
+        if self.sent.insert(rect, digest) == Some(digest) {
+            self.dropped += 1;
+            self.dropped_bytes += data.len() as u64;
+            return false;
+        }
+        true
+    }
+
+    /// Forget everything, because the browser is about to be repainted from
+    /// scratch or the coordinate space has changed under it.
+    ///
+    /// Not merely tidy. The session layer drops frames while no browser is
+    /// attached ([`crate::session`]), so without this a reattached browser would
+    /// be denied tiles this memo believes it already has — a permanently blank
+    /// region. `Refresh` is injected on every attach, which is what makes
+    /// clearing it there enough to cover detach, reattach and takeover alike.
+    fn forget(&mut self) {
+        self.report();
+        self.sent.clear();
+        self.dropped = 0;
+        self.dropped_bytes = 0;
+    }
+
+    /// Log what the dedup has saved, if anything. Reported from both places the
+    /// count stops being current: a repaint, and the end of the session.
+    fn report(&self) {
+        if self.dropped > 0 {
+            info!(
+                "rxa: relay dedup dropped {} repeated tile(s) / {} bytes",
+                self.dropped, self.dropped_bytes
+            );
+        }
+    }
+}
+
 /// Connect to the Mac agent and drive the session until the browser goes away.
 ///
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
@@ -161,18 +257,7 @@ async fn run_with(
         resize: config.resize,
     };
     let mut backoff = retry.backoff_min;
-    // What the browser has been told about the desktop, carried across
-    // reconnects: a `Resize` costs the frontend its canvas contents, so a silent
-    // reconnect to an unchanged display must not announce one.
-    let mut announced: Option<Announced> = None;
-    // The agent supplies the activity time. Keep the last snapshot across a
-    // silent agent reconnect so an otherwise-identical Fetch does not lose a
-    // timestamp merely because the transport link changed underneath it.
-    let mut clipboard_snapshot: Option<ClipboardSnapshot> = None;
-    // Likewise the display list. A reconnecting agent re-sends it beside its
-    // `Hello`, but a browser attaching in the gap between the two would
-    // otherwise find no menu at all.
-    let mut displays: Option<(u32, Vec<DisplayInfo>)> = None;
+    let mut carried = Carried::default();
     loop {
         let size = (session.width, session.height);
         info!(
@@ -183,15 +268,14 @@ async fn run_with(
             session,
             &mut input_rx,
             &frame_tx,
-            &mut announced,
-            &mut displays,
-            &mut clipboard_snapshot,
+            &mut carried,
             caps,
         )
         .await
         {
             Ok(()) => {
                 info!("rxa: session ended");
+                carried.relayed.report();
                 return;
             }
             // The link broke. Everything below is the silent-reconnect path.
@@ -354,12 +438,7 @@ async fn pump(
     session: Session,
     input_rx: &mut mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: &mpsc::Sender<ServerMsg>,
-    announced: &mut Option<Announced>,
-    // The agent's last display list, held across reconnects for the same reason
-    // `announced` is: a browser that attaches mid-session has missed it, and it
-    // is the whole of what the client's display menu knows.
-    displays: &mut Option<(u32, Vec<DisplayInfo>)>,
-    clipboard_snapshot: &mut Option<ClipboardSnapshot>,
+    carried: &mut Carried,
     caps: Caps,
 ) -> anyhow::Result<()> {
     let Session {
@@ -369,6 +448,17 @@ async fn pump(
         mut height,
         mut scale,
     } = session;
+
+    // Every link starts the dedup from nothing, including a reconnect to a
+    // browser that never went away and still holds every pixel it was sent.
+    //
+    // Deduping that reconnect repaint would be sound *if* the browser really is
+    // the same one — but it might not be. `idle` discards input during an outage
+    // (stale input is worse than none), and a browser that attached in that window
+    // had its `Refresh` discarded with the rest, so nothing else would tell this
+    // memo the canvas is now blank. Re-sending one screen per agent reconnect is
+    // cheap and rare; a permanently blank region is neither.
+    carried.relayed.forget();
 
     // Nothing to discover: the agent only builds for macOS, so reaching one at
     // all settles it.
@@ -383,7 +473,7 @@ async fn pump(
     // On the initial connect, and afterwards only when the Mac came back a
     // different size. Unchanged, the browser keeps the canvas it already has and
     // the reconnect stays invisible beyond a pause in frames.
-    if *announced != Some((width, height, scale)) {
+    if carried.announced != Some((width, height, scale)) {
         if frame_tx
             .send(ServerMsg::Resize {
                 w: width,
@@ -395,7 +485,7 @@ async fn pump(
         {
             return Ok(()); // browser link already gone
         }
-        *announced = Some((width, height, scale));
+        carried.announced = Some((width, height, scale));
     }
 
     // `FrameReader::recv` is not cancel-safe, so it cannot live in the
@@ -433,6 +523,9 @@ async fn pump(
                 last_seen = Instant::now();
                 match msg {
                     AgentMsg::Tile { format, x, y, w, h, data } => {
+                        if !carried.relayed.is_new((x, y, w, h), &data) {
+                            continue; // the browser is already showing these pixels
+                        }
                         let tile = Tile::encoded(format, x, y, w, h, data);
                         if frame_tx.send(ServerMsg::Tile(tile)).await.is_err() {
                             return Ok(());
@@ -454,7 +547,10 @@ async fn pump(
                         scale = rxa_proto::msg::scale_ratio(reported);
                         info!("rxa: display reconfigured to {w}x{h} at {scale}x");
                         (width, height) = (w, h);
-                        *announced = Some((w, h, scale));
+                        carried.announced = Some((w, h, scale));
+                        // The client clears its canvas on a resize, and the same
+                        // rectangle now means different pixels.
+                        carried.relayed.forget();
                         if frame_tx.send(ServerMsg::Resize { w, h, scale }).await.is_err() {
                             return Ok(());
                         }
@@ -464,7 +560,8 @@ async fn pump(
                     AgentMsg::Hello { w, h, scale: reported, .. } => {
                         scale = rxa_proto::msg::scale_ratio(reported);
                         (width, height) = (w, h);
-                        *announced = Some((w, h, scale));
+                        carried.announced = Some((w, h, scale));
+                        carried.relayed.forget();
                         if frame_tx.send(ServerMsg::Resize { w, h, scale }).await.is_err() {
                             return Ok(());
                         }
@@ -483,7 +580,7 @@ async fn pump(
                                 detail: display.detail,
                             })
                             .collect();
-                        *displays = Some((active, reported.clone()));
+                        carried.displays = Some((active, reported.clone()));
                         if frame_tx
                             .send(ServerMsg::Displays { active, displays: reported })
                             .await
@@ -517,7 +614,7 @@ async fn pump(
                             );
                         }
                         let changed_at_ms = changed_at_ms.or_else(|| {
-                            clipboard_snapshot
+                            carried.clipboard
                                 .as_ref()
                                 .filter(|snapshot| snapshot.text == text)
                                 .and_then(|snapshot| snapshot.changed_at_ms)
@@ -527,7 +624,7 @@ async fn pump(
                             changed_at_ms,
                             oversized_bytes,
                         };
-                        *clipboard_snapshot = Some(snapshot.clone());
+                        carried.clipboard = Some(snapshot.clone());
                         if caps.clipboard
                             && frame_tx
                                 .send(ServerMsg::Clipboard {
@@ -564,6 +661,9 @@ async fn pump(
                 // remote runs: re-announce both before asking the agent to
                 // repaint.
                 if matches!(msg, ClientMsg::Refresh) {
+                    // Before anything else: a repaint exists to put pixels on a
+                    // canvas that has none, so nothing may be withheld from it.
+                    carried.relayed.forget();
                     if frame_tx
                         .send(ServerMsg::Resize { w: width, h: height, scale })
                         .await
@@ -578,7 +678,7 @@ async fn pump(
                     // for, because `Refresh` reaches the agent as a repaint and
                     // a repaint is all it should be: the list has not changed
                     // just because a browser came back to look at it.
-                    if let Some((active, list)) = displays.clone()
+                    if let Some((active, list)) = carried.displays.clone()
                         && frame_tx
                             .send(ServerMsg::Displays { active, displays: list })
                             .await
@@ -748,7 +848,8 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
         | ClientMsg::Clipboard { .. }
         | ClientMsg::Viewport { .. }
         | ClientMsg::Connect { .. }
-        | ClientMsg::Disconnect => {
+        | ClientMsg::Disconnect
+        | ClientMsg::CacheReset => {
             return None;
         }
     })
@@ -1237,5 +1338,46 @@ mod tests {
         let (frame_tx, frame_rx) = mpsc::channel::<ServerMsg>(4);
         drop(frame_rx);
         assert!(!idle(BACKOFF_MIN, &mut input_rx, &frame_tx).await);
+    }
+
+    // The whole point: a coarse dirty rect that re-encodes to the bytes already on
+    // screen costs nothing, while an actual change still gets through.
+    #[test]
+    fn the_relay_memo_drops_a_repeat_and_passes_a_change() {
+        let mut memo = RelayMemo::default();
+        let rect = (0, 64, 3200, 64);
+        assert!(memo.is_new(rect, b"first"), "never seen before");
+        assert!(!memo.is_new(rect, b"first"), "identical bytes, same rect");
+        assert!(memo.is_new(rect, b"second"), "the pixels actually changed");
+        assert!(!memo.is_new(rect, b"second"), "and now that one is the repeat");
+        assert_eq!(memo.dropped, 2);
+    }
+
+    // Keyed by rectangle, because that is all the gateway knows: the same content
+    // arriving somewhere else is a paint the client has not been given.
+    #[test]
+    fn the_relay_memo_does_not_confuse_two_rectangles() {
+        let mut memo = RelayMemo::default();
+        assert!(memo.is_new((0, 0, 128, 64), b"same"));
+        assert!(memo.is_new((0, 64, 128, 64), b"same"), "different y");
+        assert!(memo.is_new((0, 0, 64, 64), b"same"), "different w");
+        assert_eq!(memo.dropped, 0);
+    }
+
+    // A repaint exists to fill a canvas that has nothing on it, so nothing may be
+    // withheld from one. Everything that empties a client's canvas — attach,
+    // reattach, takeover, resize, a new agent link — goes through `forget`.
+    #[test]
+    fn forgetting_makes_every_rectangle_paintable_again() {
+        let mut memo = RelayMemo::default();
+        let rect = (0, 0, 128, 64);
+        assert!(memo.is_new(rect, b"pixels"));
+        assert!(!memo.is_new(rect, b"pixels"));
+        memo.forget();
+        assert!(
+            memo.is_new(rect, b"pixels"),
+            "a repaint must reach a blank canvas even with unchanged pixels"
+        );
+        assert_eq!(memo.dropped, 0, "the counters reset with the memo");
     }
 }

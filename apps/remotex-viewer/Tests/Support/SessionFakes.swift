@@ -218,7 +218,8 @@ final class RecordingSink: GatewaySessionSink {
             switch event {
             case .status(let status): "status:\(status.rawValue)"
             case .control(let message): "control:\(Self.label(message))"
-            case .tile(let tile): "tile:\(tile.x),\(tile.y),\(tile.w)x\(tile.h)"
+            case .tiles(let tiles):
+                "tiles:" + tiles.map { "\($0.x),\($0.y),\($0.w)x\($0.h)" }.joined(separator: "|")
             case .clearFramebuffer: "clear"
             case .releaseInput: "release"
             case .failPendingClipboardFetch: "failFetch"
@@ -353,13 +354,49 @@ struct AttachedSession {
     }
 }
 
-/// A real single-colour PNG tile frame, header and all. Encoded rather than
-/// hand-rolled so the decode under test is the same one production runs.
+/// A batch frame carrying one tile, which is what most of these tests want.
 func tileFrame(
     x: UInt16,
     y: UInt16,
     size: UInt16 = 2,
     red: UInt8 = 0xFF
+) throws -> Data {
+    batchFrame([try tileRecord(x: x, y: y, size: size, red: red)])
+}
+
+/// A batch frame wrapping `records`, whose count the header reports honestly.
+func batchFrame(_ records: [Data]) -> Data {
+    var frame = Data([BatchFrame.frameKind, 0])
+    let count = UInt16(records.count)
+    frame.append(UInt8(count & 0xFF))
+    frame.append(UInt8(count >> 8))
+    for record in records {
+        frame.append(record)
+    }
+    return frame
+}
+
+/// A `TILE_REF` record: seven bytes naming a slot and where to redraw it.
+func referenceRecord(slot: UInt16, x: UInt16, y: UInt16) -> Data {
+    var record = Data([BatchFrame.opTileRef])
+    for value in [slot, x, y] {
+        record.append(UInt8(value & 0xFF))
+        record.append(UInt8(value >> 8))
+    }
+    return record
+}
+
+/// One real single-colour PNG `TILE` record, header and all. Encoded rather than
+/// hand-rolled so the decode under test is the same one production runs.
+///
+/// `slot` defaults to "do not remember this", so a test only names one when the
+/// cache is what it is about.
+func tileRecord(
+    x: UInt16,
+    y: UInt16,
+    size: UInt16 = 2,
+    red: UInt8 = 0xFF,
+    slot: UInt16 = BatchFrame.noSlot
 ) throws -> Data {
     let side = Int(size)
     var pixels = [UInt8]()
@@ -389,11 +426,15 @@ func tileFrame(
     CGImageDestinationAddImage(destination, image, nil)
     #expect(CGImageDestinationFinalize(destination))
 
-    var frame = Data([TileFrame.frameKind, TileFormat.png.rawValue])
-    for value in [x, y, size, size] {
-        frame.append(UInt8(value & 0xFF))
-        frame.append(UInt8(value >> 8))
+    var record = Data([BatchFrame.opTile, TileFormat.png.rawValue])
+    for value in [slot, x, y, size, size] {
+        record.append(UInt8(value & 0xFF))
+        record.append(UInt8(value >> 8))
     }
-    frame.append(encoded as Data)
-    return frame
+    let length = UInt32((encoded as Data).count)
+    for shift in [0, 8, 16, 24] {
+        record.append(UInt8((length >> shift) & 0xFF))
+    }
+    record.append(encoded as Data)
+    return record
 }

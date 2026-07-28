@@ -332,7 +332,7 @@ impl VirtualDisplay {
     /// display already being that size — the common case for a button pressed
     /// twice on a window that did not move — and skipping it is not an
     /// optimisation: a guest's display stack can wedge after enough mode changes
-    /// and need a reboot to clear (`docs/known-issues.md`).
+    /// and need a reboot to clear.
     pub fn set_size(&self, points: (u32, u32)) -> anyhow::Result<bool> {
         let want = size_in_envelope(points, self.base_points);
         // Whether the request was clamped and whether it changes anything are two
@@ -532,8 +532,7 @@ impl Drop for VirtualDisplay {
 /// the envelope, and the display keeps the size it was last put in.
 ///
 /// The one state this cannot undo is an arrangement remembered as *offline* — see
-/// [`Offline`], which is reported rather than routed around, and
-/// `docs/known-issues.md`.
+/// [`Offline`], which is reported rather than routed around.
 const SERIAL: u32 = 1;
 
 /// A display that was created but that the WindowServer will not bring online.

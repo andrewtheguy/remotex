@@ -55,9 +55,10 @@ use crate::config::{Subtype, TargetConfig};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, STRIP_ROWS,
-    ServerMsg, Tile, UNSCALED, clipboard_fits,
+    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, ServerMsg, Tile,
+    UNSCALED, clipboard_fits,
 };
+use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_clipboard;
 
 const SECURITY_NONE: u8 = 1;
@@ -132,6 +133,14 @@ struct DesktopState {
 }
 
 type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
+
+/// The pixels the browser has already been sent, so an update carrying none of
+/// them costs nothing and one carrying a few is sent as those few.
+///
+/// Shared because the two halves of the session both have a say: the read loop
+/// compares every rect against it, and the input side forgets it on `Refresh`.
+/// The lock is never held across an await, as with every other lock here.
+type SharedShadow = Arc<std::sync::Mutex<Shadow>>;
 
 /// What the browser should draw for the pointer, tracked so a browser that
 /// (re)attaches mid-session gets it replayed — the server only sends the shape
@@ -392,16 +401,21 @@ async fn active_loop(
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
+    let shadow: SharedShadow = Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1)));
+    let shared = Shared {
+        writer: Arc::clone(&writer),
+        desktop: Arc::clone(&desktop),
+        cursor: Arc::clone(&cursor),
+        clipboard: Arc::clone(&clipboard),
+        shadow: Arc::clone(&shadow),
+    };
 
     // Kick off the update cycle with one full (non-incremental) request.
     write_to(&writer, &update_request(false, size)).await?;
 
     let mut read_task = tokio::spawn(read_loop(
         reader,
-        Arc::clone(&writer),
-        Arc::clone(&desktop),
-        Arc::clone(&cursor),
-        Arc::clone(&clipboard),
+        shared,
         clipboard_enabled,
         frame_tx.clone(),
     ));
@@ -437,10 +451,19 @@ async fn active_loop(
                     }
                 } else if matches!(input, ClientMsg::Refresh) {
                     // A (re)attached browser needs the desktop size and a full
-                    // repaint. Unlike RDP, this engine keeps no
-                    // framebuffer copy — the VNC server is one LAN hop away,
-                    // so a non-incremental update request repaints just as
-                    // well without duplicating the framebuffer here.
+                    // repaint, and the repaint is still asked of the *server*
+                    // rather than answered from the shadow below. The shadow
+                    // holds what the browser was sent, which is not the same
+                    // thing as the remote's current pixels — the session layer
+                    // drops frames while nobody is attached, so it goes stale
+                    // exactly across a detach. Answering locally would trade the
+                    // server's ground truth for bytes on the LAN hop, which is
+                    // not the link this is trying to save.
+                    //
+                    // So: forget what the browser had. Everything the
+                    // non-incremental update brings back is then new, which is
+                    // the truth — a browser that just attached has nothing.
+                    shadow.lock().unwrap().forget();
                     let size = desktop.lock().unwrap().size;
                     if frame_tx
                         .send(ServerMsg::Resize {
@@ -578,16 +601,25 @@ async fn request_resize<W: AsyncWrite + Unpin>(
     write_to(writer, &msg).await
 }
 
-/// Read server messages forever, forwarding framebuffer updates as tiles.
-async fn read_loop(
-    mut reader: Reader,
+/// Everything the read loop and the rect handlers under it share with the input
+/// side. Grouped because it all travels together and none of it is optional.
+#[derive(Clone)]
+struct Shared {
     writer: SharedWriter,
     desktop: SharedDesktop,
     cursor: SharedCursor,
     clipboard: SharedClipboard,
+    shadow: SharedShadow,
+}
+
+/// Read server messages forever, forwarding framebuffer updates as tiles.
+async fn read_loop(
+    mut reader: Reader,
+    shared: Shared,
     clipboard_enabled: bool,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<()> {
+    let Shared { writer, desktop, clipboard, .. } = &shared;
     loop {
         let msg_type = match reader.read_u8().await {
             Ok(t) => t,
@@ -620,12 +652,12 @@ async fn read_loop(
                 let rects = reader.read_u16().await?;
                 let mut resized = false;
                 for _ in 0..rects {
-                    resized |= read_rect(&mut reader, &writer, &desktop, &cursor, &frame_tx).await?;
+                    resized |= read_rect(&mut reader, &shared, &frame_tx).await?;
                 }
                 // Complete the cycle. A resize invalidates the old contents,
                 // so repaint fully; otherwise ask for the next increment.
                 let size = desktop.lock().unwrap().size;
-                write_to(&writer, &update_request(!resized, size)).await?;
+                write_to(writer, &update_request(!resized, size)).await?;
             }
             // SetColourMapEntries — can't happen for the true-colour format we
             // set, but consume it correctly rather than desyncing the stream.
@@ -687,7 +719,7 @@ async fn read_loop(
                 reader.read_exact(&mut bytes).await?;
 
                 if signed < 0 {
-                    if extended_cut_text(&bytes, &writer, &clipboard, &frame_tx).await? {
+                    if extended_cut_text(&bytes, writer, clipboard, &frame_tx).await? {
                         return Ok(()); // browser link gone
                     }
                     continue;
@@ -853,16 +885,15 @@ async fn extended_cut_text(
     Ok(false)
 }
 
-/// Read one FramebufferUpdate rectangle — raw pixels forwarded as PNG tiles
-/// (split into [`STRIP_ROWS`] strips like the RDP engine), or one of the
-/// resize pseudo-encodings. Returns whether the desktop was resized.
+/// Read one FramebufferUpdate rectangle — raw pixels compared against what the
+/// browser holds and forwarded as PNG tiles, or one of the resize
+/// pseudo-encodings. Returns whether the desktop was resized.
 async fn read_rect(
     reader: &mut Reader,
-    writer: &SharedWriter,
-    desktop: &SharedDesktop,
-    cursor: &SharedCursor,
+    shared: &Shared,
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<bool> {
+    let Shared { writer, desktop, cursor, shadow, .. } = shared;
     let x = reader.read_u16().await?;
     let y = reader.read_u16().await?;
     let w = reader.read_u16().await?;
@@ -878,10 +909,17 @@ async fn read_rect(
             return Ok(false);
         }
         // DesktopSize: the rect itself is the announcement; no payload.
-        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, (w, h), frame_tx).await,
+        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, shadow, (w, h), frame_tx).await,
         ENCODING_EXTENDED_DESKTOP_SIZE => {
-            return read_extended_desktop_size(reader, writer, desktop, (x, y, w, h), frame_tx)
-                .await;
+            return read_extended_desktop_size(
+                reader,
+                writer,
+                desktop,
+                shadow,
+                (x, y, w, h),
+                frame_tx,
+            )
+            .await;
         }
         other => anyhow::bail!("server sent encoding {other}, which was not advertised"),
     }
@@ -902,25 +940,38 @@ async fn read_rect(
 
     let mut pixels = vec![0u8; usize::from(w) * usize::from(h) * BPP];
     reader.read_exact(&mut pixels).await?;
+    let Some(rect) = Rect::from_size(x, y, w, h) else {
+        return Ok(false);
+    };
+    let rgb = bgrx_to_rgb(&pixels);
 
-    let mut done = 0u16;
-    while done < h {
-        let strip_h = STRIP_ROWS.min(h - done);
-        let start = usize::from(done) * usize::from(w) * BPP;
-        let end = start + usize::from(strip_h) * usize::from(w) * BPP;
-        let rgb = bgrx_to_rgb(&pixels[start..end]);
-        let tile = Tile::from_rgb(x, y + done, w, strip_h, &rgb)?;
+    // What of this rect the browser does not already have. A server that
+    // re-sends unchanged pixels — and they do, on a cursor crossing a window
+    // boundary or a client asking for a full update — stops costing the browser
+    // link anything here.
+    let Some(changed) = shadow.lock().unwrap().accept(rect, &rgb) else {
+        return Ok(false);
+    };
+
+    let mut buf = Vec::new();
+    for band in changed.bands() {
+        // Cropped out of the rect just read rather than out of the shadow: the
+        // bytes are the same and this needs no lock.
+        tiles::crop(&rgb, rect, band, &mut buf);
+        let tile = Tile::from_rgb(band.left, band.top, band.w(), band.h(), &buf)?;
         debug!(
-            "vnc: tile {w}x{strip_h} at ({x},{}): {} -> {} bytes",
-            y + done,
-            end - start,
+            "vnc: tile {}x{} at ({},{}): {} -> {} bytes",
+            band.w(),
+            band.h(),
+            band.left,
+            band.top,
+            buf.len(),
             tile.data.len()
         );
         frame_tx
             .send(ServerMsg::Tile(tile))
             .await
             .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
-        done += strip_h;
     }
     Ok(false)
 }
@@ -989,6 +1040,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>
     reader: &mut R,
     writer: &Arc<Mutex<W>>,
     desktop: &SharedDesktop,
+    shadow: &SharedShadow,
     (reason, status, w, h): (u16, u16, u16, u16),
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<bool> {
@@ -1018,7 +1070,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>
         warn!("vnc: server rejected SetDesktopSize (status {status})");
         false
     } else {
-        apply_resize(desktop, (w, h), frame_tx).await?
+        apply_resize(desktop, shadow, (w, h), frame_tx).await?
     };
 
     // Replay a viewport report that arrived before support was declared.
@@ -1041,6 +1093,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>
 /// forward it to the browser. Returns whether the size actually changed.
 async fn apply_resize(
     desktop: &SharedDesktop,
+    shadow: &SharedShadow,
     new: (u16, u16),
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> anyhow::Result<bool> {
@@ -1057,6 +1110,9 @@ async fn apply_resize(
         }
         d.size = new;
     }
+    // The old pixels describe a framebuffer that no longer exists, and the
+    // browser is about to reallocate its canvas.
+    shadow.lock().unwrap().resize(new.0, new.1);
     info!("vnc: desktop resized to {}x{}", new.0, new.1);
     frame_tx
         .send(ServerMsg::Resize {
@@ -1162,8 +1218,9 @@ fn translate_input(
         // shared buffer and frame_tx) before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
-        // bridge handles them and they never reach here.
-        ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
+        // bridge handles them and they never reach here. `CacheReset` is one of
+        // them: it empties that socket's tile cache and injects its own `Refresh`.
+        ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::CacheReset => Vec::new(),
         // RFB has one framebuffer, and on a multi-screen server it spans all of
         // them: the ExtendedDesktopSize screen list describes how they are laid
         // out inside it, not a set of things to choose between. So this engine
@@ -2121,6 +2178,12 @@ mod tests {
     // A server that hangs up mid-session has to reach `run`'s error branch. Ending
     // the read loop with `Ok` instead skips it, and the browser lands on a bare
     // picker — or on whatever error was already sitting there.
+    /// A shadow of whatever size the test's desktop is; most of these tests never
+    /// put a pixel through it.
+    fn test_shadow(size: (u16, u16)) -> SharedShadow {
+        Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1)))
+    }
+
     #[tokio::test]
     async fn a_server_that_hangs_up_is_reported_instead_of_ending_quietly() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2136,10 +2199,13 @@ mod tests {
         let (frame_tx, _frame_rx) = mpsc::channel(4);
         let err = read_loop(
             BufReader::new(read_half),
-            Arc::new(Mutex::new(write_half)),
-            shared_desktop((1280, 800), None, None),
-            Arc::new(std::sync::Mutex::new(CursorState::default())),
-            Arc::new(std::sync::Mutex::new(ClipboardState::default())),
+            Shared {
+                writer: Arc::new(Mutex::new(write_half)),
+                desktop: shared_desktop((1280, 800), None, None),
+                cursor: Arc::new(std::sync::Mutex::new(CursorState::default())),
+                clipboard: Arc::new(std::sync::Mutex::new(ClipboardState::default())),
+                shadow: test_shadow((1280, 800)),
+            },
             false,
             frame_tx,
         )
@@ -2200,6 +2266,7 @@ mod tests {
             &mut payload.as_slice(),
             &writer,
             &desktop,
+            &test_shadow((1024, 768)),
             (0, 0, 1024, 768),
             &tx,
         )
@@ -2230,6 +2297,7 @@ mod tests {
             &mut payload.as_slice(),
             &writer,
             &desktop,
+            &test_shadow((1024, 768)),
             (1, 0, 800, 600),
             &tx,
         )
@@ -2254,6 +2322,7 @@ mod tests {
             &mut payload.as_slice(),
             &writer,
             &desktop,
+            &test_shadow((1024, 768)),
             (1, 1, 640, 480),
             &tx,
         )
@@ -2270,18 +2339,22 @@ mod tests {
     async fn apply_resize_dedupes_and_rejects_zero_sizes() {
         let (tx, mut rx) = mpsc::channel(8);
         let desktop = shared_desktop((1024, 768), None, None);
+        let shadow = test_shadow((1024, 768));
 
         // Same size: no change, nothing sent to the browser.
-        assert!(!apply_resize(&desktop, (1024, 768), &tx).await.unwrap());
+        assert!(!apply_resize(&desktop, &shadow, (1024, 768), &tx).await.unwrap());
         assert!(rx.try_recv().is_err());
 
         // A real change updates the state and reaches the browser.
-        assert!(apply_resize(&desktop, (640, 480), &tx).await.unwrap());
+        assert!(apply_resize(&desktop, &shadow, (640, 480), &tx).await.unwrap());
         assert_eq!(desktop.lock().unwrap().size, (640, 480));
         assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
+        // And the shadow follows it, or the next rect would be compared against a
+        // framebuffer that no longer exists.
+        assert_eq!(shadow.lock().unwrap().size(), (640, 480));
 
         // A zero dimension is a protocol violation, not a resize.
-        assert!(apply_resize(&desktop, (0, 480), &tx).await.is_err());
+        assert!(apply_resize(&desktop, &shadow, (0, 480), &tx).await.is_err());
     }
 
     /// Feed one key event through `translate_input`, carrying the browser's

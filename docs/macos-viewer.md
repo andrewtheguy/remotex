@@ -95,9 +95,21 @@ cheap to do because the gateway repaints in full whenever a client attaches.
 
 One `MTLTexture` at exactly the remote's size, with the drawable pinned to the
 same size, so nothing is scaled in the renderer. Tiles are written in with
-`replaceRegion`; there is no delta encoding, so each tile overwrites its
-rectangle outright. A remote larger than the window scrolls; it is never scaled to
-fit, and zoom is out of scope.
+`replaceRegion`; each tile overwrites its rectangle outright, and there is no
+delta *encoding* — a payload is a whole image of its rectangle. A remote larger
+than the window scrolls; it is never scaled to fit, and zoom is out of scope.
+
+What the viewer does keep is a **tile cache**: the gateway may send a record that
+names a slot instead of a payload, meaning "redraw what you have in slot N here".
+The cache is a fixed 256-entry array of *encoded* payloads, re-decoded on a
+reference — a tenth of the memory of keeping decoded pixels, for the same bytes
+saved on the wire. The viewer never evicts anything: the gateway names the slot to
+overwrite. A reference to a slot it does not hold, or a cached tile that will not
+decode, sends `cacheReset` and is dropped rather than drawn.
+
+A batch is uploaded as a batch: every tile in one frame is written, and then one
+redraw is requested. `MTKView` is paused, so it would have coalesced a burst
+anyway — but only if the burst landed inside one refresh interval, which is a race.
 
 The framebuffer *view* is laid out at the remote's own point size — its pixels
 over the density `resize` reports — so the layer rasterizes the drawable for
@@ -131,9 +143,9 @@ own `y`, so an inverted buffer or sampler puts every band in the wrong place
 rather than turning the picture upside down.
 
 Frames are handled strictly in arrival order. One loop reads the socket and fully
-handles each frame — including awaiting the tile decode — before asking for the
-next. Parallelising the decode would let a `resize` overtake the tiles queued
-behind it and blit stale pixels into a freshly allocated texture.
+handles each frame — including awaiting every tile decode in it — before asking
+for the next. Parallelising *across* frames would let a `resize` overtake the tiles
+queued behind it and blit stale pixels into a freshly allocated texture.
 
 ## Resize
 

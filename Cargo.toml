@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.45"
+version = "0.0.46"
 
 [package]
 name = "remotex"
@@ -47,6 +47,13 @@ futures-util = "0.3"
 toml = "1"
 # Tile payload compression for the browser transport (see src/protocol.rs).
 png = "0.18"
+# Content hashing on the tile path: which pixels changed, and whether a payload
+# has been sent before. Not a checksum for integrity, so it is not cryptographic
+# — but it is 64-bit rather than 32, because a collision here means permanently
+# wrong pixels rather than a retry. xxh3 over blake2/sha2 because this runs on
+# every tile of every frame, and pure Rust because nothing else in the tree pulls
+# a C toolchain into the release matrix.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Cursor shapes ride the JSON control channel as base64 PNG (see
 # src/protocol.rs) — small and rare enough not to warrant a binary frame kind.
 base64 = "0.22"

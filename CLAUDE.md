@@ -8,11 +8,27 @@
 - for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
 - keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
-- headless Playwright is allowed only for DOM/control-plane flows that have proved stable; the current whitelist is `tests/playwright/clipboard.spec.ts` (login, target selection, menu/panel state, clipboard metadata/reveal/copy/send, and responsive panel docking) and `tests/playwright/oversized-clipboard.spec.ts` (a remote clipboard over `MAX_CLIPBOARD_BYTES` reported as its size rather than truncated). Shared login/target and SSH pasteboard helpers live in `tests/playwright/support.ts`. Preserve approved tests in `tests/playwright/` instead of leaving one-off copies in `tmp/`; add another flow to this whitelist only after repeated local passes
-- every Playwright spec must hand the session back to the picker before it ends (`returnToPicker`): the server keeps a target session alive when its browser goes away, so a spec that stops on the desktop leaves the next run reattached to it. `logInAndConnect` tolerates either landing, so one abandoned run cannot break every run after it
-- the Playwright setup is TypeScript, and Playwright only transpiles it — type errors never surface at runtime, so run `npm run typecheck` in `tests/playwright/` after changing anything there
-- run Playwright tests headless and single-worker, use accessible locators plus web-first assertions/polling, and do not add fixed sleeps; framebuffer/canvas pixels, paint timing, cursor rendering, pointer input, and gesture behaviour remain out of scope for browser automation because those are the flaky paths the original restriction covered — test them through the existing raw WebSocket, protocol, and container e2e tests
 - multi session is always out of scope (never planned, not merely deferred): this is a single-user program with one active session only, with session takeover logic (a new browser force-claims the single session slot and evicts the previous holder) — no concurrent sessions, session sharing, or session broker
+
+## Browser tests
+
+Headless Playwright, in `tests/playwright/`.
+
+### What may be asserted
+
+- **assert on things the system decides, never on things a machine's timing decides.** That one rule settles what belongs here; judge a new spec by **what it observes**, not by whether it appears on a list. The existing specs are examples of the rule, not the definition of it
+- in scope, because these are deterministic: DOM state and accessible roles, control-plane JSON, HTTP responses, and WebSocket frame *bytes* — header fields, record counts, payload lengths, message ordering. `framereceived` qualifies because it is a transport event carrying a fixed payload
+- out of scope, because these are races: reading canvas pixels or `toDataURL`; asserting a paint happened, or how many did; timing anything (frame rate, latency, "within N ms"); cursor rendering; synthetic pointer input or gestures, whose coordinate mapping depends on layout having settled; screenshot comparison. Test those through the raw WebSocket, protocol, and container e2e tests, which control their own clock
+- the test for a borderline case: would the assertion change answer if this machine were twice as slow? Then it does not belong here
+- also avoid the quieter shapes, which pass locally and fail in a year: fixed sleeps, CSS/nth-child selectors, assertions on transient states a fast machine skips through, and counting events over a wall-clock window. Prefer accessible locators, web-first assertions and `expect.poll`; where a count is the point, assert a relationship that holds for any sample (`records > frames`) rather than a number that depends on how long the run happened to watch
+
+### Writing and running them
+
+- run headless and single-worker. Shared login/target and SSH pasteboard helpers live in `tests/playwright/support.ts`
+- every spec must hand the session back to the picker before it ends (`returnToPicker`): the server keeps a target session alive when its browser goes away, so a spec that stops on the desktop leaves the next run reattached to it. `logInAndConnect` tolerates either landing, so one abandoned run cannot break every run after it
+- the setup is TypeScript and Playwright only transpiles it, so type errors never surface at runtime — run `npm run typecheck` in `tests/playwright/` after changing anything there
+- keep approved specs in `tests/playwright/` rather than leaving one-off copies in `tmp/`, and run a new one several times before relying on it
+- a spec that parses a wire format should implement its own parser rather than importing the SPA's, or a wrong parser agrees with itself. This is the only place the wire is checked as the real SPA uses it: the Rust e2e tests drive a raw WebSocket client, and the Swift and TypeScript unit tests parse frames they built themselves, so both ends can otherwise agree with their own fixtures and disagree with each other
 
 ## macOS viewer
 

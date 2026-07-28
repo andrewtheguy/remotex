@@ -38,6 +38,11 @@ struct ClientMessageTests {
             .clipboard(text: "héllo"),
             ["type": "clipboard", "text": "héllo"]
         )
+        // The tile cache's only recovery path, and the one message whose *shape*
+        // matters more than its content: the gateway routes it by tag alone, and a
+        // tag it cannot parse leaves the socket emitting references into a cache
+        // this client has already emptied, forever.
+        try expectEncoding(.cacheReset, ["type": "cacheReset"])
     }
 
     /// The only way this client asks for a remote size — see ClientMsg in
@@ -112,6 +117,7 @@ struct ClientMessageTests {
             .clipboardRequest,
             .selectDisplay(id: 1),
             .hostScale(scale: 200),
+            .cacheReset,
         ]
         #expect(Set(messages.map(\.tag)) == ClientMessage.allTags)
         #expect(messages.count == ClientMessage.allTags.count)

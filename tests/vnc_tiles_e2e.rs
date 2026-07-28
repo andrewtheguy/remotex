@@ -20,9 +20,7 @@ use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-const TILE_FRAME_KIND: u8 = 0x01;
 const TILE_FORMAT_PNG: u8 = 1;
-const TILE_HEADER_LEN: usize = 10;
 
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
@@ -90,27 +88,33 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary tile frame against the desktop bounds and return its
-/// pixel area.
-fn check_tile_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> u64 {
-    assert!(frame.len() >= TILE_HEADER_LEN, "frame shorter than the header");
-    assert_eq!(frame[0], TILE_FRAME_KIND, "unexpected frame kind");
-    assert_eq!(frame[1], TILE_FORMAT_PNG, "unexpected tile format byte");
-    let x = u16::from_le_bytes([frame[2], frame[3]]);
-    let y = u16::from_le_bytes([frame[4], frame[5]]);
-    let w = u16::from_le_bytes([frame[6], frame[7]]);
-    let h = u16::from_le_bytes([frame[8], frame[9]]);
-    assert!(w > 0 && h > 0, "empty tile {w}x{h}");
-    assert!(
-        u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
-        "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
-    );
-    assert_eq!(
-        &frame[TILE_HEADER_LEN..TILE_HEADER_LEN + 8],
-        b"\x89PNG\r\n\x1a\n",
-        "payload is not a PNG stream"
-    );
-    u64::from(w) * u64::from(h)
+/// Validate one binary batch frame against the desktop bounds and return the
+/// pixel area of every tile in it.
+fn check_tile_frame(
+    stream: &mut common::TileStream,
+    frame: &[u8],
+    desktop_w: u32,
+    desktop_h: u32,
+) -> u64 {
+    let tiles = stream.paint(frame);
+    assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
+    let mut area = 0u64;
+    for tile in tiles {
+        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
+        let (x, y, w, h) = (tile.x, tile.y, tile.w, tile.h);
+        assert!(w > 0 && h > 0, "empty tile {w}x{h}");
+        assert!(
+            u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
+            "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
+        );
+        assert_eq!(
+            &tile.payload[..8],
+            b"\x89PNG\r\n\x1a\n",
+            "payload is not a PNG stream"
+        );
+        area += u64::from(w) * u64::from(h);
+    }
+    area
 }
 
 /// Validate a `cursor` control message. Either shape is legitimate: a
@@ -157,6 +161,7 @@ fn check_cursor_msg(text: &str) {
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
 async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
+    common::init_logging();
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
         common::start_dummy_server(runtime, "remotex-e2e-tigervnc", "vnc-dummy", 5900);
@@ -172,6 +177,10 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let mut got_resize = false;
     let mut covered: u64 = 0;
     let mut cursor: Option<String> = None;
+    // Resolves cache references, so `covered` counts pixels *painted* rather than
+    // pixels that happened to travel. One per socket, because the gateway's slot
+    // table lives exactly as long as one attachment.
+    let mut stream = common::TileStream::new();
 
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
@@ -200,7 +209,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "tile arrived before resize");
-                    covered += check_tile_frame(&frame, DESKTOP_W, DESKTOP_H);
+                    covered += check_tile_frame(&mut stream, &frame, DESKTOP_W, DESKTOP_H);
                     // The first (non-incremental) update must repaint the whole
                     // desktop; once that much area has arrived, the raw->tile
                     // path is proven. The Cursor pseudo-encoding rides the same
@@ -234,6 +243,8 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
 
     let mut resized = false;
     let mut covered: u64 = 0;
+    // Same socket, so the same stream: a resize does not empty the slot table, and
+    // a repaint at the new size is exactly when references start paying off.
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -257,7 +268,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if !resized {
                         continue;
                     }
-                    covered += check_tile_frame(&frame, VIEWPORT_W, VIEWPORT_H);
+                    covered += check_tile_frame(&mut stream, &frame, VIEWPORT_W, VIEWPORT_H);
                     if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H) {
                         return;
                     }
@@ -288,6 +299,8 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let mut reannounced = false;
     let mut replayed_cursor = false;
     let mut covered: u64 = 0;
+    // A new socket is a new attachment, so the gateway starts from an empty table.
+    let mut stream = common::TileStream::new();
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -319,7 +332,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if !reannounced {
                         continue;
                     }
-                    covered += check_tile_frame(&frame, VIEWPORT_W, VIEWPORT_H);
+                    covered += check_tile_frame(&mut stream, &frame, VIEWPORT_W, VIEWPORT_H);
                     if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H)
                         && replayed_cursor
                     {

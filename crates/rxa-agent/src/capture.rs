@@ -37,11 +37,26 @@ use screencapturekit::stream::delegate_trait::ErrorHandler;
 use screencapturekit::cv::CVPixelBufferLockFlags;
 use screencapturekit::prelude::*;
 
-/// Dirty rectangles taller than this are split into strips, so a full-screen
-/// repaint becomes many small messages the browser can start painting
-/// immediately rather than one enormous one. Mirrors the gateway's
-/// `protocol::STRIP_ROWS`, for the same reason.
-const STRIP_ROWS: u16 = 64;
+/// The canonical tile grid, in surface pixels. Mirrors the gateway's
+/// `protocol::CELL_W` / `CELL_H`, which is where the size is justified.
+///
+/// Damage is snapped **outward** onto this grid rather than sent at the shape
+/// ScreenCaptureKit reported, for two reasons that both come from measurement:
+///
+/// - **Its rects are coarse.** On the test Mac, 65% of all bytes reaching the
+///   browser were full-width `1600x64` strips at ~62 KB each, and most of every
+///   one of them was pixels the viewer already had. A strip that changed in one
+///   place now costs the cells that changed, not the strip.
+/// - **A cell is a stable identity.** The same position always yields the same
+///   geometry, so the per-cell hash below and the gateway's tile cache can both
+///   recognise a repeat. A rect at whatever shape the compositor happened to
+///   report matches nothing, ever.
+///
+/// The cost is that a thin change is rounded up — a 34x15 cursor rect becomes one
+/// 320x64 cell. That is paid for by the hash gate and, on this content, was 0.7% of
+/// the bytes measured against the 65% above.
+const CELL_W: u16 = 320;
+const CELL_H: u16 = 64;
 
 /// A rectangle in captured-surface pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +372,74 @@ pub struct Capture {
 /// answers "is ScreenCaptureKit delivering anything, and what?" immediately.
 const FRAMES_TO_LOG: u64 = 3;
 
+/// What was last sent for each cell, so a cell whose pixels did not change costs
+/// neither an encode nor a place on the wire.
+///
+/// This exists because ScreenCaptureKit's dirty rects are *coarse*. Measured on
+/// the test Mac at 3200x2000 with nobody touching the screen, 15 to 21 of the 32
+/// full-width strips covering it come back dirty on every frame, and each one is
+/// then packed to RGB and PNG-encoded at ~95 KB. Almost all of that is pixels the
+/// viewer is already showing.
+///
+/// Keyed by cell, which is what makes it exact rather than approximate: cells
+/// partition the surface, so a cell's remembered digest describes a region nothing
+/// else ever half-overwrites.
+///
+/// The gateway drops the repeats it can recognise, but it can only compare
+/// *encoded* payloads — by which point the PNG has been built and pushed across
+/// the LAN. Hashing the source pixels here skips both, so this is a CPU saving as
+/// much as a bandwidth one: the hash reads the same bytes the packer would have,
+/// once, and then nothing else happens.
+///
+/// 64-bit rather than 32 because a collision is not a retry: it is a cell left
+/// showing stale pixels until something else changes it.
+#[derive(Default)]
+struct CellMemo {
+    sent: std::collections::HashMap<(u16, u16, u16, u16), u64>,
+}
+
+impl CellMemo {
+    /// Whether this cell's pixels differ from the last ones sent for it, recording
+    /// them either way.
+    fn is_new(&mut self, pixels: &[u8], stride: usize, rect: Rect) -> bool {
+        let Some(digest) = cell_digest(pixels, stride, rect) else {
+            // The cell does not fit the surface — a bug elsewhere. Send it rather
+            // than remember a digest of something that was never sent.
+            return true;
+        };
+        let key = (rect.x, rect.y, rect.w, rect.h);
+        self.sent.insert(key, digest) != Some(digest)
+    }
+
+    /// Forget everything, because a full repaint is about to be sent.
+    ///
+    /// Every path that empties a viewer's canvas arrives here through
+    /// `full_repaint`: the first frame after `Attach`, a `Refresh` from the
+    /// gateway, a surface resize, and the sink dropping a frame it could not
+    /// queue. That is what makes this one call enough.
+    fn forget(&mut self) {
+        self.sent.clear();
+    }
+}
+
+/// Hash a cell's source pixels, or `None` if it does not fit the surface.
+///
+/// Reads the BGRA rows in place: the point is to answer "did this change?" without
+/// paying for the RGB pack, so this must not copy. The dimensions go into the
+/// digest too, so two differently-shaped cells cannot match by hashing the same
+/// bytes.
+fn cell_digest(pixels: &[u8], stride: usize, rect: Rect) -> Option<u64> {
+    let w = usize::from(rect.w);
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    hasher.update(&rect.w.to_le_bytes());
+    hasher.update(&rect.h.to_le_bytes());
+    for row in 0..usize::from(rect.h) {
+        let start = (usize::from(rect.y) + row) * stride + usize::from(rect.x) * 4;
+        hasher.update(pixels.get(start..start + w * 4)?);
+    }
+    Some(hasher.digest())
+}
+
 /// State shared with the capture callback.
 struct Shared {
     sink: Arc<dyn FrameSink>,
@@ -369,6 +452,8 @@ struct Shared {
     /// Last surface size seen, so a change is reported once rather than per
     /// frame.
     last_size: Mutex<(u16, u16)>,
+    /// See [`CellMemo`]. Locked once per frame, around the cell loop.
+    cells: Mutex<CellMemo>,
 }
 
 impl Capture {
@@ -417,6 +502,7 @@ impl Capture {
             frames_seen: std::sync::atomic::AtomicU64::new(0),
             full_repaint,
             last_size: Mutex::new((geometry.width, geometry.height)),
+            cells: Mutex::new(CellMemo::default()),
         });
 
         // The delegate is how ScreenCaptureKit reports an *unexpected* stop —
@@ -803,19 +889,46 @@ impl Handler {
             return Ok(());
         }
 
+        // The cells this frame's damage touches, deduplicated: ScreenCaptureKit can
+        // report overlapping rects, and snapping outward makes two nearby rects land
+        // on the same cell often. Keyed by `(y, x)` so a frame's tiles arrive
+        // top-down — the cells are disjoint, so this is for legibility rather than
+        // correctness — and holding the whole `Rect` rather than re-deriving it from
+        // the key keeps `split_cells` the only place that knows how an edge cell is
+        // clipped.
+        let cells: std::collections::BTreeMap<(u16, u16), Rect> = dirty
+            .iter()
+            .flat_map(|rect| split_cells(*rect, surface_w, surface_h))
+            .map(|cell| ((cell.y, cell.x), cell))
+            .collect();
+
         let mut tiles = Vec::new();
-        for rect in dirty {
-            for strip in split_strips(rect) {
-                tiles.push(RawTile {
-                    rect: strip,
-                    rgb: extract_rgb(pixels, stride, strip),
-                });
+        let mut unchanged = 0usize;
+        {
+            let mut memo = self.0.cells.lock().unwrap();
+            // A full repaint may be arriving at a canvas with nothing on it, so
+            // nothing may be withheld from one.
+            if full {
+                memo.forget();
+            }
+            for cell in cells.into_values() {
+                // Hashing the source rows first is the whole point: a cell
+                // ScreenCaptureKit called dirty but did not change costs one read
+                // of its pixels, not a pack plus a PNG.
+                if memo.is_new(pixels, stride, cell) {
+                    tiles.push(RawTile {
+                        rect: cell,
+                        rgb: extract_rgb(pixels, stride, cell),
+                    });
+                } else {
+                    unchanged += 1;
+                }
             }
         }
         if nth < FRAMES_TO_LOG {
             info!(
                 "capture: frame {nth} status {status:?} — surface {surface_w}x{surface_h}, \
-                 stride {stride}, full_repaint {full}, {} tile(s)",
+                 stride {stride}, full_repaint {full}, {} tile(s), {unchanged} unchanged",
                 tiles.len()
             );
         }
@@ -851,15 +964,28 @@ fn clamp_rect(rect: &screencapturekit::cg::CGRect, surface_w: u16, surface_h: u1
     })
 }
 
-/// Split a rectangle into strips at most [`STRIP_ROWS`] tall.
-fn split_strips(rect: Rect) -> impl Iterator<Item = Rect> {
-    (0..rect.h)
-        .step_by(usize::from(STRIP_ROWS))
-        .map(move |dy| Rect {
-            x: rect.x,
-            y: rect.y + dy,
-            w: rect.w,
-            h: STRIP_ROWS.min(rect.h - dy),
+/// The grid cells covering `rect`, snapped outward and clipped to the surface.
+///
+/// Every pixel of `rect` is covered by exactly one cell, and cells never overlap,
+/// so a frame's cells can be collected into a set without any question of ordering
+/// or partial coverage. Cells at the right and bottom edges are clipped where the
+/// surface does not divide by the cell size — unavoidable, and deterministic, which
+/// is all a stable identity needs.
+fn split_cells(rect: Rect, surface_w: u16, surface_h: u16) -> impl Iterator<Item = Rect> {
+    let snap = |v: u16, step: u16| v - v % step;
+    let right = rect.x.saturating_add(rect.w).min(surface_w);
+    let bottom = rect.y.saturating_add(rect.h).min(surface_h);
+    (snap(rect.y, CELL_H)..bottom)
+        .step_by(usize::from(CELL_H))
+        .flat_map(move |y| {
+            (snap(rect.x, CELL_W)..right)
+                .step_by(usize::from(CELL_W))
+                .map(move |x| Rect {
+                    x,
+                    y,
+                    w: CELL_W.min(surface_w - x),
+                    h: CELL_H.min(surface_h - y),
+                })
         })
 }
 
@@ -868,7 +994,7 @@ fn split_strips(rect: Rect) -> impl Iterator<Item = Rect> {
 /// Reads row by row at `stride`, never `w * 4` — see the module docs. A row that
 /// would run past the end of `pixels` is left black rather than panicking: a
 /// short buffer is a bug elsewhere, and taking down the agent (which
-/// `panic = "abort"` would do) is a worse outcome than one dark strip.
+/// `panic = "abort"` would do) is a worse outcome than one dark cell.
 fn extract_rgb(pixels: &[u8], stride: usize, rect: Rect) -> Vec<u8> {
     let (w, h) = (usize::from(rect.w), usize::from(rect.h));
     let mut rgb = vec![0u8; w * h * 3];
@@ -1019,34 +1145,164 @@ mod tests {
 
     }
 
+    /// The property the grid exists for: every pixel of the damage rect is covered,
+    /// exactly once, by a cell inside the surface.
     #[test]
-    fn strips_tile_a_tall_rect_without_gaps_or_overlap() {
-        let strips: Vec<Rect> = split_strips(rect(10, 20, 100, 150)).collect();
-        assert_eq!(strips.len(), 3);
-        assert_eq!(strips[0], rect(10, 20, 100, 64));
-        assert_eq!(strips[1], rect(10, 84, 100, 64));
-        // The last strip is short, not padded past the rect.
-        assert_eq!(strips[2], rect(10, 148, 100, 22));
-        // Contiguous: each strip starts where the previous ended.
-        for pair in strips.windows(2) {
-            assert_eq!(pair[1].y, pair[0].y + pair[0].h);
+    fn cells_cover_a_rect_exactly_once_and_stay_inside_the_surface() {
+        // A surface indivisible by the cell size in both axes, so the right column
+        // and bottom row are partial.
+        let (sw, sh) = (1000u16, 150u16);
+        let damage = rect(330, 70, 400, 60);
+        let cells: Vec<Rect> = split_cells(damage, sw, sh).collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for cell in &cells {
+            for y in cell.y..cell.y + cell.h {
+                for x in cell.x..cell.x + cell.w {
+                    assert!(x < sw && y < sh, "{cell:?} leaves the surface");
+                    assert!(seen.insert((x, y)), "({x},{y}) is covered twice");
+                }
+            }
+        }
+        for y in damage.y..damage.y + damage.h {
+            for x in damage.x..damage.x + damage.w {
+                assert!(seen.contains(&(x, y)), "({x},{y}) is not covered");
+            }
+        }
+    }
+
+    /// Outward, not clipped to the damage: this is what makes a cell's geometry the
+    /// same every time, which is what both the memo below and the gateway's tile
+    /// cache recognise repeats by.
+    #[test]
+    fn cells_snap_outward_rather_than_to_the_damage_rect() {
+        // A cursor-sized rect in the middle of the second cell of the second row.
+        let cells: Vec<Rect> = split_cells(rect(350, 80, 34, 15), 1600, 1000).collect();
+        assert_eq!(cells, vec![rect(320, 64, 320, 64)]);
+    }
+
+    #[test]
+    fn the_last_cell_of_a_row_is_clipped_to_the_surface() {
+        let cells: Vec<Rect> = split_cells(rect(1500, 990, 100, 10), 1600, 1000).collect();
+        assert_eq!(cells, vec![rect(1280, 960, 320, 40)]);
+    }
+
+    /// A full-width strip is the case that motivated the grid: 65% of the bytes
+    /// measured on the test Mac were these, and only the cells that changed are
+    /// worth sending.
+    #[test]
+    fn a_full_width_strip_becomes_one_row_of_cells() {
+        let cells: Vec<Rect> = split_cells(rect(0, 128, 1600, 64), 1600, 1000).collect();
+        assert_eq!(cells.len(), 5);
+        assert!(cells.iter().all(|c| c.y == 128 && c.w == 320 && c.h == 64));
+    }
+
+    /// A `stride`-padded BGRA surface whose pixels are a function of `seed`.
+    fn surface(w: usize, h: usize, stride: usize, seed: u8) -> Vec<u8> {
+        let mut pixels = vec![0u8; stride * h];
+        for row in 0..h {
+            for col in 0..w {
+                let at = row * stride + col * 4;
+                let v = (row * w + col) as u8 ^ seed;
+                pixels[at..at + 4].copy_from_slice(&[v, v.wrapping_add(1), v.wrapping_add(2), 255]);
+            }
+        }
+        pixels
+    }
+
+    // The point of the memo: a cell ScreenCaptureKit called dirty but did not
+    // change is answered without packing or encoding it.
+    #[test]
+    fn the_cell_memo_skips_unchanged_pixels_and_passes_changed_ones() {
+        let (w, h, stride) = (8, 8, 40);
+        let before = surface(w, h, stride, 0);
+        let after = surface(w, h, stride, 0x5A);
+        let cell = rect(0, 0, 8, 8);
+        let mut memo = CellMemo::default();
+
+        assert!(memo.is_new(&before, stride, cell), "never seen before");
+        assert!(!memo.is_new(&before, stride, cell), "identical pixels");
+        assert!(memo.is_new(&after, stride, cell), "the pixels changed");
+        assert!(!memo.is_new(&after, stride, cell), "and now that one repeats");
+    }
+
+    // Padding bytes are not pixels. A digest that walked the buffer straight
+    // through would fold them in and report a change whenever they moved.
+    #[test]
+    fn the_cell_digest_ignores_row_padding() {
+        let (w, h) = (8, 4);
+        let mut padded = surface(w, h, 40, 0);
+        let tight = surface(w, h, w * 4, 0);
+        let cell = rect(0, 0, 8, 4);
+        assert_eq!(
+            cell_digest(&padded, 40, cell),
+            cell_digest(&tight, w * 4, cell),
+            "the same pixels at two strides are the same picture"
+        );
+        // Scribble in the padding only: still the same picture.
+        for row in 0..h {
+            padded[row * 40 + w * 4] = 0xFF;
         }
         assert_eq!(
-            strips.iter().map(|s| u32::from(s.h)).sum::<u32>(),
-            150,
-            "the strips must cover the rect exactly"
+            cell_digest(&padded, 40, cell),
+            cell_digest(&tight, w * 4, cell)
+        );
+    }
+
+    // Two cells of different shapes must not match by hashing the same bytes.
+    #[test]
+    fn the_cell_digest_covers_the_cells_shape() {
+        let pixels = surface(8, 8, 32, 0);
+        assert_ne!(
+            cell_digest(&pixels, 32, rect(0, 0, 8, 4)),
+            cell_digest(&pixels, 32, rect(0, 0, 4, 8)),
+            "same byte count, different shape"
+        );
+    }
+
+    // A cell that runs past the surface is a bug elsewhere. The safe answer is to
+    // send it, not to remember a digest of pixels that were never read.
+    #[test]
+    fn a_strip_outside_the_surface_is_never_remembered() {
+        let pixels = surface(4, 4, 16, 0);
+        let outside = rect(0, 8, 4, 4);
+        assert_eq!(cell_digest(&pixels, 16, outside), None);
+        let mut memo = CellMemo::default();
+        assert!(memo.is_new(&pixels, 16, outside));
+        assert!(memo.is_new(&pixels, 16, outside), "still not remembered");
+    }
+
+    // A full repaint may be arriving at a canvas with nothing on it.
+    #[test]
+    fn forgetting_makes_every_cell_paintable_again() {
+        let pixels = surface(8, 8, 32, 0);
+        let cell = rect(0, 0, 8, 8);
+        let mut memo = CellMemo::default();
+        assert!(memo.is_new(&pixels, 32, cell));
+        assert!(!memo.is_new(&pixels, 32, cell));
+        memo.forget();
+        assert!(
+            memo.is_new(&pixels, 32, cell),
+            "a repaint must reach a blank canvas even with unchanged pixels"
         );
     }
 
     #[test]
-    fn a_short_rect_is_one_strip() {
-        let strips: Vec<Rect> = split_strips(rect(0, 0, 8, 1)).collect();
-        assert_eq!(strips, vec![rect(0, 0, 8, 1)]);
-        // Exactly one strip tall stays one strip.
-        let strips: Vec<Rect> = split_strips(rect(0, 0, 8, 64)).collect();
-        assert_eq!(strips, vec![rect(0, 0, 8, 64)]);
-        // One pixel more is two.
-        assert_eq!(split_strips(rect(0, 0, 8, 65)).count(), 2);
+    fn a_rect_smaller_than_a_cell_is_one_cell() {
+        let cells: Vec<Rect> = split_cells(rect(0, 0, 8, 1), 1600, 1000).collect();
+        assert_eq!(cells, vec![rect(0, 0, 320, 64)]);
+        // Exactly one cell tall stays one row.
+        assert_eq!(split_cells(rect(0, 0, 8, 64), 1600, 1000).count(), 1);
+        // One pixel more crosses into the next.
+        assert_eq!(split_cells(rect(0, 0, 8, 65), 1600, 1000).count(), 2);
+    }
+
+    /// A surface smaller than one cell still yields exactly one, sized to it —
+    /// nothing here may read past the surface.
+    #[test]
+    fn a_surface_smaller_than_a_cell_yields_one_clipped_cell() {
+        let cells: Vec<Rect> = split_cells(rect(0, 0, 40, 30), 40, 30).collect();
+        assert_eq!(cells, vec![rect(0, 0, 40, 30)]);
     }
 
     // The stride bug this module exists to avoid: rows are `stride` apart, not

@@ -55,6 +55,14 @@ enum ClientMessage: Sendable, Equatable {
     /// *have* the density that makes the result one pixel per pixel. Only rxa acts
     /// on it, and only for a display the agent made.
     case hostScale(scale: UInt16)
+    /// "I lost the tiles you told me to remember." Sent when a cached tile will
+    /// not decode, or when a reference names a slot this client does not hold.
+    ///
+    /// Deliberately not `refresh`: that is routed to the engine, which would
+    /// repaint into the gateway's *unchanged* slot table, send the same references
+    /// back, and miss again. This is handled by the socket's own bridge, which
+    /// empties the table and asks for the repaint itself.
+    case cacheReset
 
     /// The `type` tag this encodes as. Public so the wire-contract test can
     /// compare the whole set against the Rust enum.
@@ -72,6 +80,7 @@ enum ClientMessage: Sendable, Equatable {
         case .clipboardRequest: "clipboardRequest"
         case .selectDisplay: "selectDisplay"
         case .hostScale: "hostScale"
+        case .cacheReset: "cacheReset"
         }
     }
 
@@ -79,7 +88,7 @@ enum ClientMessage: Sendable, Equatable {
     static let allTags: Set<String> = [
         "mouseMove", "mouseButton", "wheel", "key", "viewport",
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
-        "selectDisplay", "hostScale",
+        "selectDisplay", "hostScale", "cacheReset",
     ]
 }
 
@@ -117,7 +126,7 @@ extension ClientMessage: Encodable {
             try container.encode(id, forKey: .id)
         case .hostScale(let scale):
             try container.encode(scale, forKey: .scale)
-        case .refresh, .disconnect, .clipboardRequest:
+        case .refresh, .disconnect, .clipboardRequest, .cacheReset:
             break
         }
     }
