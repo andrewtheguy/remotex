@@ -384,6 +384,7 @@ fn main() -> anyhow::Result<()> {
         settings,
         log_path,
         screen_recording_at_launch,
+        owned.target,
     )
 }
 

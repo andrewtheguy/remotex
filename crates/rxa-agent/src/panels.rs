@@ -55,8 +55,13 @@ use objc2_foundation::{
 const WIDTH: f64 = 540.0;
 
 /// One row of the settings dialog: label on the left, control on the right.
-const ROW_HEIGHT: f64 = 24.0;
-const ROW_GAP: f64 = 10.0;
+///
+/// These are tight, and the reason is the bottom of the panel: an `NSAlert` sizes
+/// itself around its accessory view, so every point here is a point Save moves
+/// down — and on a 1x 800x600 screen, which the test Mac has, ten rows and three
+/// headings at comfortable spacing put Save under the Dock and out of reach.
+const ROW_HEIGHT: f64 = 22.0;
+const ROW_GAP: f64 = 8.0;
 /// Wide enough for the longest caption, "This Mac's public key", which at 490
 /// against 126pt rendered as "This Mac's public ke".
 const LABEL_WIDTH: f64 = 150.0;
@@ -64,10 +69,24 @@ const CONTROL_X: f64 = LABEL_WIDTH + 8.0;
 /// A single line of label text, so a caption can be centred against its control
 /// rather than sitting at the top of a 24pt frame.
 const LABEL_HEIGHT: f64 = 17.0;
-/// The key buttons, on a row of their own under both key rows: **Copy** (this
-/// Mac's public key), **Import…** and **Regenerate identity**. Under rather than
-/// beside so each key keeps the full width — a key that scrolls is a key somebody
+/// Between a section's heading and its first row: tighter than [`ROW_GAP`], so
+/// the heading reads as belonging to what follows rather than floating between
+/// two sections.
+const HEADING_GAP: f64 = 3.0;
+/// Between the last row of one section and the next heading. Wider than
+/// [`ROW_GAP`] by enough to group without needing a rule drawn between them.
+const SECTION_GAP: f64 = 14.0;
+/// How many rows [`config`] lays out, headings included.
+const ROWS: usize = 10;
+/// The key buttons, on a row of their own directly under **this Mac's public
+/// key**: **Copy**, **Import…** and **Regenerate identity**. Under rather than
+/// beside so the key keeps the full width — a key that scrolls is a key somebody
 /// copies half of by hand, which is also what [`WIDTH`] is sized for.
+///
+/// Under *that* key and above the gateway's, because all three act on this Mac's
+/// identity and none of them touches the gateway key. They used to sit below both
+/// rows, where they read as the gateway field's — merely wrong on Copy, and
+/// alarming on Regenerate identity.
 ///
 /// In the order they are reached for, left to right: reading this Mac's key out
 /// is the routine visit, and the two that replace its identity are together at
@@ -127,14 +146,14 @@ pub fn config(
     displays: &[String],
     in_force: &InForce,
 ) -> Option<Draft> {
-    // Kept short on purpose: this is an NSAlert, so the body pushes the rows
-    // down, and the whole panel has to fit a small screen — the test Mac's is
-    // 800x600. The detail lives in the rows' own tooltips.
+    // One line, and that is a budget rather than a style: this is an NSAlert, so
+    // every line of body text pushes all ten rows down, and the whole panel has to
+    // fit a small screen — the test Mac's is 800x600, where the sections alone
+    // pushed Save off the bottom. What pairing *is* was two paragraphs here and is
+    // now the Pairing heading plus the two key rows' tooltips, which is where
+    // somebody reading that row will look for it.
     let mut body = String::from(
-        "Pairing is two public keys, one each way, and neither is a secret. Copy this \
-         Mac's onto the gateway as `agent_public_key`; paste the gateway's own — from \
-         `remotex rxa-pubkey` — below.\n\nSaving restarts the agent, dropping any \
-         connection in progress. The gateway reconnects on its own.",
+        "Saving restarts the agent; the gateway reconnects on its own.",
     );
     if current.gateway_public_key.trim().is_empty() {
         body.push_str("\n\n⚠︎ Unpaired: no gateway key is set, so every connection is refused.");
@@ -151,72 +170,102 @@ pub fn config(
              and open it again to start using these.",
         );
     }
-    let alert = alert(mtm, "remotex-agent Settings", &body, NSAlertStyle::Informational);
+    // The emoji is in the title, which is the whole of how it gets to the left of
+    // it: a string, and nothing else.
+    //
+    // Where AppKit's own icon goes is not ours to set. An NSAlert this wide lays it
+    // out *above* the title rather than beside it, decided from the accessory
+    // view's width. Both ways of arguing with that were tried on the test Mac and
+    // neither is worth what it costs: `setSize` on the image did not change what it
+    // drew at, and giving it a blank image hid the icon while the alert kept the
+    // gap — so it bought an `unsafe setIcon` and recovered no space at all.
+    let alert = alert(mtm, "⚙️ remotex-agent Settings", &body, NSAlertStyle::Informational);
 
-    // Listen address, the display list, the virtual display switch, its size,
-    // this Mac's public key, the gateway's, and the key buttons. Only the list
-    // is taller than one row, and only because it grows with the number of
+    // Three sections, because the settings answer three unrelated questions —
+    // where to listen, what to share, and who may connect — and read as one
+    // undifferentiated column of eight rows otherwise. Each is a heading with its
+    // own rows under it.
+    //
+    // Every row's height and the gap that follows it, in order. Only the display
+    // list is taller than one row, and only because it grows with the number of
     // screens attached.
     let list_height = (displays.len().max(1) as f64) * LABEL_HEIGHT;
-    let heights = [
-        ROW_HEIGHT,
-        list_height,
-        ROW_HEIGHT,
-        ROW_HEIGHT,
-        ROW_HEIGHT,
-        ROW_HEIGHT,
-        ROW_HEIGHT,
+    let rows: [(f64, f64); ROWS] = [
+        // Network
+        (LABEL_HEIGHT, HEADING_GAP),
+        (ROW_HEIGHT, SECTION_GAP), // listen address
+        // Displays
+        (LABEL_HEIGHT, HEADING_GAP),
+        (list_height, ROW_GAP),    // what this Mac can share
+        (ROW_HEIGHT, ROW_GAP),     // add a virtual display
+        (ROW_HEIGHT, SECTION_GAP), // its initial size
+        // Pairing
+        (LABEL_HEIGHT, HEADING_GAP),
+        (ROW_HEIGHT, ROW_GAP), // this Mac's public key
+        (ROW_HEIGHT, ROW_GAP), // and what can be done to it
+        (ROW_HEIGHT, 0.0),     // the gateway's public key
     ];
-    let height =
-        heights.iter().sum::<f64>() + (heights.len() as f64 - 1.0) * ROW_GAP;
+    let height: f64 = rows.iter().map(|(row, gap)| row + gap).sum();
     let view = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(NSPoint::ZERO, NSSize::new(WIDTH, height)),
     );
     // AppKit's origin is bottom-left, so rows are laid out upwards and named
-    // downwards: listen on top, then the displays, the virtual switch and its
-    // size, then the two keys and what can be done to them.
-    let mut tops = [0.0; 7];
+    // downwards: the order above is the order on screen, top to bottom.
+    let mut tops = [0.0; ROWS];
     let mut cursor = height;
-    for (top, row_height) in tops.iter_mut().zip(heights) {
+    for (top, (row_height, gap)) in tops.iter_mut().zip(rows) {
         cursor -= row_height;
         *top = cursor;
-        cursor -= ROW_GAP;
+        cursor -= gap;
     }
     let row = |n: usize| tops[n];
 
-    view.addSubview(&label(mtm, "Listen address", row(0)));
-    let listen = field(mtm, &current.listen, row(0), WIDTH - CONTROL_X, false);
+    view.addSubview(&heading(mtm, "Network", row(0)));
+    view.addSubview(&label(mtm, "Listen address", row(1)));
+    let listen = field(mtm, &current.listen, row(1), WIDTH - CONTROL_X, false);
     view.addSubview(&listen);
 
+    view.addSubview(&heading(mtm, "Displays", row(2)));
     // Read-only, and that is the design rather than a shortcut: which display a
     // session shares is picked in the viewer or the browser, by whoever is
     // looking at it, and can change several times while this dialog is closed.
     // A control here would be a second opinion about a decision this process
     // does not own. What it is good for is answering "what is there to pick
     // from", which is exactly what the list says.
-    view.addSubview(&label(mtm, "Displays", row(1)));
+    //
+    // The Mac's own screens are numbered "Display 1", "Display 2"; the one this
+    // agent made is named "Virtual display" — which is the distinction the
+    // checkbox below decides, and which this list used to hide by numbering it in
+    // with the rest (see `menubar::display_summary`).
+    view.addSubview(&label(mtm, "Can share", row(3)));
     let list = NSTextField::labelWithString(&NSString::from_str(&displays.join("\n")), mtm);
     list.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(1)),
+        NSPoint::new(CONTROL_X, row(3)),
         NSSize::new(WIDTH - CONTROL_X, list_height),
     ));
     list.setToolTip(Some(&NSString::from_str(
-        "Every display this Mac can share. Which one a session shares is chosen \
-         from the remotex viewer or the browser, not here.",
+        "Every display this Mac can share, the Mac's own screens and the virtual \
+         one together. Which of them a session shares is chosen from the remotex \
+         viewer or the browser, not here.",
     )));
     view.addSubview(&list);
 
+    // "Add a virtual display", not "a private 2x display": the density is not a
+    // property of the setting — a client reports the screen it is on and the
+    // display matches it, 1x or 2x — so naming a number here promised something
+    // this checkbox does not decide. "Virtual" is also the word the list above,
+    // both clients' display menus and this Mac's own System Settings use for it.
     let virtual_display = unsafe {
         NSButton::checkboxWithTitle_target_action(
-            &NSString::from_str("Add a private 2x display"),
+            &NSString::from_str("Add a virtual display"),
             None,
             None,
             mtm,
         )
     };
     virtual_display.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(2)),
+        NSPoint::new(CONTROL_X, row(4)),
         NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
     ));
     virtual_display.setState(if current.virtual_display {
@@ -226,20 +275,23 @@ pub fn config(
     });
     virtual_display.setToolTip(Some(&NSString::from_str(
         "Give this Mac an extra display that nobody is sitting in front of. It \
-         joins the list above — the Mac's own screens stay shareable.",
+         joins the list above — the Mac's own screens stay shareable — and it is \
+         the only display a client can ask to resize.",
     )));
     view.addSubview(&virtual_display);
 
-    // Only meaningful with the box above ticked, and left enabled regardless: a
-    // field that greys out as a checkbox is toggled is more startling than one
-    // whose value simply does not apply yet.
+    // Greyed while the box above is clear, and enabled the moment it is ticked —
+    // which reverses an earlier call that a field changing state under the cursor
+    // was more startling than one whose value simply did not apply. It reads as a
+    // second, unrelated setting when it is live with no display to be the size
+    // of, and "Initial size" gave nothing away about which display it meant.
     //
-    // "Initial" is in the label rather than only the tooltip, because the field
-    // otherwise reads as the display's current resolution — which it stops being
-    // the moment anyone changes that display, in System Settings or with a
-    // client's Resize to window.
-    view.addSubview(&label(mtm, "Initial size", row(3)));
-    let virtual_size = field(mtm, &current.virtual_size, row(3), WIDTH - CONTROL_X, false);
+    // "Its" ties it to the checkbox rather than repeating "virtual display" in a
+    // 150pt label, and "initial" stays because it is load-bearing: this is the
+    // size the display is *created* at, and macOS remembers whatever it is
+    // changed to afterwards.
+    view.addSubview(&label(mtm, "Its initial size", row(5)));
+    let virtual_size = field(mtm, &current.virtual_size, row(5), WIDTH - CONTROL_X, false);
     virtual_size.setToolTip(Some(&NSString::from_str(
         "The size the virtual display is created at the first time this Mac sees \
          it, in points, WIDTHxHEIGHT, no smaller than 800x600 — and the largest \
@@ -254,6 +306,18 @@ pub fn config(
     )));
     view.addSubview(&virtual_size);
 
+    // Wired after both exist: the checkbox's target is this object, so it cannot
+    // be handed to the checkbox at construction. Sets the field's state to match
+    // the box as it stands, so the dialog opens consistent rather than becoming
+    // so on the first click.
+    let size_enabler = SizeEnabler::new(mtm, virtual_size.clone());
+    unsafe {
+        virtual_display.setTarget(Some(&size_enabler.as_object()));
+        virtual_display.setAction(Some(sel!(virtualDisplayToggled:)));
+    }
+    size_enabler.arm(virtual_display.clone());
+
+    view.addSubview(&heading(mtm, "Pairing", row(6)));
     // Shown whole, and a label rather than a field: this is derived from the
     // private key and there is nothing to type into it, so there is no state to
     // lock and no white box to suggest otherwise. Whole because it is not a
@@ -261,12 +325,12 @@ pub fn config(
     // one — and because reading it against the gateway's copy is the common
     // visit to this dialog. Copy is still there, being exact where a drag-select
     // over 50 monospaced characters is not.
-    view.addSubview(&label(mtm, "This Mac's public key", row(4)));
+    view.addSubview(&label(mtm, "This Mac's public key", row(7)));
     let public_key = NSTextField::labelWithString(&NSString::from_str(&current.public_key()), mtm);
     public_key.setFont(NSFont::userFixedPitchFontOfSize(12.0).as_deref());
     public_key.setSelectable(true);
     public_key.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(4)),
+        NSPoint::new(CONTROL_X, row(7)),
         NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
     ));
     public_key.setToolTip(Some(&NSString::from_str(
@@ -278,11 +342,15 @@ pub fn config(
 
     // An ordinary editable field: this one is pasted in, and it is not a secret
     // either, so nothing about it wants hiding or locking.
-    view.addSubview(&label(mtm, "Gateway public key", row(5)));
+    //
+    // Below the buttons, not above them: all three of those act on the key above
+    // *them*, and with this field in between they read as the gateway key's —
+    // which is alarming on Regenerate identity and wrong on all three.
+    view.addSubview(&label(mtm, "Gateway public key", row(9)));
     let gateway = field(
         mtm,
         &current.gateway_public_key,
-        row(5),
+        row(9),
         WIDTH - CONTROL_X,
         true,
     );
@@ -304,7 +372,7 @@ pub fn config(
     let import_x = regenerate_x - BUTTON_GAP - IMPORT_WIDTH;
     let copy_x = import_x - BUTTON_GAP - COPY_WIDTH;
 
-    let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(6), COPY_WIDTH);
+    let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(8), COPY_WIDTH);
     copy.setToolTip(Some(&NSString::from_str(
         "Put this Mac's public key on the clipboard, to paste as `agent_public_key` on \
          the gateway's rxa target.",
@@ -317,7 +385,7 @@ pub fn config(
         &actions,
         sel!(importIdentity:),
         import_x,
-        row(6),
+        row(8),
         IMPORT_WIDTH,
     );
     import.setToolTip(Some(&NSString::from_str(
@@ -333,7 +401,7 @@ pub fn config(
         &actions,
         sel!(regenerateIdentity:),
         regenerate_x,
-        row(6),
+        row(8),
         REGENERATE_WIDTH,
     );
     // Confirmed rather than disabled behind an unlock step: there is no field to
@@ -617,6 +685,86 @@ impl KeyActions {
     }
 }
 
+/// Keeps the virtual display's size field live only while the display it sizes is
+/// switched on.
+///
+/// A whole class for one checkbox, for the same reason [`KeyActions`] is one: an
+/// `NSButton` action has to be a selector on an Objective-C object.
+struct SizeEnablerIvars {
+    size: Retained<NSTextField>,
+    /// The checkbox, so its state is read through `NSButton::state` rather than a
+    /// `msg_send` at the sender. Filled in by [`SizeEnabler::arm`] rather than at
+    /// construction: the checkbox takes *this* object as its target, so it cannot
+    /// exist before this does — the same shape as [`KeyActions::arm`].
+    checkbox: RefCell<Option<Retained<NSButton>>>,
+}
+
+define_class!(
+    // SAFETY:
+    // - NSObject has no subclassing requirements.
+    // - `SizeEnabler` does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    // AppKit sends the action on the main thread, and the ivar is a main-thread
+    // only object.
+    #[thread_kind = MainThreadOnly]
+    #[name = "RxaSizeEnabler"]
+    #[ivars = SizeEnablerIvars]
+    struct SizeEnabler;
+
+    unsafe impl NSObjectProtocol for SizeEnabler {}
+
+    impl SizeEnabler {
+        /// The checkbox moved; the field follows it.
+        #[unsafe(method(virtualDisplayToggled:))]
+        fn virtual_display_toggled(&self, _sender: Option<&AnyObject>) {
+            self.follow();
+        }
+    }
+);
+
+impl SizeEnabler {
+    fn new(mtm: MainThreadMarker, size: Retained<NSTextField>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SizeEnablerIvars {
+            size,
+            checkbox: RefCell::new(None),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+
+    /// Hand over the checkbox, and match the field to it as it stands — so the
+    /// dialog opens consistent rather than becoming so on the first click.
+    fn arm(&self, checkbox: Retained<NSButton>) {
+        *self.ivars().checkbox.borrow_mut() = Some(checkbox);
+        self.follow();
+    }
+
+    /// Match the field to the checkbox.
+    fn follow(&self) {
+        let on = self
+            .ivars()
+            .checkbox
+            .borrow()
+            .as_ref()
+            .is_some_and(|checkbox| checkbox.state() == NSControlStateValueOn);
+        self.enable(on);
+    }
+
+    /// Editable *and* selectable, or a disabled field's contents cannot even be
+    /// read — and the size it is showing is worth reading while deciding whether
+    /// to switch the display on.
+    fn enable(&self, on: bool) {
+        let size = &self.ivars().size;
+        size.setEnabled(on);
+        size.setSelectable(true);
+    }
+
+    fn as_object(&self) -> Retained<AnyObject> {
+        let this: Retained<Self> = self.retain();
+        // Safety: upcasting a subclass of NSObject to AnyObject.
+        unsafe { Retained::cast_unchecked(this) }
+    }
+}
+
 /// Ask before doing something whose cost lands somewhere else.
 ///
 /// `confirm` rather than `error`'s single button, and the destructive verb is on
@@ -703,6 +851,23 @@ fn alert(
     alert.setMessageText(&NSString::from_str(title));
     alert.setInformativeText(&NSString::from_str(body));
     alert
+}
+
+/// A section heading: bold, and starting at the left edge rather than in the
+/// label column.
+///
+/// Outdented deliberately. A heading right-aligned into [`LABEL_WIDTH`] with the
+/// captions would read as one more caption belonging to the row beside it; at
+/// x = 0 it spans the whole width and the rows under it are visibly indented from
+/// it.
+fn heading(mtm: MainThreadMarker, text: &str, y: f64) -> Retained<NSTextField> {
+    let heading = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    heading.setFont(Some(&NSFont::boldSystemFontOfSize(12.0)));
+    heading.setFrame(NSRect::new(
+        NSPoint::new(0.0, y),
+        NSSize::new(WIDTH, LABEL_HEIGHT),
+    ));
+    heading
 }
 
 /// A settings row's caption: right-aligned against its control, and centred on
