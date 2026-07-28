@@ -279,6 +279,18 @@ pub mod batch {
 ///
 /// 20480 px also stays far clear of the agent's `MIN_JPEG_PIXELS` (32×32), so its
 /// per-tile codec classifier still has enough pixels to judge.
+///
+/// # Where this does *not* apply
+///
+/// All of the above answers "if damage is split into cells, how big should a cell
+/// be". It says nothing about whether damage *should* be split into cells, and for
+/// the gateway's own engines the answer turned out to be no: RDP reports damage
+/// with a median area of 1295 pixels, 92% of it smaller than one cell, so snapping
+/// outward onto this grid cost 8.9× the bytes (see [`crate::tiles`] and
+/// `tests/rdp_bytes_probe.rs`). Those engines compare against a shadow copy of what
+/// the client holds instead, and this grid is left for damage that genuinely
+/// arrives coarse — the macOS agent's, which is reported in full-width strips of a
+/// 3200-pixel desktop.
 pub const CELL_W: u16 = 320;
 /// See [`CELL_W`]. Also the height a dirty rectangle is split at, which is what
 /// [`STRIP_ROWS`] used to mean on its own.
