@@ -38,13 +38,14 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSModalResponseCancel,
     NSModalResponseOK, NSPanel, NSTextAlignment, NSTextField, NSView,
     NSWindowButton, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+    NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+    NSTimer,
 };
 
 /// Width of the settings form, in points.
@@ -683,11 +684,18 @@ define_class!(
 
     impl SelectAllField {
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &AnyObject) {
-            let _: () = unsafe { msg_send![super(self), mouseDown: event] };
+        fn mouse_down(&self, _event: &AnyObject) {
+            // Do not let NSTextField perform its ordinary word selection first:
+            // the hyphens in a key are word boundaries. Start its field editor,
+            // then pin that editor's selection to the entire NSString range.
             // SAFETY: `self` is the control being selected, and AppKit accepts a
             // nil sender for this standard action.
             unsafe { self.selectText(None) };
+            if let Some(editor) = self.currentEditor() {
+                let whole_value = NSRange::new(0, self.stringValue().length());
+                editor.setSelectedRange(whole_value);
+                editor.scrollRangeToVisible(whole_value);
+            }
         }
     }
 );
@@ -701,12 +709,6 @@ impl SelectAllField {
         this.setFont(NSFont::userFixedPitchFontOfSize(12.0).as_deref());
         this.setEditable(false);
         this.setSelectable(true);
-        // Match the standard inactive-control fill without disabling the field:
-        // a disabled NSTextField cannot receive the click that selects this
-        // value. Keep the bezel too, since this is still a focusable, copyable
-        // value rather than static explanatory text.
-        this.setDrawsBackground(true);
-        this.setBackgroundColor(Some(&NSColor::controlBackgroundColor()));
         this
     }
 }
