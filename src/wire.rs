@@ -13,7 +13,7 @@
 //! synthetic run of messages is the only way the byte cost of the transport can be
 //! checked in CI at all, and that requires being able to call it without a client.
 //!
-//! Three rules the tests pin, each of which is a correctness matter rather than a
+//! Four rules the tests pin, each of which is a correctness matter rather than a
 //! tuning knob:
 //!
 //! - **A control message flushes the pending batch.** Tiles and control messages
@@ -27,8 +27,15 @@
 //! - **A partial batch never outlives the run that built it.** `encode` returns
 //!   every frame for the messages it was given, so nothing is held back waiting
 //!   for work that may not arrive.
+//! - **A pending tile a later one completely covers is dropped.** Safe only
+//!   *within* one batch, and only because the client applies a frame's records in
+//!   order: the covered paint would be overwritten before anything was displayed.
+//!   It is not safe across a flush (those bytes are already gone) and it is not
+//!   safe across a `Resize` (the two rects are in different coordinate spaces) —
+//!   the flush rule above is what makes both impossible rather than merely
+//!   avoided.
 
-use crate::protocol::{ServerMsg, WireFrame, batch};
+use crate::protocol::{ServerMsg, Tile, WireFrame, batch};
 
 /// How many bytes of records a single batch frame may carry before it is flushed
 /// and a new one started.
@@ -40,13 +47,27 @@ use crate::protocol::{ServerMsg, WireFrame, batch};
 /// a whole repaint as one write, which would only move the latency somewhere else.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 
+/// How many records a single batch frame may carry.
+///
+/// Two reasons, and the smaller one is the hard one: the header's count is a
+/// `u16`, so 65535 is a limit the format cannot exceed whatever the byte cap says.
+/// This sits far below that because a frame is also a unit of client work — every
+/// record in it is decoded before anything is presented — and a desktop's full
+/// repaint is a few hundred records, not thousands.
+const MAX_BATCH_RECORDS: usize = 4096;
+
 /// Per-attachment encoder for the server -> client direction.
 #[derive(Default)]
 pub struct Wire {
-    /// Records accumulated for the batch currently being built.
-    records: Vec<u8>,
-    /// How many records `records` holds.
-    count: u16,
+    /// Tiles accumulated for the batch currently being built.
+    ///
+    /// Held as tiles rather than serialized on arrival so a later one can still
+    /// displace an earlier one it covers. Serializing happens once, at flush, so
+    /// this costs no extra copy — only the ability to change one's mind.
+    pending: Vec<Tile>,
+    /// What `pending` will serialize to, so the byte cap can be checked without
+    /// serializing to find out.
+    pending_bytes: usize,
     pub totals: Totals,
 }
 
@@ -72,14 +93,7 @@ impl Wire {
                         // `text_frame` returns None for tiles alone.
                         unreachable!("only a tile has no text encoding");
                     };
-                    if !self.records.is_empty()
-                        && self.records.len() + tile.record_len() > MAX_BATCH_BYTES
-                    {
-                        self.flush(&mut frames);
-                    }
-                    tile.write_record(batch::NO_SLOT, &mut self.records);
-                    self.count += 1;
-                    self.totals.tile(tile.record_len());
+                    self.push(tile, &mut frames);
                 }
             }
         }
@@ -87,18 +101,64 @@ impl Wire {
         frames
     }
 
+    fn push(&mut self, tile: Tile, frames: &mut Vec<WireFrame>) {
+        // Before the cap is consulted, because dropping covered tiles is what
+        // makes room and a flush that was not needed costs a frame.
+        self.supersede(&tile);
+
+        let len = tile.record_len();
+        if !self.pending.is_empty()
+            && (self.pending_bytes + len > MAX_BATCH_BYTES
+                || self.pending.len() >= MAX_BATCH_RECORDS)
+        {
+            self.flush(frames);
+        }
+        self.pending_bytes += len;
+        self.pending.push(tile);
+    }
+
+    /// Drop pending tiles that `tile` completely covers.
+    ///
+    /// Sound only because every record in a frame is applied in order before
+    /// anything is presented, so a covered paint is one nothing could have seen.
+    /// A partial overlap is left alone: the uncovered part is still owed.
+    fn supersede(&mut self, tile: &Tile) {
+        let (right, bottom) = (
+            u32::from(tile.x) + u32::from(tile.w),
+            u32::from(tile.y) + u32::from(tile.h),
+        );
+        let mut dropped_bytes = 0usize;
+        let mut dropped = 0u64;
+        self.pending.retain(|old| {
+            let covered = old.x >= tile.x
+                && old.y >= tile.y
+                && u32::from(old.x) + u32::from(old.w) <= right
+                && u32::from(old.y) + u32::from(old.h) <= bottom;
+            if covered {
+                dropped += 1;
+                dropped_bytes += old.record_len();
+            }
+            !covered
+        });
+        self.pending_bytes -= dropped_bytes;
+        self.totals.superseded += dropped;
+        self.totals.superseded_bytes += dropped_bytes as u64;
+    }
+
     /// Emit the pending batch, if there is one.
     fn flush(&mut self, frames: &mut Vec<WireFrame>) {
-        if self.count == 0 {
+        if self.pending.is_empty() {
             return;
         }
-        let mut frame = Vec::with_capacity(batch::HEADER_LEN + self.records.len());
+        let mut frame = Vec::with_capacity(batch::HEADER_LEN + self.pending_bytes);
         frame.push(batch::FRAME_KIND);
         frame.push(0); // flags
-        frame.extend_from_slice(&self.count.to_le_bytes());
-        frame.extend_from_slice(&self.records);
-        self.records.clear();
-        self.count = 0;
+        frame.extend_from_slice(&(self.pending.len() as u16).to_le_bytes());
+        for tile in self.pending.drain(..) {
+            self.totals.tile(tile.record_len());
+            tile.write_record(batch::NO_SLOT, &mut frame);
+        }
+        self.pending_bytes = 0;
         self.totals.frame(frame.len());
         frames.push(WireFrame::Binary(frame));
     }
@@ -115,7 +175,9 @@ impl Wire {
 /// - **payload bytes separately from frame bytes**, so envelope overhead is
 ///   visible rather than assumed;
 /// - **the largest single frame**, which is the number a client's WebSocket
-///   message ceiling is measured against.
+///   message ceiling is measured against;
+/// - **what was superseded**, because a dedup that never fires is worth removing
+///   and one that fires constantly says something about the engine feeding it.
 #[derive(Default)]
 pub struct Totals {
     pub binary_frames: u64,
@@ -125,6 +187,8 @@ pub struct Totals {
     pub text_frames: u64,
     pub text_bytes: u64,
     pub largest_binary: u64,
+    pub superseded: u64,
+    pub superseded_bytes: u64,
 }
 
 impl Totals {
@@ -150,7 +214,8 @@ impl std::fmt::Display for Totals {
         write!(
             f,
             "{} binary frames / {} bytes carrying {} tile records / {} bytes, \
-             {} text frames / {} bytes, largest binary {} bytes",
+             {} text frames / {} bytes, largest binary {} bytes, \
+             {} superseded / {} bytes",
             self.binary_frames,
             self.binary_bytes,
             self.tiles,
@@ -158,6 +223,8 @@ impl std::fmt::Display for Totals {
             self.text_frames,
             self.text_bytes,
             self.largest_binary,
+            self.superseded,
+            self.superseded_bytes,
         )
     }
 }
@@ -168,12 +235,16 @@ mod tests {
     use crate::protocol::{Tile, UNSCALED};
 
     fn tile(y: u16, bytes: usize) -> ServerMsg {
+        rect(0, y, 320, 64, bytes)
+    }
+
+    fn rect(x: u16, y: u16, w: u16, h: u16, bytes: usize) -> ServerMsg {
         ServerMsg::Tile(Tile {
             format: Tile::FORMAT_PNG,
-            x: 0,
+            x,
             y,
-            w: 320,
-            h: 64,
+            w,
+            h,
             data: vec![7u8; bytes],
         })
     }
@@ -300,11 +371,94 @@ mod tests {
     fn nothing_is_held_back_between_runs() {
         let mut wire = Wire::default();
         assert_eq!(wire.encode(vec![tile(0, 10)]).len(), 1);
-        assert!(wire.records.is_empty());
-        assert_eq!(wire.count, 0);
+        assert!(wire.pending.is_empty());
+        assert_eq!(wire.pending_bytes, 0);
         // A run with nothing in it produces nothing, rather than an empty frame.
         assert!(wire.encode(Vec::new()).is_empty());
         assert_eq!(wire.encode(vec![resize()]).len(), 1);
+    }
+
+    // A tile a later one paints over completely never needed sending. Safe only
+    // inside one frame, where the covered paint is one nothing could have seen.
+    #[test]
+    fn a_covered_tile_is_dropped_from_the_batch() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![
+            rect(0, 0, 320, 64, 50),   // covered exactly
+            rect(320, 0, 320, 64, 50), // beside it, untouched
+            rect(0, 0, 640, 128, 50),  // covers the first, and the second
+        ]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 1, "both earlier tiles were painted over");
+        assert_eq!((records[0].2, records[0].4), (0, 640));
+        assert_eq!(wire.totals.superseded, 2);
+        assert_eq!(wire.totals.tiles, 1, "only what was sent is counted as sent");
+    }
+
+    // Partial overlap is not coverage: the part sticking out is still owed.
+    #[test]
+    fn a_partly_overlapping_tile_keeps_both() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![
+            rect(0, 0, 320, 64, 50),
+            rect(160, 0, 320, 64, 50), // overlaps half of it
+        ]);
+        assert_eq!(records(binary(&frames)[0]).len(), 2);
+        assert_eq!(wire.totals.superseded, 0);
+    }
+
+    // The dangerous case, and the reason the flush rule exists. Two rects either
+    // side of a resize are in different coordinate spaces, so "covers" is
+    // meaningless across one — and the earlier tile has already been sent anyway.
+    #[test]
+    fn coverage_never_reaches_across_a_control_message() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![
+            rect(0, 0, 320, 64, 50),
+            resize(),
+            rect(0, 0, 640, 128, 50), // would cover the first, if it could
+        ]);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(
+            records(binary(&frames)[0]).len(),
+            1,
+            "the tile before the resize was already sent, so it cannot be recalled"
+        );
+        assert_eq!(records(binary(&frames)[1]).len(), 1);
+        assert_eq!(wire.totals.superseded, 0);
+    }
+
+    // Likewise across a flush forced by the byte cap: those bytes are gone.
+    //
+    // The two big tiles are at different `y` on purpose — one that covered the
+    // other would be dropped rather than flushed, and then this would be testing
+    // supersede again instead of the boundary it is named for.
+    #[test]
+    fn coverage_never_reaches_across_a_flushed_batch() {
+        let mut wire = Wire::default();
+        let big = MAX_BATCH_BYTES - 1024;
+        let frames = wire.encode(vec![
+            rect(0, 0, 320, 64, big),
+            rect(0, 64, 320, 64, big), // no overlap, so the cap forces a flush
+            rect(0, 0, 640, 128, 100), // covers both, but only reaches the pending one
+        ]);
+        let sent: usize = binary(&frames).iter().map(|f| records(f).len()).sum();
+        assert_eq!(sent, 2, "the flushed tile survives, the pending one does not");
+        assert_eq!(wire.totals.superseded, 1);
+    }
+
+    // Dropping is checked before the cap, so a batch that had room after the drop
+    // does not pay for a frame it did not need.
+    #[test]
+    fn superseding_makes_room_instead_of_forcing_a_flush() {
+        let mut wire = Wire::default();
+        let big = MAX_BATCH_BYTES - 1024;
+        let frames = wire.encode(vec![
+            rect(0, 0, 320, 64, big),
+            rect(0, 0, 640, 128, big), // covers it; must not also flush
+        ]);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(records(binary(&frames)[0]).len(), 1);
     }
 
     // The transport's reason to exist, as a byte comparison against v2's one

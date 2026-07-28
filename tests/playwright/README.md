@@ -1,14 +1,23 @@
 # Stable headless browser tests
 
-These Playwright checks cover DOM/control-plane behaviour and WebSocket frame
-bytes. They do not assert canvas pixels, framebuffer timing, cursor rendering,
-pointer input, or remote-desktop gestures; the Rust protocol and container E2E
-tests cover those paths.
+One rule decides what belongs here: **assert on what the system decides, never on
+what a machine's timing decides.**
 
-That line is where it is because `framereceived` is a transport event, not a
-paint event: what a frame *contains* is deterministic, what it *drew* is not. So
-header fields, record counts and payload lengths are in scope, and the canvas
-they land on is not.
+In scope, because their values are deterministic — DOM state and accessible roles,
+control-plane JSON, HTTP responses, and WebSocket frame bytes (header fields,
+record counts, payload lengths, ordering). `framereceived` qualifies because it is
+a transport event carrying a fixed payload.
+
+Out of scope, because their values are a race — canvas pixels, whether or how many
+paints happened, frame rate or latency, cursor rendering, synthetic pointer input
+and gestures, and screenshot comparison. The Rust protocol and container E2E tests
+cover those; they control their own clock.
+
+The quieter flaky shapes are worth naming too, because they pass locally and fail
+in a year: fixed sleeps, CSS or nth-child selectors, assertions on transient states
+a fast machine skips through, and counts taken over a wall-clock window. Where a
+count is the point, assert a relationship that holds for any sample — `records >
+frames` — not a number that depends on how long the run happened to watch.
 
 `batch-envelope.spec.ts` is the v3 binary envelope, read off the SPA's own socket.
 It exists because it is the only test that watches the browser link as the browser
