@@ -38,7 +38,7 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSModalResponseCancel,
     NSModalResponseOK, NSPanel, NSTextAlignment, NSTextField, NSView,
     NSWindowButton, NSWindowStyleMask,
@@ -52,11 +52,11 @@ use objc2_foundation::{
 /// What sets it is the key rows: a 50-character key has to fit on one line in a
 /// 12pt monospaced font, because one that scrolls is one somebody copies half of
 /// by hand. Menlo 12 advances ~7.23pt per character, so 50 of them need ~361pt
-/// plus the field's insets — and what a row leaves for its control is
-/// `WIDTH - CONTROL_X`, which is why widening [`LABEL_WIDTH`] means widening
-/// this too. Both were measured on screen: at 490 against a 126pt label the last
-/// character of the key was cut off.
-const WIDTH: f64 = 540.0;
+/// plus the field's insets. `540` was the measured minimum for that field alone;
+/// this is wider so its Copy button can sit on the same row without shortening
+/// the value, making the button's target unambiguous. The resulting 670pt panel
+/// still fits the 800pt-wide test Mac.
+const WIDTH: f64 = 630.0;
 
 /// The ordinary window chrome is outside this rectangle; these are the panel's
 /// content margins and its bottom action row.
@@ -91,23 +91,46 @@ const HEADING_GAP: f64 = 3.0;
 const SECTION_GAP: f64 = 14.0;
 /// How many rows [`config`] lays out, headings and their explanations included.
 const ROWS: usize = 13;
-/// The key buttons, on a row of their own directly under **this Mac's public
-/// key**: **Copy**, **Import…** and **Regenerate identity**. Under rather than
-/// beside so the key keeps the full width — a key that scrolls is a key somebody
-/// copies half of by hand, which is also what [`WIDTH`] is sized for.
-///
-/// Under *that* key and above the gateway's, because all three act on this Mac's
-/// identity and none of them touches the gateway key. They used to sit below both
-/// rows, where they read as the gateway field's — merely wrong on Copy, and
-/// alarming on Regenerate identity.
-///
-/// In the order they are reached for, left to right: reading this Mac's key out
-/// is the routine visit, and the two that replace its identity are together at
-/// the far end.
+/// Copy belongs to the public value on its row. Import and Regenerate belong to
+/// the private identity on the next row, where the text says why no private value
+/// is visible. Keeping those two action groups separate is more important than
+/// saving one row.
 const COPY_WIDTH: f64 = 78.0;
 const IMPORT_WIDTH: f64 = 84.0;
 const REGENERATE_WIDTH: f64 = 144.0;
 const BUTTON_GAP: f64 = 8.0;
+
+/// The line that distinguishes the agent-made display from a physical one.
+///
+/// Its suffix is the detail shared with the viewer's Display menu. Matching the
+/// whole label and separator keeps a capture error mentioning a virtual display
+/// from being mistaken for the display itself.
+const VIRTUAL_DISPLAY_PREFIX: &str = "Virtual display — ";
+const PENDING_VIRTUAL_DISPLAY: &str = "Virtual display — added after Save";
+
+fn is_virtual_display(line: &str) -> bool {
+    line.starts_with(VIRTUAL_DISPLAY_PREFIX)
+}
+
+/// What the viewer's Display menu will contain after this draft is saved.
+fn display_list_after_save(displays: &[String], virtual_display: bool) -> String {
+    let has_virtual = displays.iter().any(|line| is_virtual_display(line));
+    let mut saved: Vec<String> = displays
+        .iter()
+        .filter(|line| virtual_display || !is_virtual_display(line))
+        .cloned()
+        .collect();
+    if virtual_display && !has_virtual {
+        saved.push(PENDING_VIRTUAL_DISPLAY.to_owned());
+    }
+    saved.join("\n")
+}
+
+/// Reserve the largest number of lines the saved list can need while the checkbox
+/// is toggled, so the panel and everything below the list stay still.
+fn display_list_rows(displays: &[String]) -> usize {
+    displays.len() + usize::from(!displays.iter().any(|line| is_virtual_display(line)))
+}
 
 /// Every setting the agent has, as the dialog reads and writes it.
 ///
@@ -118,9 +141,9 @@ const BUTTON_GAP: f64 = 8.0;
 pub struct Draft {
     pub listen: String,
     /// This Mac's private key. Carried through the dialog but never shown in it
-    /// and never typed into: the only thing that changes it is **Regenerate
-    /// identity**. What the dialog *displays* is the public half derived from
-    /// it, which is not a secret.
+    /// and never typed into a persistent field: only **Import…** and
+    /// **Regenerate identity** change it. What the dialog *displays* is the
+    /// public half derived from it, which is not a secret.
     pub private_key: String,
     /// The gateway's public key, as pasted in. Empty means unpaired.
     pub gateway_public_key: String,
@@ -166,9 +189,9 @@ pub fn config(
     );
     let (displays_copy, displays_copy_height) = section_copy(
         mtm,
-        "The viewer's Display menu shows the choices below. Selecting one changes \
-         which screen the session shows. The optional virtual display adds a \
-         separate screen for remote use; it is the only one the viewer can resize.",
+        "The viewer's Display menu chooses which screen a session shows. The list \
+         below shows that menu after Save: physical displays always remain; \
+         clearing Add a virtual display removes Virtual display.",
     );
     let mut pairing_copy = String::from(
         "Pairing uses two public keys, one in each direction; neither is secret. \
@@ -202,7 +225,7 @@ pub fn config(
     // Every row's height and the gap that follows it, in order. Only the display
     // list is taller than one row, and only because it grows with the number of
     // screens attached.
-    let list_height = (displays.len().max(1) as f64) * LABEL_HEIGHT;
+    let list_height = (display_list_rows(displays).max(1) as f64) * LABEL_HEIGHT;
     let rows: [(f64, f64); ROWS] = [
         // Network
         (LABEL_HEIGHT, HEADING_GAP),
@@ -211,14 +234,14 @@ pub fn config(
         // Displays
         (LABEL_HEIGHT, HEADING_GAP),
         (displays_copy_height, ROW_GAP),
-        (list_height, ROW_GAP),    // what this Mac can share
         (ROW_HEIGHT, ROW_GAP),     // add a virtual display
-        (ROW_HEIGHT, SECTION_GAP), // its initial size
+        (ROW_HEIGHT, ROW_GAP),     // its initial size
+        (list_height, SECTION_GAP), // resulting viewer menu
         // Pairing
         (LABEL_HEIGHT, HEADING_GAP),
         (pairing_copy_height, ROW_GAP),
-        (ROW_HEIGHT, ROW_GAP), // this Mac's public key
-        (ROW_HEIGHT, ROW_GAP), // and what can be done to it
+        (ROW_HEIGHT, ROW_GAP), // this Mac's public key and Copy
+        (ROW_HEIGHT, ROW_GAP), // its private key actions
         (ROW_HEIGHT, 0.0),     // the gateway's public key
     ];
     let height: f64 = rows.iter().map(|(row, gap)| row + gap).sum();
@@ -253,34 +276,10 @@ pub fn config(
         NSSize::new(WIDTH, displays_copy_height),
     ));
     view.addSubview(&displays_copy);
-    // Read-only, and that is the design rather than a shortcut: which display a
-    // session shares is picked in the viewer or the browser, by whoever is
-    // looking at it, and can change several times while this dialog is closed.
-    // A control here would be a second opinion about a decision this process
-    // does not own. What it is good for is answering "what is there to pick
-    // from", which is exactly what the list says.
-    //
-    // The Mac's own screens are numbered "Display 1", "Display 2"; the one this
-    // agent made is named "Virtual display" — which is the distinction the
-    // checkbox below decides, and which this list used to hide by numbering it in
-    // with the rest (see `menubar::display_summary`).
-    view.addSubview(&label(mtm, "Viewer choices", row(5)));
-    let list = NSTextField::labelWithString(&NSString::from_str(&displays.join("\n")), mtm);
-    list.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(5)),
-        NSSize::new(WIDTH - CONTROL_X, list_height),
-    ));
-    list.setToolTip(Some(&NSString::from_str(
-        "The same choices shown in the viewer's Display menu. The viewer's \
-         checkmark marks the screen this Mac is sharing now; this list only \
-         reports which choices are available.",
-    )));
-    view.addSubview(&list);
-
     // "Add a virtual display", not "a private 2x display": the density is not a
     // property of the setting — a client reports the screen it is on and the
     // display matches it, 1x or 2x — so naming a number here promised something
-    // this checkbox does not decide. "Virtual" is also the word the list above,
+    // this checkbox does not decide. "Virtual" is also the word the list below,
     // both clients' display menus and this Mac's own System Settings use for it.
     let virtual_display = unsafe {
         NSButton::checkboxWithTitle_target_action(
@@ -291,7 +290,7 @@ pub fn config(
         )
     };
     virtual_display.setFrame(NSRect::new(
-        NSPoint::new(CONTROL_X, row(6)),
+        NSPoint::new(CONTROL_X, row(5)),
         NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
     ));
     virtual_display.setState(if current.virtual_display {
@@ -301,7 +300,7 @@ pub fn config(
     });
     virtual_display.setToolTip(Some(&NSString::from_str(
         "Give this Mac an extra display that nobody is sitting in front of. It \
-         joins the list above — the Mac's own screens stay shareable — and it is \
+         joins the list below — the Mac's own screens stay shareable — and it is \
          the only display a client can ask to resize.",
     )));
     view.addSubview(&virtual_display);
@@ -316,8 +315,8 @@ pub fn config(
     // 150pt label, and "initial" stays because it is load-bearing: this is the
     // size the display is *created* at, and macOS remembers whatever it is
     // changed to afterwards.
-    view.addSubview(&label(mtm, "Its initial size", row(7)));
-    let virtual_size = field(mtm, &current.virtual_size, row(7), WIDTH - CONTROL_X, false);
+    view.addSubview(&label(mtm, "Its initial size", row(6)));
+    let virtual_size = field(mtm, &current.virtual_size, row(6), WIDTH - CONTROL_X, false);
     virtual_size.setToolTip(Some(&NSString::from_str(
         "The size the virtual display is created at the first time this Mac sees \
          it, in points, WIDTHxHEIGHT, no smaller than 800x600 — and the largest \
@@ -332,16 +331,47 @@ pub fn config(
     )));
     view.addSubview(&virtual_size);
 
+    // Read-only, and that is the design rather than a shortcut: which display a
+    // session shares is picked in the viewer or the browser, by whoever is
+    // looking at it, and can change several times while this dialog is closed.
+    // This final row shows the choices after the two virtual-display controls
+    // above are saved.
+    //
+    // The Mac's own screens are numbered "Display 1", "Display 2"; the one this
+    // agent made is named "Virtual display" — which is the distinction the
+    // checkbox decides, and which this list used to hide by numbering it in with
+    // the rest (see `menubar::display_summary`).
+    view.addSubview(&label(mtm, "Displays after Save", row(7)));
+    let list = NSTextField::labelWithString(
+        &NSString::from_str(&display_list_after_save(displays, current.virtual_display)),
+        mtm,
+    );
+    list.setFrame(NSRect::new(
+        NSPoint::new(CONTROL_X, row(7)),
+        NSSize::new(WIDTH - CONTROL_X, list_height),
+    ));
+    list.setToolTip(Some(&NSString::from_str(
+        "The choices the viewer's Display menu will show after Save. Clearing \
+         Add a virtual display removes its line immediately; physical displays \
+         remain available.",
+    )));
+    view.addSubview(&list);
+
     // Wired after both exist: the checkbox's target is this object, so it cannot
     // be handed to the checkbox at construction. Sets the field's state to match
     // the box as it stands, so the dialog opens consistent rather than becoming
     // so on the first click.
-    let size_enabler = SizeEnabler::new(mtm, virtual_size.clone());
+    let virtual_controls = VirtualDisplayControls::new(
+        mtm,
+        virtual_size.clone(),
+        list.clone(),
+        displays.to_vec(),
+    );
     unsafe {
-        virtual_display.setTarget(Some(&size_enabler.as_object()));
+        virtual_display.setTarget(Some(&virtual_controls.as_object()));
         virtual_display.setAction(Some(sel!(virtualDisplayToggled:)));
     }
-    size_enabler.arm(virtual_display.clone());
+    virtual_controls.arm(virtual_display.clone());
 
     view.addSubview(&heading(mtm, "Pairing", row(8)));
     pairing_copy.setFrame(NSRect::new(
@@ -353,15 +383,16 @@ pub fn config(
     // there is nothing to type into it. Whole because it is not a secret — which
     // is the entire reason the protocol stopped using a shared one — and because
     // reading it against the gateway's copy is the common visit to this dialog.
-    // One click selects all 50 characters, and Copy remains the exact one-step
-    // route to the pasteboard.
+    // One click selects all 50 characters, and Copy is on this same row as the
+    // exact one-step route to the pasteboard.
     view.addSubview(&label(mtm, "This Mac's public key", row(10)));
+    let copy_x = WIDTH - COPY_WIDTH;
     let public_key = SelectAllField::new(
         mtm,
         &current.public_key(),
         NSRect::new(
             NSPoint::new(CONTROL_X, row(10)),
-            NSSize::new(WIDTH - CONTROL_X, ROW_HEIGHT),
+            NSSize::new(copy_x - BUTTON_GAP - CONTROL_X, ROW_HEIGHT),
         ),
     );
     public_key.setToolTip(Some(&NSString::from_str(
@@ -372,11 +403,8 @@ pub fn config(
     view.addSubview(&public_key);
 
     // An ordinary editable field: this one is pasted in, and it is not a secret
-    // either, so nothing about it wants hiding or locking.
-    //
-    // Below the buttons, not above them: all three of those act on the key above
-    // *them*, and with this field in between they read as the gateway key's —
-    // which is alarming on Regenerate identity and wrong on all three.
+    // either, so nothing about it wants hiding or locking. It follows both of
+    // this Mac's rows, so neither row's buttons can read as actions on it.
     view.addSubview(&label(mtm, "Gateway public key", row(12)));
     let gateway = field(
         mtm,
@@ -391,24 +419,35 @@ pub fn config(
     )));
     view.addSubview(&gateway);
 
-    // Owns both buttons' actions and the private key behind the label above.
+    // Owns all three buttons' actions and the private key behind the fields.
     // `buttonWithTitle:target:action:` holds its target weakly, so this has to
     // outlive `runModalForWindow` below — which is why it is a named local and
     // not a temporary.
     let actions = KeyActions::new(mtm, public_key.clone(), &current.private_key);
-    // Right-aligned as one group under the keys, in the order they are reached
-    // for: read this Mac's key, or — rarely — replace it, with one it had before
-    // or with a new one.
+    // Copy sits beside the public value. The two actions that consume or replace
+    // private key material get their own explicitly labelled row.
     let regenerate_x = WIDTH - REGENERATE_WIDTH;
     let import_x = regenerate_x - BUTTON_GAP - IMPORT_WIDTH;
-    let copy_x = import_x - BUTTON_GAP - COPY_WIDTH;
 
-    let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(11), COPY_WIDTH);
+    let copy = button(mtm, "Copy", &actions, sel!(copyKey:), copy_x, row(10), COPY_WIDTH);
     copy.setToolTip(Some(&NSString::from_str(
         "Put this Mac's public key on the clipboard, to paste as `agent_public_key` on \
          the gateway's rxa target.",
     )));
     view.addSubview(&copy);
+
+    view.addSubview(&label(mtm, "This Mac's private key", row(11)));
+    let private_key_status =
+        NSTextField::labelWithString(&NSString::from_str("Stored on this Mac; never shown"), mtm);
+    private_key_status.setFrame(NSRect::new(
+        NSPoint::new(CONTROL_X, row(11) + (ROW_HEIGHT - LABEL_HEIGHT) / 2.0),
+        NSSize::new(import_x - BUTTON_GAP - CONTROL_X, LABEL_HEIGHT),
+    ));
+    private_key_status.setToolTip(Some(&NSString::from_str(
+        "The private half of this Mac's identity stays on this Mac. Import replaces \
+         it with an existing private key; Regenerate identity creates a new one.",
+    )));
+    view.addSubview(&private_key_status);
 
     let import = button(
         mtm,
@@ -662,6 +701,12 @@ impl SelectAllField {
         this.setFont(NSFont::userFixedPitchFontOfSize(12.0).as_deref());
         this.setEditable(false);
         this.setSelectable(true);
+        // Match the standard inactive-control fill without disabling the field:
+        // a disabled NSTextField cannot receive the click that selects this
+        // value. Keep the bezel too, since this is still a focusable, copyable
+        // value rather than static explanatory text.
+        this.setDrawsBackground(true);
+        this.setBackgroundColor(Some(&NSColor::controlBackgroundColor()));
         this
     }
 }
@@ -672,7 +717,7 @@ const COPIED_FOR: f64 = 1.2;
 /// The key buttons' target: copy this Mac's public key, or replace the identity
 /// behind it — and the keeper of the private key, which nothing on screen shows.
 ///
-/// A whole class for two buttons, because an `NSButton` action has to be a
+/// A whole class for three buttons, because an `NSButton` action has to be a
 /// selector on an Objective-C object — there is nowhere to hang a Rust closure.
 struct KeyActionsIvars {
     /// The read-only field showing the public key, updated by a regenerate.
@@ -822,7 +867,7 @@ impl KeyActions {
         self.ivars().private_key.borrow().clone()
     }
 
-    /// What the label is showing, which is the public half of the above.
+    /// What the read-only field is showing, which is the public half of the above.
     fn public_key(&self) -> String {
         self.ivars().public_key.stringValue().to_string()
     }
@@ -861,36 +906,41 @@ impl KeyActions {
     }
 }
 
-/// Keeps the virtual display's size field live only while the display it sizes is
-/// switched on.
+/// Keeps both consequences of the virtual-display checkbox visible.
 ///
 /// A whole class for one checkbox, for the same reason [`KeyActions`] is one: an
 /// `NSButton` action has to be a selector on an Objective-C object.
-struct SizeEnablerIvars {
+struct VirtualDisplayControlsIvars {
     size: Retained<NSTextField>,
+    /// The display list after Save.
+    list: Retained<NSTextField>,
+    /// The displays present when the panel opened. The checkbox filters or adds
+    /// the virtual line without inventing new details for the physical ones.
+    displays: Vec<String>,
     /// The checkbox, so its state is read through `NSButton::state` rather than a
-    /// `msg_send` at the sender. Filled in by [`SizeEnabler::arm`] rather than at
-    /// construction: the checkbox takes *this* object as its target, so it cannot
-    /// exist before this does — the same shape as [`KeyActions::arm`].
+    /// `msg_send` at the sender. Filled in by [`VirtualDisplayControls::arm`]
+    /// rather than at construction: the checkbox takes *this* object as its
+    /// target, so it cannot exist before this does — the same shape as
+    /// [`KeyActions::arm`].
     checkbox: RefCell<Option<Retained<NSButton>>>,
 }
 
 define_class!(
     // SAFETY:
     // - NSObject has no subclassing requirements.
-    // - `SizeEnabler` does not implement `Drop`.
+    // - `VirtualDisplayControls` does not implement `Drop`.
     #[unsafe(super(NSObject))]
-    // AppKit sends the action on the main thread, and the ivar is a main-thread
-    // only object.
+    // AppKit sends the action on the main thread, and the UI ivars are
+    // main-thread-only objects.
     #[thread_kind = MainThreadOnly]
-    #[name = "RxaSizeEnabler"]
-    #[ivars = SizeEnablerIvars]
-    struct SizeEnabler;
+    #[name = "RxaVirtualDisplayControls"]
+    #[ivars = VirtualDisplayControlsIvars]
+    struct VirtualDisplayControls;
 
-    unsafe impl NSObjectProtocol for SizeEnabler {}
+    unsafe impl NSObjectProtocol for VirtualDisplayControls {}
 
-    impl SizeEnabler {
-        /// The checkbox moved; the field follows it.
+    impl VirtualDisplayControls {
+        /// The checkbox moved; both the size field and display list follow it.
         #[unsafe(method(virtualDisplayToggled:))]
         fn virtual_display_toggled(&self, _sender: Option<&AnyObject>) {
             self.follow();
@@ -898,23 +948,31 @@ define_class!(
     }
 );
 
-impl SizeEnabler {
-    fn new(mtm: MainThreadMarker, size: Retained<NSTextField>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(SizeEnablerIvars {
+impl VirtualDisplayControls {
+    fn new(
+        mtm: MainThreadMarker,
+        size: Retained<NSTextField>,
+        list: Retained<NSTextField>,
+        displays: Vec<String>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(VirtualDisplayControlsIvars {
             size,
+            list,
+            displays,
             checkbox: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Hand over the checkbox, and match the field to it as it stands — so the
-    /// dialog opens consistent rather than becoming so on the first click.
+    /// Hand over the checkbox, and match both dependent controls to it as it
+    /// stands — so the dialog opens consistent rather than becoming so on the
+    /// first click.
     fn arm(&self, checkbox: Retained<NSButton>) {
         *self.ivars().checkbox.borrow_mut() = Some(checkbox);
         self.follow();
     }
 
-    /// Match the field to the checkbox.
+    /// Match the size field and saved display list to the checkbox.
     fn follow(&self) {
         let on = self
             .ivars()
@@ -923,6 +981,10 @@ impl SizeEnabler {
             .as_ref()
             .is_some_and(|checkbox| checkbox.state() == NSControlStateValueOn);
         self.enable(on);
+        let ivars = self.ivars();
+        ivars
+            .list
+            .setStringValue(&NSString::from_str(&display_list_after_save(&ivars.displays, on)));
     }
 
     /// Editable *and* selectable, or a disabled field's contents cannot even be
@@ -1150,6 +1212,36 @@ mod tests {
 
     fn gateway_public_key() -> String {
         key::public_text_of(Role::Gateway, &key::generate_private(Role::Gateway)).unwrap()
+    }
+
+    /// The list shows the saved setting, not a stale report of what exists behind
+    /// the checkbox. Physical displays never move; the virtual line follows the
+    /// box in both directions.
+    #[test]
+    fn the_virtual_display_checkbox_updates_the_saved_display_list() {
+        let physical = "Display 1 — 1440×900 at 2x".to_owned();
+        let virtual_display = "Virtual display — 1280×800 at 2x".to_owned();
+        let existing = vec![physical.clone(), virtual_display.clone()];
+
+        assert_eq!(
+            display_list_after_save(&existing, true),
+            format!("{physical}\n{virtual_display}")
+        );
+        assert_eq!(display_list_after_save(&existing, false), physical);
+        assert_eq!(display_list_rows(&existing), 2);
+
+        let physical_only = vec!["Display 1 — 1440×900 at 2x".to_owned()];
+        assert_eq!(
+            display_list_after_save(&physical_only, true),
+            format!("{}\n{PENDING_VIRTUAL_DISPLAY}", physical_only[0])
+        );
+        assert_eq!(display_list_after_save(&physical_only, false), physical_only[0]);
+        assert_eq!(display_list_rows(&physical_only), 2);
+
+        // Only an actual menu row is filtered, not an error that happens to
+        // mention the same kind of display.
+        let error = vec!["Cannot list displays — Virtual display is unavailable".to_owned()];
+        assert_eq!(display_list_after_save(&error, false), error[0]);
     }
 
     /// What the dialog puts on screen for this Mac. The rest of this module
