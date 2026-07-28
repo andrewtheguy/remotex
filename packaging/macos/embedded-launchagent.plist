@@ -45,7 +45,9 @@
 	     false` keeps crash recovery and lets a deliberate exit 0 stick until the
 	     next login (or until the user opens the app again). The agent also exits
 	     0 when the port is already bound, which is another case where coming
-	     back would achieve nothing. -->
+	     back would achieve nothing — and when the copy holding it is *this* job,
+	     that exit follows a `kickstart -k` of this label, which is how opening an
+	     upgraded bundle restarts the job into it. See `hand_over_to_launchd`. -->
 	<key>KeepAlive</key>
 	<dict>
 		<key>SuccessfulExit</key>

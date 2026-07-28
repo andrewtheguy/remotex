@@ -27,8 +27,8 @@ icon; use its menu bar item.
 
 ## Connect the gateway
 
-Choose **Copy Pre-Shared Key** from the menu bar item and add an `rxa` target to
-the gateway config:
+Open **Settings…** from the menu bar item and press **Copy** beside the
+pre-shared key, then add an `rxa` target to the gateway config:
 
 ```toml
 [[targets]]
@@ -129,9 +129,36 @@ comments are not preserved.
 
 ## Upgrade
 
-Replace the app in Applications, then open the new copy once. Opening it
-refreshes the login-item registration, which can otherwise continue pointing
-at the replaced bundle.
+Choose **Quit** from the menu bar item first, then replace the app in
+Applications, then open the new copy once.
+
+Quitting first is what makes the upgrade land, and skipping it is silent rather
+than noisy. macOS will not launch a second copy of an app that is already
+running: opening the new bundle over a running agent just *activates* the old
+process, so nothing is upgraded, nothing is said, and the old version keeps
+running until the next login. With the agent quit there is nothing to activate,
+and opening the new copy starts the LaunchAgent job from it.
+
+The job is the copy that matters — it is the one that comes back at login, that
+the menu's Quit and a settings save restart, and that the Screen Recording and
+Accessibility grants were issued to. So whichever order things happen in, only
+one agent ends up running: a copy that finds the job already registered stands
+down and asks launchd to start it from this bundle instead of competing for the
+port (see `hand_over_to_launchd` in `main.rs`). Before that, a fresh install
+could leave two processes fighting over 52381 and a modal alert nobody was there
+to dismiss.
+
+Scripted, with no GUI in the way, the whole upgrade is: replace the bundle, then
+
+```sh
+launchctl kickstart -k gui/$(id -u)/dev.remotex.agent
+```
+
+which restarts the job from whatever is on disk. Do not `bootout` first — that
+unloads the job, and the kickstart then has nothing to find.
+
+There is no need to uninstall anything. Unregistering the login item, which is
+what Uninstall does, only means having to register it again.
 
 Stay with the same kind of build you already have — see [Signing identity and
 the grants](#signing-identity-and-the-grants). Upgrading a signed install with
@@ -163,11 +190,18 @@ only the checkbox that decides whether the private display exists and the
 `virtual_display_initial_size` its first appearance uses.
 
 "Initial" is the whole of how that size behaves: it is what the private display is
-created at the first time this Mac sees it. After that its resolution is the Mac's
-like any other screen's — set it in System Settings > Displays, where macOS
-remembers it against the display and restores it on the next launch. Editing the
-setting will not move a display that has already been arranged; what it fixes
-permanently is the largest mode that display can ever render at 2x.
+created at the first time this Mac sees it (no smaller than 800x600), and what it
+fixes permanently is the largest mode that display can ever render at 2x.
+
+Set it there, and then leave that display alone in System Settings > Displays.
+macOS will resize it like any other screen, but it lists every size twice — a
+HiDPI entry and a `(low resolution)` one — and a display shrunk much below the
+size it was created at drops out of HiDPI whichever entry is picked, so it comes
+back soft or oversized at a size nobody chose. macOS then remembers that against
+the display and restores it on the next launch, and editing the setting will not
+move a display that has already been arranged. Its density needs no help either:
+whichever client is connected reports the screen it is on, and the display
+matches it.
 
 See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
 for the capture, transport, and lifecycle design.

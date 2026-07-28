@@ -175,6 +175,14 @@ fn main() -> anyhow::Result<()> {
     // Infallible after the load above validated it, the same way `psk_bytes` is —
     // and `?` here would be one more way for a launch to end with nothing on
     // screen, which is the thing this whole block exists to stop.
+    // Before the bind, not after losing it: whoever is not the LaunchAgent job
+    // defers to the job, whether or not it would have won the port. The two
+    // `--no-` flags are hand-run developer copies, which have no business
+    // restarting the installed agent.
+    if !args.no_menu && !args.no_register && hand_over_to_launchd() {
+        return Ok(());
+    }
+
     let addr = config
         .socket_addr()
         .expect("listen validated in Config::validate");
@@ -393,6 +401,68 @@ fn restart() -> anyhow::Error {
     }
 }
 
+/// Unless this process *is* the LaunchAgent job, start that job from this bundle
+/// and let the caller exit. Returns whether it did.
+///
+/// One instance of this agent is the right number, and the LaunchAgent job is
+/// which one: it is the copy that survives a logout, that the menu's Quit and a
+/// settings save both restart, and that TCC's grants were issued to. So an
+/// `open` is not a second agent — it is a request that the job be running, from
+/// the bundle that was just opened.
+///
+/// The collision this ends is `open` on a bundle whose job is **registered but
+/// not running** — a fresh install, and every upgrade done the documented way,
+/// which quits the agent first. The opened copy registers the login item, that
+/// registration bootstraps the job, launchd starts it, and now two processes are
+/// starting at once with one port between them. Whichever lost used to park a
+/// modal alert nobody was going to click; on the test VM that left a zombie
+/// process behind every single deploy. Deferring *before* the bind, rather than
+/// reacting after losing it, means there is no race to lose.
+///
+/// The other half of the same problem is not a collision and cannot be fixed
+/// here: opening a new bundle while the old agent still runs launches nothing at
+/// all, because macOS activates the running app instead — so the upgrade quietly
+/// does not happen. That one is answered in the README, by quitting first.
+///
+/// It does mean opening the app restarts a running agent, dropping a session in
+/// progress. That is the trade a settings save already makes and the gateway
+/// already reconnects from; the alternative is an upgrade that cannot take effect
+/// without a logout.
+///
+/// A job that is loaded but not yet running still counts — on a fresh install
+/// that is exactly the state a few milliseconds after registering, and leaving it
+/// to start on its own is how the collision happened. What does not count is a
+/// pid that is ours: then we are the job, and kickstarting would be this process
+/// restarting itself forever. Nor does a `print` that fails, which means no job —
+/// an unregistered or hand-built copy, which should simply serve.
+fn hand_over_to_launchd() -> bool {
+    let service = format!("gui/{}/{}", uid(), loginitem::LABEL);
+    let Ok(printed) = std::process::Command::new("/bin/launchctl")
+        .args(["print", &service])
+        .output()
+    else {
+        return false;
+    };
+    if !printed.status.success() {
+        return false;
+    }
+    let job_pid = String::from_utf8_lossy(&printed.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pid = ")?.trim().parse::<u32>().ok());
+    if job_pid == Some(std::process::id()) {
+        return false;
+    }
+    info!("agent: {service} is this Mac's copy; starting it from this bundle and standing down");
+    // `-k` so a job that is already running is restarted into this bundle, which
+    // is the upgrade. Harmless on one that is merely loaded.
+    matches!(
+        std::process::Command::new("/bin/launchctl")
+            .args(["kickstart", "-k", &service])
+            .status(),
+        Ok(status) if status.success()
+    )
+}
+
 /// This user's uid, for the launchd domain the login item lives in.
 fn uid() -> u32 {
     // No safe binding in std, and it cannot fail.
@@ -548,7 +618,7 @@ fn print_first_run(path: &Path) {
     println!();
     println!("The rest is in the menu bar, under the remotex-agent icon:");
     println!();
-    println!("    Pre-Shared Key     — the one credential; it goes on the gateway target");
+    println!("    Settings…          — holds the one credential; Copy puts it on the clipboard");
     println!("    Screen Recording   — without it the screen never paints");
     println!("    Accessibility      — without it input is silently ignored");
     println!();

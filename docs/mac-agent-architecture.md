@@ -235,10 +235,20 @@ and both are only surprising if you expected the agent to be in charge:
   calls main, and if the arrangement makes ours primary, that is ours. Overriding
   it would mean overruling a System Settings choice.
 - **The configured size is an initial size.** `virtual_display_initial_size` is
-  what the display is created at the first time a Mac sees it; afterwards the
-  remembered mode wins, and editing the setting will not move a display that has
-  already been arranged. What the value fixes permanently is the *ceiling*, since
+  what the display is created at the first time a Mac sees it (at least 800x600,
+  a floor `config.rs` and `virtualdisplay.rs` share); afterwards the remembered
+  mode wins, and editing the setting will not move a display that has already
+  been arranged. What the value fixes permanently is the *ceiling*, since
   `maxPixels` and `sizeInMillimeters` cannot change after creation.
+
+  Which is also why both the config comment and the settings dialog say to set
+  the size there and then leave the display alone in System Settings. Resizing it
+  is *allowed* — it is an ordinary display — but the mode list offers a
+  `(low resolution)` twin of every size, a mode much below the created one falls
+  out of the density window whichever twin is picked, and macOS then remembers
+  the result. None of that is recoverable from this process: only a new display
+  restores the density, and a new display means a new identity and the lost
+  arrangement above.
 
 The one remembered state that is a genuine problem is an arrangement that holds
 the identity **offline**. Nothing in the process can clear it, and the agent
@@ -261,8 +271,11 @@ Recording permission for capture.
 ## Lifecycle
 
 The app registers its embedded LaunchAgent with `SMAppService` and runs in the
-logged-in user's GUI session. Its menu bar item exposes status, settings, the
-PSK, permission shortcuts, logs, and the login-item toggle.
+logged-in user's GUI session. Its menu bar item exposes status, settings,
+permission shortcuts, logs, and the login-item toggle. The PSK is not among them:
+it lives in the settings dialog, read-only with a Copy button, and both editing
+it and regenerating it are behind that dialog's Edit — copying a credential is
+routine, replacing one is not, and a menu item cannot tell the two apart.
 
 Only one gateway may be connected. A new authenticated connection replaces the
 old one. The shared browser heartbeat ends the engine under the same policy as
