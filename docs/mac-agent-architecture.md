@@ -271,8 +271,11 @@ Recording permission for capture.
 ## Lifecycle
 
 The app registers its embedded LaunchAgent with `SMAppService` and runs in the
-logged-in user's GUI session. Its menu bar item exposes status, settings, the
-PSK, permission shortcuts, logs, and the login-item toggle.
+logged-in user's GUI session. Its menu bar item exposes status, settings,
+permission shortcuts, logs, and the login-item toggle. The PSK is not among them:
+it lives in the settings dialog, read-only with a Copy button, and both editing
+it and regenerating it are behind that dialog's Edit — copying a credential is
+routine, replacing one is not, and a menu item cannot tell the two apart.
 
 Only one gateway may be connected. A new authenticated connection replaces the
 old one. The shared browser heartbeat ends the engine under the same policy as

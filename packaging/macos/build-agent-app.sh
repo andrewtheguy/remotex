@@ -380,8 +380,9 @@ agent in System Settings > General > Login Items.
 Everything after that is in the menu bar item, which is the agent's whole
 interface — there are no subcommands. Open it for:
 
-    Copy Pre-Shared Key  to paste the key into the gateway's rxa target
-    Settings...          listen address, displays and key, in one dialog
+    Settings...          listen address, displays, and the pre-shared key —
+                         Copy puts it on the clipboard for the gateway's rxa
+                         target, and it takes an Edit to change it
 
 It also needs Screen Recording and Accessibility, and asks for whichever is
 missing: the icon warns and the menu offers the right Privacy pane. Read the

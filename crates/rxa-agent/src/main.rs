@@ -548,7 +548,7 @@ fn print_first_run(path: &Path) {
     println!();
     println!("The rest is in the menu bar, under the remotex-agent icon:");
     println!();
-    println!("    Pre-Shared Key     — the one credential; it goes on the gateway target");
+    println!("    Settings…          — holds the one credential; Copy puts it on the clipboard");
     println!("    Screen Recording   — without it the screen never paints");
     println!("    Accessibility      — without it input is silently ignored");
     println!();

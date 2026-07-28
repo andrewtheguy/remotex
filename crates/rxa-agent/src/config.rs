@@ -279,14 +279,14 @@ fn render(config: &Config) -> String {
     format!(
         r#"# remotex-agent configuration.
 #
-# Managed from the menu bar item — Settings and Pre-Shared Key both write this
-# file, and each write rewrites it completely. Hand edits to these comments will
-# not survive the next one.
+# Managed from the menu bar item — Settings rewrites this file completely on
+# every save. Hand edits to these comments will not survive the next one.
 #
 # The psk below is the entire credential: the gateway authenticates with it and
 # nothing else, which is what makes a reconnect need no login. The *same* key
 # must appear as `psk` on the matching [[targets]] entry in the gateway's
-# remotex.toml. Read it from the menu bar: Pre-Shared Key.
+# remotex.toml. Copy it from the menu bar: Settings, then Copy — the field is
+# read-only there until Edit, so it cannot be changed by accident.
 
 # Address to listen on, as address:port — 0.0.0.0 so the gateway host can reach
 # it; narrow this to a specific interface if you prefer.

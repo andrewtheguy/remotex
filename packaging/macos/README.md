@@ -27,8 +27,8 @@ icon; use its menu bar item.
 
 ## Connect the gateway
 
-Choose **Copy Pre-Shared Key** from the menu bar item and add an `rxa` target to
-the gateway config:
+Open **Settings…** from the menu bar item and press **Copy** beside the
+pre-shared key, then add an `rxa` target to the gateway config:
 
 ```toml
 [[targets]]

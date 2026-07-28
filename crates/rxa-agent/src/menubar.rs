@@ -246,7 +246,12 @@ define_class!(
             };
 
             loop {
-                let Some(edited) = panels::config(mtm, &draft, &attached) else {
+                // The key the *process* is using, so the dialog can say when the
+                // file's key is one that never took effect — Copy is in there
+                // now, and copying the wrong one looks like an agent gone deaf.
+                let Some(edited) =
+                    panels::config(mtm, &draft, &attached, &settings.running().psk)
+                else {
                     return;
                 };
                 let next = config::Config {
@@ -288,17 +293,6 @@ define_class!(
                     }
                 }
             }
-        }
-
-        #[unsafe(method(copyPsk:))]
-        fn copy_psk(&self, _sender: Option<&AnyObject>) {
-            // The key this process is authenticating with, not the one in the
-            // file — the same reason the "Listening on" line reads `running()`.
-            // Saving a key normally re-execs straight into it, so the two agree;
-            // when they do not (a re-exec that failed, a hand-edited file) the
-            // file's key is the one nothing will accept, and pasting it into the
-            // gateway would look like the agent had gone deaf.
-            self.copy_to_clipboard(&self.ivars().settings.running().psk);
         }
 
         /// Show the config file in the Finder.
@@ -510,28 +504,15 @@ impl Controller {
         }
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        // Outside the dialog, because it is not an edit: copying the key onto the
-        // gateway is the one thing anybody does with it, and it should not need a
-        // dialog and a Cancel every time.
-        let item = self.action("Copy Pre-Shared Key", sel!(copyPsk:), mtm);
-        // Not a state a save can leave behind: saving a key re-execs into it, so
-        // the two agree. The keys differ only when that did not happen — a
-        // re-exec that failed, or a config edited by hand — and then which key
-        // this copies is the difference between a gateway that connects and one
-        // that is refused.
-        if saved.psk != settings.running().psk {
-            item.setToolTip(Some(&NSString::from_str(
-                "Copies the key in force right now. The config file holds a different one that \
-                 never took effect — quit remotex-agent and open it again to switch to it.",
-            )));
-        }
-        menu.addItem(&item);
-
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        // The key is not out here any more. Copying it is one button inside the
+        // dialog, next to the field it copies — which is one click further away
+        // than a menu item was, and buys the two guards that matter: the field is
+        // read-only until Edit, and Regenerate is dead until then too, so neither
+        // a stray keystroke nor a stray click can replace the credential.
         let item = self.action("Settings…", sel!(openSettings:), mtm);
         item.setToolTip(Some(&NSString::from_str(&format!(
-            "Listen address ({}), display and pre-shared key. Saving a change restarts \
-             the agent.",
+            "Listen address ({}), display, and the pre-shared key with a Copy button. \
+             Saving a change restarts the agent.",
             saved.listen
         ))));
         menu.addItem(&item);
@@ -601,14 +582,6 @@ impl Controller {
              it again is also what applies a saved change.",
         )));
         menu.addItem(&item);
-    }
-
-    fn copy_to_clipboard(&self, psk: &str) {
-        if pasteboard::write(psk) {
-            info!("menu: pre-shared key copied to the clipboard");
-        } else {
-            warn!("menu: the clipboard refused the pre-shared key");
-        }
     }
 
     /// A line of text, not a control: disabled, which is how AppKit draws a
