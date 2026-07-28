@@ -228,6 +228,12 @@ final class AppModel: GatewaySessionSink {
     /// A VNC target is the case to know about: it takes the window's size
     /// continuously rather than on request, so `canResize` is false and this is the
     /// enabled half — where it finds the desktop already fitting and does nothing.
+    ///
+    /// For an rxa target with `resize` the pair flips *during* a session, as the
+    /// user switches between the Mac's own screens and the display the agent made:
+    /// this one is enabled for a real screen, whose resolution is not ours to set,
+    /// and the one above takes over for the agent's. That is the same invariant
+    /// holding, now answered per display rather than once per connection.
     var canResizeToDisplay: Bool {
         session.screen == .desktop && session.remoteSize != nil && !session.canResize
     }
@@ -459,15 +465,18 @@ final class AppModel: GatewaySessionSink {
             session.connectError = nil
             // The three resize behaviours, as `useRemoteDesktop.ts` picks between
             // them. RDP resizes only on request because a resize forces a heavy
-            // Deactivation-Reactivation; rxa never resizes, because a Mac's
-            // resolution is set on that Mac; VNC follows the window.
+            // Deactivation-Reactivation; VNC follows the window; rxa is on
+            // request too, but only for a display the agent *made* — a Mac's own
+            // panel is never resized because somebody connected — so it starts
+            // out at "never" here and may be raised by the first `displays`.
             viewportPolicy = ViewportPolicy(
                 protocolName: payload.protocolName,
                 resize: payload.resize
             )
-            // The two are the same question here: the only target that
+            // Still the same question as `manualOnly`: the only target that
             // suppresses automatic reports and can still be resized is the one
-            // whose menu item does the asking.
+            // whose menu item does the asking. Re-asked on every `displays`,
+            // because for rxa the answer can change mid-session.
             session.canResize = viewportPolicy.manualOnly
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
@@ -499,6 +508,19 @@ final class AppModel: GatewaySessionSink {
             let switched = session.activeDisplayID != active
             session.displays = displays
             session.activeDisplayID = active
+            // Whether "Resize to Window" is offered is a question about *this*
+            // display, not only about the target: a Mac's own panel is never
+            // resized from here, and the user can switch onto and off an
+            // agent-made one from the Display menu at any point. An `active` the
+            // list does not contain — a screen unplugged between the two, which
+            // this message allows — reads as not virtual, leaving the item greyed
+            // rather than offering to resize a display nobody here can name.
+            viewportPolicy.sharing(
+                virtualDisplay: displays.first { $0.id == active }?.isVirtual ?? false
+            )
+            // Harmless for RDP and VNC, whose policy the call above cannot touch:
+            // it writes back the value that is already there.
+            session.canResize = viewportPolicy.manualOnly
             // A different display is being shared, and the density was only ever
             // reported *at* the previous one — the agent acts on it for the display
             // it is currently sharing, so a switch onto one the agent made would

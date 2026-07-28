@@ -21,8 +21,10 @@ export type ClientMsg =
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
   // The only way to ask for a remote size, and deliberately not paired with a
   // menu of resolutions: a remote's resolution belongs to the machine running
-  // it. The two engines that act on this are the two whose protocols hand that
-  // decision to the client — VNC continuously, RDP on request.
+  // it. Three engines act on this, each where its protocol hands that decision
+  // to the client — VNC continuously, RDP on request, and rxa on request and
+  // only for the display the agent made, since a Mac's own panel is never
+  // resized because somebody connected to it.
   | { type: "viewport"; w: number; h: number }
   // The density of the screen this browser window is on, in hundredths:
   // `devicePixelRatio * 100`, so 100 for a 1x screen and 200 for a Retina one.
@@ -122,7 +124,10 @@ export type ControlMsg =
   | { type: "error"; message: string }
   | { type: "picker" }
   // `protocol` ("rdp"/"vnc"/"rxa") and `resize` tell the browser how to handle
-  // resize: VNC follows the viewport automatically, RDP only on request.
+  // resize: VNC follows the viewport automatically, RDP only on request. For
+  // rxa they settle only half of it — `resize` is the target's permission, and
+  // whether the control appears also needs the shared display to be one the
+  // agent made, which arrives later in `displays`.
   // `clipboard` is whether this target opted into the clipboard bridge.
   | {
       type: "connected";

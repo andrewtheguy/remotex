@@ -62,8 +62,9 @@ struct ViewportReportingTests {
         try await session.expectViewport(w: 1600, h: 1000)
     }
 
-    /// A Mac's resolution is set on that Mac, so a report has nothing to act on
-    /// — and it is never sent.
+    /// A Mac's screens are set on that Mac, and a display the agent made is
+    /// resized only when the user asks — so nothing an rxa session measures for
+    /// itself ever reaches the socket, whichever display is being shared.
     @Test
     func anRxaTargetReportsNothingAutomatically() async throws {
         let session = try await Self.attached()
@@ -71,9 +72,54 @@ struct ViewportReportingTests {
 
         session.model.reportViewport(DisplayMode(w: 1600, h: 1000))
         try await session.settle()
+        #expect(session.viewports.isEmpty)
 
+        // Still nothing once the agent's own display is the one being shared:
+        // that raises the menu item, not the automatic reports behind it.
+        session.model.apply(.control(.displays(active: 9, displays: Self.displays)))
+        session.model.reportViewport(DisplayMode(w: 1440, h: 900))
+        try await session.settle()
         #expect(session.viewports.isEmpty)
     }
+
+    /// And the whole path a press of "Resize to Window" takes: three components
+    /// and a screen, which is where both of the "it never resized" bugs lived.
+    /// The display list is what unlocks it, and switching to a real screen locks
+    /// it again — with the automatic report in between still swallowed.
+    @Test
+    func askingResizesAnAgentMadeDisplayAndNothingElse() async throws {
+        let session = try await Self.attached()
+        session.connect(protocolName: "rxa", resize: true)
+        session.model.apply(.control(.displays(active: 9, displays: Self.displays)))
+
+        session.model.reportViewport(DisplayMode(w: 1440, h: 900))
+        try await session.settle()
+        #expect(session.viewports.isEmpty, "measuring is not asking")
+
+        session.model.resizeToWindow()
+        try await session.expectViewport(w: 1440, h: 900)
+
+        // Onto one of the Mac's own screens: the item greys out, and a press that
+        // somehow got through would still send nothing.
+        session.model.apply(.control(.displays(active: 7, displays: Self.displays)))
+        #expect(!session.model.session.canResize)
+        session.model.resizeToWindow()
+        try await session.settle()
+        #expect(session.viewports.count == 1)
+    }
+
+    /// The fake Mac's two screens: one somebody is sitting at, and the one the
+    /// agent made to be looked at from here.
+    private static let displays: [ServerMessage.DisplayInfo] = [
+        .init(id: 7, label: "Display 1", detail: "1920×1080 at 1x", main: true, isVirtual: false),
+        .init(
+            id: 9,
+            label: "Virtual display",
+            detail: "3200×2000 at 2x",
+            main: false,
+            isVirtual: true
+        ),
+    ]
 
     private static func attached() async throws -> AttachedSession {
         try await AttachedSession.attached(suite: "ViewportReportingTests")
