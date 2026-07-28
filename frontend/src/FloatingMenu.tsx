@@ -411,6 +411,47 @@ export default function FloatingMenu({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [helpOpen]);
 
+  // Ctrl+Alt+Shift+Semicolon hides the floating chrome and shows it again — for a
+  // screen recording, or to uncover whatever the button is sitting on top of.
+  //
+  // Two things make the chord workable. It is caught on `window` in the **capture**
+  // phase and stopped there, because the remote surface forwards every key it sees
+  // to the guest (see useRemoteDesktop): a bubble-phase listener would toggle the
+  // button *and* type the chord at the remote. And capturing on the window rather
+  // than the surface means it still works when focus has wandered off the desktop,
+  // which matters when the way back is the only way back.
+  //
+  // Three modifiers because the chord this steals from is the guest's, not the
+  // browser's — whatever it binds never reaches the remote again. Ctrl+Shift+; was
+  // tried and is Excel's "insert the current time", and Ctrl+Alt+anything is AltGr
+  // on Windows and X11, so on a non-US layout it can be a character somebody means
+  // to type. Adding Shift lands on a fourth modifier level that few layouts
+  // populate, and no browser or desktop binds.
+  //
+  // Deliberately not persisted: a chrome-less desktop with no visible way to
+  // recover it should not survive a reload.
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // All three and no Command: a Mac user's Cmd+Ctrl+Alt+Shift+; stays theirs.
+      if (
+        e.code !== "Semicolon" ||
+        !e.ctrlKey ||
+        !e.altKey ||
+        !e.shiftKey ||
+        e.metaKey
+      ) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      setHidden((was) => !was);
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, []);
+
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>) => {
       if (
@@ -563,25 +604,34 @@ export default function FloatingMenu({
 
   return (
     <>
-      <button
-        type="button"
-        className={`fab${open ? " fab-open" : ""}${dragging ? " fab-dragging" : ""}`}
-        style={{
-          left: `${resolvedPosition.x}px`,
-          top: `${resolvedPosition.y}px`,
-        }}
-        onClick={onClick}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerCancel}
-        aria-label={open ? "Close menu" : "Open menu"}
-        aria-expanded={open}
-      >
-        {open ? "✕" : "☰"}
-      </button>
+      {/* The button and its drawer go together: a toolbar anchored to a button
+          that isn't there reads as a bug. Both keep their state while hidden, so
+          the chord brings back exactly what was on screen. Docked panels are left
+          alone — they carry their own Close. */}
+      {!hidden && (
+        <button
+          type="button"
+          className={`fab${open ? " fab-open" : ""}${dragging ? " fab-dragging" : ""}`}
+          style={{
+            left: `${resolvedPosition.x}px`,
+            top: `${resolvedPosition.y}px`,
+          }}
+          onClick={onClick}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerCancel}
+          aria-label={open ? "Close menu" : "Open menu"}
+          aria-expanded={open}
+          // The only place the chord is written down in the UI, and it has to be
+          // here: once the button is hidden there is nothing left to read it off.
+          title="Ctrl+Alt+Shift+; hides this button"
+        >
+          {open ? "✕" : "☰"}
+        </button>
+      )}
 
-      {open && (
+      {open && !hidden && (
         <div className="toolbar" style={toolbarStyle}>
           <DisplaySection
             displays={displays}

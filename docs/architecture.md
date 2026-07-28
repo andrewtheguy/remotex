@@ -374,6 +374,14 @@ Clipboard API is unavailable. The on-screen keyboard and the
 clipboard panel are mutually exclusive: both dock to the bottom edge on mobile
 and report their height so the canvas insets above them.
 
+`Ctrl+Alt+Shift+;` hides the floating button and its drawer, and shows them again.
+It is caught on `window` in the capture phase and stopped there, because the remote
+surface forwards every key it sees — a bubble-phase listener would toggle the
+button and type the chord at the guest. Three modifiers because the chord it takes
+is the guest's rather than the browser's: `Ctrl+Shift+;` is Excel's insert-time,
+and `Ctrl+Alt` is AltGr on Windows and X11. Not persisted: a chrome-less desktop
+with no visible way back should not survive a reload.
+
 On a Mac host driving a non-Mac remote, the SPA translates Command chords the way
 the macOS viewer does (see `frontend/src/macKeys.ts` and docs/macos-viewer.md):
 Command plus A, C, F, P, S, V, X or Z becomes a remote Control chord, a bare
