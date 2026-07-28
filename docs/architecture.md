@@ -65,6 +65,11 @@ separately records which browser owns the desktop and which target is active.
    remains available for a 60-second reattach grace period and discards frames
    while detached. If no browser returns, the engine stops and the slot returns
    to the picker.
+6. `POST /api/auth/logout` ends the login *and* the session with it: the engine
+   stops, the selection and the claim are released, and an attached WebSocket is
+   closed. Deliberately not the grace-period path — a log out is not a browser
+   that might come back, and leaving the engine running meant a login inside that
+   minute resumed the desktop that had just been logged out of.
 
 A forced takeover closes the previous WebSocket and preserves the engine and
 selected target when the new browser attaches within the same grace period. If
@@ -193,7 +198,8 @@ with a protocol pong in their networking stack, so background-tab JavaScript
 timer throttling does not affect liveness. A connection with no pong for about
 60 seconds is expired and its engine stops immediately because the missing-pong
 wait has already consumed the reattach grace period. An orderly WebSocket close
-starts a fresh 60-second reattach window. These frames are transport-level and
+starts a fresh 60-second reattach window — except after a log out, which has
+already ended the engine before the socket closes. These frames are transport-level and
 do not appear in the JSON browser protocol.
 
 The connection out to a remote gets the matching treatment, in one place for all

@@ -163,8 +163,19 @@ async fn login_handler(
     Ok(([(header::SET_COOKIE, cookie)], Json(OkResponse { ok: true })))
 }
 
-/// Invalidate the caller's session (if any) and clear the cookie. Public: it
-/// only ever drops the caller's own token.
+/// Invalidate the caller's login (if any), end the remote session with it, and
+/// clear the cookie. Public: it only ever drops the caller's own token.
+///
+/// Both halves, because a login and the desktop it opened end together. Ending only
+/// the login left the engine to the ordinary detach path — indistinguishable from a
+/// browser that crashed, so the gateway held the target for its reattach grace and a
+/// login inside that minute resumed the desktop instead of showing the picker (see
+/// [`session::SessionManager::log_out`]).
+///
+/// Server-side rather than a `disconnect` the browser sends first: one request does
+/// both, so there is no ordering to get right and no dependence on the WebSocket
+/// still being up — which is precisely the state a browser is in when the grace
+/// period is already counting down.
 async fn logout_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -172,6 +183,7 @@ async fn logout_handler(
     if let Some(token) = auth::token_from_headers(&headers) {
         state.auth.invalidate(&token);
     }
+    state.sessions.log_out();
     let cookie = format!(
         "{}=; {}; Max-Age=0",
         auth::COOKIE_NAME,
