@@ -201,7 +201,8 @@ fn shared_owned_display(
 /// Serve one gateway connection until it hangs up or fails.
 pub async fn serve(
     stream: TcpStream,
-    psk: [u8; 32],
+    private_key: [u8; 32],
+    gateway_public_key: [u8; 32],
     owned: Owned,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
@@ -210,8 +211,9 @@ pub async fn serve(
     let owned = owned.target;
     stream.set_nodelay(true).ok();
 
-    // A wrong PSK fails here, before the agent has revealed anything at all.
-    let transport = rxa_proto::noise::respond(&mut stream, &psk)
+    // A gateway this Mac is not paired with fails here, before the agent has
+    // revealed anything at all.
+    let transport = rxa_proto::noise::respond(&mut stream, &private_key, &gateway_public_key)
         .await
         .map_err(|e| anyhow::anyhow!("handshake: {e}"))?;
     let (read_half, write_half) = stream.into_split();

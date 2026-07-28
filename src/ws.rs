@@ -259,7 +259,8 @@ mod tests {
             security: Security::Auto,
             resize: false,
             clipboard: false,
-            psk: String::new(),
+            agent_public_key: String::new(),
+            gateway_private_key: String::new(),
         };
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(

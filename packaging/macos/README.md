@@ -1,7 +1,7 @@
 # remotex-agent for macOS
 
 `remotex-agent` is an optional, RealVNC-like dedicated-agent alternative to
-using macOS Screen Sharing as a VNC target. Its PSK authenticates reconnects
+using macOS Screen Sharing as a VNC target. Its keypair authenticates reconnects
 directly instead of returning to Screen Sharing's login gate. It shares the
 logged-in user's Mac with a remotex gateway over the encrypted `rxa` protocol
 and requires macOS 15.4 or later.
@@ -21,25 +21,37 @@ Download `remotex-agent-<version>-macos-arm64-unsigned.dmg` from the
 3. Open `/Applications/remotex-agent.app`.
 
 The first launch creates
-`~/Library/Application Support/remotex-agent/config.toml`, generates a
-pre-shared key, and registers the app as a login item. The agent has no Dock
-icon; use its menu bar item.
+`~/Library/Application Support/remotex-agent/config.toml`, mints this Mac's
+keypair, and registers the app as a login item. The agent has no Dock icon; use
+its menu bar item. It starts **unpaired**: it listens and refuses every
+connection until it is told which gateway to answer.
 
-## Connect the gateway
+## Pair it with the gateway
 
-Open **Settings…** from the menu bar item and press **Copy** beside the
-pre-shared key, then add an `rxa` target to the gateway config:
+Two public keys are exchanged, one each way. Neither is a secret — the private
+key behind each never leaves the machine that made it.
+
+**1. This Mac's key onto the gateway.** Open **Settings…** from the menu bar item
+and press **Copy** beside *This Mac's public key* (or run
+`remotex-agent --public-key`, which works over SSH). Add an `rxa` target:
 
 ```toml
+[rxa]
+private_key = "rxgs..."      # this gateway's identity; `remotex gen-key`
+
 [[targets]]
 name = "mac"
 protocol = "rxa"
 host = "mac.local"
-psk = "rxa..."
+agent_public_key = "rxap..."
 ```
 
-The agent listens on port 52381 by default. The PSK is the credential and must
-match exactly on both sides.
+**2. The gateway's key into the agent.** Run `remotex rxa-pubkey` on the gateway
+— it also logs its public key at startup — and paste the `rxgp...` value into
+*Gateway public key* in the same Settings dialog.
+
+The agent listens on port 52381 by default. One `[rxa].private_key` serves every
+`rxa` target: it is the server's identity, not a per-Mac credential.
 
 ## Permissions
 
@@ -95,11 +107,12 @@ bar reports the current setting once macOS has one to report.
 The status icon distinguishes idle, connected, and missing-permission states.
 Its menu provides:
 
-- connection and listen-address status;
-- PSK copy;
+- connection and listen-address status, and a **Not paired** row while no
+  gateway key is set;
 - settings: listen address, a read-only list of the displays this Mac can share,
   whether to add a private 2x display of the agent's own, that display's
-  **initial** size, and the PSK;
+  **initial** size, this Mac's public key with a **Copy** button, the gateway's
+  public key to paste in, and **Regenerate identity** behind a confirmation;
 - config and log shortcuts;
 - permission shortcuts;
 - the **Start at Login** toggle and **Quit**.

@@ -27,9 +27,19 @@ pub struct Config {
     /// the whole point is to be reachable from the gateway host.
     #[serde(default = "default_listen")]
     pub listen: String,
-    /// Pre-shared key, matching the gateway target's `psk`. This is the entire
-    /// credential; without it no handshake completes.
-    pub psk: String,
+    /// This Mac's own private key (`rxas…`), minted on first launch and never
+    /// shown, copied or printed. Its public half — derived on demand by
+    /// [`Config::public_key`] — is what goes on the gateway.
+    pub private_key: String,
+    /// The gateway's public key (`rxgp…`), from `remotex rxa-pubkey`. The agent
+    /// answers that gateway and no other.
+    ///
+    /// **May be empty**, which means unpaired: a first launch has nobody to
+    /// pair with yet, and the agent has to be running before its own public key
+    /// can be read out of the menu bar. An unpaired agent listens and refuses
+    /// every connection — see [`Config::gateway_public_key_bytes`].
+    #[serde(default)]
+    pub gateway_public_key: String,
     /// Give the Mac an extra display, of the agent's own making.
     ///
     /// An addition, not a substitution: `CGVirtualDisplay` *adds* a monitor next
@@ -112,10 +122,26 @@ impl Config {
     /// panel the user can correct rather than a handshake that mysteriously
     /// never completes once the gateway starts dialing.
     pub fn validate(&self) -> anyhow::Result<()> {
-        rxa_proto::psk::parse(&self.psk).map_err(|e| anyhow::anyhow!("invalid psk: {e}"))?;
+        rxa_proto::key::parse_private(rxa_proto::key::Role::Agent, &self.private_key)
+            .map_err(|e| anyhow::anyhow!("invalid private_key: {e}"))?;
+        // Empty is unpaired, which is what a first launch looks like. Anything
+        // else has to be a gateway's public key — including, pointedly, not
+        // this Mac's own, which the role in the prefix is there to catch.
+        if !self.gateway_public_key.trim().is_empty() {
+            rxa_proto::key::parse_public(
+                rxa_proto::key::Role::Gateway,
+                &self.gateway_public_key,
+            )
+            .map_err(|e| anyhow::anyhow!("invalid gateway_public_key: {e}"))?;
+        }
         self.socket_addr()?;
         self.virtual_display_initial_points()?;
         Ok(())
+    }
+
+    /// Whether this agent has been told which gateway to answer.
+    pub fn is_paired(&self) -> bool {
+        !self.gateway_public_key.trim().is_empty()
     }
 
     /// The virtual display's size in points.
@@ -167,9 +193,30 @@ impl Config {
         })
     }
 
-    /// The 32-byte key. Infallible after [`Config::validate`].
-    pub fn psk_bytes(&self) -> [u8; 32] {
-        rxa_proto::psk::parse(&self.psk).expect("psk validated in Config::validate")
+    /// This Mac's 32-byte private key. Infallible after [`Config::validate`].
+    pub fn private_key_bytes(&self) -> [u8; 32] {
+        rxa_proto::key::parse_private(rxa_proto::key::Role::Agent, &self.private_key)
+            .expect("private_key validated in Config::validate")
+    }
+
+    /// This Mac's public key, in the form the gateway's `agent_public_key`
+    /// takes. Derived rather than stored, so it cannot go stale against the
+    /// private key beside it.
+    pub fn public_key(&self) -> String {
+        rxa_proto::key::public_text_of(rxa_proto::key::Role::Agent, &self.private_key)
+            .expect("private_key validated in Config::validate")
+    }
+
+    /// The gateway this agent answers, or `None` while it is unpaired.
+    /// Infallible after [`Config::validate`].
+    pub fn gateway_public_key_bytes(&self) -> Option<[u8; 32]> {
+        if !self.is_paired() {
+            return None;
+        }
+        Some(
+            rxa_proto::key::parse_public(rxa_proto::key::Role::Gateway, &self.gateway_public_key)
+                .expect("gateway_public_key validated in Config::validate"),
+        )
     }
 
     /// Write this config to `path`, replacing whatever is there.
@@ -218,12 +265,14 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBuf)> {
     Ok((config, path))
 }
 
-/// Load the config, creating it with a freshly generated key if it is absent.
+/// Load the config, creating it with a freshly minted identity if it is absent.
 ///
 /// There is no install script to write this file (the app registers itself — see
 /// [`crate::loginitem`]), so first launch has to be self-sufficient: the user
-/// drags the bundle in, opens it, and the only thing left to do is copy the key
-/// from the menu bar onto the gateway.
+/// drags the bundle in, opens it, and is left with two things to do — copy this
+/// Mac's public key onto the gateway, and paste the gateway's back in. The
+/// config it lands in is deliberately *unpaired* rather than half-written:
+/// there is no gateway to name yet.
 ///
 /// Returns the config, its path, and whether this call created it.
 pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBuf, bool)> {
@@ -243,7 +292,8 @@ pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBu
         .with_context(|| format!("failed to create {}", parent.display()))?;
     let config = Config {
         listen: default_listen(),
-        psk: rxa_proto::psk::generate(),
+        private_key: rxa_proto::key::generate_private(rxa_proto::key::Role::Agent),
+        gateway_public_key: String::new(),
         virtual_display: false,
         virtual_display_initial_size: default_virtual_display_initial_size(),
     };
@@ -253,9 +303,10 @@ pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBu
 
 /// Write a file readable only by its owner.
 ///
-/// The key in here is the entire credential for reaching this Mac's screen and
-/// keyboard, so the file is created 0600 from the start rather than chmod'ed
-/// afterwards — that leaves no window where it is world-readable.
+/// `private_key` in here is this Mac's whole identity — anything holding it can
+/// be this Mac to the gateway — so the file is created 0600 from the start
+/// rather than chmod'ed afterwards, which leaves no window where it is
+/// world-readable.
 fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -283,17 +334,28 @@ fn render(config: &Config) -> String {
 # Managed from the menu bar item — Settings rewrites this file completely on
 # every save. Hand edits to these comments will not survive the next one.
 #
-# The psk below is the entire credential: the gateway authenticates with it and
-# nothing else, which is what makes a reconnect need no login. The *same* key
-# must appear as `psk` on the matching [[targets]] entry in the gateway's
-# remotex.toml. Copy it from the menu bar: Settings, then Copy — the field is
-# read-only there until Edit, so it cannot be changed by accident.
+# Pairing is two keys, one each way, the way WireGuard pairs an interface with a
+# peer. Neither is a shared secret, and only one of them is secret at all:
+#
+#   * private_key below is this Mac's identity. It never leaves this file — not
+#     to the clipboard, not to a terminal, not into the gateway's config. Its
+#     PUBLIC half is what the gateway needs, and Settings shows that one in full
+#     with a Copy button; paste it as `agent_public_key` on the matching
+#     [[targets]] entry in the gateway's remotex.toml.
+#   * gateway_public_key is that gateway's public key, which `remotex rxa-pubkey`
+#     prints. Until it is set this agent is unpaired: it listens, and refuses
+#     every connection.
 
 # Address to listen on, as address:port — 0.0.0.0 so the gateway host can reach
 # it; narrow this to a specific interface if you prefer.
 listen = "{listen}"
 
-psk = "{psk}"
+# Secret. Regenerating it means re-pairing: the gateway will refuse this Mac
+# until its new public key is pasted there.
+private_key = "{private_key}"
+
+# The one gateway this Mac answers. Empty means unpaired.
+gateway_public_key = "{gateway_public_key}"
 
 # There is no setting for which display to share: that is picked per session
 # from the viewer or the browser, out of every display attached to this Mac.
@@ -327,7 +389,8 @@ virtual_display = {virtual_display}
 virtual_display_initial_size = "{virtual_display_initial_size}"
 "#,
         listen = config.listen,
-        psk = config.psk,
+        private_key = config.private_key,
+        gateway_public_key = config.gateway_public_key,
         virtual_display = config.virtual_display,
         virtual_display_initial_size = config.virtual_display_initial_size,
     )
@@ -373,14 +436,27 @@ mod tests {
     use super::scratch::TempDir;
     use super::*;
 
-    fn with_psk(extra: &str) -> String {
-        format!("psk = \"{}\"\n{extra}", rxa_proto::psk::generate())
+    use rxa_proto::key::{self, Role};
+
+    /// A config body with a valid identity, plus whatever `extra` adds. Left
+    /// unpaired, since most of these tests are not about the gateway.
+    fn with_identity(extra: &str) -> String {
+        format!(
+            "private_key = \"{}\"\n{extra}",
+            key::generate_private(Role::Agent)
+        )
+    }
+
+    /// A fresh gateway's public key, as `remotex rxa-pubkey` prints it.
+    fn gateway_public_key() -> String {
+        key::public_text_of(Role::Gateway, &key::generate_private(Role::Gateway)).unwrap()
     }
 
     fn sample() -> Config {
         Config {
             listen: default_listen(),
-            psk: rxa_proto::psk::generate(),
+            private_key: key::generate_private(Role::Agent),
+            gateway_public_key: gateway_public_key(),
             virtual_display: false,
             virtual_display_initial_size: default_virtual_display_initial_size(),
         }
@@ -388,39 +464,89 @@ mod tests {
 
     #[test]
     fn minimal_config_listens_on_the_rxa_port_everywhere() {
-        let config = Config::parse(&with_psk("")).unwrap();
+        let config = Config::parse(&with_identity("")).unwrap();
         assert_eq!(config.listen, format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT));
         assert!(!config.virtual_display, "no extra display unless asked for");
     }
 
+    // A config with no gateway named is the state every Mac starts in, and it
+    // has to be a *valid* one: the agent must run before its public key can be
+    // read out of the menu bar and taken to a gateway.
     #[test]
-    fn full_config_parses() {
-        let psk = rxa_proto::psk::generate();
-        let config =
-            Config::parse(&format!(
-                "listen = \"192.168.1.5:9000\"\npsk = \"{psk}\"\nvirtual_display = true"
-            ))
-            .unwrap();
-        assert_eq!(config.listen, "192.168.1.5:9000");
-        assert!(config.virtual_display);
-        assert_eq!(config.psk_bytes(), rxa_proto::psk::parse(&psk).unwrap());
+    fn an_agent_with_no_gateway_yet_is_unpaired_rather_than_invalid() {
+        let config = Config::parse(&with_identity("")).unwrap();
+        assert!(!config.is_paired());
+        assert!(config.gateway_public_key_bytes().is_none());
+        // And it still knows its own half, which is the thing to go and copy.
+        assert!(config.public_key().starts_with("rxap"), "{}", config.public_key());
     }
 
     #[test]
-    fn a_missing_or_malformed_psk_is_rejected() {
-        let err = Config::parse("listen = \"0.0.0.0:1\"").unwrap_err();
-        assert!(format!("{err:#}").contains("psk"), "{err:#}");
+    fn full_config_parses() {
+        let private_key = key::generate_private(Role::Agent);
+        let gateway = gateway_public_key();
+        let config = Config::parse(&format!(
+            "listen = \"192.168.1.5:9000\"\nprivate_key = \"{private_key}\"\n\
+             gateway_public_key = \"{gateway}\"\nvirtual_display = true"
+        ))
+        .unwrap();
+        assert_eq!(config.listen, "192.168.1.5:9000");
+        assert!(config.virtual_display);
+        assert!(config.is_paired());
+        assert_eq!(
+            config.private_key_bytes(),
+            key::parse_private(Role::Agent, &private_key).unwrap()
+        );
+        assert_eq!(
+            config.gateway_public_key_bytes(),
+            Some(key::parse_public(Role::Gateway, &gateway).unwrap())
+        );
+        // Derived, not stored: the file holds one key and this is the other
+        // face of it.
+        assert_eq!(
+            config.public_key(),
+            key::public_text_of(Role::Agent, &private_key).unwrap()
+        );
+    }
 
-        let err = Config::parse("psk = \"nonsense\"").unwrap_err();
-        assert!(format!("{err:#}").contains("invalid psk"), "{err:#}");
+    #[test]
+    fn a_missing_or_malformed_private_key_is_rejected() {
+        let err = Config::parse("listen = \"0.0.0.0:1\"").unwrap_err();
+        assert!(format!("{err:#}").contains("private_key"), "{err:#}");
+
+        let err = Config::parse("private_key = \"nonsense\"").unwrap_err();
+        assert!(format!("{err:#}").contains("invalid private_key"), "{err:#}");
 
         // A single-character typo is caught by the key's own checksum.
-        let psk = rxa_proto::psk::generate();
-        let mut chars: Vec<char> = psk.chars().collect();
+        let mut chars: Vec<char> = key::generate_private(Role::Agent).chars().collect();
         chars[10] = if chars[10] == 'A' { 'B' } else { 'A' };
         let typo: String = chars.into_iter().collect();
-        let err = Config::parse(&format!("psk = \"{typo}\"")).unwrap_err();
+        let err = Config::parse(&format!("private_key = \"{typo}\"")).unwrap_err();
         assert!(format!("{err:#}").contains("checksum"), "{err:#}");
+    }
+
+    #[test]
+    fn a_malformed_gateway_public_key_is_rejected() {
+        let err = Config::parse(&with_identity("gateway_public_key = \"rxgpnope\"")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid gateway_public_key"),
+            "{err:#}"
+        );
+    }
+
+    // The mistake the role in the prefix exists to catch, from this side: both
+    // public keys are on screen while pairing, and pasting the wrong one here
+    // would otherwise be a gateway that mysteriously never connects.
+    #[test]
+    fn this_macs_own_public_key_is_rejected_as_the_gateways() {
+        let private_key = key::generate_private(Role::Agent);
+        let own_public = key::public_text_of(Role::Agent, &private_key).unwrap();
+        let err = Config::parse(&format!(
+            "private_key = \"{private_key}\"\ngateway_public_key = \"{own_public}\""
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("this is an agent public key"), "{msg}");
     }
 
     // The GUI validates a typed address with `validate`, so what it rejects is
@@ -428,7 +554,7 @@ mod tests {
     #[test]
     fn a_listen_address_that_is_not_an_address_and_port_is_rejected() {
         for bad in ["", "0.0.0.0", "52381", "mac.local:52381", "0.0.0.0:notaport"] {
-            let err = Config::parse(&with_psk(&format!("listen = {bad:?}"))).unwrap_err();
+            let err = Config::parse(&with_identity(&format!("listen = {bad:?}"))).unwrap_err();
             let msg = format!("{err:#}");
             assert!(msg.contains("address:port"), "{bad:?} gave {msg}");
         }
@@ -436,26 +562,26 @@ mod tests {
 
     #[test]
     fn a_valid_listen_address_parses_to_a_socket_address() {
-        let config = Config::parse(&with_psk("listen = \"127.0.0.1:9000\"")).unwrap();
+        let config = Config::parse(&with_identity("listen = \"127.0.0.1:9000\"")).unwrap();
         let addr = config.socket_addr().unwrap();
         assert_eq!(addr.port(), 9000);
         assert!(addr.ip().is_loopback());
         // An IPv6 literal needs its brackets, and does not lose them.
-        let config = Config::parse(&with_psk("listen = \"[::1]:9000\"")).unwrap();
+        let config = Config::parse(&with_identity("listen = \"[::1]:9000\"")).unwrap();
         assert!(config.socket_addr().unwrap().is_ipv6());
     }
 
     #[test]
     fn typos_in_keys_are_rejected() {
         // deny_unknown_fields: a misspelled key is an error, not silence.
-        let err = Config::parse(&with_psk("listn = \"x\"")).unwrap_err();
+        let err = Config::parse(&with_identity("listn = \"x\"")).unwrap_err();
         assert!(format!("{err:#}").contains("listn"), "{err:#}");
     }
 
     // First launch has to be self-sufficient: there is no install script to
     // write this file.
     #[test]
-    fn a_missing_config_is_created_with_a_fresh_key() {
+    fn a_missing_config_is_created_with_a_fresh_identity_and_no_pairing() {
         let dir = TempDir::new("create");
         let path = dir.join("nested/config.toml");
 
@@ -464,18 +590,20 @@ mod tests {
         assert_eq!(written, path);
         assert!(path.exists());
         // A real, checksum-valid key, not a placeholder.
-        assert_eq!(config.psk.len(), rxa_proto::psk::TEXT_LEN);
-        rxa_proto::psk::parse(&config.psk).unwrap();
+        assert_eq!(config.private_key.len(), rxa_proto::key::TEXT_LEN);
+        key::parse_private(Role::Agent, &config.private_key).unwrap();
         assert_eq!(config.listen, format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT));
+        // Unpaired: there is no gateway to name until someone brings one.
+        assert!(!config.is_paired(), "a first launch has no gateway yet");
 
-        // Owner-only: this file is the whole credential.
+        // Owner-only: the private key in this file is this Mac's identity.
         assert_eq!(mode(&path), 0o600, "config must not be group/world readable");
 
-        // A second call reuses it rather than minting a new key — otherwise
-        // every restart would silently break the pairing with the gateway.
+        // A second call reuses it rather than minting a new identity —
+        // otherwise every restart would silently break the pairing.
         let (again, _, created) = load_or_create(Some(&path)).unwrap();
         assert!(!created);
-        assert_eq!(again.psk, config.psk);
+        assert_eq!(again.private_key, config.private_key);
     }
 
     // Saving is how every menu-bar edit lands, so a saved config has to read
@@ -492,7 +620,8 @@ mod tests {
         // Overwriting an existing file is the common case: every edit does it.
         config.listen = "127.0.0.1:9999".to_owned();
         config.virtual_display = true;
-        config.psk = rxa_proto::psk::generate();
+        config.private_key = key::generate_private(Role::Agent);
+        config.gateway_public_key = gateway_public_key();
         config.save(&path).unwrap();
         assert_eq!(mode(&path), 0o600, "the rename must not widen the mode");
         assert_eq!(load(Some(&path)).unwrap().0, config);
@@ -530,11 +659,21 @@ mod tests {
         // only surface on a user's next launch.
         let config = Config {
             listen: "10.0.0.1:1234".to_owned(),
-            psk: rxa_proto::psk::generate(),
+            private_key: key::generate_private(Role::Agent),
+            gateway_public_key: gateway_public_key(),
             virtual_display: true,
             virtual_display_initial_size: "1440x900".to_owned(),
         };
         assert_eq!(Config::parse(&render(&config)).unwrap(), config);
+
+        // And the unpaired shape, which is what a first launch writes: an empty
+        // `gateway_public_key` has to survive the round trip as empty rather
+        // than becoming a line the parser then rejects.
+        let unpaired = Config {
+            gateway_public_key: String::new(),
+            ..config
+        };
+        assert_eq!(Config::parse(&render(&unpaired)).unwrap(), unpaired);
     }
 
     // The floor the config accepts is the floor the display is created at. Were
@@ -554,7 +693,7 @@ mod tests {
 
         for (w, h, axis) in [(min_w - 1, min_h, "width"), (min_w, min_h - 1, "height")] {
             let err =
-                Config::parse(&with_psk(&format!(
+                Config::parse(&with_identity(&format!(
                     "virtual_display_initial_size = \"{w}x{h}\""
                 )))
                 .unwrap_err();
@@ -565,7 +704,7 @@ mod tests {
         // And the floor itself is fine, so the message is a bound and not an
         // off-by-one.
         let config =
-            Config::parse(&with_psk(&format!(
+            Config::parse(&with_identity(&format!(
                 "virtual_display_initial_size = \"{min_w}x{min_h}\""
             )))
             .unwrap();

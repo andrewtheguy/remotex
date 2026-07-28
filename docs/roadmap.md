@@ -163,7 +163,7 @@ alongside `Aqua` instead of relying on per-user `SMAppService`.
 
 Nothing past that shape is settled, and none of it should be designed here first.
 What has to be measured on a real Mac: how the single listener is held across the
-login transition and fast user switching, where config and PSK readable by both
+login transition and fast user switching, where a config and private key readable by both
 the configured user and the UID 0 login-window process should live, and whether
 Screen Recording and Accessibility grants reach the signed app in the
 `LoginWindow` session at all.

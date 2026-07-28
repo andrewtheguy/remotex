@@ -68,16 +68,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSPasteboard",
     "NSWorkspace",
     # The modal panels (src/panels.rs): the agent has no windows, so showing the
-    # pre-shared key and taking a listen address are both NSAlert with an
+    # two public keys and taking a listen address are both NSAlert with an
     # NSTextField accessory. NSWindow comes with NSAlert (`alert.window()`, for
-    # focusing the field), NSText and NSFont with the field. NSColor is what
-    # makes the locked key field look locked, and it gates NSTextField's own
-    # `setBackgroundColor`.
+    # focusing a field), NSText and NSFont with the field itself — the keys are
+    # monospaced so they can be compared character by character against the
+    # gateway's config.
     "NSAlert",
     "NSTextField",
     "NSText",
     "NSFont",
-    "NSColor",
     "NSWindow",
     "NSPopUpButton",
 ] }

@@ -47,7 +47,7 @@ and uninstall.
 
 Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
 no companion software. For RealVNC-like behavior where reconnects authenticate
-with a PSK instead of returning to Screen Sharing's login gate, install the
+from a keypair instead of returning to Screen Sharing's login gate, install the
 optional agent DMG from the same release and use `protocol = "rxa"`. The agent
 mirrors a logged-in user's display and does not provide login-window access. See
 [`packaging/macos/README.md`](packaging/macos/README.md).
@@ -116,8 +116,10 @@ username = "Administrator"
 password = "change-me"
 ```
 
-Generate `site_passwd` with `remotex gen-passwd <username>`. Generate an `rxa`
-key with `remotex gen-psk`. Keep the config mode `0600`; target credentials
+Generate `site_passwd` with `remotex gen-passwd <username>`. For `rxa`, generate
+this gateway's identity with `remotex gen-key` into `[rxa].private_key`, read its
+public half back with `remotex rxa-pubkey`, and put each Mac's public key in that
+target's `agent_public_key`. Keep the config mode `0600`; target credentials
 remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in

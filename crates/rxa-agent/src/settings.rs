@@ -75,7 +75,8 @@ impl Settings {
         // Whitespace round a pasted value is the user's typing, not their intent.
         let next = Config {
             listen: next.listen.trim().to_owned(),
-            psk: next.psk.trim().to_owned(),
+            private_key: next.private_key.trim().to_owned(),
+            gateway_public_key: next.gateway_public_key.trim().to_owned(),
             virtual_display: next.virtual_display,
             virtual_display_initial_size: next.virtual_display_initial_size.trim().to_owned(),
         };
@@ -96,6 +97,12 @@ impl Settings {
 mod tests {
     use super::*;
     use crate::config::scratch::TempDir;
+    use rxa_proto::key::{self, Role};
+
+    /// A fresh gateway's public key, as `remotex rxa-pubkey` prints it.
+    fn gateway_public_key() -> String {
+        key::public_text_of(Role::Gateway, &key::generate_private(Role::Gateway)).unwrap()
+    }
 
     /// The `TempDir` comes back with the settings: dropping it removes the
     /// directory, the config written into it and the key that config carries, so
@@ -105,7 +112,8 @@ mod tests {
         let path = dir.join("config.toml");
         let config = Config {
             listen: format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT),
-            psk: rxa_proto::psk::generate(),
+            private_key: key::generate_private(Role::Agent),
+            gateway_public_key: gateway_public_key(),
             virtual_display: false,
             virtual_display_initial_size: "1600x1000".to_owned(),
         };
@@ -158,17 +166,34 @@ mod tests {
     // A key pasted into the dialog is stored verbatim, and the old one keeps
     // authenticating until the restart.
     #[test]
-    fn a_new_key_is_saved_without_becoming_the_running_one() {
-        let (settings, path, _dir) = settings("psk");
-        let before = settings.saved().psk;
-        let after = rxa_proto::psk::generate();
+    fn a_new_gateway_is_saved_without_becoming_the_running_one() {
+        let (settings, path, _dir) = settings("gateway");
+        let before = settings.saved().gateway_public_key;
+        let after = gateway_public_key();
         let mut next = settings.saved();
-        next.psk = after.clone();
+        next.gateway_public_key = after.clone();
 
         assert!(settings.apply(next).unwrap());
-        assert_eq!(settings.saved().psk, after);
-        assert_eq!(on_disk(&path).psk, after);
-        assert_eq!(settings.running().psk, before);
+        assert_eq!(settings.saved().gateway_public_key, after);
+        assert_eq!(on_disk(&path).gateway_public_key, after);
+        assert_eq!(settings.running().gateway_public_key, before);
+        assert!(settings.restart_pending());
+    }
+
+    // Regenerating this Mac's identity is the same deal, and the more important
+    // half of it: the gateway keeps talking to the old key until the re-exec,
+    // so the menu has to be able to say a restart is pending.
+    #[test]
+    fn a_regenerated_identity_is_saved_without_becoming_the_running_one() {
+        let (settings, path, _dir) = settings("identity");
+        let before = settings.saved().private_key;
+        let after = key::generate_private(Role::Agent);
+        let mut next = settings.saved();
+        next.private_key = after.clone();
+
+        assert!(settings.apply(next).unwrap());
+        assert_eq!(on_disk(&path).private_key, after);
+        assert_eq!(settings.running().private_key, before);
         assert!(settings.restart_pending());
     }
 
@@ -186,9 +211,12 @@ mod tests {
         assert!(format!("{err:#}").contains("address:port"), "{err:#}");
 
         let mut bad = before.clone();
-        bad.psk = "rxanonsense".to_owned();
+        bad.gateway_public_key = "rxgpnonsense".to_owned();
         let err = settings.apply(bad).unwrap_err();
-        assert!(format!("{err:#}").contains("psk"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("gateway_public_key"),
+            "{err:#}"
+        );
 
         assert_eq!(settings.saved(), before);
         assert_eq!(on_disk(&path), before);
@@ -214,16 +242,21 @@ mod tests {
     #[test]
     fn pasted_values_are_trimmed() {
         let (settings, _, _dir) = settings("trim");
-        let psk = rxa_proto::psk::generate();
+        let private_key = key::generate_private(Role::Agent);
+        let gateway = gateway_public_key();
         let next = Config {
             listen: "  127.0.0.1:9002\n".to_owned(),
-            psk: format!(" {psk}\n"),
+            private_key: format!(" {private_key}\n"),
+            // The one most likely to arrive with whitespace: it is pasted in
+            // from wherever `remotex rxa-pubkey` was read.
+            gateway_public_key: format!("  {gateway}  "),
             virtual_display: true,
             virtual_display_initial_size: " 1440x900 ".to_owned(),
         };
         assert!(settings.apply(next).unwrap());
         assert_eq!(settings.saved().listen, "127.0.0.1:9002");
-        assert_eq!(settings.saved().psk, psk);
+        assert_eq!(settings.saved().private_key, private_key);
+        assert_eq!(settings.saved().gateway_public_key, gateway);
         assert_eq!(settings.saved().virtual_display_initial_size, "1440x900");
     }
 }

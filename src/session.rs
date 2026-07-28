@@ -13,7 +13,7 @@
 //!
 //! One engine bends the "returns when the session ends" rule on purpose:
 //! [`crate::rxa`] reconnects to its agent silently rather than ending, because
-//! its PSK handshake needs no human. See that module.
+//! its keypair handshake needs no human. See that module.
 //!
 //! ## The single session slot
 //!
@@ -577,7 +577,8 @@ mod tests {
             security: Security::Auto,
             resize,
             clipboard,
-            psk: String::new(),
+            agent_public_key: String::new(),
+            gateway_private_key: String::new(),
         }
     }
 

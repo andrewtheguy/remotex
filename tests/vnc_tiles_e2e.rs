@@ -77,7 +77,8 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             security: Security::Auto, // RDP-only knob, ignored for VNC
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
-            psk: String::new(),
+            agent_public_key: String::new(),
+            gateway_private_key: String::new(),
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
