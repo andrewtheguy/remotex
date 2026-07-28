@@ -30,7 +30,7 @@
 
 use std::collections::HashSet;
 
-use log::debug;
+use log::{debug, info};
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID,
@@ -365,6 +365,20 @@ impl PointerHome {
         Some(Self { owned, saved })
     }
 
+    /// A home that remembers nothing, for the moment the display is *created*.
+    ///
+    /// Deliberately not "note the position first, then restore it". Creating the
+    /// display rearranges the others: on the test VM the new display takes the
+    /// global origin and the Mac's own screen moves from (0,0) to (-800,0), so a
+    /// pointer that never moved is suddenly inside the new display's rectangle —
+    /// which is how it gets swallowed in the first place. A position noted
+    /// beforehand would name a spot that is now on the new display, making the
+    /// restore a no-op. The middle of a real screen is the only answer that still
+    /// means what it said.
+    pub fn for_new_display(owned: u32) -> Self {
+        Self { owned, saved: None }
+    }
+
     /// Put the pointer back, if this session is what took it away.
     ///
     /// Consumes itself: a restore is the end of a session, and doing it twice would
@@ -384,7 +398,10 @@ impl PointerHome {
         // nobody is racing this — the session that was driving the pointer has just
         // ended.
         let err = CGWarpMouseCursorPosition(to);
-        debug!(
+        // `info`, not `debug`: this moves the pointer out from under whoever is at
+        // the Mac, and the log is where they will look to find out why. It only
+        // fires when a warp actually happened.
+        info!(
             "input: pointer left on display {}; moved to ({}, {}) (warp {})",
             self.owned, to.x as i32, to.y as i32, err.0
         );
