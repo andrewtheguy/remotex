@@ -298,6 +298,13 @@ discovered `remoteOs` bit. The default-on **Enable macOS Keyboard Overrides**
 item in the **Remote** menu disables Command shortcut translation globally — also
 the fix if a Mac is ever not recognised as one.
 
+The SPA does the same thing for a Mac browser, over a smaller table: eight chords
+rather than fourteen, because a web page never receives Command-W, T, N, L or O.
+The two implementations are meant to agree on every chord they share, so
+`frontend/src/macKeys.test.ts` is deliberately parallel to
+`KeyboardTranslatorTests.swift` — a case in one and not the other is where they
+drift. See docs/architecture.md.
+
 The protocol has no release-everything message, so `PressedInput` tracks what is
 held and sends one release per code. Focus loss, window deactivation, a target
 switch, a socket close, a takeover, and teardown all go through that one path;

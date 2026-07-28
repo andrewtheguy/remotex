@@ -374,6 +374,18 @@ Clipboard API is unavailable. The on-screen keyboard and the
 clipboard panel are mutually exclusive: both dock to the bottom edge on mobile
 and report their height so the canvas insets above them.
 
+On a Mac host driving a non-Mac remote, the SPA translates Command chords the way
+the macOS viewer does (see `frontend/src/macKeys.ts` and docs/macos-viewer.md):
+Command plus A, C, F, P, S, V, X or Z becomes a remote Control chord, a bare
+Command taps remote Meta, and any other Command chord is forwarded as a Meta
+chord. Eight rather than the viewer's fourteen, because a web page never receives
+Command-W, T, N, L or O — the browser keeps those — and Command-R is left alone
+deliberately, since a leaked reload would drop the session. A **Mac keyboard**
+toggle in the floating menu turns translation off, and it is inapplicable (and
+disabled) for a Mac remote, which is what the `remoteOs` message decides. Command
+releasing also flushes any translated key still held, because macOS browsers can
+withhold `keyup` while Command is down.
+
 Incoming image decodes are serialized so tiles and resize messages are applied
 in wire order. A remote cursor shape is installed as a CSS cursor for mouse
 input and rendered separately for touch input.

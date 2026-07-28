@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { createSender } from "./outbound.ts";
 import {
   type BatchRecord,
@@ -60,6 +61,23 @@ export interface RemoteSize {
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
 export const SESSION_KEY = "remotex.sessionId";
+// The Mac-host Command-to-Control preference, default on. localStorage rather
+// than sessionStorage: unlike the session identity this is a lasting choice about
+// how this machine's keyboard behaves, and it should survive a new tab.
+const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
+// Evaluated once: the host OS cannot change under a running tab, and the input
+// effect must not pay for it per keystroke.
+const IS_MAC_HOST = isMacHost();
+
+// Whether Command chords should be translated for a non-Mac guest, as last set
+// here. Absent means on, matching the viewer's default-on menu item.
+function readMacKeyOverridesPreference(): boolean {
+  try {
+    return localStorage.getItem(MAC_KEYS_KEY) !== "off";
+  } catch {
+    return true; // storage disabled or blocked; the default is still the default
+  }
+}
 // Mobile sizing: pinch-zoom-capable touch devices size the session in CSS
 // pixels (no dpr multiplication — a phone's 3x dpr would mint an enormous
 // desktop), floored per axis at a fixed 1024x768 — so a portrait phone raises
@@ -452,6 +470,24 @@ export function useRemoteDesktop(
   // leaves the panel agreeing with what is on screen.
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [activeDisplayId, setActiveDisplayId] = useState<number | null>(null);
+  // Whether the remote reported itself as a Mac, which is the only thing that
+  // decides whether a local Command chord stays Command or becomes remote
+  // Control. Reset to false on every disconnect (see the "picker" case), because
+  // a target that never reports makes the question moot and the last answer must
+  // not carry over to it.
+  const [remoteIsMac, setRemoteIsMac] = useState(false);
+  const [macKeyOverridesEnabled, setMacKeyOverridesEnabled] = useState(
+    readMacKeyOverridesPreference,
+  );
+  // All three conditions, which the toolbar shows and the input effect obeys: a
+  // Mac keyboard to translate from, a guest that is not a Mac to translate for,
+  // and the user's consent. Off on a non-Mac host means the physical `code` goes
+  // out untouched, which is what this client has always done.
+  const macKeyOverridesActive =
+    IS_MAC_HOST && macKeyOverridesEnabled && !remoteIsMac;
+  // Read by the key handlers, which must not re-subscribe when it changes: a
+  // teardown mid-chord would strand whatever is held.
+  const macKeyOverridesActiveRef = useRef(macKeyOverridesActive);
   // The last remote clipboard snapshot, whether fetched or pushed, and a
   // counter that ticks on every arrival. Fetching the same text twice must
   // still register as an answer, and a null-vs-string flag cannot express that.
@@ -471,6 +507,24 @@ export function useRemoteDesktop(
     ((snapshot: ClipboardSnapshot | null) => void)[]
   >([]);
 
+  useEffect(() => {
+    if (macKeyOverridesActiveRef.current === macKeyOverridesActive) {
+      return;
+    }
+    macKeyOverridesActiveRef.current = macKeyOverridesActive;
+    releaseInputRef.current?.();
+  }, [macKeyOverridesActive]);
+
+  // Persist the preference as it changes rather than in the toggle callback, so
+  // the stored value follows the state whatever set it.
+  useEffect(() => {
+    try {
+      localStorage.setItem(MAC_KEYS_KEY, macKeyOverridesEnabled ? "on" : "off");
+    } catch {
+      // Storage blocked: the preference still holds for this tab.
+    }
+  }, [macKeyOverridesEnabled]);
+
   // Settle everyone waiting on a fetch. `null` means "no answer came".
   const settleClipboardWaiters = useCallback(
     (snapshot: ClipboardSnapshot | null) => {
@@ -484,6 +538,12 @@ export function useRemoteDesktop(
   );
 
   const wsRef = useRef<WebSocket | null>(null);
+  // Releases every key and button the input effect has sent as pressed, and
+  // clears the Command translator with them. Set by that effect; called from
+  // here when the translation rules change under a chord that is part way
+  // through — the guest has already been told those keys are down, and the new
+  // rules would send the releases for different codes.
+  const releaseInputRef = useRef<(() => void) | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   // Kept in a ref (not just state) so input handlers read the latest size
   // without re-subscribing.
@@ -1055,11 +1115,11 @@ export function useRemoteDesktop(
           handleDisplays(msg);
           break;
         case "remoteOs":
-          // Ignored here. Whether the remote is a Mac only decides a keyboard
-          // convention (does a local Command shortcut stay Command or become
-          // remote Control), and the browser never translates shortcuts — it
-          // forwards the physical `code` it saw. The macOS viewer is the client
-          // that acts on this.
+          // Decides one keyboard convention: does a local Command shortcut stay
+          // Command or become remote Control. Only meaningful on a Mac host, and
+          // only for the eight chords in macKeys.ts — the browser reserves the
+          // rest for itself.
+          setRemoteIsMac(msg.macos);
           break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
@@ -1071,6 +1131,10 @@ export function useRemoteDesktop(
           rxaResize = false;
           setCanResize(false);
           setCanClipboard(false);
+          // Back to the default rather than left as the last target's answer: the
+          // next one may not report at all, and inheriting "the remote is a Mac"
+          // would silently stop translating Command for a Windows guest.
+          setRemoteIsMac(false);
           setDisplays([]);
           setActiveDisplayId(null);
           sharedDisplay = null;
@@ -1340,7 +1404,11 @@ export function useRemoteDesktop(
     // Track what's held so we can release it if focus/pointer leaves the surface,
     // avoiding keys/buttons that stick down on the remote host.
     const pressedButtons = new Set<MouseButton>();
+    // Codes as *sent*, which is not the same as the codes typed: a translated
+    // Command chord sends ControlLeft and swallows Meta, so releasing what was
+    // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
+    const macKeys = new MacKeyboardTranslator();
 
     // Touch gestures, only on pinch-zoom-capable devices — they
     // drive the same view transform applyCanvasCss renders.
@@ -1435,33 +1503,40 @@ export function useRemoteDesktop(
         send({ type: "key", code, pressed: false, caps: false });
       }
       pressedKeys.clear();
+      // After the releases, not before: the translator holds no state the sweep
+      // above needs, and resetting it first would say a chord is over while its
+      // codes are still going out.
+      macKeys.reset();
       for (const button of pressedButtons) {
         send({ type: "mouseButton", button, pressed: false });
       }
       pressedButtons.clear();
       gestures?.release();
     };
-    const onKeyDown = (e: KeyboardEvent) => {
+    // Every key event goes through the Command translator, which is a
+    // pass-through unless this is a Mac host driving a non-Mac guest. `pressedKeys`
+    // follows what it emits rather than what arrived, so releaseAll can undo a
+    // chord the guest was told about in different codes than the user typed.
+    const sendTranslated = (e: KeyboardEvent, pressed: boolean) => {
       e.preventDefault();
-      pressedKeys.add(e.code);
-      send({
-        type: "key",
-        code: e.code,
-        pressed: true,
-        caps: e.getModifierState("CapsLock"),
-      });
+      const caps = e.getModifierState("CapsLock");
+      const translated = macKeys.translate(
+        { code: e.code, pressed, caps, meta: e.metaKey },
+        macKeyOverridesActiveRef.current,
+      );
+      for (const key of translated) {
+        if (key.pressed) {
+          pressedKeys.add(key.code);
+        } else {
+          pressedKeys.delete(key.code);
+        }
+        send({ type: "key", ...key });
+      }
     };
-    const onKeyUp = (e: KeyboardEvent) => {
-      e.preventDefault();
-      pressedKeys.delete(e.code);
-      send({
-        type: "key",
-        code: e.code,
-        pressed: false,
-        caps: e.getModifierState("CapsLock"),
-      });
-    };
+    const onKeyDown = (e: KeyboardEvent) => sendTranslated(e, true);
+    const onKeyUp = (e: KeyboardEvent) => sendTranslated(e, false);
     const onBlur = () => releaseAll();
+    releaseInputRef.current = releaseAll;
 
     el.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
@@ -1476,6 +1551,7 @@ export function useRemoteDesktop(
 
     return () => {
       gestures?.detach();
+      releaseInputRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mouseup", onMouseUp);
@@ -1498,6 +1574,14 @@ export function useRemoteDesktop(
     displays,
     activeDisplayId,
     remoteClipboard,
+    // The preference and the three-way verdict, which the toolbar shows
+    // separately: a Mac guest or a non-Mac host makes translation inapplicable
+    // without the user having turned anything off.
+    macKeyOverridesEnabled,
+    macKeyOverridesActive,
+    isMacHost: IS_MAC_HOST,
+    remoteIsMac,
+    setMacKeyOverridesEnabled,
     takeOver,
     connect,
     switchTarget,

@@ -211,6 +211,53 @@ function DisplaySection({
   );
 }
 
+// The Command-to-Control switch, on Mac hosts only: nothing else has a Command
+// key to reinterpret, and a section explaining that to a Windows user is worse
+// than no section. Disabled rather than hidden for a Mac guest, matching the
+// viewer's menu item — the preference still exists, it just has nothing to do
+// while Command already means Command at the other end.
+//
+// The label names the state rather than the action because all three states are
+// worth distinguishing: translating, sending Command through as the guest's Super
+// key, and a Mac guest where the question does not arise. See macKeys.ts.
+function MacKeyboardSection({
+  enabled,
+  active,
+  isMacHost,
+  remoteIsMac,
+  onChange,
+}: {
+  enabled: boolean;
+  active: boolean;
+  isMacHost: boolean;
+  remoteIsMac: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  if (!isMacHost) {
+    return null;
+  }
+  const label = remoteIsMac ? "⌘ stays ⌘" : active ? "⌘ → Ctrl" : "⌘ as Super";
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Mac keyboard</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={() => onChange(!enabled)}
+        aria-pressed={active}
+        disabled={remoteIsMac}
+        title={
+          remoteIsMac
+            ? "This remote is a Mac, so Command chords are sent as Command"
+            : "Send ⌘A ⌘C ⌘F ⌘P ⌘S ⌘V ⌘X ⌘Z to the remote as Ctrl chords, and a bare ⌘ as the Windows key. Your browser keeps ⌘W, ⌘T, ⌘N, ⌘L, ⌘O and ⌘R for itself."
+        }
+      >
+        {label}
+      </button>
+    </div>
+  );
+}
+
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
@@ -224,6 +271,11 @@ export default function FloatingMenu({
   displays,
   activeDisplayId,
   onSelectDisplay,
+  macKeyOverridesEnabled,
+  macKeyOverridesActive,
+  isMacHost,
+  remoteIsMac,
+  onMacKeyOverridesChange,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
@@ -256,6 +308,15 @@ export default function FloatingMenu({
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
+  // The Command-to-Control preference and whether it is doing anything. The two
+  // differ when the guest is itself a Mac, which is why the section reports the
+  // reason rather than just showing the switch off. The whole section is absent
+  // on a non-Mac host, where there is no Command key to translate. See macKeys.ts.
+  macKeyOverridesEnabled: boolean;
+  macKeyOverridesActive: boolean;
+  isMacHost: boolean;
+  remoteIsMac: boolean;
+  onMacKeyOverridesChange: (enabled: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -590,6 +651,14 @@ export default function FloatingMenu({
               ))}
             </div>
           </div>
+
+          <MacKeyboardSection
+            enabled={macKeyOverridesEnabled}
+            active={macKeyOverridesActive}
+            isMacHost={isMacHost}
+            remoteIsMac={remoteIsMac}
+            onChange={onMacKeyOverridesChange}
+          />
 
           <div className="toolbar-section toolbar-actions">
             {onResizeToWindow && (
