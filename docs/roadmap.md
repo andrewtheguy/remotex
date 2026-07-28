@@ -95,15 +95,29 @@ here, so for those the scaled presentation is the whole answer.
 
 ### Retina performance for `rxa`
 
-The current adaptive PNG/JPEG tile path has not been characterized on a Retina
-desktop. If it cannot keep up, optimize in this order:
+Largely overtaken by protocol v3, which was measured rather than guessed and went
+a different way than the ladder below anticipated. What shipped instead:
 
-1. downscale through `SCStreamConfiguration`;
-2. use coarser tiles;
+- per-cell change detection in the agent, and a shadow copy of what the client
+  holds in the RDP and VNC engines, so unchanged pixels are never encoded;
+- a 320×64 grid in the agent, so one change in a full-width strip costs one cell —
+  which is step 2 of the ladder below, arrived at from the opposite direction (the
+  tiles got *finer*, and the gate is what paid for it);
+- batching, so a repaint is one frame rather than one per tile;
+- a slot-indexed tile cache, so content the client already has costs seven bytes.
+
+An idle Retina desktop went from 290 MB in 30 s to nothing at all. What is left of
+this item:
+
+1. downscale through `SCStreamConfiguration`, which is still the only answer for a
+   remote whose *changing* area is genuinely large;
+2. replace PNG with WebP lossless, which is the next codec step and is smaller on
+   exactly this content — flat colour, hard edges, text. It touches `rxa-proto`'s
+   format byte, so the agent and gateway must be deployed together;
 3. move to VideoToolbox H.264 and browser WebCodecs.
 
-H.264 is last because it creates a second browser decode path and adds stream
-state that the current independent tile protocol avoids.
+H.264 is still last because it creates a second browser decode path and adds
+stream state that the independent tile protocol avoids.
 
 ### Application-level liveness for VNC
 

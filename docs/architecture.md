@@ -81,24 +81,56 @@ trusted local network. A server restart logs browsers out.
 `src/protocol.rs` and `frontend/src/protocol.ts` define the two sides.
 
 Server-to-browser traffic uses JSON for control messages and binary frames for
-tiles. A tile contains a 10-byte little-endian header:
+screen updates. Control messages cover picker/connected state, desktop size, the
+remote's display list, cursor shape, clipboard text, and errors.
+
+Every binary frame is a **batch** of records, little-endian throughout:
 
 ```text
-u8 kind | u8 format | u16 x | u16 y | u16 width | u16 height | image bytes
+u8 kind = 0x02 | u8 flags = 0 | u16 record count | records
+
+TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
+                  | u32 len | payload[len]
+TILE_REF op 0x02: u16 slot | u16 x | u16 y
 ```
 
-Formats are PNG and JPEG. Control messages cover picker/connected state,
-desktop size, the remote's display list, cursor shape, clipboard text, and
-errors. Large dirty rectangles are split into 64-row strips to bound individual
-WebSocket frames.
+One frame carries however many updates were ready at once, so a repaint costs
+one client event, one round of decoding and one paint rather than one of each per
+tile. The record count earns its two bytes: records are self-delimiting, so
+without it a truncated frame would parse cleanly as a complete but smaller batch.
+A non-zero `flags` is *rejected* rather than ignored, which is what makes the byte
+usable for an additive change later.
+
+Payload formats are PNG and JPEG (`format` 1 and 2); the macOS agent chooses per
+tile and the gateway relays those bytes without decoding them.
+
+`slot` is the tile cache. `TILE` means "draw this, and keep it in slot N";
+`TILE_REF` means "draw what you have in slot N here", in seven bytes instead of a
+payload. `NO_SLOT` (0xFFFF) means "draw this and do not keep it" — used for
+payloads too large to be worth a slot. A client's cache is a fixed array of
+`SLOT_COUNT` (256) entries and it never evicts: the gateway names the slot to
+overwrite. That asymmetry is deliberate, because a content-addressed cache would
+need both ends running an identical eviction policy over an identical cost metric,
+and they cannot have one — the gateway knows encoded bytes, a client knows what
+its decoder made of them. Both clients keep the encoded payload and re-decode on a
+reference.
+
+A client that cannot decode a tile it was told to keep, or that meets a reference
+to a slot it does not hold, sends `cacheReset`. That is a separate message from
+`refresh` for a reason: `refresh` is routed to the engine, which would repaint
+into an unchanged slot table, send the same references back, and miss again.
 
 Browser-to-server traffic is JSON:
 
 - session control: connect or disconnect;
 - input: mouse movement/buttons, wheel, and DOM keyboard codes;
 - display control: viewport size and a display selection;
-- a full repaint request;
+- a full repaint request, and a tile-cache reset;
 - clipboard: send text to the remote, or request the remote's text.
+
+Pointer motion is coalesced at the client: while the socket has bytes still
+queued, only the newest move is kept. Anything that is not a move flushes the
+held one first, because a click has to follow the move that positioned it.
 
 Viewport reports affect only engines configured for resize, and there is no
 other way for a client to ask for a size — no menu of resolutions, for any
@@ -180,8 +212,23 @@ itself as well, which closes that half for it — see
 ### RDP
 
 IronRDP handles TLS and optional NLA/CredSSP. The engine maintains a decoded
-framebuffer, converts dirty rectangles to RGB, and sends image strips to the
-browser. Input uses fast-path PDUs after mapping DOM codes to scancodes.
+framebuffer, converts dirty rectangles to RGB, and sends them to the browser as
+PNG tiles at most 64 rows tall. Input uses fast-path PDUs after mapping DOM codes
+to scancodes.
+
+Before anything is encoded, the rectangle is compared against a *shadow copy* of
+the pixels this client was last sent (`src/tiles.rs`). An update that changed
+nothing is dropped; one that changed a little is sent as the part that changed.
+That matters most here: the RDP pointer is composited into the framebuffer, so
+every mouse event produces a damage rectangle, and this engine also repaints
+regions that did not change. Measured on the dummy xrdp container, a scripted
+240-position mouse sweep went from 115,747 bytes to 27,634 with the tile cache
+behind it (`tests/rdp_bytes_probe.rs`).
+
+The shadow tracks which pixels it actually knows, and a repaint (`refresh`) drops
+that knowledge rather than assuming the client is showing black — both clients
+keep their pixels when a `resize` repeats the size they already have, so assuming
+black would withhold every region that is *now* black.
 
 With `resize = true`, the Display Control Virtual Channel resizes the remote
 desktop when requested from the browser. Otherwise the configured initial
@@ -203,7 +250,13 @@ ending the session.
 The built-in client speaks RFB 3.8 with None, classic VncAuth, or Apple's DH
 security. It
 requests raw 32-bit true-colour pixels, converts them to RGB, and supports the
-Cursor pseudo-encoding. This path can connect directly to macOS Screen Sharing;
+Cursor pseudo-encoding. Rects go through the same shadow comparison as RDP's, so a
+server that re-sends unchanged pixels — and they do — costs the browser link
+nothing. `refresh` still asks the server for a non-incremental update rather than
+answering from the shadow: the shadow holds what the *browser* was sent, which goes
+stale across a detach because the session layer drops frames while nobody is
+attached, and trading the server's ground truth for bytes on a LAN hop is not the
+trade this is trying to make. This path can connect directly to macOS Screen Sharing;
 the companion agent is not required for Mac targets.
 
 A Mac target says so: `subtype = "ard"`, which selects Apple's DH authentication
