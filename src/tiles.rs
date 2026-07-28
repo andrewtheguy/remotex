@@ -108,13 +108,29 @@ impl Rect {
     }
 }
 
-/// The pixels the client was last sent, as packed RGB888.
+/// The pixels the client was last sent, as packed RGB888, and which of them are
+/// actually known.
+///
+/// The `known` half is not bookkeeping, it is the difference between right and
+/// wrong. A cleared shadow cannot be treated as *black*, however tempting: both
+/// clients deliberately keep their pixels when a `resize` repeats the size they
+/// already have (`FramebufferRenderer.resize`, `handleResize`), so a browser
+/// reattaching to an unchanged desktop still shows the previous session's picture.
+/// A shadow claiming black would then withhold every region that is *now* black —
+/// a window that closed while nobody was attached would stay on screen forever.
+///
+/// So a cleared pixel is not black, it is unknown, and unknown differs from
+/// everything.
 pub struct Shadow {
     /// Which engine this belongs to, for the log line only.
     engine: &'static str,
     w: u16,
     h: u16,
     pixels: Vec<u8>,
+    /// One flag per pixel: whether `pixels` says anything about it. `[bool]`
+    /// rather than a bitset because scanning it for a `false` is a `memchr`,
+    /// which is what the hot path does once per row.
+    known: Vec<bool>,
     /// Rectangles examined, and those that turned out to hold nothing new.
     examined: u64,
     unchanged: u64,
@@ -125,13 +141,14 @@ pub struct Shadow {
 }
 
 impl Shadow {
-    /// A shadow for a `w`×`h` framebuffer, holding black.
+    /// A shadow for a `w`×`h` framebuffer, knowing nothing.
     pub fn new(engine: &'static str, w: u16, h: u16) -> Self {
         Self {
             engine,
             w,
             h,
             pixels: vec![0; usize::from(w) * usize::from(h) * 3],
+            known: vec![false; usize::from(w) * usize::from(h)],
             examined: 0,
             unchanged: 0,
             trimmed: 0,
@@ -155,7 +172,9 @@ impl Shadow {
     /// current — the other is the end of the session.
     pub fn forget(&mut self) {
         self.report();
-        self.pixels.fill(0);
+        // The pixels are left alone; only the claim to know them is dropped. That
+        // is all the difference between them, and it saves touching 25 MB.
+        self.known.fill(false);
         self.examined = 0;
         self.unchanged = 0;
         self.trimmed = 0;
@@ -189,15 +208,23 @@ impl Shadow {
         let mut last_byte = 0usize;
 
         for r in 0..h {
+            let y = rect.top + r as u16;
             let src = &rgb[r * row_bytes..(r + 1) * row_bytes];
-            let dst = self.row(rect.left, rect.top + r as u16, row_bytes);
             // Whole-slice equality first: it is a `memcmp`, and on an update that
-            // changed nothing — which is most of them — no row is ever scanned
-            // byte by byte.
-            if src == dst {
-                continue;
-            }
-            let (lo, hi) = differing_bytes(src, dst);
+            // changed nothing — which is most of them — no row is scanned byte by
+            // byte and the unknown flags are never consulted.
+            let differs = (src != self.row(rect.left, y, row_bytes))
+                .then(|| differing_bytes(src, self.row(rect.left, y, row_bytes)));
+            // An unknown pixel differs by definition, even where its bytes match.
+            let unknown = self
+                .first_unknown(rect.left, y, w)
+                .map(|lo| (lo * 3, self.last_unknown(rect.left, y, w).unwrap_or(lo) * 3 + 2));
+
+            let (lo, hi) = match (differs, unknown) {
+                (None, None) => continue,
+                (Some(bytes), None) | (None, Some(bytes)) => bytes,
+                (Some(a), Some(b)) => (a.0.min(b.0), a.1.max(b.1)),
+            };
             first_row = first_row.min(r);
             last_row = r;
             first_byte = first_byte.min(lo);
@@ -209,12 +236,14 @@ impl Shadow {
             return None;
         }
 
-        // Copy the changed rows only. Rows outside them are identical already, so
-        // copying them would be work for no effect.
+        // Copy the changed rows only. Rows outside them are identical *and* known
+        // already, so copying them would be work for no effect.
         for r in first_row..=last_row {
             let src = &rgb[r * row_bytes..(r + 1) * row_bytes];
-            let dst = self.row_mut(rect.left, rect.top + r as u16, row_bytes);
-            dst.copy_from_slice(src);
+            let y = rect.top + r as u16;
+            self.row_mut(rect.left, y, row_bytes).copy_from_slice(src);
+            let at = usize::from(y) * usize::from(self.w) + usize::from(rect.left);
+            self.known[at..at + w].fill(true);
         }
 
         let changed = Rect {
@@ -255,24 +284,62 @@ impl Shadow {
         let at = self.offset(x, y);
         &mut self.pixels[at..at + len]
     }
+
+    /// The first unknown pixel of `w` starting at `x` in row `y`, as an offset from
+    /// `x`. `None` when every one of them is known, which is the steady state.
+    fn first_unknown(&self, x: u16, y: u16, w: usize) -> Option<usize> {
+        let at = usize::from(y) * usize::from(self.w) + usize::from(x);
+        self.known[at..at + w].iter().position(|known| !known)
+    }
+
+    fn last_unknown(&self, x: u16, y: u16, w: usize) -> Option<usize> {
+        let at = usize::from(y) * usize::from(self.w) + usize::from(x);
+        self.known[at..at + w]
+            .iter()
+            .rposition(|known| !known)
+    }
+}
+
+/// Copy `sub` out of `src`, which holds `rect`'s pixels as packed RGB888.
+///
+/// `sub` must be inside `rect`; `out` is left empty if it is not, which shows up
+/// as a payload-length error at the encoder rather than as wrong pixels.
+pub fn crop(src: &[u8], rect: Rect, sub: Rect, out: &mut Vec<u8>) {
+    out.clear();
+    if sub.left < rect.left
+        || sub.top < rect.top
+        || sub.right > rect.right
+        || sub.bottom > rect.bottom
+        || src.len() != usize::from(rect.w()) * usize::from(rect.h()) * 3
+    {
+        return;
+    }
+    let stride = usize::from(rect.w()) * 3;
+    let row_bytes = usize::from(sub.w()) * 3;
+    let left = usize::from(sub.left - rect.left) * 3;
+    out.reserve(row_bytes * usize::from(sub.h()));
+    for r in 0..usize::from(sub.h()) {
+        let at = (usize::from(sub.top - rect.top) + r) * stride + left;
+        out.extend_from_slice(&src[at..at + row_bytes]);
+    }
 }
 
 /// The first and last byte index at which two equal-length rows differ.
 ///
 /// Only called for rows already known to differ, so there is always an answer.
 fn differing_bytes(a: &[u8], b: &[u8]) -> (usize, usize) {
-    let first = a
-        .iter()
-        .zip(b)
-        .position(|(x, y)| x != y)
-        .expect("rows differ");
+    // Only ever called for rows a `memcmp` has already found unequal, so both
+    // searches must succeed. Saturating instead of unwrapping anyway: the caller is
+    // one line away today, and a panic here would take a whole session down over an
+    // update that could simply have been sent whole.
+    let first = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(0);
     let back = a
         .iter()
         .rev()
         .zip(b.iter().rev())
         .position(|(x, y)| x != y)
-        .expect("rows differ");
-    (first, a.len() - 1 - back)
+        .unwrap_or(0);
+    (first, a.len().saturating_sub(1 + back))
 }
 
 #[cfg(test)]
@@ -307,13 +374,45 @@ mod tests {
         assert_eq!(shadow.accept(r, &solid(r, 9)), Some(r));
     }
 
-    /// Black on a fresh shadow is not new, and that is deliberate: a client that
-    /// was just told to resize is showing black already.
+    /// Black on a fresh shadow *is* new. This is the case that makes `known`
+    /// necessary rather than tidy: a client keeps its pixels when a `resize`
+    /// repeats the size it already has, so a shadow that assumed black would
+    /// withhold every region that is now black — a window closed while nobody was
+    /// attached would stay on screen for the rest of the session.
     #[test]
-    fn black_on_a_fresh_shadow_is_not_sent() {
+    fn black_on_a_fresh_shadow_is_still_sent() {
         let mut shadow = Shadow::new("test", 64, 64);
         let r = rect(0, 0, 15, 15);
-        assert_eq!(shadow.accept(r, &solid(r, 0)), None);
+        assert_eq!(shadow.accept(r, &solid(r, 0)), Some(r));
+        assert_eq!(shadow.accept(r, &solid(r, 0)), None, "but only once");
+    }
+
+    /// The same hazard through the front door: a region goes black while the shadow
+    /// has been forgotten, and must still be sent.
+    #[test]
+    fn a_region_that_went_black_while_forgotten_is_sent() {
+        let mut shadow = Shadow::new("test", 64, 64);
+        let r = rect(0, 0, 31, 31);
+        shadow.accept(r, &solid(r, 200));
+
+        shadow.forget();
+
+        assert_eq!(shadow.accept(r, &solid(r, 0)), Some(r));
+    }
+
+    /// A rectangle partly covering a forgotten region: the unknown pixels widen the
+    /// trim even where their bytes happen to match, or they would never be sent.
+    #[test]
+    fn unknown_pixels_widen_the_trim() {
+        let mut shadow = Shadow::new("test", 64, 64);
+        let whole = rect(0, 0, 63, 63);
+        shadow.accept(whole, &solid(whole, 5));
+        assert_eq!(shadow.accept(whole, &solid(whole, 5)), None);
+
+        shadow.forget();
+
+        // Identical pixels, but nothing is known any more, so all of it is sent.
+        assert_eq!(shadow.accept(whole, &solid(whole, 5)), Some(whole));
     }
 
     #[test]
