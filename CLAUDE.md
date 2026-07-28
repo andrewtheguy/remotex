@@ -8,15 +8,27 @@
 - for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
 - keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
-- headless Playwright is allowed in `tests/playwright/`. Judge a new spec by **what it observes**, not by whether it is on a list — the rule below is the whole test, and existing specs are examples of it rather than the definition. Preserve approved specs there instead of leaving one-off copies in `tmp/`, and run a new one several times before relying on it
-- **assert on things the system decides, never on things a machine's timing decides.** In scope: DOM state and accessible roles, control-plane JSON, HTTP responses, and WebSocket frame *bytes* — header fields, record counts, payload lengths, message ordering. Out of scope: anything whose value depends on when a frame arrived relative to a paint, or on how fast this particular machine is. `framereceived` is fine because it is a transport event with a deterministic payload; a canvas is not, because what is on it at any instant is a race
-- concretely, the flaky shapes to avoid: reading canvas pixels or `toDataURL`; asserting a paint happened, or how many did; timing anything (frame rate, latency, "within N ms"); cursor rendering; synthetic pointer input or gestures, whose coordinate mapping depends on layout that has settled; screenshot comparison; and any assertion that would change answer if the machine were twice as slow. Those belong in the raw WebSocket, protocol, and container e2e tests, which control their own clock
-- also avoid the quieter kind: fixed sleeps, CSS/nth-child selectors, assertions on transient states a fast machine skips through, and counting events over a wall-clock window. Prefer accessible locators, web-first assertions and `expect.poll`; where a count is the point, assert a relationship that holds for any sample (`records > frames`) rather than a number that depends on how long the run happened to observe
-- every Playwright spec must hand the session back to the picker before it ends (`returnToPicker`): the server keeps a target session alive when its browser goes away, so a spec that stops on the desktop leaves the next run reattached to it. `logInAndConnect` tolerates either landing, so one abandoned run cannot break every run after it
-- the Playwright setup is TypeScript, and Playwright only transpiles it — type errors never surface at runtime, so run `npm run typecheck` in `tests/playwright/` after changing anything there
-- run Playwright tests headless and single-worker. Shared login/target and SSH pasteboard helpers live in `tests/playwright/support.ts`
-- a spec that parses a wire format should implement its own parser rather than importing the SPA's, or a wrong parser agrees with itself. This is the only place the wire is checked as the real SPA uses it: the Rust e2e tests drive a raw WebSocket client, and the Swift and TypeScript unit tests parse frames they built themselves, so both ends can otherwise agree with their own fixtures and disagree with each other
 - multi session is always out of scope (never planned, not merely deferred): this is a single-user program with one active session only, with session takeover logic (a new browser force-claims the single session slot and evicts the previous holder) — no concurrent sessions, session sharing, or session broker
+
+## Browser tests
+
+Headless Playwright, in `tests/playwright/`.
+
+### What may be asserted
+
+- **assert on things the system decides, never on things a machine's timing decides.** That one rule settles what belongs here; judge a new spec by **what it observes**, not by whether it appears on a list. The existing specs are examples of the rule, not the definition of it
+- in scope, because these are deterministic: DOM state and accessible roles, control-plane JSON, HTTP responses, and WebSocket frame *bytes* — header fields, record counts, payload lengths, message ordering. `framereceived` qualifies because it is a transport event carrying a fixed payload
+- out of scope, because these are races: reading canvas pixels or `toDataURL`; asserting a paint happened, or how many did; timing anything (frame rate, latency, "within N ms"); cursor rendering; synthetic pointer input or gestures, whose coordinate mapping depends on layout having settled; screenshot comparison. Test those through the raw WebSocket, protocol, and container e2e tests, which control their own clock
+- the test for a borderline case: would the assertion change answer if this machine were twice as slow? Then it does not belong here
+- also avoid the quieter shapes, which pass locally and fail in a year: fixed sleeps, CSS/nth-child selectors, assertions on transient states a fast machine skips through, and counting events over a wall-clock window. Prefer accessible locators, web-first assertions and `expect.poll`; where a count is the point, assert a relationship that holds for any sample (`records > frames`) rather than a number that depends on how long the run happened to watch
+
+### Writing and running them
+
+- run headless and single-worker. Shared login/target and SSH pasteboard helpers live in `tests/playwright/support.ts`
+- every spec must hand the session back to the picker before it ends (`returnToPicker`): the server keeps a target session alive when its browser goes away, so a spec that stops on the desktop leaves the next run reattached to it. `logInAndConnect` tolerates either landing, so one abandoned run cannot break every run after it
+- the setup is TypeScript and Playwright only transpiles it, so type errors never surface at runtime — run `npm run typecheck` in `tests/playwright/` after changing anything there
+- keep approved specs in `tests/playwright/` rather than leaving one-off copies in `tmp/`, and run a new one several times before relying on it
+- a spec that parses a wire format should implement its own parser rather than importing the SPA's, or a wrong parser agrees with itself. This is the only place the wire is checked as the real SPA uses it: the Rust e2e tests drive a raw WebSocket client, and the Swift and TypeScript unit tests parse frames they built themselves, so both ends can otherwise agree with their own fixtures and disagree with each other
 
 ## macOS viewer
 
