@@ -42,7 +42,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval};
 use crate::capture::{self, Capture, FrameSink, RawTile};
 use crate::cursor;
 use crate::encode;
-use crate::input::Injector;
+use crate::input::{Injector, PointerHome};
 use crate::pasteboard;
 
 /// Frames of raw tiles buffered between the capture callback and the encoder.
@@ -237,12 +237,19 @@ pub async fn serve(
     let display = owned.handle.clone();
     let owned = owned.target;
 
-    // Every session starts on the Mac's main display — which is the Mac's own
-    // screen, because a display of ours joins as an extended one and never takes
-    // that role (see `crate::virtualdisplay`). A selection is session state, not
-    // agent state: the person at the far end picks a screen for as long as they
-    // are looking at it, and the next connection starts from the same place
-    // rather than from wherever the last one wandered off to.
+    // Every session starts on the Mac's main display, whichever that is. It is
+    // *not* reliably the Mac's own screen: an earlier note here said a display of
+    // ours joins as an extended one and never takes that role, and measurement
+    // says otherwise — on the test VM the agent's display came up at the global
+    // origin, which is what being the main display means, with the Mac's own screen
+    // pushed to its left. macOS decides that placement and the arrangement is the
+    // user's to set in System Settings, so this reads the answer rather than
+    // assuming one.
+    //
+    // A selection is session state, not agent state: the person at the far end
+    // picks a screen for as long as they are looking at it, and the next connection
+    // starts from the same place rather than from wherever the last one wandered
+    // off to.
     //
     // Through `resolve` so that a Mac whose *only* display is ours still measures
     // it as ours — its backing scale cannot be read back from the system.
@@ -436,6 +443,9 @@ async fn pump(
     let _abort = AbortOnDrop(read_task);
 
     let mut injector = Injector::new(geometry.scale, geometry.origin);
+    // Before the first injected event, which is the only moment this is worth
+    // asking: from here on the pointer is wherever the client last put it.
+    let pointer_home = PointerHome::note(owned.map(capture::Target::id));
     let full_repaint = Arc::new(AtomicBool::new(true));
     // All three appear together when `Attach` starts the pipeline, and are torn
     // down together when the session ends.
@@ -996,6 +1006,13 @@ async fn pump(
     // stuck down on the Mac — that is baffling and hard to clear from the
     // keyboard.
     injector.release_all();
+    // The same obligation for the pointer, and for the same reason: a session that
+    // shared the agent's own display has left the Mac's one pointer on a screen
+    // nobody there can see. Releases first — the buttons belong to the position they
+    // were pressed at, and a warp before them would let go somewhere else.
+    if let Some(pointer_home) = pointer_home {
+        pointer_home.restore();
+    }
     // Stop capturing: the stream costs CPU and battery with nobody watching.
     drop(capture);
     // Before the join, and load-bearing: an encoder parked in `blocking_send` on

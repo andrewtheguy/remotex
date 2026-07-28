@@ -323,6 +323,13 @@ fn main() -> anyhow::Result<()> {
     // that is the whole of what `CGVirtualDisplay` does — so it joins the list a
     // client picks from rather than replacing what the Mac already has. Every
     // session starts on the main display; the choice after that is the viewer's.
+    //
+    // Which does not mean the Mac's own screen keeps that role. macOS places the
+    // new display, and on the test VM it placed it at the global origin — making it
+    // the main display and pushing the Mac's own screen to its left. Where it lands
+    // is the user's to change in System Settings > Displays, so nothing here moves
+    // it; what the agent does own is not *stranding the pointer* on it, which is
+    // `input::PointerHome` (see `session::pump`).
     let owned = virtual_display
         .as_ref()
         .map(|display| capture::Target::Owned {

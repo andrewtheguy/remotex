@@ -31,10 +31,11 @@
 use std::collections::HashSet;
 
 use log::debug;
-use objc2_core_foundation::CGPoint;
+use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType,
-    CGMouseButton, CGScrollEventUnit,
+    CGDisplayBounds, CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID,
+    CGEventTapLocation, CGEventType, CGGetActiveDisplayList, CGMouseButton, CGScrollEventUnit,
+    CGWarpMouseCursorPosition,
 };
 use rxa_proto::keymap;
 
@@ -320,6 +321,137 @@ fn wheel_lines(delta: f32) -> i32 {
     }
 }
 
+/// Where the pointer was before a session moved it, so it can be put back.
+///
+/// A Mac has **one** pointer for every display it has, and [`Injector`] moves it:
+/// a client's mouse position is posted as an absolute location in the global point
+/// space (see [`Injector::to_global_point`]), so while a session shares the display
+/// the agent made, the pointer lives on a screen nobody sitting at the Mac can see.
+/// That much is the price of one pointer and cannot be fixed here.
+///
+/// What can be fixed is the state a session *leaves behind*. Nothing moved the
+/// pointer back when a session ended, so the person at the Mac was left with no
+/// pointer on their own screen — and, depending on how the displays are arranged,
+/// sometimes no way to walk it back. The pointer is clamped to the union of the
+/// display rectangles, so two displays of different heights do not share every row:
+/// measured on the test VM with the agent's 1600x1000 display at (0,0) and the
+/// Mac's own 800x600 screen at (-800,0), a pointer anywhere below y=600 had no
+/// leftward path onto the real screen at all. It had to go up first, which is not
+/// something anyone guesses while their pointer is invisible.
+///
+/// Recorded per session rather than once per process because the answer is "wherever
+/// that person was working", which is only knowable at the moment the session takes
+/// the pointer away from them.
+pub struct PointerHome {
+    /// The agent's own display — the only screen a session can strand it on.
+    owned: u32,
+    /// Where the pointer was, if that was anywhere worth returning it to.
+    saved: Option<CGPoint>,
+}
+
+impl PointerHome {
+    /// Note where the pointer is, before a session starts moving it.
+    ///
+    /// `None` when the agent has no display of its own: every display is then one
+    /// the person at the Mac can see, so a session cannot hide the pointer and there
+    /// is nothing to undo.
+    pub fn note(owned: Option<u32>) -> Option<Self> {
+        let owned = owned?;
+        let now = CGEvent::location(None);
+        // Already on our display means the previous session left it there and this
+        // one inherited it. Saving that would make the restore a no-op, so it is
+        // left empty and [`restore`] falls back to a screen someone can see.
+        let saved = (!contains(CGDisplayBounds(owned), now)).then_some(now);
+        Some(Self { owned, saved })
+    }
+
+    /// Put the pointer back, if this session is what took it away.
+    ///
+    /// Consumes itself: a restore is the end of a session, and doing it twice would
+    /// move a pointer the person at the Mac has since moved themselves.
+    pub fn restore(self) {
+        let others: Vec<CGRect> = active_displays()
+            .into_iter()
+            .filter(|id| *id != self.owned)
+            .map(|id| CGDisplayBounds(id))
+            .collect();
+        let now = CGEvent::location(None);
+        let Some(to) = destination(now, self.saved, CGDisplayBounds(self.owned), &others) else {
+            return;
+        };
+        // No `CGAssociateMouseAndMouseCursorPosition` after it: a warp suppresses
+        // mouse events for a fraction of a second and then resumes on its own, and
+        // nobody is racing this — the session that was driving the pointer has just
+        // ended.
+        let err = CGWarpMouseCursorPosition(to);
+        debug!(
+            "input: pointer left on display {}; moved to ({}, {}) (warp {})",
+            self.owned, to.x as i32, to.y as i32, err.0
+        );
+    }
+}
+
+/// Where to send the pointer, or `None` to leave it alone. Pure so the rules can be
+/// tested without a WindowServer, which is the whole of the logic worth testing —
+/// the rest is three CoreGraphics calls.
+///
+/// `others` is every active display except the agent's, in the order the system
+/// lists them.
+fn destination(
+    now: CGPoint,
+    saved: Option<CGPoint>,
+    owned: CGRect,
+    others: &[CGRect],
+) -> Option<CGPoint> {
+    // Not on our display: either the session never moved it there or the person at
+    // the Mac has already recovered it. Either way, moving it now would be the rude
+    // one of the two mistakes available.
+    if !contains(owned, now) {
+        return None;
+    }
+    // Back where they were working, but only if that screen is still there — a
+    // display can be unplugged, or resized, while a session holds the pointer.
+    if let Some(saved) = saved
+        && others.iter().any(|rect| contains(*rect, saved))
+    {
+        return Some(saved);
+    }
+    // Otherwise the middle of the first display someone could be sitting at. A Mac
+    // whose *only* display is ours gets `None`: there is nowhere better to be.
+    others.first().map(centre)
+}
+
+/// The active displays, ours included, in system order. Empty if the list cannot be
+/// read, which leaves [`PointerHome::restore`] doing nothing rather than guessing.
+fn active_displays() -> Vec<u32> {
+    let mut count: u32 = 0;
+    if unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) }.0 != 0 || count == 0 {
+        return Vec::new();
+    }
+    let mut ids = vec![0u32; count as usize];
+    if unsafe { CGGetActiveDisplayList(count, ids.as_mut_ptr(), &mut count) }.0 != 0 {
+        return Vec::new();
+    }
+    ids.truncate(count as usize);
+    ids
+}
+
+/// Half-open on both axes, matching how the WindowServer tiles displays edge to
+/// edge: a point on one display's right edge belongs to the next one along.
+fn contains(rect: CGRect, point: CGPoint) -> bool {
+    point.x >= rect.origin.x
+        && point.x < rect.origin.x + rect.size.width
+        && point.y >= rect.origin.y
+        && point.y < rect.origin.y + rect.size.height
+}
+
+fn centre(rect: &CGRect) -> CGPoint {
+    CGPoint {
+        x: rect.origin.x + rect.size.width / 2.0,
+        y: rect.origin.y + rect.size.height / 2.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +572,92 @@ mod tests {
         assert_eq!(dom_button(1), Some(CGMouseButton::Center));
         assert_eq!(dom_button(2), Some(CGMouseButton::Right));
         assert_eq!(dom_button(3), None);
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect {
+            origin: CGPoint { x, y },
+            size: objc2_core_foundation::CGSize {
+                width: w,
+                height: h,
+            },
+        }
+    }
+
+    fn point(x: f64, y: f64) -> CGPoint {
+        CGPoint { x, y }
+    }
+
+    /// The measured arrangement on the test VM: the agent's display at the origin,
+    /// the Mac's own smaller screen to its left.
+    const OWNED: fn() -> CGRect = || rect(0.0, 0.0, 1600.0, 1000.0);
+    const REAL: fn() -> CGRect = || rect(-800.0, 0.0, 800.0, 600.0);
+
+    #[test]
+    fn a_pointer_left_on_the_agents_display_goes_back_where_the_session_found_it() {
+        assert_eq!(
+            destination(point(859.0, 943.0), Some(point(-400.0, 300.0)), OWNED(), &[REAL()]),
+            Some(point(-400.0, 300.0))
+        );
+    }
+
+    /// The row that has no leftward path to the real screen is exactly the case the
+    /// restore exists for, so it must not be treated as "already fine".
+    #[test]
+    fn a_pointer_below_the_real_screens_bottom_edge_is_still_stranded() {
+        assert!(destination(point(859.0, 943.0), None, OWNED(), &[REAL()]).is_some());
+    }
+
+    #[test]
+    fn a_pointer_on_a_real_screen_is_left_alone() {
+        assert_eq!(
+            destination(point(-400.0, 300.0), Some(point(-400.0, 300.0)), OWNED(), &[REAL()]),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_saved_falls_back_to_the_middle_of_the_first_real_screen() {
+        assert_eq!(
+            destination(point(10.0, 10.0), None, OWNED(), &[REAL()]),
+            Some(point(-400.0, 300.0))
+        );
+    }
+
+    /// A display that went away while the session held the pointer: the saved point
+    /// is on no screen now, so returning it there would strand the pointer off every
+    /// display instead of on the wrong one.
+    #[test]
+    fn a_saved_point_on_a_screen_that_is_gone_falls_back_to_one_that_is_there() {
+        assert_eq!(
+            destination(point(10.0, 10.0), Some(point(-9000.0, 50.0)), OWNED(), &[REAL()]),
+            Some(point(-400.0, 300.0))
+        );
+    }
+
+    /// A saved point that is itself on the agent's display would make the restore a
+    /// no-op. `note` already declines to save one, and the rule holds here too.
+    #[test]
+    fn a_saved_point_on_the_agents_own_display_is_not_a_destination() {
+        assert_eq!(
+            destination(point(10.0, 10.0), Some(point(20.0, 20.0)), OWNED(), &[REAL()]),
+            Some(point(-400.0, 300.0))
+        );
+    }
+
+    #[test]
+    fn a_mac_whose_only_display_is_the_agents_has_nowhere_to_put_the_pointer() {
+        assert_eq!(destination(point(10.0, 10.0), None, OWNED(), &[]), None);
+    }
+
+    /// Displays tile edge to edge, so the shared edge belongs to exactly one of
+    /// them. Without the half-open rule a pointer at x=0 would read as being on both
+    /// the real screen and ours.
+    #[test]
+    fn a_display_owns_its_top_left_edge_and_not_its_bottom_right() {
+        assert!(contains(REAL(), point(-800.0, 0.0)));
+        assert!(!contains(REAL(), point(0.0, 0.0)));
+        assert!(contains(OWNED(), point(0.0, 0.0)));
+        assert!(!contains(OWNED(), point(1600.0, 1000.0)));
     }
 }
