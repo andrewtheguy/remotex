@@ -129,9 +129,36 @@ comments are not preserved.
 
 ## Upgrade
 
-Replace the app in Applications, then open the new copy once. Opening it
-refreshes the login-item registration, which can otherwise continue pointing
-at the replaced bundle.
+Choose **Quit** from the menu bar item first, then replace the app in
+Applications, then open the new copy once.
+
+Quitting first is what makes the upgrade land, and skipping it is silent rather
+than noisy. macOS will not launch a second copy of an app that is already
+running: opening the new bundle over a running agent just *activates* the old
+process, so nothing is upgraded, nothing is said, and the old version keeps
+running until the next login. With the agent quit there is nothing to activate,
+and opening the new copy starts the LaunchAgent job from it.
+
+The job is the copy that matters — it is the one that comes back at login, that
+the menu's Quit and a settings save restart, and that the Screen Recording and
+Accessibility grants were issued to. So whichever order things happen in, only
+one agent ends up running: a copy that finds the job already registered stands
+down and asks launchd to start it from this bundle instead of competing for the
+port (see `hand_over_to_launchd` in `main.rs`). Before that, a fresh install
+could leave two processes fighting over 52381 and a modal alert nobody was there
+to dismiss.
+
+Scripted, with no GUI in the way, the whole upgrade is: replace the bundle, then
+
+```sh
+launchctl kickstart -k gui/$(id -u)/dev.remotex.agent
+```
+
+which restarts the job from whatever is on disk. Do not `bootout` first — that
+unloads the job, and the kickstart then has nothing to find.
+
+There is no need to uninstall anything. Unregistering the login item, which is
+what Uninstall does, only means having to register it again.
 
 Stay with the same kind of build you already have — see [Signing identity and
 the grants](#signing-identity-and-the-grants). Upgrading a signed install with
