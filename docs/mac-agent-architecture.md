@@ -2,8 +2,8 @@
 
 `remotex-agent` is the optional macOS endpoint for `protocol = "rxa"`, offered
 as a dedicated-agent alternative to connecting the gateway directly to macOS
-Screen Sharing over VNC. Its PSK authenticates reconnects directly instead of
-returning to Screen Sharing's login gate. It captures the logged-in user's
+Screen Sharing over VNC. Its keypair authenticates reconnects directly instead
+of returning to Screen Sharing's login gate. It captures the logged-in user's
 display, encodes changed regions, and accepts input from the remotex gateway.
 The agent and gateway share the protocol crate so their wire types and key
 handling stay in sync.
@@ -23,7 +23,7 @@ src/rxa.rs                              crates/rxa-agent
                                            ├─ Core Graphics input injection
                                            └─ menu bar UI and SMAppService
 
-crates/rxa-proto: PSKs, handshake, framing, messages, and key mapping
+crates/rxa-proto: identity keys, handshake, framing, messages, key mapping
 ```
 
 - `rxa-proto` is cross-platform and contains everything both endpoints must
@@ -37,9 +37,31 @@ crates/rxa-proto: PSKs, handshake, framing, messages, and key mapping
 ## Transport
 
 The transport is TCP on port 52381 by default, protected with
-`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`. The protocol version is included in
-the Noise prologue. A generated `rxa...` pre-shared key authenticates both
-endpoints and includes a checksum to catch transcription errors.
+`Noise_KK_25519_ChaChaPoly_BLAKE2s`. The protocol version is included in the
+Noise prologue.
+
+Each end holds one long-lived X25519 keypair and pins the other's public key,
+the way WireGuard pairs an interface with a peer: the gateway's identity is
+`[rxa].private_key` in `remotex.toml` and each target names that Mac's
+`agent_public_key`; the agent's identity is `private_key` in its own config and
+it names one `gateway_public_key`. `KK` rather than `IK` because each side pins
+exactly one peer, so both statics are known before the first byte and
+authentication happens entirely inside Noise — there is no list of accepted
+gateways and nothing for either endpoint to compare after the fact. Both `es`
+and `ss` are consumed in the first message, so a mismatch on either side is
+rejected by the agent before it has revealed anything.
+
+Keys are text as `<prefix><base64url of 32 bytes and a CRC16>`, the checksum
+catching transcription errors. The prefix carries the role as well as the kind —
+`rxgs`/`rxgp` for a gateway's private and public keys, `rxas`/`rxap` for an
+agent's — so each of the four config fields accepts only its own kind and rejects
+the other three, naming what was pasted instead. That matters most while pairing,
+when both public keys are in play at once and a swap would otherwise surface as
+an opaque handshake rejection.
+
+Only the two public keys ever move between machines, so both ends display theirs
+in full: the agent in its settings dialog and via `remotex-agent --public-key`,
+the gateway via `remotex rxa-pubkey` and a line in its startup log.
 
 Noise transport frames carry length-prefixed `rxa-proto` messages:
 
@@ -334,13 +356,35 @@ Recording permission for capture.
 
 The app registers its embedded LaunchAgent with `SMAppService` and runs in the
 logged-in user's GUI session. Its menu bar item exposes status, settings,
-permission shortcuts, logs, and the login-item toggle. The PSK is not among them:
-it lives in the settings dialog, read-only with a Copy button, and both editing
-it and regenerating it are behind that dialog's Edit — copying a credential is
-routine, replacing one is not, and a menu item cannot tell the two apart.
+permission shortcuts, logs, and the login-item toggle. Neither key is among
+them: both live in the settings dialog, shown in full because neither is a
+secret — this Mac's public key as a read-only label with a Copy button, the
+gateway's as an ordinary field to paste into. The private key is never displayed
+anywhere. Replacing it is a Regenerate identity button in that dialog, behind a
+confirmation, because the cost is not local: every gateway paired with this Mac
+must be given the new public key before it can reach it again.
 
-Only one gateway may be connected. A new authenticated connection replaces the
-old one. The shared browser heartbeat ends the engine under the same policy as
+An agent with no `gateway_public_key` is unpaired: it listens, refuses every
+connection, and says so in its menu. That is the state a first launch lands in,
+since the agent has to be running before its public key can be read off it.
+
+An identity can also be *imported*, which is how it outlives the Mac that minted
+it: a re-imaged machine, or one replacing another, takes the private key its
+gateways' `agent_public_key` entries already match, so nothing is re-paired. The
+settings dialog has an Import… button, and `remotex-agent
+--import-private-key` reads the key from stdin — never an argument, so it stays
+out of shell history and out of `ps`. Both validate the key by role as well as
+checksum before writing it, and neither can display a private key: the dialog
+accepts one and shows only the public half it derives.
+
+Only one gateway may be connected. A new connection replaces the old one when it
+completes its handshake, not when it is accepted: a peer that cannot prove it
+holds the paired key is refused without the running session noticing, so nothing
+that can merely reach the port can end a session by opening a socket. Handshakes
+run off the accept path and on a 20-second timeout, so one silent peer cannot
+hold up the connection behind it either.
+
+The shared browser heartbeat ends the engine under the same policy as
 RDP and VNC: a missing pong expires it after about 60 seconds, while an orderly
 WebSocket close allows 60 seconds for reattachment. Ending the RXA engine closes
 the agent connection, stops capture, and changes the menu from "Sharing this

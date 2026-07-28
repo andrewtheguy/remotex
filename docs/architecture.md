@@ -251,8 +251,9 @@ it only when it changes.
 ### rxa
 
 As an alternative to macOS Screen Sharing over VNC, the gateway can connect to
-the optional `remotex-agent` with a pre-shared-key Noise session. This provides
-RealVNC-like reconnect behavior: the PSK is the connection credential, so a
+the optional `remotex-agent` with a Noise session authenticated by a long-lived
+X25519 keypair on each end, each pinning the other's public key. This provides
+RealVNC-like reconnect behavior: the keys are the connection credential, so a
 reconnect does not return to Screen Sharing's login gate. The agent captures
 and encodes the Mac display, and the gateway relays its tiles. Established
 connections retry with capped backoff after transient failures and request a
@@ -345,8 +346,12 @@ sections. See [`install.md`](install.md) and
 [`packaging/etc/remotex.toml.example`](../packaging/etc/remotex.toml.example).
 
 Protocol-specific fields are validated during startup. In particular, `rxa`
-requires a checksum-valid PSK; incompatible fields are rejected rather than
-silently accepted, `resize` on a `subtype = "ard"` target among them.
+requires a checksum-valid `[rxa].private_key` and a checksum-valid
+`agent_public_key` per target, each rejected if it is the wrong *kind* of key —
+the role is in the prefix, so a gateway key pasted where an agent's belongs is
+named rather than left to fail at the handshake. Incompatible fields are rejected
+rather than silently accepted, `resize` on a `subtype = "ard"` target among
+them.
 
 Unit tests cover protocol, config, authentication, key mapping, and engine
 helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and

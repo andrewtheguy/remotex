@@ -13,11 +13,11 @@ snow = "0.10"
 # Only the io-util traits — rxa-proto never opens a socket itself, it adapts
 # whatever AsyncRead/AsyncWrite the caller hands it.
 tokio = { version = "1", features = ["io-util"] }
-# PSK text encoding (base64url, no padding).
+# Key text encoding (base64url, no padding).
 base64 = "0.22"
-# Typed wire/PSK errors, per CLAUDE.md.
+# Typed wire/key errors, per CLAUDE.md.
 thiserror = "2"
-# 32 random bytes for `psk::generate`.
+# 32 random bytes for `key::generate_private`.
 getrandom = "0.3"
 
 [dev-dependencies]

@@ -36,7 +36,8 @@ async fn spawn_app() -> SocketAddr {
             security: Security::Auto,
             resize: false,
             clipboard: false,
-            psk: String::new(),
+            agent_public_key: String::new(),
+            gateway_private_key: String::new(),
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

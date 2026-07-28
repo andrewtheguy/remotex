@@ -1,9 +1,10 @@
 //! The Mac's general pasteboard, read and written on demand.
 //!
-//! Used by two callers with nothing else in common: the menu bar's "Copy
-//! pre-shared key", and the clipboard bridge, where the gateway asks for the
-//! pasteboard text ([`rxa_proto::msg::GatewayMsg::ClipboardRequest`]) or hands
-//! over text to put on it.
+//! Used by two callers with nothing else in common: the settings dialog's Copy
+//! button, for this Mac's public key, and the clipboard bridge, where the
+//! gateway asks for the pasteboard text
+//! ([`rxa_proto::msg::GatewayMsg::ClipboardRequest`]) or hands over text to put
+//! on it.
 //!
 //! **Contents are read as rarely as possible.** AppKit has no change
 //! notification for `NSPasteboard` — unlike iOS, where `UIPasteboard` posts

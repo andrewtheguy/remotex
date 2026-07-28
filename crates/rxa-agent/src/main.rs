@@ -3,7 +3,7 @@
 //! remotex reaches a Mac today over Apple's Screen Sharing (VNC), which drops
 //! and then demands a fresh login on every reconnect — the credential prompt
 //! belongs to Apple's server, so there is nothing to fix on remotex's side of
-//! the RFB connection. This agent replaces that hop: one pre-shared key, a
+//! the RFB connection. This agent replaces that hop: a keypair on each end, a
 //! two-message Noise handshake, and no human in a reconnect ever. See
 //! `docs/mac-agent-architecture.md`.
 //!
@@ -12,7 +12,7 @@
 //! There is no install script. On first launch the agent
 //!
 //! 1. writes `~/Library/Application Support/remotex-agent/config.toml` with a
-//!    freshly generated pre-shared key, if it is not already there, and
+//!    freshly minted keypair, if it is not already there, and
 //! 2. registers itself with `SMAppService` (see [`loginitem`]), which puts it in
 //!    **System Settings → General → Login Items** and starts it at every login.
 //!
@@ -23,16 +23,20 @@
 //! ## Everything happens in the menu bar
 //!
 //! There are no windows, but there is a status item (see [`menubar`]), and it is
-//! the entire interface: whether a gateway is connected, the pre-shared key and a
-//! button to mint a new one, the listen address, which display is shared, the
-//! config file, the log, the two Privacy panes, the login item, and Quit.
-//! Anything the agent can be asked to do is done there.
+//! the entire interface: whether a gateway is connected, this Mac's public key
+//! and the gateway's, the listen address, which display is shared, the config
+//! file, the log, the two Privacy panes, the login item, and Quit. Anything the
+//! agent can be asked to do is done there.
 //!
-//! The flags below are launch modes only — where to read the config, and whether
-//! to register or to put up a menu at all. No operation has a flag: a permission
-//! read from a terminal is the *terminal's* permission (see
-//! [`report_permissions`]), and a key printed to a terminal is a credential in
-//! somebody's shell history.
+//! The flags below are launch modes, plus the two that read and write this Mac's
+//! identity. No *operation* has a flag: a permission read from a terminal is the
+//! *terminal's* permission (see [`report_permissions`]).
+//!
+//! The identity flags are not exceptions to that so much as the thing the rule
+//! was about, which is a *secret* in somebody's shell history. `--public-key`
+//! prints the half that is not a secret. `--import-private-key` takes one that
+//! is — from stdin, never an argument, so it reaches neither the history nor
+//! `ps`. The private key is still never printed, by anything.
 //!
 //! ## Two permissions
 //!
@@ -64,10 +68,13 @@
 //!
 //! ## One gateway at a time
 //!
-//! A new connection evicts the previous one, matching remotex's single-session
-//! model (see CLAUDE.md): multi-session is permanently out of scope, and a
-//! browser that force-claims the gateway's session slot should not find itself
-//! queued behind a stale agent connection.
+//! A newly *authenticated* connection evicts the previous one, matching
+//! remotex's single-session model (see CLAUDE.md): multi-session is permanently
+//! out of scope, and a browser that force-claims the gateway's session slot
+//! should not find itself queued behind a stale agent connection.
+//!
+//! Authenticated is the load-bearing word — see [`serve`]. Anything that cannot
+//! complete the handshake is refused without the running session noticing.
 
 // A bare `#![cfg(target_os = "macos")]` would compile the crate away to
 // nothing on Linux and fail at link time with "main function not found",
@@ -94,6 +101,7 @@ mod state;
 mod virtualdisplay;
 
 use std::io::IsTerminal as _;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -102,6 +110,7 @@ use file_rotate::{
     ContentLimit, FileRotate, compression::Compression, suffix::AppendCount,
 };
 use log::{info, warn};
+use tokio::time::timeout;
 
 /// How often the main thread re-reads the system cursor when `--no-menu` has
 /// taken the run loop away. The menu bar polls at the same rate from a timer.
@@ -113,7 +122,38 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
     let log_path = init_logging();
 
-    let (config, path, created) = match config::load_or_create(args.config.as_deref()) {
+    let loaded = config::load_or_create(args.config.as_deref());
+
+    // Answered before the login item, the bind and the TCC prompts: this is a
+    // question about the config file, not a launch, and asking it must not
+    // register anything, take the port from a running agent, or raise a prompt.
+    //
+    // `load_or_create`, so the first thing anyone does over SSH on a fresh Mac
+    // mints the identity and prints it in one go. And `?` rather than the
+    // report-and-exit-0 below, which exists so launchd's KeepAlive does not loop
+    // on a broken config — for a question asked from a shell that would answer
+    // with silence.
+    if args.public_key {
+        let (config, _, _) = loaded?;
+        println!("{}", config.public_key());
+        return Ok(());
+    }
+
+    // Same reasoning, and the same place in the launch: a config edit, not a
+    // launch. Drops `loaded` because the import re-reads and rewrites the file
+    // itself — and because on a Mac with no config yet, the identity that load
+    // just minted is the one being replaced.
+    if args.import_private_key {
+        drop(loaded);
+        let key = read_private_key_from_stdin()?;
+        let config = config::import_private_key(args.config.as_deref(), &key)?;
+        // The public half, because that is the value to check against whatever
+        // the gateway already has — the point of importing rather than minting.
+        println!("{}", config.public_key());
+        return Ok(());
+    }
+
+    let (config, path, created) = match loaded {
         Ok(loaded) => loaded,
         Err(e) => {
             // Exits 0 despite failing, so launchd's KeepAlive leaves it alone: no
@@ -135,7 +175,10 @@ fn main() -> anyhow::Result<()> {
         path.display()
     );
     if created {
-        info!("config: created {} with a fresh pre-shared key", path.display());
+        info!(
+            "config: created {} with a fresh identity, unpaired",
+            path.display()
+        );
     }
 
     // Registering is idempotent, so doing it on every launch keeps a bundle that
@@ -151,11 +194,12 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Only worth printing where somebody can read it, and the key is not in it:
-    // secrets stay out of log files, out of shell history and out of a terminal
-    // somebody may be screen-sharing. Reading it is a menu item.
+    // Only worth printing where somebody can read it. The public key *is* in it
+    // now — it is the next thing to do, and it is not a secret; the private key
+    // stays out of log files, out of shell history and out of a terminal
+    // somebody may be screen-sharing.
     if created && std::io::stdout().is_terminal() {
-        print_first_run(&path);
+        print_first_run(&path, &config.public_key());
     }
 
     // Bound on the main thread, and early — because "the port is taken" is the
@@ -241,7 +285,18 @@ fn main() -> anyhow::Result<()> {
     // AppKit, which owns the menu bar and the pointer shape both.
     let serve_tracker = Arc::clone(&tracker);
     let serve_state = Arc::clone(&state);
-    let psk = config.psk_bytes();
+    let keys = Keys {
+        private: config.private_key_bytes(),
+        gateway_public: config.gateway_public_key_bytes(),
+    };
+    if keys.gateway_public.is_none() {
+        warn!(
+            "no gateway_public_key: this Mac is unpaired and will refuse every \
+             connection. Its public key is {} — paste that into the gateway's \
+             agent_public_key, and the gateway's own into Settings.",
+            config.public_key()
+        );
+    }
 
     // A display of our own, if the config asks for one. Created here, on the
     // main thread and before any session exists, because a display that came and
@@ -300,7 +355,7 @@ fn main() -> anyhow::Result<()> {
             };
             match runtime.block_on(serve(
                 listener,
-                psk,
+                keys,
                 serve_owned,
                 serve_tracker,
                 serve_state,
@@ -511,14 +566,47 @@ fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
     Some((writer, path))
 }
 
+/// How long a peer has to complete a handshake before it is dropped.
+///
+/// Generous — this is two messages over a LAN — and its job is only to stop
+/// half-open connections accumulating. The gateway gives the whole
+/// connect-and-hello 10 seconds, so nothing legitimate is near this.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Accept gateway connections, one at a time.
 ///
 /// Takes an already-bound listener: binding is the main thread's job, so a port
 /// that is already taken can be reported on screen rather than from this thread
 /// (see `main`).
+///
+/// ## Only an authenticated peer takes the slot
+///
+/// There is one session slot and a new gateway evicts whoever is in it — but the
+/// eviction happens when a connection *finishes its handshake*, not when it is
+/// accepted. Evicting at accept meant anything that could reach this port could
+/// end a live session by opening a socket, without holding a key or saying a
+/// word: a port scanner, a stale gateway, a mistyped host in someone else's
+/// config. Now a peer that cannot prove it is the paired gateway is refused
+/// without the running session ever noticing.
+///
+/// Handshakes therefore run in their own tasks and report back over a channel,
+/// rather than inline: one peer that connects and stays silent must not hold up
+/// the accept loop, which is why [`HANDSHAKE_TIMEOUT`] exists too.
+/// This Mac's identity and the one gateway it answers.
+///
+/// `gateway_public` is `None` while the agent is unpaired — a first launch, or a
+/// config whose `gateway_public_key` was cleared. Then it still listens, so the
+/// port is visibly answering and the menu bar is there to be paired from, but no
+/// connection gets as far as a handshake.
+#[derive(Clone, Copy)]
+struct Keys {
+    private: [u8; 32],
+    gateway_public: Option<[u8; 32]>,
+}
+
 async fn serve(
     listener: std::net::TcpListener,
-    psk: [u8; 32],
+    keys: Keys,
     owned: session::Owned,
     tracker: Arc<cursor::Tracker>,
     state: Arc<state::AgentState>,
@@ -528,40 +616,86 @@ async fn serve(
 
     // The single active session, so a new gateway evicts the previous one.
     let mut current: Option<tokio::task::JoinHandle<()>> = None;
+    // Connections that have finished a handshake, waiting to take the slot.
+    // Bounded, and generously: it holds only authenticated peers, and the loop
+    // below drains it immediately.
+    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<(SocketAddr, session::Authenticated)>(4);
 
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(e) => {
-                // A per-connection accept error (e.g. EMFILE) must not kill the
-                // agent; the next accept usually succeeds.
-                warn!("agent: accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                continue;
-            }
-        };
-        info!("agent: gateway connected from {peer}");
-        // Recorded before the eviction, so the menu bar never blinks through a
-        // "not connected" state during a reconnect. The id is what keeps the
-        // evicted session from clearing this one on its way out.
-        let id = state.connected(peer, Instant::now());
-        if let Some(previous) = current.take() {
-            info!("agent: evicting the previous gateway connection");
-            previous.abort();
-        }
+        tokio::select! {
+            // A connection that proved itself. *Now* the slot moves — see the
+            // module docs on why this is not done at accept.
+            Some((peer, authenticated)) = ready_rx.recv() => {
+                info!("agent: gateway connected from {peer}");
+                // Recorded before the eviction, so the menu bar never blinks
+                // through a "not connected" state during a reconnect. The id is
+                // what keeps the evicted session from clearing this one on its
+                // way out.
+                let id = state.connected(peer, Instant::now());
+                if let Some(previous) = current.take() {
+                    info!("agent: evicting the previous gateway connection");
+                    previous.abort();
+                }
 
-        let tracker = Arc::clone(&tracker);
-        let session_owned = owned.clone();
-        let session_state = Arc::clone(&state);
-        current = Some(tokio::spawn(async move {
-            match session::serve(stream, psk, session_owned, tracker).await {
-                Ok(()) => info!("agent: gateway {peer} disconnected"),
-                // Includes a wrong PSK, which is a failed handshake — logged and
-                // dropped, never fatal to the agent.
-                Err(e) => warn!("agent: session with {peer} ended: {e:#}"),
+                let tracker = Arc::clone(&tracker);
+                let session_owned = owned.clone();
+                let session_state = Arc::clone(&state);
+                current = Some(tokio::spawn(async move {
+                    match session::serve(authenticated, session_owned, tracker).await {
+                        Ok(()) => info!("agent: gateway {peer} disconnected"),
+                        Err(e) => warn!("agent: session with {peer} ended: {e:#}"),
+                    }
+                    session_state.disconnected(id);
+                }));
             }
-            session_state.disconnected(id);
-        }));
+            accepted = listener.accept() => {
+                let (stream, peer) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(e) => {
+                        // A per-connection accept error (e.g. EMFILE) must not
+                        // kill the agent; the next accept usually succeeds.
+                        warn!("agent: accept failed: {e}");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                };
+                // An unpaired agent has no key to judge anyone by, so this is as
+                // far as any connection gets.
+                let Some(gateway_public) = keys.gateway_public else {
+                    warn!("agent: refusing {peer} — no gateway_public_key is set (open Settings)");
+                    drop(stream);
+                    continue;
+                };
+
+                // Off the accept path, and on a clock. Handshaking inline would
+                // let one peer that connects and then says nothing block every
+                // later connection — including the real gateway's — for as long
+                // as it cared to hold the socket open.
+                let ready_tx = ready_tx.clone();
+                tokio::spawn(async move {
+                    let handshake =
+                        session::handshake(stream, keys.private, gateway_public);
+                    match timeout(HANDSHAKE_TIMEOUT, handshake).await {
+                        Ok(Ok(authenticated)) => {
+                            // A full queue means four authenticated peers are
+                            // already waiting, which one gateway at a time
+                            // cannot produce. Dropping this one is right.
+                            if ready_tx.try_send((peer, authenticated)).is_err() {
+                                warn!("agent: dropping {peer}, too many pending sessions");
+                            }
+                        }
+                        // Never fatal to the agent, and never visible to the
+                        // session already running: an unpaired peer, a port
+                        // scanner, or a gateway on another protocol version.
+                        Ok(Err(e)) => warn!("agent: refusing {peer}: {e:#}"),
+                        Err(_) => warn!(
+                            "agent: refusing {peer}: no handshake within {}s",
+                            HANDSHAKE_TIMEOUT.as_secs()
+                        ),
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -612,13 +746,59 @@ fn report_permissions() -> bool {
     screen_recording_at_launch
 }
 
-fn print_first_run(path: &Path) {
+/// Read the key `--import-private-key` imports.
+///
+/// From stdin and nowhere else. As an argument it would be in the shell's
+/// history and visible in `ps` to every user on the machine; this way
+/// `pbpaste | … --import-private-key` or a redirect from a file leaves neither
+/// trace.
+///
+/// The whole of stdin, not a line: a key pasted into a terminal, piped from
+/// `pbpaste`, or read from a file that ends without a newline all have to work,
+/// and none of them is distinguishable here.
+///
+/// Returns the key alone. Every one of those ways of supplying it brings its own
+/// whitespace — a pipe from `pbpaste` most often a trailing newline — and
+/// `config::import_private_key` trims again before it uses one, so this is not
+/// what keeps a newline out of the config file. It is so that what this function
+/// returns is a key, which is what its name promises.
+fn read_private_key_from_stdin() -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::io::Read as _;
+
+    // Said before the read, or a terminal with nothing piped into it looks like
+    // a hang rather than a prompt.
+    if std::io::stdin().is_terminal() {
+        eprintln!("Paste this Mac's private key (rxas…), then press Ctrl-D:");
+    }
+    let mut key = String::new();
+    std::io::stdin()
+        .read_to_string(&mut key)
+        .context("failed to read the private key from stdin")?;
+    let key = key.trim();
+    anyhow::ensure!(
+        !key.is_empty(),
+        "no private key on stdin — pipe one in, e.g. \
+         `pbpaste | remotex-agent --import-private-key`"
+    );
+    Ok(key.to_owned())
+}
+
+fn print_first_run(path: &Path, public_key: &str) {
     println!();
-    println!("Set up {}, with a fresh pre-shared key.", path.display());
+    println!("Set up {}, with a fresh identity.", path.display());
+    println!();
+    println!("This Mac's public key — paste it as `agent_public_key` on the");
+    println!("matching [[targets]] entry in the gateway's remotex.toml:");
+    println!();
+    println!("    {public_key}");
+    println!();
+    println!("Then paste the gateway's own key — `remotex rxa-pubkey` prints it —");
+    println!("into Settings. Until you do, this agent refuses every connection.");
     println!();
     println!("The rest is in the menu bar, under the remotex-agent icon:");
     println!();
-    println!("    Settings…          — holds the one credential; Copy puts it on the clipboard");
+    println!("    Settings…          — the two public keys, and where the gateway's goes");
     println!("    Screen Recording   — without it the screen never paints");
     println!("    Accessibility      — without it input is silently ignored");
     println!();
@@ -634,6 +814,8 @@ struct Args {
     config: Option<PathBuf>,
     no_register: bool,
     no_menu: bool,
+    public_key: bool,
+    import_private_key: bool,
 }
 
 impl Args {
@@ -650,6 +832,12 @@ impl Args {
                 }
                 "--no-register" => parsed.no_register = true,
                 "--no-menu" => parsed.no_menu = true,
+                "--public-key" => parsed.public_key = true,
+                // Deliberately takes no value: the key arrives on stdin. As an
+                // argument it would be in the shell's history and in `ps` for
+                // every user on the machine, which is the whole of why the agent
+                // has no key operations on the command line otherwise.
+                "--import-private-key" => parsed.import_private_key = true,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -680,13 +868,28 @@ Options:
       --no-menu        Serve without a menu bar item. Needed over SSH, where
                        there is no window server to put one in — and with no menu
                        there is no interface at all, so this is for development
+      --public-key     Print this Mac's public key and exit, without serving.
+                       Creates the config first if there is none, so a fresh Mac
+                       can be paired over SSH. The private key is never printed
+      --import-private-key
+                       Replace this Mac's identity with a private key read from
+                       stdin, keeping every other setting, then print the
+                       resulting public key and exit. For giving a re-imaged or
+                       replacement Mac the identity its gateways already know,
+                       so nothing has to be re-paired. The key is taken from
+                       stdin rather than an argument so it stays out of shell
+                       history and out of `ps`:
+                           pbpaste | remotex-agent --import-private-key
   -h, --help           Show this help
   -V, --version        Show the version
 
-Everything else is in the menu bar: the pre-shared key (which goes on the
-matching [[targets]] entry in the gateway's remotex.toml, and is the only
-credential either side uses), the listen address, the display, the config file,
-the log, the two permissions, Start at Login, and Quit.
+Pairing is two public keys, one each way. This Mac's goes on the gateway as
+`agent_public_key` on the matching [[targets]] entry in remotex.toml; the
+gateway's own — from `remotex rxa-pubkey` — goes in Settings here. Neither is a
+secret; the private key behind each stays on the machine that made it.
+
+Everything else is in the menu bar: those two keys, the listen address, the
+display, the config file, the log, the two permissions, Start at Login, and Quit.
 ";
 
 #[cfg(test)]
@@ -721,6 +924,8 @@ mod tests {
     fn every_flag_parses() {
         assert!(parse(&["--no-register"]).unwrap().no_register);
         assert!(parse(&["--no-menu"]).unwrap().no_menu);
+        assert!(parse(&["--public-key"]).unwrap().public_key);
+        assert!(parse(&["--import-private-key"]).unwrap().import_private_key);
     }
 
     #[test]
@@ -748,7 +953,15 @@ mod tests {
     // it must mention every flag `parse` accepts.
     #[test]
     fn the_usage_text_documents_every_flag() {
-        for flag in ["--config", "--no-register", "--no-menu", "--help", "--version"] {
+        for flag in [
+            "--config",
+            "--no-register",
+            "--no-menu",
+            "--public-key",
+            "--import-private-key",
+            "--help",
+            "--version",
+        ] {
             assert!(USAGE.contains(flag), "usage does not mention {flag}");
         }
     }

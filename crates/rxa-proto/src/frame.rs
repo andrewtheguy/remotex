@@ -227,7 +227,8 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{noise, psk};
+    use crate::key::{self, Role};
+    use crate::noise;
 
     /// A connected pair of framed endpoints over an in-memory duplex, with the
     /// real handshake underneath.
@@ -235,15 +236,17 @@ mod tests {
         (FrameReader<impl AsyncRead + Unpin>, FrameWriter<impl AsyncWrite + Unpin>),
         (FrameReader<impl AsyncRead + Unpin>, FrameWriter<impl AsyncWrite + Unpin>),
     ) {
-        let key = psk::parse(&psk::generate()).unwrap();
+        let mint = |role| key::parse_private(role, &key::generate_private(role)).unwrap();
+        let (gateway, agent): ([u8; 32], [u8; 32]) = (mint(Role::Gateway), mint(Role::Agent));
+        let (gateway_public, agent_public) = (key::public_of(&gateway), key::public_of(&agent));
         // A small duplex buffer on purpose: it forces multi-megabyte frames to
         // interleave reads and writes, exercising reassembly under back-pressure.
         let (mut a, mut b) = tokio::io::duplex(8 * 1024);
         let server = tokio::spawn(async move {
-            let t = noise::respond(&mut b, &key).await.unwrap();
+            let t = noise::respond(&mut b, &agent, &gateway_public).await.unwrap();
             (b, t)
         });
-        let client_t = noise::initiate(&mut a, &key).await.unwrap();
+        let client_t = noise::initiate(&mut a, &gateway, &agent_public).await.unwrap();
         let (b, server_t) = server.await.unwrap();
 
         let (ar, aw) = tokio::io::split(a);

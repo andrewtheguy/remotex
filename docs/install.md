@@ -31,7 +31,7 @@ config readable only by the service user because it contains credentials.
 
 For a Mac target, the gateway can connect directly to macOS Screen Sharing over
 VNC; no companion software is required. The optional `remotex-agent` DMG offers
-a dedicated-agent alternative whose PSK authenticates reconnects without
+a dedicated-agent alternative whose keypair authenticates reconnects without
 returning to Screen Sharing's login gate. See
 [`packaging/macos/README.md`](../packaging/macos/README.md).
 

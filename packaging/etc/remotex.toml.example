@@ -22,6 +22,17 @@ site_passwd = ""
 # tab title. Defaults to "remotex".
 #branding = "remotex"
 
+# This gateway's identity on the "rxa" protocol — the macOS agent (see the rxa
+# target near the end of this file). Required as soon as any target is
+# protocol = "rxa", and unused otherwise.
+#
+# One key for the whole server, not one per Mac: this is the [Interface] half of
+# a WireGuard-style pairing, and every agent is configured with its public half.
+# Generate with:      remotex gen-key
+# Read the public half with:   remotex rxa-pubkey
+#[rxa]
+#private_key = "rxgs..."
+
 # Target profiles (at least one required). Each needs a unique name. Every
 # profile is served; the browser picks one from a picker after login (there is
 # no --target selector).
@@ -102,15 +113,24 @@ password = "change-me"
 # password = "the-account-password"
 
 # As an optional alternative, a Mac can run the remotex agent (protocol "rxa")
-# for RealVNC-like reconnect behavior. The pre-shared key below is the
-# connection credential, so reconnects authenticate directly instead of
-# returning to Screen Sharing's login gate. The Noise handshake authenticates
-# both ends from it.
+# for RealVNC-like reconnect behavior. Reconnects authenticate from a keypair on
+# each end instead of returning to Screen Sharing's login gate.
 #
-# The same key goes in two places, and they must match exactly:
-#   1. `psk` here, and
-#   2. `psk` in the Mac's ~/Library/Application Support/remotex-agent/config.toml
-# Generate one with:  remotex gen-psk
+# Pairing is two public keys, one each way — the way WireGuard pairs an interface
+# with a peer. Neither is a secret; the private key behind each stays on the
+# machine that made it:
+#
+#   1. This gateway's identity is [rxa].private_key, above. Its public half —
+#      printed by `remotex rxa-pubkey` — goes in `gateway_public_key` in the
+#      Mac's ~/Library/Application Support/remotex-agent/config.toml, or in the
+#      agent's Settings dialog.
+#   2. The Mac's public key goes in `agent_public_key` below. Its Settings dialog
+#      shows it with a Copy button, and `remotex-agent --public-key` prints it.
+#
+# One [rxa].private_key serves every rxa target: it is this server's identity,
+# not a per-Mac credential. Each Mac keeps its own key across re-pairings, so
+# pointing one at a different gateway is a one-field edit on the Mac rather than
+# new key material on both ends.
 #
 # The agent runs in the Mac user's login session and needs two one-time grants
 # in System Settings -> Privacy & Security: Screen Recording and Accessibility.
@@ -132,4 +152,4 @@ password = "change-me"
 # name = "mac"
 # protocol = "rxa"
 # host = "mac.local"
-# psk = "rxa..."
+# agent_public_key = "rxap..."

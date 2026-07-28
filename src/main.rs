@@ -2,8 +2,9 @@ use anyhow::Context;
 use clap::Parser;
 use log::{info, warn};
 use remotex::cli::{Cli, Commands};
-use remotex::config::AppConfig;
+use remotex::config::{AppConfig, Protocol};
 use remotex::server;
+use rxa_proto::key;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,16 +26,43 @@ async fn main() -> anyhow::Result<()> {
             // picks one after login.
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
+            // Said once at startup because it is the value an operator needs
+            // when adding a Mac, and there is nowhere else to read it off a
+            // running server — the browser never sees it (see src/server.rs).
+            if file.targets.iter().any(|t| t.protocol == Protocol::Rxa) {
+                info!("rxa: gateway public key {}", rxa_pubkey(&file.rxa.private_key)?);
+            }
             let config = file.resolve()?;
             serve(config).await?;
         }
         Commands::GenPasswd { username } => gen_passwd(&username)?,
-        // The same key goes in two places: the target's `psk` here, and the Mac
-        // agent's own config.toml. That symmetry is the whole credential model.
-        Commands::GenPsk => println!("{}", rxa_proto::psk::generate()),
+        // Only this half is minted here. The public half is derived on demand
+        // (`rxa-pubkey`) rather than stored beside it: two copies of one fact
+        // in a config file is one of them going stale.
+        Commands::GenKey => println!("{}", key::generate_private(key::Role::Gateway)),
+        Commands::RxaPubkey { config } => {
+            // Reads `[rxa].private_key` alone, not the whole config: pairing is
+            // a cycle otherwise, since a target's `agent_public_key` comes from
+            // a Mac that is waiting on the value this prints.
+            let (private, _) = remotex::config::load_rxa_private_key(config.as_deref())?;
+            println!("{}", rxa_pubkey(&private)?);
+        }
     }
 
     Ok(())
+}
+
+/// This gateway's `rxa` public key, from the private key in its config.
+///
+/// The error names the fix rather than the field, because the only way to reach
+/// it is a config that has not been given an identity yet.
+fn rxa_pubkey(private_key: &str) -> anyhow::Result<String> {
+    let private = private_key.trim();
+    anyhow::ensure!(
+        !private.is_empty(),
+        "[rxa].private_key is unset — generate one with `remotex gen-key`"
+    );
+    key::public_text_of(key::Role::Gateway, private).context("invalid [rxa].private_key")
 }
 
 /// Generate the `[server].site_passwd` value: prompt for the password (hidden,

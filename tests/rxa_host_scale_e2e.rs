@@ -1,13 +1,14 @@
 //! `HostScale` against a **real** macOS agent with a display of its own.
 //!
-//! Ignored by default and driven by two environment variables, because the thing
+//! Ignored by default and driven by environment variables, because the thing
 //! under test is the one part of the density path that no fake can stand in for:
 //! whether `applySettings:` on a live `CGVirtualDisplay` actually changes its
 //! backing scale, and whether the agent then measures and reports the new one.
 //! Everything either side of that is covered without a Mac in `rxa_e2e.rs`.
 //!
 //!     REMOTEX_RXA_HOST='[fdb8:…:a:20]:52381' \
-//!     REMOTEX_RXA_PSK=rxap… \
+//!     REMOTEX_RXA_PRIVATE_KEY=rxgs… \
+//!     REMOTEX_RXA_AGENT_PUBLIC_KEY=rxap… \
 //!     cargo test --test rxa_host_scale_e2e -- --ignored --nocapture
 //!
 //! The agent must have `virtual_display = true` and be otherwise idle: it serves
@@ -22,18 +23,40 @@ use tokio::net::TcpStream;
 /// measured at 66–397 ms to apply and 134–580 ms to settle.
 const SETTLE: Duration = Duration::from_secs(5);
 
+/// The two halves of the pairing this test dials with: a gateway private key
+/// standing in for `[rxa].private_key`, and the Mac's public key from its own
+/// Settings or `remotex-agent --public-key`.
+struct Keys {
+    private: [u8; 32],
+    agent_public: [u8; 32],
+}
+
+impl Keys {
+    fn from_env() -> Self {
+        use rxa_proto::key::{Role, parse_private, parse_public};
+
+        let read = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is unset"));
+        Self {
+            private: parse_private(Role::Gateway, &read("REMOTEX_RXA_PRIVATE_KEY"))
+                .expect("REMOTEX_RXA_PRIVATE_KEY"),
+            agent_public: parse_public(Role::Agent, &read("REMOTEX_RXA_AGENT_PUBLIC_KEY"))
+                .expect("REMOTEX_RXA_AGENT_PUBLIC_KEY"),
+        }
+    }
+}
+
 struct Agent {
     reader: rxa_proto::frame::FrameReader<tokio::net::tcp::OwnedReadHalf>,
     writer: rxa_proto::frame::FrameWriter<tokio::net::tcp::OwnedWriteHalf>,
 }
 
 impl Agent {
-    async fn connect(host: &str, psk: [u8; 32]) -> Self {
+    async fn connect(host: &str, keys: &Keys) -> Self {
         let mut stream = TcpStream::connect(host).await.expect("connect to the agent");
         stream.set_nodelay(true).ok();
-        let transport = rxa_proto::noise::initiate(&mut stream, &psk)
+        let transport = rxa_proto::noise::initiate(&mut stream, &keys.private, &keys.agent_public)
             .await
-            .expect("handshake (is the PSK right?)");
+            .expect("handshake (are the two keys a pair?)");
         let (read_half, write_half) = stream.into_split();
         let (reader, writer) = rxa_proto::frame::split(read_half, write_half, transport);
         Self { reader, writer }
@@ -78,10 +101,9 @@ async fn owned_display(agent: &mut Agent) -> Option<DisplayEntry> {
 #[ignore = "needs a real macOS agent with a virtual display; see the module docs"]
 async fn the_agents_display_follows_the_clients_density() {
     let host = std::env::var("REMOTEX_RXA_HOST").expect("REMOTEX_RXA_HOST");
-    let psk = rxa_proto::psk::parse(&std::env::var("REMOTEX_RXA_PSK").expect("REMOTEX_RXA_PSK"))
-        .expect("REMOTEX_RXA_PSK is not a valid pre-shared key");
+    let keys = Keys::from_env();
 
-    let mut agent = Agent::connect(&host, psk).await;
+    let mut agent = Agent::connect(&host, &keys).await;
     let hello = agent
         .wait_for(|msg| match msg {
             AgentMsg::Hello { w, h, scale, .. } => Some((*w, *h, *scale)),

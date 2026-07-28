@@ -27,9 +27,18 @@ pub enum Commands {
         username: String,
     },
 
-    /// Generate a pre-shared key for an "rxa" target: prints one key to paste
-    /// into both the target's psk and the Mac agent's config.toml
-    GenPsk,
+    /// Generate this gateway's "rxa" identity: prints a private key to paste
+    /// into [rxa].private_key. Its public half is `remotex rxa-pubkey`.
+    GenKey,
+
+    /// Print this gateway's "rxa" public key, derived from [rxa].private_key:
+    /// the value to paste into each Mac agent's gateway_public_key
+    RxaPubkey {
+        /// TOML config file (default: the installed <prefix>/etc/remotex.toml;
+        /// required when running from a checkout)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[cfg(test)]
@@ -75,10 +84,28 @@ mod tests {
     }
 
     #[test]
-    fn gen_psk_takes_no_arguments() {
-        let cli = Cli::try_parse_from(["remotex", "gen-psk"]).unwrap();
-        assert!(matches!(cli.command, Commands::GenPsk));
-        // Simpler than gen-passwd on purpose: no prompt, no username.
-        assert!(Cli::try_parse_from(["remotex", "gen-psk", "mac"]).is_err());
+    fn gen_key_takes_no_arguments() {
+        let cli = Cli::try_parse_from(["remotex", "gen-key"]).unwrap();
+        assert!(matches!(cli.command, Commands::GenKey));
+        // Simpler than gen-passwd on purpose: no prompt, no username. And no
+        // config either — a fresh identity does not depend on one.
+        assert!(Cli::try_parse_from(["remotex", "gen-key", "mac"]).is_err());
+    }
+
+    // The public key is *derived*, so unlike gen-key this one has to be told
+    // which config holds the private key it comes from.
+    #[test]
+    fn rxa_pubkey_takes_the_same_config_flag_as_serve() {
+        let cli = Cli::try_parse_from(["remotex", "rxa-pubkey", "-c", "/etc/x.toml"]).unwrap();
+        let Commands::RxaPubkey { config } = cli.command else {
+            panic!("expected the rxa-pubkey subcommand");
+        };
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("/etc/x.toml")));
+
+        let cli = Cli::try_parse_from(["remotex", "rxa-pubkey"]).unwrap();
+        let Commands::RxaPubkey { config } = cli.command else {
+            panic!("expected the rxa-pubkey subcommand");
+        };
+        assert!(config.is_none(), "defaults to the installed config");
     }
 }

@@ -6,9 +6,9 @@
 //! browser's WebSocket — and that is the entire gateway half.
 //!
 //! The fake agent speaks the real protocol: it completes a genuine
-//! `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` handshake with a known PSK, sends
-//! `Hello`, then a pre-encoded JPEG tile and a cursor shape, and it records the
-//! input it is sent. Four things are under test:
+//! `Noise_KK_25519_ChaChaPoly_BLAKE2s` handshake against a gateway it has been
+//! paired with, sends `Hello`, then a pre-encoded JPEG tile and a cursor shape,
+//! and it records the input it is sent. Four things are under test:
 //!
 //! 1. **Pass-through.** A JPEG the agent encoded reaches the browser as a
 //!    `format = 2` tile frame, byte for byte, and the cursor shape arrives on
@@ -99,7 +99,7 @@ fn fake_cursor_png() -> Vec<u8> {
 /// counter of accepted connections, and the browser input the agent received in
 /// arrival order.
 async fn spawn_fake_agent(
-    psk: [u8; 32],
+    keys: AgentKeys,
     hang_up_first: bool,
 ) -> (
     u16,
@@ -107,13 +107,13 @@ async fn spawn_fake_agent(
     Arc<AtomicUsize>,
     mpsc::UnboundedReceiver<GatewayMsg>,
 ) {
-    spawn_fake_agent_with_mode_change(psk, hang_up_first, None).await
+    spawn_fake_agent_with_mode_change(keys, hang_up_first, None).await
 }
 
 /// As [`spawn_fake_agent`], with the Mac changing its own display mode right
 /// after the first paint — the only way a resolution ever changes here.
 async fn spawn_fake_agent_with_mode_change(
-    psk: [u8; 32],
+    keys: AgentKeys,
     hang_up_first: bool,
     mode_change: Option<(u16, u16)>,
 ) -> (
@@ -137,7 +137,7 @@ async fn spawn_fake_agent_with_mode_change(
             let active = Arc::clone(&active_connections);
             tokio::spawn(async move {
                 active.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = serve_fake_agent(stream, psk, hang_up, mode_change, input_tx).await
+                if let Err(e) = serve_fake_agent(stream, keys, hang_up, mode_change, input_tx).await
                 {
                     // Expected on the hang-up path and at test teardown.
                     eprintln!("fake agent connection ended: {e}");
@@ -151,12 +151,13 @@ async fn spawn_fake_agent_with_mode_change(
 
 async fn serve_fake_agent(
     mut stream: TcpStream,
-    psk: [u8; 32],
+    keys: AgentKeys,
     hang_up: bool,
     mode_change: Option<(u16, u16)>,
     input_tx: mpsc::UnboundedSender<GatewayMsg>,
 ) -> anyhow::Result<()> {
-    let transport = rxa_proto::noise::respond(&mut stream, &psk).await?;
+    let transport =
+        rxa_proto::noise::respond(&mut stream, &keys.private, &keys.gateway_public).await?;
     let (read_half, write_half) = stream.into_split();
     let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
 
@@ -380,22 +381,60 @@ where
     Ok(())
 }
 
+/// What the fake agent authenticates with: its own private key, and the public
+/// key of the one gateway it will answer.
+#[derive(Clone, Copy)]
+struct AgentKeys {
+    private: [u8; 32],
+    gateway_public: [u8; 32],
+}
+
+/// A paired gateway and Mac — both halves of what the two config files would
+/// hold, minted together so a test does not have to derive one from the other.
+struct Pairing {
+    agent: AgentKeys,
+    /// For `[rxa].private_key` on the gateway.
+    gateway_private_key: String,
+    /// For the target's `agent_public_key`.
+    agent_public_key: String,
+}
+
+fn pair() -> Pairing {
+    use rxa_proto::key::{Role, generate_private, parse_private, public_of, public_text_of};
+
+    let gateway_private_key = generate_private(Role::Gateway);
+    let agent_private_key = generate_private(Role::Agent);
+    Pairing {
+        agent: AgentKeys {
+            private: parse_private(Role::Agent, &agent_private_key).unwrap(),
+            gateway_public: public_of(&parse_private(Role::Gateway, &gateway_private_key).unwrap()),
+        },
+        agent_public_key: public_text_of(Role::Agent, &agent_private_key).unwrap(),
+        gateway_private_key,
+    }
+}
+
 /// Start the real axum server with a single `rxa` target pointed at `port`.
-async fn spawn_app(port: u16, psk: &str) -> SocketAddr {
-    spawn_app_with(port, psk, false, false).await
+async fn spawn_app(port: u16, keys: &Pairing) -> SocketAddr {
+    spawn_app_with(port, keys, false, false).await
 }
 
 /// As [`spawn_app`], with the target's clipboard bridge opted in or out.
-async fn spawn_app_with_clipboard(port: u16, psk: &str, clipboard: bool) -> SocketAddr {
-    spawn_app_with(port, psk, clipboard, false).await
+async fn spawn_app_with_clipboard(port: u16, keys: &Pairing, clipboard: bool) -> SocketAddr {
+    spawn_app_with(port, keys, clipboard, false).await
 }
 
 /// As [`spawn_app`], with the target's `resize` opted in or out.
-async fn spawn_app_with_resize(port: u16, psk: &str, resize: bool) -> SocketAddr {
-    spawn_app_with(port, psk, false, resize).await
+async fn spawn_app_with_resize(port: u16, keys: &Pairing, resize: bool) -> SocketAddr {
+    spawn_app_with(port, keys, false, resize).await
 }
 
-async fn spawn_app_with(port: u16, psk: &str, clipboard: bool, resize: bool) -> SocketAddr {
+async fn spawn_app_with(
+    port: u16,
+    keys: &Pairing,
+    clipboard: bool,
+    resize: bool,
+) -> SocketAddr {
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,
@@ -417,7 +456,10 @@ async fn spawn_app_with(port: u16, psk: &str, clipboard: bool, resize: bool) -> 
             // agent made. Off for every test but the one about it.
             resize,
             clipboard,
-            psk: psk.to_owned(),
+            agent_public_key: keys.agent_public_key.clone(),
+            // `ConfigFile::resolve` fans `[rxa].private_key` out to each rxa
+            // target; these tests build the resolved config directly.
+            gateway_private_key: keys.gateway_private_key.clone(),
         }],
         site_passwd: common::test_site_passwd(),
         branding: "remotex".to_owned(),
@@ -552,10 +594,9 @@ fn assert_paint_pixels(paint: &Paint) {
 
 #[tokio::test]
 async fn agent_tiles_and_cursor_reach_the_browser_untouched() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, connections, _active, _input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app(port, &psk_text).await;
+    let keys = pair();
+    let (port, connections, _active, _input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app(port, &keys).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -568,10 +609,9 @@ async fn agent_tiles_and_cursor_reach_the_browser_untouched() {
 
 #[tokio::test]
 async fn closing_the_browser_releases_the_agent_connection() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, connections, active, _input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app(port, &psk_text).await;
+    let keys = pair();
+    let (port, connections, active, _input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app(port, &keys).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -697,10 +737,9 @@ async fn assert_quiet(ws: &mut Ws) {
 // JSON a browser sends and asserts what reached the agent, in order.
 #[tokio::test]
 async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app(port, &psk_text).await;
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app(port, &keys).await;
 
     let mut ws = open_session(addr).await;
     // Wait for the paint, so the session is fully up before any input is sent.
@@ -758,10 +797,9 @@ async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
 // is UTF-8 rather than latin-1.
 #[tokio::test]
 async fn clipboard_round_trips_through_the_agent_in_utf8() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app_with_clipboard(port, &psk_text, true).await;
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app_with_clipboard(port, &keys, true).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -853,10 +891,9 @@ async fn clipboard_round_trips_through_the_agent_in_utf8() {
 // even though the agent itself would happily answer.
 #[tokio::test]
 async fn clipboard_is_inert_when_the_rxa_target_did_not_opt_in() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app(port, &psk_text).await; // clipboard defaults to off
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app(port, &keys).await; // clipboard defaults to off
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -900,11 +937,10 @@ async fn clipboard_is_inert_when_the_rxa_target_did_not_opt_in() {
 // other side.
 #[tokio::test]
 async fn a_mode_change_on_the_mac_reaches_the_browser() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
+    let keys = pair();
     let (port, _connections, _active, _input) =
-        spawn_fake_agent_with_mode_change(psk, false, Some(AGENT_MODE_CHANGE)).await;
-    let addr = spawn_app(port, &psk_text).await;
+        spawn_fake_agent_with_mode_change(keys.agent, false, Some(AGENT_MODE_CHANGE)).await;
+    let addr = spawn_app(port, &keys).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -929,10 +965,9 @@ async fn a_mode_change_on_the_mac_reaches_the_browser() {
 // symptom is a Mac desktop that is the wrong size.
 #[tokio::test]
 async fn a_viewport_reaches_the_agent_as_display_points() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app_with_resize(port, &psk_text, true).await;
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app_with_resize(port, &keys, true).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -961,10 +996,9 @@ async fn a_viewport_reaches_the_agent_as_display_points() {
 // is the belt to their braces.
 #[tokio::test]
 async fn a_viewport_stops_at_the_gateway_when_the_target_did_not_opt_in() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app_with_resize(port, &psk_text, false).await;
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app_with_resize(port, &keys, false).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -1003,10 +1037,9 @@ fn expected_displays(active: u32) -> String {
 // bring back the new size *before* any pixels drawn at it.
 #[tokio::test]
 async fn the_browser_can_pick_which_display_the_mac_shares() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app(port, &psk_text).await;
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app(port, &keys).await;
 
     let mut ws = open_session(addr).await;
     let first = expect_paint(&mut ws).await;
@@ -1051,10 +1084,9 @@ async fn the_browser_can_pick_which_display_the_mac_shares() {
 // because a refresh is a repaint and the displays have not changed.
 #[tokio::test]
 async fn a_refreshing_browser_gets_the_display_list_again() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, _connections, _active, mut input) = spawn_fake_agent(psk, false).await;
-    let addr = spawn_app(port, &psk_text).await;
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app(port, &keys).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -1083,10 +1115,9 @@ async fn a_refreshing_browser_gets_the_display_list_again() {
 // picker.
 #[tokio::test]
 async fn a_dropped_agent_link_reconnects_and_repaints_instead_of_erroring() {
-    let psk_text = rxa_proto::psk::generate();
-    let psk = rxa_proto::psk::parse(&psk_text).unwrap();
-    let (port, connections, _active, _input) = spawn_fake_agent(psk, true).await;
-    let addr = spawn_app(port, &psk_text).await;
+    let keys = pair();
+    let (port, connections, _active, _input) = spawn_fake_agent(keys.agent, true).await;
+    let addr = spawn_app(port, &keys).await;
 
     let mut ws = open_session(addr).await;
     assert_first_paint(&expect_paint(&mut ws).await);
@@ -1108,17 +1139,24 @@ async fn a_dropped_agent_link_reconnects_and_repaints_instead_of_erroring() {
     );
 }
 
-// A wrong PSK is a configuration mistake, not a transient fault: it must be
-// reported immediately rather than disappearing into the retry loop.
+// Being pointed at a Mac this gateway is not paired with is a configuration
+// mistake, not a transient fault: it must be reported immediately rather than
+// disappearing into the retry loop.
 #[tokio::test]
-async fn a_wrong_psk_is_reported_instead_of_retried_forever() {
-    let (port, connections, _active, _input) = spawn_fake_agent(
-        rxa_proto::psk::parse(&rxa_proto::psk::generate()).unwrap(),
-        false,
+async fn a_wrong_agent_public_key_is_reported_instead_of_retried_forever() {
+    let keys = pair();
+    let (port, connections, _active, _input) = spawn_fake_agent(keys.agent, false).await;
+    // Well-formed keys throughout — the target just names some other Mac, which
+    // is what a stale `agent_public_key` looks like after one is re-imaged.
+    let stranger = pair();
+    let addr = spawn_app(
+        port,
+        &Pairing {
+            agent_public_key: stranger.agent_public_key,
+            ..keys
+        },
     )
     .await;
-    // A valid key, but not the agent's.
-    let addr = spawn_app(port, &rxa_proto::psk::generate()).await;
 
     let mut ws = open_session(addr).await;
     let text = tokio::time::timeout(Duration::from_secs(20), async {
@@ -1127,13 +1165,13 @@ async fn a_wrong_psk_is_reported_instead_of_retried_forever() {
                 Message::Text(text) if text.contains(r#""type":"error""#) => {
                     return text.to_string();
                 }
-                Message::Binary(_) => panic!("a wrong PSK must not paint anything"),
+                Message::Binary(_) => panic!("an unpaired agent must not paint anything"),
                 _ => {}
             }
         }
     })
     .await
-    .expect("a wrong PSK should be reported, not retried silently");
+    .expect("an unpaired agent should be reported, not retried silently");
     assert!(text.contains("rxa connect failed"), "{text}");
 
     // Reported is only half of it: "instead of retried" needs the counter. Wait

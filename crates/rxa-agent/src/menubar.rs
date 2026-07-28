@@ -15,7 +15,7 @@
 //! ## Everything is here, because there is nowhere else
 //!
 //! This menu is the agent's whole interface — the CLI is three launch flags and
-//! no operations at all. It copies the pre-shared key, opens the one settings
+//! no operations at all. It copies this Mac's public key, opens the one settings
 //! dialog, reveals the config, opens the log, offers the Privacy panes when a
 //! grant is missing, toggles the login item, and quits. The panels live in
 //! [`crate::panels`]; what a saved change means lives in [`crate::settings`].
@@ -240,23 +240,28 @@ define_class!(
             let attached = display_summary();
             let mut draft = panels::Draft {
                 listen: saved.listen.clone(),
-                psk: saved.psk.clone(),
+                private_key: saved.private_key.clone(),
+                gateway_public_key: saved.gateway_public_key.clone(),
                 virtual_display: saved.virtual_display,
                 virtual_size: saved.virtual_display_initial_size.clone(),
             };
+            // The pairing the *process* is using, so the dialog can say when the
+            // file's is one that never took effect — Copy is in there, and
+            // copying a key the agent is not actually using looks like an agent
+            // gone deaf.
+            let in_force = panels::InForce {
+                private_key: settings.running().private_key.clone(),
+                gateway_public_key: settings.running().gateway_public_key.clone(),
+            };
 
             loop {
-                // The key the *process* is using, so the dialog can say when the
-                // file's key is one that never took effect — Copy is in there
-                // now, and copying the wrong one looks like an agent gone deaf.
-                let Some(edited) =
-                    panels::config(mtm, &draft, &attached, &settings.running().psk)
-                else {
+                let Some(edited) = panels::config(mtm, &draft, &attached, &in_force) else {
                     return;
                 };
                 let next = config::Config {
                     listen: edited.listen.clone(),
-                    psk: edited.psk.clone(),
+                    private_key: edited.private_key.clone(),
+                    gateway_public_key: edited.gateway_public_key.clone(),
                     virtual_display: edited.virtual_display,
                     virtual_display_initial_size: edited.virtual_size.clone(),
                 };
@@ -504,15 +509,25 @@ impl Controller {
         }
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        // The key is not out here any more. Copying it is one button inside the
-        // dialog, next to the field it copies — which is one click further away
-        // than a menu item was, and buys the two guards that matter: the field is
-        // read-only until Edit, and Regenerate is dead until then too, so neither
-        // a stray keystroke nor a stray click can replace the credential.
+        // An agent nobody has paired says so, because there is nothing else on
+        // screen to explain a Mac that is plainly running and refusing every
+        // connection. Above Settings, which is where it is fixed.
+        if !saved.is_paired() {
+            let item = self.action("Not paired — open Settings", sel!(openSettings:), mtm);
+            item.setToolTip(Some(&NSString::from_str(
+                "No gateway key is set, so this Mac refuses every connection. Paste the \
+                 gateway's public key — `remotex rxa-pubkey` prints it — into Settings.",
+            )));
+            menu.addItem(&item);
+        }
+        // Neither key is out here. Copying this Mac's is one button inside the
+        // dialog, beside the key it copies — one click further than a menu item
+        // was, and it puts the copy next to the gateway key it has to be
+        // exchanged with, which is the thing being done.
         let item = self.action("Settings…", sel!(openSettings:), mtm);
         item.setToolTip(Some(&NSString::from_str(&format!(
-            "Listen address ({}), display, and the pre-shared key with a Copy button. \
-             Saving a change restarts the agent.",
+            "Listen address ({}), display, this Mac's public key with a Copy button, and \
+             the gateway's. Saving a change restarts the agent.",
             saved.listen
         ))));
         menu.addItem(&item);

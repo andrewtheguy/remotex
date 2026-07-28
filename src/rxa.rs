@@ -13,9 +13,10 @@
 //!
 //! **A dropped agent link reconnects silently while the browser is live.**
 //! Against Apple's Screen Sharing every disconnect meant a fresh credential
-//! prompt, because the prompt belonged to Apple's server. Here the PSK lives in
-//! the config file, so an established link retries with capped backoff rather
-//! than surfacing an error and bouncing the browser back to the picker. The
+//! prompt, because the prompt belonged to Apple's server. Here each end's key
+//! lives in its own config file, so an established link retries with capped
+//! backoff rather than surfacing an error and bouncing the browser back to the
+//! picker. The
 //! shared session layer ends the engine when the browser stays absent; RXA's
 //! own ping/pong detects a half-open agent link and drives reconnection.
 //!
@@ -24,8 +25,9 @@
 //! never does — retrying it indefinitely left the browser holding a frozen
 //! desktop that claimed to be live, which is worse than the picker and an error.
 //!
-//! An *initial* connect failure is still fatal and reported: a wrong host or a
-//! wrong PSK has to be visible immediately, not hidden behind an infinite retry.
+//! An *initial* connect failure is still fatal and reported: a wrong host, or a
+//! Mac that is not the one this target is paired with, has to be visible
+//! immediately rather than hidden behind an infinite retry.
 
 use std::time::Duration;
 
@@ -130,22 +132,18 @@ async fn run_with(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    // Already validated in `ConfigFile::parse`, so this only fires if a target
-    // reached us without going through the config loader.
-    let psk = match rxa_proto::psk::parse(&config.psk) {
-        Ok(psk) => psk,
+    // Both already validated in `ConfigFile::parse`, so these only fire if a
+    // target reached us without going through the config loader.
+    let keys = match keys(&config) {
+        Ok(keys) => keys,
         Err(e) => {
-            warn!("rxa: unusable psk for target {:?}: {e}", config.name);
-            let _ = frame_tx
-                .send(ServerMsg::Error {
-                    message: format!("rxa target has an invalid psk: {e}"),
-                })
-                .await;
+            warn!("rxa: unusable keys for target {:?}: {e}", config.name);
+            let _ = frame_tx.send(ServerMsg::Error { message: e }).await;
             return;
         }
     };
 
-    let mut session = match connect(&config, &psk).await {
+    let mut session = match connect(&config, &keys).await {
         Ok(session) => session,
         Err(e) => {
             warn!("rxa: connect failed: {e:#}");
@@ -208,7 +206,7 @@ async fn run_with(
                 info!("rxa: session ended while reconnecting");
                 return;
             }
-            match connect(&config, &psk).await {
+            match connect(&config, &keys).await {
                 Ok(session) => break session,
                 Err(e) => {
                     debug!("rxa: reconnect failed, retrying: {e:#}");
@@ -275,13 +273,38 @@ struct Session {
     scale: f32,
 }
 
+/// What this target authenticates with: our own private key and the public key
+/// of the one Mac it is paired with.
+struct Keys {
+    private: [u8; 32],
+    agent_public: [u8; 32],
+}
+
+/// Parse both halves out of the target, turning either failure into the message
+/// the browser is shown.
+///
+/// `ConfigFile::parse` has already accepted both, so this is the belt to that
+/// braces — and the place the two `expect`s it would otherwise take are not.
+fn keys(config: &TargetConfig) -> Result<Keys, String> {
+    use rxa_proto::key::{Role, parse_private, parse_public};
+
+    let private = parse_private(Role::Gateway, &config.gateway_private_key)
+        .map_err(|e| format!("rxa gateway has an invalid [rxa].private_key: {e}"))?;
+    let agent_public = parse_public(Role::Agent, &config.agent_public_key)
+        .map_err(|e| format!("rxa target has an invalid agent_public_key: {e}"))?;
+    Ok(Keys {
+        private,
+        agent_public,
+    })
+}
+
 /// TCP connect → Noise handshake → read the agent's `Hello`.
-async fn connect(config: &TargetConfig, psk: &[u8; 32]) -> anyhow::Result<Session> {
+async fn connect(config: &TargetConfig, keys: &Keys) -> anyhow::Result<Session> {
     let dest = host_port(&config.host, config.port);
     timeout(CONNECT_TIMEOUT, async {
         let mut stream = engine::tcp_connect(&dest).await?;
 
-        let transport = rxa_proto::noise::initiate(&mut stream, psk)
+        let transport = rxa_proto::noise::initiate(&mut stream, &keys.private, &keys.agent_public)
             .await
             .map_err(|e| anyhow::anyhow!("handshake with {dest}: {e}"))?;
         let (read_half, write_half) = stream.into_split();
@@ -771,8 +794,25 @@ mod tests {
         give_up_after: Duration::from_millis(100),
     };
 
-    fn rxa_target(port: u16, psk: &str) -> TargetConfig {
-        TargetConfig {
+    /// A paired gateway and Mac: the target as the gateway reads it, and the
+    /// two keys the fake agent needs to answer a dial from it.
+    struct Pairing {
+        target: TargetConfig,
+        agent_private: [u8; 32],
+        gateway_public: [u8; 32],
+    }
+
+    fn pairing(port: u16) -> Pairing {
+        use rxa_proto::key::{Role, generate_private, parse_private, public_of};
+
+        let gateway_private_key = generate_private(Role::Gateway);
+        let agent_private_key = generate_private(Role::Agent);
+        let agent_private = parse_private(Role::Agent, &agent_private_key).unwrap();
+        let gateway_public =
+            public_of(&parse_private(Role::Gateway, &gateway_private_key).unwrap());
+        // What the config loader would have produced: the agent's public key in
+        // the target, this gateway's private key fanned in by `resolve`.
+        let target = TargetConfig {
             name: "mac".to_owned(),
             protocol: crate::config::Protocol::Rxa,
             subtype: None,
@@ -787,7 +827,14 @@ mod tests {
             security: crate::config::Security::Auto,
             resize: false,
             clipboard: false,
-            psk: psk.to_owned(),
+            agent_public_key: rxa_proto::key::public_text_of(Role::Agent, &agent_private_key)
+                .unwrap(),
+            gateway_private_key,
+        };
+        Pairing {
+            target,
+            agent_private,
+            gateway_public,
         }
     }
 
@@ -796,9 +843,15 @@ mod tests {
     /// The listener is returned so the caller decides whether the agent ever
     /// comes back: dropping it is a Mac that was switched off, keeping it is one
     /// whose link merely blipped.
-    async fn serve_one_link(listener: &tokio::net::TcpListener, psk: [u8; 32]) {
+    async fn serve_one_link(
+        listener: &tokio::net::TcpListener,
+        agent_private: [u8; 32],
+        gateway_public: [u8; 32],
+    ) {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let transport = rxa_proto::noise::respond(&mut stream, &psk).await.unwrap();
+        let transport = rxa_proto::noise::respond(&mut stream, &agent_private, &gateway_public)
+            .await
+            .unwrap();
         let (read_half, write_half) = stream.into_split();
         let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
         writer
@@ -825,19 +878,19 @@ mod tests {
     // forever while the browser held a frozen desktop that claimed to be live.
     #[tokio::test]
     async fn an_agent_that_never_comes_back_is_reported_instead_of_retried_forever() {
-        let psk_text = rxa_proto::psk::generate();
-        let psk = rxa_proto::psk::parse(&psk_text).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let paired = pairing(port);
+        let (agent_private, gateway_public) = (paired.agent_private, paired.gateway_public);
 
         let agent = tokio::spawn(async move {
-            serve_one_link(&listener, psk).await;
+            serve_one_link(&listener, agent_private, gateway_public).await;
             // Everything goes, listener included: nothing will answer again.
         });
 
         let (_input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, mut frame_rx) = mpsc::channel(16);
-        run_with(rxa_target(port, &psk_text), FAST_RETRY, input_rx, frame_tx).await;
+        run_with(paired.target, FAST_RETRY, input_rx, frame_tx).await;
         agent.await.unwrap();
 
         // `run_with` returning at all is half the point — that is what drops
@@ -856,23 +909,23 @@ mod tests {
     // non-event, which is the whole reason the silent retry exists.
     #[tokio::test]
     async fn a_reconnect_that_succeeds_restarts_the_give_up_window() {
-        let psk_text = rxa_proto::psk::generate();
-        let psk = rxa_proto::psk::parse(&psk_text).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let paired = pairing(port);
+        let (agent_private, gateway_public) = (paired.agent_private, paired.gateway_public);
 
         let agent = tokio::spawn(async move {
             // Hang up twice, each time well inside the window, then stop
             // answering. A bound measured from the *first* outage rather than
             // per-outage would have given up during this.
             for _ in 0..3 {
-                serve_one_link(&listener, psk).await;
+                serve_one_link(&listener, agent_private, gateway_public).await;
             }
         });
 
         let (_input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, mut frame_rx) = mpsc::channel(16);
-        run_with(rxa_target(port, &psk_text), FAST_RETRY, input_rx, frame_tx).await;
+        run_with(paired.target, FAST_RETRY, input_rx, frame_tx).await;
         agent.await.unwrap();
 
         // It still ends up reporting — the agent stops answering eventually —

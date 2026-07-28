@@ -374,15 +374,19 @@ ${wrote}
 ${install_note}
 ${adhoc_note}
 
-That first open writes the config with a fresh pre-shared key and registers the
-agent in System Settings > General > Login Items.
+That first open writes the config with a fresh keypair and registers the agent
+in System Settings > General > Login Items. It starts unpaired: it listens and
+refuses every connection until it is given a gateway's public key.
 
 Everything after that is in the menu bar item, which is the agent's whole
-interface — there are no subcommands. Open it for:
+interface — the only flags that do anything but launch it are --public-key, which
+prints this Mac's public key, and --import-private-key, which reads a private key
+from stdin to give this Mac an identity it already had. Open it for:
 
-    Settings...          listen address, displays, and the pre-shared key —
-                         Copy puts it on the clipboard for the gateway's rxa
-                         target, and it takes an Edit to change it
+    Settings...          listen address, displays, and the two public keys —
+                         Copy puts this Mac's on the clipboard for the gateway's
+                         agent_public_key, and the gateway's own (printed by
+                         "remotex rxa-pubkey") is pasted in beside it
 
 It also needs Screen Recording and Accessibility, and asks for whichever is
 missing: the icon warns and the menu offers the right Privacy pane. Read the
