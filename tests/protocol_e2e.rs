@@ -305,7 +305,9 @@ async fn expect_tile(ws: &mut Ws) {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     // Parsed rather than sniffed: the envelope's own invariants
-                    // are checked on the way past.
+                    // are checked on the way past. Records, not painted tiles —
+                    // this only cares that paint arrived, and a repeat of pixels
+                    // the client already has legitimately arrives as a reference.
                     assert!(!common::batch_records(&frame).is_empty());
                     return;
                 }

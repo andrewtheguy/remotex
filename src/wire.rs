@@ -35,7 +35,7 @@
 //!   the flush rule above is what makes both impossible rather than merely
 //!   avoided.
 
-use crate::protocol::{ServerMsg, Tile, WireFrame, batch};
+use crate::protocol::{self, ServerMsg, Tile, WireFrame, batch};
 
 /// How many bytes of records a single batch frame may carry before it is flushed
 /// and a new one started.
@@ -56,6 +56,109 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// repaint is a few hundred records, not thousands.
 const MAX_BATCH_RECORDS: usize = 4096;
 
+/// One remembered tile, as the client holds it.
+///
+/// The payload is kept, not only its hash. A hash alone would make a collision
+/// into permanently wrong pixels with no recovery path, and 64 bits over a few
+/// hundred entries is only *almost* never — where comparing the bytes is never,
+/// for at most [`batch::MAX_CACHED_BYTES`] each.
+struct Cached {
+    digest: u64,
+    format: u8,
+    w: u16,
+    h: u16,
+    data: Vec<u8>,
+}
+
+/// What the client has been told to remember, and where.
+///
+/// Keyed by *content*, addressed by *slot*. The client never chooses a slot and
+/// never evicts: it holds a fixed array and overwrites whatever slot a `TILE`
+/// names. That asymmetry is the point — a content-addressed cache would need both
+/// ends to run an identical eviction policy over an identical cost metric, and
+/// they cannot: the server knows encoded bytes, a client knows what its decoder
+/// made of them.
+struct Slots {
+    /// `SLOT_COUNT` entries, `None` until first used.
+    entries: Vec<Option<Cached>>,
+    /// Content digest -> slot, for the lookup. Only ever holds digests that are
+    /// live in `entries`.
+    index: std::collections::HashMap<u64, u16>,
+    /// The next slot to claim. Round robin: the oldest *assignment* is evicted,
+    /// which needs no per-hit bookkeeping and cannot develop a pathology worse
+    /// than sending a payload that would have been a reference.
+    next: u16,
+}
+
+impl Default for Slots {
+    fn default() -> Self {
+        Self {
+            entries: (0..batch::SLOT_COUNT).map(|_| None).collect(),
+            index: std::collections::HashMap::new(),
+            next: 0,
+        }
+    }
+}
+
+/// How a tile should be written.
+enum Placed {
+    /// The client already holds these bytes here: seven bytes instead of a payload.
+    Ref(u16),
+    /// Send the payload and have the client remember it in this slot.
+    Store(u16),
+    /// Send the payload; not worth a slot.
+    Plain,
+}
+
+impl Slots {
+    fn place(&mut self, tile: &Tile) -> Placed {
+        if tile.data.len() > batch::MAX_CACHED_BYTES {
+            return Placed::Plain;
+        }
+        // The dimensions and format are hashed with the payload: a reference
+        // carries only a position, so the client redraws the remembered tile at
+        // its remembered size, and two tiles must never share a slot unless they
+        // agree on all three.
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        hasher.update(&[tile.format]);
+        hasher.update(&tile.w.to_le_bytes());
+        hasher.update(&tile.h.to_le_bytes());
+        hasher.update(&tile.data);
+        let digest = hasher.digest();
+
+        if let Some(&slot) = self.index.get(&digest) {
+            let held = self.entries[usize::from(slot)].as_ref();
+            if held.is_some_and(|c| {
+                c.format == tile.format && c.w == tile.w && c.h == tile.h && c.data == tile.data
+            }) {
+                return Placed::Ref(slot);
+            }
+        }
+
+        let slot = self.next;
+        self.next = (self.next + 1) % batch::SLOT_COUNT;
+        if let Some(evicted) = self.entries[usize::from(slot)].take() {
+            self.index.remove(&evicted.digest);
+        }
+        self.index.insert(digest, slot);
+        self.entries[usize::from(slot)] = Some(Cached {
+            digest,
+            format: tile.format,
+            w: tile.w,
+            h: tile.h,
+            data: tile.data.clone(),
+        });
+        Placed::Store(slot)
+    }
+
+    /// Forget everything, because the client has.
+    fn clear(&mut self) {
+        self.entries.iter_mut().for_each(|slot| *slot = None);
+        self.index.clear();
+        self.next = 0;
+    }
+}
+
 /// Per-attachment encoder for the server -> client direction.
 #[derive(Default)]
 pub struct Wire {
@@ -67,7 +170,12 @@ pub struct Wire {
     pending: Vec<Tile>,
     /// What `pending` will serialize to, so the byte cap can be checked without
     /// serializing to find out.
+    ///
+    /// An upper bound rather than exact: a tile that turns out to be a reference at
+    /// flush costs seven bytes instead of its payload, so a batch can come out
+    /// smaller than this predicted. Bounding high is the safe direction for a cap.
     pending_bytes: usize,
+    slots: Slots,
     pub totals: Totals,
 }
 
@@ -155,12 +263,35 @@ impl Wire {
         frame.push(0); // flags
         frame.extend_from_slice(&(self.pending.len() as u16).to_le_bytes());
         for tile in self.pending.drain(..) {
-            self.totals.tile(tile.record_len());
-            tile.write_record(batch::NO_SLOT, &mut frame);
+            match self.slots.place(&tile) {
+                Placed::Ref(slot) => {
+                    self.totals.tile_ref(tile.record_len());
+                    protocol::write_tile_ref(slot, tile.x, tile.y, &mut frame);
+                }
+                Placed::Store(slot) => {
+                    self.totals.tile(tile.record_len());
+                    tile.write_record(slot, &mut frame);
+                }
+                Placed::Plain => {
+                    self.totals.tile(tile.record_len());
+                    tile.write_record(batch::NO_SLOT, &mut frame);
+                }
+            }
         }
         self.pending_bytes = 0;
         self.totals.frame(frame.len());
         frames.push(WireFrame::Binary(frame));
+    }
+
+    /// Forget every slot, because the client says it lost them.
+    ///
+    /// The only way back from a client that could not decode a tile it was told to
+    /// remember: the server believes the slot is full, the client knows it is
+    /// empty, and nothing else would ever correct that. Spurious calls are free —
+    /// the next tiles are simply sent whole.
+    pub fn reset_cache(&mut self) {
+        self.slots.clear();
+        self.totals.cache_resets += 1;
     }
 }
 
@@ -177,7 +308,10 @@ impl Wire {
 /// - **the largest single frame**, which is the number a client's WebSocket
 ///   message ceiling is measured against;
 /// - **what was superseded**, because a dedup that never fires is worth removing
-///   and one that fires constantly says something about the engine feeding it.
+///   and one that fires constantly says something about the engine feeding it;
+/// - **what the tile cache saved**, as both the count of references sent and the
+///   payload bytes they stood in for. A cache is the kind of thing that looks
+///   obviously worthwhile and turns out to fire twice an hour.
 #[derive(Default)]
 pub struct Totals {
     pub binary_frames: u64,
@@ -189,6 +323,10 @@ pub struct Totals {
     pub largest_binary: u64,
     pub superseded: u64,
     pub superseded_bytes: u64,
+    /// References sent, and what their payloads would have cost.
+    pub refs: u64,
+    pub refs_saved_bytes: u64,
+    pub cache_resets: u64,
 }
 
 impl Totals {
@@ -203,6 +341,12 @@ impl Totals {
         self.tile_bytes += len as u64;
     }
 
+    fn tile_ref(&mut self, would_have_been: usize) {
+        self.refs += 1;
+        self.tile_bytes += batch::TILE_REF_LEN as u64;
+        self.refs_saved_bytes += (would_have_been - batch::TILE_REF_LEN) as u64;
+    }
+
     fn text(&mut self, len: usize) {
         self.text_frames += 1;
         self.text_bytes += len as u64;
@@ -215,7 +359,8 @@ impl std::fmt::Display for Totals {
             f,
             "{} binary frames / {} bytes carrying {} tile records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
-             {} superseded / {} bytes",
+             {} superseded / {} bytes, \
+             {} cache refs saving {} bytes, {} cache resets",
             self.binary_frames,
             self.binary_bytes,
             self.tiles,
@@ -225,6 +370,9 @@ impl std::fmt::Display for Totals {
             self.largest_binary,
             self.superseded,
             self.superseded_bytes,
+            self.refs,
+            self.refs_saved_bytes,
+            self.cache_resets,
         )
     }
 }
@@ -238,14 +386,31 @@ mod tests {
         rect(0, y, 320, 64, bytes)
     }
 
+    /// A tile whose payload is unique to its position, so a test about batching is
+    /// not quietly testing the tile cache instead. Use [`repeat`] for that.
     fn rect(x: u16, y: u16, w: u16, h: u16, bytes: usize) -> ServerMsg {
+        let mut data = vec![7u8; bytes];
+        let stamp = [x.to_le_bytes(), y.to_le_bytes()].concat();
+        data[..stamp.len().min(bytes)].copy_from_slice(&stamp[..stamp.len().min(bytes)]);
         ServerMsg::Tile(Tile {
             format: Tile::FORMAT_PNG,
             x,
             y,
             w,
             h,
-            data: vec![7u8; bytes],
+            data,
+        })
+    }
+
+    /// The same payload as some other tile, at `(x, y)` — what the cache is for.
+    fn repeat(x: u16, y: u16, bytes: usize) -> ServerMsg {
+        ServerMsg::Tile(Tile {
+            format: Tile::FORMAT_PNG,
+            x,
+            y,
+            w: 320,
+            h: 64,
+            data: vec![9u8; bytes],
         })
     }
 
@@ -257,7 +422,8 @@ mod tests {
         }
     }
 
-    /// Records of a batch frame as `(op, slot, x, y, w, h, payload_len)`.
+    /// Records of a batch frame as `(op, slot, x, y, w, h, payload_len)`. A
+    /// reference carries no size or payload, so those come back zero.
     fn records(frame: &[u8]) -> Vec<(u8, u16, u16, u16, u16, u16, usize)> {
         assert_eq!(frame[0], batch::FRAME_KIND);
         assert_eq!(frame[1], 0, "flags must be zero");
@@ -266,16 +432,24 @@ mod tests {
         let mut out = Vec::new();
         while at < frame.len() {
             let op = frame[at];
-            assert_eq!(op, batch::OP_TILE, "only tiles are emitted yet");
             let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
-            let len = u32::from_le_bytes([
-                frame[at + 12],
-                frame[at + 13],
-                frame[at + 14],
-                frame[at + 15],
-            ]) as usize;
-            out.push((op, le(2), le(4), le(6), le(8), le(10), len));
-            at += batch::TILE_HEADER_LEN + len;
+            match op {
+                batch::OP_TILE_REF => {
+                    out.push((op, le(1), le(3), le(5), 0, 0, 0));
+                    at += batch::TILE_REF_LEN;
+                }
+                batch::OP_TILE => {
+                    let len = u32::from_le_bytes([
+                        frame[at + 12],
+                        frame[at + 13],
+                        frame[at + 14],
+                        frame[at + 15],
+                    ]) as usize;
+                    out.push((op, le(2), le(4), le(6), le(8), le(10), len));
+                    at += batch::TILE_HEADER_LEN + len;
+                }
+                other => panic!("unknown record op {other}"),
+            }
         }
         assert_eq!(at, frame.len(), "records must exactly fill the frame");
         assert_eq!(
@@ -304,9 +478,10 @@ mod tests {
         assert_eq!(frames.len(), 1, "eight tiles must not cost eight frames");
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 8);
-        // In order, and every one marked uncacheable until the cache exists.
+        // In order, each carrying its payload and the slot to keep it in.
         for (i, record) in records.iter().enumerate() {
-            assert_eq!(record.1, batch::NO_SLOT);
+            assert_eq!(record.0, batch::OP_TILE);
+            assert_eq!(record.1, i as u16, "each new payload claims the next slot");
             assert_eq!(record.3, i as u16 * 64, "records keep their arrival order");
             assert_eq!(record.6, 100);
         }
@@ -479,5 +654,159 @@ mod tests {
             wire.totals.binary_bytes < (payload + 10) as u64 * cells as u64 + 4096,
             "the envelope must not cost more than the per-frame headers it replaced"
         );
+    }
+    // MARK: the tile cache
+
+    // The cache's whole claim: bytes the client already has become a position.
+    #[test]
+    fn content_the_client_already_holds_becomes_a_reference() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![repeat(0, 0, 900), repeat(320, 0, 900)]);
+        let records = records(binary(&frames)[0]);
+
+        assert_eq!(records[0].0, batch::OP_TILE, "the first copy carries payload");
+        assert_eq!(records[0].1, 0, "and the slot to keep it in");
+        assert_eq!(records[0].6, 900);
+
+        assert_eq!(records[1].0, batch::OP_TILE_REF, "the second is a reference");
+        assert_eq!(records[1].1, 0, "to the slot the first claimed");
+        assert_eq!((records[1].2, records[1].3), (320, 0), "drawn at its own position");
+
+        assert_eq!(wire.totals.refs, 1);
+        assert_eq!(
+            wire.totals.refs_saved_bytes,
+            (batch::TILE_HEADER_LEN + 900 - batch::TILE_REF_LEN) as u64
+        );
+    }
+
+    // A reference is seven bytes whatever it stands for, which is the point.
+    #[test]
+    fn a_reference_costs_seven_bytes() {
+        let mut wire = Wire::default();
+        let first = wire.encode(vec![repeat(0, 0, 20_000)]);
+        let second = wire.encode(vec![repeat(640, 128, 20_000)]);
+        assert_eq!(
+            binary(&second)[0].len(),
+            batch::HEADER_LEN + batch::TILE_REF_LEN
+        );
+        assert!(binary(&first)[0].len() > 20_000, "the first one paid in full");
+    }
+
+    // Content that differs at all is different content, however similar.
+    #[test]
+    fn a_tile_that_differs_by_one_byte_is_not_a_reference() {
+        let mut wire = Wire::default();
+        wire.encode(vec![repeat(0, 0, 900)]);
+        let mut changed = repeat(320, 0, 900);
+        if let ServerMsg::Tile(tile) = &mut changed {
+            tile.data[500] = 1;
+        }
+        let frames = wire.encode(vec![changed]);
+        assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
+        assert_eq!(wire.totals.refs, 0);
+    }
+
+    // Same bytes, different geometry, is not the same tile: a reference carries a
+    // position and nothing else, so the client would redraw it at the wrong size.
+    #[test]
+    fn the_same_bytes_at_a_different_size_are_not_a_reference() {
+        let mut wire = Wire::default();
+        wire.encode(vec![repeat(0, 0, 900)]);
+        let frames = wire.encode(vec![ServerMsg::Tile(Tile {
+            format: Tile::FORMAT_PNG,
+            x: 0,
+            y: 0,
+            w: 64,
+            h: 320,
+            data: vec![9u8; 900],
+        })]);
+        assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
+        assert_eq!(wire.totals.refs, 0);
+    }
+
+    // A slot spent on one screen-sized payload is a slot not spent on the dozens of
+    // small tiles a returning menu is made of.
+    #[test]
+    fn a_payload_too_large_for_a_slot_is_sent_uncached() {
+        let mut wire = Wire::default();
+        let huge = batch::MAX_CACHED_BYTES + 1;
+        let first = wire.encode(vec![repeat(0, 0, huge)]);
+        assert_eq!(records(binary(&first)[0])[0].1, batch::NO_SLOT);
+
+        let second = wire.encode(vec![repeat(0, 0, huge)]);
+        assert_eq!(
+            records(binary(&second)[0])[0].0,
+            batch::OP_TILE,
+            "never cached, so never referenced"
+        );
+        assert_eq!(wire.totals.refs, 0);
+    }
+
+    // Round robin, and the eviction has to reach the index as well as the slot: a
+    // digest left behind would produce a reference to content the client replaced.
+    #[test]
+    fn a_slot_reused_for_new_content_stops_being_referenced() {
+        let mut wire = Wire::default();
+        let oldest = repeat(0, 0, 200);
+        wire.encode(vec![oldest.clone()]);
+        // Fill every remaining slot with something else, so slot 0 is reused.
+        wire.encode((1..batch::SLOT_COUNT).map(|i| rect(i, 0, 320, 64, 200)));
+        wire.encode(vec![rect(0, 64, 320, 64, 200)]);
+
+        let frames = wire.encode(vec![oldest]);
+        assert_eq!(
+            records(binary(&frames)[0])[0].0,
+            batch::OP_TILE,
+            "the client no longer holds it, so it must be sent again"
+        );
+    }
+
+    // The recovery path. A client that could not decode a cached tile says so, and
+    // everything after that has to arrive whole — the server cannot know which slot
+    // is the bad one, and guessing is what a reset avoids.
+    #[test]
+    fn a_cache_reset_sends_payloads_again() {
+        let mut wire = Wire::default();
+        wire.encode(vec![repeat(0, 0, 900)]);
+        assert_eq!(records(binary(&wire.encode(vec![repeat(0, 0, 900)]))[0])[0].0, batch::OP_TILE_REF);
+
+        wire.reset_cache();
+
+        let frames = wire.encode(vec![repeat(0, 0, 900)]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records[0].0, batch::OP_TILE);
+        assert_eq!(records[0].1, 0, "and slot numbering starts over");
+        assert_eq!(wire.totals.cache_resets, 1);
+    }
+
+    // A reference inside the same batch as the tile it names is fine: records are
+    // applied in order, so the client stores it before it is asked to reuse it.
+    #[test]
+    fn a_reference_may_share_a_batch_with_the_tile_it_names() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![repeat(0, 0, 900), repeat(0, 64, 900), repeat(0, 128, 900)]);
+        assert_eq!(frames.len(), 1);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records[0].0, batch::OP_TILE);
+        assert_eq!(records[1].0, batch::OP_TILE_REF);
+        assert_eq!(records[2].0, batch::OP_TILE_REF);
+    }
+
+    // Superseding happens before a slot is claimed, so a tile that never went out
+    // cannot leave the server believing the client has it.
+    #[test]
+    fn a_superseded_tile_claims_no_slot() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![
+            repeat(0, 0, 200),        // covered by the next one, never sent
+            rect(0, 0, 640, 128, 200),
+        ]);
+        assert_eq!(records(binary(&frames)[0]).len(), 1);
+
+        // The covered payload arrives for real now. If it had claimed a slot while
+        // being dropped, this would come back as a reference to a tile the client
+        // never received.
+        let frames = wire.encode(vec![repeat(0, 256, 200)]);
+        assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
     }
 }

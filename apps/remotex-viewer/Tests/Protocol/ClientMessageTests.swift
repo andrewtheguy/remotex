@@ -112,6 +112,7 @@ struct ClientMessageTests {
             .clipboardRequest,
             .selectDisplay(id: 1),
             .hostScale(scale: 200),
+            .cacheReset,
         ]
         #expect(Set(messages.map(\.tag)) == ClientMessage.allTags)
         #expect(messages.count == ClientMessage.allTags.count)

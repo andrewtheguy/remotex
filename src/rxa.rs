@@ -842,7 +842,8 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
         | ClientMsg::Clipboard { .. }
         | ClientMsg::Viewport { .. }
         | ClientMsg::Connect { .. }
-        | ClientMsg::Disconnect => {
+        | ClientMsg::Disconnect
+        | ClientMsg::CacheReset => {
             return None;
         }
     })

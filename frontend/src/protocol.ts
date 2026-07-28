@@ -59,7 +59,13 @@ export type ClientMsg =
   // answers it — RDP and VNC each deliver one framebuffer spanning every remote
   // screen — so for other protocols no display list arrives and no picker is
   // shown.
-  | { type: "selectDisplay"; id: number };
+  | { type: "selectDisplay"; id: number }
+  // "I lost the tiles you told me to remember." Sent when a cached tile will not
+  // decode, or when a reference names a slot this client does not hold. The
+  // server empties its slot table and repaints; deliberately not "refresh",
+  // which is routed to the engine and would leave the table intact — the repaint
+  // would come back as the same references and miss again.
+  | { type: "cacheReset" };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
 // src/protocol.rs. The backend refuses anything over it in either direction;
@@ -156,8 +162,7 @@ export interface TileMsg {
   y: number;
   w: number;
   h: number;
-  // Where the server wants this remembered, or NO_SLOT for "do not". Parsed but
-  // unused until the client keeps a tile cache.
+  // Where the server wants this remembered, or NO_SLOT for "do not".
   slot: number;
   // An encoded image stream, in `mime`.
   data: Uint8Array;
@@ -166,13 +171,33 @@ export interface TileMsg {
   mime: "image/png" | "image/jpeg";
 }
 
+// "Draw what you have in `slot` at (x, y)" — seven bytes instead of a payload.
+export interface TileRefMsg {
+  slot: number;
+  x: number;
+  y: number;
+}
+
+export type BatchRecord =
+  | ({ kind: "tile" } & TileMsg)
+  | ({ kind: "ref" } & TileRefMsg);
+
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 4;
 const OP_TILE = 0x01;
+const OP_TILE_REF = 0x02;
 const TILE_HEADER_LEN = 16;
-const TILE_FORMAT_PNG = 1;
-const TILE_FORMAT_JPEG = 2;
+const TILE_REF_LEN = 7;
+// The format byte, as the MIME type `createImageBitmap` needs for its Blob.
+const MIME_BY_FORMAT: Record<number, TileMsg["mime"] | undefined> = {
+  1: "image/png",
+  2: "image/jpeg",
+};
 export const NO_SLOT = 0xffff;
+// How many tiles the server may ask this client to remember. Part of the wire
+// contract (`batch::SLOT_COUNT`), which is what makes the cache a fixed array
+// rather than something a server could grow without limit.
+export const SLOT_COUNT = 256;
 
 // Parse a binary batch frame into its tile records. Layout (little-endian,
 // matching `batch` in `src/protocol.rs`):
@@ -182,14 +207,15 @@ export const NO_SLOT = 0xffff;
 //   offset 2: u16 record count
 //   offset 4: records, back to back
 //
-//   TILE (op 0x01): u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
-//                   | u32 len | payload[len]
+//   TILE (op 0x01):     u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
+//                       | u32 len | payload[len]
+//   TILE_REF (op 0x02):  u16 slot | u16 x | u16 y
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
 // only because the header carries a record count — without it, a short read
 // would look like a complete but smaller batch.
-export function decodeBatchFrame(buf: ArrayBuffer): TileMsg[] | null {
+export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
   if (buf.byteLength < BATCH_HEADER_LEN) {
     return null;
   }
@@ -198,43 +224,79 @@ export function decodeBatchFrame(buf: ArrayBuffer): TileMsg[] | null {
     return null;
   }
   const count = view.getUint16(2, true);
-  const tiles: TileMsg[] = [];
+  const records: BatchRecord[] = [];
   let at = BATCH_HEADER_LEN;
   while (at < buf.byteLength) {
-    if (view.getUint8(at) !== OP_TILE) {
+    const parsed =
+      view.getUint8(at) === OP_TILE_REF
+        ? decodeRef(view, buf.byteLength, at)
+        : decodeTile(view, buf, at);
+    if (!parsed) {
       return null;
     }
-    if (at + TILE_HEADER_LEN > buf.byteLength) {
-      return null;
-    }
-    let mime: TileMsg["mime"];
-    switch (view.getUint8(at + 1)) {
-      case TILE_FORMAT_PNG:
-        mime = "image/png";
-        break;
-      case TILE_FORMAT_JPEG:
-        mime = "image/jpeg";
-        break;
-      default:
-        return null;
-    }
-    const len = view.getUint32(at + 12, true);
-    const start = at + TILE_HEADER_LEN;
-    if (start + len > buf.byteLength) {
-      return null;
-    }
-    tiles.push({
-      slot: view.getUint16(at + 2, true),
+    records.push(parsed.record);
+    at = parsed.next;
+  }
+  return records.length === count ? records : null;
+}
+
+function decodeRef(
+  view: DataView,
+  length: number,
+  at: number,
+): { record: BatchRecord; next: number } | null {
+  if (at + TILE_REF_LEN > length) {
+    return null;
+  }
+  const slot = view.getUint16(at + 1, true);
+  if (slot >= SLOT_COUNT) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "ref",
+      slot,
+      x: view.getUint16(at + 3, true),
+      y: view.getUint16(at + 5, true),
+    },
+    next: at + TILE_REF_LEN,
+  };
+}
+
+function decodeTile(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: BatchRecord; next: number } | null {
+  if (view.getUint8(at) !== OP_TILE || at + TILE_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const slot = view.getUint16(at + 2, true);
+  if (slot !== NO_SLOT && slot >= SLOT_COUNT) {
+    return null;
+  }
+  const mime = MIME_BY_FORMAT[view.getUint8(at + 1)];
+  if (!mime) {
+    return null;
+  }
+  const len = view.getUint32(at + 12, true);
+  const start = at + TILE_HEADER_LEN;
+  if (start + len > buf.byteLength) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "tile",
+      slot,
       x: view.getUint16(at + 4, true),
       y: view.getUint16(at + 6, true),
       w: view.getUint16(at + 8, true),
       h: view.getUint16(at + 10, true),
       data: new Uint8Array(buf, start, len),
       mime,
-    });
-    at = start + len;
-  }
-  return tiles.length === count ? tiles : null;
+    },
+    next: start + len,
+  };
 }
 
 // Map DOM MouseEvent.button (0/1/2) to the protocol button name.

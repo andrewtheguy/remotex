@@ -100,7 +100,20 @@ pub type Ws = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+/// One record parsed out of a batch frame: a tile, or a reference to a tile the
+/// client was told to keep.
+///
+/// A reference carries no payload and no size — those belong to whatever filled
+/// the slot — so a test that measures painted area has to resolve it against the
+/// tiles it has already seen, exactly as a client does.
+#[allow(dead_code)]
+pub enum BatchRecord {
+    Tile(BatchTile),
+    Reference { slot: u16, x: u16, y: u16 },
+}
+
 /// One `TILE` record parsed out of a batch frame.
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct BatchTile {
     pub format: u8,
@@ -112,7 +125,7 @@ pub struct BatchTile {
     pub payload: Vec<u8>,
 }
 
-/// Parse a server -> client binary frame into its `TILE` records.
+/// Parse a server -> client binary frame into its records.
 ///
 /// One parser for every test that looks at painted pixels, because four of them
 /// used to decode the header by hand and a wire change had to be applied four
@@ -121,7 +134,7 @@ pub struct BatchTile {
 /// present, and records that exactly fill the frame — so every test that reads a
 /// tile also checks the frame carrying it was well formed.
 #[allow(dead_code)]
-pub fn batch_records(frame: &[u8]) -> Vec<BatchTile> {
+pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
     use remotex::protocol::batch;
 
     assert!(
@@ -133,36 +146,112 @@ pub fn batch_records(frame: &[u8]) -> Vec<BatchTile> {
     let count = u16::from_le_bytes([frame[2], frame[3]]);
 
     let mut at = batch::HEADER_LEN;
-    let mut tiles = Vec::new();
+    let mut records = Vec::new();
     while at < frame.len() {
-        let op = frame[at];
-        assert_eq!(op, batch::OP_TILE, "only tile records are expected here");
         let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
-        let len = u32::from_le_bytes([
-            frame[at + 12],
-            frame[at + 13],
-            frame[at + 14],
-            frame[at + 15],
-        ]) as usize;
-        let start = at + batch::TILE_HEADER_LEN;
-        tiles.push(BatchTile {
-            format: frame[at + 1],
-            slot: le(2),
-            x: le(4),
-            y: le(6),
-            w: le(8),
-            h: le(10),
-            payload: frame[start..start + len].to_vec(),
-        });
-        at = start + len;
+        match frame[at] {
+            batch::OP_TILE_REF => {
+                let slot = le(1);
+                assert!(slot < batch::SLOT_COUNT, "slot {slot} is outside the cache");
+                records.push(BatchRecord::Reference {
+                    slot,
+                    x: le(3),
+                    y: le(5),
+                });
+                at += batch::TILE_REF_LEN;
+            }
+            batch::OP_TILE => {
+                let len = u32::from_le_bytes([
+                    frame[at + 12],
+                    frame[at + 13],
+                    frame[at + 14],
+                    frame[at + 15],
+                ]) as usize;
+                let slot = le(2);
+                assert!(
+                    slot == batch::NO_SLOT || slot < batch::SLOT_COUNT,
+                    "slot {slot} is outside the cache"
+                );
+                let start = at + batch::TILE_HEADER_LEN;
+                records.push(BatchRecord::Tile(BatchTile {
+                    format: frame[at + 1],
+                    slot,
+                    x: le(4),
+                    y: le(6),
+                    w: le(8),
+                    h: le(10),
+                    payload: frame[start..start + len].to_vec(),
+                }));
+                at = start + len;
+            }
+            op => panic!("unknown record op {op}"),
+        }
     }
     assert_eq!(at, frame.len(), "records must exactly fill the frame");
     assert_eq!(
-        tiles.len(),
+        records.len(),
         usize::from(count),
-        "the header's record count must match the records present"
+        "the header's count must match the records present"
     );
-    tiles
+    records
+}
+
+/// A client's-eye view of a batch stream: the tiles each frame *paints*, with
+/// references resolved against the slots filled so far.
+///
+/// Every test that measures painted pixels needs this rather than the raw records,
+/// because the gateway may send a tile the client already has as a slot and a
+/// position. Keeping the resolution here — one implementation, shaped like a real
+/// client's — also means the reference path is exercised by every one of those
+/// tests instead of only by a unit test of the encoder.
+#[allow(dead_code)]
+pub struct TileStream {
+    slots: Vec<Option<BatchTile>>,
+    /// References seen, so a test can say whether the cache was exercised at all.
+    pub references: u64,
+}
+
+#[allow(dead_code)]
+impl TileStream {
+    pub fn new() -> Self {
+        Self {
+            slots: vec![None; usize::from(remotex::protocol::batch::SLOT_COUNT)],
+            references: 0,
+        }
+    }
+
+    /// The tiles `frame` paints, in wire order.
+    ///
+    /// Panics on a reference to an empty slot: a real client answers that with a
+    /// `cacheReset`, but in a test it means the gateway and the client disagree about
+    /// what was sent, which is the bug this would otherwise hide.
+    pub fn paint(&mut self, frame: &[u8]) -> Vec<BatchTile> {
+        let mut painted = Vec::new();
+        for record in batch_records(frame) {
+            match record {
+                BatchRecord::Tile(tile) => {
+                    if tile.slot != remotex::protocol::batch::NO_SLOT {
+                        self.slots[usize::from(tile.slot)] = Some(tile.clone());
+                    }
+                    painted.push(tile);
+                }
+                BatchRecord::Reference { slot, x, y } => {
+                    self.references += 1;
+                    let held = self.slots[usize::from(slot)]
+                        .clone()
+                        .unwrap_or_else(|| panic!("reference to empty slot {slot}"));
+                    painted.push(BatchTile { x, y, ..held });
+                }
+            }
+        }
+        painted
+    }
+}
+
+impl Default for TileStream {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Let the gateway log during an opted-in e2e run.

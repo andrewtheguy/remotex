@@ -96,9 +96,9 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
 }
 
 /// Validate one binary batch frame against the documented layout, returning how
-/// many tiles it carried.
-fn check_tile_frame(frame: &[u8]) -> u32 {
-    let tiles = common::batch_records(frame);
+/// many tiles it painted.
+fn check_tile_frame(stream: &mut common::TileStream, frame: &[u8]) -> u32 {
+    let tiles = stream.paint(frame);
     assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
     for tile in &tiles {
         assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
@@ -130,6 +130,9 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
 
     let mut got_resize = false;
     let mut tiles = 0u32;
+    // Resolves cache references, so this counts tiles *painted* rather than tiles
+    // whose pixels happened to be on the wire.
+    let mut stream = common::TileStream::new();
 
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
@@ -150,7 +153,7 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                     assert!(got_resize, "tile arrived before resize");
                     // Tiles, not frames: a batch carries however many were ready
                     // at once, so counting frames would stop the test early.
-                    tiles += check_tile_frame(&frame);
+                    tiles += check_tile_frame(&mut stream, &frame);
                     // The xrdp login screen paints in well over 20 strips;
                     // that's enough to call the transport exercised.
                     if tiles >= 20 {

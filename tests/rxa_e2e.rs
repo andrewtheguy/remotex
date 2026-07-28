@@ -561,23 +561,33 @@ fn assert_first_paint(paint: &Paint) {
 }
 
 /// The half of a paint that looks the same however the link came up.
+///
+/// The fake agent sends the same tile every time, so a repaint on a socket that has
+/// already had one arrives as a *reference* — the gateway recognising bytes the
+/// browser already holds. Either form satisfies the claim this makes, and the
+/// reference form makes it more strongly: it can only be sent for byte-identical
+/// content.
 fn assert_paint_pixels(paint: &Paint) {
-    // The tile record: the agent's format byte and its bytes, untouched.
     let expected = fake_jpeg();
-    let records = common::batch_records(&paint.tile);
-    assert_eq!(records.len(), 1, "one tile was painted");
-    let tile = &records[0];
-    assert_eq!(
-        tile.format,
-        Tile::FORMAT_JPEG,
-        "the agent's JPEG must reach the browser as format 2, not be re-encoded"
-    );
-    assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 64, 64));
-    assert_eq!(
-        tile.payload,
-        expected.as_slice(),
-        "tile payload must pass through byte for byte"
-    );
+    match &common::batch_records(&paint.tile)[..] {
+        [common::BatchRecord::Tile(tile)] => {
+            assert_eq!(
+                tile.format,
+                Tile::FORMAT_JPEG,
+                "the agent's JPEG must reach the browser as format 2, not be re-encoded"
+            );
+            assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 64, 64));
+            assert_eq!(
+                tile.payload,
+                expected.as_slice(),
+                "tile payload must pass through byte for byte"
+            );
+        }
+        [common::BatchRecord::Reference { x, y, .. }] => {
+            assert_eq!((*x, *y), (0, 0), "the repeat is redrawn where it was");
+        }
+        other => panic!("expected one tile record, got {}", other.len()),
+    }
 
     // The cursor rides the existing control channel, so the frontend's
     // `paintCursor` — built for VNC — needs no changes.

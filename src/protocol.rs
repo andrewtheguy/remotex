@@ -176,6 +176,20 @@ pub enum ClientMsg {
     /// wrong, which the viewer offers as Remote > Refresh; the SPA has no such
     /// command and never sends this.
     Refresh,
+    /// "I lost the tiles you told me to remember." Empties the server's slot table
+    /// and repaints, so the next tiles arrive as payloads rather than references.
+    ///
+    /// A client sends this when it cannot decode a tile it was told to cache, or
+    /// when a reference names a slot it does not hold. Both leave the two ends
+    /// disagreeing about what the client has, and **nothing else can repair it** —
+    /// which is why this exists instead of reusing [`ClientMsg::Refresh`]. A
+    /// `Refresh` is routed to the *engine* ([`crate::session`]); the outbound task
+    /// that owns the slot table never sees it, so the engine would repaint,
+    /// the repaint's tiles would still be believed cached, references would be sent
+    /// again, and the client would miss again — a livelock at full-repaint
+    /// bandwidth. This is handled by the socket's own bridge instead, which bumps
+    /// the table's epoch *and* asks the engine to repaint.
+    CacheReset,
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
@@ -252,8 +266,28 @@ pub mod batch {
     ///
     /// Needed so one enormous photographic tile cannot evict a screenful of
     /// useful small ones, and so a three-pixel caret rectangle need not consume a
-    /// slot at all. Every tile carries `NO_SLOT` until the cache exists.
+    /// slot at all.
     pub const NO_SLOT: u16 = 0xFFFF;
+
+    /// How many tile slots a client keeps.
+    ///
+    /// Part of the wire contract, not a server-side tuning knob: a client sizes
+    /// its cache by this, and a `slot` at or above it (other than [`NO_SLOT`]) is
+    /// a malformed record rather than something to grow an array for. That makes a
+    /// client's memory a function of the protocol instead of a function of what a
+    /// server chooses to send it.
+    ///
+    /// 256 because both clients cache *encoded* payloads, so the cost is bytes
+    /// received rather than pixels decoded — at the per-slot ceiling below, 8 MiB
+    /// worst case, and a small fraction of that in practice.
+    pub const SLOT_COUNT: u16 = 256;
+
+    /// The largest payload worth a slot.
+    ///
+    /// A slot spent on one screen-sized photograph is a slot not spent on the
+    /// dozens of small tiles a returning menu or a blinking caret is made of, and
+    /// large payloads are the least likely to recur byte for byte anyway.
+    pub const MAX_CACHED_BYTES: usize = 32 * 1024;
 }
 
 /// The canonical tile grid, in framebuffer pixels.

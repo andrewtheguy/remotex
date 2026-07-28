@@ -14,7 +14,7 @@ enum TileFormat: UInt8, Sendable, Equatable {
 struct TileFrame: Sendable, Equatable {
     let format: TileFormat
     /// Where the gateway wants this remembered, or `BatchFrame.noSlot` for "do
-    /// not". Parsed but unused until this client keeps a tile cache.
+    /// not".
     let slot: UInt16
     let x: UInt16
     let y: UInt16
@@ -33,8 +33,9 @@ struct TileFrame: Sendable, Equatable {
 /// offset 2: u16 record count
 /// offset 4: records, back to back
 ///
-/// TILE (op 0x01): u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
-///                 | u32 len | payload[len]
+/// TILE (op 0x01):     u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
+///                     | u32 len | payload[len]
+/// TILE_REF (op 0x02): u16 slot | u16 x | u16 y
 /// ```
 ///
 /// One frame carries however many tiles were ready at once, which is what a full
@@ -44,9 +45,23 @@ enum BatchFrame {
     static let frameKind: UInt8 = 0x02
     static let headerLength = 4
     static let opTile: UInt8 = 0x01
+    static let opTileRef: UInt8 = 0x02
     static let tileHeaderLength = 16
+    static let tileRefLength = 7
     /// `slot` meaning "draw this and do not remember it".
     static let noSlot: UInt16 = 0xFFFF
+    /// How many tiles this client keeps. Part of the wire contract
+    /// (`batch::SLOT_COUNT`): a slot at or above it is a malformed record rather
+    /// than a reason to grow an array, which keeps this client's memory a function
+    /// of the protocol instead of of what a gateway chooses to send.
+    static let slotCount: UInt16 = 256
+
+    /// One record of a batch: pixels to draw and keep, or a position to redraw
+    /// something already kept at.
+    enum Record: Sendable, Equatable {
+        case tile(TileFrame)
+        case reference(slot: UInt16, x: UInt16, y: UInt16)
+    }
 
     /// Parse a binary frame into its tile records, or nil for anything malformed
     /// or of an unknown kind, op or format.
@@ -59,59 +74,92 @@ enum BatchFrame {
     /// The record count in the header is what makes a *truncated* frame
     /// detectable: records are self-delimiting, so without it a short read would
     /// parse cleanly as a complete but smaller batch.
-    static func decode(_ frame: Data) -> [TileFrame]? {
+    static func decode(_ frame: Data) -> [Record]? {
         guard frame.count >= headerLength else {
             return nil
         }
         // Read through the raw buffer rather than by subscript: `frame` may be a
         // slice, whose indices start wherever it was cut from, and the multi-byte
         // fields are not aligned, so the loads have to be unaligned ones.
-        return frame.withUnsafeBytes { raw -> [TileFrame]? in
+        return frame.withUnsafeBytes { raw -> [Record]? in
             guard raw[0] == frameKind, raw[1] == 0 else {
                 return nil
             }
-            let u16 = { (at: Int) -> UInt16 in
-                UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: at, as: UInt16.self))
-            }
-            let count = Int(u16(2))
+            let count = Int(u16(raw, 2))
 
-            var tiles: [TileFrame] = []
-            tiles.reserveCapacity(count)
+            var records: [Record] = []
+            records.reserveCapacity(count)
             var at = headerLength
             while at < raw.count {
-                guard at + tileHeaderLength <= raw.count, raw[at] == opTile,
-                      let format = TileFormat(rawValue: raw[at + 1])
+                guard let parsed = raw[at] == opTileRef
+                    ? reference(raw, at)
+                    : tile(raw, at)
                 else {
                     return nil
                 }
-                let length = Int(
-                    UInt32(
-                        littleEndian: raw.loadUnaligned(
-                            fromByteOffset: at + 12,
-                            as: UInt32.self
-                        )
-                    )
-                )
-                let start = at + tileHeaderLength
-                guard start + length <= raw.count else {
-                    return nil
-                }
-                tiles.append(
-                    TileFrame(
-                        format: format,
-                        slot: u16(at + 2),
-                        x: u16(at + 4),
-                        y: u16(at + 6),
-                        w: u16(at + 8),
-                        h: u16(at + 10),
-                        // Re-based to index 0, so nothing downstream has to know
-                        // this came out of the middle of a larger buffer.
-                        payload: Data(raw[start..<(start + length)])
-                    )
-                )
-                at = start + length
+                records.append(parsed.record)
+                at = parsed.next
             }
-            return tiles.count == count ? tiles : nil
+            return records.count == count ? records : nil
         }
+    }
+
+    private static func u16(_ raw: UnsafeRawBufferPointer, _ at: Int) -> UInt16 {
+        UInt16(littleEndian: raw.loadUnaligned(fromByteOffset: at, as: UInt16.self))
+    }
+
+    private static func reference(
+        _ raw: UnsafeRawBufferPointer,
+        _ at: Int
+    ) -> (record: Record, next: Int)? {
+        guard at + tileRefLength <= raw.count else {
+            return nil
+        }
+        let slot = u16(raw, at + 1)
+        guard slot < slotCount else {
+            return nil
+        }
+        return (
+            .reference(slot: slot, x: u16(raw, at + 3), y: u16(raw, at + 5)),
+            at + tileRefLength
+        )
+    }
+
+    private static func tile(
+        _ raw: UnsafeRawBufferPointer,
+        _ at: Int
+    ) -> (record: Record, next: Int)? {
+        guard at + tileHeaderLength <= raw.count, raw[at] == opTile,
+              let format = TileFormat(rawValue: raw[at + 1])
+        else {
+            return nil
+        }
+        let slot = u16(raw, at + 2)
+        guard slot == noSlot || slot < slotCount else {
+            return nil
+        }
+        let length = Int(
+            UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: at + 12, as: UInt32.self))
+        )
+        let start = at + tileHeaderLength
+        guard start + length <= raw.count else {
+            return nil
+        }
+        return (
+            .tile(
+                TileFrame(
+                    format: format,
+                    slot: slot,
+                    x: u16(raw, at + 4),
+                    y: u16(raw, at + 6),
+                    w: u16(raw, at + 8),
+                    h: u16(raw, at + 10),
+                    // Re-based to index 0, so nothing downstream has to know this
+                    // came out of the middle of a larger buffer.
+                    payload: Data(raw[start..<(start + length)])
+                )
+            ),
+            start + length
+        )
     }
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createSender } from "./outbound.ts";
 import {
+  type BatchRecord,
   type ClientMsg,
   type ClipboardSnapshot,
   type ControlMsg,
@@ -9,7 +10,9 @@ import {
   MAX_CLIPBOARD_BYTES,
   type MouseButton,
   mouseButtonFromEvent,
+  NO_SLOT,
   type RemoteClipboard,
+  SLOT_COUNT,
   type TileMsg,
 } from "./protocol.ts";
 import {
@@ -536,6 +539,15 @@ export function useRemoteDesktop(
 
     let disposed = false;
     let ws: WebSocket | null = null;
+    // The tiles the server has told this client to remember, by slot. Fixed
+    // length because the wire says how many there are (`SLOT_COUNT`), so a server
+    // cannot grow it — and the client never evicts: the server names the slot to
+    // overwrite, which is what keeps the two ends in step without either
+    // modelling the other's memory.
+    const tileCache: ({ data: Uint8Array; mime: TileMsg["mime"] } | null)[] =
+      new Array(SLOT_COUNT).fill(null);
+    // Whether a reset has already been asked for while handling this batch.
+    let resetAsked = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
 
@@ -559,6 +571,11 @@ export function useRemoteDesktop(
       // otherwise. A reattach to the same engine gets the shape replayed.
       cursorRef.current = null;
       touchCursorRef.current = null;
+      // The next attachment's server starts with an empty slot table, so holding
+      // these would only cost memory. (Nothing could be *drawn* wrongly: a
+      // reference always follows the tile that filled its slot on the same
+      // socket.)
+      tileCache.fill(null);
       syncCursor();
     };
 
@@ -765,36 +782,96 @@ export function useRemoteDesktop(
     // dropped alone, because abandoning its batch would drop tiles that decoded
     // perfectly well and leave the region they cover stale.
     const drawBatch = async (data: ArrayBuffer) => {
-      const tiles = decodeBatchFrame(data);
-      if (!tiles) {
+      const records = decodeBatchFrame(data);
+      if (!records) {
         return;
       }
-      paintBatch(tiles, await Promise.all(tiles.map(decodeTile)));
+      // One reset per batch at most: fifty references into a cache this client
+      // lost are one disagreement, not fifty.
+      resetAsked = false;
+      const jobs = records.map(resolveRecord);
+      paintBatch(jobs, await Promise.all(jobs.map(decodeJob)));
+    };
+
+    // What a record turns into once the cache has had its say: a payload to
+    // decode and where to put it, or nothing.
+    interface PaintJob {
+      x: number;
+      y: number;
+      data: Uint8Array;
+      mime: TileMsg["mime"];
+      /** True when the server believes this client is keeping these bytes. */
+      cached: boolean;
+    }
+
+    // Store what the server says to store, and resolve what it says to reuse.
+    //
+    // The payload is copied out of the frame rather than held as a view of it:
+    // a view would pin the whole batch — up to 256 KB — for the lifetime of one
+    // slot.
+    const resolveRecord = (record: BatchRecord): PaintJob | null => {
+      if (record.kind === "tile") {
+        if (record.slot !== NO_SLOT) {
+          tileCache[record.slot] = {
+            data: new Uint8Array(record.data),
+            mime: record.mime,
+          };
+        }
+        return { ...record, cached: record.slot !== NO_SLOT };
+      }
+      const held = tileCache[record.slot];
+      if (!held) {
+        // The server thinks this client holds a tile it does not. Nothing else
+        // will ever correct that, so say so and draw nothing here.
+        askForCacheReset();
+        return null;
+      }
+      return { x: record.x, y: record.y, ...held, cached: true };
+    };
+
+    const decodeJob = async (job: PaintJob | null) => {
+      if (!job) {
+        return null;
+      }
+      try {
+        return await createImageBitmap(
+          new Blob([job.data as Uint8Array<ArrayBuffer>], { type: job.mime }),
+        );
+      } catch {
+        // A tile that will not decode is one dropped tile — unless the server is
+        // keeping it as a slot, in which case every later reference to it would
+        // fail the same way.
+        if (job.cached) {
+          askForCacheReset();
+        }
+        return null;
+      }
+    };
+
+    const askForCacheReset = () => {
+      if (resetAsked) {
+        return;
+      }
+      resetAsked = true;
+      tileCache.fill(null);
+      sendRef.current({ type: "cacheReset" });
     };
 
     // Every bitmap is closed whether or not it was drawn: with no canvas to draw
     // into there is nothing to paint, but the decoded images still have to go.
-    const paintBatch = (tiles: TileMsg[], bitmaps: (ImageBitmap | null)[]) => {
+    const paintBatch = (
+      jobs: (PaintJob | null)[],
+      bitmaps: (ImageBitmap | null)[],
+    ) => {
       const ctx = ctxRef.current;
       for (let i = 0; i < bitmaps.length; i += 1) {
         const bitmap = bitmaps[i];
-        if (!bitmap) {
+        const job = jobs[i];
+        if (!bitmap || !job) {
           continue;
         }
-        ctx?.drawImage(bitmap, tiles[i].x, tiles[i].y);
+        ctx?.drawImage(bitmap, job.x, job.y);
         bitmap.close();
-      }
-    };
-
-    const decodeTile = async (tile: TileMsg): Promise<ImageBitmap | null> => {
-      try {
-        return await createImageBitmap(
-          new Blob([tile.data as Uint8Array<ArrayBuffer>], {
-            type: tile.mime,
-          }),
-        );
-      } catch {
-        return null;
       }
     };
 

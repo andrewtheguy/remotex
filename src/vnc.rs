@@ -1218,8 +1218,9 @@ fn translate_input(
         // shared buffer and frame_tx) before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
-        // bridge handles them and they never reach here.
-        ClientMsg::Connect { .. } | ClientMsg::Disconnect => Vec::new(),
+        // bridge handles them and they never reach here. `CacheReset` is one of
+        // them: it empties that socket's tile cache and injects its own `Refresh`.
+        ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::CacheReset => Vec::new(),
         // RFB has one framebuffer, and on a multi-screen server it spans all of
         // them: the ExtendedDesktopSize screen list describes how they are laid
         // out inside it, not a set of things to choose between. So this engine

@@ -60,6 +60,15 @@ protocol GatewaySessionSink: AnyObject, Sendable {
 actor GatewayConnection {
     private let gateway: any SessionGateway
     private let decoder = TileDecoder()
+    /// The tiles the gateway has told this client to remember, by slot.
+    ///
+    /// Encoded payloads rather than decoded pixels: a decoded 320x64 tile is 80 KB
+    /// where its PNG is a few hundred bytes, and re-decoding on a reference is
+    /// cheaper than the transfer it replaced. Fixed length because the wire says
+    /// how many slots there are, so a gateway cannot grow it; and this client never
+    /// evicts — the gateway names the slot to overwrite, which keeps the two ends
+    /// in step without either modelling the other's memory.
+    private var tileCache = [TileFrame?](repeating: nil, count: Int(BatchFrame.slotCount))
     private let log = Logger(subsystem: "dev.remotex.viewer", category: "session")
 
     /// Nonisolated so `send` needs no `await`: see `OutboundQueue` for why that
@@ -330,10 +339,14 @@ actor GatewayConnection {
     }
 
     private func deliver(tile data: Data) async {
-        guard let frames = BatchFrame.decode(data) else {
+        guard let records = BatchFrame.decode(data) else {
             log.warning("malformed batch frame of \(data.count, privacy: .public) bytes")
             return
         }
+        // At most one reset per batch: a hundred references into a cache this
+        // client lost are one disagreement, not a hundred.
+        var askedForReset = false
+
         // In order, and each awaited: a later tile has to overwrite an earlier one
         // that covers the same pixels.
         //
@@ -341,8 +354,11 @@ actor GatewayConnection {
         // it — the rest decoded, and the pixels they cover would otherwise stay
         // stale until something repaints them.
         var decoded = [DecodedTile]()
-        decoded.reserveCapacity(frames.count)
-        for frame in frames {
+        decoded.reserveCapacity(records.count)
+        for record in records {
+            guard let frame = resolve(record, askedForReset: &askedForReset) else {
+                continue
+            }
             guard let tile = await decoder.decode(frame) else {
                 log.warning(
                     """
@@ -350,6 +366,12 @@ actor GatewayConnection {
                     \(frame.w, privacy: .public)x\(frame.h, privacy: .public)
                     """
                 )
+                // A tile that will not decode is one dropped tile — unless the
+                // gateway is keeping it as a slot, in which case every later
+                // reference to it would fail the same way.
+                if frame.slot != BatchFrame.noSlot {
+                    askForCacheReset(&askedForReset)
+                }
                 continue
             }
             decoded.append(tile)
@@ -360,6 +382,50 @@ actor GatewayConnection {
             return
         }
         await publish(.tiles(decoded))
+    }
+
+    /// The payload a record stands for: its own, or the one its slot holds.
+    ///
+    /// Storing happens here too, so the cache is written in wire order by the same
+    /// pass that reads it — a reference may legitimately name a slot filled earlier
+    /// in its own batch.
+    private func resolve(
+        _ record: BatchFrame.Record,
+        askedForReset: inout Bool
+    ) -> TileFrame? {
+        switch record {
+        case .tile(let frame):
+            if frame.slot != BatchFrame.noSlot {
+                tileCache[Int(frame.slot)] = frame
+            }
+            return frame
+        case .reference(let slot, let x, let y):
+            guard let held = tileCache[Int(slot)] else {
+                // The gateway believes this client holds a tile it does not.
+                // Nothing else will ever correct that.
+                log.warning("reference to empty tile slot \(slot, privacy: .public)")
+                askForCacheReset(&askedForReset)
+                return nil
+            }
+            return TileFrame(
+                format: held.format,
+                slot: held.slot,
+                x: x,
+                y: y,
+                w: held.w,
+                h: held.h,
+                payload: held.payload
+            )
+        }
+    }
+
+    private func askForCacheReset(_ askedForReset: inout Bool) {
+        guard !askedForReset else {
+            return
+        }
+        askedForReset = true
+        tileCache = Array(repeating: nil, count: Int(BatchFrame.slotCount))
+        outbound.enqueue(.cacheReset)
     }
 
     // MARK: - Outbound

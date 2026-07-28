@@ -90,8 +90,13 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
 
 /// Validate one binary batch frame against the desktop bounds and return the
 /// pixel area of every tile in it.
-fn check_tile_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> u64 {
-    let tiles = common::batch_records(frame);
+fn check_tile_frame(
+    stream: &mut common::TileStream,
+    frame: &[u8],
+    desktop_w: u32,
+    desktop_h: u32,
+) -> u64 {
+    let tiles = stream.paint(frame);
     assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
     let mut area = 0u64;
     for tile in tiles {
@@ -172,6 +177,10 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let mut got_resize = false;
     let mut covered: u64 = 0;
     let mut cursor: Option<String> = None;
+    // Resolves cache references, so `covered` counts pixels *painted* rather than
+    // pixels that happened to travel. One per socket, because the gateway's slot
+    // table lives exactly as long as one attachment.
+    let mut stream = common::TileStream::new();
 
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
@@ -200,7 +209,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "tile arrived before resize");
-                    covered += check_tile_frame(&frame, DESKTOP_W, DESKTOP_H);
+                    covered += check_tile_frame(&mut stream, &frame, DESKTOP_W, DESKTOP_H);
                     // The first (non-incremental) update must repaint the whole
                     // desktop; once that much area has arrived, the raw->tile
                     // path is proven. The Cursor pseudo-encoding rides the same
@@ -234,6 +243,8 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
 
     let mut resized = false;
     let mut covered: u64 = 0;
+    // Same socket, so the same stream: a resize does not empty the slot table, and
+    // a repaint at the new size is exactly when references start paying off.
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -257,7 +268,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if !resized {
                         continue;
                     }
-                    covered += check_tile_frame(&frame, VIEWPORT_W, VIEWPORT_H);
+                    covered += check_tile_frame(&mut stream, &frame, VIEWPORT_W, VIEWPORT_H);
                     if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H) {
                         return;
                     }
@@ -288,6 +299,8 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     let mut reannounced = false;
     let mut replayed_cursor = false;
     let mut covered: u64 = 0;
+    // A new socket is a new attachment, so the gateway starts from an empty table.
+    let mut stream = common::TileStream::new();
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -319,7 +332,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if !reannounced {
                         continue;
                     }
-                    covered += check_tile_frame(&frame, VIEWPORT_W, VIEWPORT_H);
+                    covered += check_tile_frame(&mut stream, &frame, VIEWPORT_W, VIEWPORT_H);
                     if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H)
                         && replayed_cursor
                     {

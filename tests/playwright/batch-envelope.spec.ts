@@ -22,13 +22,24 @@ import {
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 4;
 const OP_TILE = 0x01;
+const OP_TILE_REF = 0x02;
 const TILE_HEADER_LEN = 16;
+const TILE_REF_LEN = 7;
 const NO_SLOT = 0xffff;
+const SLOT_COUNT = 256;
+
+interface Record {
+  op: number;
+  slot: number;
+  /** Tiles only. */
+  format?: number;
+  payloadLen?: number;
+}
 
 interface Batch {
   flags: number;
   count: number;
-  records: { op: number; format: number; slot: number; payloadLen: number }[];
+  records: Record[];
   /** Whether the records exactly filled the frame. */
   exact: boolean;
 }
@@ -37,10 +48,19 @@ interface Batch {
 // re-using the SPA's parser here would let a wrong parser agree with itself.
 function parseBatch(payload: Buffer): Batch {
   const count = payload.readUInt16LE(2);
-  const records: Batch["records"] = [];
+  const records: Record[] = [];
   let at = BATCH_HEADER_LEN;
   let exact = true;
   while (at < payload.length) {
+    if (payload.readUInt8(at) === OP_TILE_REF) {
+      if (at + TILE_REF_LEN > payload.length) {
+        exact = false;
+        break;
+      }
+      records.push({ op: OP_TILE_REF, slot: payload.readUInt16LE(at + 1) });
+      at += TILE_REF_LEN;
+      continue;
+    }
     if (at + TILE_HEADER_LEN > payload.length) {
       exact = false;
       break;
@@ -106,15 +126,27 @@ test.describe("v3 batch envelope", () => {
       ).toBe(batch.count);
       expect(batch.exact, "records must exactly fill the frame").toBe(true);
       for (const record of batch.records) {
+        if (record.op === OP_TILE_REF) {
+          // A reference names a slot the SPA is keeping. Seven bytes, no payload,
+          // and the slot must be inside the fixed cache the wire promises.
+          expect(record.slot).toBeLessThan(SLOT_COUNT);
+          continue;
+        }
         expect(record.op).toBe(OP_TILE);
         // 1 = PNG, 2 = JPEG. The Mac agent picks per tile.
         expect([1, 2]).toContain(record.format);
-        // Nothing is cached yet, so every tile says so.
-        expect(record.slot).toBe(NO_SLOT);
+        // Either a slot inside the cache, or "do not remember this".
+        if (record.slot !== NO_SLOT) {
+          expect(record.slot).toBeLessThan(SLOT_COUNT);
+        }
         expect(record.payloadLen).toBeGreaterThan(0);
       }
     }
 
+    // Whatever the gateway sent, the SPA has to have parsed it: every record it
+    // could not read would be a dropped frame, and a dropped frame is a region of
+    // stale pixels. The parser above is the check — it would have thrown.
+    //
     // The envelope's reason to exist: a repaint of a real desktop puts more than
     // one tile in a frame. Asserted across the run rather than per frame, because
     // a quiet moment legitimately produces a single-record batch.

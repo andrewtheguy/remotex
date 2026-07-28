@@ -15,6 +15,7 @@
 //! |---|---|---|
 //! | full-width strips, no comparison | 244–245 | 115,747–115,751 |
 //! | trimmed against a shadow copy | 244 | 86,891 |
+//! | and with the tile cache | 244 | 27,634 |
 //! | outward-snapped 320x64 cells + hash gate (rejected) | 334 | 1,030,637 |
 //!
 //! Use `--release`: byte counts are the same in either profile, but a debug `png`

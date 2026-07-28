@@ -114,6 +114,9 @@ enum ProbeCommand {
         /// Tile records across every batch, which is the number that used to equal
         /// `binary` one-for-one. Seeing the two apart is the whole point.
         var records = 0
+        /// References among them: records the gateway sent as a slot and a position
+        /// because this client already had the pixels.
+        var references = 0
         var largestBinary = 0
         var largestTile = "none"
 
@@ -122,19 +125,27 @@ enum ProbeCommand {
             controlBytes += text.utf8.count
         }
 
-        mutating func binaryFrame(_ data: Data, tiles: [TileFrame]?) {
+        mutating func binaryFrame(_ data: Data, records batch: [BatchFrame.Record]?) {
             binary += 1
             binaryBytes += data.count
-            records += tiles?.count ?? 0
+            records += batch?.count ?? 0
+            references += batch?.count { record in
+                if case .reference = record { true } else { false }
+            } ?? 0
             // Both halves have to come from the *same* frame, or the summary pairs
             // the largest frame with whatever happened to arrive last — which is
             // the number this probe exists to report.
             if data.count > largestBinary {
                 largestBinary = data.count
-                largestTile = tiles.map { tiles in
-                    let shapes = tiles.prefix(3).map { "\($0.w)x\($0.h) \($0.format)" }
-                    let more = tiles.count > 3 ? ", +\(tiles.count - 3) more" : ""
-                    return "\(tiles.count) records: \(shapes.joined(separator: ", "))\(more)"
+                largestTile = batch.map { records in
+                    let shapes = records.prefix(3).map { record in
+                        switch record {
+                        case .tile(let tile): "\(tile.w)x\(tile.h) \(tile.format)"
+                        case .reference(let slot, _, _): "ref slot \(slot)"
+                        }
+                    }
+                    let more = records.count > 3 ? ", +\(records.count - 3) more" : ""
+                    return "\(records.count) records: \(shapes.joined(separator: ", "))\(more)"
                 } ?? "undecodable"
             }
         }
@@ -169,11 +180,11 @@ enum ProbeCommand {
                 counts.text(text)
                 print("probe: control \(text.prefix(200))")
             case .binary(let data):
-                let tiles = BatchFrame.decode(data)
-                if tiles == nil {
+                let records = BatchFrame.decode(data)
+                if records == nil {
                     print("probe: undecodable \(data.count)-byte binary frame")
                 }
-                counts.binaryFrame(data, tiles: tiles)
+                counts.binaryFrame(data, records: records)
             }
         }
 
@@ -185,7 +196,8 @@ enum ProbeCommand {
     private static func summarize(_ counts: Counts, survivedHeartbeat: Bool) {
         print(
             "probe: \(counts.binary) binary frames / \(counts.binaryBytes) bytes "
-                + "carrying \(counts.records) tile records, "
+                + "carrying \(counts.records) tile records "
+                + "(\(counts.references) cache references), "
                 + "\(counts.control) control frames / \(counts.controlBytes) bytes"
         )
         print("probe: largest binary frame \(counts.largestBinary) bytes (\(counts.largestTile))")
