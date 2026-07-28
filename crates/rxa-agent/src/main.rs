@@ -756,6 +756,12 @@ fn report_permissions() -> bool {
 /// The whole of stdin, not a line: a key pasted into a terminal, piped from
 /// `pbpaste`, or read from a file that ends without a newline all have to work,
 /// and none of them is distinguishable here.
+///
+/// Returns the key alone. Every one of those ways of supplying it brings its own
+/// whitespace — a pipe from `pbpaste` most often a trailing newline — and
+/// `config::import_private_key` trims again before it uses one, so this is not
+/// what keeps a newline out of the config file. It is so that what this function
+/// returns is a key, which is what its name promises.
 fn read_private_key_from_stdin() -> anyhow::Result<String> {
     use anyhow::Context as _;
     use std::io::Read as _;
@@ -769,12 +775,13 @@ fn read_private_key_from_stdin() -> anyhow::Result<String> {
     std::io::stdin()
         .read_to_string(&mut key)
         .context("failed to read the private key from stdin")?;
+    let key = key.trim();
     anyhow::ensure!(
-        !key.trim().is_empty(),
+        !key.is_empty(),
         "no private key on stdin — pipe one in, e.g. \
          `pbpaste | remotex-agent --import-private-key`"
     );
-    Ok(key)
+    Ok(key.to_owned())
 }
 
 fn print_first_run(path: &Path, public_key: &str) {

@@ -54,9 +54,10 @@ rejected by the agent before it has revealed anything.
 Keys are text as `<prefix><base64url of 32 bytes and a CRC16>`, the checksum
 catching transcription errors. The prefix carries the role as well as the kind —
 `rxgs`/`rxgp` for a gateway's private and public keys, `rxas`/`rxap` for an
-agent's — so each of the four config fields accepts one kind and names the other
-three. That matters most while pairing, when both public keys are in play at
-once and a swap would otherwise surface as an opaque handshake rejection.
+agent's — so each of the four config fields accepts only its own kind and rejects
+the other three, naming what was pasted instead. That matters most while pairing,
+when both public keys are in play at once and a swap would otherwise surface as
+an opaque handshake rejection.
 
 Only the two public keys ever move between machines, so both ends display theirs
 in full: the agent in its settings dialog and via `remotex-agent --public-key`,

@@ -379,7 +379,9 @@ in System Settings > General > Login Items. It starts unpaired: it listens and
 refuses every connection until it is given a gateway's public key.
 
 Everything after that is in the menu bar item, which is the agent's whole
-interface — the only subcommand is --public-key. Open it for:
+interface — the only flags that do anything but launch it are --public-key, which
+prints this Mac's public key, and --import-private-key, which reads a private key
+from stdin to give this Mac an identity it already had. Open it for:
 
     Settings...          listen address, displays, and the two public keys —
                          Copy puts this Mac's on the clipboard for the gateway's

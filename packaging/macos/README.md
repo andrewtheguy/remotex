@@ -28,8 +28,11 @@ connection until it is told which gateway to answer.
 
 ## Pair it with the gateway
 
-Two public keys are exchanged, one each way. Neither is a secret — the private
-key behind each never leaves the machine that made it.
+Two public keys are exchanged, one each way. Neither is a secret, and pairing
+never moves a private key: each machine's stays in its own config file. The one
+time a private key does travel is when you deliberately carry an identity to
+another Mac — see [Moving an identity to another
+Mac](#moving-an-identity-to-another-mac).
 
 **1. This Mac's key onto the gateway.** Open **Settings…** from the menu bar item
 and press **Copy** beside *This Mac's public key* (or run

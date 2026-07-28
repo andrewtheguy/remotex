@@ -388,9 +388,16 @@ impl InForce {
     /// Both halves, because either one changing is a pairing that has not taken
     /// effect: a regenerated identity the gateway has not been told about, and a
     /// newly pasted gateway key, fail in exactly the same way.
+    ///
+    /// Trimmed on both sides. The draft's is whatever was typed, and the running
+    /// side is the config file as parsed — which `Config::validate` accepts with
+    /// spaces inside the quotes, because `key::parse_private` trims before it
+    /// looks. Comparing a padded key in force against a trimmed draft of the same
+    /// key reported a pairing that "never took effect" while the agent was using
+    /// exactly it.
     fn matches(&self, draft: &Draft) -> bool {
-        self.private_key == draft.private_key.trim()
-            && self.gateway_public_key == draft.gateway_public_key.trim()
+        self.private_key.trim() == draft.private_key.trim()
+            && self.gateway_public_key.trim() == draft.gateway_public_key.trim()
     }
 }
 
@@ -803,6 +810,18 @@ mod tests {
         // Whitespace round a pasted value is the user's typing, not a change —
         // `Settings::apply` trims it before it ever reaches the file.
         assert!(running.matches(&draft(private_key.clone(), format!("  {gateway}\n"))));
+
+        // And the same on the *running* side, which is not written by the GUI:
+        // it is the config file as parsed, and `Config::validate` accepts a
+        // padded key because `key::parse_private` trims before it looks. A
+        // hand-edited file with spaces inside the quotes is therefore in force,
+        // and warning that it "never took effect" would be a lie about the one
+        // thing this warning exists to report.
+        let padded = InForce {
+            private_key: format!("  {private_key}\n"),
+            gateway_public_key: format!(" {gateway} "),
+        };
+        assert!(padded.matches(&draft(private_key.clone(), gateway.clone())));
 
         // A regenerated identity the gateway has not been told about.
         assert!(!running.matches(&draft(key::generate_private(Role::Agent), gateway)));
