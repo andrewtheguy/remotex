@@ -1185,6 +1185,137 @@ mod tests {
         rgb
     }
 
+    /// Uniform noise: the one case with no structure for either codec to exploit,
+    /// and therefore the honest worst case for encode *time*.
+    fn noise_rgb(w: u16, h: u16) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..usize::from(w) * usize::from(h) * 3)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// A real screen, decoded to packed RGB888 from the PNG at
+    /// `REMOTEX_BENCH_IMAGE`.
+    ///
+    /// **There is deliberately no synthetic fallback**, and that is the most
+    /// important thing in this module for anyone extending the bench below. The
+    /// obvious generated fixtures — [`flat_ui_rgb`], [`gradient_rgb`], the agent's
+    /// `photo` — are all exactly *periodic*, and WebP lossless resolves any of them
+    /// to about a hundred bytes at any size, because its backward references match
+    /// the whole image against its first period. Measured that way WebP appears to
+    /// beat PNG by 60× on a 3200×64 strip, which is fiction. Those fixtures are
+    /// fine for [`encode_cost_against_hash_cost`], which compares PNG against
+    /// itself, and worthless for comparing one codec to another.
+    ///
+    /// So this reads real pixels. Any screenshot of a desktop will do:
+    ///
+    /// ```sh
+    /// ssh mac screencapture -x -t png /tmp/shot.png
+    /// scp 'mac:/tmp/shot.png' tmp/bench/shot.png
+    /// REMOTEX_BENCH_IMAGE=tmp/bench/shot.png \
+    ///   cargo test --release --lib -- --ignored --nocapture webp_cost
+    /// ```
+    fn screenshot_rgb() -> Option<(u16, u16, Vec<u8>, String)> {
+        let path = std::env::var("REMOTEX_BENCH_IMAGE").ok()?;
+        let file = std::fs::File::open(&path).expect("REMOTEX_BENCH_IMAGE is not readable");
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+            .read_info()
+            .expect("REMOTEX_BENCH_IMAGE is not a PNG");
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).expect("PNG did not decode");
+        assert_eq!(info.bit_depth, png::BitDepth::Eight, "expected an 8-bit PNG");
+        let rgb = match info.color_type {
+            png::ColorType::Rgb => buf[..info.buffer_size()].to_vec(),
+            png::ColorType::Rgba => buf[..info.buffer_size()]
+                .chunks_exact(4)
+                .flat_map(|px| [px[0], px[1], px[2]])
+                .collect(),
+            other => panic!("expected an RGB or RGBA PNG, got {other:?}"),
+        };
+        let (w, h) = (info.width as u16, info.height as u16);
+        assert_eq!(rgb.len(), usize::from(w) * usize::from(h) * 3);
+        Some((w, h, rgb, path))
+    }
+
+    /// Cut one `w`×`h` tile out of a `sw`-wide RGB888 image at `(x, y)`.
+    fn crop_rgb(src: &[u8], sw: u16, x: u16, y: u16, w: u16, h: u16) -> Vec<u8> {
+        let stride = usize::from(sw) * 3;
+        let mut out = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for row in 0..usize::from(h) {
+            let start = (usize::from(y) + row) * stride + usize::from(x) * 3;
+            out.extend_from_slice(&src[start..start + usize::from(w) * 3]);
+        }
+        out
+    }
+
+    /// Up to `limit` `w`×`h` tiles spread evenly over the image, and how many the
+    /// image holds in total — a strided sample of what a full repaint would send.
+    fn sample_tiles(
+        src: &[u8],
+        sw: u16,
+        sh: u16,
+        w: u16,
+        h: u16,
+        limit: usize,
+    ) -> (Vec<Vec<u8>>, usize) {
+        let (cols, rows) = (usize::from(sw / w), usize::from(sh / h));
+        let total = cols * rows;
+        let step = total.div_ceil(limit.max(1)).max(1);
+        let tiles = (0..total)
+            .step_by(step)
+            .map(|i| {
+                let (cx, cy) = (i % cols, i / cols);
+                crop_rgb(src, sw, (cx as u16) * w, (cy as u16) * h, w, h)
+            })
+            .collect();
+        (tiles, total)
+    }
+
+    /// WebP-encode packed RGB888 with a hand-built config.
+    ///
+    /// `encode_advanced` is the only encode entry point in the `webp` crate that
+    /// returns a `Result`: `Encoder::encode` and `Encoder::encode_lossless` both
+    /// `unwrap()` internally, and `[profile.release] panic = "abort"` makes that
+    /// unrecoverable. `Encoder::from_rgb` panics on a buffer shorter than
+    /// `w * h * 3`, so the length is asserted before it is handed over.
+    ///
+    /// In lossless mode libwebp reads `quality` as an effort dial, not a fidelity
+    /// one, and `method` is the speed/size trade (0 selects its low-effort path).
+    fn webp_rgb(w: u16, h: u16, rgb: &[u8], lossless: bool, quality: f32, method: i32) -> Vec<u8> {
+        assert_eq!(rgb.len(), usize::from(w) * usize::from(h) * 3);
+        let mut config = webp::WebPConfig::new().expect("libwebp rejected its own defaults");
+        config.lossless = i32::from(lossless);
+        config.quality = quality;
+        config.method = method;
+        // No worker thread: these encodes run on an engine's protocol-read loop,
+        // where spawning a thread per small tile would cost more than it saves.
+        config.thread_level = 0;
+        webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
+            .encode_advanced(&config)
+            .map(|mem| mem.to_vec())
+            .unwrap_or_else(|e| panic!("webp encode failed for {w}x{h}: {e:?}"))
+    }
+
+    /// Decode and compare, so a "lossless" config that is quietly lossy cannot be
+    /// printed as a win.
+    fn assert_webp_roundtrips(w: u16, h: u16, rgb: &[u8], encoded: &[u8], label: &str) {
+        let image = webp::Decoder::new(encoded)
+            .decode()
+            .unwrap_or_else(|| panic!("{label}: {w}x{h} payload did not decode"));
+        assert_eq!(
+            (image.width(), image.height()),
+            (u32::from(w), u32::from(h)),
+            "{label}: {w}x{h} decoded to the wrong size"
+        );
+        assert!(!image.is_alpha(), "{label}: an RGB source gained an alpha channel");
+        assert_eq!(&*image, rgb, "{label}: {w}x{h} did not roundtrip losslessly");
+    }
+
     /// What a change-detection hash costs against what it skips, and what a
     /// narrower cell costs when its pixels really did change.
     ///
@@ -1278,5 +1409,284 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// What WebP costs against PNG on this protocol's own content, in bytes and in
+    /// time. The decision record for replacing the tile codec.
+    ///
+    /// A sibling of [`encode_cost_against_hash_cost`] rather than an extension of
+    /// it: that test's numbers are quoted verbatim in [`CELL_W`]'s documentation and
+    /// have to stay readable on their own.
+    ///
+    /// Ignored and mostly assertion-free for the same reasons as its sibling — it
+    /// prints, it does not judge, because a timing assertion on a shared machine is
+    /// a flaky test. The one thing it *does* assert is that every payload from a
+    /// lossless config decodes back to the original pixels: a config that is
+    /// quietly lossy would otherwise print as the winner.
+    ///
+    /// Run it in **release**. `png` at `Compression::Fast` is several times slower
+    /// in a debug build, so a debug run flatters WebP and decides nothing:
+    ///
+    /// ```sh
+    /// cargo test --release --lib -- --ignored --nocapture webp_cost
+    /// ```
+    ///
+    /// Measured on **real screen pixels** ([`screenshot_rgb`]), tiled the way an
+    /// engine would tile them, because generated fixtures give answers off by
+    /// orders of magnitude — see that function for what went wrong the first time.
+    ///
+    /// Three questions, in the order they have to be answered:
+    ///
+    /// 1. **Which lossless config?** Section 1 sweeps `method` × effort at one shape.
+    /// 2. **Does it hold across shapes?** Section 2 re-runs the shortlist over the
+    ///    whole shape range, summing a sampled tiling of the screenshot — so the
+    ///    byte column is a repaint total, not one lucky tile. Gateway damage is
+    ///    *small*: RDP's median is 1295 px, 92% of it under one cell (see
+    ///    [`CELL_W`]), and those encodes run synchronously on the engine's
+    ///    protocol-read loop, so the small end is the binding case, not the
+    ///    3200-wide strip.
+    /// 3. **Can JPEG go?** Section 3 puts WebP lossy against `jpeg-encoder` at the
+    ///    quality the agent ships. If WebP is competitive the wire drops to one
+    ///    codec. Section 4 repeats both against uniform noise, the worst case
+    ///    either codec can be handed.
+    #[test]
+    #[ignore = "prints timings; run explicitly in release"]
+    fn webp_cost_against_png_cost() {
+        use std::time::Instant;
+
+        /// How many times to repeat a pass over a tile sample.
+        ///
+        /// Budgeted in *pixels*, not passes: one pass already encodes every tile in
+        /// the sample, so a wide shape needs very few repeats to be timed as well as
+        /// a small one needs many. Fixing the repeat count instead makes the slowest
+        /// config at the widest shape dominate the whole run.
+        fn passes_for(tiles: usize, w: u16, h: u16) -> u32 {
+            let per_pass = tiles as u64 * u64::from(w) * u64::from(h);
+            (4_000_000 / per_pass.max(1)).clamp(1, 50) as u32
+        }
+
+        fn time<T>(runs: u32, mut f: impl FnMut() -> T) -> std::time::Duration {
+            let started = Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(f());
+            }
+            started.elapsed() / runs
+        }
+
+        let Some((sw, sh, screen, path)) = screenshot_rgb() else {
+            println!(
+                "\nSkipped: set REMOTEX_BENCH_IMAGE to a PNG screenshot. Generated\n\
+                 fixtures are periodic and would overstate WebP by ~60x — see\n\
+                 screenshot_rgb's documentation."
+            );
+            return;
+        };
+        println!("\n=== source: {path}, {sw}x{sh} ===");
+
+        // Gateway-realistic rects first (small and numerous), then the agent's cell,
+        // then a wide strip. Widths beyond the screenshot are skipped, not clamped.
+        const SHAPES: [(u16, u16); 8] = [
+            (16, 16),
+            (32, 40),
+            (64, 20),
+            (120, 11),
+            (240, 64),
+            (320, 64),
+            (640, 64),
+            (1600, 64),
+        ];
+        /// `(method, effort)` pairs carried into section 2: fastest, middle, and the
+        /// crate's own default effort.
+        const SHORTLIST: [(i32, f32); 3] = [(0, 20.0), (2, 50.0), (4, 75.0)];
+        /// Tiles per shape. A 16×16 tiling of a 1600×1000 screen is 6250 tiles, and
+        /// timing every one of them at 15 configs would take minutes for a ratio the
+        /// sample already settles. Every table below prints the sample and the total.
+        const SAMPLE: usize = 24;
+
+        println!("\n=== 1. lossless config sweep at 320x64, against png::Compression::Fast ===");
+        let (cells, total) = sample_tiles(&screen, sw, sh, 320, 64, SAMPLE);
+        let runs = passes_for(cells.len(), 320, 64);
+        let png: usize = cells
+            .iter()
+            .map(|c| Tile::from_rgb(0, 0, 320, 64, c).unwrap().data.len())
+            .sum();
+        let png_time = time(runs, || {
+            cells
+                .iter()
+                .map(|c| Tile::from_rgb(0, 0, 320, 64, c).unwrap().data.len())
+                .sum::<usize>()
+        });
+        println!(
+            "  {} of {total} tiles, {png} png bytes, {:.1}µs/tile",
+            cells.len(),
+            png_time.as_secs_f64() * 1e6 / cells.len() as f64
+        );
+        println!("  config      bytes   vs png   µs/tile   vs png");
+        for method in [0, 1, 2, 3, 4] {
+            for effort in [20.0f32, 50.0, 75.0] {
+                let bytes: usize = cells
+                    .iter()
+                    .map(|c| {
+                        let data = webp_rgb(320, 64, c, true, effort, method);
+                        assert_webp_roundtrips(320, 64, c, &data, "lossless sweep");
+                        data.len()
+                    })
+                    .sum();
+                let took = time(runs, || {
+                    cells
+                        .iter()
+                        .map(|c| webp_rgb(320, 64, c, true, effort, method).len())
+                        .sum::<usize>()
+                });
+                println!(
+                    "  m{method} q{effort:<3.0}  {bytes:>7}  {:>6.2}x  {:>7.1}  {:>6.2}x",
+                    bytes as f64 / png as f64,
+                    took.as_secs_f64() * 1e6 / cells.len() as f64,
+                    took.as_secs_f64() / png_time.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+        }
+
+        println!("\n=== 2. the shortlist across every shape (sampled repaint totals) ===");
+        println!("  shape      tiles     png B  µs/tile   config     B   vs png  µs/tile   vs png");
+        for (w, h) in SHAPES {
+            if w > sw || h > sh {
+                println!("  {w}x{h}: larger than the screenshot, skipped");
+                continue;
+            }
+            let (tiles, total) = sample_tiles(&screen, sw, sh, w, h, SAMPLE);
+            let runs = passes_for(tiles.len(), w, h);
+            let png: usize = tiles
+                .iter()
+                .map(|t| Tile::from_rgb(0, 0, w, h, t).unwrap().data.len())
+                .sum();
+            let png_time = time(runs, || {
+                tiles
+                    .iter()
+                    .map(|t| Tile::from_rgb(0, 0, w, h, t).unwrap().data.len())
+                    .sum::<usize>()
+            });
+            let per_tile = |d: std::time::Duration| d.as_secs_f64() * 1e6 / tiles.len() as f64;
+            let mut shape = format!("{w}x{h}");
+            let mut count = format!("{}/{total}", tiles.len());
+            for (method, effort) in SHORTLIST {
+                let bytes: usize = tiles
+                    .iter()
+                    .map(|t| {
+                        let data = webp_rgb(w, h, t, true, effort, method);
+                        assert_webp_roundtrips(w, h, t, &data, "shape sweep");
+                        data.len()
+                    })
+                    .sum();
+                let took = time(runs, || {
+                    tiles
+                        .iter()
+                        .map(|t| webp_rgb(w, h, t, true, effort, method).len())
+                        .sum::<usize>()
+                });
+                println!(
+                    "  {shape:<9} {count:>7} {png:>9} {:>8.1}   m{method} q{effort:<3.0} \
+                     {bytes:>7}  {:>6.2}x {:>8.1}  {:>6.2}x",
+                    per_tile(png_time),
+                    bytes as f64 / png as f64,
+                    per_tile(took),
+                    took.as_secs_f64() / png_time.as_secs_f64().max(f64::EPSILON),
+                );
+                // The png columns belong to the shape, not to each config row.
+                shape.clear();
+                count.clear();
+            }
+        }
+
+        println!("\n=== 3. lossy: WebP q80 against jpeg-encoder q80, on the same tiles ===");
+        println!("  shape      tiles    jpeg B  µs/tile   config     B  vs jpeg  µs/tile  vs jpeg");
+        for (w, h) in [(320u16, 64u16), (640, 64)] {
+            let (tiles, total) = sample_tiles(&screen, sw, sh, w, h, SAMPLE);
+            let runs = passes_for(tiles.len(), w, h);
+            let jpeg: usize = tiles.iter().map(|t| jpeg_q80(w, h, t).len()).sum();
+            let jpeg_time = time(runs, || {
+                tiles.iter().map(|t| jpeg_q80(w, h, t).len()).sum::<usize>()
+            });
+            let per_tile = |d: std::time::Duration| d.as_secs_f64() * 1e6 / tiles.len() as f64;
+            let mut shape = format!("{w}x{h}");
+            let mut count = format!("{}/{total}", tiles.len());
+            for method in [0, 2, 4] {
+                let bytes: usize = tiles
+                    .iter()
+                    .map(|t| webp_rgb(w, h, t, false, 80.0, method).len())
+                    .sum();
+                let took = time(runs, || {
+                    tiles
+                        .iter()
+                        .map(|t| webp_rgb(w, h, t, false, 80.0, method).len())
+                        .sum::<usize>()
+                });
+                println!(
+                    "  {shape:<9} {count:>7} {jpeg:>9} {:>8.1}   m{method} q80  {bytes:>7}  \
+                     {:>6.2}x {:>8.1}  {:>6.2}x",
+                    per_tile(jpeg_time),
+                    bytes as f64 / jpeg as f64,
+                    per_tile(took),
+                    took.as_secs_f64() / jpeg_time.as_secs_f64().max(f64::EPSILON),
+                );
+                shape.clear();
+                count.clear();
+            }
+        }
+
+        println!("\n=== 4. worst case: uniform noise, nothing for either codec to find ===");
+        for (w, h) in [(320u16, 64u16)] {
+            let rgb = noise_rgb(w, h);
+            let runs = passes_for(1, w, h);
+            let png = Tile::from_rgb(0, 0, w, h, &rgb).unwrap();
+            let png_time = time(runs, || Tile::from_rgb(0, 0, w, h, &rgb).unwrap());
+            println!(
+                "  {w}x{h} ({} raw): png {} bytes, {:.1}µs",
+                rgb.len(),
+                png.data.len(),
+                png_time.as_secs_f64() * 1e6
+            );
+            for (method, effort) in SHORTLIST {
+                let data = webp_rgb(w, h, &rgb, true, effort, method);
+                assert_webp_roundtrips(w, h, &rgb, &data, "noise");
+                let took = time(runs, || webp_rgb(w, h, &rgb, true, effort, method));
+                println!(
+                    "    lossless m{method} q{effort:<3.0} {:>7} {:>6.2}x  {:>8.1}µs  {:>6.2}x",
+                    data.len(),
+                    data.len() as f64 / png.data.len() as f64,
+                    took.as_secs_f64() * 1e6,
+                    took.as_secs_f64() / png_time.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+            let jpeg = jpeg_q80(w, h, &rgb);
+            let jpeg_time = time(runs, || jpeg_q80(w, h, &rgb));
+            println!(
+                "    jpeg q80          {:>7}          {:>8.1}µs",
+                jpeg.len(),
+                jpeg_time.as_secs_f64() * 1e6
+            );
+            for method in [0, 2, 4] {
+                let data = webp_rgb(w, h, &rgb, false, 80.0, method);
+                let took = time(runs, || webp_rgb(w, h, &rgb, false, 80.0, method));
+                println!(
+                    "    lossy    m{method} q80  {:>7} {:>6.2}x  {:>8.1}µs  {:>6.2}x  (vs jpeg)",
+                    data.len(),
+                    data.len() as f64 / jpeg.len() as f64,
+                    took.as_secs_f64() * 1e6,
+                    took.as_secs_f64() / jpeg_time.as_secs_f64().max(f64::EPSILON),
+                );
+            }
+        }
+    }
+
+    /// The agent's current lossy encoder at the quality it ships (`JPEG_QUALITY`
+    /// in `crates/rxa-agent/src/encode.rs`), so section 3 above compares against
+    /// what is actually deployed rather than a default.
+    fn jpeg_q80(w: u16, h: u16, rgb: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        jpeg_encoder::Encoder::new(&mut out, 80)
+            .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
+            .expect("jpeg encode failed");
+        out
     }
 }
