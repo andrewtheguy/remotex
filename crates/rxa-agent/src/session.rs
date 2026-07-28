@@ -619,13 +619,12 @@ async fn pump(
                                 if Some(id) == owned.map(capture::Target::id) =>
                             {
                                 let display = Arc::clone(display);
-                                let points = capture::display_points(id);
                                 tokio::spawn(async move {
                                     let done = tokio::task::spawn_blocking(move || {
                                         display
                                             .lock()
                                             .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
-                                            .and_then(|display| display.set_scale(wanted, points))
+                                            .and_then(|display| display.set_scale(wanted))
                                     })
                                     .await;
                                     match done {
@@ -640,8 +639,60 @@ async fn pump(
                             _ => {}
                         }
                     }
-                    // Which display, unlike what resolution, is the client's to
-                    // choose — see the message's own documentation.
+                    // The size of the client's window, gated exactly as the
+                    // density above is and for the same two reasons, and detached
+                    // for the same reason too — this reconfigure is the slower of
+                    // the pair, since it waits for the WindowServer to settle
+                    // before releasing the lock.
+                    //
+                    // The one deliberate difference is `try_lock`. A held lock
+                    // means a reconfigure is already running, and dropping this
+                    // request is the right answer: the display cannot be two sizes
+                    // at once, and whoever pressed the button can press it again
+                    // once the desktop has settled. Waiting instead would let a
+                    // person mashing the button queue one WindowServer round trip
+                    // per press — which is exactly the shape that wedges a guest's
+                    // display stack until it is rebooted (`docs/known-issues.md`),
+                    // and would park a blocking-pool thread per press if it did.
+                    GatewayMsg::ResizeDisplay { w, h } => {
+                        match (&display, target) {
+                            (Some(display), capture::Target::Owned { id, .. })
+                                if Some(id) == owned.map(capture::Target::id) =>
+                            {
+                                let display = Arc::clone(display);
+                                let points = (u32::from(w), u32::from(h));
+                                tokio::spawn(async move {
+                                    let done = tokio::task::spawn_blocking(move || {
+                                        match display.try_lock() {
+                                            Ok(display) => display.set_size(points).map(Some),
+                                            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+                                            Err(std::sync::TryLockError::Poisoned(_)) => {
+                                                Err(anyhow::anyhow!("the display lock is poisoned"))
+                                            }
+                                        }
+                                    })
+                                    .await;
+                                    match done {
+                                        Ok(Ok(Some(_))) => {}
+                                        Ok(Ok(None)) => debug!(
+                                            "session: a display reconfigure is already running; dropping this resize"
+                                        ),
+                                        Ok(Err(e)) => warn!("session: cannot resize the display: {e:#}"),
+                                        Err(e) => warn!("session: the resize did not run: {e}"),
+                                    }
+                                });
+                            }
+                            // A resize asked of a Mac's own screen, or of a display
+                            // this session is not sharing. Ignored rather than
+                            // answered with an `Error`, which the gateway treats as
+                            // fatal: a button that did nothing must never be what
+                            // ends a session.
+                            _ => {}
+                        }
+                    }
+                    // Which display to look at is the client's to choose, and
+                    // separately from how large to make it — see the messages'
+                    // own documentation.
                     GatewayMsg::SelectDisplay { id } => {
                         let next = if displays_sent.iter().any(|display| display.id == id) {
                             Some(resolve(id, owned))
