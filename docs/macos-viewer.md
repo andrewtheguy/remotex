@@ -144,18 +144,24 @@ three so they cannot spread into the model as protocol checks.
 |---|---|
 | `vnc` | follows the window continuously, debounced and deduped |
 | `rdp` with `resize` | only on **Remote → Resize to Window**; a resize forces a Deactivation-Reactivation |
-| `rxa` | sends nothing, ever |
+| `rxa` with `resize` | only on **Remote → Resize to Window**, and only while the display being shared is one the agent *made* |
+| `rxa` otherwise | sends nothing, ever |
 
-There is no resolution menu, for any target. A remote's resolution belongs to the
-machine running it; the two exceptions above are the two protocols that hand that
-decision to the client. A Mac's size arrives here as a `resize` and is never
-answered — see `docs/mac-agent-architecture.md`.
+There is no resolution menu, for any target: a remote's resolution belongs to the
+machine running it, and the rows above are the cases where that machine hands the
+decision over. `rxa` is the narrowest, and the only one whose answer changes
+mid-session — a Mac's own panel is never resized from here, so switching displays
+from **Remote → Display** turns the item on and off. `ViewportPolicy` starts an
+rxa session ignoring viewports and learns the rest from the `displays` list; see
+`docs/mac-agent-architecture.md`.
 
 A size mismatch has two directions, and **Remote → Resize to Window** is only one
 of them. Below it, **Resize to Display** takes the other: the window is sized so
 the desktop fits it exactly, and nothing goes on the wire. Which of the two is the
 one that can move is decided by a single fact — a target that takes a size from
-here gets the first, and every other target gets the second — but neither is
+here gets the first, and every other target gets the second. For an rxa target
+with `resize` that fact is answered per display, so the pair flips as the user
+switches between the Mac's own screens and the agent's. Neither is
 enabled before there is something to act on. **Resize to Display** waits for the
 desktop to have a remote size to fit the window to, and **Resize to Window** for a
 measured viewport to report; until then both are greyed, and after that exactly one

@@ -60,10 +60,20 @@ holds it fixed, are the record.
 - **Seen:** after a number of resolution changes, every further one hangs —
   `CGCompleteDisplayConfiguration` never returns and the calling thread spins at
   around 40% CPU. Nothing but a reboot of the guest clears it.
-- **Not remotex's to trigger:** nothing here changes a display's mode,
-  so this is reached only by changing the resolution on the Mac itself. The
-  agent keeps capturing whatever the display last settled on.
-- **Guard:** none possible off a real VM.
+- **Reachable from remotex, and bounded rather than prevented:** the agent
+  changes the mode of the display it made, for a client's density and for a
+  client's **Resize to window**. Four things keep the count low. It is a button,
+  never a follow, so a window drag cannot send forty. `VirtualDisplay::set_size`
+  and `set_scale` return early when the display is already there, so a repeated
+  press costs nothing. The session arm takes the display lock with `try_lock`, so
+  a person pressing during a wedge cannot queue one round trip per press. And the
+  work is detached, so a `CGCompleteDisplayConfiguration` that never returns costs
+  one parked blocking-pool thread and a frozen picture — not the session, not
+  tiles, not input. Everything else still reaches it only by changing the
+  resolution on the Mac itself.
+- **Guard:** none possible off a real VM. The closest thing is
+  `tests/rxa_resize_e2e.rs`, which asserts from the wire that a repeated request
+  for the same size produces no reconfigure at all.
 
 ## The browser can render the virtual display jagged
 

@@ -183,25 +183,36 @@ remote access generally. RealVNC Service Mode and RustDesk's installed service
 support the login screen by adding system-level launch components. Equivalent
 login-screen support is planned for remotex.
 
-The agent mirrors one whole display at a time and does not resize it to the
-browser viewport. Which display is chosen from the remotex viewer or the browser,
-per session, not in the agent's settings — so there is no display setting here,
-only the checkbox that decides whether the private display exists and the
-`virtual_display_initial_size` its first appearance uses.
+The agent mirrors one whole display at a time. Which display is chosen from the
+remotex viewer or the browser, per session, not in the agent's settings — so
+there is no display setting here, only the checkbox that decides whether the
+private display exists and the `virtual_display_initial_size` its first
+appearance uses.
 
-"Initial" is the whole of how that size behaves: it is what the private display is
-created at the first time this Mac sees it (no smaller than 800x600), and what it
-fixes permanently is the largest mode that display can ever render at 2x.
+A Mac's own screens are never resized from a client: their resolution is set on
+the Mac. The private display is the exception, because nobody is sitting at it —
+with `resize = true` on the gateway's target, **Resize to window** in either
+client asks it to match the window it is being viewed in, and the control appears
+only while that display is the one being shared.
 
-Set it there, and then leave that display alone in System Settings > Displays.
-macOS will resize it like any other screen, but it lists every size twice — a
+"Initial" is the whole of how the configured size behaves: it is what the private
+display is created at the first time this Mac sees it (no smaller than 800x600),
+and what it fixes permanently is the largest mode that display can ever render at
+2x — which is also the ceiling a Resize to window clamps to.
+
+Prefer Resize to window over the mode list in System Settings > Displays. macOS
+will resize this display like any other screen, but it lists every size twice — a
 HiDPI entry and a `(low resolution)` one — and a display shrunk much below the
 size it was created at drops out of HiDPI whichever entry is picked, so it comes
-back soft or oversized at a size nobody chose. macOS then remembers that against
-the display and restores it on the next launch, and editing the setting will not
-move a display that has already been arranged. Its density needs no help either:
-whichever client is connected reports the screen it is on, and the display
-matches it.
+back soft or oversized at a size nobody chose. Resize to window stays inside the
+envelope and keeps the density the display is in, so it cannot land on either.
+
+Whatever the display ends up at, however it got there, macOS remembers it against
+that display and restores it on the next launch — so a resize asked for from a
+client sticks the same way one made in System Settings does, and editing the
+setting will not move a display that has already been arranged. Its density needs
+no help at all: whichever client is connected reports the screen it is on, and the
+display matches it.
 
 See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
 for the capture, transport, and lifecycle design.

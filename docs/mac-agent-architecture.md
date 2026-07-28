@@ -47,8 +47,8 @@ Noise transport frames carry length-prefixed `rxa-proto` messages:
   shared, PNG/JPEG tiles, cursor shape, pasteboard text (on request or when the
   watched pasteboard changes), and heartbeat pongs;
 - gateway to agent: mouse, wheel, and keyboard input, session control, a display
-  selection, clipboard read requests, writes and the watch toggle, and heartbeat
-  pings.
+  selection, a size and a density for a display the agent made, clipboard read
+  requests, writes and the watch toggle, and heartbeat pings.
 
 The gateway translates these into the same browser protocol used by RDP and
 VNC. It passes tile payloads through byte-for-byte. RXA ping/pong independently
@@ -109,18 +109,24 @@ whole point. *Which* screen to look at is a question about the person looking, s
 a client answers it. *What resolution* that screen runs at is a question about
 the machine, so the machine answers it.
 
-There is no message on this wire that asks it to
-change resolution, and `resize = true` on an `rxa` target is a config error.
-Whoever is using that machine sets the mode where every other mode is set — in
-System Settings > Displays — and the agent finds out the same way for every kind
-of display: `Capture::follow_display` re-measures on the cursor tick, resizes the
-capture surface, and the new size travels as `AgentMsg::DisplaySize` ordered with
-the tiles it applies to.
+For a screen somebody is sitting at, that is the whole of it: nothing on this
+wire asks a Mac's own panel to change resolution. Whoever is using that machine
+sets the mode where every other mode is set — in System Settings > Displays — and
+the agent finds out the same way for every kind of display:
+`Capture::follow_display` re-measures on the cursor tick, resizes the capture
+surface, and the new size travels as `AgentMsg::DisplaySize` ordered with the
+tiles it applies to.
 
-That includes the display the agent creates for itself, which is why it needs no
-mechanism of its own — see below. Selecting a different display is not a
-resolution change either: the size that follows is the size that display was
-already at.
+The one exception is the display the agent creates for itself, and it is an
+exception to the *premise* rather than to the rule: nobody is sitting at that
+display, so there is no one on the machine for the question to belong to. A
+client may ask for its size — `GatewayMsg::ResizeDisplay`, on the user's request,
+gated on the target's `resize` and on that display being the one being shared —
+and the answer comes back through the same `follow_display` path as every other
+cause. See [Its size follows the client's window, when asked](#its-size-follows-the-clients-window-when-asked).
+
+Selecting a different display is not a resolution change either: the size that
+follows is the size that display was already at.
 
 Some displays change size with nobody touching System Settings at all. A UTM
 guest's default screen is the host's to size: Apple Virtualization's
@@ -157,11 +163,13 @@ our display arranged as the *main* one, so a session started there. That is the
 remembered arrangement doing its job — see A stable identity below — and not
 something the agent second-guesses.
 
-Created once, and then it belongs to macOS. It appears in System Settings >
-Displays with the mode list macOS derives from the descriptor — a HiDPI entry and
-a `(low resolution)` one at each size — so it is resized exactly where every
-other display on that Mac is resized. The agent never applies a second
-configuration to it.
+Created once, and then it belongs to whoever is looking through it. It appears in
+System Settings > Displays with the mode list macOS derives from the descriptor —
+a HiDPI entry and a `(low resolution)` one at each size — so it can be resized
+exactly where every other display on that Mac is resized. Two of its properties
+can also be set from here, and the two sections below are why: its density
+follows the client automatically, and its size follows the client's window when
+the person asks.
 
 The API reports success for configurations that do not work, so
 `virtualdisplay.rs` checks rather than trusts. The mode is listed at the
@@ -195,12 +203,13 @@ random.
 
 ## Its density follows the client
 
-The one thing about this display that is not the Mac's to decide, and it is the
-one thing nobody at the Mac is deciding *for*: a display nobody sits in front of
-has no right density of its own, only the right density for whoever is looking
-through it. So both clients report the backing scale of the screen their window
-is on — on connect, and again when the window changes screen — and the agent
-matches it with `applySettings:` at the display's current point size.
+One of two things about this display that are not the Mac's to decide, and they
+are the two nobody at the Mac is deciding *for*: a display nobody sits in front
+of has no right density and no right size of its own, only the right ones for
+whoever is looking through it. So both clients report the backing scale of the
+screen their window is on — on connect, and again when the window changes screen
+— and the agent matches it with `applySettings:` at the display's current point
+size.
 
 The point size is deliberately preserved, so the desktop keeps its layout and only
 the pixels behind it change; a client connecting from a different screen does not
@@ -210,12 +219,57 @@ WindowServer round trip that relays that desktop's windows.
 
 Narrow on purpose, in three ways. It reaches only a display the agent *made* — a
 Mac's own panel does not change because someone connected. It changes only the
-density, never the resolution (see [`roadmap.md`](roadmap.md) for the size
-question, which is a button rather than something automatic). And it changes what
+density, never the resolution; that is the section below. And it changes what
 the client *receives*, never how the client draws it: both clients present a
 remote at its own point size and let their host rasterize that, so mismatched
 densities already look correct — this is what makes them stop costing four times
 the framebuffer, or stop being resampled.
+
+## Its size follows the client's window, when asked
+
+The same argument, applied to the other property, with one difference that
+decides the whole shape: a reconfigure relays every window on that desktop, and a
+guest's display stack can wedge after enough of them ([`known-issues.md`](known-issues.md)).
+So this is RDP's shape rather than VNC's — the floating menu's and the viewer's
+**Resize to window**, pressed, never a window drag followed forty times.
+
+Measured on the test VM (macOS 26.5.2): `applySettings:` on the live display
+honours an arbitrary point size, keeps the same `displayID`, applies in 66–397 ms
+and settles 134–580 ms later. `VirtualDisplay::set_size` waits for that settle
+before releasing the display lock, and returns early when the display is already
+that size, so a second press on a window that did not move costs nothing.
+
+Three gates, and they answer different questions:
+
+- **`resize = true` on the gateway target.** The operator's permission. Accepted
+  for `rxa` targets, and it cannot be validated further from the gateway: whether
+  a Mac's agent even has a private display lives in that Mac's own config.
+- **The shared display is one the agent made.** Both clients read this off the
+  `displays` list and enable the control accordingly, so it appears when the user
+  picks the agent's display and disappears when they pick a real screen.
+- **The agent agrees.** The only non-racy authority, since it owns the display.
+  A request for anything else is dropped in silence — an `AgentMsg::Error` would
+  be fatal to the session, and a button that did nothing must never end one.
+
+**Units.** A client's `viewport` is remote *pixels* — its window times the
+density the gateway announced — and a display mode is *points*, so the gateway
+divides on the way through. It holds the exact scale the client multiplied by,
+which makes that an exact inverse; the agent's live density would not be, because
+a display publishes no mode to read for tens of milliseconds around a density
+change.
+
+**Bounds.** The request is clamped into the envelope creation fixed, per axis, and
+never refused — past `maxPixels` there is nothing to refuse with, since
+`applySettings:` answers YES and halves the result. Below roughly 57% of the
+created width the mode leaves the HiDPI window and comes back 1x; that is applied
+rather than clamped away, because 2x is not obtainable there at any size that
+could be substituted, and the honest answer is the size that was asked for at the
+density it can hold. `capture::mode_scale` then reports the truth.
+
+**Nothing reverts it.** Not on disconnect, not at the next launch, and nothing is
+written back to the config file. macOS files the resulting mode against the
+display's identity, so a resize asked for from a viewer sticks exactly the way one
+made in System Settings sticks — see the next section.
 
 ## Its identity, and what macOS remembers against it
 
@@ -227,9 +281,10 @@ That is what makes a monitor you plug back in come back where you left it, and i
 is the behaviour to have rather than one to work around. An identity that changed
 between launches would be a new display every time, and would forget the lot.
 
-So the agent takes the arrangement macOS gives it as given. It measures what it
-finds, reports that, and never applies a second configuration. Two things follow,
-and both are only surprising if you expected the agent to be in charge:
+So the agent takes the arrangement macOS gives it at startup as given. It
+measures what it finds and reports that, rather than applying a configuration of
+its own accord. Two things follow, and both are only surprising if you expected
+the agent to be in charge:
 
 - **A session can start on this display.** It starts on whichever display the Mac
   calls main, and if the arrangement makes ours primary, that is ours. Overriding
@@ -238,15 +293,19 @@ and both are only surprising if you expected the agent to be in charge:
   what the display is created at the first time a Mac sees it (at least 800x600,
   a floor `config.rs` and `virtualdisplay.rs` share); afterwards the remembered
   mode wins, and editing the setting will not move a display that has already
-  been arranged. What the value fixes permanently is the *ceiling*, since
+  been arranged. What the value fixes permanently is the *envelope*, since
   `maxPixels` and `sizeInMillimeters` cannot change after creation.
 
-  Which is also why both the config comment and the settings dialog say to set
-  the size there and then leave the display alone in System Settings. Resizing it
-  is *allowed* — it is an ordinary display — but the mode list offers a
-  `(low resolution)` twin of every size, a mode much below the created one falls
-  out of the density window whichever twin is picked, and macOS then remembers
-  the result. None of that is recoverable from this process: only a new display
+  A client's Resize to window lands in that same remembered mode, which is the
+  intended consequence rather than a leak: a resize asked for from a viewer comes
+  back after a restart the way a monitor comes back where you left it. It is also
+  the reason to prefer it over the mode list in System Settings, which both the
+  config comment and the settings dialog now say. Resizing there is *allowed* —
+  it is an ordinary display — but the list offers a `(low resolution)` twin of
+  every size, and a mode much below the created one falls out of the density
+  window whichever twin is picked. Resize to window stays inside the envelope and
+  keeps the density the display is in, so it cannot land on either. Neither is
+  recoverable from this process once macOS has remembered it: only a new display
   restores the density, and a new display means a new identity and the lost
   arrangement above.
 

@@ -103,16 +103,19 @@ Browser-to-server traffic is JSON:
 Viewport reports affect only engines configured for resize, and there is no
 other way for a client to ask for a size — no menu of resolutions, for any
 protocol. RDP resize is explicit from the UI; VNC resize follows the browser
-when the server advertises the extension. Those two protocols hand the desktop
-size to the client; every other remote's resolution is set on the remote, `rxa`
-included, and reaches the client only as a `resize`.
+when the server advertises the extension. `rxa` is explicit too and narrower
+still: what it resizes is the private display the agent can create, never one of
+the Mac's own screens, so the control appears only while that display is the one
+being shared. A remote's resolution is otherwise set on the remote and reaches
+the client only as a `resize`.
 
 Choosing *which* of a remote's displays to view is a separate matter, and one a
 client does decide: an engine that can offer a choice sends a `displays` list and
 acts on `selectDisplay`. Only `rxa` can — RDP and VNC each deliver a single
-framebuffer spanning every remote screen — so those clients show no picker. It
-changes nothing about resolution: the size that follows is the size the chosen
-display was already at.
+framebuffer spanning every remote screen — so those clients show no picker.
+Switching changes nothing about resolution: the size that follows is the size the
+chosen display was already at. What it does change is whether a resize may be
+asked for at all, since only the agent's own display can take one.
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine, so a new canvas does not
@@ -217,7 +220,8 @@ filled, because the two dialects want different ones and guessing is how a good
 password ends up authenticating nobody. It therefore requires `username` and
 `password`, rejects `vnc_password`, and rejects `resize` — macOS accepts the
 resize negotiation and then ignores every request, so the key would promise a
-control that does nothing. A plain `vnc` target is the mirror image: it takes
+control that does nothing, and there is no agent-made display behind this
+protocol for it to mean something about. A plain `vnc` target is the mirror image: it takes
 `vnc_password` only. Reaching a Mac as a plain target is allowed and warned about
 once, in the log, at the moment it can still be changed.
 
@@ -259,11 +263,12 @@ seconds — long enough to hide a Wi-Fi roam or an agent restart, short enough t
 a Mac which was switched off does not leave a frozen desktop on screen.
 
 A client picks which of the Mac's displays to share, and the agent reports the
-set it has. Nothing on this wire asks the Mac to change a display's *resolution*,
-though, and `resize = true` on an `rxa` target is a config error. The Mac's mode
-is changed on the Mac — in System Settings, including for the private display the
-agent can create for itself, which appears there like any other screen — and the
-agent reports the new size when it sees it. See
+set it has. A Mac's own screens keep their mode: nothing on this wire asks a
+physical panel to change resolution, and it is changed on the Mac, in System
+Settings, with the agent reporting the new size when it sees it. The private
+display the agent can create for itself is the exception — nobody is sitting at
+it, so a client may ask for its size with `resize = true` on the target and that
+display being the one shared. See
 [`mac-agent-architecture.md`](mac-agent-architecture.md).
 
 RXA has a separate application ping/pong between the gateway and agent to detect
@@ -341,7 +346,7 @@ sections. See [`install.md`](install.md) and
 
 Protocol-specific fields are validated during startup. In particular, `rxa`
 requires a checksum-valid PSK; incompatible fields are rejected rather than
-silently accepted, `resize` on an `rxa` target among them.
+silently accepted, `resize` on a `subtype = "ard"` target among them.
 
 Unit tests cover protocol, config, authentication, key mapping, and engine
 helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and
