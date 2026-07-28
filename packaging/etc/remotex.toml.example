@@ -124,9 +124,10 @@ password = "change-me"
 # agent notices whatever mode it is put in and the client follows. But the agent
 # can also create a private display for itself (`virtual_display` in its own
 # config), and nobody is sitting at that one — so with `resize = true` here,
-# "Resize to window" asks it to match the window it is being viewed in. The
-# control appears only while that display is the one being shared, and does
-# nothing at all on a Mac whose agent has no such display.
+# "Resize to window" asks it to match the window it is being viewed in. It
+# applies only while that display is the one being shared: the viewer keeps the
+# menu item and greys it out otherwise, the browser shows its button only when it
+# applies. On a Mac whose agent has no such display it never applies at all.
 # [[targets]]
 # name = "mac"
 # protocol = "rxa"

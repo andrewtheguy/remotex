@@ -245,8 +245,9 @@ Three gates, and they answer different questions:
   for `rxa` targets, and it cannot be validated further from the gateway: whether
   a Mac's agent even has a private display lives in that Mac's own config.
 - **The shared display is one the agent made.** Both clients read this off the
-  `displays` list and enable the control accordingly, so it appears when the user
-  picks the agent's display and disappears when they pick a real screen.
+  `displays` list and enable the control accordingly, as the user picks the
+  agent's display or a real screen from the Display menu. They present it
+  differently: the viewer greys the menu item, the browser omits its button.
 - **The agent agrees.** The only non-racy authority, since it owns the display.
   A request for anything else is dropped in silence — an `AgentMsg::Error` would
   be fatal to the session, and a button that did nothing must never end one.
@@ -302,12 +303,14 @@ the agent to be in charge:
   the reason to prefer it over the mode list in System Settings, which both the
   config comment and the settings dialog now say. Resizing there is *allowed* —
   it is an ordinary display — but the list offers a `(low resolution)` twin of
-  every size, and a mode much below the created one falls out of the density
-  window whichever twin is picked. Resize to window stays inside the envelope and
-  keeps the density the display is in, so it cannot land on either. Neither is
-  recoverable from this process once macOS has remembered it: only a new display
-  restores the density, and a new display means a new identity and the lost
-  arrangement above.
+  every size, so half of what it presents is 1x at a size that could have been
+  2x. Resize to window never picks the twin: it stays inside the envelope and
+  re-applies the density the display is in. What it cannot do is hold that
+  density below the floor described under Bounds above — a small enough window
+  leaves the HiDPI range and comes back 1x there too, at the size that was asked
+  for. Neither is recoverable from this process once macOS has remembered it:
+  only a new display restores the density, and a new display means a new identity
+  and the lost arrangement above.
 
 The one remembered state that is a genuine problem is an arrangement that holds
 the identity **offline**. Nothing in the process can clear it, and the agent
