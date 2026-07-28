@@ -45,17 +45,21 @@ use objc2_foundation::{
 
 /// Width of an accessory view, in points.
 ///
-/// Sized so a 50-character public key fits on one line in a 12pt monospaced
-/// font: a key that wrapped or scrolled would invite copying half of it by
-/// hand. Menlo 12 advances about 7.23pt per character, so 50 of them need
-/// ~361pt plus a field's insets, against the [`WIDTH`] − [`CONTROL_X`] a row
-/// leaves for its control.
-const WIDTH: f64 = 490.0;
+/// What sets it is the key rows: a 50-character key has to fit on one line in a
+/// 12pt monospaced font, because one that scrolls is one somebody copies half of
+/// by hand. Menlo 12 advances ~7.23pt per character, so 50 of them need ~361pt
+/// plus the field's insets — and what a row leaves for its control is
+/// `WIDTH - CONTROL_X`, which is why widening [`LABEL_WIDTH`] means widening
+/// this too. Both were measured on screen: at 490 against a 126pt label the last
+/// character of the key was cut off.
+const WIDTH: f64 = 540.0;
 
 /// One row of the settings dialog: label on the left, control on the right.
 const ROW_HEIGHT: f64 = 24.0;
 const ROW_GAP: f64 = 10.0;
-const LABEL_WIDTH: f64 = 126.0;
+/// Wide enough for the longest caption, "This Mac's public key", which at 490
+/// against 126pt rendered as "This Mac's public ke".
+const LABEL_WIDTH: f64 = 150.0;
 const CONTROL_X: f64 = LABEL_WIDTH + 8.0;
 /// A single line of label text, so a caption can be centred against its control
 /// rather than sitting at the top of a 24pt frame.
@@ -118,19 +122,17 @@ pub fn config(
     displays: &[String],
     in_force: &InForce,
 ) -> Option<Draft> {
+    // Kept short on purpose: this is an NSAlert, so the body pushes the rows
+    // down, and the whole panel has to fit a small screen — the test Mac's is
+    // 800x600. The detail lives in the rows' own tooltips.
     let mut body = String::from(
-        "Pairing is two public keys, one each way. Copy this Mac's onto the gateway as \
-         `agent_public_key` on the matching [[targets]] entry in remotex.toml, and paste \
-         the gateway's own — `remotex rxa-pubkey` prints it — below. Neither is a secret. \
-         The private key behind this Mac's stays in its config file and is never \
-         shown.\n\nSaving a change restarts the agent, which drops any connection in \
-         progress — the gateway reconnects on its own.",
+        "Pairing is two public keys, one each way, and neither is a secret. Copy this \
+         Mac's onto the gateway as `agent_public_key`; paste the gateway's own — from \
+         `remotex rxa-pubkey` — below.\n\nSaving restarts the agent, dropping any \
+         connection in progress. The gateway reconnects on its own.",
     );
     if current.gateway_public_key.trim().is_empty() {
-        body.push_str(
-            "\n\n⚠︎ No gateway key is set, so this Mac is unpaired: it is listening, and \
-             refusing every connection.",
-        );
+        body.push_str("\n\n⚠︎ Unpaired: no gateway key is set, so every connection is refused.");
     }
     // Said out loud rather than left in a tooltip, because the difference
     // between the saved pairing and the running one is the difference between a
