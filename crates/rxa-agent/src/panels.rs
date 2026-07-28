@@ -38,7 +38,7 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSModalResponseCancel,
     NSModalResponseOK, NSPanel, NSTextAlignment, NSTextField, NSView,
     NSWindowButton, NSWindowStyleMask,
@@ -100,6 +100,27 @@ const COPY_WIDTH: f64 = 78.0;
 const IMPORT_WIDTH: f64 = 84.0;
 const REGENERATE_WIDTH: f64 = 144.0;
 const BUTTON_GAP: f64 = 8.0;
+
+/// How much of the read-only fill is let through, over the panel behind it.
+///
+/// The fill is a semantic grey thinned with alpha rather than a lighter named
+/// colour, and the alpha is the reason: it is one number to turn when the shade
+/// is wrong, and it stays correct in dark mode — where the panel behind is dark
+/// and a hardcoded light grey would be a bright band across it. At `1.0` the grey
+/// read heavier than the row needed.
+const READ_ONLY_FILL_ALPHA: f64 = 0.4;
+
+/// The fill behind a value that can be read and copied but not typed into.
+fn read_only_fill() -> Retained<NSColor> {
+    NSColor::unemphasizedSelectedContentBackgroundColor()
+        .colorWithAlphaComponent(READ_ONLY_FILL_ALPHA)
+}
+
+/// What a bezel insets its text by, and a bare border does not.
+///
+/// Measured against the bezeled gateway field on the row below, which is the
+/// alignment this one has to match.
+const BEZEL_INSET: f64 = 3.0;
 
 /// The line that distinguishes the agent-made display from a physical one.
 ///
@@ -703,12 +724,41 @@ define_class!(
 impl SelectAllField {
     fn new(mtm: MainThreadMarker, value: &str, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(SelectAllFieldIvars);
+        // Inset on the horizontal only. A bezel's own inset is what puts its text
+        // where the neighbouring rows have theirs; a bordered field has none, so
+        // without this the key sits hard against its border and ~3pt left of the
+        // gateway key below.
+        let frame = NSRect::new(
+            NSPoint::new(frame.origin.x + BEZEL_INSET, frame.origin.y),
+            NSSize::new(frame.size.width - BEZEL_INSET, frame.size.height),
+        );
         let this: Retained<Self> =
             unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setStringValue(&NSString::from_str(value));
         this.setFont(NSFont::userFixedPitchFontOfSize(12.0).as_deref());
         this.setEditable(false);
         this.setSelectable(true);
+        // The fill is the whole of how this reads as a value rather than a field.
+        // `initWithFrame:` gives an NSTextField a bezel and `textBackgroundColor` —
+        // white, the colour of somewhere to type — so it was indistinguishable
+        // from the gateway field below, which *is* typed into.
+        //
+        // A bezeled NSTextField ignores `backgroundColor` — measured both ways on
+        // the test Mac: bezel on, an obvious grey drew white; bezel off, the colour
+        // appears. So a custom fill means no bezel, and the bezel's two other jobs
+        // have to be done by hand:
+        //
+        // - **the border**, or the value has nothing to sit in. `setBordered` draws
+        //   a plain rectangle where the bezel drew a rounded, shaded one.
+        // - **the horizontal inset**. A bezel insets its text; a bare border does
+        //   not, so the key started left of the gateway key below it — the
+        //   misalignment. The frame is inset by [`BEZEL_INSET`] to put the text back
+        //   in the column the bezeled rows have it in. Vertically the two agree
+        //   without help, so nothing is done to the height.
+        this.setBezeled(false);
+        this.setBordered(true);
+        this.setDrawsBackground(true);
+        this.setBackgroundColor(Some(&read_only_fill()));
         this
     }
 }

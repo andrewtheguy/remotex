@@ -79,6 +79,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSFont",
     "NSWindow",
     "NSPopUpButton",
+    # NSColor is what makes the read-only public key look read-only: an
+    # NSTextField built with `initWithFrame:` fills itself with
+    # `textBackgroundColor` and reads as somewhere to type. It also gates
+    # NSTextField's own `setBackgroundColor`.
+    "NSColor",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
