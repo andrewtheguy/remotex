@@ -34,9 +34,10 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
-    protocol::{ClientMsg, ServerMsg, WireFrame},
+    protocol::{ClientMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager},
+    wire::Wire,
 };
 
 /// Close code: the session token is missing, invalid, or superseded.
@@ -62,67 +63,6 @@ const HEARTBEAT_TIMINGS: HeartbeatTimings = HeartbeatTimings {
 #[derive(Deserialize)]
 pub struct WsParams {
     session: Option<String>,
-}
-
-/// What one attachment cost on the wire, logged when it ends.
-///
-/// This link — backend to a possibly weak-signal WAN browser — is the bottleneck
-/// the binary tile transport optimizes, and the repo has no benchmark harness, so
-/// this line is the only measurement of it that exists. Two things it reports that
-/// a plain byte total cannot:
-///
-/// - **frames separately from bytes**, because a transport change can move one
-///   without the other (many small frames and one large frame carrying the same
-///   pixels cost very different amounts in per-frame overhead and in client-side
-///   decode scheduling);
-/// - **the largest single frame**, which is the number a client's WebSocket message
-///   ceiling is measured against — the macOS viewer raises `maximumMessageSize`
-///   because exceeding it kills the whole socket rather than dropping one frame.
-#[derive(Default)]
-struct Totals {
-    binary_frames: u64,
-    binary_bytes: u64,
-    text_frames: u64,
-    text_bytes: u64,
-    largest_binary: u64,
-    /// `(format, w, h)` of the tile in the largest binary frame, for context on
-    /// what that ceiling is actually being spent on.
-    largest_tile: Option<(u8, u16, u16)>,
-}
-
-impl Totals {
-    fn binary(&mut self, len: usize, tile: Option<(u8, u16, u16)>) {
-        let len = len as u64;
-        self.binary_frames += 1;
-        self.binary_bytes += len;
-        if len > self.largest_binary {
-            self.largest_binary = len;
-            self.largest_tile = tile;
-        }
-    }
-
-    fn text(&mut self, len: usize) {
-        self.text_frames += 1;
-        self.text_bytes += len as u64;
-    }
-}
-
-impl std::fmt::Display for Totals {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} binary frames / {} bytes, {} text frames / {} bytes, largest binary {} bytes",
-            self.binary_frames,
-            self.binary_bytes,
-            self.text_frames,
-            self.text_bytes,
-            self.largest_binary
-        )?;
-        if let Some((format, w, h)) = self.largest_tile {
-            write!(f, " ({w}x{h} format {format})")?;
-        }
-        Ok(())
-    }
 }
 
 pub async fn handler(
@@ -158,14 +98,14 @@ async fn session(
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (attach_id, mut events) = (attachment.id, attachment.events);
 
-    // Outbound: session events -> browser. Wire counters are logged at the end of
-    // the attachment so the transport can be measured in the field (see
-    // [`Totals`]). Ends on eviction (explicit close) or engine death.
+    // Outbound: session events -> browser, batched through [`Wire`], whose
+    // counters are logged when the attachment ends so the transport can be
+    // measured in the field. Ends on eviction (explicit close) or engine death.
     let mut outbound = tokio::spawn(async move {
-        let mut totals = Totals::default();
+        let mut wire = Wire::default();
         let mut heartbeat = interval(heartbeat_timings.interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
+        'outbound: loop {
             let event = tokio::select! {
                 event = events.recv() => {
                     let Some(event) = event else {
@@ -180,40 +120,50 @@ async fn session(
                     continue;
                 }
             };
-            let msg = match event {
-                AttachEvent::Msg(msg) => msg,
-                AttachEvent::Evicted => {
-                    info!("ws: evicted by a session takeover");
-                    let _ = ws_tx
-                        .send(Message::Close(Some(CloseFrame {
-                            code: CLOSE_EVICTED,
-                            reason: "session taken over".into(),
-                        })))
-                        .await;
-                    break;
+
+            // Take everything already queued behind the first message, so a burst
+            // of tiles is batched instead of costing a frame each. `try_recv` and
+            // not another `await`: a batch must never *wait* for more work, only
+            // collect what is already there. Under a slow link the channel fills
+            // and the batches grow, which is the adaptation wanted — bigger writes
+            // exactly when per-frame overhead hurts most.
+            let mut run = Vec::new();
+            let mut evicted = false;
+            for event in std::iter::once(event).chain(std::iter::from_fn(|| events.try_recv().ok()))
+            {
+                match event {
+                    AttachEvent::Msg(msg) => run.push(msg),
+                    AttachEvent::Evicted => {
+                        evicted = true;
+                        break;
+                    }
                 }
-            };
-            // Read before encoding: only the tile variant produces a binary frame,
-            // and `encode` consumes the shape the dimensions come from.
-            let tile = match &msg {
-                ServerMsg::Tile(tile) => Some((tile.format, tile.w, tile.h)),
-                _ => None,
-            };
-            let frame = match msg.encode() {
-                WireFrame::Binary(bytes) => {
-                    totals.binary(bytes.len(), tile);
-                    Message::Binary(bytes.into())
+            }
+
+            // Whatever was already encoded still goes out first: eviction is not a
+            // reason to drop paint the client was owed.
+            for frame in wire.encode(run) {
+                let frame = match frame {
+                    WireFrame::Binary(bytes) => Message::Binary(bytes.into()),
+                    WireFrame::Text(json) => Message::Text(json.into()),
+                };
+                if ws_tx.send(frame).await.is_err() {
+                    break 'outbound; // browser gone
                 }
-                WireFrame::Text(json) => {
-                    totals.text(json.len());
-                    Message::Text(json.into())
-                }
-            };
-            if ws_tx.send(frame).await.is_err() {
-                break; // browser gone
+            }
+
+            if evicted {
+                info!("ws: evicted by a session takeover");
+                let _ = ws_tx
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_EVICTED,
+                        reason: "session taken over".into(),
+                    })))
+                    .await;
+                break;
             }
         }
-        info!("ws: outbound totals: {totals}");
+        info!("ws: outbound totals: {}", wire.totals);
     });
 
     // Inbound: browser input -> protocol engine. Also ends when the outbound

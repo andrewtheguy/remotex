@@ -328,20 +328,24 @@ actor GatewayConnection {
     }
 
     private func deliver(tile data: Data) async {
-        guard let frame = TileFrame.decode(data) else {
-            log.warning("malformed tile frame of \(data.count, privacy: .public) bytes")
+        guard let frames = BatchFrame.decode(data) else {
+            log.warning("malformed batch frame of \(data.count, privacy: .public) bytes")
             return
         }
-        guard let decoded = await decoder.decode(frame) else {
-            log.warning(
-                """
-                undecodable \(String(describing: frame.format), privacy: .public) tile \
-                \(frame.w, privacy: .public)x\(frame.h, privacy: .public)
-                """
-            )
-            return
+        // In order, and each awaited: a later tile has to overwrite an earlier one
+        // that covers the same pixels.
+        for frame in frames {
+            guard let decoded = await decoder.decode(frame) else {
+                log.warning(
+                    """
+                    undecodable \(String(describing: frame.format), privacy: .public) tile \
+                    \(frame.w, privacy: .public)x\(frame.h, privacy: .public)
+                    """
+                )
+                continue
+            }
+            await publish(.tile(decoded))
         }
-        await publish(.tile(decoded))
     }
 
     // MARK: - Outbound

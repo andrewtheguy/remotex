@@ -4,7 +4,7 @@ import {
   type ClipboardSnapshot,
   type ControlMsg,
   type DisplayInfo,
-  decodeTileFrame,
+  decodeBatchFrame,
   MAX_CLIPBOARD_BYTES,
   type MouseButton,
   mouseButtonFromEvent,
@@ -726,10 +726,10 @@ export function useRemoteDesktop(
         // longer closes the socket; the server returns it to the picker.)
         scheduleRetry();
       };
-      // PNG tiles decode asynchronously (createImageBitmap), so all messages
-      // are chained through one promise queue: draws land in arrival order
-      // (later tiles must overwrite earlier ones) and a resize can't jump the
-      // queue. The catch keeps a garbled frame from stalling the chain.
+      // Tiles decode asynchronously (createImageBitmap), so all messages are
+      // chained through one promise queue: draws land in arrival order (later
+      // tiles must overwrite earlier ones) and a resize can't jump the queue.
+      // The catch keeps a garbled frame from stalling the chain.
       let queue: Promise<void> = Promise.resolve();
       socket.onmessage = (ev) => {
         queue = queue.then(() => handleMessage(ev.data)).catch(() => {});
@@ -748,10 +748,22 @@ export function useRemoteDesktop(
         return;
       }
       if (data instanceof ArrayBuffer) {
-        const tile = decodeTileFrame(data);
-        if (tile) {
-          await drawTile(tile);
-        }
+        await drawBatch(data);
+      }
+    };
+
+    // One binary frame carries however many tiles were ready at once.
+    //
+    // A malformed batch is dropped whole rather than partly applied: half a
+    // repaint leaves the canvas in a state nothing will correct, where dropping
+    // it costs one refresh.
+    const drawBatch = async (data: ArrayBuffer) => {
+      const tiles = decodeBatchFrame(data);
+      if (!tiles) {
+        return;
+      }
+      for (const tile of tiles) {
+        await drawTile(tile);
       }
     };
 

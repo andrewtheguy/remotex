@@ -156,6 +156,9 @@ export interface TileMsg {
   y: number;
   w: number;
   h: number;
+  // Where the server wants this remembered, or NO_SLOT for "do not". Parsed but
+  // unused until the client keeps a tile cache.
+  slot: number;
   // An encoded image stream, in `mime`.
   data: Uint8Array;
   // What `data` is, for the Blob handed to createImageBitmap. The RDP and VNC
@@ -163,47 +166,75 @@ export interface TileMsg {
   mime: "image/png" | "image/jpeg";
 }
 
-const TILE_FRAME_KIND = 0x01;
+const BATCH_FRAME_KIND = 0x02;
+const BATCH_HEADER_LEN = 4;
+const OP_TILE = 0x01;
+const TILE_HEADER_LEN = 16;
 const TILE_FORMAT_PNG = 1;
 const TILE_FORMAT_JPEG = 2;
-const TILE_HEADER_LEN = 10;
+export const NO_SLOT = 0xffff;
 
-// Parse a binary tile frame. Layout (little-endian, matching `Tile::to_frame`
-// in the backend):
+// Parse a binary batch frame into its tile records. Layout (little-endian,
+// matching `batch` in `src/protocol.rs`):
 //
-//   offset 0: u8  frame kind, always 0x01 (tile)
-//   offset 1: u8  format: 1 = PNG, 2 = JPEG
-//   offset 2: u16 x | 4: u16 y | 6: u16 w | 8: u16 h
-//   offset 10: payload (a PNG or JPEG stream)
+//   offset 0: u8  frame kind, always 0x02 (batch)
+//   offset 1: u8  flags, always 0
+//   offset 2: u16 record count
+//   offset 4: records, back to back
 //
-// Returns null for anything malformed or unknown.
-export function decodeTileFrame(buf: ArrayBuffer): TileMsg | null {
-  if (buf.byteLength < TILE_HEADER_LEN) {
+//   TILE (op 0x01): u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
+//                   | u32 len | payload[len]
+//
+// Returns null for anything malformed or unknown, so callers can drop a bad
+// frame whole rather than paint half of it. A truncated frame is *detectable*
+// only because the header carries a record count — without it, a short read
+// would look like a complete but smaller batch.
+export function decodeBatchFrame(buf: ArrayBuffer): TileMsg[] | null {
+  if (buf.byteLength < BATCH_HEADER_LEN) {
     return null;
   }
   const view = new DataView(buf);
-  if (view.getUint8(0) !== TILE_FRAME_KIND) {
+  if (view.getUint8(0) !== BATCH_FRAME_KIND || view.getUint8(1) !== 0) {
     return null;
   }
-  let mime: TileMsg["mime"];
-  switch (view.getUint8(1)) {
-    case TILE_FORMAT_PNG:
-      mime = "image/png";
-      break;
-    case TILE_FORMAT_JPEG:
-      mime = "image/jpeg";
-      break;
-    default:
+  const count = view.getUint16(2, true);
+  const tiles: TileMsg[] = [];
+  let at = BATCH_HEADER_LEN;
+  while (at < buf.byteLength) {
+    if (view.getUint8(at) !== OP_TILE) {
       return null;
+    }
+    if (at + TILE_HEADER_LEN > buf.byteLength) {
+      return null;
+    }
+    let mime: TileMsg["mime"];
+    switch (view.getUint8(at + 1)) {
+      case TILE_FORMAT_PNG:
+        mime = "image/png";
+        break;
+      case TILE_FORMAT_JPEG:
+        mime = "image/jpeg";
+        break;
+      default:
+        return null;
+    }
+    const len = view.getUint32(at + 12, true);
+    const start = at + TILE_HEADER_LEN;
+    if (start + len > buf.byteLength) {
+      return null;
+    }
+    tiles.push({
+      slot: view.getUint16(at + 2, true),
+      x: view.getUint16(at + 4, true),
+      y: view.getUint16(at + 6, true),
+      w: view.getUint16(at + 8, true),
+      h: view.getUint16(at + 10, true),
+      data: new Uint8Array(buf, start, len),
+      mime,
+    });
+    at = start + len;
   }
-  return {
-    x: view.getUint16(2, true),
-    y: view.getUint16(4, true),
-    w: view.getUint16(6, true),
-    h: view.getUint16(8, true),
-    data: new Uint8Array(buf, TILE_HEADER_LEN),
-    mime,
-  };
+  return tiles.length === count ? tiles : null;
 }
 
 // Map DOM MouseEvent.button (0/1/2) to the protocol button name.

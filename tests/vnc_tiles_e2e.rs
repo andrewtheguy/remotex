@@ -20,9 +20,7 @@ use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-const TILE_FRAME_KIND: u8 = 0x01;
 const TILE_FORMAT_PNG: u8 = 1;
-const TILE_HEADER_LEN: usize = 10;
 
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
@@ -90,27 +88,28 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary tile frame against the desktop bounds and return its
-/// pixel area.
+/// Validate one binary batch frame against the desktop bounds and return the
+/// pixel area of every tile in it.
 fn check_tile_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> u64 {
-    assert!(frame.len() >= TILE_HEADER_LEN, "frame shorter than the header");
-    assert_eq!(frame[0], TILE_FRAME_KIND, "unexpected frame kind");
-    assert_eq!(frame[1], TILE_FORMAT_PNG, "unexpected tile format byte");
-    let x = u16::from_le_bytes([frame[2], frame[3]]);
-    let y = u16::from_le_bytes([frame[4], frame[5]]);
-    let w = u16::from_le_bytes([frame[6], frame[7]]);
-    let h = u16::from_le_bytes([frame[8], frame[9]]);
-    assert!(w > 0 && h > 0, "empty tile {w}x{h}");
-    assert!(
-        u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
-        "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
-    );
-    assert_eq!(
-        &frame[TILE_HEADER_LEN..TILE_HEADER_LEN + 8],
-        b"\x89PNG\r\n\x1a\n",
-        "payload is not a PNG stream"
-    );
-    u64::from(w) * u64::from(h)
+    let tiles = common::batch_records(frame);
+    assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
+    let mut area = 0u64;
+    for tile in tiles {
+        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
+        let (x, y, w, h) = (tile.x, tile.y, tile.w, tile.h);
+        assert!(w > 0 && h > 0, "empty tile {w}x{h}");
+        assert!(
+            u32::from(x) + u32::from(w) <= desktop_w && u32::from(y) + u32::from(h) <= desktop_h,
+            "tile {w}x{h}+{x}+{y} exceeds the {desktop_w}x{desktop_h} desktop"
+        );
+        assert_eq!(
+            &tile.payload[..8],
+            b"\x89PNG\r\n\x1a\n",
+            "payload is not a PNG stream"
+        );
+        area += u64::from(w) * u64::from(h);
+    }
+    area
 }
 
 /// Validate a `cursor` control message. Either shape is legitimate: a

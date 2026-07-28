@@ -111,6 +111,9 @@ enum ProbeCommand {
         var controlBytes = 0
         var binary = 0
         var binaryBytes = 0
+        /// Tile records across every batch, which is the number that used to equal
+        /// `binary` one-for-one. Seeing the two apart is the whole point.
+        var records = 0
         var largestBinary = 0
         var largestTile = "none"
 
@@ -119,15 +122,20 @@ enum ProbeCommand {
             controlBytes += text.utf8.count
         }
 
-        mutating func binaryFrame(_ data: Data, tile: TileFrame?) {
+        mutating func binaryFrame(_ data: Data, tiles: [TileFrame]?) {
             binary += 1
             binaryBytes += data.count
+            records += tiles?.count ?? 0
             // Both halves have to come from the *same* frame, or the summary pairs
-            // the largest payload with whatever tile happened to arrive last —
-            // which is the number this probe exists to report.
+            // the largest frame with whatever happened to arrive last — which is
+            // the number this probe exists to report.
             if data.count > largestBinary {
                 largestBinary = data.count
-                largestTile = tile.map { "\($0.w)x\($0.h) \($0.format)" } ?? "undecodable"
+                largestTile = tiles.map { tiles in
+                    let shapes = tiles.prefix(3).map { "\($0.w)x\($0.h) \($0.format)" }
+                    let more = tiles.count > 3 ? ", +\(tiles.count - 3) more" : ""
+                    return "\(tiles.count) records: \(shapes.joined(separator: ", "))\(more)"
+                } ?? "undecodable"
             }
         }
     }
@@ -161,11 +169,11 @@ enum ProbeCommand {
                 counts.text(text)
                 print("probe: control \(text.prefix(200))")
             case .binary(let data):
-                let tile = TileFrame.decode(data)
-                if tile == nil {
+                let tiles = BatchFrame.decode(data)
+                if tiles == nil {
                     print("probe: undecodable \(data.count)-byte binary frame")
                 }
-                counts.binaryFrame(data, tile: tile)
+                counts.binaryFrame(data, tiles: tiles)
             }
         }
 
@@ -176,7 +184,8 @@ enum ProbeCommand {
 
     private static func summarize(_ counts: Counts, survivedHeartbeat: Bool) {
         print(
-            "probe: \(counts.binary) binary frames / \(counts.binaryBytes) bytes, "
+            "probe: \(counts.binary) binary frames / \(counts.binaryBytes) bytes "
+                + "carrying \(counts.records) tile records, "
                 + "\(counts.control) control frames / \(counts.controlBytes) bytes"
         )
         print("probe: largest binary frame \(counts.largestBinary) bytes (\(counts.largestTile))")

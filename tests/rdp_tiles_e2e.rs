@@ -20,9 +20,7 @@ use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-const TILE_FRAME_KIND: u8 = 0x01;
 const TILE_FORMAT_PNG: u8 = 1;
-const TILE_HEADER_LEN: usize = 10;
 
 /// Wait until xrdp actually answers RDP on the published port.
 ///
@@ -97,19 +95,21 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary tile frame against the documented layout.
-fn check_tile_frame(frame: &[u8]) {
-    assert!(frame.len() >= TILE_HEADER_LEN, "frame shorter than the header");
-    assert_eq!(frame[0], TILE_FRAME_KIND, "unexpected frame kind");
-    assert_eq!(frame[1], TILE_FORMAT_PNG, "unexpected tile format byte");
-    let w = u16::from_le_bytes([frame[6], frame[7]]);
-    let h = u16::from_le_bytes([frame[8], frame[9]]);
-    assert!(w > 0 && h > 0, "empty tile {w}x{h}");
-    assert_eq!(
-        &frame[TILE_HEADER_LEN..TILE_HEADER_LEN + 8],
-        b"\x89PNG\r\n\x1a\n",
-        "payload is not a PNG stream"
-    );
+/// Validate one binary batch frame against the documented layout, returning how
+/// many tiles it carried.
+fn check_tile_frame(frame: &[u8]) -> u32 {
+    let tiles = common::batch_records(frame);
+    assert!(!tiles.is_empty(), "a batch frame with no tiles in it");
+    for tile in &tiles {
+        assert_eq!(tile.format, TILE_FORMAT_PNG, "unexpected tile format byte");
+        assert!(tile.w > 0 && tile.h > 0, "empty tile {}x{}", tile.w, tile.h);
+        assert_eq!(
+            &tile.payload[..8],
+            b"\x89PNG\r\n\x1a\n",
+            "payload is not a PNG stream"
+        );
+    }
+    tiles.len() as u32
 }
 
 #[tokio::test]
@@ -148,8 +148,9 @@ async fn tiles_arrive_as_binary_frames_after_resize_text() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "tile arrived before resize");
-                    check_tile_frame(&frame);
-                    tiles += 1;
+                    // Tiles, not frames: a batch carries however many were ready
+                    // at once, so counting frames would stop the test early.
+                    tiles += check_tile_frame(&frame);
                     // The xrdp login screen paints in well over 20 strips;
                     // that's enough to call the transport exercised.
                     if tiles >= 20 {

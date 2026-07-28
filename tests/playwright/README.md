@@ -1,9 +1,22 @@
 # Stable headless browser tests
 
-These Playwright checks cover DOM/control-plane behaviour only. They do not
-assert canvas pixels, framebuffer timing, cursor rendering, pointer input, or
-remote-desktop gestures; the Rust protocol and container E2E tests cover those
-paths.
+These Playwright checks cover DOM/control-plane behaviour and WebSocket frame
+bytes. They do not assert canvas pixels, framebuffer timing, cursor rendering,
+pointer input, or remote-desktop gestures; the Rust protocol and container E2E
+tests cover those paths.
+
+That line is where it is because `framereceived` is a transport event, not a
+paint event: what a frame *contains* is deterministic, what it *drew* is not. So
+header fields, record counts and payload lengths are in scope, and the canvas
+they land on is not.
+
+`batch-envelope.spec.ts` is the v3 binary envelope, read off the SPA's own socket.
+It exists because it is the only test that watches the browser link as the browser
+actually uses it — the Rust E2E tests drive a raw WebSocket client, and the Swift
+and TypeScript unit tests parse frames they built themselves, so both ends can
+agree with their own fixtures and disagree with each other. Its frame parser is
+deliberately a second implementation rather than an import of the SPA's, because a
+wrong parser would otherwise agree with itself.
 
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and

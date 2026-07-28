@@ -389,11 +389,19 @@ func tileFrame(
     CGImageDestinationAddImage(destination, image, nil)
     #expect(CGImageDestinationFinalize(destination))
 
-    var frame = Data([TileFrame.frameKind, TileFormat.png.rawValue])
-    for value in [x, y, size, size] {
-        frame.append(UInt8(value & 0xFF))
-        frame.append(UInt8(value >> 8))
+    // One TILE record in a batch frame carrying exactly one record.
+    var record = Data([BatchFrame.opTile, TileFormat.png.rawValue])
+    for value in [BatchFrame.noSlot, x, y, size, size] {
+        record.append(UInt8(value & 0xFF))
+        record.append(UInt8(value >> 8))
     }
-    frame.append(encoded as Data)
+    let length = UInt32((encoded as Data).count)
+    for shift in [0, 8, 16, 24] {
+        record.append(UInt8((length >> shift) & 0xFF))
+    }
+    record.append(encoded as Data)
+
+    var frame = Data([BatchFrame.frameKind, 0, 1, 0])
+    frame.append(record)
     return frame
 }

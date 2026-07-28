@@ -562,20 +562,19 @@ fn assert_first_paint(paint: &Paint) {
 
 /// The half of a paint that looks the same however the link came up.
 fn assert_paint_pixels(paint: &Paint) {
-    // The tile frame: the agent's format byte and its bytes, untouched.
+    // The tile record: the agent's format byte and its bytes, untouched.
     let expected = fake_jpeg();
-    assert_eq!(paint.tile[0], Tile::FRAME_KIND);
+    let records = common::batch_records(&paint.tile);
+    assert_eq!(records.len(), 1, "one tile was painted");
+    let tile = &records[0];
     assert_eq!(
-        paint.tile[1],
+        tile.format,
         Tile::FORMAT_JPEG,
         "the agent's JPEG must reach the browser as format 2, not be re-encoded"
     );
-    assert_eq!(&paint.tile[2..4], &[0, 0]); // x
-    assert_eq!(&paint.tile[4..6], &[0, 0]); // y
-    assert_eq!(&paint.tile[6..8], &[64, 0]); // w
-    assert_eq!(&paint.tile[8..10], &[64, 0]); // h
+    assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 64, 64));
     assert_eq!(
-        &paint.tile[Tile::HEADER_LEN..],
+        tile.payload,
         expected.as_slice(),
         "tile payload must pass through byte for byte"
     );

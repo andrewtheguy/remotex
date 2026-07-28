@@ -100,6 +100,71 @@ pub type Ws = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+/// One `TILE` record parsed out of a batch frame.
+#[allow(dead_code)]
+pub struct BatchTile {
+    pub format: u8,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub slot: u16,
+    pub payload: Vec<u8>,
+}
+
+/// Parse a server -> client binary frame into its `TILE` records.
+///
+/// One parser for every test that looks at painted pixels, because four of them
+/// used to decode the header by hand and a wire change had to be applied four
+/// times to four subtly different copies. Asserts the envelope's own invariants on
+/// the way through — kind, zero flags, a record count that matches the records
+/// present, and records that exactly fill the frame — so every test that reads a
+/// tile also checks the frame carrying it was well formed.
+#[allow(dead_code)]
+pub fn batch_records(frame: &[u8]) -> Vec<BatchTile> {
+    use remotex::protocol::batch;
+
+    assert!(
+        frame.len() >= batch::HEADER_LEN,
+        "frame is shorter than a batch header"
+    );
+    assert_eq!(frame[0], batch::FRAME_KIND, "unexpected frame kind");
+    assert_eq!(frame[1], 0, "flags must be zero");
+    let count = u16::from_le_bytes([frame[2], frame[3]]);
+
+    let mut at = batch::HEADER_LEN;
+    let mut tiles = Vec::new();
+    while at < frame.len() {
+        let op = frame[at];
+        assert_eq!(op, batch::OP_TILE, "only tile records are expected here");
+        let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
+        let len = u32::from_le_bytes([
+            frame[at + 12],
+            frame[at + 13],
+            frame[at + 14],
+            frame[at + 15],
+        ]) as usize;
+        let start = at + batch::TILE_HEADER_LEN;
+        tiles.push(BatchTile {
+            format: frame[at + 1],
+            slot: le(2),
+            x: le(4),
+            y: le(6),
+            w: le(8),
+            h: le(10),
+            payload: frame[start..start + len].to_vec(),
+        });
+        at = start + len;
+    }
+    assert_eq!(at, frame.len(), "records must exactly fill the frame");
+    assert_eq!(
+        tiles.len(),
+        usize::from(count),
+        "the header's record count must match the records present"
+    );
+    tiles
+}
+
 /// Let the gateway log during an opted-in e2e run.
 ///
 /// The point is the per-attachment wire totals (`ws: outbound totals:`,
