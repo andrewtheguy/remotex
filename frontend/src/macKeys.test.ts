@@ -120,6 +120,95 @@ test("an unmapped Command chord forwards Command as itself", () => {
   ]);
 });
 
+// The two modes — Command forwarded as itself, and Command replaced by a synthetic
+// Control — are mutually exclusive, and one Command hold can ask for both. Holding
+// them at once sends the guest a chord nobody typed.
+test("switching from a forwarded chord to a mapped one takes Command back", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), true);
+  assert.deepEqual(t.translate(down("KeyB", true), true), [
+    sent("MetaLeft", true),
+    sent("KeyB", true),
+  ]);
+  assert.deepEqual(t.translate(up("KeyB", true), true), [sent("KeyB", false)]);
+  // Command never came up, so Meta is still down on the guest. Left there, this
+  // would arrive as Meta plus Control plus C.
+  assert.deepEqual(t.translate(down("KeyC", true), true), [
+    sent("MetaLeft", false),
+    sent("ControlLeft", true),
+    sent("KeyC", true),
+  ]);
+  assert.deepEqual(t.translate(up("KeyC", true), true), [
+    sent("KeyC", false),
+    sent("ControlLeft", false),
+  ]);
+  // Command's own release adds nothing: the guest was told about that Meta and
+  // then told to let it go, so there is nothing left owing.
+  assert.deepEqual(t.translate(up("MetaLeft"), true), []);
+});
+
+test("switching from a mapped chord to a forwarded one drops the Control", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), true);
+  assert.deepEqual(t.translate(down("KeyC", true), true), [
+    sent("ControlLeft", true),
+    sent("KeyC", true),
+  ]);
+  // KeyC is still held, so its synthetic Control is still down. Forwarding
+  // Command on top of it would be the same invented chord the other way round.
+  assert.deepEqual(t.translate(down("KeyB", true), true), [
+    sent("ControlLeft", false),
+    sent("MetaLeft", true),
+    sent("KeyB", true),
+  ]);
+  assert.deepEqual(t.translate(up("KeyC", true), true), [sent("KeyC", false)]);
+  assert.deepEqual(t.translate(up("KeyB", true), true), [sent("KeyB", false)]);
+  assert.deepEqual(t.translate(up("MetaLeft"), true), [
+    sent("MetaLeft", false),
+  ]);
+});
+
+// Command-Shift-Z is redo on a Windows guest, and the most ordinary chord that
+// used to break: Shift looked like a key outside the table, so Command was
+// forwarded and the guest got Meta-Shift-Control-Z.
+test("a Shift on a mapped chord does not forward Command", () => {
+  const t = new MacKeyboardTranslator();
+  assert.deepEqual(t.translate(down("MetaLeft"), true), []);
+  assert.deepEqual(t.translate(down("ShiftLeft", true), true), [
+    sent("ShiftLeft", true),
+  ]);
+  assert.deepEqual(t.translate(down("KeyZ", true), true), [
+    sent("ControlLeft", true),
+    sent("KeyZ", true),
+  ]);
+  assert.deepEqual(t.translate(up("KeyZ", true), true), [
+    sent("KeyZ", false),
+    sent("ControlLeft", false),
+  ]);
+  assert.deepEqual(t.translate(up("ShiftLeft", true), true), [
+    sent("ShiftLeft", false),
+  ]);
+  assert.deepEqual(t.translate(up("MetaLeft"), true), []);
+});
+
+test("a modifier held under Command is still not a chord of its own", () => {
+  const t = new MacKeyboardTranslator();
+  t.translate(down("MetaLeft"), true);
+  // Option and Control pass through the same way, and none of them counts as the
+  // key that would make this an unmapped chord.
+  assert.deepEqual(t.translate(down("AltLeft", true), true), [
+    sent("AltLeft", true),
+  ]);
+  assert.deepEqual(t.translate(down("ControlRight", true), true), [
+    sent("ControlRight", true),
+  ]);
+  // So Command is still pending, and letting it go is still a bare tap.
+  assert.deepEqual(t.translate(up("MetaLeft"), true), [
+    sent("MetaLeft", true),
+    sent("MetaLeft", false),
+  ]);
+});
+
 test("a bare Command tap still works after a forwarded chord", () => {
   const t = new MacKeyboardTranslator();
   t.translate(down("MetaLeft"), true);

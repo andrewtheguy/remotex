@@ -512,7 +512,7 @@ export function useRemoteDesktop(
       return;
     }
     macKeyOverridesActiveRef.current = macKeyOverridesActive;
-    releaseInputRef.current?.();
+    releaseKeysRef.current?.();
   }, [macKeyOverridesActive]);
 
   // Persist the preference as it changes rather than in the toggle callback, so
@@ -538,12 +538,17 @@ export function useRemoteDesktop(
   );
 
   const wsRef = useRef<WebSocket | null>(null);
-  // Releases every key and button the input effect has sent as pressed, and
-  // clears the Command translator with them. Set by that effect; called from
-  // here when the translation rules change under a chord that is part way
-  // through — the guest has already been told those keys are down, and the new
-  // rules would send the releases for different codes.
-  const releaseInputRef = useRef<(() => void) | null>(null);
+  // Releases every key the input effect has sent as pressed and clears the
+  // Command translator with them. Set by that effect; called from here when the
+  // translation rules change under a chord that is part way through — the guest
+  // has already been told those keys are down, and the new rules would send the
+  // releases for different codes.
+  //
+  // Keys only, deliberately: the mouse and the gesture layer have nothing to do
+  // with which chord a Command means, and a held button or an in-flight pinch is
+  // not the toolbar's business to cancel. Focus loss is the case that releases
+  // everything.
+  const releaseKeysRef = useRef<(() => void) | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   // Kept in a ref (not just state) so input handlers read the latest size
   // without re-subscribing.
@@ -1496,7 +1501,7 @@ export function useRemoteDesktop(
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
     // Release everything still held so nothing sticks on the remote when focus
     // leaves the surface.
-    const releaseAll = () => {
+    const releaseKeys = () => {
       for (const code of pressedKeys) {
         // caps is irrelevant on release: the backend releases the keysym it
         // recorded at press time.
@@ -1507,6 +1512,9 @@ export function useRemoteDesktop(
       // above needs, and resetting it first would say a chord is over while its
       // codes are still going out.
       macKeys.reset();
+    };
+    const releaseAll = () => {
+      releaseKeys();
       for (const button of pressedButtons) {
         send({ type: "mouseButton", button, pressed: false });
       }
@@ -1536,7 +1544,7 @@ export function useRemoteDesktop(
     const onKeyDown = (e: KeyboardEvent) => sendTranslated(e, true);
     const onKeyUp = (e: KeyboardEvent) => sendTranslated(e, false);
     const onBlur = () => releaseAll();
-    releaseInputRef.current = releaseAll;
+    releaseKeysRef.current = releaseKeys;
 
     el.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
@@ -1551,7 +1559,7 @@ export function useRemoteDesktop(
 
     return () => {
       gestures?.detach();
-      releaseInputRef.current = null;
+      releaseKeysRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mouseup", onMouseUp);

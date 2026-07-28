@@ -21,6 +21,11 @@
 //     leaving them alone. Command-R is preventable and was still left out: it
 //     would work until some browser version where it doesn't, and the failure is
 //     the SPA reloading out from under a live session.
+//   - **Shift, Control and Option are told apart from ordinary keys.** AppKit
+//     reports them as `flagsChanged`, a branch that never reaches the viewer's
+//     `translateKey`; a browser reports them as ordinary key events. Without the
+//     distinction, the Shift in Command-Shift-Z looked like a key outside the
+//     table and forwarded Command, so redo arrived as Meta-Shift-Control-Z.
 //   - **A release flush on Command up.** macOS browsers can withhold `keyup` for
 //     a character key while Command is held. The viewer never sees that because
 //     it reads `NSEvent`s. Here a missing `keyup` would strand both the letter
@@ -64,6 +69,23 @@ const COMMAND_MAPS_TO_CONTROL: ReadonlySet<string> = new Set([
 ]);
 
 const META_CODES: ReadonlySet<string> = new Set(["MetaLeft", "MetaRight"]);
+
+// Modifiers that qualify a chord rather than being its key. They must not be
+// mistaken for "some key that isn't in the table", which is what decides that
+// Command should be forwarded as itself: Command-Shift-Z is a mapped chord with a
+// Shift on it, and forwarding Command there sent the guest Meta-Shift-Control-Z.
+//
+// The viewer needs no such set. AppKit reports these as `flagsChanged`, a
+// separate branch that never reaches its `translateKey`; a browser reports them
+// as ordinary key events, so the distinction has to be made here.
+const CHORD_MODIFIERS: ReadonlySet<string> = new Set([
+  "ShiftLeft",
+  "ShiftRight",
+  "ControlLeft",
+  "ControlRight",
+  "AltLeft",
+  "AltRight",
+]);
 
 /// Whether this browser is running on a Mac, and so whether Command chords are
 /// the local convention at all.
@@ -182,6 +204,11 @@ export class MacKeyboardTranslator {
     caps: boolean,
     meta: boolean,
   ): TranslatedKey[] {
+    // Straight through, and deliberately before everything below: a modifier is
+    // not a chord's key, so it neither starts a translation nor forwards Command.
+    if (CHORD_MODIFIERS.has(code)) {
+      return [{ code, pressed, caps }];
+    }
     if (pressed && meta && COMMAND_MAPS_TO_CONTROL.has(code)) {
       return this.beginTranslatedChord(code, caps);
     }
@@ -198,7 +225,10 @@ export class MacKeyboardTranslator {
   private beginTranslatedChord(code: string, caps: boolean): TranslatedKey[] {
     this.commandWasUsed = true;
     this.translatedCommandKeys.add(code);
-    const translated: TranslatedKey[] = [];
+    // A Command this hold already forwarded is taken back first. The two modes
+    // are mutually exclusive: Meta held *and* a synthetic Control is a chord
+    // nobody typed, and it is what the guest saw for Command-B then Command-C.
+    const translated = this.withdrawForwardedCommands(caps);
     if (!this.syntheticControlHeld) {
       this.syntheticControlHeld = true;
       translated.push({ code: "ControlLeft", pressed: true, caps });
@@ -207,14 +237,25 @@ export class MacKeyboardTranslator {
     return translated;
   }
 
+  /// Release every Command already forwarded as itself, without forgetting it is
+  /// physically down: the codes stay in `pendingCommandCodes`, so Command's own
+  /// release is still accounted for and a later unmapped key forwards it again.
+  private withdrawForwardedCommands(caps: boolean): TranslatedKey[] {
+    const translated: TranslatedKey[] = [];
+    for (const commandCode of this.forwardedCommandCodes) {
+      translated.push({ code: commandCode, pressed: false, caps });
+    }
+    this.forwardedCommandCodes.clear();
+    return translated;
+  }
+
   /// The letter of a translated chord came back up. The synthetic Control follows
   /// it, but only once no other translated key is still down — Command-C then
   /// Command-V without releasing Command holds one Control across both.
   private endTranslatedChord(code: string, caps: boolean): TranslatedKey[] {
     const translated: TranslatedKey[] = [{ code, pressed: false, caps }];
-    if (this.translatedCommandKeys.size === 0 && this.syntheticControlHeld) {
-      this.syntheticControlHeld = false;
-      translated.push({ code: "ControlLeft", pressed: false, caps });
+    if (this.translatedCommandKeys.size === 0) {
+      translated.push(...this.releaseSyntheticControl(caps));
     }
     return translated;
   }
@@ -224,7 +265,9 @@ export class MacKeyboardTranslator {
   /// precisely so a chord that turns out to be mapped never sends one.
   private forwardPendingCommands(caps: boolean): TranslatedKey[] {
     this.commandWasUsed = true;
-    const translated: TranslatedKey[] = [];
+    // The same exclusivity from the other side: a mapped key still held under
+    // this Command loses its synthetic Control before Command goes out as itself.
+    const translated = this.releaseSyntheticControl(caps);
     for (const commandCode of this.pendingCommandCodes) {
       if (this.forwardedCommandCodes.has(commandCode)) {
         continue;
@@ -246,10 +289,18 @@ export class MacKeyboardTranslator {
       translated.push({ code: held, pressed: false, caps });
     }
     this.translatedCommandKeys.clear();
-    if (this.syntheticControlHeld) {
-      this.syntheticControlHeld = false;
-      translated.push({ code: "ControlLeft", pressed: false, caps });
-    }
+    translated.push(...this.releaseSyntheticControl(caps));
     return translated;
+  }
+
+  /// The synthetic Control's release, or nothing if it is not held. Every path
+  /// that stops translating goes through here, so none of them can leave a
+  /// Control down that the guest was told about and never told to let go.
+  private releaseSyntheticControl(caps: boolean): TranslatedKey[] {
+    if (!this.syntheticControlHeld) {
+      return [];
+    }
+    this.syntheticControlHeld = false;
+    return [{ code: "ControlLeft", pressed: false, caps }];
   }
 }
