@@ -198,26 +198,44 @@ fn shared_owned_display(
     }
 }
 
-/// Serve one gateway connection until it hangs up or fails.
-pub async fn serve(
-    stream: TcpStream,
+/// A gateway that has completed the Noise handshake, and is therefore *the*
+/// gateway this Mac is paired with.
+///
+/// Split out from [`serve`] so the caller can hold the two apart: authenticating
+/// is what earns a connection the single session slot, and anything short of it
+/// must not disturb the session already in it (see [`crate::serve`]).
+pub struct Authenticated {
+    reader: FrameReader<OwnedReadHalf>,
+    writer: FrameWriter<OwnedWriteHalf>,
+}
+
+/// Answer a dial, proving to it and about it that both ends hold the right keys.
+///
+/// A peer whose public key is not the configured one fails here, before the
+/// agent has revealed anything at all — including whether anyone is connected.
+pub async fn handshake(
+    mut stream: TcpStream,
     private_key: [u8; 32],
     gateway_public_key: [u8; 32],
-    owned: Owned,
-    cursor_tracker: Arc<cursor::Tracker>,
-) -> anyhow::Result<()> {
-    let mut stream = stream;
-    let display = owned.handle.clone();
-    let owned = owned.target;
+) -> anyhow::Result<Authenticated> {
     stream.set_nodelay(true).ok();
-
-    // A gateway this Mac is not paired with fails here, before the agent has
-    // revealed anything at all.
     let transport = rxa_proto::noise::respond(&mut stream, &private_key, &gateway_public_key)
         .await
         .map_err(|e| anyhow::anyhow!("handshake: {e}"))?;
     let (read_half, write_half) = stream.into_split();
-    let (reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
+    let (reader, writer) = rxa_proto::frame::split(read_half, write_half, transport);
+    Ok(Authenticated { reader, writer })
+}
+
+/// Serve one authenticated gateway connection until it hangs up or fails.
+pub async fn serve(
+    authenticated: Authenticated,
+    owned: Owned,
+    cursor_tracker: Arc<cursor::Tracker>,
+) -> anyhow::Result<()> {
+    let Authenticated { reader, mut writer } = authenticated;
+    let display = owned.handle.clone();
+    let owned = owned.target;
 
     // Every session starts on the Mac's main display — which is the Mac's own
     // screen, because a display of ours joins as an extended one and never takes

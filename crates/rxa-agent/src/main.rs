@@ -65,10 +65,13 @@
 //!
 //! ## One gateway at a time
 //!
-//! A new connection evicts the previous one, matching remotex's single-session
-//! model (see CLAUDE.md): multi-session is permanently out of scope, and a
-//! browser that force-claims the gateway's session slot should not find itself
-//! queued behind a stale agent connection.
+//! A newly *authenticated* connection evicts the previous one, matching
+//! remotex's single-session model (see CLAUDE.md): multi-session is permanently
+//! out of scope, and a browser that force-claims the gateway's session slot
+//! should not find itself queued behind a stale agent connection.
+//!
+//! Authenticated is the load-bearing word — see [`serve`]. Anything that cannot
+//! complete the handshake is refused without the running session noticing.
 
 // A bare `#![cfg(target_os = "macos")]` would compile the crate away to
 // nothing on Linux and fail at link time with "main function not found",
@@ -95,6 +98,7 @@ mod state;
 mod virtualdisplay;
 
 use std::io::IsTerminal as _;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -103,6 +107,7 @@ use file_rotate::{
     ContentLimit, FileRotate, compression::Compression, suffix::AppendCount,
 };
 use log::{info, warn};
+use tokio::time::timeout;
 
 /// How often the main thread re-reads the system cursor when `--no-menu` has
 /// taken the run loop away. The menu bar polls at the same rate from a timer.
@@ -544,11 +549,32 @@ fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
     Some((writer, path))
 }
 
+/// How long a peer has to complete a handshake before it is dropped.
+///
+/// Generous — this is two messages over a LAN — and its job is only to stop
+/// half-open connections accumulating. The gateway gives the whole
+/// connect-and-hello 10 seconds, so nothing legitimate is near this.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Accept gateway connections, one at a time.
 ///
 /// Takes an already-bound listener: binding is the main thread's job, so a port
 /// that is already taken can be reported on screen rather than from this thread
 /// (see `main`).
+///
+/// ## Only an authenticated peer takes the slot
+///
+/// There is one session slot and a new gateway evicts whoever is in it — but the
+/// eviction happens when a connection *finishes its handshake*, not when it is
+/// accepted. Evicting at accept meant anything that could reach this port could
+/// end a live session by opening a socket, without holding a key or saying a
+/// word: a port scanner, a stale gateway, a mistyped host in someone else's
+/// config. Now a peer that cannot prove it is the paired gateway is refused
+/// without the running session ever noticing.
+///
+/// Handshakes therefore run in their own tasks and report back over a channel,
+/// rather than inline: one peer that connects and stays silent must not hold up
+/// the accept loop, which is why [`HANDSHAKE_TIMEOUT`] exists too.
 /// This Mac's identity and the one gateway it answers.
 ///
 /// `gateway_public` is `None` while the agent is unpaired — a first launch, or a
@@ -573,56 +599,86 @@ async fn serve(
 
     // The single active session, so a new gateway evicts the previous one.
     let mut current: Option<tokio::task::JoinHandle<()>> = None;
+    // Connections that have finished a handshake, waiting to take the slot.
+    // Bounded, and generously: it holds only authenticated peers, and the loop
+    // below drains it immediately.
+    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<(SocketAddr, session::Authenticated)>(4);
 
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(e) => {
-                // A per-connection accept error (e.g. EMFILE) must not kill the
-                // agent; the next accept usually succeeds.
-                warn!("agent: accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                continue;
-            }
-        };
-        // Refused before anything is recorded or evicted: an unpaired agent has
-        // no gateway to compare this one against, so nothing about the
-        // connection is knowable and a live session must not be dropped for it.
-        let Some(gateway_public) = keys.gateway_public else {
-            warn!("agent: refusing {peer} — no gateway_public_key is set (open Settings)");
-            drop(stream);
-            continue;
-        };
-        info!("agent: gateway connected from {peer}");
-        // Recorded before the eviction, so the menu bar never blinks through a
-        // "not connected" state during a reconnect. The id is what keeps the
-        // evicted session from clearing this one on its way out.
-        let id = state.connected(peer, Instant::now());
-        if let Some(previous) = current.take() {
-            info!("agent: evicting the previous gateway connection");
-            previous.abort();
-        }
+        tokio::select! {
+            // A connection that proved itself. *Now* the slot moves — see the
+            // module docs on why this is not done at accept.
+            Some((peer, authenticated)) = ready_rx.recv() => {
+                info!("agent: gateway connected from {peer}");
+                // Recorded before the eviction, so the menu bar never blinks
+                // through a "not connected" state during a reconnect. The id is
+                // what keeps the evicted session from clearing this one on its
+                // way out.
+                let id = state.connected(peer, Instant::now());
+                if let Some(previous) = current.take() {
+                    info!("agent: evicting the previous gateway connection");
+                    previous.abort();
+                }
 
-        let tracker = Arc::clone(&tracker);
-        let session_owned = owned.clone();
-        let session_state = Arc::clone(&state);
-        current = Some(tokio::spawn(async move {
-            match session::serve(
-                stream,
-                keys.private,
-                gateway_public,
-                session_owned,
-                tracker,
-            )
-            .await
-            {
-                Ok(()) => info!("agent: gateway {peer} disconnected"),
-                // Includes a gateway this Mac is not paired with, which is a
-                // failed handshake — logged and dropped, never fatal.
-                Err(e) => warn!("agent: session with {peer} ended: {e:#}"),
+                let tracker = Arc::clone(&tracker);
+                let session_owned = owned.clone();
+                let session_state = Arc::clone(&state);
+                current = Some(tokio::spawn(async move {
+                    match session::serve(authenticated, session_owned, tracker).await {
+                        Ok(()) => info!("agent: gateway {peer} disconnected"),
+                        Err(e) => warn!("agent: session with {peer} ended: {e:#}"),
+                    }
+                    session_state.disconnected(id);
+                }));
             }
-            session_state.disconnected(id);
-        }));
+            accepted = listener.accept() => {
+                let (stream, peer) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(e) => {
+                        // A per-connection accept error (e.g. EMFILE) must not
+                        // kill the agent; the next accept usually succeeds.
+                        warn!("agent: accept failed: {e}");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                };
+                // An unpaired agent has no key to judge anyone by, so this is as
+                // far as any connection gets.
+                let Some(gateway_public) = keys.gateway_public else {
+                    warn!("agent: refusing {peer} — no gateway_public_key is set (open Settings)");
+                    drop(stream);
+                    continue;
+                };
+
+                // Off the accept path, and on a clock. Handshaking inline would
+                // let one peer that connects and then says nothing block every
+                // later connection — including the real gateway's — for as long
+                // as it cared to hold the socket open.
+                let ready_tx = ready_tx.clone();
+                tokio::spawn(async move {
+                    let handshake =
+                        session::handshake(stream, keys.private, gateway_public);
+                    match timeout(HANDSHAKE_TIMEOUT, handshake).await {
+                        Ok(Ok(authenticated)) => {
+                            // A full queue means four authenticated peers are
+                            // already waiting, which one gateway at a time
+                            // cannot produce. Dropping this one is right.
+                            if ready_tx.try_send((peer, authenticated)).is_err() {
+                                warn!("agent: dropping {peer}, too many pending sessions");
+                            }
+                        }
+                        // Never fatal to the agent, and never visible to the
+                        // session already running: an unpaired peer, a port
+                        // scanner, or a gateway on another protocol version.
+                        Ok(Err(e)) => warn!("agent: refusing {peer}: {e:#}"),
+                        Err(_) => warn!(
+                            "agent: refusing {peer}: no handshake within {}s",
+                            HANDSHAKE_TIMEOUT.as_secs()
+                        ),
+                    }
+                });
+            }
+        }
     }
 }
 

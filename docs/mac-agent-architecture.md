@@ -367,8 +367,14 @@ An agent with no `gateway_public_key` is unpaired: it listens, refuses every
 connection, and says so in its menu. That is the state a first launch lands in,
 since the agent has to be running before its public key can be read off it.
 
-Only one gateway may be connected. A new authenticated connection replaces the
-old one. The shared browser heartbeat ends the engine under the same policy as
+Only one gateway may be connected. A new connection replaces the old one when it
+completes its handshake, not when it is accepted: a peer that cannot prove it
+holds the paired key is refused without the running session noticing, so nothing
+that can merely reach the port can end a session by opening a socket. Handshakes
+run off the accept path and on a 20-second timeout, so one silent peer cannot
+hold up the connection behind it either.
+
+The shared browser heartbeat ends the engine under the same policy as
 RDP and VNC: a missing pong expires it after about 60 seconds, while an orderly
 WebSocket close allows 60 seconds for reattachment. Ending the RXA engine closes
 the agent connection, stops capture, and changes the menu from "Sharing this
