@@ -1646,6 +1646,40 @@ mod tests {
         std::fs::write(dir.join("alpha-4x4.webp"), &*alpha).unwrap();
         println!("wrote alpha-4x4.webp");
 
+        // A *lossy* payload, which no other fixture is: the agent's classifier sends
+        // photographic tiles down that branch, and lossy WebP is a VP8 bitstream
+        // where everything else here is VP8L. Two different decoders on the other
+        // side, and only one of them was being exercised — so a viewer that could
+        // not read VP8 would have shown blank tiles on exactly the content the
+        // classifier picks, with every test passing.
+        let mut rgb = Vec::new();
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for y in 0..64u16 {
+            for x in 0..64u16 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let jitter = ((state >> 56) as i32 - 128) / 5;
+                // Ramps chosen so that neither wraps across 64 pixels: red climbs
+                // with x and green with y, monotonically, which is what lets the
+                // Swift side check the orientation from two corners.
+                for base in [i32::from(x) * 3, i32::from(y) * 3 + 30, 100] {
+                    rgb.push((base + jitter).clamp(0, 255) as u8);
+                }
+            }
+        }
+        let mut lossy_config = webp::WebPConfig::new().unwrap();
+        lossy_config.lossless = 0;
+        lossy_config.quality = 80.0;
+        lossy_config.method = WEBP_LOSSLESS_METHOD;
+        lossy_config.thread_level = 0;
+        let lossy = webp::Encoder::from_rgb(&rgb, 64, 64)
+            .encode_advanced(&lossy_config)
+            .expect("lossy fixture encodes");
+        assert_ne!(&*lossy, rgb.as_slice(), "the lossy fixture is not lossy");
+        std::fs::write(dir.join("lossy-64x64.webp"), &*lossy).unwrap();
+        println!("wrote lossy-64x64.webp");
+
         // Every fixture is read back and checked against what its name claims,
         // because the Swift side cannot tell the difference. `alpha-4x4` in
         // particular is only worth having if the bitstream really does carry alpha:
@@ -1659,6 +1693,7 @@ mod tests {
             ("topdown-8x8.webp", 8, 8, false),
             ("opaque-4x4.webp", 4, 4, false),
             ("alpha-4x4.webp", 4, 4, true),
+            ("lossy-64x64.webp", 64, 64, false),
         ] {
             let bytes = std::fs::read(dir.join(name)).unwrap();
             assert_eq!(&bytes[..4], b"RIFF", "{name} is not a RIFF container");

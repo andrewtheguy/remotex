@@ -147,6 +147,35 @@ struct TileDecoderTests {
         )
     }
 
+    /// The lossy branch, which is a different bitstream: `VP8 ` where every other
+    /// fixture is `VP8L`, and a different decoder inside ImageIO.
+    ///
+    /// The macOS agent's classifier sends photographic tiles this way, so without
+    /// this a viewer that could not read VP8 would show blank tiles on exactly the
+    /// content the classifier picks — while every other test here passed. Pixels are
+    /// checked loosely, because lossy: what matters is that a plausible image comes
+    /// out at the right size, not which values.
+    @Test
+    func aLossyTileDecodesToTopDownBGRA() async throws {
+        let tile = try #require(
+            await TileDecoder().decode(
+                TileFrame(
+                    format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 64, h: 64,
+                    payload: try webpFixture("lossy-64x64")
+                )
+            )
+        )
+        #expect(tile.bgra.count == 64 * 64 * 4)
+        // The fixture ramps red with x and green with y from a low base, so the
+        // right-hand column is redder than the left and the bottom is greener than
+        // the top. Both survive a lossy encode; neither survives a flip or a swap.
+        let topLeft = bgr(tile, 0)
+        let topRight = bgr(tile, 63)
+        let bottomLeft = bgr(tile, 63 * 64)
+        #expect(topRight.r > topLeft.r + 100, "red should ramp with x, got \(topLeft) -> \(topRight)")
+        #expect(bottomLeft.g > topLeft.g + 100, "green should ramp with y, got \(topLeft) -> \(bottomLeft)")
+    }
+
     /// Every fixture is what its name says, checked from the bytes on disk.
     ///
     /// This is the guard the runtime encoding used to provide for free. Without it a
@@ -159,6 +188,7 @@ struct TileDecoderTests {
         for (name, side) in [
             ("solid-2x2-11", 2), ("solid-2x2-22", 2), ("solid-2x2-ff", 2),
             ("topdown-8x8", 8), ("opaque-4x4", 4), ("alpha-4x4", 4),
+            ("lossy-64x64", 64),
         ] {
             let data = try webpFixture(name)
             #expect(data.prefix(4) == Data("RIFF".utf8), "\(name) is not a RIFF container")
