@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.47"
+version = "0.0.48"
 
 [package]
 name = "remotex"

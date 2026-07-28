@@ -39,6 +39,11 @@ export default function RemoteDesktop({
     displays,
     activeDisplayId,
     remoteClipboard,
+    macKeyOverridesEnabled,
+    macKeyOverridesActive,
+    isMacHost,
+    remoteIsMac,
+    setMacKeyOverridesEnabled,
     takeOver,
     connect,
     switchTarget,
@@ -99,6 +104,11 @@ export default function RemoteDesktop({
           displays={displays}
           activeDisplayId={activeDisplayId}
           onSelectDisplay={selectDisplay}
+          macKeyOverridesEnabled={macKeyOverridesEnabled}
+          macKeyOverridesActive={macKeyOverridesActive}
+          isMacHost={isMacHost}
+          remoteIsMac={remoteIsMac}
+          onMacKeyOverridesChange={setMacKeyOverridesEnabled}
         />
       )}
 

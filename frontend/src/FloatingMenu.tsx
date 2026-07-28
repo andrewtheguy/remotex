@@ -211,6 +211,53 @@ function DisplaySection({
   );
 }
 
+// The Command-to-Control switch, on Mac hosts only: nothing else has a Command
+// key to reinterpret, and a section explaining that to a Windows user is worse
+// than no section. Disabled rather than hidden for a Mac guest, matching the
+// viewer's menu item — the preference still exists, it just has nothing to do
+// while Command already means Command at the other end.
+//
+// The label names the state rather than the action because all three states are
+// worth distinguishing: translating, sending Command through as the guest's Super
+// key, and a Mac guest where the question does not arise. See macKeys.ts.
+function MacKeyboardSection({
+  enabled,
+  active,
+  isMacHost,
+  remoteIsMac,
+  onChange,
+}: {
+  enabled: boolean;
+  active: boolean;
+  isMacHost: boolean;
+  remoteIsMac: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  if (!isMacHost) {
+    return null;
+  }
+  const label = remoteIsMac ? "⌘ stays ⌘" : active ? "⌘ → Ctrl" : "⌘ as Super";
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Mac keyboard</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={() => onChange(!enabled)}
+        aria-pressed={active}
+        disabled={remoteIsMac}
+        title={
+          remoteIsMac
+            ? "This remote is a Mac, so Command chords are sent as Command"
+            : "Send ⌘A ⌘C ⌘F ⌘P ⌘S ⌘V ⌘X ⌘Z to the remote as Ctrl chords, and a bare ⌘ as the Windows key. Your browser keeps ⌘W, ⌘T, ⌘N, ⌘L, ⌘O and ⌘R for itself."
+        }
+      >
+        {label}
+      </button>
+    </div>
+  );
+}
+
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
@@ -224,6 +271,11 @@ export default function FloatingMenu({
   displays,
   activeDisplayId,
   onSelectDisplay,
+  macKeyOverridesEnabled,
+  macKeyOverridesActive,
+  isMacHost,
+  remoteIsMac,
+  onMacKeyOverridesChange,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
@@ -256,6 +308,15 @@ export default function FloatingMenu({
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
+  // The Command-to-Control preference and whether it is doing anything. The two
+  // differ when the guest is itself a Mac, which is why the section reports the
+  // reason rather than just showing the switch off. The whole section is absent
+  // on a non-Mac host, where there is no Command key to translate. See macKeys.ts.
+  macKeyOverridesEnabled: boolean;
+  macKeyOverridesActive: boolean;
+  isMacHost: boolean;
+  remoteIsMac: boolean;
+  onMacKeyOverridesChange: (enabled: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -349,6 +410,47 @@ export default function FloatingMenu({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [helpOpen]);
+
+  // Ctrl+Alt+Shift+Semicolon hides the floating chrome and shows it again — for a
+  // screen recording, or to uncover whatever the button is sitting on top of.
+  //
+  // Two things make the chord workable. It is caught on `window` in the **capture**
+  // phase and stopped there, because the remote surface forwards every key it sees
+  // to the guest (see useRemoteDesktop): a bubble-phase listener would toggle the
+  // button *and* type the chord at the remote. And capturing on the window rather
+  // than the surface means it still works when focus has wandered off the desktop,
+  // which matters when the way back is the only way back.
+  //
+  // Three modifiers because the chord this steals from is the guest's, not the
+  // browser's — whatever it binds never reaches the remote again. Ctrl+Shift+; was
+  // tried and is Excel's "insert the current time", and Ctrl+Alt+anything is AltGr
+  // on Windows and X11, so on a non-US layout it can be a character somebody means
+  // to type. Adding Shift lands on a fourth modifier level that few layouts
+  // populate, and no browser or desktop binds.
+  //
+  // Deliberately not persisted: a chrome-less desktop with no visible way to
+  // recover it should not survive a reload.
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // All three and no Command: a Mac user's Cmd+Ctrl+Alt+Shift+; stays theirs.
+      if (
+        e.code !== "Semicolon" ||
+        !e.ctrlKey ||
+        !e.altKey ||
+        !e.shiftKey ||
+        e.metaKey
+      ) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      setHidden((was) => !was);
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, []);
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>) => {
@@ -502,25 +604,34 @@ export default function FloatingMenu({
 
   return (
     <>
-      <button
-        type="button"
-        className={`fab${open ? " fab-open" : ""}${dragging ? " fab-dragging" : ""}`}
-        style={{
-          left: `${resolvedPosition.x}px`,
-          top: `${resolvedPosition.y}px`,
-        }}
-        onClick={onClick}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerCancel}
-        aria-label={open ? "Close menu" : "Open menu"}
-        aria-expanded={open}
-      >
-        {open ? "✕" : "☰"}
-      </button>
+      {/* The button and its drawer go together: a toolbar anchored to a button
+          that isn't there reads as a bug. Both keep their state while hidden, so
+          the chord brings back exactly what was on screen. Docked panels are left
+          alone — they carry their own Close. */}
+      {!hidden && (
+        <button
+          type="button"
+          className={`fab${open ? " fab-open" : ""}${dragging ? " fab-dragging" : ""}`}
+          style={{
+            left: `${resolvedPosition.x}px`,
+            top: `${resolvedPosition.y}px`,
+          }}
+          onClick={onClick}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerCancel}
+          aria-label={open ? "Close menu" : "Open menu"}
+          aria-expanded={open}
+          // The only place the chord is written down in the UI, and it has to be
+          // here: once the button is hidden there is nothing left to read it off.
+          title="Ctrl+Alt+Shift+; hides this button"
+        >
+          {open ? "✕" : "☰"}
+        </button>
+      )}
 
-      {open && (
+      {open && !hidden && (
         <div className="toolbar" style={toolbarStyle}>
           <DisplaySection
             displays={displays}
@@ -590,6 +701,14 @@ export default function FloatingMenu({
               ))}
             </div>
           </div>
+
+          <MacKeyboardSection
+            enabled={macKeyOverridesEnabled}
+            active={macKeyOverridesActive}
+            isMacHost={isMacHost}
+            remoteIsMac={remoteIsMac}
+            onChange={onMacKeyOverridesChange}
+          />
 
           <div className="toolbar-section toolbar-actions">
             {onResizeToWindow && (
