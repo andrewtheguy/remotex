@@ -165,7 +165,20 @@ impl Tracker {
     /// **Main thread only.**
     pub fn poll(&self) {
         let scale = f64::from_bits(self.scale_bits.load(std::sync::atomic::Ordering::Relaxed));
-        let shape = current(scale);
+        self.record(current(scale));
+    }
+
+    /// Record a freshly read shape, bumping the generation if it differs.
+    ///
+    /// Split from [`Tracker::poll`] so the bookkeeping either side of it can be
+    /// driven from a test. Everything here is a decision about two values; the
+    /// only part that needs a window server is the `current` call above, and it
+    /// is one line. A test that went through `poll` instead could only assert
+    /// against whatever shape the pointer happened to be in — including that it
+    /// held that shape from one poll to the next, which is live state belonging
+    /// to whoever is using the Mac, and which such a test would be assuming
+    /// rather than arranging.
+    fn record(&self, shape: Option<CursorImage>) {
         let mut cached = self.inner.lock().unwrap();
         if cached.shape != shape {
             cached.shape = shape;
@@ -241,29 +254,83 @@ mod tests {
         assert_eq!(clamp_u16(70_000.0), u16::MAX);
     }
 
+    /// A distinguishable shape. The bytes are not a real PNG and do not need to
+    /// be: nothing in the tracker decodes one, it only compares them.
+    fn shape(tag: u8) -> CursorImage {
+        CursorImage {
+            w: 16,
+            h: 16,
+            hx: 1,
+            hy: 2,
+            png: vec![tag],
+        }
+    }
+
+    // Driven through `record` rather than `poll`, so what is under test is the
+    // generation bookkeeping and not the pointer's mood.
+    //
+    // Through `poll` this failed once, in a full workspace run, and would not
+    // reproduce afterwards under load or with the pointer being driven around —
+    // which is the shape of a test whose outcome depends on the machine rather
+    // than on the code. Its last assertion required two reads of
+    // `NSCursor::currentSystemCursor` to be equal, and that is live state
+    // belonging to whoever is at the Mac. Whatever moved on the day, the test was
+    // asserting something it had not arranged, and none of the logic it covers
+    // needs a pointer at all.
+    //
+    // It also no longer skips itself. The old version returned early when no
+    // system cursor was available, so on a machine without one — CI, a headless
+    // session — the bookkeeping went unasserted exactly where nobody would
+    // notice. `the_live_system_cursor_is_a_coherent_png` below is what covers the
+    // read, and it only ever asserts one read against itself.
     #[test]
     fn a_fresh_tracker_reports_a_change_so_the_first_check_always_sends() {
         let tracker = Tracker::new();
-        // Nothing polled yet: generation 0 == UNSEEN, so no spurious send.
+        // Nothing recorded yet: generation 0 == UNSEEN, so no spurious send.
         assert!(tracker.changed_since(UNSEEN).is_none());
 
-        // After a poll the generation moves only if the shape differs from the
-        // default (None) — in a headless session it may legitimately stay None.
-        tracker.poll();
-        let after = tracker.changed_since(UNSEEN);
-        let generation = match after {
-            Some((generation, _)) => generation,
-            None => {
-                eprintln!("no system cursor available (headless session); skipping");
-                return;
-            }
-        };
+        tracker.record(Some(shape(1)));
+        let (generation, recorded) = tracker
+            .changed_since(UNSEEN)
+            .expect("the first shape is news to every session");
         assert_eq!(generation, 1);
+        assert_eq!(recorded, Some(shape(1)));
+
         // A session that has seen this generation is told nothing further.
         assert!(tracker.changed_since(generation).is_none());
-        // An unchanged cursor does not bump the generation again.
-        tracker.poll();
+        // And an unchanged cursor does not bump it again, however often it is
+        // polled — this is what keeps a 100ms poll off the wire.
+        tracker.record(Some(shape(1)));
         assert!(tracker.changed_since(generation).is_none());
+    }
+
+    // The cases the equality test above cannot reach on its own, and the one that
+    // matters most is the last: a pointer that goes away is a change, and a
+    // client that is not told keeps drawing a cursor the Mac has hidden.
+    #[test]
+    fn every_change_of_shape_is_one_generation() {
+        let tracker = Tracker::new();
+
+        tracker.record(Some(shape(1)));
+        tracker.record(Some(shape(2)));
+        let (generation, recorded) = tracker.changed_since(1).expect("a different shape is news");
+        assert_eq!(generation, 2);
+        assert_eq!(recorded, Some(shape(2)));
+
+        // Hidden. `None` differs from a shape, so it is a change like any other.
+        tracker.record(None);
+        let (generation, recorded) = tracker.changed_since(generation).expect("hiding is news");
+        assert_eq!(generation, 3);
+        assert_eq!(recorded, None);
+        // Still hidden: nothing to say.
+        tracker.record(None);
+        assert!(tracker.changed_since(generation).is_none());
+
+        // And back, which must not be mistaken for the generation it had before
+        // it was hidden — a session that saw generation 2 has to hear about this.
+        tracker.record(Some(shape(2)));
+        assert_eq!(tracker.changed_since(generation).map(|(g, _)| g), Some(4));
+        assert!(tracker.changed_since(2).is_some());
     }
 
     // Requires a GUI session, so it only asserts self-consistency rather than a
