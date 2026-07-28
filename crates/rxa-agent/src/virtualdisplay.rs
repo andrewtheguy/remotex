@@ -335,22 +335,24 @@ impl VirtualDisplay {
     /// and need a reboot to clear (`docs/known-issues.md`).
     pub fn set_size(&self, points: (u32, u32)) -> anyhow::Result<bool> {
         let want = size_in_envelope(points, self.base_points);
-        if want != points {
-            info!(
-                "virtualdisplay: display {} was asked for {}x{} points and can be {}x{} — clamped \
-                 into the {}x{} envelope its descriptor fixed at creation",
-                self.id,
-                points.0,
-                points.1,
-                want.0,
-                want.1,
-                self.base_points.0,
-                self.base_points.1
-            );
-        }
+        // Whether the request was clamped and whether it changes anything are two
+        // questions, and a window dragged past the envelope answers yes to the
+        // first and no to the second on every press after the first. Reported
+        // together so the log never says a size was clamped without also saying
+        // what came of it — the pair read separately is how "it clamped again"
+        // gets mistaken for "it resized again".
+        let clamped = if want == points {
+            String::new()
+        } else {
+            format!(
+                " (asked for {}x{}, clamped into the {}x{} envelope its descriptor fixed at \
+                 creation)",
+                points.0, points.1, self.base_points.0, self.base_points.1
+            )
+        };
         if want == crate::capture::display_points(self.id) {
             debug!(
-                "virtualdisplay: display {} is already {}x{} points; not reconfiguring",
+                "virtualdisplay: display {} is already {}x{} points; not reconfiguring{clamped}",
                 self.id, want.0, want.1
             );
             return Ok(false);
@@ -389,7 +391,7 @@ impl VirtualDisplay {
         // that announces geometry will find it.
         match await_bounds(self.id, |size| size == want) {
             Some(_) => info!(
-                "virtualdisplay: display {} is now {}x{} points at {}",
+                "virtualdisplay: display {} is now {}x{} points at {}{clamped}",
                 self.id,
                 want.0,
                 want.1,

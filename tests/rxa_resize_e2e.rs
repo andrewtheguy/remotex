@@ -203,12 +203,23 @@ async fn the_agents_display_follows_the_clients_window() {
     // display's identity, which is the intended behaviour — so a test run that
     // stopped here would leave the developer's display somewhere they did not
     // choose.
-    agent
-        .send(GatewayMsg::ResizeDisplay {
-            w: started_at.0,
-            h: started_at.1,
-        })
-        .await;
-    let (restored, _) = agent.next_size().await.expect("a size after restoring");
-    assert_eq!(restored, started_at, "the display should be back where it started");
+    //
+    // Only if it is not already there. On a display that had been left at its
+    // created size, the clamp above restored it as a side effect, and asking for
+    // a size the display is already in is exactly the case that reports nothing —
+    // as the assertion immediately above just required.
+    if envelope != started_at {
+        agent
+            .send(GatewayMsg::ResizeDisplay {
+                w: started_at.0,
+                h: started_at.1,
+            })
+            .await;
+        let (restored, _) = agent.next_size().await.expect("a size after restoring");
+        assert_eq!(
+            restored, started_at,
+            "the display should be back where it started"
+        );
+    }
+    println!("left at {}x{} points, where it was found", started_at.0, started_at.1);
 }
