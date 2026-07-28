@@ -42,21 +42,41 @@ pub struct Config {
     /// it, so it is created once at startup and lives as long as the agent.
     #[serde(default)]
     pub virtual_display: bool,
-    /// The **initial** size of that display in points, as `WIDTHxHEIGHT`.
+    /// The **initial** size of that display in points, as `WIDTHxHEIGHT`, no
+    /// smaller than 800x600 on either axis.
     ///
     /// Initial, not current, and the distinction is the whole of how this setting
     /// behaves. It is the size the display is created at the *first* time this Mac
     /// sees it. After that its resolution belongs to the Mac like any other
-    /// screen's: it appears in System Settings > Displays, whoever is using the
-    /// machine changes it there, and macOS remembers that choice against the
-    /// display's identity and restores it on the next launch — so this value stops
-    /// being what the display comes up at, and changing it will not move a display
-    /// that has already been arranged. (Nothing here ever asks for a resolution
-    /// twice; see [`crate::virtualdisplay`] for why, and
-    /// `docs/known-issues.md` for the VM display stack that makes it unwise.)
+    /// screen's: it appears in System Settings > Displays, macOS remembers
+    /// whatever is picked there against the display's identity and restores it on
+    /// the next launch — so this value stops being what the display comes up at,
+    /// and changing it will not move a display that has already been arranged.
+    /// (Nothing here ever asks for a resolution twice; see
+    /// [`crate::virtualdisplay`] for why, and `docs/known-issues.md` for the VM
+    /// display stack that makes it unwise.)
     ///
-    /// What it fixes forever is the *ceiling*: `maxPixels` and
-    /// `sizeInMillimeters` are set from this at creation and cannot be changed,
+    /// **Set the size here, and then leave that display alone in System
+    /// Settings.** macOS will resize it — it is an ordinary display to the rest
+    /// of the system — but nothing in that panel says which of its offers are
+    /// worth taking, and the agent cannot undo one afterwards:
+    ///
+    /// - every size is listed twice, once HiDPI and once `(low resolution)`, and
+    ///   the second is a 1x desktop that reads as the same choice in the list;
+    /// - below roughly 57% of the created width the mode falls out of the HiDPI
+    ///   density window altogether, so it comes back 1x whichever entry was
+    ///   picked, and only a *new* display recovers it — which means a new
+    ///   identity, and the arrangement macOS filed against the old one lost;
+    /// - whatever was picked is then remembered and restored, so the discrepancy
+    ///   outlives the session that caused it.
+    ///
+    /// Density is not a manual choice either, any more: a client reports the
+    /// density of the screen its window is on and the agent matches this display
+    /// to it (`GatewayMsg::HostScale`), so a hand-picked 1x or 2x is undone by
+    /// the next connection from a screen that disagrees.
+    ///
+    /// What this value fixes forever is the *ceiling*: `maxPixels` and
+    /// `sizeInMillimeters` are set from it at creation and cannot be changed,
     /// so this is the largest mode macOS can render on it at 2x, and every
     /// smaller size it offers has density to spare. Twice this many pixels get
     /// captured and encoded per frame, which is the reason not to ask for the
@@ -108,25 +128,27 @@ impl Config {
             .with_context(|| {
                 format!("virtual_display_initial_size must be WIDTHxHEIGHT, got {text:?}")
             })?;
-        let parse = |value: &str, axis: &str| -> anyhow::Result<u32> {
+        // The floors are the ones the display is clamped to at creation, shared
+        // rather than repeated: a size accepted here and then quietly changed
+        // there would be a saved setting that does not describe the display.
+        // Twice this is the pixel size, and the protocol carries pixels as u16 —
+        // so anything past 32767 points cannot be described to the gateway at
+        // all.
+        let parse = |value: &str, axis: &str, min: u32| -> anyhow::Result<u32> {
             let n: u32 = value.trim().parse().with_context(|| {
                 format!("virtual_display_initial_size {axis} must be a whole number, got {value:?}")
             })?;
-            // The floor is the one the display is clamped to at creation, shared
-            // rather than repeated: a size accepted here and then quietly changed
-            // there would be a saved setting that does not describe the display.
-            // Twice this is the pixel size, and the protocol carries pixels as
-            // u16 — so anything past 32767 points cannot be described to the
-            // gateway at all.
-            const MIN: u32 = crate::virtualdisplay::MIN_POINTS;
             anyhow::ensure!(
-                (MIN..=32_767).contains(&n),
-                "virtual_display_initial_size {axis} must be between {MIN} and 32767 \
+                (min..=32_767).contains(&n),
+                "virtual_display_initial_size {axis} must be between {min} and 32767 \
                  points, got {n}"
             );
             Ok(n)
         };
-        Ok((parse(w, "width")?, parse(h, "height")?))
+        Ok((
+            parse(w, "width", crate::virtualdisplay::MIN_WIDTH_POINTS)?,
+            parse(h, "height", crate::virtualdisplay::MIN_HEIGHT_POINTS)?,
+        ))
     }
 
     /// The parsed listen address.
@@ -283,13 +305,19 @@ psk = "{psk}"
 virtual_display = {virtual_display}
 
 # The size that display is created at the FIRST time this Mac sees it, in points,
-# WIDTHxHEIGHT — and the largest mode macOS can ever render on it at 2x.
+# WIDTHxHEIGHT, no smaller than 800x600 — and the largest mode macOS can ever
+# render on it at 2x.
 #
-# Initial, not current. After the first launch its resolution belongs to the Mac
-# like any other screen's: change it in System Settings > Displays, and macOS
-# remembers that against the display and restores it next time. Editing this
-# value will not move a display that has already been arranged — only a size
-# smaller than the one in use is worth changing here, and only for the ceiling.
+# Initial, not current. Set the size here, and then leave that display alone in
+# System Settings > Displays. macOS will resize it there like any other screen,
+# but it lists every size twice — HiDPI and "(low resolution)" — and a display
+# shrunk much below this one drops out of HiDPI whichever entry is picked, so it
+# comes back soft or oversized at a size nobody chose. macOS then remembers that
+# against the display and restores it at the next launch, and editing this value
+# will not move a display that has already been arranged.
+#
+# Its density needs no help either: whichever client is connected reports the
+# screen it is on and this display matches it, 1x or 2x, on its own.
 virtual_display_initial_size = "{virtual_display_initial_size}"
 "#,
         listen = config.listen,
@@ -506,26 +534,39 @@ mod tests {
     // The floor the config accepts is the floor the display is created at. Were
     // they to drift, a size saved from the dialog would come back as a display of
     // some other size, with nothing having said so.
+    //
+    // Per axis, and 800x600 is the whole of it: a desktop is not square, so one
+    // shared number would either let through a 600-point-wide display or refuse
+    // an 800x600 one.
     #[test]
     fn a_virtual_display_initial_size_below_the_created_floor_is_rejected() {
-        let floor = crate::virtualdisplay::MIN_POINTS;
-        let err = Config::parse(&with_psk(&format!(
-            "virtual_display_initial_size = \"{}x{floor}\"",
-            floor - 1
-        )))
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("width"), "{msg}");
-        assert!(msg.contains(&floor.to_string()), "{msg}");
+        let (min_w, min_h) = (
+            crate::virtualdisplay::MIN_WIDTH_POINTS,
+            crate::virtualdisplay::MIN_HEIGHT_POINTS,
+        );
+        assert_eq!((min_w, min_h), (800, 600), "the documented minimum config");
+
+        for (w, h, axis) in [(min_w - 1, min_h, "width"), (min_w, min_h - 1, "height")] {
+            let err =
+                Config::parse(&with_psk(&format!(
+                    "virtual_display_initial_size = \"{w}x{h}\""
+                )))
+                .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(axis), "{w}x{h} gave {msg}");
+        }
 
         // And the floor itself is fine, so the message is a bound and not an
         // off-by-one.
         let config =
             Config::parse(&with_psk(&format!(
-                "virtual_display_initial_size = \"{floor}x{floor}\""
+                "virtual_display_initial_size = \"{min_w}x{min_h}\""
             )))
             .unwrap();
-        assert_eq!(config.virtual_display_initial_points().unwrap(), (floor, floor));
+        assert_eq!(
+            config.virtual_display_initial_points().unwrap(),
+            (min_w, min_h)
+        );
     }
 
     #[test]

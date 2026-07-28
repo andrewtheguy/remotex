@@ -163,11 +163,18 @@ only the checkbox that decides whether the private display exists and the
 `virtual_display_initial_size` its first appearance uses.
 
 "Initial" is the whole of how that size behaves: it is what the private display is
-created at the first time this Mac sees it. After that its resolution is the Mac's
-like any other screen's — set it in System Settings > Displays, where macOS
-remembers it against the display and restores it on the next launch. Editing the
-setting will not move a display that has already been arranged; what it fixes
-permanently is the largest mode that display can ever render at 2x.
+created at the first time this Mac sees it (no smaller than 800x600), and what it
+fixes permanently is the largest mode that display can ever render at 2x.
+
+Set it there, and then leave that display alone in System Settings > Displays.
+macOS will resize it like any other screen, but it lists every size twice — a
+HiDPI entry and a `(low resolution)` one — and a display shrunk much below the
+size it was created at drops out of HiDPI whichever entry is picked, so it comes
+back soft or oversized at a size nobody chose. macOS then remembers that against
+the display and restores it on the next launch, and editing the setting will not
+move a display that has already been arranged. Its density needs no help either:
+whichever client is connected reports the screen it is on, and the display
+matches it.
 
 See [`docs/mac-agent-architecture.md`](../../docs/mac-agent-architecture.md)
 for the capture, transport, and lifecycle design.

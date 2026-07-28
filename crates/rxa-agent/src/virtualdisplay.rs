@@ -71,14 +71,23 @@ pub const SCALE: f64 = 2.0;
 /// display is the common case, and every step down costs density.
 const MAX_DPI: f64 = 250.0;
 
-/// Floor for a created display, in points.
+/// Floor for a created display, in points: 800x600.
 ///
-/// Nothing enforces a minimum in the API — this is here so a nonsensical
-/// configured size cannot ask for a 2x1 desktop. Public because
-/// [`crate::config`] validates against the same number: a size the config
-/// accepts and the clamp below then quietly changes would be a saved setting
-/// that does not describe the display.
-pub const MIN_POINTS: u32 = 320;
+/// Nothing enforces a minimum in the API. The floor here was once a guard
+/// against nonsense rather than a size — it let a 320-point desktop through,
+/// which is smaller than the dialogs macOS would put on it — and 800x600 is the
+/// smallest thing that reads as a screen at all.
+///
+/// It is also the one bound that cannot be recovered from later, which is why it
+/// is worth being strict about: the created size is simultaneously the *ceiling*
+/// (see [`VirtualDisplay::create`]), so every mode this display will ever offer
+/// is this one or smaller.
+///
+/// Public because [`crate::config`] validates against the same two numbers: a
+/// size the config accepts and the clamp below then quietly changes would be a
+/// saved setting that does not describe the display.
+pub const MIN_WIDTH_POINTS: u32 = 800;
+pub const MIN_HEIGHT_POINTS: u32 = 600;
 
 /// How long to wait for the WindowServer to publish a new configuration.
 ///
@@ -121,7 +130,10 @@ impl VirtualDisplay {
     /// twice the requested size is worse than no display of our own, and the
     /// caller can fall back to the Mac's real screen and say so.
     pub fn create(points: (u32, u32)) -> anyhow::Result<Self> {
-        let points = (points.0.max(MIN_POINTS), points.1.max(MIN_POINTS));
+        let points = (
+            points.0.max(MIN_WIDTH_POINTS),
+            points.1.max(MIN_HEIGHT_POINTS),
+        );
         // Worked out once and used three ways: the descriptor's ceiling, the
         // physical size that places the mode in the density window, and the log
         // line. A second calculation of it is a second place for `SCALE` to be

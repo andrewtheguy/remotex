@@ -177,10 +177,13 @@ pub fn config(mtm: MainThreadMarker, current: &Draft, displays: &[String]) -> Op
     let virtual_size = field(mtm, &current.virtual_size, row(3), WIDTH - CONTROL_X, false);
     virtual_size.setToolTip(Some(&NSString::from_str(
         "The size the virtual display is created at the first time this Mac sees \
-         it, in points, WIDTHxHEIGHT — and the largest mode macOS can ever render \
-         on it at 2x.\n\nAfter that its resolution is the Mac's, like any other \
-         screen: change it in System Settings > Displays, where macOS also \
-         remembers it. Editing this will not move a display already arranged \
+         it, in points, WIDTHxHEIGHT, no smaller than 800x600 — and the largest \
+         mode macOS can ever render on it at 2x.\n\nSet it here and leave that \
+         display alone in System Settings > Displays. It can be resized there \
+         like any other screen, but every size is listed twice — HiDPI and \
+         \"(low resolution)\" — and one much smaller than this drops out of HiDPI \
+         either way, so it comes back soft or oversized. macOS remembers that and \
+         restores it, and editing this will not move a display already arranged \
          there.",
     )));
     view.addSubview(&virtual_size);
