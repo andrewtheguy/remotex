@@ -77,12 +77,13 @@ VideoToolbox on the Mac, is separate again.
 
 ### A remote size that is chosen rather than derived
 
-Every size a client asks for today is one it worked out from its own window, and
-mobile is where that stops being possible. A portrait phone's window asks for a tall,
-narrow desktop no desktop OS lays out well, and rotating it asks for a different one —
-so a pinch-zoom client stopped deriving one. A tablet now asks for its own landscape
-dimensions, and a phone asks for `defaultSize`: the target's configured
-`width`/`height`, or the point size the `rxa` agent created its display at.
+A client on a real desktop works its size out from its own window, and mobile is
+where that stops being possible: a portrait phone's window asks for a tall, narrow
+desktop no desktop OS lays out well, and rotating it asks for a different one. So a
+pinch-zoom client derives nothing. A tablet asks for its own landscape dimensions off
+`screen`, and a phone sends `ClientMsg::DefaultSize` — a request carrying no size at
+all, which each engine answers with the target's configured `width`/`height`, or with
+the point size the `rxa` agent created its display at.
 
 Those are defensible guesses, not answers. An iPad's landscape shape is a
 tablet's, not a resolution anybody picked for the desktop behind it, and the
@@ -91,12 +92,17 @@ connect. The person looking at the desktop knows what they want it to be, and
 nothing anywhere asks them — the phone/tablet split in `useRemoteDesktop.ts` exists
 only because the client has to guess, and a chosen size would delete it.
 
-The wire needs nothing new: `ClientMsg::Viewport` already carries an arbitrary size
-and three engines already act on it. What this revises is the stance recorded on
-that message, that a remote's resolution belongs to the machine running it. That is
-true of a Mac's own panel — which is why `rxa` resizes only a display the agent made,
-and that stays true — and false of a headless VNC server or a display created for
-one client, whose size exists only for whoever is connected.
+A chosen size needs nothing new on the wire: `ClientMsg::Viewport` already carries an
+arbitrary size and all three engines already act on it. `DefaultSize` is not a step
+towards it and does not grow into it — deferring to whatever the far side calls its
+default is the opposite of naming a resolution, and it remains what a phone sends
+whatever this adds beside it.
+
+What a chosen size revises is the stance recorded on `Viewport`, that a remote's
+resolution belongs to the machine running it. That is true of a Mac's own panel —
+which is why `rxa` resizes only a display the agent made, and that stays true — and
+false of a headless VNC server or a display created for one client, whose size exists
+only for whoever is connected.
 
 What is not settled, and should not be decided here first:
 

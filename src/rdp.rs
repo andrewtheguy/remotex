@@ -385,20 +385,19 @@ async fn active_loop(
                 // automatic resize, the browser only sends this when the user
                 // asks for it (the menu's "Resize to window") — reactivation is
                 // heavier than VNC's SetDesktopSize. Ignored unless negotiated.
-                if let ClientMsg::Viewport { w, h } = input {
-                    if resize {
-                        resize_desktop(&mut active_stage, &mut framed, desktop, w, h).await?;
-                    }
-                    continue;
-                }
-                // The same request without a size on it: the target's configured
-                // `width`/`height` is what "default" means here, and it is already
-                // the size this session connected at — so this is a no-op unless
+                //
+                // `DefaultSize` is the same request with the size supplied from
+                // here: the target's configured `width`/`height`, which is already
+                // what this session connected at — so it is a no-op unless
                 // something moved the desktop off it. See
                 // [`ClientMsg::DefaultSize`].
-                if matches!(input, ClientMsg::DefaultSize) {
+                let wanted_size = match input {
+                    ClientMsg::Viewport { w, h } => Some((w, h)),
+                    ClientMsg::DefaultSize => Some(default_size),
+                    _ => None,
+                };
+                if let Some((w, h)) = wanted_size {
                     if resize {
-                        let (w, h) = default_size;
                         resize_desktop(&mut active_stage, &mut framed, desktop, w, h).await?;
                     }
                     continue;

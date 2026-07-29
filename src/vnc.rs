@@ -475,18 +475,18 @@ async fn active_loop(
                 // Viewport reports drive dynamic resize, not an input event;
                 // dropped entirely unless the target opted in. `DefaultSize` is
                 // the same request with the size supplied from here instead of by
-                // the client — see [`ClientMsg::DefaultSize`] — so it goes through
-                // the same call and inherits the stash-until-supported and
-                // drop-the-no-op behaviour with it.
-                let sent = if let ClientMsg::Viewport { w, h } = input {
+                // the client — see [`ClientMsg::DefaultSize`] — so the two resolve
+                // to a size first and share the one call, which is also how the
+                // second inherits the stash-until-supported and drop-the-no-op
+                // behaviour `request_resize` already has.
+                let wanted_size = match input {
+                    ClientMsg::Viewport { w, h } => Some((w, h)),
+                    ClientMsg::DefaultSize => Some(default_size),
+                    _ => None,
+                };
+                let sent = if let Some(size) = wanted_size {
                     if resize {
-                        request_resize(&writer, &desktop, (w, h)).await
-                    } else {
-                        Ok(())
-                    }
-                } else if matches!(input, ClientMsg::DefaultSize) {
-                    if resize {
-                        request_resize(&writer, &desktop, default_size).await
+                        request_resize(&writer, &desktop, size).await
                     } else {
                         Ok(())
                     }
