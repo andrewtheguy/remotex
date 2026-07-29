@@ -66,11 +66,19 @@ use crate::opus_stream::{FRAME_FRAMES, OPUS_SAMPLE_RATE, OggOpus};
 
 /// How many wave buffers the queue holds before the oldest are dropped.
 ///
-/// A Windows server sends a few KiB per buffer — roughly 20–25 ms of CD-quality
-/// stereo — so this is on the order of a second and a half. Enough to ride out a
-/// scheduling hiccup in the response task, and short enough that a consumer that
-/// stopped reading cannot put a noticeable delay between the desktop and its
-/// sound.
+/// This is deep: the tested host sends **32 KiB per buffer, 186 ms** of CD-quality
+/// stereo, so 64 of them is **11.8 seconds** — not the "second and a half" this
+/// comment claimed while it assumed a few KiB a buffer. Worth knowing before relying
+/// on the drop rule to bound latency, because it does not: a consumer that ran one
+/// buffer per second slow would be eleven seconds behind before anything was
+/// dropped.
+///
+/// It has never come to that. Measured against the live target, 299 consecutive
+/// buffers arrived with the queue at **zero** every time — the host paces itself to
+/// real time (one buffer every ~189 ms) and the encode side keeps up with room to
+/// spare. So the depth is doing nothing but absorbing a scheduling hiccup, which is
+/// what it is for, and shrinking it would only make a drop more likely without
+/// making anything faster.
 pub const AUDIO_QUEUE_DEPTH: usize = 64;
 
 /// One Opus frame as a duration: 20 ms, derived rather than written down.
@@ -78,10 +86,17 @@ const FRAME: Duration =
     Duration::from_nanos(FRAME_FRAMES as u64 * 1_000_000_000 / OPUS_SAMPLE_RATE as u64);
 
 /// How long the keepalive lets the stream go without sending anything.
-///
-/// Comfortably longer than the ~185 ms a live host leaves between wave buffers, so
-/// while real audio is arriving this never fires and no filler is mixed into it.
 const SILENCE_CHECK: Duration = Duration::from_millis(500);
+
+/// How long since the last wave buffer before the remote counts as quiet.
+///
+/// The interval above is not enough on its own. A live host leaves ~185 ms between
+/// buffers, but it is a desktop and not a clock: one late delivery longer than the
+/// check would put 100 ms of silence into the middle of real audio, which is a
+/// stutter, and the listener then carries that 100 ms as lag. Eight times the
+/// cadence is comfortably past any hiccup and still quick enough that a browser is
+/// never left more than two seconds with nothing at all.
+const SILENCE_GRACE: Duration = Duration::from_millis(1_500);
 
 /// How much silence it sends when it does fire: 100 ms, against that 500 ms wait.
 ///
@@ -315,6 +330,14 @@ impl AudioListener {
             header: Option<Vec<u8>>,
             waves: broadcast::Receiver<Vec<u8>>,
             stop: oneshot::Receiver<()>,
+            /// When a wave buffer last arrived, so the keepalive can tell a quiet
+            /// remote from a late delivery. `tokio`'s clock rather than the standard
+            /// library's, so `tokio::time::pause` can drive it in tests.
+            last_wave: tokio::time::Instant,
+            /// When the response opened, which only the diagnostic line below reads:
+            /// frames encoded against time elapsed is how a stream that is drifting
+            /// from real time shows itself.
+            started: tokio::time::Instant,
         }
 
         let (encoder, header) = match OggOpus::new(format) {
@@ -333,6 +356,8 @@ impl AudioListener {
             header,
             waves: self.waves,
             stop: self.stop,
+            last_wave: tokio::time::Instant::now(),
+            started: tokio::time::Instant::now(),
         };
         futures_util::stream::unfold(state, |mut state| async move {
             if let Some(header) = state.header.take() {
@@ -345,7 +370,27 @@ impl AudioListener {
                     // and both mean the same thing here.
                     _ = &mut state.stop => return None,
                     wave = state.waves.recv() => match wave {
-                        Ok(samples) => encoder.push(&samples),
+                        Ok(samples) => {
+                            let now = tokio::time::Instant::now();
+                            // Four numbers, and between them they say whether this
+                            // gateway is adding delay: the buffer size and the queue
+                            // depth locate a backlog, and encoded frames against
+                            // elapsed time say whether the stream is running ahead of
+                            // real time or behind it. It was written to answer a
+                            // report of a couple of seconds of lag, and it answered it
+                            // — no backlog, ratio 0.9996 — which is why it stays:
+                            // the next such report deserves the same evidence rather
+                            // than a fresh round of theories.
+                            debug!(
+                                "audio: wave {} bytes, {} queued, {} frames encoded in {} ms",
+                                samples.len(),
+                                state.waves.len(),
+                                encoder.frames_encoded(),
+                                state.started.elapsed().as_millis(),
+                            );
+                            state.last_wave = now;
+                            encoder.push(&samples)
+                        }
                         // Old audio was dropped while this consumer was behind.
                         // Skipping forward is the point: the alternative is a
                         // delay that never comes back. The encoder carries on:
@@ -357,11 +402,15 @@ impl AudioListener {
                         }
                         Err(broadcast::error::RecvError::Closed) => return None,
                     },
-                    // The keepalive. A fresh timer each iteration, so it only fires
-                    // when nothing has arrived for the whole interval — and it hands
-                    // over less than the interval's worth, so a quiet remote drains
-                    // the listener's backlog instead of holding it.
+                    // The keepalive, which fills a remote that has gone quiet and
+                    // nothing else: a late buffer is waited for rather than papered
+                    // over. What it hands across is less than the interval's worth,
+                    // so a quiet remote drains the listener's backlog instead of
+                    // holding it.
                     _ = tokio::time::sleep(SILENCE_CHECK) => {
+                        if state.last_wave.elapsed() < SILENCE_GRACE {
+                            continue;
+                        }
                         encoder.push_silence(SILENCE_TRICKLE_FRAMES)
                     }
                 };
@@ -555,11 +604,12 @@ mod tests {
         );
         // And the frame count has to be that duration, not a number beside it.
         assert_eq!(FRAME * SILENCE_TRICKLE_FRAMES as u32, SILENCE_TRICKLE);
-        // And long enough not to fire between a live host's wave buffers, which
-        // would mix filler into real audio.
+        // And it must not be able to land inside real audio: a host sends a buffer
+        // every ~185 ms, and one arriving late must be waited for rather than filled
+        // in, since the filler becomes lag the listener then carries.
         assert!(
-            SILENCE_CHECK > Duration::from_millis(370),
-            "a host sends a buffer every ~185 ms; leave it room"
+            SILENCE_GRACE > Duration::from_millis(185) * 4,
+            "the grace has to clear a late delivery, not just the usual cadence"
         );
     }
 

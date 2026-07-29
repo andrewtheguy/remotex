@@ -5,6 +5,14 @@ to the browser through the remotex gateway**. RDP already redirects the sound to
 its client; remotex requests that channel and exposes what arrives as an
 ordinary live HTTP audio response.
 
+> **Experimental, and the open part is latency.** Sound arrives, in the right format,
+> in stereo, starting and stopping on its own — all measured, all below. What is not
+> settled is *promptness*: a live desktop has been heard a couple of seconds late, and
+> the gateway has been measured out of that as a cause. See
+> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out).
+> Treat the timing behaviour, and the two mechanisms that exist to manage it, as
+> subject to change.
+
 Audio does not belong in the desktop WebSocket for this path. The browser already
 has a streaming audio client:
 
@@ -248,9 +256,12 @@ second request by the same owner replaces the first instead of creating a shared
 stream.
 
 Audio must not travel through the tile encoder or its queue. The RDPSND handler
-feeds a small bounded audio queue owned by the session (`src/audio.rs`): a
-`broadcast` channel of 64 buffers, around a second and a half. Every property of
-that channel answers a requirement — `send` never awaits, so it cannot block the
+feeds a bounded audio queue owned by the session (`src/audio.rs`): a `broadcast`
+channel of 64 buffers. That is **11.8 seconds**, not the "second and a half" this said
+while it assumed a few KiB per buffer — the tested host sends 32 KiB, 186 ms, per
+buffer. So the drop rule is not what bounds latency here, and it has never had to be:
+299 consecutive buffers arrived with the queue at zero. Every property of that channel
+answers a requirement — `send` never awaits, so it cannot block the
 RDP read loop; a full ring drops the *oldest* buffer, so a slow consumer loses old
 audio rather than accumulating latency; a consumer that fell behind is told and
 skips forward; and with nobody listening `send` simply fails, which is how an
@@ -262,6 +273,58 @@ Reverse proxies must pass the response through rather than buffer it.
 `X-Accel-Buffering: no` is sent unconditionally because it is the one such header
 that is inert everywhere it is not understood; the rest of the proxy configuration
 is deployment-specific.
+
+## Latency, and what has been ruled out
+
+**A live desktop has been heard a couple of seconds behind itself.** This is the open
+question in this path, and the reason to call the timing behaviour experimental. What
+follows is what has been measured rather than what has been theorised, because three
+plausible theories have already been wrong.
+
+**The gateway is not adding it.** Per-buffer instrumentation (`RUST_LOG=remotex=debug`,
+the `audio: wave …` line) against the live target, across a 55-second run with music
+playing:
+
+```
+299 buffers, all 32768 bytes, max queued: 0
+content produced 55340 ms over 55360 ms of wall clock  → ratio 0.9996
+inter-arrival: min 169 ms, median 189 ms, max 200 ms
+frame steps other than 9/10: []
+```
+
+Each line closes one theory:
+
+- **No backlog in the queue.** `max queued: 0`, every time, so the 11.8 s of depth
+  above was never touched.
+- **The host paces itself.** One 186 ms buffer every ~189 ms, and content out matching
+  the clock to 0.04%. FreeRDP's `rdpsnd_detect_overrun` exists because "older windows
+  RDP servers do not limit the send buffer" and dump audio faster than real time; this
+  host does not, so there is nothing for us to drop.
+- **The keepalive never lands in real audio.** Every step is 9 or 10 frames — the
+  arithmetic of a 32 KiB buffer — with no 5-frame silence batch anywhere, and the
+  longest gap between buffers (200 ms) is nowhere near the 1.5 s grace. So filler is
+  not the cause of the occasional stutter either.
+
+What the gateway contributes is therefore about **200 ms**: one wave buffer, plus at
+most one 20 ms Opus frame held for the next one.
+
+**The browser's buffer is not adding it either.** Reading `buffered.end - currentTime`
+on screen while the sound was late showed it **near zero** — the element was already at
+the live edge of what it had been sent. That is what makes playing faster useless here,
+and it is why the catch-up in `AudioPanel.tsx` is described there as insurance rather
+than a fix.
+
+So what is left, untested: **Windows' own capture path before rdpsnd sends**, and
+whatever the browser holds outside the buffered range (a network cache is not visible
+in `buffered`). The clean next experiment is an A/B against a different client on the
+same host — `freerdp` playing that desktop's audio — because if it is equally late, no
+change to this gateway can help.
+
+Two mechanisms exist in the meantime, and both are honest about being partial: the
+keepalive trickles below real time so a listener drains back towards live during any
+quiet (`audio::SILENCE_TRICKLE`), and the panel trims a standing buffer with
+`playbackRate` if one ever appears (`AudioPanel.tsx`). The first fixed a real,
+reproduced fault. The second has never been observed to engage.
 
 ## What has been heard, and what has not
 

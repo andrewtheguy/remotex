@@ -44,6 +44,41 @@
 import { useEffect, useRef, useState } from "react";
 import { useDockedHeight } from "./SoftKeyboardPanel.tsx";
 
+// Catching up to live, which is the only lever a media element has for its own
+// latency: it cannot be told to skip forward, but it can be told to play faster.
+//
+// Measure the gap between the end of the buffered range and the playhead, and where
+// it is more than a fraction of a second, play 8% fast until it is not. Pitch is
+// preserved by default, so the effect is inaudible on speech and music alike; the
+// hysteresis is wide enough that this engages once and then stops, rather than
+// oscillating around a single threshold.
+const CATCH_UP_ABOVE_S = 0.4;
+const CATCH_UP_UNTIL_S = 0.15;
+const CATCH_UP_RATE = 1.08;
+const CATCH_UP_EVERY_MS = 500;
+
+// Trim the buffer this element is holding ahead of its playhead.
+//
+// **Insurance rather than a fix, and it has never been seen to engage.** A live
+// desktop was heard a couple of seconds late, and reading this same number on screen
+// is what ruled the browser's buffer out: it sat near zero while the sound was late,
+// so the element was already at the live edge of what it had been sent and playing
+// faster could not have helped. What this still covers is the failure that *was*
+// observed, when the gateway kept the stream level with the clock: a standing buffer
+// the element will never give back on its own.
+function catchUp(player: HTMLAudioElement): void {
+  const ranges = player.buffered;
+  if (player.paused || ranges.length === 0) {
+    return;
+  }
+  const ahead = ranges.end(ranges.length - 1) - player.currentTime;
+  if (ahead > CATCH_UP_ABOVE_S) {
+    player.playbackRate = CATCH_UP_RATE;
+  } else if (ahead < CATCH_UP_UNTIL_S) {
+    player.playbackRate = 1;
+  }
+}
+
 interface Props {
   /** The session's audio endpoint, carrying its claim token. */
   src: string;
@@ -81,6 +116,20 @@ export default function AudioPanel({
       return;
     }
     playerRef.current?.play().catch(() => setBlocked(true));
+  }, [enabled]);
+
+  // Trim whatever buffer the element is holding ahead of the playhead — see above.
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    const timer = setInterval(() => {
+      const player = playerRef.current;
+      if (player) {
+        catchUp(player);
+      }
+    }, CATCH_UP_EVERY_MS);
+    return () => clearInterval(timer);
   }, [enabled]);
 
   return (
