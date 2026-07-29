@@ -533,7 +533,7 @@ mod tests {
         println!("wrote head.bin ({} bytes) and packets.bin ({} bytes)", head.len(), framed.len());
     }
 
-    /// The checked-in fixtures still match what this encoder produces.
+    /// The checked-in fixtures still describe what this encoder produces.
     ///
     /// **Not `#[ignore]`d, and that is the point of it.** The writer above is explicit
     /// because it touches another target's source tree, which means nothing forces it to
@@ -542,33 +542,115 @@ mod tests {
     /// keep passing on them — stale Opus decodes perfectly well — so the drift would
     /// surface as the cross-end check quietly no longer being one.
     ///
-    /// A byte comparison is the right strength here. libopus is deterministic for a given
-    /// input and configuration, so this only fails when something real moved: an encoder
-    /// setting in this file, the framing, or the vendored libopus version — and every one
-    /// of those is a case where the fixtures *should* be regenerated rather than trusted.
+    /// **This compares properties rather than bytes, and it learned that the hard way.**
+    /// The first version byte-compared, on the reasoning that libopus is deterministic
+    /// for a given input and configuration. It is — for a given *build*. The fixtures are
+    /// checked in, so the comparison spans builds, and CI sets `LIBOPUS_NO_PKG=1` to
+    /// compile `audiopus_sys`'s vendored source while a dev machine may link a system
+    /// libopus (homebrew 1.6.1 here). Those two produced 9960 bytes each and disagreed on
+    /// the contents, which broke `Agent validation` on main. Encoded float output is not a
+    /// reproducible artifact across libopus versions or optimisation paths.
+    ///
+    /// So the head is compared exactly — it is byte assembly plus the encoder's
+    /// lookahead, and the CI failure confirmed both builds report the same 312 — while
+    /// the packets are checked for the things a configuration change moves and a libopus
+    /// upgrade does not:
+    ///
+    /// - **the packet count**, which is pure arithmetic (882 input frames per packet) and
+    ///   is what a frame-size change halves or doubles;
+    /// - **the frames per packet**, read back through a decoder, which is the same change
+    ///   seen from the other side and also catches a rate change;
+    /// - **the total size**, within a band wide enough for a version difference and far
+    ///   narrower than a bitrate move (96 -> 64 kbps is a third of the bytes);
+    /// - **the panning**, which catches a channel count or interleave change.
+    ///
+    /// What this deliberately no longer claims is that the fixture bytes are *the* bytes
+    /// this machine would write. It cannot: two correct builds disagree.
     #[test]
     fn the_checked_in_opus_fixtures_match_this_encoder() {
+        const REGENERATE: &str =
+            "regenerate with `cargo test --lib -- --ignored --nocapture swift_opus_fixtures`";
         let dir = swift_fixture_dir();
         let (head, framed) = swift_opus_fixture_bytes();
 
-        for (name, produced) in [("head.bin", head), ("packets.bin", framed)] {
+        let read = |name: &str| -> Vec<u8> {
             let path = dir.join(name);
-            let checked_in = std::fs::read(&path).unwrap_or_else(|e| {
-                panic!(
-                    "read {}: {e}\nregenerate with \
-                     `cargo test --lib -- --ignored --nocapture swift_opus_fixtures`",
-                    path.display()
-                )
-            });
-            assert!(
-                checked_in == produced,
-                "{name} is {} bytes and this encoder now produces {} — the viewer's \
-                 cross-end decode test is checking stale bytes. Regenerate with \
-                 `cargo test --lib -- --ignored --nocapture swift_opus_fixtures`",
-                checked_in.len(),
-                produced.len()
+            std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}\n{REGENERATE}", path.display()))
+        };
+
+        assert!(
+            read("head.bin") == head,
+            "head.bin is not what this encoder's OpusHead is — the channel count, the \
+             input rate or the encoder's lookahead moved, and the viewer discards the \
+             pre-skip from this. {REGENERATE}"
+        );
+
+        let checked_in = read("packets.bin");
+        let fixture_packets = unframe(&checked_in);
+        let produced_packets = unframe(&framed);
+        assert_eq!(
+            fixture_packets.len(),
+            produced_packets.len(),
+            "packets.bin holds {} packets and this encoder now cuts {} — the frame size \
+             or the resampling changed. {REGENERATE}",
+            fixture_packets.len(),
+            produced_packets.len()
+        );
+
+        // Within 25%: a libopus version difference moves the total by a percent or two
+        // (both builds happened to land on exactly 9960 bytes), where the smallest
+        // bitrate change worth making moves it by a third.
+        let (fixture_len, produced_len) = (checked_in.len() as f64, framed.len() as f64);
+        assert!(
+            (fixture_len - produced_len).abs() / produced_len < 0.25,
+            "packets.bin is {} bytes where this encoder produces {} — that is a bitrate \
+             change, not a libopus difference. {REGENERATE}",
+            checked_in.len(),
+            framed.len()
+        );
+
+        // Decoded, because the wire's own framing says nothing about what is inside a
+        // packet: this is where a rate or channel change shows up.
+        let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo)
+            .expect("the fixtures are stereo at 48 kHz");
+        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
+        for (index, packet) in fixture_packets.iter().enumerate() {
+            let frames = decoder
+                .decode(packet, &mut decoded, false)
+                .unwrap_or_else(|e| panic!("fixture packet {index} does not decode: {e}\n{REGENERATE}"));
+            assert_eq!(
+                frames, FRAME_FRAMES,
+                "fixture packet {index} carries {frames} frames, not one 20 ms frame. {REGENERATE}"
             );
         }
+        // The last decoded packet is past the encoder settling, so the silent channel is
+        // really silent — the fixture is hard-panned on purpose (see the writer).
+        let energy = |samples: Vec<i16>| -> f64 {
+            samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>()
+                / samples.len() as f64
+        };
+        let left = energy(decoded.iter().copied().step_by(2).collect());
+        let right = energy(decoded.iter().copied().skip(1).step_by(2).collect());
+        assert!(
+            left > 1_000_000.0 && right * 10.0 < left,
+            "the fixture should still be hard-panned left, got {left} against {right}. \
+             {REGENERATE}"
+        );
+    }
+
+    /// Split the wire's `u16`-length framing back into packets.
+    fn unframe(framed: &[u8]) -> Vec<&[u8]> {
+        let mut packets = Vec::new();
+        let mut at = 0;
+        while at + 2 <= framed.len() {
+            let len = usize::from(u16::from_le_bytes([framed[at], framed[at + 1]]));
+            at += 2;
+            assert!(at + len <= framed.len(), "the framing is truncated");
+            packets.push(&framed[at..at + len]);
+            at += len;
+        }
+        packets
     }
 
     /// Absolute, so both of the tests above work whatever directory cargo was run from.
