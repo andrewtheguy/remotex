@@ -48,6 +48,13 @@ pub const STRIP_ROWS: u16 = 64;
 /// rejecting an unknown format drops the whole frame silently, which looks like a
 /// dead session rather than a version mismatch — so this is what makes the failure
 /// legible.
+///
+/// **Audio did not bump it, and that was a decision rather than an oversight.** The
+/// [`audio`] frame kind and its two messages are additive *and* opt-in: nothing
+/// arrives until a client sends [`ClientMsg::Audio`], which only a browser does. So
+/// a viewer's socket carries the same bytes it did before audio existed, and since
+/// the viewer compares this number for **equality** and ships as its own DMG, a bump
+/// would have cost every installed copy a reinstall to gain nothing.
 pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
@@ -251,6 +258,22 @@ pub enum ClientMsg {
     /// screen, with no way to ask for one of them — so those engines never send
     /// a display list and a client with none shows no picker.
     SelectDisplay { id: u32 },
+    /// Start or stop sending this attachment's audio. Handled by the session layer,
+    /// never forwarded to an engine (see [`crate::session::SessionManager::set_audio`]).
+    ///
+    /// **Audio is opt-in for a reason beyond taste, and it is why
+    /// [`PROTOCOL_VERSION`] did not have to move for it.** The macOS viewer checks
+    /// that number for equality and ships separately, so a bump costs every
+    /// installed copy a reinstall. Nothing but a browser sends this, so a viewer's
+    /// socket carries exactly the bytes it carried before audio existed — there is
+    /// no new wire for it to refuse. Guacamole makes the same arrangement from the
+    /// other end: its client declares the audio mimetypes it can decode, and a
+    /// client that declares none gets a stream carrying nothing.
+    ///
+    /// The browser sends this from the floating menu's Audio button, so the enabling
+    /// message is always inside a user gesture — which is also what lets it create
+    /// an `AudioContext` a policy will let play.
+    Audio { enabled: bool },
 }
 
 /// The layout of a server -> client binary frame: a **batch** of records.
@@ -321,6 +344,56 @@ pub mod batch {
     /// dozens of small tiles a returning menu or a blinking caret is made of, and
     /// large payloads are the least likely to recur byte for byte anyway.
     pub const MAX_CACHED_BYTES: usize = 32 * 1024;
+}
+
+/// The layout of a server -> client **audio** frame: one wave buffer's worth of
+/// Opus packets.
+///
+/// ```text
+/// offset 0: u8  frame kind, always 0x03 (audio)
+/// offset 1: u8  flags, always 0 — a receiver rejects anything else
+/// offset 2: u16 packet count
+/// offset 4: packets, each u16 length | length bytes  (little-endian throughout)
+/// ```
+///
+/// Deliberately the same four-byte header as [`batch`], so a reader of one finds
+/// nothing surprising in the other, and for the same two reasons: a reserved flags
+/// byte a receiver *rejects* rather than ignores, and a count that makes a truncated
+/// frame detectable rather than a silently short one.
+///
+/// **Why lengths at all**, when a WebSocket message is already delimited: an Opus
+/// packet does not carry its own size, and one frame holds several. Nine or ten of
+/// them for the tested host's 32 KiB wave buffers — 20 ms each — which is what keeps
+/// this at ~5 frames a second instead of the 50 a packet-per-frame design would
+/// send.
+///
+/// Audio shares the desktop socket rather than getting one of its own, following
+/// Guacamole, and [`crate::wire`] is where that is made to cost as little as it can:
+/// an audio frame does not wait behind a batch still being built.
+pub mod audio {
+    pub const FRAME_KIND: u8 = 0x03;
+    pub const HEADER_LEN: usize = 4;
+    /// Bytes each packet costs besides its own bytes.
+    pub const PACKET_HEADER_LEN: usize = 2;
+
+    /// Serialize `packets` into one audio frame.
+    ///
+    /// Panics on more than `u16::MAX` packets or a packet over `u16::MAX` bytes,
+    /// neither of which the encoder can produce: it cuts 20 ms frames of at most a
+    /// few hundred bytes, and a wave buffer holds tens of them, not thousands.
+    pub fn frame(packets: &[Vec<u8>]) -> Vec<u8> {
+        let len: usize = packets.iter().map(|p| PACKET_HEADER_LEN + p.len()).sum();
+        let mut frame = Vec::with_capacity(HEADER_LEN + len);
+        frame.push(FRAME_KIND);
+        frame.push(0); // flags
+        frame.extend_from_slice(&u16::try_from(packets.len()).expect("packet count").to_le_bytes());
+        for packet in packets {
+            let size = u16::try_from(packet.len()).expect("packet length");
+            frame.extend_from_slice(&size.to_le_bytes());
+            frame.extend_from_slice(packet);
+        }
+        frame
+    }
 }
 
 /// The canonical tile grid, in framebuffer pixels.
@@ -715,10 +788,10 @@ pub enum ServerMsg {
     /// target opted into the clipboard bridge, which is what enables the
     /// floating menu's Clipboard button.
     ///
-    /// `audio` is the same kind of permission and the only one whose feature does
-    /// not use this WebSocket at all: it says the browser may point an `<audio>`
-    /// element at `GET /api/session/audio` for this session (see
-    /// docs/remote-audio.md).
+    /// `audio` is the same kind of permission: it says this session *can* carry the
+    /// remote's sound, so a browser may ask for it with [`ClientMsg::Audio`] (see
+    /// docs/remote-audio.md). It does not mean any is playing, or that the remote's
+    /// audio channel is even up — from this end those are indistinguishable.
     Connected {
         name: String,
         protocol: &'static str,
@@ -763,6 +836,27 @@ pub enum ServerMsg {
         /// [`MAX_CLIPBOARD_BYTES`] — see [`ClipboardSnapshot::oversized_bytes`].
         oversized_bytes: Option<u64>,
     },
+    /// How to decode the audio frames that follow, sent once when a client's
+    /// [`ClientMsg::Audio`] subscription starts — and *before* the first packet,
+    /// because a decoder cannot be configured by the audio it is meant to decode.
+    ///
+    /// `sample_rate` and `channels` are the *stream's*, which is 48 kHz whatever
+    /// rate the remote negotiated: libopus encodes at 48 kHz and nothing else.
+    /// `head` is `OpusHead` (RFC 7845 §5.1) — base64 on the wire, and exactly the
+    /// byte string WebCodecs wants as an `AudioDecoderConfig.description`. It is
+    /// what carries the encoder's pre-skip, so a decoder discards its own delay
+    /// instead of playing it as leading silence.
+    AudioFormat {
+        codec: &'static str,
+        sample_rate: u32,
+        channels: u16,
+        head: Vec<u8>,
+    },
+    /// One wave buffer's worth of Opus packets, framed by [`audio::frame`].
+    ///
+    /// Like a tile, this has no text encoding and is not a control message: it is a
+    /// binary frame, and [`crate::wire`] is what turns it into one.
+    Audio(Vec<Vec<u8>>),
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -808,6 +902,15 @@ enum ControlMsg<'a> {
         active: u32,
         displays: Vec<WireDisplay<'a>>,
     },
+    AudioFormat {
+        codec: &'a str,
+        #[serde(rename = "sampleRate")]
+        sample_rate: u32,
+        channels: u16,
+        /// base64 `OpusHead`, for the same reason `cursor`'s PNG is base64: a text
+        /// frame cannot carry bytes, and this is 19 of them once a session.
+        head: String,
+    },
 }
 
 /// [`DisplayInfo`] as it goes out: `virtual_display` is `virtual` on the wire,
@@ -831,7 +934,7 @@ impl ServerMsg {
     /// type-level fact is what stops a future caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Tile(_) => return None,
+            ServerMsg::Tile(_) | ServerMsg::Audio(_) => return None,
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,
@@ -869,6 +972,17 @@ impl ServerMsg {
                 audio: *audio,
             }),
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
+            ServerMsg::AudioFormat {
+                codec,
+                sample_rate,
+                channels,
+                head,
+            } => control(&ControlMsg::AudioFormat {
+                codec,
+                sample_rate: *sample_rate,
+                channels: *channels,
+                head: base64::engine::general_purpose::STANDARD.encode(head),
+            }),
             ServerMsg::Displays { active, displays } => control(&ControlMsg::Displays {
                 active: *active,
                 displays: displays
@@ -986,6 +1100,52 @@ mod tests {
             ClientMsg::SelectDisplay { id: u32::MAX }
         ));
         assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"selectDisplay","id":-1}"#).is_err());
+        // The audio subscription, which is also the FAB's enable/disable control.
+        // Both directions matter: nothing sends this but a browser, and a viewer
+        // that never sends it is why [`PROTOCOL_VERSION`] did not have to move.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"audio","enabled":true}"#).unwrap(),
+            ClientMsg::Audio { enabled: true }
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"audio","enabled":false}"#).unwrap(),
+            ClientMsg::Audio { enabled: false }
+        ));
+        // No default: "audio" with nothing said about it would otherwise mean
+        // whichever of on and off serde picked.
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"audio"}"#).is_err());
+    }
+
+    /// The audio pair, which is one text frame and one binary frame — and the split
+    /// is the point: a decoder is configured by the first and fed by the second, so
+    /// a client that received them in the other order would decode nothing.
+    #[test]
+    fn the_audio_format_is_text_and_the_packets_are_not() {
+        let head = crate::opus_stream::opus_head(crate::audio::PCM_CD_QUALITY, 312);
+        let json = (ServerMsg::AudioFormat {
+            codec: "opus",
+            sample_rate: 48_000,
+            channels: 2,
+            head: head.clone(),
+        })
+        .text_frame()
+        .expect("the format must be a text frame");
+        assert_eq!(
+            json,
+            r#"{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}"#
+        );
+        // And the base64 is really OpusHead, not a placeholder that happens to
+        // decode: a client configures a decoder from these bytes.
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode("T3B1c0hlYWQBAjgBRKwAAAAAAA==")
+            .expect("valid base64");
+        assert_eq!(decoded, head);
+        assert_eq!(&decoded[0..8], b"OpusHead");
+
+        assert!(
+            ServerMsg::Audio(vec![vec![1, 2, 3]]).text_frame().is_none(),
+            "packets are a binary frame, like a tile"
+        );
     }
 
     // Control messages keep the tagged, camelCase text shape `protocol.ts` expects.

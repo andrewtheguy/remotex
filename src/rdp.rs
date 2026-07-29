@@ -978,7 +978,12 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
         // them: it empties that socket's tile cache and injects its own `Refresh`.
-        ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::CacheReset => Vec::new(),
+        // `Audio` is another: it subscribes that attachment to the queue this
+        // engine already fills, so there is nothing to translate for the remote.
+        ClientMsg::Connect { .. }
+        | ClientMsg::Disconnect
+        | ClientMsg::CacheReset
+        | ClientMsg::Audio { .. } => Vec::new(),
         // An RDP session is one framebuffer spanning every monitor the server
         // composed into it, and its protocol has no way to ask for one of them.
         // So this engine never sends a display list, no client offers the

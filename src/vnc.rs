@@ -1244,7 +1244,12 @@ fn translate_input(
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
         // them: it empties that socket's tile cache and injects its own `Refresh`.
-        ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::CacheReset => Vec::new(),
+        // `Audio` is another: it subscribes that attachment to the queue this
+        // engine already fills, so there is nothing to translate for the remote.
+        ClientMsg::Connect { .. }
+        | ClientMsg::Disconnect
+        | ClientMsg::CacheReset
+        | ClientMsg::Audio { .. } => Vec::new(),
         // RFB has one framebuffer, and on a multi-screen server it spans all of
         // them: the ExtendedDesktopSize screen list describes how they are laid
         // out inside it, not a set of things to choose between. So this engine
