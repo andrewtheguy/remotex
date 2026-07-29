@@ -131,6 +131,15 @@ enum ServerMessage: Sendable, Equatable {
             case head
         }
 
+        /// Spelled out because the custom `init(from:)` below suppresses the memberwise
+        /// one, and the decoder's tests build these directly.
+        init(codec: String, sampleRate: Double, channels: UInt32, head: Data) {
+            self.codec = codec
+            self.sampleRate = sampleRate
+            self.channels = channels
+            self.head = head
+        }
+
         /// Hand-written for `head` alone: base64 that will not decode is drift worth
         /// reporting as `malformed`, right here where the tag is still known, rather
         /// than an empty `Data` that fails later inside a decoder as "this browser

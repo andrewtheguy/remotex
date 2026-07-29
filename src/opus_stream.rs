@@ -497,6 +497,65 @@ mod tests {
         assert_eq!(packets.len(), 1);
     }
 
+    /// Write the Opus fixtures the macOS viewer's tests decode.
+    ///
+    /// Checked in for a different reason than the WebP ones ([`crate::protocol`]'s
+    /// `write_swift_webp_fixtures`, which exists because ImageIO cannot *write* WebP):
+    /// macOS can encode Opus perfectly well, and the point is that it must not. The
+    /// viewer's decoder test has to answer to *this* encoder — the resampler, the 20 ms
+    /// framing, the bitrate and the pre-skip in this file — or the two ends agree with
+    /// their own fixtures and disagree with each other, which is the failure the
+    /// browser's own wire tests are shaped around too (CLAUDE.md).
+    ///
+    /// Hard-panned, for the reason [`a_hard_panned_signal_still_has_two_channels_after_a_round_trip`]
+    /// exists: a channel *swap* or a blend passes every other assertion, and a
+    /// dual-mono source decodes with a correlation of exactly 1.0 while looking like a
+    /// fault. Left carries the tone, right is silent.
+    ///
+    /// The packets are framed the way the wire frames them — `u16` length, then the
+    /// packet — so the Swift side reads them with the parser it uses in production
+    /// rather than with a second format invented for the fixture.
+    ///
+    /// Run after changing the encoder's configuration:
+    ///
+    /// ```sh
+    /// cargo test --lib -- --ignored --nocapture swift_opus_fixtures
+    /// ```
+    #[test]
+    #[ignore = "writes files into the viewer's test bundle; run explicitly"]
+    fn write_swift_opus_fixtures() {
+        let dir = std::path::Path::new("apps/remotex-viewer/Tests/Fixtures/opus");
+        std::fs::create_dir_all(dir).expect("fixture directory");
+
+        let (mut stream, head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        assert_eq!(head.len(), 19, "OpusHead is 19 bytes");
+
+        // 40 packets' worth at 44 100 Hz: 882 input frames become one 20 ms packet.
+        let mut pcm = Vec::new();
+        for frame in 0..882 * 40 {
+            let phase = (frame % 100) as f32 / 100.0 * std::f32::consts::TAU;
+            pcm.extend_from_slice(&((phase.sin() * 12_000.0) as i16).to_le_bytes());
+            pcm.extend_from_slice(&0i16.to_le_bytes());
+        }
+        let packets = stream.push(&pcm).expect("push");
+        assert!(packets.len() >= 20, "too few packets to be worth a fixture");
+
+        let mut framed = Vec::new();
+        for packet in &packets {
+            let size = u16::try_from(packet.len()).expect("a packet fits a u16");
+            framed.extend_from_slice(&size.to_le_bytes());
+            framed.extend_from_slice(packet);
+        }
+
+        std::fs::write(dir.join("head.bin"), &head).unwrap();
+        std::fs::write(dir.join("packets.bin"), &framed).unwrap();
+        println!(
+            "wrote head.bin (19 bytes) and packets.bin ({} packets, {} bytes)",
+            packets.len(),
+            framed.len()
+        );
+    }
+
     #[test]
     fn an_impossible_channel_count_is_refused_rather_than_encoded() {
         let format = PcmFormat {
