@@ -217,9 +217,21 @@ function DisplaySection({
 // viewer's menu item — the preference still exists, it just has nothing to do
 // while Command already means Command at the other end.
 //
-// The label names the state rather than the action because all three states are
-// worth distinguishing: translating, sending Command through as the guest's Super
-// key, and a Mac guest where the question does not arise. See macKeys.ts.
+// The label names the state rather than the action, and says "on"/"off" out loud
+// to do it. `aria-pressed` is the honest place for that, but nothing in the
+// stylesheet draws a pressed toolbar button, so the text is the only channel a
+// sighted user has — which is why the other toggles here spell their state as
+// "Hide displays" and "Hide keyboard".
+//
+// This one cannot borrow that trick. "Hide" is unmistakably an action, whereas
+// "⌘ → Ctrl" describes a key mapping, so as a bare label it reads as what pressing
+// the button would *do* rather than what is already happening — and it meant the
+// opposite of that. The viewer has no such problem: AppKit puts a checkmark beside
+// a fixed "Enable macOS Keyboard Overrides", so its name never has to move.
+//
+// Three states are still worth distinguishing, and a Mac guest is the one that is
+// genuinely not a state of this preference but a reason it has nothing to do. See
+// macKeys.ts.
 function MacKeyboardSection({
   enabled,
   active,
@@ -236,7 +248,11 @@ function MacKeyboardSection({
   if (!isMacHost) {
     return null;
   }
-  const label = remoteIsMac ? "⌘ stays ⌘" : active ? "⌘ → Ctrl" : "⌘ as Super";
+  const label = remoteIsMac
+    ? "⌘ stays ⌘"
+    : active
+      ? "⌘ → Ctrl: on"
+      : "⌘ → Ctrl: off";
   return (
     <div className="toolbar-section">
       <span className="toolbar-label">Mac keyboard</span>
