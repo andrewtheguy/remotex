@@ -484,7 +484,8 @@ mod tests {
         let mut handler = Handler::new(Arc::clone(&bridge));
         handler.get_formats();
         let format = listener.negotiated_format().expect("answering the formats negotiates");
-        let mut stream = Box::pin(listener.into_packets(format));
+        let (_head, packets) = listener.into_packets(format).expect("an encoder");
+        let mut stream = Box::pin(packets);
 
         let frame = one_frame_of_pcm();
         handler.wave(0, 0, Cow::Borrowed(&frame));
@@ -590,7 +591,8 @@ mod tests {
             .expect("the client confirms training");
         assert!(!answer.is_empty(), "training must be confirmed");
 
-        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
+        let (_head, packets) = listener.into_packets(PCM_CD_QUALITY).expect("an encoder");
+        let mut stream = Box::pin(packets);
 
         let samples = one_frame_of_pcm();
         let answer = rdpsnd
@@ -658,7 +660,8 @@ mod tests {
             .expect("the client confirms training");
         assert_eq!(answer.len(), 1, "training is confirmed");
 
-        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
+        let (_head, packets) = listener.into_packets(PCM_CD_QUALITY).expect("an encoder");
+        let mut stream = Box::pin(packets);
 
         let samples = one_frame_of_pcm();
         let answer = dvc
@@ -717,7 +720,11 @@ mod tests {
         // The dynamic channel gets there first.
         dvc.process(1, &server_formats(&[audio_format(PCM_CD_QUALITY)]))
             .unwrap();
-        let mut stream = Box::pin(bridge.take_listener().into_packets(PCM_CD_QUALITY));
+        let (_head, packets) = bridge
+            .take_listener()
+            .into_packets(PCM_CD_QUALITY)
+            .expect("an encoder");
+        let mut stream = Box::pin(packets);
 
         // The two buffers are deliberately different lengths, because Opus makes
         // them otherwise indistinguishable: three frames from the transport that

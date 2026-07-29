@@ -32,12 +32,6 @@ pub enum AppError {
     #[error("forbidden")]
     Forbidden,
 
-    /// The resource exists but has nothing to serve yet — rendered as
-    /// `503 Service Unavailable`, naming what was unavailable. A retry is
-    /// meaningful, which is what separates this from a 404.
-    #[error("{0} is unavailable")]
-    Unavailable(&'static str),
-
     /// Another browser's WebSocket holds the single session slot — rendered
     /// as `409 Conflict`. The client may retry with `force` (takeover).
     #[error("session busy")]
@@ -52,19 +46,6 @@ pub enum AppError {
 /// Result alias for fallible handlers, e.g. `async fn h() -> ApiResult<Json<T>>`.
 pub type ApiResult<T> = Result<T, AppError>;
 
-impl From<crate::session::AudioError> for AppError {
-    /// The two refusals mean different things to a client and get different
-    /// codes: a token that is not the current claim will never work again (403),
-    /// while a session that has no audio *yet* — the picker, or an audio channel
-    /// still coming up — is worth asking again for (503).
-    fn from(err: crate::session::AudioError) -> Self {
-        match err {
-            crate::session::AudioError::InvalidToken(_) => AppError::Forbidden,
-            crate::session::AudioError::NoSource => AppError::Unavailable("remote audio"),
-        }
-    }
-}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
@@ -75,11 +56,6 @@ impl IntoResponse for AppError {
             AppError::Forbidden => {
                 (StatusCode::FORBIDDEN, "not this session's holder").into_response()
             }
-            AppError::Unavailable(what) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("{what} is unavailable"),
-            )
-                .into_response(),
             AppError::SessionBusy(_) => {
                 (StatusCode::CONFLICT, "another browser holds the session").into_response()
             }

@@ -51,7 +51,7 @@ use std::sync::Mutex;
 
 use futures_util::Stream;
 use log::{debug, info, warn};
-use tokio::sync::{broadcast, oneshot, watch};
+use tokio::sync::{broadcast, watch};
 
 use crate::opus_stream::OpusStream;
 
@@ -123,11 +123,6 @@ pub struct AudioBridge {
     /// way — so it is a record rather than a gate: what the log says about whether
     /// the remote's audio is set up, and what an indicator would read one day.
     format: watch::Sender<Option<PcmFormat>>,
-    /// Ends the current listener's response. Held here rather than derived from
-    /// the engine's lifetime because two of the cases that must end a response
-    /// leave the engine running: a session takeover, and a second request by the
-    /// same owner (which replaces the first rather than sharing the stream).
-    listener: Mutex<Option<oneshot::Sender<()>>>,
     /// Which MS-RDPEA transport is filling this queue — see
     /// [`Self::claim_transport`].
     transport: Mutex<Option<&'static str>>,
@@ -138,7 +133,6 @@ impl AudioBridge {
         Self {
             waves: broadcast::channel(AUDIO_QUEUE_DEPTH).0,
             format: watch::Sender::new(None),
-            listener: Mutex::new(None),
             transport: Mutex::new(None),
         }
     }
@@ -210,25 +204,29 @@ impl AudioBridge {
         let _ = self.waves.send(samples);
     }
 
-    /// Attach the one listener, ending whichever response held the slot before.
+    /// How many listeners are reading this queue.
+    ///
+    /// Exists for [`crate::session`]'s tests, which assert on it rather than on a
+    /// socket going quiet: stopping audio aborts a task, so the observable fact is
+    /// that its subscription went away.
+    #[cfg(test)]
+    pub fn listener_count(&self) -> usize {
+        self.waves.receiver_count()
+    }
+
+    /// Subscribe to the queue from now on.
+    ///
+    /// Nothing here can *end* a listener, and it used to: a `oneshot` lived beside
+    /// this so a takeover could cut the previous browser's stream while the engine
+    /// carried on. That belonged to a stream whose lifetime was an HTTP request's.
+    /// Now a listener is read by one attachment's pump task, so ending it is
+    /// [`crate::session`]'s business — it holds the task — and the two cases that
+    /// need it (a takeover, and disabling audio) are both cases where the session
+    /// layer is already acting.
     pub fn take_listener(&self) -> AudioListener {
-        let (stop_tx, stop) = oneshot::channel();
-        // Assigning drops the previous sender, and that drop is what ends the
-        // previous response.
-        *self.listener.lock().unwrap() = Some(stop_tx);
         AudioListener {
             waves: self.waves.subscribe(),
             format: self.format.subscribe(),
-            stop,
-        }
-    }
-
-    /// End the current listener's response without touching the engine. What a
-    /// session takeover does: the desktop carries on for the new browser, but
-    /// the previous browser's audio belongs to the claim it no longer holds.
-    pub fn stop_listener(&self) {
-        if self.listener.lock().unwrap().take().is_some() {
-            debug!("audio: ending the current listener's response");
         }
     }
 }
@@ -239,11 +237,10 @@ impl Default for AudioBridge {
     }
 }
 
-/// One HTTP response's read side of an [`AudioBridge`].
+/// One client's read side of an [`AudioBridge`].
 pub struct AudioListener {
     waves: broadcast::Receiver<Vec<u8>>,
     format: watch::Receiver<Option<PcmFormat>>,
-    stop: oneshot::Receiver<()>,
 }
 
 impl AudioListener {
@@ -259,92 +256,83 @@ impl AudioListener {
         *self.format.borrow()
     }
 
-    /// The Opus packets cut from the PCM that arrives after this listener attached,
-    /// one item per wave buffer that completed at least one 20 ms frame.
+    /// `OpusHead` and the Opus packets cut from the PCM that arrives after this
+    /// listener attached — one item per wave buffer that completed at least one
+    /// 20 ms frame.
     ///
-    /// The header a decoder needs is *not* in here — it is [`crate::opus_stream::
-    /// opus_head`], handed over separately by whoever set this stream up, because a
-    /// client has to be configured before the first packet rather than by it.
+    /// The header comes back *beside* the stream rather than as its first item,
+    /// because it does not travel with the audio: a decoder is configured by it
+    /// before the first packet, and on this wire that means a text control message
+    /// ahead of the binary frames (see [`crate::protocol::ServerMsg::AudioFormat`]).
+    /// Returning both from one call is what makes it impossible to start a stream
+    /// and forget to say how to decode it.
+    ///
+    /// The error is a format libopus will not encode — in practice a channel count
+    /// other than 1 or 2, which the single advertised format rules out. Refusing here
+    /// rather than sending a stream that will never carry anything is the difference
+    /// between one log line and a client waiting forever.
     ///
     /// Open-ended by construction: there is no recording and no history, so a
     /// listener starts at live audio and receives only what arrives after it
     /// attached. It ends when the engine's bridge is dropped (the target changed,
-    /// disconnected, or the engine died), when the slot ends this listener (a
-    /// takeover), or when the consumer stops reading and this stream is dropped
-    /// with it.
+    /// disconnected, or the engine died), or when the consumer stops reading and this
+    /// stream is dropped with it.
     ///
     /// A wave buffer usually yields several packets and sometimes none — the encoder
     /// cuts 20 ms frames out of whatever sizes RDP sends and holds the remainder —
     /// and it yields **nothing at all** while the remote is quiet, which is the whole
     /// difference from the silence-filled version this replaced.
-    pub fn into_packets(self, format: PcmFormat) -> impl Stream<Item = Vec<Vec<u8>>> {
+    pub fn into_packets(
+        self,
+        format: PcmFormat,
+    ) -> Result<(Vec<u8>, impl Stream<Item = Vec<Vec<u8>>>), anyhow::Error> {
         struct State {
-            /// `None` once the encoder has refused the format; the stream then ends
-            /// immediately, which every consumer already handles as the remote's
-            /// audio going away.
-            encoder: Option<OpusStream>,
+            encoder: OpusStream,
             waves: broadcast::Receiver<Vec<u8>>,
-            stop: oneshot::Receiver<()>,
             /// When this listener attached, which only the diagnostic line below
             /// reads: frames encoded against time elapsed is how a stream that is
             /// drifting from real time shows itself.
             started: tokio::time::Instant,
         }
 
-        let encoder = match OpusStream::new(format) {
-            Ok((encoder, _head)) => Some(encoder),
-            Err(e) => {
-                warn!("audio: cannot encode {format:?} as opus, no audio will be sent: {e}");
-                None
-            }
-        };
+        let (encoder, head) = OpusStream::new(format)
+            .map_err(|e| anyhow::anyhow!("cannot encode {format:?} as opus: {e}"))?;
 
         let state = State {
             encoder,
             waves: self.waves,
-            stop: self.stop,
             started: tokio::time::Instant::now(),
         };
-        futures_util::stream::unfold(state, |mut state| async move {
-            let encoder = state.encoder.as_mut()?;
+        let stream = futures_util::stream::unfold(state, |mut state| async move {
             loop {
-                let encoded = tokio::select! {
-                    // Resolves on the value *or* on the sender being dropped,
-                    // and both mean the same thing here.
-                    _ = &mut state.stop => return None,
-                    wave = state.waves.recv() => match wave {
-                        Ok(samples) => {
-                            // Four numbers, and between them they say whether this
-                            // gateway is adding delay: the buffer size and the queue
-                            // depth locate a backlog, and encoded frames against
-                            // elapsed time say whether the stream is running ahead of
-                            // real time or behind it. It was written to answer a
-                            // report of a couple of seconds of lag, and it answered it
-                            // — no backlog, ratio 0.9996 — which is why it stays:
-                            // the next such report deserves the same evidence rather
-                            // than a fresh round of theories.
-                            debug!(
-                                "audio: wave {} bytes, {} queued, {} frames encoded in {} ms",
-                                samples.len(),
-                                state.waves.len(),
-                                encoder.frames_encoded(),
-                                state.started.elapsed().as_millis(),
-                            );
-                            encoder.push(&samples)
-                        }
-                        // Old audio was dropped while this consumer was behind.
-                        // Skipping forward is the point: the alternative is a
-                        // delay that never comes back. The encoder carries on:
-                        // Opus frames are independent, so a gap is a gap in the
-                        // sound rather than a broken stream.
-                        Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                            debug!("audio: listener fell behind, {dropped} buffer(s) dropped");
-                            continue;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => return None,
-                    },
+                let samples = match state.waves.recv().await {
+                    Ok(samples) => samples,
+                    // Old audio was dropped while this consumer was behind.
+                    // Skipping forward is the point: the alternative is a delay that
+                    // never comes back. The encoder carries on — Opus frames are
+                    // independent, so a gap is a gap in the sound rather than a
+                    // broken stream.
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        debug!("audio: listener fell behind, {dropped} buffer(s) dropped");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
                 };
-                match encoded {
+                // Four numbers, and between them they say whether this gateway is
+                // adding delay: the buffer size and the queue depth locate a backlog,
+                // and encoded frames against elapsed time say whether the stream is
+                // running ahead of real time or behind it. It was written to answer a
+                // report of a couple of seconds of lag, and it answered it — no
+                // backlog, ratio 0.9996 — which is why it stays: the next such report
+                // deserves the same evidence rather than a fresh round of theories.
+                debug!(
+                    "audio: wave {} bytes, {} queued, {} frames encoded in {} ms",
+                    samples.len(),
+                    state.waves.len(),
+                    state.encoder.frames_encoded(),
+                    state.started.elapsed().as_millis(),
+                );
+                match state.encoder.push(&samples) {
                     // Empty when the buffer did not complete a 20 ms frame. Yielding
                     // nothing would end the stream, so keep reading instead.
                     Ok(packets) if packets.is_empty() => continue,
@@ -355,7 +343,8 @@ impl AudioListener {
                     }
                 }
             }
-        })
+        });
+        Ok((head, stream))
     }
 }
 
@@ -400,6 +389,17 @@ mod tests {
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 
+    /// The packet stream alone, with the header asserted to be one — every test
+    /// here is about the queue rather than the encoder, and none of them should
+    /// pass if a listener came back without a way to decode it.
+    fn packets_of(listener: AudioListener) -> impl Stream<Item = Vec<Vec<u8>>> {
+        let (head, stream) = listener
+            .into_packets(PCM_CD_QUALITY)
+            .expect("the negotiated format must be encodable");
+        assert_eq!(&head[0..8], b"OpusHead");
+        stream
+    }
+
     async fn next(stream: &mut (impl Stream<Item = Vec<Vec<u8>>> + Unpin)) -> Option<Vec<Vec<u8>>> {
         tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
@@ -419,7 +419,7 @@ mod tests {
             Some(PCM_CD_QUALITY),
             "the format was published before the listener attached"
         );
-        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
+        let mut stream = Box::pin(packets_of(listener));
 
         bridge.wave(one_frame_of_pcm());
         let packets = next(&mut stream).await.expect("a packet for the buffer");
@@ -451,7 +451,7 @@ mod tests {
         let bridge = AudioBridge::new();
         let listener = bridge.take_listener();
         assert_eq!(listener.negotiated_format(), None);
-        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
+        let mut stream = Box::pin(packets_of(listener));
 
         assert!(
             tokio::time::timeout(Duration::from_secs(3), stream.next())
@@ -472,7 +472,7 @@ mod tests {
         let bridge = AudioBridge::new();
         bridge.publish_format(PCM_CD_QUALITY);
         let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
+        let mut stream = Box::pin(packets_of(listener));
 
         bridge.wave(one_frame_of_pcm());
         assert_eq!(next(&mut stream).await.unwrap().len(), 1);
@@ -494,43 +494,27 @@ mod tests {
     async fn dropping_the_bridge_ends_the_stream() {
         let bridge = AudioBridge::new();
         let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
+        let mut stream = Box::pin(packets_of(listener));
 
         drop(bridge);
         assert!(next(&mut stream).await.is_none());
     }
 
-    /// A takeover, and the one lifecycle case the engine's own lifetime cannot
-    /// express: the desktop carries on, this listener's audio does not.
+    /// A second listener does **not** end the first, and that is a property this
+    /// module deliberately stopped having: a `oneshot` used to live in the bridge so
+    /// a takeover could cut the previous browser's stream. Ending a listener is now
+    /// [`crate::session`]'s job — it owns the task doing the reading — which is where
+    /// `a_takeover_ends_the_audio_while_the_engine_carries_on` and the enable/disable
+    /// tests moved to. What is left here is the queue's own promise: subscribing
+    /// takes nothing away from anyone.
     #[tokio::test]
-    async fn stopping_the_listener_ends_the_stream_but_not_the_bridge() {
+    async fn a_second_listener_leaves_the_first_alone() {
         let bridge = AudioBridge::new();
-        let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
+        let mut first = Box::pin(packets_of(bridge.take_listener()));
+        let mut second = Box::pin(packets_of(bridge.take_listener()));
 
-        bridge.stop_listener();
-        assert!(next(&mut stream).await.is_none());
-
-        // The bridge is still usable, which is what a takeover needs.
-        let replacement = bridge.take_listener();
-        let mut stream = Box::pin(replacement.into_packets(PCM_CD_QUALITY));
         bridge.wave(one_frame_of_pcm());
-        assert_eq!(next(&mut stream).await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_second_listener_replaces_the_first() {
-        let bridge = AudioBridge::new();
-        let first = bridge.take_listener();
-        let mut first = Box::pin(first.into_packets(PCM_CD_QUALITY));
-
-        let second = bridge.take_listener();
-        let mut second = Box::pin(second.into_packets(PCM_CD_QUALITY));
-        assert!(
-            next(&mut first).await.is_none(),
-            "the first stream should have ended"
-        );
-        bridge.wave(one_frame_of_pcm());
+        assert_eq!(next(&mut first).await.unwrap().len(), 1);
         assert_eq!(next(&mut second).await.unwrap().len(), 1);
     }
 
