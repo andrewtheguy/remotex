@@ -270,7 +270,10 @@ black would withhold every region that is *now* black.
 
 With `resize = true`, the Display Control Virtual Channel resizes the remote
 desktop when requested from the browser. Otherwise the configured initial
-width and height remain fixed.
+width and height remain fixed. Those two are also what `defaultSize` resolves to
+here — and for a VNC target, whose own size is otherwise the server's: the key is
+read at connect only by RDP, but by both engines when a client asks for whatever
+size this end considers right.
 
 With `clipboard = true`, the MS-RDPECLIP static virtual channel carries
 `CF_UNICODETEXT` in both directions. RDP uses delayed rendering: a copy
@@ -433,6 +436,19 @@ Viewport reports are in the remote's pixels for the same reason.
 Touch devices use fit-to-width rendering with pinch zoom, pan, a virtual cursor,
 and multi-finger gestures. View transforms affect presentation and input
 coordinate mapping, not framebuffer resolution.
+
+A pinch-zoom device never drives the remote's size from its window, and "Resize to
+window" is not offered on one. A portrait phone's window asks for a tall, narrow
+desktop no desktop OS lays out well, and rotating it asks for a different one — so
+the size is asked for once, on connect, and nothing afterwards changes it. A tablet
+asks for its own landscape dimensions, fixed for the life of the tab, so landscape
+is about 1:1 and portrait pinch-zooms that same picture. A phone sends
+`defaultSize`, which carries no size at all: the browser is the one end that cannot
+name a sensible one, so each engine resolves its own — the target's configured
+`width`/`height` for RDP and VNC, and for `rxa` the point size the agent created its
+display at. That last case is why declining to ask is not equivalent to asking for
+the default: macOS restores the mode a display identity was last put in, so a
+desktop session that stretched it leaves it stretched for whoever connects next.
 
 ### Native macOS viewer
 

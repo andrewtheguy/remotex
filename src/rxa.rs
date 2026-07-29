@@ -786,10 +786,16 @@ impl Drop for AbortOnDrop {
 /// not be, since a display publishes no mode to read for tens of milliseconds
 /// around a density change.
 ///
-/// `SelectDisplay` and `HostScale` pass through too, and the three together are
+/// `DefaultSize` is the same request with no size on it, for a client whose window
+/// is not a shape a desktop can usefully be — a phone. It needs no division for
+/// the same reason it needs no gate of its own: there is no number to convert, and
+/// the size it means is one only the agent can name. See [`ClientMsg::DefaultSize`].
+///
+/// `SelectDisplay` and `HostScale` pass through too, and the four together are
 /// the whole of what a client decides: *which* screen to look at, *how dense* to
-/// draw it, and *how large* to make it. The first is about the person looking; the
-/// last two apply only to a display that exists for them.
+/// draw it, and *how large* to make it — either by saying, or by deferring. The
+/// first is about the person looking; the rest apply only to a display that exists
+/// for them.
 fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
     Some(match msg {
         ClientMsg::MouseMove { x, y } => GatewayMsg::PointerMove {
@@ -835,6 +841,13 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
                 h: points(*h),
             }
         }
+        // The one size request that needs no conversion, because it carries no
+        // size: the created size is in points already, and it is the agent that
+        // knows it. Which is the argument for the message existing rather than
+        // this engine substituting a number — nothing here can name the size a
+        // display was made at, and the pixels-to-points division above would be
+        // the wrong instrument for it anyway.
+        ClientMsg::DefaultSize if caps.resize => GatewayMsg::DefaultDisplaySize,
         // The agent reads its pasteboard only when asked, so a fetch is a real
         // round trip rather than a cached value (unlike VNC, where the server
         // pushes and the engine caches).
@@ -855,12 +868,14 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
             text: text.clone(),
         },
         // The opted-out cases of the two gates above, plus the pair the session
-        // layer never forwards. A `Viewport` reaching here is a target whose
-        // profile says no, which is also the only state either client offers the
-        // button in — so this is the belt, not the braces.
+        // layer never forwards. A `Viewport` or `DefaultSize` reaching here is a
+        // target whose profile says no, which is also the only state in which
+        // either client withholds the request — so this is the belt, not the
+        // braces.
         ClientMsg::ClipboardRequest
         | ClientMsg::Clipboard { .. }
         | ClientMsg::Viewport { .. }
+        | ClientMsg::DefaultSize
         | ClientMsg::Connect { .. }
         | ClientMsg::Disconnect
         | ClientMsg::CacheReset => {
@@ -1305,6 +1320,19 @@ mod tests {
         );
     }
 
+    // The sizeless request beside it, and the point of the test is what it does
+    // *not* do: no division, whatever the scale, because there is no number on it
+    // to divide. The `scale` argument is varied to prove it is ignored.
+    #[test]
+    fn a_default_size_request_passes_through_unconverted() {
+        for scale in [UNSCALED, 2.0, 1.5, 0.0] {
+            assert_eq!(
+                to_agent(&ClientMsg::DefaultSize, RESIZE, scale),
+                Some(GatewayMsg::DefaultDisplaySize)
+            );
+        }
+    }
+
     // The two flags gate different messages, and this is the test that catches
     // them being swapped at a call site — which, while they were two bare bools
     // sitting next to each other, compiled.
@@ -1315,6 +1343,10 @@ mod tests {
             to_agent(&ClientMsg::Viewport { w: 1280, h: 800 }, CLIPBOARD, UNSCALED),
             None
         );
+        // Both size requests answer to the operator's `resize`, not to the
+        // clipboard flag — the sizeless one is not a way around the gate.
+        assert_eq!(to_agent(&ClientMsg::DefaultSize, CLIPBOARD, UNSCALED), None);
+        assert_eq!(to_agent(&ClientMsg::DefaultSize, NO_CAPS, UNSCALED), None);
     }
 
     // The clipboard pair is the only thing the flag gates, and it gates both

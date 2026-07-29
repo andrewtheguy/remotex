@@ -259,9 +259,10 @@ pub struct Owned {
 /// panel is set on the Mac, and a display nobody is looking at has nothing to
 /// match — so a request naming either is dropped rather than answered.
 ///
-/// Shared by [`rxa_proto::msg::GatewayMsg::HostScale`] and
-/// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`], which differ in what they do
-/// with the handle rather than in who may have one. Returns a clone because
+/// Shared by [`rxa_proto::msg::GatewayMsg::HostScale`],
+/// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`] and
+/// [`rxa_proto::msg::GatewayMsg::DefaultDisplaySize`], which differ in what they
+/// do with the handle rather than in who may have one. Returns a clone because
 /// every caller hands it to a task that outlives the message.
 fn shared_owned_display(
     display: Option<&DisplayHandle>,
@@ -276,6 +277,54 @@ fn shared_owned_display(
         }
         _ => None,
     }
+}
+
+/// Resize a display the agent made, off the session loop.
+///
+/// `points` is the size to ask for, or `None` for the size the display was
+/// *created* at — which is read here, under the same lock that is about to apply
+/// it, rather than being passed in. That is the only way the created size can be
+/// asked for at all: the client that wants it cannot name it (nothing on the wire
+/// carries it) and neither can the gateway, so
+/// [`rxa_proto::msg::GatewayMsg::DefaultDisplaySize`] defers to the one place that
+/// holds it. Reading it inside the lock also keeps it honest against a
+/// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`] landing a moment earlier —
+/// `base_points` is fixed at creation and cannot drift, but taking both readings
+/// together is the habit `VirtualDisplay::set_scale` documents and there is no
+/// reason to break it here.
+///
+/// Detached from the caller twice over, because this is the slower of the two
+/// reconfigures a client can ask for — it waits for the WindowServer to settle
+/// before releasing the lock, and awaiting that on the session's `select!` loop
+/// would hold tiles, cursor updates and input injection for the whole of it.
+///
+/// `try_lock` rather than `lock`, and the drop is deliberate. A held lock means a
+/// reconfigure is already running, and a display cannot be two sizes at once, so
+/// whoever asked can ask again once the desktop has settled. Waiting instead
+/// would let a person mashing the button queue one WindowServer round trip per
+/// press — exactly the shape that wedges a guest's display stack until it is
+/// rebooted — and would park a blocking-pool thread per press while it did.
+fn resize_shared_display(display: DisplayHandle, points: Option<(u32, u32)>) {
+    tokio::spawn(async move {
+        let done = tokio::task::spawn_blocking(move || match display.try_lock() {
+            Ok(display) => display
+                .set_size(points.unwrap_or_else(|| display.base_points()))
+                .map(Some),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(anyhow::anyhow!("the display lock is poisoned"))
+            }
+        })
+        .await;
+        match done {
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => debug!(
+                "session: a display reconfigure is already running; dropping this resize"
+            ),
+            Ok(Err(e)) => warn!("session: cannot resize the display: {e:#}"),
+            Err(e) => warn!("session: the resize did not run: {e}"),
+        }
+    });
 }
 
 /// A gateway that has completed the Noise handshake, and is therefore *the*
@@ -776,21 +825,10 @@ async fn pump(
                             });
                         }
                     }
-                    // The size of the client's window, gated exactly as the
-                    // density above is and for the same two reasons, and detached
-                    // for the same reason too — this reconfigure is the slower of
-                    // the pair, since it waits for the WindowServer to settle
-                    // before releasing the lock.
-                    //
-                    // The one deliberate difference is `try_lock`. A held lock
-                    // means a reconfigure is already running, and dropping this
-                    // request is the right answer: the display cannot be two sizes
-                    // at once, and whoever pressed the button can press it again
-                    // once the desktop has settled. Waiting instead would let a
-                    // person mashing the button queue one WindowServer round trip
-                    // per press — which is exactly the shape that wedges a guest's
-                    // display stack until it is rebooted, and would park a
-                    // blocking-pool thread per press if it did.
+                    // The size of the client's window, gated exactly as the density
+                    // above is and for the same two reasons. Both size requests
+                    // hand off to `resize_shared_display`, which is where the
+                    // detachment and the drop-if-busy rule are argued.
                     GatewayMsg::ResizeDisplay { w, h } => {
                         // `None` is a resize asked of a Mac's own screen, or of a
                         // display this session is not sharing. Ignored rather than
@@ -800,27 +838,19 @@ async fn pump(
                         if let Some(display) =
                             shared_owned_display(display.as_ref(), target, owned)
                         {
-                            let points = (u32::from(w), u32::from(h));
-                            tokio::spawn(async move {
-                                let done = tokio::task::spawn_blocking(move || {
-                                    match display.try_lock() {
-                                        Ok(display) => display.set_size(points).map(Some),
-                                        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
-                                        Err(std::sync::TryLockError::Poisoned(_)) => {
-                                            Err(anyhow::anyhow!("the display lock is poisoned"))
-                                        }
-                                    }
-                                })
-                                .await;
-                                match done {
-                                    Ok(Ok(Some(_))) => {}
-                                    Ok(Ok(None)) => debug!(
-                                        "session: a display reconfigure is already running; dropping this resize"
-                                    ),
-                                    Ok(Err(e)) => warn!("session: cannot resize the display: {e:#}"),
-                                    Err(e) => warn!("session: the resize did not run: {e}"),
-                                }
-                            });
+                            resize_shared_display(display, Some((u32::from(w), u32::from(h))));
+                        }
+                    }
+                    // The same request with no size on it, gated the same way and
+                    // run through the same path — the size is read off the display
+                    // under the lock that is about to resize it, which is the whole
+                    // reason it can be asked for by name from a client that could
+                    // not name it. See `rxa_proto::msg::GatewayMsg::DefaultDisplaySize`.
+                    GatewayMsg::DefaultDisplaySize => {
+                        if let Some(display) =
+                            shared_owned_display(display.as_ref(), target, owned)
+                        {
+                            resize_shared_display(display, None);
                         }
                     }
                     // Which display to look at is the client's to choose, and

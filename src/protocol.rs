@@ -159,6 +159,32 @@ pub enum ClientMsg {
     /// is a display the agent *made* to be looked at from here, so the control
     /// appears only while that display is the one being shared.
     Viewport { w: u16, h: u16 },
+    /// Put the remote desktop back at whatever size the *far side* considers its
+    /// default: a target's `width`/`height` for VNC and RDP, and for `rxa` the
+    /// point size the agent created its display at.
+    ///
+    /// The contrast with [`ClientMsg::Viewport`] above is the whole reason both
+    /// exist. A `Viewport` is a size the client worked out from the room it has,
+    /// which presumes the client's window is a shape a desktop can usefully be.
+    /// A phone's is not — a portrait window asks for a tall, narrow desktop no
+    /// desktop OS lays out well, and rotating it asks for a different one — so a
+    /// client reading the desktop through pinch zoom carries no number worth
+    /// sending. Deferring to the far side is the only form of the request it can
+    /// make honestly, and it deliberately carries no size for the same reason:
+    /// the default is known where it lives, and the client is the one place that
+    /// does not know it.
+    ///
+    /// Not merely "send nothing", which was the other candidate and is not
+    /// equivalent. A remote's size outlives the client that set it — most
+    /// sharply for `rxa`, where macOS remembers and restores the mode a display
+    /// identity was last put in (see the agent's `virtual_display_initial_size`),
+    /// so a session that stretched that display leaves it stretched for whoever
+    /// connects next. Declining to ask inherits that; this repairs it.
+    ///
+    /// Gated on the target's `resize` opt-in by every engine, exactly as
+    /// `Viewport` is, and subject to the same per-protocol narrowing — `rxa`
+    /// still only resizes a display the agent made.
+    DefaultSize,
     /// The density of the screen this client's window is on, in hundredths —
     /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
     /// whenever the window moves to a screen of a different density.
@@ -921,6 +947,12 @@ mod tests {
         // Viewport dimensions beyond the protocol's u16 range are rejected at
         // the deserialization boundary, not clamped.
         assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"viewport","w":70000,"h":1}"#).is_err());
+        // The sizeless request beside it, which carries no dimensions at all:
+        // what "default" means is the far side's to say.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"defaultSize"}"#).unwrap(),
+            ClientMsg::DefaultSize
+        ));
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh

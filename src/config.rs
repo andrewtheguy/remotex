@@ -161,9 +161,18 @@ pub struct TargetConfig {
     #[serde(default)]
     pub domain: Option<String>,
     /// Initial desktop width requested from the server.
+    ///
+    /// Read by RDP at connect, where it is genuinely the size asked for, and by
+    /// both RDP and VNC as the answer to [`crate::protocol::ClientMsg::DefaultSize`]
+    /// — a client with no desktop-shaped window of its own asking for whatever
+    /// size this end considers right. A VNC server keeps its own size at connect
+    /// and this is only ever consulted for a client that asks, so setting it costs
+    /// a VNC target nothing and gives an operator somewhere to say what a phone
+    /// should get. `rxa` ignores it: the size of a display the agent made is the
+    /// agent's to state, in its own `virtual_display_initial_size`.
     #[serde(default = "default_width")]
     pub width: u16,
-    /// Initial desktop height requested from the server.
+    /// Initial desktop height requested from the server. See [`Self::width`].
     #[serde(default = "default_height")]
     pub height: u16,
     /// Security negotiation mode: `"auto"`, `"nla"`, or `"tls"`. RDP only —
@@ -216,7 +225,8 @@ pub struct TargetConfig {
     ///
     /// `#[serde(default)]` because [`TargetConfig`] is one struct for every
     /// protocol and `deny_unknown_fields` leaves no room for a per-protocol
-    /// shape — the same arrangement as the RDP-only `security`/`width`/`height`.
+    /// shape — the same arrangement as the RDP-only `security` and the
+    /// RDP-and-VNC `width`/`height`.
     #[serde(default)]
     pub agent_public_key: String,
     /// This gateway's own private key, copied in from [`RxaSection`] by

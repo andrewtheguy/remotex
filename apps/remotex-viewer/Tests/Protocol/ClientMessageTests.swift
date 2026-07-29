@@ -110,6 +110,7 @@ struct ClientMessageTests {
             .wheel(dx: 0, dy: 0),
             .key(code: "KeyA", pressed: true, caps: false),
             .viewport(w: 1, h: 1),
+            .defaultSize,
             .refresh,
             .connect(target: "t"),
             .disconnect,
