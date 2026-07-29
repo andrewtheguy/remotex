@@ -8,17 +8,39 @@ import Testing
 ///
 /// Both enums are read out of the Rust source instead of being listed twice,
 /// following `ProductInfoTests`, which already pins constants that way.
+///
+/// **Implemented or knowingly declined, but not absent.** What this asks is whether
+/// somebody has decided about each message, so a variant the viewer deliberately does
+/// not implement belongs in `unsentTags`/`ignoredTags` rather than nowhere: the
+/// decision is then recorded next to the reason, and the test still fails the day a
+/// message appears that nobody has considered. Audio is the case that established
+/// this — the gateway grew it, and a viewer that stays silent is what lets it.
 struct WireContractTests {
     @Test
     func everyClientMsgVariantHasATagThisBuildSends() throws {
         let source = try protocolSource()
-        #expect(try tags(ofEnum: "ClientMsg", in: source) == ClientMessage.allTags)
+        #expect(
+            try tags(ofEnum: "ClientMsg", in: source)
+                == ClientMessage.allTags.union(ClientMessage.unsentTags)
+        )
     }
 
     @Test
     func everyControlMsgVariantHasATagThisBuildUnderstands() throws {
         let source = try protocolSource()
-        #expect(try tags(ofEnum: "ControlMsg", in: source) == ServerMessage.allTags)
+        #expect(
+            try tags(ofEnum: "ControlMsg", in: source)
+                == ServerMessage.allTags.union(ServerMessage.ignoredTags)
+        )
+    }
+
+    /// A tag cannot be both implemented and declined, and the union above would hide
+    /// that: a message moved into the build without being taken off the declined list
+    /// would keep passing while the comment beside it said the opposite.
+    @Test
+    func nothingIsBothImplementedAndDeclined() {
+        #expect(ClientMessage.allTags.isDisjoint(with: ClientMessage.unsentTags))
+        #expect(ServerMessage.allTags.isDisjoint(with: ServerMessage.ignoredTags))
     }
 
     private func protocolSource() throws -> String {
