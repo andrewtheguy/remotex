@@ -1,41 +1,48 @@
 # Remote audio
 
-The first audio path is deliberately narrow: **sound from a Windows RDP target
-to the browser through the remotex gateway**. RDP already redirects the sound to
-its client; remotex requests that channel, re-encodes what arrives as Opus, and
-sends it as audio frames on the session's own WebSocket, where the browser decodes
-and schedules it.
+The audio path is deliberately narrow: **sound from a Windows RDP target to a client
+through the remotex gateway**. RDP already redirects the sound to its client; remotex
+requests that channel, re-encodes what arrives as Opus, and sends it as audio frames on
+the session's own WebSocket, where **the browser and the macOS viewer each decode and
+schedule it themselves**.
 
-> **Experimental, and what has been verified is narrower than the design.** Sound
-> arrives, in the right format, in stereo, starting and stopping on its own, and **the
-> latency the previous design was called experimental for is much smaller**: the live
-> Windows target was heard through the in-band path in Chrome on 2026-07-29. Every
-> verified run shares one shape — the **static** `rdpsnd` transport, and a browser on a
-> **loopback** origin — so what is proven is that path, not the design's full reach. See
-> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out).
+Both clients play the same bytes off the same queue. What differs is only what decodes
+them — WebCodecs in the browser, the Opus decoder macOS already ships in the viewer —
+and one deliberate divergence in what each does when it falls behind
+([Catching up](#catching-up-differs-between-the-two-clients)).
+
+> **This works, and is no longer experimental.** The live Windows target has been heard
+> through this path in Chrome, in macOS 26 Safari, on a real iPhone, and in the macOS
+> viewer: sound in the right format, in stereo, starting and stopping on its own, and
+> without the couple of seconds of delay the design before it carried. **Opus-only
+> survived contact with every Apple client**, which was the risk this design took — there
+> is no fallback representation, so a WebKit or AVFoundation refusal would have meant no
+> sound at all on Apple platforms.
 >
-> **Opus-only survived contact with Safari**, which was the risk this took: it plays in
-> Chrome, in macOS 26 Safari, and on a real iPhone. It **did not work in the iOS
-> Simulator**, and that is the whole of what is known — the cause has not been looked
-> into, so nothing here should be read as blaming the simulator or clearing this path.
+> What is *narrower than the design* is the shape every run shared: the **static**
+> `rdpsnd` transport, and a client on a **loopback** origin. That is a statement about
+> coverage, not confidence.
 >
-> Three things are therefore open, and only one of them is about a browser:
+> Three things are therefore still open, and two of them are only about a browser:
 >
-> - **the iOS Simulator**, unexplained, which until it is explained could as easily be
->   something here as something there;
-> - **the origin.** WebCodecs is secure-context only, so a client reaching this gateway
->   at a LAN address over plain HTTP has no decoder at all. Every run went through
->   loopback, so serving audio to a phone on a real network needs TLS and is untested;
+> - **the iOS Simulator**, where it did not work and the cause has not been looked into.
+>   That is the whole of what is known: a simulator without the codec, a simulator
+>   without a working audio output, and a fault in this path all present the same way
+>   from here, so nothing here should be read as blaming the simulator or as clearing
+>   this path;
+> - **the origin.** WebCodecs is secure-context only, so a *browser* reaching this
+>   gateway at a LAN address over plain HTTP has no decoder at all. Every run went
+>   through loopback, so serving audio to a phone on a real network needs TLS and is
+>   untested. The viewer is exempt: nothing in AVFoundation asks about the origin;
 > - **the dynamic MS-RDPEA transport**, which has still never carried a byte from a real
->   server, so a host that chooses it has never been heard from at all.
+>   server, so a host that chooses it has never been heard from at all. That one is
+>   about the gateway, so it is open for both clients at once.
 >
-> **This is a browser feature, and changing it needs no check against the macOS
-> viewer.** The viewer has no audio at all — no decoder, no setting, and now not even
-> a wire it could receive audio on — so there is nothing there for a change here to
-> break, and asking whether one still suits the viewer is friction bought for nothing.
-> Viewer audio is planned ([`roadmap.md`](roadmap.md)) as a *second* representation
-> from the same queue; when it exists it will bring its own tests, and until then this
-> path answers only to a browser.
+> **A change to the encoder, the frames or the queue now answers to two clients.** That
+> was not true until 2026-07-29, and most of this document was written while it was: the
+> viewer had no audio at all, and passages saying a change here needs no check against it
+> have been corrected rather than left as history. What is still true is the *ordering* —
+> the browser settled the timing model first, and the viewer inherited it settled.
 
 ## Why the browser owns the schedule
 
@@ -278,6 +285,62 @@ pinned are that nothing is ever scheduled in the past or past the ceiling, that 
 never exceeds the buffer, and that the timeline never moves backwards — swept across
 leads from −5 s to +60 s.
 
+**The macOS viewer half** (`apps/remotex-viewer/Sources/Audio/`) is the same three
+pieces with the same two constants: `OpusDecoder` around `AVAudioConverter`,
+`AudioSchedule` holding the arithmetic, and `AudioOutput` driving an `AVAudioEngine`.
+The control is one item, **Remote → Enable Audio**, greyed for a target whose `connected`
+carried no `audio` and deliberately *live* in view only — that mode is about nothing this
+Mac does reaching the remote, and sound travels the other way.
+
+**macOS ships an Opus decoder, and reaching it needs no container.** This is the fact the
+whole viewer half turned on, and none of it is documented:
+`/System/Library/Components/AudioCodecs.component` exports `ACOpusDecoderFactory` and
+logs `opus_decoder_create`, and `AVAudioConverter` reaches it through `kAudioFormatOpus`
+— accepting the wire's **bare** packets described by nothing but an
+`AudioStreamBasicDescription`. So the viewer needs no vendored libopus and no CAF wrapper
+for the system's own parser to unwrap again, which is what the two candidate designs both
+were. `kAudioFormatOpus` existing says nothing about whether the converter's front end
+takes packets without a container, so this was probed against fixtures from `opusenc` and
+from this gateway's own encoder before anything was built on it.
+
+Three measurements from that probe are load-bearing in `OpusDecoder`:
+
+- **the magic cookie is ignored.** Setting `converter.magicCookie` to the `OpusHead`
+  reads back `nil` and changes no output byte — the decoder takes its rate and channel
+  count from the ASBD, which is all libopus needs. So one is not set;
+- **the pre-skip is not honoured**, so the viewer discards it. The `OpusHead` is
+  therefore still load-bearing here, for that field alone;
+- **the converter's first call returns 120 frames short and every later call returns
+  exactly its packets.** A one-off priming trim, not a per-call loss — which is the
+  distinction worth having measured, because a per-call loss at five calls a second is a
+  skew that grows for the length of the session and a long listen is the only other way
+  to find it. The pre-skip is discarded by counting what actually came back rather than by
+  dropping a constant 312, so the priming figure is CoreAudio's business and this stays
+  right if it changes.
+
+### Catching up differs between the two clients
+
+Both bound the lead at `MAX_LEAD = 0.3` with a `START_LEAD = 0.1` cushion. What differs
+is what happens at the ceiling, and it is forced as much as chosen:
+
+- **the browser trims.** Web Audio can truncate audio it has already committed
+  (`source.stop(when)`), so the SPA pulls the schedule back to the ceiling and skips the
+  front of the arriving buffer to match;
+- **the viewer flushes.** `AVAudioPlayerNode` has no per-buffer `stop(at:)` — its only
+  eraser is `stop()`, which takes the whole queue — so the choice is between dropping the
+  backlog outright and carrying it. Dropping it is both what the API offers and what is
+  wanted: the excess *is* latency, and one audible skip buys back all of it. A stopped
+  player node also rebases its own clock to zero (measured), so the flush restarts the
+  timeline rather than continuing it.
+
+The viewer's is the coarser skip and the tighter bound — `START_LEAD` right after the
+event, where the browser lands at `MAX_LEAD`. Worth knowing the browser's clamp discards
+the excess **twice**, once from the committed tail and once from the front of the arriving
+buffer; that over-discards by up to one buffer and is deliberately left alone, because it
+errs in the direction both clients want. Neither path has been reached against a real
+host: the tested Windows host paces itself to real time, and 299 consecutive buffers
+arrived with the queue at zero.
+
 **WebCodecs is secure-context only, and that is a real deployment constraint.**
 `AudioDecoder` is simply *undefined* on `http://` to anything but localhost, where the
 `<audio>` element it replaces played a plain-HTTP response from any origin. So a
@@ -489,17 +552,27 @@ description:<the OpusHead above>}` — and, on the same run, **no `AudioDecoder`
 on `about:blank`, which is how the secure-context requirement above was found rather
 than discovered in the field.
 
-**Stereo has been confirmed by ear**, which is the part no test can claim: a
-hard-panned file played on the live Windows target on 2026-07-29 arrived correctly
-separated in the browser — left on the left, right on the right, no collapse toward
-the centre. Worth doing by ear rather than only in code, because a channel *swap*
-passes every assertion in the suite; only a listener who knows which side the source is
-playing can catch it. One false alarm from that session is worth keeping, because it
-will recur: a live capture's two channels decoded with an L/R correlation of exactly
-1.0000, which is what blended channels would look like and was in fact a dual-mono
-source. Only a hard-panned signal tells those apart, which is what
-`opus_stream::tests::a_hard_panned_signal_still_has_two_channels_after_a_round_trip`
-sends through the whole path for exactly this reason.
+**Stereo has been confirmed by ear in both clients**, which is the part no test can
+claim: a hard-panned file played on the live Windows target arrived correctly separated
+in the browser on 2026-07-29 — left on the left, right on the right, no collapse toward
+the centre — and the viewer was checked the same day with
+[audiocheck.net's stereo tests](https://www.audiocheck.net/audiotests_stereo.php).
+
+**Use that page, or something like it, rather than any stereo file you have.** Its tests
+*announce which channel they are playing*, and that is the difference between confirming
+separation and confirming **order**. A channel swap passes every assertion in either
+suite and every by-ear test with an unlabelled source: the fixtures only prove the
+gateway's encoder and a client's decoder agree with each other about which channel is
+which, never that the pair matches what Windows captured.
+
+One false alarm from the browser session is worth keeping, because it will recur: a live
+capture's two channels decoded with an L/R correlation of exactly 1.0000, which is what
+blended channels would look like and was in fact a dual-mono source. Only a hard-panned
+signal tells those apart, which is what
+`opus_stream::tests::a_hard_panned_signal_still_has_two_channels_after_a_round_trip` and
+the viewer's `OpusDecoderTests` both send through for exactly this reason — the latter on
+fixtures the *gateway's* encoder wrote, which is the one place the two ends of this path
+are checked against each other rather than each against its own fixtures.
 
 **The RDP negotiation is proven, and the two halves have been run together** — under
 the previous representation. A live Windows 11 host (`desktop-vnvgdaf`) redirects its
@@ -558,21 +631,31 @@ FreeRDP's client, which is not the same as having run. The first sign of trouble
 be the `claim_transport` line naming the dynamic transport followed by no first-buffer
 line.
 
-**The tone harness is how the browser half is checked**, and it needs no Windows host:
-an `#[ignore]`d in-crate test serving the real router — SPA, login, `/ws` — in front of
-a scripted engine that fills the queue in real time.
+**And the viewer has been heard from the same host**, on 2026-07-29, with audio enabled
+*before* the guest played anything — which is the case worth having: the gateway logged
+`audio enabled, the remote's audio channel is not up yet`, negotiated 44 100 Hz stereo
+PCM a second later, and the first 32 KiB buffer arrived a second after that, so the sound
+started on its own rather than needing a second press. 129 wave buffers across that run,
+`0 queued` on every one, and **not one flush** — so the ceiling has still never engaged
+against a real host in either client.
+
+**The tone harness is how either client's half is checked**, and it needs no Windows
+host: an `#[ignore]`d in-crate test serving the real router — SPA, login, `/ws` — in front
+of a scripted engine that fills the queue in real time.
 
 ```sh
 cargo test --lib serve_a_test_tone -- --ignored --nocapture
+# the viewer takes the same test:
+open -n dist/remotex-viewer.app --args --settings qa --gateway http://127.0.0.1:<port>
 ```
 
 It plays five seconds of tone and then goes quiet for five, publishing and clearing the
 format around the gaps the way a real host's channel opening and closing does. That is
-what makes it QA for the behaviour rather than only for the codec: press **Enable
-audio** *during a quiet phase*, close the drawer, and touch nothing — the tone must
-arrive on its own, go away, and come back. A line under the button instead means this
-browser has no decoder for it, which is the one answer this design does not work
-around.
+what makes it QA for the behaviour rather than only for the codec: enable audio *during a
+quiet phase*, close the drawer (or leave the menu), and touch nothing — the tone must
+arrive on its own, go away, and come back. In the browser, a line under the button
+instead means this browser has no decoder for it, which is the one answer this design
+does not work around.
 
 One other thing it is worth knowing the harness gets right, because it was wrong first
 and would have been misread as a flaw in the transport: it paces against a deadline
@@ -583,9 +666,15 @@ browser but the first to attach waits forever for a desktop.
 
 ## Scope
 
-Audible sound from one Windows RDP target to a browser, on the session's own
-WebSocket, surviving an ordinary page reconnect (with audio off, to be re-enabled by a
-click) and stopping on target disconnect or takeover.
+Audible sound from one Windows RDP target to a browser or to the macOS viewer, on the
+session's own WebSocket, surviving an ordinary reconnect and stopping on target
+disconnect or takeover.
+
+The two clients differ in one behaviour, and it is a deliberate difference rather than an
+omission: a **browser** reconnect comes back with audio off, to be re-enabled by a click,
+because a browser's `AudioContext` must be created inside a user gesture. The **viewer**
+re-subscribes on its own, because nothing there needs a gesture and a menu item that says
+On should mean it.
 
 It does not include:
 
@@ -595,17 +684,30 @@ It does not include:
 - audio/video synchronization;
 - a selectable bitrate or codec, or any fallback representation;
 - recording, seeking, or replay;
-- mixing, in-page volume, or more than one listener;
-- audio over plain HTTP to anything but localhost, which WebCodecs forbids; or
-- the macOS viewer.
+- mixing, in-app volume, or more than one listener — the viewer's level is the system's,
+  as the browser's is;
+- choosing the viewer's output device: it follows the Mac's default, and follows it
+  across a change (the engine is rebuilt on
+  `AVAudioEngineConfigurationChange`); or
+- audio over plain HTTP to anything but localhost *in a browser*, which WebCodecs
+  forbids. The viewer is not subject to it.
 
-**The viewer cannot share this path, and that is a cost of the design rather than an
-oversight.** It could once have pointed `AVPlayer` at the WAV endpoint; Ogg took that
-away (AVFoundation has no Ogg demuxer), and audio frames on the WebSocket take it
-further — there is no HTTP response left to point anything at, and the viewer does not
-send the message that would start one. Giving the viewer sound therefore means a
-representation of its own from the same queue: Opus in CAF or fragmented MP4, both of
-which AVFoundation reads, or decoding Opus in the viewer. That is planned and second
-([`roadmap.md`](roadmap.md)), and the ordering is deliberate — the browser is where
-this is being listened to, so it is where the timing model should be settled before a
-second client inherits it.
+**The viewer shares this path after all, and what that cost was worth recording.** This
+section used to say it could not: pointing `AVPlayer` at the old WAV endpoint had been
+possible, Ogg took that away (AVFoundation has no Ogg demuxer for `AVAsset`), and audio
+frames on the WebSocket took it further — no HTTP response left to point anything at. The
+conclusion drawn from that was that viewer audio meant **a second representation from the
+same queue**, Opus in CAF or fragmented MP4.
+
+That conclusion was wrong, and the reason is worth keeping because it is the same mistake
+in a new place: it reasoned about `AVPlayer` and `AVAsset`, the media-element-shaped APIs,
+and concluded from their limits that the *platform* could not decode Opus. One layer down,
+`AVAudioConverter` decodes it from bare packets with no container at all. So the viewer
+needed no second representation, no second frame kind, and no encoder change — only a
+decoder and the same schedule, which is what a client that owns its playback clock always
+needed.
+
+The **ordering** was right even though the reasoning about the cost was not. The browser
+settled the timing model — through an open-ended WAV, then Ogg/Opus, then raw packets on
+the socket — and the viewer inherited it settled. Anything built against the viewer first
+would have been built against a representation on its way out.

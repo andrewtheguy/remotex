@@ -467,6 +467,9 @@ mod tests {
         println!("  Press it during a quiet phase and then close the drawer: the tone");
         println!("  must arrive on its own, go away, and come back, untouched.");
         println!("  A line under the button instead means this browser has no Opus decoder.");
+        println!("  The macOS viewer takes the same test through Remote > Enable Audio:");
+        println!("  open -n dist/remotex-viewer.app --args --settings qa \\");
+        println!("    --gateway http://{addr}");
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;

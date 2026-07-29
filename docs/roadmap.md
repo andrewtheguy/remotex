@@ -123,11 +123,11 @@ What is not settled, and should not be decided here first:
 
 ### Prompter audio from an RDP guest
 
-The RDP-to-browser path is done: MS-RDPEA redirection over both of its channels (plus
-the `rdpdr` advertisement Windows requires before it will redirect anything), Opus
-frames on the session's own WebSocket, and a browser that decodes them with WebCodecs
-and schedules every buffer itself. A live Windows 11 target's own sound has been heard
-through it. The mechanism, its lifecycle and that evidence are recorded in
+**Done, for both clients.** MS-RDPEA redirection over both of its channels (plus the
+`rdpdr` advertisement Windows requires before it will redirect anything), Opus frames on
+the session's own WebSocket, and a browser and a macOS viewer that each decode them and
+schedule every buffer themselves. A live Windows 11 target's own sound has been heard
+through both. The mechanism, its lifecycle and that evidence are recorded in
 [`remote-audio.md`](remote-audio.md), which is where they belong.
 
 Every question the design named has now been answered, including the one whose answer
@@ -190,26 +190,26 @@ Two of Guacamole's other choices are worth recording, one of which this now shar
   have — it is what let audio frames join a wire the macOS viewer already speaks
   without bumping the version number the viewer matches on.
 
-**Then the same RDP audio in the macOS viewer, and deliberately second.** It could once
-have pointed `AVPlayer` at an HTTP endpoint unchanged; Ogg took that away (AVFoundation
-has no Ogg demuxer) and audio frames on the WebSocket take it further — there is no
-response left to point anything at. So viewer audio means a representation of its own
-from the same queue: Opus in CAF or fragmented MP4, both of which AVFoundation reads,
-or decoding Opus in the viewer. A second representation, not a second transport, and
-not difficult.
+**The macOS viewer has the same audio now, and it was second on purpose.** It plays the
+same frames off the same queue through the Opus decoder macOS already ships, reached with
+`AVAudioConverter` and `kAudioFormatOpus`, scheduled on the same ceiling. One item —
+**Remote → Enable Audio** — and no change to the gateway's wire at all: the viewer simply
+started sending the message it had been declining.
 
-The order was the argument, not the difficulty, and it has already paid: the browser
-path has since moved from an open-ended WAV to Ogg/Opus to raw Opus frames on the
-socket, and anything the viewer had been built against first would have been a
-representation on its way out. What it copies now is a settled *timing* model rather
-than an unsettled one — and note the deletion this leaves it, since the frames it would
-need are opt-in: a viewer that never sends the `audio` message needed no protocol
-version bump and no rebuild.
+**The prediction here about what it would cost was wrong, and the way it was wrong is the
+part worth keeping.** This section said viewer audio meant a second representation from
+the same queue — Opus in CAF or fragmented MP4 — because `AVPlayer` has no Ogg demuxer and
+audio frames on a socket leave nothing to point it at. All true, and the conclusion did
+not follow: it reasoned from the limits of the media-element-shaped APIs to a limit of the
+*platform*. One layer down, `AVAudioConverter` decodes bare Opus packets with no container
+at all. So there is no second representation, no second frame kind, and no encoder change.
 
-**Until that work starts, the viewer is not a constraint on the browser path.** It has
-no audio at all — and now not even a wire it could receive audio on — so no change to
-the encoder, the frames or the control needs checking against it, and none should be
-held up for it. Being planned is not the same as being a dependency.
+The **ordering** argument held even so, and it paid exactly as claimed: the browser path
+moved from an open-ended WAV to Ogg/Opus to raw packets on the socket, and a viewer built
+against any of the first two would have been built against a representation on its way
+out. What it inherited instead was a *settled* timing model — and the opt-in that let the
+gateway grow audio without a version bump is what let the viewer join it without one
+either.
 
 Audio for `rxa` and VNC, and a microphone going the other way, are
 [not planned](#audio-for-rxa-and-vnc-and-a-microphone).

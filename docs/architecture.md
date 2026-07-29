@@ -27,15 +27,18 @@ Audio shares that socket but not the tile encoder or its queue: the gateway
 re-encodes the remote's PCM as Opus (~96 kbps against the 1.4 Mbit/s the RDP side
 delivers) and sends it as its own binary frame kind, which a batch still being
 filled does not delay ([`remote-audio.md`](remote-audio.md)). It flows only for a
-client that asks — the browser sends an `audio` message, the viewer never does — so
-audio needed no protocol-version bump, and a quiet remote costs nothing at all.
+client that asks, which is why audio needed no protocol-version bump — a client that
+sends no `audio` message receives the bytes it received before audio existed — and why a
+quiet remote costs nothing at all.
 
-The browser decodes it with WebCodecs and schedules every buffer itself, which is the
-one thing an `<audio>` element cannot do: a media element's schedule belongs to the
-browser and never skips forward, so a delay it accumulated stayed for the session.
-Owning the clock is what bounds it (a 300 ms ceiling, following Guacamole), and it is
-why audio moved onto this socket at all — the bytes have to arrive as bytes rather
-than as a media source.
+**Both clients decode and schedule it themselves**, which is the one thing a media
+element cannot do: its schedule belongs to the player and never skips forward, so a delay
+it accumulated stayed for the session. Owning the clock is what bounds it (a 300 ms
+ceiling, following Guacamole), and it is why audio moved onto this socket at all — the
+bytes have to arrive as bytes rather than as a media source. The browser decodes with
+WebCodecs; the viewer with the Opus decoder macOS already ships, reached through
+`AVAudioConverter`, so neither needs a container and the gateway sends one
+representation.
 
 ## Constraints
 
@@ -308,8 +311,8 @@ LF at the boundary. Images, HTML and file transfer are out of scope, and a
 server that never joins the channel leaves the clipboard inert rather than
 ending the session.
 
-With `audio = true`, MS-RDPEA redirects the remote's sound, which reaches the
-browser as Opus frames on this same WebSocket — see
+With `audio = true`, MS-RDPEA redirects the remote's sound, which reaches whichever
+client asked for it as Opus frames on this same WebSocket — see
 [`remote-audio.md`](remote-audio.md) for the wire, the lifecycle, and how a
 live Windows host was made to cooperate. Four things about it belong
 here, because they are facts about this engine. MS-RDPEA has **two** channels, a
@@ -321,7 +324,7 @@ Windows redirects no audio at all unless device redirection is advertised
 alongside it; nothing is ever redirected through that channel. The channels have
 to be negotiated at connect, so an audio target asks for redirection from the start and
 discards buffers while nobody is listening; there is no way to add one to a live
-connection when a browser asks for sound. And the gateway advertises exactly one
+connection when a client asks for sound. And the gateway advertises exactly one
 format — 44100 Hz 16-bit stereo PCM — because a wave buffer identifies its format by
 an index, and with one advertised format that index cannot be misread. That also
 means the format a buffer will be in is known before the negotiation happens, so the
@@ -501,8 +504,9 @@ desktop session that stretched it leaves it stretched for whoever connects next.
 The optional macOS 26 viewer is a second client of the same protocol, not a shell
 around this one. It speaks `/api/*` and `/ws` itself: its own login and target
 picker, its own claim/attach/reconnect state machine, Metal framebuffer
-rendering, AppKit input, and `NSPasteboard`. Nothing web is involved, and the SPA
-is unaffected by it.
+rendering, AppKit input, `NSPasteboard`, and — through `AVAudioConverter` and
+`AVAudioEngine` — its own Opus decoding and playback schedule. Nothing web is
+involved, and the SPA is unaffected by it.
 
 Because the two artifacts ship separately, `GET /api/config` carries a
 `protocolVersion` (`PROTOCOL_VERSION` in `src/protocol.rs`) that the viewer

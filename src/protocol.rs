@@ -50,11 +50,16 @@ pub const STRIP_ROWS: u16 = 64;
 /// legible.
 ///
 /// **Audio did not bump it, and that was a decision rather than an oversight.** The
-/// [`audio`] frame kind and its two messages are additive *and* opt-in: nothing
-/// arrives until a client sends [`ClientMsg::Audio`], which only a browser does. So
-/// a viewer's socket carries the same bytes it did before audio existed, and since
+/// [`audio`] frame kind and its two messages are additive *and* opt-in: nothing arrives
+/// until a client sends [`ClientMsg::Audio`]. While the browser was the only client that
+/// did, a viewer's socket carried the same bytes it had before audio existed — and since
 /// the viewer compares this number for **equality** and ships as its own DMG, a bump
 /// would have cost every installed copy a reinstall to gain nothing.
+///
+/// The viewer has since gained audio, and it did not bump this either, for the same
+/// reason from the other direction: it started *sending* a message this gateway already
+/// understood. What did change is the viewer's floor — it decodes `connected.audio` as a
+/// required field, so it refuses a gateway older than the release that added it.
 pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
@@ -262,17 +267,20 @@ pub enum ClientMsg {
     /// never forwarded to an engine (see [`crate::session::SessionManager::set_audio`]).
     ///
     /// **Audio is opt-in for a reason beyond taste, and it is why
-    /// [`PROTOCOL_VERSION`] did not have to move for it.** The macOS viewer checks
-    /// that number for equality and ships separately, so a bump costs every
-    /// installed copy a reinstall. Nothing but a browser sends this, so a viewer's
-    /// socket carries exactly the bytes it carried before audio existed — there is
-    /// no new wire for it to refuse. Guacamole makes the same arrangement from the
-    /// other end: its client declares the audio mimetypes it can decode, and a
-    /// client that declares none gets a stream carrying nothing.
+    /// [`PROTOCOL_VERSION`] did not have to move for it.** The macOS viewer checks that
+    /// number for equality and ships separately, so a bump costs every installed copy a
+    /// reinstall. While the browser was the only sender, a viewer's socket carried
+    /// exactly the bytes it carried before audio existed — there was no new wire for it
+    /// to refuse — and when the viewer gained audio it only had to start sending this,
+    /// which is not a wire change either. Guacamole makes the same arrangement from the
+    /// other end: its client declares the audio mimetypes it can decode, and a client
+    /// that declares none gets a stream carrying nothing.
     ///
-    /// The browser sends this from the floating menu's Audio button, so the enabling
-    /// message is always inside a user gesture — which is also what lets it create
-    /// an `AudioContext` a policy will let play.
+    /// Both clients send it from a control the user pressed — the SPA's floating menu,
+    /// the viewer's Remote menu — but only the browser *needs* that: the gesture is what
+    /// lets it create an `AudioContext` an autoplay policy will let play. Which is also
+    /// why the two differ on reconnect: the viewer re-sends this by itself, and the
+    /// browser waits to be asked again.
     Audio { enabled: bool },
 }
 

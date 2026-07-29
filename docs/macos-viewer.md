@@ -354,6 +354,61 @@ Control-V events.
 Programmatic pasteboard reads follow macOS's Paste from Other Apps permission.
 The target's `clipboard = true` remains the server-side security boundary.
 
+## Audio
+
+**Remote → Enable Audio** subscribes to the remote's sound, for a target whose
+`connected` carried `audio` (RDP with `audio = true`; the item is greyed otherwise). The
+wire, the queue and the ceiling are the gateway's and are documented in
+[`remote-audio.md`](remote-audio.md) — what follows is only what is specific to this
+client.
+
+**The decoder is the one macOS already ships.** `AVAudioConverter` with
+`kAudioFormatOpus` decodes the wire's bare packets from an
+`AudioStreamBasicDescription` alone, so the viewer needs no vendored libopus and no
+container: `/System/Library/Components/AudioCodecs.component` is libopus behind an
+`AudioCodec`. Two behaviours of it are load-bearing and were measured, since neither is
+documented — the magic cookie is ignored, and the `OpusHead`'s pre-skip is not honoured,
+so `OpusDecoder` discards it itself by counting what the converter returned rather than
+by dropping a constant (its first call keeps 120 frames of priming, later calls keep
+none).
+
+**The schedule is the viewer's own**, not `AVPlayer`'s, and that is the whole reason this
+is not four lines of AVFoundation: a media element's schedule never skips forward, so a
+delay it accumulates is permanent. Each decoded buffer is handed to an
+`AVAudioPlayerNode` at an explicit `AVAudioTime` — `AudioSchedule` holds the arithmetic,
+with the same 0.1 s cushion and 0.3 s ceiling as the SPA.
+
+Past the ceiling the viewer **flushes**: `player.stop()` discards everything queued and
+the timeline restarts at the cushion. The SPA instead trims the arriving buffer, because
+Web Audio can truncate audio it has already committed and `AVAudioPlayerNode` cannot —
+its only eraser takes the whole queue. Dropping the backlog is the intent either way; the
+excess is latency, and one audible skip buys back all of it. Note a stopped player node
+rebases its own clock to zero, which is why a flush resets the timeline rather than
+continuing it.
+
+Three smaller decisions:
+
+- **Audio is live in view only.** That mode is about nothing this Mac does reaching the
+  remote, and sound travels the other way — watching a desktop without touching it is
+  exactly when it is wanted. The clipboard, which is bidirectional, does go down with it.
+- **A reconnect keeps playing.** The gateway's subscription belongs to an *attachment*, so
+  a reattach arrives with audio off; the viewer re-asserts from `connected`, as it already
+  re-sends the viewport and the host scale there. The SPA needs a fresh click instead,
+  because a browser's `AudioContext` must be created inside a user gesture. A *target
+  switch* does forget the answer, since it was an answer about the target being left.
+- **The output device follows the Mac's default**, including across a change: the engine
+  is torn down and rebuilt on `AVAudioEngineConfigurationChange` rather than restarted,
+  because the node graph was connected with the old device's format and a mismatch there
+  is silence with nothing in the log.
+
+Nothing reports whether sound is *arriving*, because from the gateway's end a quiet remote
+and one that will never redirect are the same thing. What the viewer can report is the
+local device refusing, which is the only failure available to it — unlike the browser,
+where a missing decoder and an insecure origin are both live possibilities.
+
+Playing audio needs no entitlement and there is no `AVAudioSession` on macOS, so nothing
+was added to the bundle for this.
+
 ## Networking
 
 Plain HTTP is allowed. A gateway is commonly reached directly over a private
@@ -393,6 +448,22 @@ REMOTEX_PROBE_USERNAME=… REMOTEX_PROBE_PASSWORD=… \
 Idling past 60 seconds is the check that `URLSessionWebSocketTask` answers the
 gateway's protocol pings — it does — since the gateway kills the engine after
 that long without a pong.
+
+Audio needs a listener, so the automated tests stop where the sound starts: the framing,
+the arithmetic and the decoding are covered (`AudioFrameTests`, `AudioScheduleTests`,
+`OpusDecoderTests` — the last against fixtures the *gateway's* encoder wrote), and
+playback is checked by ear. The tone harness needs no Windows host:
+
+```sh
+cargo test --lib serve_a_test_tone -- --ignored --nocapture   # prints a port
+open -n dist/remotex-viewer.app --args --settings qa --gateway http://127.0.0.1:<port>
+```
+
+Enable audio during one of its quiet phases and touch nothing: the tone must arrive on
+its own, go away after five seconds, and come back. For stereo, use a source that
+**names** the channel it is playing —
+[audiocheck.net](https://www.audiocheck.net/audiotests_stereo.php) — because a channel
+swap passes every assertion in the suite and every by-ear check with an unlabelled file.
 
 See [`../packaging/macos-viewer/README.md`](../packaging/macos-viewer/README.md)
 for installation, signing, permissions, and development launch arguments.

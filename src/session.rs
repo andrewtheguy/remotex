@@ -368,7 +368,7 @@ impl SessionManager {
     ///
     /// Enabling replaces whatever was running, so a repeated request cannot end up
     /// with two pumps on one queue. A session with no audio source — the picker, or a
-    /// target that did not opt in — is a no-op with a log line: the browser is only
+    /// target that did not opt in — is a no-op with a log line: a client is only
     /// offered the control when [`ServerMsg::Connected`] said `audio`, so reaching
     /// here otherwise is a client bug rather than a state to report.
     pub fn set_audio(&self, attach_id: u64, enabled: bool) {
@@ -1500,8 +1500,8 @@ mod tests {
 
     /// Nothing to listen to is a no-op rather than an error, on both of its paths:
     /// the picker has no engine, and a target that did not opt in has no queue. The
-    /// browser is only offered the control when `connected` said `audio`, so getting
-    /// here is a client bug — and one that must not cost the socket anything.
+    /// SPA and the viewer both only offer the control when `connected` said `audio`,
+    /// so getting here is a client bug — and one that must not cost the socket anything.
     #[tokio::test]
     async fn asking_for_audio_without_a_source_changes_nothing() {
         let (mgr, _hooks) = manager_with_fake_engine();
