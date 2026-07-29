@@ -410,20 +410,15 @@ mod tests {
         encode_vec(&pdu).expect("a server PDU encodes")
     }
 
-    /// Ogg pages in a chunk of the response body.
-    ///
-    /// The response is Opus now, so these tests can no longer compare the bytes
-    /// they sent against the bytes that came out. What they still prove is the
-    /// plumbing — a wave PDU reaching the HTTP stream — and a page is the
-    /// observable form of that. The encoding itself is covered in
-    /// [`crate::opus_stream`], which decodes what it encoded.
-    fn page_count(chunk: &[u8]) -> usize {
-        chunk.windows(4).filter(|w| *w == b"OggS").count()
-    }
-
     /// Enough PCM for exactly one 20 ms Opus frame at the negotiated format.
     /// Smaller buffers are held by the encoder rather than emitted, so a test
-    /// that sent a handful of bytes would wait forever for a page.
+    /// that sent a handful of bytes would wait forever for a packet.
+    ///
+    /// The stream is Opus, so these tests cannot compare the bytes they sent
+    /// against the bytes that came out. What they still prove is the plumbing — a
+    /// wave PDU reaching a listener — and a packet count is the observable form of
+    /// that. The encoding itself is covered in [`crate::opus_stream`], which
+    /// decodes what it encoded.
     fn one_frame_of_pcm() -> Vec<u8> {
         let frames = crate::opus_stream::FRAME_FRAMES * PCM_CD_QUALITY.sample_rate as usize
             / crate::opus_stream::OPUS_SAMPLE_RATE as usize;
@@ -489,22 +484,21 @@ mod tests {
         let mut handler = Handler::new(Arc::clone(&bridge));
         handler.get_formats();
         let format = listener.negotiated_format().expect("answering the formats negotiates");
-        let mut stream = Box::pin(listener.into_stream(format));
-        stream.next().await.unwrap().unwrap(); // the header pages
+        let mut stream = Box::pin(listener.into_packets(format));
 
         let frame = one_frame_of_pcm();
         handler.wave(0, 0, Cow::Borrowed(&frame));
-        assert_eq!(page_count(&stream.next().await.unwrap().unwrap()), 1);
+        assert_eq!(stream.next().await.unwrap().len(), 1);
 
         // An index we never advertised is dropped rather than played as if it
         // were PCM. Three frames on the bad index against one on the good one, so
-        // the page count says which of them reached the queue — the encoded bytes
+        // the packet count says which of them reached the queue — the encoded bytes
         // no longer carry anything a test could recognise.
         let bogus = frame.repeat(3);
         handler.wave(1, 0, Cow::Borrowed(&bogus));
         handler.wave(0, 0, Cow::Borrowed(&frame));
         assert_eq!(
-            page_count(&stream.next().await.unwrap().unwrap()),
+            stream.next().await.unwrap().len(),
             1,
             "the wave on an unadvertised format index should have been dropped"
         );
@@ -596,12 +590,7 @@ mod tests {
             .expect("the client confirms training");
         assert!(!answer.is_empty(), "training must be confirmed");
 
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        assert_eq!(
-            page_count(&stream.next().await.unwrap().unwrap()),
-            2,
-            "the response opens with OpusHead and OpusTags"
-        );
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
 
         let samples = one_frame_of_pcm();
         let answer = rdpsnd
@@ -618,9 +607,9 @@ mod tests {
             "every buffer is confirmed, accepted or dropped"
         );
         assert_eq!(
-            page_count(&stream.next().await.unwrap().unwrap()),
+            stream.next().await.unwrap().len(),
             1,
-            "the server's PCM should reach the HTTP response as an encoded page"
+            "the server's PCM should reach the listener as an encoded packet"
         );
 
         // And the server closing the channel ends the format, so the next
@@ -669,12 +658,7 @@ mod tests {
             .expect("the client confirms training");
         assert_eq!(answer.len(), 1, "training is confirmed");
 
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        assert_eq!(
-            page_count(&stream.next().await.unwrap().unwrap()),
-            2,
-            "the response opens with OpusHead and OpusTags"
-        );
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
 
         let samples = one_frame_of_pcm();
         let answer = dvc
@@ -690,7 +674,7 @@ mod tests {
             )
             .expect("the client accepts a wave");
         assert_eq!(answer.len(), 1, "every buffer is confirmed");
-        assert_eq!(page_count(&stream.next().await.unwrap().unwrap()), 1);
+        assert_eq!(stream.next().await.unwrap().len(), 1);
 
         dvc.close(1);
         assert_eq!(
@@ -720,8 +704,8 @@ mod tests {
     }
 
     /// The guard against two transports feeding one queue. A server driving both
-    /// would interleave two streams into one WAV response, which is worse than
-    /// silence because nothing would report it.
+    /// would interleave two streams into one listener, which is worse than silence
+    /// because nothing would report it.
     #[tokio::test]
     async fn the_second_transport_to_arrive_is_ignored() {
         use futures_util::StreamExt as _;
@@ -733,13 +717,12 @@ mod tests {
         // The dynamic channel gets there first.
         dvc.process(1, &server_formats(&[audio_format(PCM_CD_QUALITY)]))
             .unwrap();
-        let mut stream = Box::pin(bridge.take_listener().into_stream(PCM_CD_QUALITY));
-        stream.next().await.unwrap().unwrap(); // the header pages
+        let mut stream = Box::pin(bridge.take_listener().into_packets(PCM_CD_QUALITY));
 
         // The two buffers are deliberately different lengths, because Opus makes
         // them otherwise indistinguishable: three frames from the transport that
         // must be ignored, one from the transport that owns the queue. The first
-        // chunk to arrive therefore says which buffer landed — and it was sent
+        // item to arrive therefore says which buffer landed — and it was sent
         // first, so if it were queued it would be the one read.
         let ignored = one_frame_of_pcm().repeat(3);
         let owned = one_frame_of_pcm();
@@ -756,7 +739,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            page_count(&stream.next().await.unwrap().unwrap()),
+            stream.next().await.unwrap().len(),
             1,
             "the dynamic channel owns the queue, so the static buffer never landed"
         );

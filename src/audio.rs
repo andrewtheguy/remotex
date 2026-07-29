@@ -1,13 +1,12 @@
-//! Remote audio: the queue between an engine that receives sound and the HTTP
-//! response that plays it. The response's bytes are Ogg/Opus, framed by
-//! [`crate::opus_stream`].
+//! Remote audio: the queue between an engine that receives sound and the stream of
+//! Opus packets a client plays. The packets are cut by [`crate::opus_stream`].
 //!
-//! See docs/remote-audio.md. Audio deliberately does not travel on the desktop
-//! WebSocket: the browser already has a streaming audio client, so the gateway
-//! hands it an ordinary live HTTP response and leaves buffering, decoding and
-//! playback to `<audio>`. That is why this module knows nothing about
-//! [`crate::protocol`] — no wire record, no version bump, no decoder or jitter
-//! buffer in any client.
+//! See docs/remote-audio.md. This module knows nothing about how those packets
+//! reach anyone — no frames, no sockets, no HTTP — because what carries them has
+//! already changed once and may again. It used to be an open-ended `audio/ogg`
+//! response read by an `<audio>` element; it is now audio frames on the desktop
+//! WebSocket, decoded and scheduled by the browser (see [`crate::protocol`] and
+//! [`crate::session`]). What survived both is this queue.
 //!
 //! Nothing here is RDP-specific either, though RDPSND is its only producer today
 //! (see [`crate::rdp_audio`]).
@@ -27,42 +26,34 @@
 //!   audio-enabled target discards sound while nobody is listening.
 //!
 //! There is at most one consumer, because there is one session (see CLAUDE.md).
-//! That is enforced in [`AudioBridge::take_listener`] rather than assumed.
 //!
-//! ## Why the response never goes quiet
+//! ## A quiet remote sends nothing, and that took two designs to get to
 //!
 //! A remote is quiet most of the time, and the tested Windows host does not merely
 //! stop sending buffers when nothing is playing — it never opens the audio channel
 //! at all until something does, and closes it again afterwards. So "no audio yet"
-//! and "no audio ever" look identical from here, and an endpoint that waited to
-//! find out answered `503` to a perfectly good session whose desktop happened to be
-//! silent. A media element does not retry, so that `503` was final.
+//! and "no audio ever" look identical from here.
 //!
-//! Instead the response opens immediately and **keeps flowing**: while no buffers
-//! arrive, [`AudioListener::into_stream`] encodes silence, so the element stays
-//! playing and real audio simply replaces the silence when the remote starts — and
-//! again after it stops and starts. One element, one `play()`, from the click that
-//! opened the panel; nothing to re-load, no second autoplay attempt for a browser
-//! policy to refuse, and no restart delay when sound returns.
+//! While an `<audio>` element was the player, that could not be left alone. A media
+//! element whose stream goes dry stalls, and it never skips forward, so the stream
+//! had to keep flowing with encoded silence — trickling below real time, because
+//! silence that kept pace with the clock made start-up buffering and every hiccup
+//! into permanent lag. All of that machinery is gone. A Web Audio schedule simply
+//! has a gap in it: the client resumes at its own start lead when packets return,
+//! so quiet costs zero bytes and nothing has to be kept alive. The WebSocket's ping
+//! covers the connection, which an HTTP body could not do without sending audio.
 //!
-//! That silence trickles rather than keeping pace with the clock, which is the part
-//! that is easy to get wrong — see [`SILENCE_TRICKLE_FRAMES`]. A media element never
-//! skips forward, so a keepalive that matched real time would make start-up
-//! buffering and every hiccup permanent lag.
-//!
-//! FreeRDP makes the same call one layer down: its `rdpsnd_recv_close_pdu` only
-//! logs, deliberately leaving the local audio device open, and reopens it on the
-//! next wave. A server closing the channel is not a teardown.
+//! FreeRDP makes the same call one layer down, which is worth knowing before
+//! treating a server's `Close` as a teardown: its `rdpsnd_recv_close_pdu` only logs,
+//! deliberately leaving the local audio device open, and reopens it on the next wave.
 
-use std::convert::Infallible;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use futures_util::Stream;
 use log::{debug, info, warn};
 use tokio::sync::{broadcast, oneshot, watch};
 
-use crate::opus_stream::{FRAME_FRAMES, OPUS_SAMPLE_RATE, OggOpus};
+use crate::opus_stream::OpusStream;
 
 /// How many wave buffers the queue holds before the oldest are dropped.
 ///
@@ -80,42 +71,6 @@ use crate::opus_stream::{FRAME_FRAMES, OPUS_SAMPLE_RATE, OggOpus};
 /// what it is for, and shrinking it would only make a drop more likely without
 /// making anything faster.
 pub const AUDIO_QUEUE_DEPTH: usize = 64;
-
-/// One Opus frame as a duration: 20 ms, derived rather than written down.
-const FRAME: Duration =
-    Duration::from_nanos(FRAME_FRAMES as u64 * 1_000_000_000 / OPUS_SAMPLE_RATE as u64);
-
-/// How long the keepalive lets the stream go without sending anything.
-const SILENCE_CHECK: Duration = Duration::from_millis(500);
-
-/// How long since the last wave buffer before the remote counts as quiet.
-///
-/// The interval above is not enough on its own. A live host leaves ~185 ms between
-/// buffers, but it is a desktop and not a clock: one late delivery longer than the
-/// check would put 100 ms of silence into the middle of real audio, which is a
-/// stutter, and the listener then carries that 100 ms as lag. Eight times the
-/// cadence is comfortably past any hiccup and still quick enough that a browser is
-/// never left more than two seconds with nothing at all.
-const SILENCE_GRACE: Duration = Duration::from_millis(1_500);
-
-/// How much silence it sends when it does fire: 100 ms, against that 500 ms wait.
-///
-/// **Deliberately slower than real time, and that is the whole point of the number.**
-/// A keepalive that kept pace with the clock — which is what this was first — keeps
-/// the element alive but makes every stall permanent: a media element resumes where
-/// it stopped and never skips forward, so whatever it fell behind by during start-up
-/// buffering or one hiccup, it stays behind by, and a session accumulates seconds of
-/// lag with nothing to shed them.
-///
-/// At a fifth of real time, a quiet remote is instead when a listener catches back
-/// up: the element plays out its buffer at 1x while receiving 0.2x, so a second of
-/// lag is gone after about a second and a quarter of quiet. It arrives at the sound
-/// starved rather than ahead, which is what playing at the live edge means.
-const SILENCE_TRICKLE: Duration = Duration::from_millis(100);
-
-/// The same in Opus frames, which is the unit the encoder cuts silence in.
-const SILENCE_TRICKLE_FRAMES: usize =
-    (SILENCE_TRICKLE.as_nanos() / FRAME.as_nanos()) as usize;
 
 /// Linear PCM parameters: the only kind of audio this path carries.
 ///
@@ -304,65 +259,53 @@ impl AudioListener {
         *self.format.borrow()
     }
 
-    /// The response body: the Ogg header pages for `format`, then Opus packets as
-    /// the PCM to fill them arrives.
+    /// The Opus packets cut from the PCM that arrives after this listener attached,
+    /// one item per wave buffer that completed at least one 20 ms frame.
     ///
-    /// Open-ended by construction — there is no recording and no seekable
-    /// history, so a listener starts at live audio and receives only what
-    /// arrives after it attached. It ends when the engine's bridge is dropped
-    /// (the target changed, disconnected, or the engine died), when the slot
-    /// ends this listener (a takeover, or a second request), or when the
-    /// consumer stops reading and this stream is dropped with it.
+    /// The header a decoder needs is *not* in here — it is [`crate::opus_stream::
+    /// opus_head`], handed over separately by whoever set this stream up, because a
+    /// client has to be configured before the first packet rather than by it.
     ///
-    /// A wave buffer usually yields several pages and sometimes none — the
-    /// encoder cuts 20 ms frames out of whatever sizes RDP sends, and holds the
-    /// remainder (see [`crate::opus_stream`]).
+    /// Open-ended by construction: there is no recording and no history, so a
+    /// listener starts at live audio and receives only what arrives after it
+    /// attached. It ends when the engine's bridge is dropped (the target changed,
+    /// disconnected, or the engine died), when the slot ends this listener (a
+    /// takeover), or when the consumer stops reading and this stream is dropped
+    /// with it.
     ///
-    /// What it does *not* do is go quiet when the remote does: gaps are filled with
-    /// encoded silence, so the element keeps playing and resumes on its own when
-    /// sound comes back. See this module's header.
-    pub fn into_stream(self, format: PcmFormat) -> impl Stream<Item = Result<Vec<u8>, Infallible>> {
+    /// A wave buffer usually yields several packets and sometimes none — the encoder
+    /// cuts 20 ms frames out of whatever sizes RDP sends and holds the remainder —
+    /// and it yields **nothing at all** while the remote is quiet, which is the whole
+    /// difference from the silence-filled version this replaced.
+    pub fn into_packets(self, format: PcmFormat) -> impl Stream<Item = Vec<Vec<u8>>> {
         struct State {
-            /// `None` once the encoder has failed or refused the format; the
-            /// stream then ends, which is what the endpoint's caller already
-            /// handles for a remote that went away.
-            encoder: Option<OggOpus>,
-            header: Option<Vec<u8>>,
+            /// `None` once the encoder has refused the format; the stream then ends
+            /// immediately, which every consumer already handles as the remote's
+            /// audio going away.
+            encoder: Option<OpusStream>,
             waves: broadcast::Receiver<Vec<u8>>,
             stop: oneshot::Receiver<()>,
-            /// When a wave buffer last arrived, so the keepalive can tell a quiet
-            /// remote from a late delivery. `tokio`'s clock rather than the standard
-            /// library's, so `tokio::time::pause` can drive it in tests.
-            last_wave: tokio::time::Instant,
-            /// When the response opened, which only the diagnostic line below reads:
-            /// frames encoded against time elapsed is how a stream that is drifting
-            /// from real time shows itself.
+            /// When this listener attached, which only the diagnostic line below
+            /// reads: frames encoded against time elapsed is how a stream that is
+            /// drifting from real time shows itself.
             started: tokio::time::Instant,
         }
 
-        let (encoder, header) = match OggOpus::new(format) {
-            Ok((encoder, header)) => (Some(encoder), Some(header)),
+        let encoder = match OpusStream::new(format) {
+            Ok((encoder, _head)) => Some(encoder),
             Err(e) => {
-                // Reported here rather than as an HTTP status: by this point the
-                // 200 has been sent, and a media element shows a load failure
-                // either way. The log is the only place this can be seen.
                 warn!("audio: cannot encode {format:?} as opus, no audio will be sent: {e}");
-                (None, None)
+                None
             }
         };
 
         let state = State {
             encoder,
-            header,
             waves: self.waves,
             stop: self.stop,
-            last_wave: tokio::time::Instant::now(),
             started: tokio::time::Instant::now(),
         };
         futures_util::stream::unfold(state, |mut state| async move {
-            if let Some(header) = state.header.take() {
-                return Some((Ok(header), state));
-            }
             let encoder = state.encoder.as_mut()?;
             loop {
                 let encoded = tokio::select! {
@@ -371,7 +314,6 @@ impl AudioListener {
                     _ = &mut state.stop => return None,
                     wave = state.waves.recv() => match wave {
                         Ok(samples) => {
-                            let now = tokio::time::Instant::now();
                             // Four numbers, and between them they say whether this
                             // gateway is adding delay: the buffer size and the queue
                             // depth locate a backlog, and encoded frames against
@@ -388,7 +330,6 @@ impl AudioListener {
                                 encoder.frames_encoded(),
                                 state.started.elapsed().as_millis(),
                             );
-                            state.last_wave = now;
                             encoder.push(&samples)
                         }
                         // Old audio was dropped while this consumer was behind.
@@ -402,23 +343,12 @@ impl AudioListener {
                         }
                         Err(broadcast::error::RecvError::Closed) => return None,
                     },
-                    // The keepalive, which fills a remote that has gone quiet and
-                    // nothing else: a late buffer is waited for rather than papered
-                    // over. What it hands across is less than the interval's worth,
-                    // so a quiet remote drains the listener's backlog instead of
-                    // holding it.
-                    _ = tokio::time::sleep(SILENCE_CHECK) => {
-                        if state.last_wave.elapsed() < SILENCE_GRACE {
-                            continue;
-                        }
-                        encoder.push_silence(SILENCE_TRICKLE_FRAMES)
-                    }
                 };
                 match encoded {
                     // Empty when the buffer did not complete a 20 ms frame. Yielding
                     // nothing would end the stream, so keep reading instead.
-                    Ok(pages) if pages.is_empty() => continue,
-                    Ok(pages) => return Some((Ok(pages), state)),
+                    Ok(packets) if packets.is_empty() => continue,
+                    Ok(packets) => return Some((packets, state)),
                     Err(e) => {
                         warn!("audio: the opus encoder failed, ending the stream: {e}");
                         return None;
@@ -431,6 +361,8 @@ impl AudioListener {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use futures_util::StreamExt as _;
 
     use super::*;
@@ -468,30 +400,14 @@ mod tests {
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 
-    /// Ogg pages in a chunk, counted by their capture pattern.
-    fn page_count(chunk: &[u8]) -> usize {
-        chunk.windows(4).filter(|w| *w == b"OggS").count()
-    }
-
-    async fn next(stream: &mut (impl Stream<Item = Result<Vec<u8>, Infallible>> + Unpin)) -> Option<Vec<u8>> {
+    async fn next(stream: &mut (impl Stream<Item = Vec<Vec<u8>>> + Unpin)) -> Option<Vec<Vec<u8>>> {
         tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .expect("timed out waiting for the audio stream")
-            .map(|chunk| chunk.unwrap())
-    }
-
-    /// The header pages, asserted to be exactly that. Every test wants them out
-    /// of the way, and none of them should pass if audio arrived first.
-    async fn expect_headers(
-        stream: &mut (impl Stream<Item = Result<Vec<u8>, Infallible>> + Unpin),
-    ) {
-        let headers = next(stream).await.expect("the ogg header pages");
-        assert_eq!(&headers[0..4], b"OggS");
-        assert_eq!(page_count(&headers), 2, "OpusHead and OpusTags");
     }
 
     #[tokio::test]
-    async fn a_listener_gets_the_headers_then_only_what_arrives_after_it_attached() {
+    async fn a_listener_gets_only_what_arrives_after_it_attached() {
         let bridge = AudioBridge::new();
         bridge.publish_format(PCM_CD_QUALITY);
         // Discarded: nobody was listening, and there is no history to replay.
@@ -503,12 +419,11 @@ mod tests {
             Some(PCM_CD_QUALITY),
             "the format was published before the listener attached"
         );
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut stream).await;
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
 
         bridge.wave(one_frame_of_pcm());
-        let audio = next(&mut stream).await.unwrap();
-        assert_eq!(page_count(&audio), 1, "one frame in, one page out");
+        let packets = next(&mut stream).await.expect("a packet for the buffer");
+        assert_eq!(packets.len(), 1, "one frame in, one packet out");
     }
 
     /// The watch, not a snapshot: a listener attached before the channel came up
@@ -526,23 +441,28 @@ mod tests {
         assert_eq!(listener.negotiated_format(), None);
     }
 
-    /// What used to be the `503`: a target configured for audio whose channel never
-    /// came up. Nothing is negotiated, nothing is published, and the response is
-    /// still a playable stream — the point of the whole keepalive.
+    /// A quiet remote now costs **nothing**, which is the keepalive's deletion
+    /// stated as a property rather than an absence. Paused time auto-advances
+    /// whenever the runtime has nothing to do, so this would see any timer that
+    /// still fired: three seconds pass with no buffer sent, and the stream yields
+    /// nothing at all rather than filler.
     #[tokio::test(start_paused = true)]
-    async fn a_listener_that_negotiated_nothing_still_gets_a_playable_stream() {
+    async fn a_quiet_remote_produces_no_packets_at_all() {
         let bridge = AudioBridge::new();
         let listener = bridge.take_listener();
         assert_eq!(listener.negotiated_format(), None);
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut stream).await;
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
 
-        // Paused time auto-advances to the keepalive's timer, so this is arithmetic
-        // rather than a race: nothing has been sent, and pages arrive anyway.
-        for _ in 0..3 {
-            let silence = next(&mut stream).await.expect("the stream must stay open");
-            assert_eq!(page_count(&silence), 1, "a batch of silence shares one page");
-        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .is_err(),
+            "nothing was sent, so nothing should have been encoded"
+        );
+
+        // And the stream is still live: silence was a gap, not an end.
+        bridge.wave(one_frame_of_pcm());
+        assert_eq!(next(&mut stream).await.expect("audio after the gap").len(), 1);
     }
 
     /// The remote going quiet and coming back, which is the sequence this exists
@@ -552,123 +472,73 @@ mod tests {
         let bridge = AudioBridge::new();
         bridge.publish_format(PCM_CD_QUALITY);
         let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut stream).await;
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
 
         bridge.wave(one_frame_of_pcm());
-        assert_eq!(page_count(&next(&mut stream).await.unwrap()), 1);
+        assert_eq!(next(&mut stream).await.unwrap().len(), 1);
 
-        // The channel closes, as a real host's does when nothing is playing.
+        // The channel closes, as a real host's does when nothing is playing, and it
+        // comes back — without the listener having reattached.
         bridge.clear_format();
-        for _ in 0..2 {
-            assert_eq!(page_count(&next(&mut stream).await.unwrap()), 1, "silence");
-        }
-
-        // And it comes back, without the listener having reattached.
+        tokio::time::advance(Duration::from_secs(30)).await;
         bridge.publish_format(PCM_CD_QUALITY);
         bridge.wave(one_frame_of_pcm());
         assert_eq!(
-            page_count(&next(&mut stream).await.unwrap()),
+            next(&mut stream).await.unwrap().len(),
             1,
             "the same stream should carry the audio that came back"
         );
     }
 
-    /// Real audio must not have filler mixed into it. A buffer already on the queue
-    /// wins over the keepalive's timer, so while buffers keep arriving faster than
-    /// [`SILENCE_CHECK`] — a live remote sends one every ~185 ms — the check never
-    /// fires and one frame in is one page out.
-    #[tokio::test(start_paused = true)]
-    async fn a_buffer_arriving_before_the_next_check_is_not_padded() {
-        let bridge = AudioBridge::new();
-        let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut stream).await;
-
-        tokio::time::advance(SILENCE_CHECK / 2).await;
-        bridge.wave(one_frame_of_pcm());
-        assert_eq!(page_count(&next(&mut stream).await.unwrap()), 1);
-    }
-
-    /// The two properties the keepalive's numbers have to keep, both of which were
-    /// learnt by getting them wrong. Pinned here because they are invisible in the
-    /// arm that uses them: it is two constants and a `sleep`.
-    #[test]
-    fn the_keepalive_trickles_rather_than_keeps_pace() {
-        // Slower than real time, or a listener that fell behind stays behind: it
-        // plays out at 1x and can only catch up while receiving less than that.
-        assert!(
-            SILENCE_TRICKLE * 2 < SILENCE_CHECK,
-            "silence must arrive well under real time, \
-             got {SILENCE_TRICKLE:?} per {SILENCE_CHECK:?}"
-        );
-        // And the frame count has to be that duration, not a number beside it.
-        assert_eq!(FRAME * SILENCE_TRICKLE_FRAMES as u32, SILENCE_TRICKLE);
-        // And it must not be able to land inside real audio: a host sends a buffer
-        // every ~185 ms, and one arriving late must be waited for rather than filled
-        // in, since the filler becomes lag the listener then carries.
-        assert!(
-            SILENCE_GRACE > Duration::from_millis(185) * 4,
-            "the grace has to clear a late delivery, not just the usual cadence"
-        );
-    }
-
     #[tokio::test]
-    async fn dropping_the_bridge_ends_the_response() {
+    async fn dropping_the_bridge_ends_the_stream() {
         let bridge = AudioBridge::new();
         let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut stream).await;
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
 
         drop(bridge);
         assert!(next(&mut stream).await.is_none());
     }
 
     /// A takeover, and the one lifecycle case the engine's own lifetime cannot
-    /// express: the desktop carries on, the audio response does not.
+    /// express: the desktop carries on, this listener's audio does not.
     #[tokio::test]
-    async fn stopping_the_listener_ends_the_response_but_not_the_bridge() {
+    async fn stopping_the_listener_ends_the_stream_but_not_the_bridge() {
         let bridge = AudioBridge::new();
         let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut stream).await;
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
 
         bridge.stop_listener();
         assert!(next(&mut stream).await.is_none());
 
-        // The bridge is still usable, which is what a takeover needs — and the
-        // replacement gets its own headers, without which its Opus packets would
-        // arrive with nothing to configure a decoder.
+        // The bridge is still usable, which is what a takeover needs.
         let replacement = bridge.take_listener();
-        let mut stream = Box::pin(replacement.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut stream).await;
+        let mut stream = Box::pin(replacement.into_packets(PCM_CD_QUALITY));
         bridge.wave(one_frame_of_pcm());
-        assert_eq!(page_count(&next(&mut stream).await.unwrap()), 1);
+        assert_eq!(next(&mut stream).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn a_second_listener_replaces_the_first() {
         let bridge = AudioBridge::new();
         let first = bridge.take_listener();
-        let mut first = Box::pin(first.into_stream(PCM_CD_QUALITY));
-        expect_headers(&mut first).await;
+        let mut first = Box::pin(first.into_packets(PCM_CD_QUALITY));
 
         let second = bridge.take_listener();
-        let mut second = Box::pin(second.into_stream(PCM_CD_QUALITY));
+        let mut second = Box::pin(second.into_packets(PCM_CD_QUALITY));
         assert!(
             next(&mut first).await.is_none(),
-            "the first response should have ended"
+            "the first stream should have ended"
         );
-        expect_headers(&mut second).await;
         bridge.wave(one_frame_of_pcm());
-        assert_eq!(page_count(&next(&mut second).await.unwrap()), 1);
+        assert_eq!(next(&mut second).await.unwrap().len(), 1);
     }
 
     /// The backpressure rule: the producer is never held up, and what gives way
     /// is old audio. A queue that blocked here would be blocking the RDP read
     /// loop, and one that grew would be building a permanent delay.
     ///
-    /// Read straight off the queue rather than through [`AudioListener::into_stream`],
+    /// Read straight off the queue rather than through [`AudioListener::into_packets`],
     /// for two reasons: what is under test is the queue's overflow rule, and the
     /// encoder in between makes buffers unidentifiable, so there would be no way
     /// to say *which* audio survived. Draining the stream instead is also not

@@ -155,37 +155,12 @@ async fn websocket_upgrade_without_a_login_fails_with_401() {
     }
 }
 
-/// The audio endpoint's three refusals, which are the whole of its guard: it is
-/// behind the login like the rest of `/api`, and behind the *claim* on top of
-/// that, because a live audio stream belongs to whoever holds the single session
-/// slot rather than to anyone with a cookie.
-///
-/// A 503 rather than a 404 for the last one: this target has no audio and never
-/// connects, which reads the same way to a client as an audio channel that has
-/// not come up yet — both are worth asking about again.
-#[tokio::test]
-async fn the_audio_endpoint_needs_a_login_and_the_current_claim() {
-    let addr = spawn_app().await;
-
-    let (status, _) = get(addr, "/api/session/audio?session=whatever", None).await;
-    assert_eq!(status, 401, "audio must require a login");
-
-    let cookie = common::login(addr).await;
-    let (status, _) = get(addr, "/api/session/audio?session=forged", Some(&cookie)).await;
-    assert_eq!(status, 403, "a token that is not the claim must be refused");
-    let (status, _) = get(addr, "/api/session/audio", Some(&cookie)).await;
-    assert_eq!(status, 403, "no token at all is not the claim either");
-
-    let token = common::claim_session(addr, &cookie).await;
-    let (status, _) = get(
-        addr,
-        &format!("/api/session/audio?session={token}"),
-        Some(&cookie),
-    )
-    .await;
-    assert_eq!(status, 503, "the claim holder still needs a session with audio");
-}
-
+/// Audio has no endpoint of its own to guard any more: it travels on `/ws`, so its
+/// guard is the socket's — the login cookie checked before the upgrade above, and
+/// the claim token checked on attach. What used to be here was that endpoint's
+/// three refusals (401 without a login, 403 for a token that is not the claim, 503
+/// for a session with no audio source), and every one of them is now expressed as a
+/// socket that is refused or an audio subscription that produces nothing.
 #[tokio::test]
 async fn logout_invalidates_the_session_and_clears_the_cookie() {
     let addr = spawn_app().await;

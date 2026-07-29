@@ -823,26 +823,21 @@ mod tests {
             .expect("event stream ended unexpectedly")
     }
 
-    /// The next chunk of an audio response, or `None` once it has ended.
-    async fn next_chunk(
-        stream: &mut (impl Stream<Item = Result<Vec<u8>, std::convert::Infallible>> + Unpin),
-    ) -> Option<Vec<u8>> {
+    /// One wave buffer's worth of Opus packets, or `None` once the stream ended.
+    ///
+    /// What these tests care about is the lifecycle — whose audio is live and when
+    /// it ends — so a packet is only ever used as proof that audio reached the
+    /// stream at all. The bytes themselves are [`crate::opus_stream`]'s business.
+    async fn next_packets(
+        stream: &mut (impl Stream<Item = Vec<Vec<u8>>> + Unpin),
+    ) -> Option<Vec<Vec<u8>>> {
         tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
-            .expect("timed out waiting on the audio response")
-            .map(|chunk| chunk.unwrap())
-    }
-
-    /// Ogg pages in a chunk of an audio response. What these tests care about is
-    /// the lifecycle — whose response is open and when it ends — so a page is
-    /// only ever used as proof that audio reached the stream at all. The bytes
-    /// themselves are [`crate::opus_stream`]'s business.
-    fn page_count(chunk: &[u8]) -> usize {
-        chunk.windows(4).filter(|w| *w == b"OggS").count()
+            .expect("timed out waiting on the audio stream")
     }
 
     /// Enough PCM for one 20 ms Opus frame, since a smaller buffer is held by the
-    /// encoder and would leave a `next_chunk` waiting for a page that never comes.
+    /// encoder and would leave a `next_packets` waiting for a packet that never comes.
     fn one_frame_of_pcm() -> Vec<u8> {
         let frames = crate::opus_stream::FRAME_FRAMES * PCM_CD_QUALITY.sample_rate as usize
             / crate::opus_stream::OPUS_SAMPLE_RATE as usize;
@@ -1298,10 +1293,9 @@ mod tests {
         let audio = audio.expect("an audio target's engine is given a bridge");
 
         let listener = mgr.audio_listener(&token).unwrap();
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        next_chunk(&mut stream).await.expect("the ogg header pages");
+        let mut stream = Box::pin(listener.into_packets(PCM_CD_QUALITY));
         audio.wave(one_frame_of_pcm());
-        assert_eq!(page_count(&next_chunk(&mut stream).await.unwrap()), 1);
+        assert_eq!(next_packets(&mut stream).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1353,21 +1347,27 @@ mod tests {
         let (input_rx, _frame_tx, audio) = hooks.try_recv().unwrap();
         let audio = audio.unwrap();
 
-        let mut stream = Box::pin(mgr.audio_listener(&token_a).unwrap().into_stream(PCM_CD_QUALITY));
-        next_chunk(&mut stream).await.expect("the ogg header pages");
+        let mut stream =
+            Box::pin(mgr.audio_listener(&token_a).unwrap().into_packets(PCM_CD_QUALITY));
+        audio.wave(one_frame_of_pcm());
+        assert_eq!(
+            next_packets(&mut stream).await.unwrap().len(),
+            1,
+            "this browser's audio should be live before the takeover"
+        );
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(
-            next_chunk(&mut stream).await.is_none(),
-            "the evicted browser's audio response should have ended"
+            next_packets(&mut stream).await.is_none(),
+            "the evicted browser's audio should have ended"
         );
         assert!(!input_rx.is_closed(), "a takeover keeps the engine");
 
         // And the new holder gets its own stream off the same live engine.
-        let mut stream = Box::pin(mgr.audio_listener(&token_b).unwrap().into_stream(PCM_CD_QUALITY));
-        next_chunk(&mut stream).await.expect("the ogg header pages");
+        let mut stream =
+            Box::pin(mgr.audio_listener(&token_b).unwrap().into_packets(PCM_CD_QUALITY));
         audio.wave(one_frame_of_pcm());
-        assert_eq!(page_count(&next_chunk(&mut stream).await.unwrap()), 1);
+        assert_eq!(next_packets(&mut stream).await.unwrap().len(), 1);
     }
 
     /// Every way an engine ends takes its audio with it, with nothing in those
@@ -1392,15 +1392,21 @@ mod tests {
             mgr.connect(att.id, "rdp-audio").unwrap();
             expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
                 .await;
-            let (_input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+            let (_input_rx, _frame_tx, audio) = hooks.try_recv().unwrap();
+            let audio = audio.expect("an audio target's engine is given a bridge");
             let mut stream =
-                Box::pin(mgr.audio_listener(&token).unwrap().into_stream(PCM_CD_QUALITY));
-            next_chunk(&mut stream).await.expect("the ogg header pages");
+                Box::pin(mgr.audio_listener(&token).unwrap().into_packets(PCM_CD_QUALITY));
+            audio.wave(one_frame_of_pcm());
+            assert_eq!(
+                next_packets(&mut stream).await.unwrap().len(),
+                1,
+                "{what}: the audio should be live before the engine ends"
+            );
 
             end_it(&mgr, att.id);
             assert!(
-                next_chunk(&mut stream).await.is_none(),
-                "{what} left the audio response open"
+                next_packets(&mut stream).await.is_none(),
+                "{what} left the audio stream open"
             );
         }
     }
