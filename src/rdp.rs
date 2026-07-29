@@ -8,6 +8,8 @@
 //!
 //! See docs/architecture.md for the design.
 
+use std::sync::Arc;
+
 use ironrdp::cliprdr::pdu::{ClipboardFormat, ClipboardFormatId, FormatDataResponse};
 use ironrdp::cliprdr::{Client, CliprdrClient, CliprdrSvcMessages};
 use ironrdp::core::IntoOwned as _;
@@ -29,6 +31,8 @@ use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::PointerFlags;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp::rdpdr::{NoopRdpdrBackend, Rdpdr};
+use ironrdp::rdpsnd::client::Rdpsnd;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
@@ -38,11 +42,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
+use crate::audio::AudioBridge;
 use crate::config::TargetConfig;
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{ClientMsg, ClipboardSnapshot, MouseButton, ServerMsg, UNSCALED};
+use crate::rdp_audio;
 use crate::rdp_clipboard::{self, ClipboardEvent};
 use crate::tiles::{Rect, Shadow};
 
@@ -86,6 +92,10 @@ impl PendingClipboardRead {
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Both closing (browser gone / RDP ended) tears the session down.
 ///
+/// `audio` is `Some` for a target that opted into remote audio, and is the one
+/// thing this engine emits that does not go through `frame_tx` at all — it goes
+/// to an HTTP response instead (see [`crate::audio`] and docs/remote-audio.md).
+///
 /// A thin wrapper so the shutdown cannot be missed. Everything this engine sends the
 /// client goes through a [`TileSink`], which forwards from a task of its own — and
 /// the engine thread's runtime dies with this function, so anything the sink still
@@ -96,9 +106,10 @@ pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
+    audio: Option<Arc<AudioBridge>>,
 ) {
     let sink = TileSink::new("rdp", frame_tx);
-    session(config, input_rx, &sink).await;
+    session(config, input_rx, &sink, audio).await;
     sink.finish().await;
 }
 
@@ -106,6 +117,7 @@ async fn session(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
+    audio: Option<Arc<AudioBridge>>,
 ) {
     // The clipboard channel processor runs inside `ActiveStage` and can only
     // report through a channel — see [`crate::rdp_clipboard`]. Created here so
@@ -122,7 +134,7 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, stream, clip_tx),
+        |stream| connect(&config, stream, clip_tx, audio),
     )
     .await
     else {
@@ -178,10 +190,14 @@ async fn session(
 ///
 /// `clip_tx` is handed to the clipboard backend when the target opted in; it is
 /// dropped unused otherwise, and the channel is then never registered at all.
+/// `audio` works the same way — and *has* to happen here rather than later,
+/// because RDPSND is negotiated when the connection is established: an HTTP
+/// listener appearing afterwards cannot add the channel to a live connection.
 async fn connect(
     config: &TargetConfig,
     stream: tokio::net::TcpStream,
     clip_tx: mpsc::UnboundedSender<ClipboardEvent>,
+    audio: Option<Arc<AudioBridge>>,
 ) -> anyhow::Result<(ConnectionResult, UpgradedFramed)> {
     let server_name = config.host.clone();
 
@@ -190,25 +206,12 @@ async fn connect(
         .map_err(|e| anyhow::anyhow!("get local address: {e}"))?;
 
     let mut framed = TokioFramed::new(stream);
-    let mut connector = ClientConnector::new(build_connector_config(config), client_addr);
-    if config.resize {
-        // Negotiate the Display Control Virtual Channel so the session can drive
-        // the remote resolution from the browser viewport (client-initiated
-        // resize). The capabilities callback is a no-op — `encode_resize` reads
-        // the channel state directly once the server answers.
-        connector = connector.with_static_channel(
-            DrdynvcClient::new()
-                .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new()))),
-        );
-    }
-    if config.clipboard {
-        // MS-RDPECLIP. Registered only on opt-in, so a target without the flag
-        // never even negotiates the channel and the remote cannot advertise a
-        // clipboard at us.
-        connector = connector.with_static_channel(CliprdrClient::new(Box::new(
-            rdp_clipboard::Backend::new(clip_tx),
-        )));
-    }
+    let mut connector = register_channels(
+        ClientConnector::new(build_connector_config(config), client_addr),
+        config,
+        clip_tx,
+        audio,
+    );
 
     let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
         .await
@@ -242,6 +245,80 @@ async fn connect(
     .map_err(|e| anyhow::anyhow!("RDP activation (connect_finalize): {}", describe(&e)))?;
 
     Ok((connection_result, upgraded_framed))
+}
+
+/// Registers the virtual channels a target's flags ask for.
+///
+/// Separate from [`connect`] so the registration can be asserted on without a
+/// socket: `ClientConnector::static_channels` is public, so a test can name the
+/// channels this puts on the wire. That matters most for `rdpdr`, which is
+/// invisible in every other way — nothing is redirected through it — and whose
+/// absence costs an audio target all of its sound.
+fn register_channels(
+    mut connector: ClientConnector,
+    config: &TargetConfig,
+    clip_tx: mpsc::UnboundedSender<ClipboardEvent>,
+    audio: Option<Arc<AudioBridge>>,
+) -> ClientConnector {
+    // One `drdynvc` for every dynamic channel this session wants, because there is
+    // only one to have: registering it twice would advertise the channel twice and
+    // leave the second registration's listeners on a channel the server never
+    // talks to. Resize wants the Display Control channel, audio wants
+    // `AUDIO_PLAYBACK_DVC`, and either alone is reason enough to negotiate it.
+    if config.resize || audio.is_some() {
+        let mut drdynvc = DrdynvcClient::new();
+        if config.resize {
+            // The Display Control Virtual Channel, so the session can drive the
+            // remote resolution from the browser viewport (client-initiated
+            // resize). The capabilities callback is a no-op — `encode_resize`
+            // reads the channel state directly once the server answers.
+            drdynvc = drdynvc
+                .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
+        }
+        if let Some(audio) = &audio {
+            // The dynamic half of MS-RDPEA. The Windows host tested against picks
+            // the static channel instead, but FreeRDP is offered this one on the
+            // same host, so which half a server uses is not ours to predict —
+            // see [`crate::rdp_audio`], which implements both.
+            drdynvc = drdynvc
+                .with_dynamic_channel(rdp_audio::AudioPlaybackDvc::new(Arc::clone(audio)));
+        }
+        connector = connector.with_static_channel(drdynvc);
+    }
+    if config.clipboard {
+        // MS-RDPECLIP. Registered only on opt-in, so a target without the flag
+        // never even negotiates the channel and the remote cannot advertise a
+        // clipboard at us.
+        connector = connector.with_static_channel(CliprdrClient::new(Box::new(
+            rdp_clipboard::Backend::new(clip_tx),
+        )));
+    }
+    if let Some(audio) = audio {
+        // And the static half, on the same opt-in terms. Both are registered
+        // because which one a server uses is the server's choice; the bridge
+        // settles which one ends up feeding the queue.
+        connector = connector
+            .with_static_channel(Rdpsnd::new(Box::new(rdp_audio::Handler::new(audio))));
+        // MS-RDPEFS, announced with no devices and an inert backend: nothing is
+        // ever redirected through it, and it is not optional. Windows gates audio
+        // redirection on device redirection being advertised — with `rdpsnd` alone
+        // the tested host opened neither audio channel and sent no format PDU;
+        // adding this made the same host start redirecting immediately, over the
+        // static channel. FreeRDP encodes the rule as forcing device redirection
+        // on whenever audio playback is on ("rdpsnd requires rdpdr to be
+        // registered", client/common/cmdline.c). The published spec states only
+        // the converse — [MS-RDPEFS] Appendix A<1>: without "RDPSND" advertised
+        // the server issues nothing on "RDPDR" — so the pairing is observed
+        // behaviour rather than a documented rule, but it is what makes the
+        // difference between silence and sound.
+        connector = connector.with_static_channel(Rdpdr::new(
+            Box::new(NoopRdpdrBackend),
+            // Only ever user-visible as the "on <computer>" suffix File Explorer
+            // puts after a redirected drive, and we announce no drives.
+            "remotex".to_owned(),
+        ));
+    }
+    connector
 }
 
 /// Drive the active RDP session: server frames in, input out, tiles back.
@@ -1047,7 +1124,10 @@ fn build_connector_config(config: &TargetConfig) -> Config {
         pointer_software_rendering: true,
         request_data: None,
         autologon: false,
-        enable_audio_playback: false,
+        // Load-bearing beyond the channel registration: left false, IronRDP puts
+        // NO_AUDIO_PLAYBACK in the Client Info PDU, and the server then redirects
+        // nothing however carefully RDPSND was negotiated.
+        enable_audio_playback: config.audio,
         compression_type: None,
         multitransport_flags: None,
         desktop_scale_factor: 0,
@@ -1195,6 +1275,106 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// Pinned because the failure it guards against is silent and total: with
+    /// `enable_audio_playback` false, IronRDP puts `NO_AUDIO_PLAYBACK` in the
+    /// Client Info PDU and the server redirects nothing — a registered RDPSND
+    /// channel that simply never carries a byte, which looks exactly like a
+    /// server that has no audio to offer.
+    #[test]
+    fn audio_playback_is_requested_exactly_for_an_audio_target() {
+        let mut target = TargetConfig {
+            name: "win".to_owned(),
+            protocol: crate::config::Protocol::Rdp,
+            subtype: None,
+            host: "127.0.0.1".to_owned(),
+            port: 3389,
+            username: "tester".to_owned(),
+            password: String::new(),
+            vnc_password: String::new(),
+            domain: None,
+            width: 1280,
+            height: 800,
+            security: crate::config::Security::Auto,
+            resize: false,
+            clipboard: false,
+            audio: false,
+            agent_public_key: String::new(),
+            gateway_private_key: String::new(),
+        };
+        assert!(!build_connector_config(&target).enable_audio_playback);
+        target.audio = true;
+        assert!(build_connector_config(&target).enable_audio_playback);
+    }
+
+    /// The other half of the same silent failure, and the more surprising one.
+    ///
+    /// Windows redirects no audio unless **device** redirection is advertised
+    /// beside it, so an audio target has to put `rdpdr` on the wire even though
+    /// nothing is ever redirected through it. That was worth days to find (see
+    /// the registration in [`register_channels`]) and nothing else in this crate
+    /// would notice its removal: no test fails, no log line changes, and the
+    /// symptom is a session that is merely quiet. Hence pinning the channel names
+    /// themselves.
+    ///
+    /// It is pinned in both directions: a target that did not ask for audio must
+    /// not get device redirection as a side effect.
+    #[test]
+    fn an_audio_target_advertises_rdpdr_beside_the_audio_channels() {
+        use ironrdp::pdu::gcc::ChannelName;
+
+        fn channels_for(audio: bool, resize: bool, clipboard: bool) -> Vec<ChannelName> {
+            let target = TargetConfig {
+                name: "win".to_owned(),
+                protocol: crate::config::Protocol::Rdp,
+                subtype: None,
+                host: "127.0.0.1".to_owned(),
+                port: 3389,
+                username: "tester".to_owned(),
+                password: String::new(),
+                vnc_password: String::new(),
+                domain: None,
+                width: 1280,
+                height: 800,
+                security: crate::config::Security::Auto,
+                resize,
+                clipboard,
+                audio,
+                agent_public_key: String::new(),
+                gateway_private_key: String::new(),
+            };
+            let (clip_tx, _clip_rx) = mpsc::unbounded_channel();
+            let bridge = audio.then(|| Arc::new(AudioBridge::new()));
+            let connector = register_channels(
+                ClientConnector::new(
+                    build_connector_config(&target),
+                    "127.0.0.1:0".parse().unwrap(),
+                ),
+                &target,
+                clip_tx,
+                bridge,
+            );
+            connector
+                .static_channels
+                .values()
+                .map(|channel| channel.channel_name())
+                .collect()
+        }
+
+        let audio_target = channels_for(true, false, false);
+        assert!(
+            audio_target.contains(&Rdpdr::NAME),
+            "an audio target must advertise rdpdr or the remote redirects nothing: {audio_target:?}"
+        );
+        assert!(audio_target.contains(&Rdpsnd::NAME));
+        assert!(audio_target.contains(&DrdynvcClient::NAME));
+
+        // Everything else on, audio off: no rdpdr, because device redirection is
+        // not a feature this gateway offers on its own.
+        let quiet_target = channels_for(false, true, true);
+        assert!(!quiet_target.contains(&Rdpdr::NAME), "{quiet_target:?}");
+        assert!(!quiet_target.contains(&Rdpsnd::NAME));
     }
 
     #[test]

@@ -302,13 +302,14 @@ mod tests {
             security: Security::Auto,
             resize: false,
             clipboard: false,
+            audio: false,
             agent_public_key: String::new(),
             gateway_private_key: String::new(),
         };
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target],
-            move |_target, input_rx, frame_tx| {
+            move |_target, input_rx, frame_tx, _audio| {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));

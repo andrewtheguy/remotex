@@ -121,20 +121,32 @@ What is not settled, and should not be decided here first:
   feature that phones inherit only through the config. Worth resisting the symmetry
   if the menu would be unusable at that size.
 
-### RDP audio through a gateway live stream
+### Audio past the first RDP slice
 
-The browser is already an audio-stream client, so the first audio slice does not
-need to become part of remotex's desktop protocol. The RDP engine requests
-RDPSND audio redirection, the gateway exposes the claimed session through an
-authenticated live HTTP endpoint, and the SPA points a basic `<audio>` element
-at it.
+The RDP-to-browser path is done and proven end to end: MS-RDPEA redirection over
+both of its channels (plus the `rdpdr` advertisement Windows requires before it
+will redirect anything), an authenticated live `audio/wav` endpoint on the claimed
+session, and an `<audio>` element in the SPA. A live Windows 11 target's own sound
+has been measured arriving through that endpoint. The mechanism, its lifecycle and
+that evidence are recorded in [`remote-audio.md`](remote-audio.md), which is where
+they belong.
 
-The first PoC wraps negotiated PCM in an open-ended WAV response. Its purpose is
-to prove progressive playback through the browsers and reverse proxy used with
-remotex. If that representation is not consumed progressively, only the HTTP
-media representation changes to a compressed stream; the RDP channel, endpoint,
-and `<audio>` integration remain the path. [`remote-audio.md`](remote-audio.md)
-holds the boundary and lifecycle details.
+Both open questions the design named are now closed: an open-ended WAV response
+**is** played progressively by a browser, so the representation stays and no
+compressed fallback is needed; and a real host does redirect to this gateway.
+
+What is left is two things, neither urgent:
+
+- **The macOS viewer.** It can consume the same authenticated endpoint with
+  `AVPlayer` and needs no second transport. Nothing blocks it: the representation
+  is settled and there is now a target that carries real audio to test against.
+- **Audio for the other two protocols.** `rxa` would mean capturing sound on the
+  Mac, which the agent does not do and which is a feature of the agent rather than
+  of this path. VNC has no audio channel to turn on at all, so there is nothing
+  here to plan — RFB would need an extension both ends invented.
+
+Sound in the other direction — a microphone at the browser reaching the remote —
+is not on this list and has never been designed.
 
 ## Deferred pending measurements
 

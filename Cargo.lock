@@ -1802,6 +1802,8 @@ dependencies = [
  "ironrdp-dvc",
  "ironrdp-graphics",
  "ironrdp-pdu",
+ "ironrdp-rdpdr",
+ "ironrdp-rdpsnd",
  "ironrdp-session",
  "ironrdp-svc",
 ]
@@ -1935,6 +1937,33 @@ dependencies = [
  "sha1 0.10.7",
  "tap",
  "x509-cert",
+]
+
+[[package]]
+name = "ironrdp-rdpdr"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ece9e67ccf992eb8ce5ec0416d3950e2e199d4b1e2523f91af192205279fc970"
+dependencies = [
+ "bitflags 2.13.1",
+ "ironrdp-core",
+ "ironrdp-error",
+ "ironrdp-pdu",
+ "ironrdp-svc",
+ "tracing",
+]
+
+[[package]]
+name = "ironrdp-rdpsnd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d1a4f7092ae8fdc0a2f61be8e100277dc6f4ad51b85455dc9e8157979993ea2"
+dependencies = [
+ "bitflags 2.13.1",
+ "ironrdp-core",
+ "ironrdp-pdu",
+ "ironrdp-svc",
+ "tracing",
 ]
 
 [[package]]

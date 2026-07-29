@@ -458,6 +458,7 @@ async fn spawn_app_with(
             // agent made. Off for every test but the one about it.
             resize,
             clipboard,
+            audio: false,
             agent_public_key: keys.agent_public_key.clone(),
             // `ConfigFile::resolve` fans `[rxa].private_key` out to each rxa
             // target; these tests build the resolved config directly.

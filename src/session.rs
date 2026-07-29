@@ -53,6 +53,7 @@ use log::{info, warn};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::audio::{AudioBridge, AudioListener};
 use crate::config::{Protocol, TargetConfig};
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::{rdp, rxa, vnc};
@@ -84,6 +85,20 @@ pub struct SessionBusy;
 #[derive(Debug, thiserror::Error)]
 #[error("invalid or superseded session token")]
 pub struct InvalidToken;
+
+/// A [`SessionManager::audio_listener`] was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum AudioError {
+    /// The token is not the current claim. The audio response belongs to the
+    /// claimed session and not merely to an authenticated login, so a stale
+    /// token is refused here exactly as it is on `/ws`.
+    #[error(transparent)]
+    InvalidToken(#[from] InvalidToken),
+    /// Nothing is streaming audio: the slot is on the picker, or the connected
+    /// target did not opt in.
+    #[error("this session has no audio")]
+    NoSource,
+}
 
 /// A [`SessionManager::connect`] was refused.
 #[derive(Debug, thiserror::Error)]
@@ -117,9 +132,17 @@ pub struct Attachment {
 
 /// Spawns a protocol engine. Injectable so the manager's unit tests can run
 /// against a scripted fake instead of a real RDP/VNC connect.
+///
+/// The [`AudioBridge`] is `Some` only for a target that opted into audio, which
+/// today means one RDP engine reads it and the other two never see it (see
+/// [`spawn_engine`]).
 type EngineSpawner = Box<
-    dyn Fn(TargetConfig, mpsc::UnboundedReceiver<ClientMsg>, mpsc::Sender<ServerMsg>)
-        + Send
+    dyn Fn(
+            TargetConfig,
+            mpsc::UnboundedReceiver<ClientMsg>,
+            mpsc::Sender<ServerMsg>,
+            Option<Arc<AudioBridge>>,
+        ) + Send
         + Sync,
 >;
 
@@ -127,6 +150,17 @@ struct EngineSlot {
     input_tx: mpsc::UnboundedSender<ClientMsg>,
     /// Guards the pump's cleanup against clearing a *newer* engine.
     generation: u64,
+    /// Where this engine puts redirected audio, for an audio target. It lives on
+    /// the engine slot because that is what the audio response's lifetime is: the
+    /// endpoint finds it here, and every way an engine ends ends the response.
+    ///
+    /// Two things make that true, and neither is the `Arc` going out of scope —
+    /// the engine holds the other reference and would keep the stream open until
+    /// it noticed its input channel close. [`State::take_engine`] ends the
+    /// listener on every path that stops an engine, and [`SessionManager::claim`]
+    /// ends it for the one case where the engine *keeps running*: a takeover,
+    /// where the desktop carries on for a browser that is not the one listening.
+    audio: Option<Arc<AudioBridge>>,
 }
 
 struct ClientSlot {
@@ -156,6 +190,26 @@ struct State {
 }
 
 impl State {
+    /// End the running engine, and with it any audio response, reporting whether
+    /// there was one. Every path that stops an engine goes through here.
+    ///
+    /// Dropping the slot would get to the audio eventually — the engine notices
+    /// its input channel close, unwinds, and takes the last reference to the
+    /// bridge with it — but "eventually" is the wrong answer for a stream
+    /// belonging to a desktop that has already gone. So the listener is ended
+    /// here, before the engine has even noticed.
+    fn take_engine(&mut self) -> bool {
+        match self.engine.take() {
+            Some(engine) => {
+                if let Some(audio) = &engine.audio {
+                    audio.stop_listener();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     fn bump_epoch_for_detach(&mut self) -> Option<(u64, u64)> {
         self.attachment_epoch = self.attachment_epoch.wrapping_add(1);
         self.engine
@@ -195,6 +249,7 @@ impl SessionManager {
             TargetConfig,
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
+            Option<Arc<AudioBridge>>,
         ) + Send
         + Sync
         + 'static,
@@ -215,6 +270,14 @@ impl SessionManager {
             }
             let id = Uuid::new_v4().to_string();
             st.claim = Some(id.clone());
+            // The audio response belongs to the claim, and this claim has just
+            // replaced it. The engine keeps running for whoever claimed — which
+            // is exactly why this is here and not on the engine's own teardown
+            // paths: nothing else about a takeover would end the previous
+            // browser's stream, and it holds a token it no longer owns.
+            if let Some(audio) = st.engine.as_ref().and_then(|e| e.audio.as_ref()) {
+                audio.stop_listener();
+            }
             let evicted = st.client.take();
             let expiry = if evicted.is_some() {
                 st.bump_epoch_for_detach()
@@ -272,6 +335,7 @@ impl SessionManager {
                     protocol: target.protocol.name(),
                     resize: target.resize,
                     clipboard: target.clipboard,
+                    audio: target.audio,
                 }
             }
             // No engine (idle, or an engine that ended): the picker.
@@ -281,6 +345,31 @@ impl SessionManager {
 
         st.client = Some(ClientSlot { attach_id: id, event_tx });
         Ok(Attachment { id, events })
+    }
+
+    /// Attach the session's one audio listener, for a client holding `token`.
+    ///
+    /// The audio counterpart of [`Self::attach`], and authorised the same way:
+    /// the login cookie has already been checked by the time this is called, and
+    /// the claim token is what proves the caller owns the *session* rather than
+    /// merely holding a login. It takes no attachment id and does not require a
+    /// live WebSocket — a listener is a second HTTP request, not a second
+    /// browser.
+    ///
+    /// A second call replaces the first rather than adding to it: one session,
+    /// one live audio consumer, and no shared stream (see CLAUDE.md).
+    pub fn audio_listener(&self, token: &str) -> Result<AudioListener, AudioError> {
+        let st = self.state.lock().unwrap();
+        if st.claim.as_deref() != Some(token) {
+            return Err(InvalidToken.into());
+        }
+        let audio = st
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.audio.as_ref())
+            .ok_or(AudioError::NoSource)?;
+        info!("session: audio listener attached");
+        Ok(audio.take_listener())
     }
 
     /// Reliably deliver a session status message to `client` — a spawned
@@ -334,14 +423,24 @@ impl SessionManager {
         let (frame_tx, frame_rx) = mpsc::channel(FRAME_BUFFER);
         st.next_generation += 1;
         let generation = st.next_generation;
-        st.engine = Some(EngineSlot { input_tx, generation });
-        (self.spawn_engine)(target.clone(), input_rx, frame_tx);
+        // Audio does not travel on `frame_tx`: that queue feeds the browser's
+        // WebSocket through the tile encoder, and sound has no business waiting
+        // behind pixels or costing an engine its frame rate. It gets a queue of
+        // its own, which the HTTP endpoint reads (see [`crate::audio`]).
+        let audio = target.audio.then(|| Arc::new(AudioBridge::new()));
+        st.engine = Some(EngineSlot {
+            input_tx,
+            generation,
+            audio: audio.clone(),
+        });
+        (self.spawn_engine)(target.clone(), input_rx, frame_tx, audio);
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
 
         let name = target.name.clone();
         let protocol = target.protocol.name();
         let resize = target.resize;
         let clipboard = target.clipboard;
+        let audio = target.audio;
         st.selected = Some(target);
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
@@ -353,6 +452,7 @@ impl SessionManager {
                 protocol,
                 resize,
                 clipboard,
+                audio,
             }));
         }
         Ok(())
@@ -369,7 +469,7 @@ impl SessionManager {
         // Dropping the EngineSlot closes the engine's input channel, which ends
         // the engine (both engines exit their loop when input_rx closes); its
         // pump then finds a newer/absent generation and does nothing.
-        let had_engine = st.engine.take().is_some();
+        let had_engine = st.take_engine();
         st.selected = None;
         if had_engine {
             info!("session: disconnected; returning to the picker");
@@ -450,7 +550,7 @@ impl SessionManager {
             // detached-engine timer from an earlier close must not act on what is
             // left here.
             st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
-            let had_engine = st.engine.take().is_some();
+            let had_engine = st.take_engine();
             st.selected = None;
             if had_engine {
                 info!("session: logged out; engine stopped");
@@ -479,7 +579,7 @@ impl SessionManager {
         }
         st.client = None;
         st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
-        let had_engine = st.engine.take().is_some();
+        let had_engine = st.take_engine();
         st.selected = None;
         if had_engine {
             info!("session: browser heartbeat expired; engine stopped");
@@ -500,7 +600,7 @@ impl SessionManager {
                     && st.attachment_epoch == attachment_epoch
                     && st.engine.as_ref().is_some_and(|engine| engine.generation == generation)
                 {
-                    st.engine = None;
+                    st.take_engine();
                     st.selected = None;
                     true
                 } else {
@@ -548,7 +648,7 @@ impl SessionManager {
             if st.engine.as_ref().is_none_or(|e| e.generation != generation) {
                 return;
             }
-            st.engine = None;
+            st.take_engine();
             st.selected = None;
             st.client.as_ref().map(|c| c.event_tx.clone())
         };
@@ -571,10 +671,14 @@ impl SessionManager {
 /// Scalability: this costs one OS thread + one current-thread runtime per
 /// engine — fine here, since multi session is permanently out of scope
 /// (single user, one active session at a time; see CLAUDE.md).
+/// `audio` reaches only the RDP engine, and only when the target opted in: MS-RDPEA
+/// is the one audio channel any of these speak, which the config file has already
+/// refused the other two protocols over.
 fn spawn_engine(
     target: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
+    audio: Option<Arc<AudioBridge>>,
 ) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -585,7 +689,7 @@ fn spawn_engine(
             }
         };
         match target.protocol {
-            Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx)),
+            Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx, audio)),
             Protocol::Vnc => rt.block_on(vnc::run(target, input_rx, frame_tx)),
             Protocol::Rxa => rt.block_on(rxa::run(target, input_rx, frame_tx)),
         }
@@ -597,27 +701,71 @@ mod tests {
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
 
+    use futures_util::{Stream, StreamExt as _};
+
     use super::*;
+    use crate::audio::PCM_CD_QUALITY;
     use crate::config::Security;
     use crate::protocol::UNSCALED;
 
-    /// A scripted engine: each spawn hands its channel ends to the test, which
-    /// plays the engine role directly (no task, no sockets).
-    type EngineEnds = (mpsc::UnboundedReceiver<ClientMsg>, mpsc::Sender<ServerMsg>);
+    /// A scripted engine: each spawn hands its channel ends — and the audio
+    /// bridge the slot built for the target, if any — to the test, which plays
+    /// the engine role directly (no task, no sockets).
+    type EngineEnds = (
+        mpsc::UnboundedReceiver<ClientMsg>,
+        mpsc::Sender<ServerMsg>,
+        Option<Arc<AudioBridge>>,
+    );
 
-    fn fake_target(name: &str) -> TargetConfig {
-        fake_target_with(name, Protocol::Vnc, false, false)
-    }
-
-    fn fake_target_with(
-        name: &str,
+    /// The per-target capabilities the connected status carries. One struct
+    /// rather than four positional bools, and the same value builds the target
+    /// and states the expectation — so a test cannot assert metadata the target
+    /// it connected to never had.
+    #[derive(Clone, Copy, Debug)]
+    struct Meta {
         protocol: Protocol,
         resize: bool,
         clipboard: bool,
-    ) -> TargetConfig {
+        audio: bool,
+    }
+
+    impl Meta {
+        const fn of(protocol: Protocol) -> Self {
+            Self {
+                protocol,
+                resize: false,
+                clipboard: false,
+                audio: false,
+            }
+        }
+
+        const fn resize(mut self) -> Self {
+            self.resize = true;
+            self
+        }
+
+        const fn clipboard(mut self) -> Self {
+            self.clipboard = true;
+            self
+        }
+
+        const fn audio(mut self) -> Self {
+            self.audio = true;
+            self
+        }
+    }
+
+    /// What the plain fake targets are: VNC with nothing switched on.
+    const PLAIN: Meta = Meta::of(Protocol::Vnc);
+
+    fn fake_target(name: &str) -> TargetConfig {
+        fake_target_with(name, PLAIN)
+    }
+
+    fn fake_target_with(name: &str, meta: Meta) -> TargetConfig {
         TargetConfig {
             name: name.to_owned(),
-            protocol,
+            protocol: meta.protocol,
             host: "127.0.0.1".to_owned(),
             subtype: None,
             port: 1,
@@ -628,28 +776,30 @@ mod tests {
             width: 1,
             height: 1,
             security: Security::Auto,
-            resize,
-            clipboard,
+            resize: meta.resize,
+            clipboard: meta.clipboard,
+            audio: meta.audio,
             agent_public_key: String::new(),
             gateway_private_key: String::new(),
         }
     }
 
-    /// A manager over two fake targets whose engine spawns hand their channel
+    /// A manager over the fake targets, whose engine spawns hand their channel
     /// ends to the test (which plays the engine role directly).
     fn manager_with_fake_engine() -> (Arc<SessionManager>, std_mpsc::Receiver<EngineEnds>) {
         let (hook_tx, hook_rx) = std_mpsc::channel();
-        let spawner: EngineSpawner = Box::new(move |_target, input_rx, frame_tx| {
-            hook_tx.send((input_rx, frame_tx)).unwrap();
+        let spawner: EngineSpawner = Box::new(move |_target, input_rx, frame_tx, audio| {
+            hook_tx.send((input_rx, frame_tx, audio)).unwrap();
         });
         let targets = vec![
             fake_target("fake"),
             fake_target("other"),
             // Non-default metadata so the connected status can be checked to
-            // carry the target's protocol, resize and clipboard flags verbatim.
-            fake_target_with("rdp-resize", Protocol::Rdp, true, false),
-            fake_target_with("vnc-resize", Protocol::Vnc, true, false),
-            fake_target_with("rxa", Protocol::Rxa, false, true),
+            // carry each of the target's capability flags verbatim.
+            fake_target_with("rdp-resize", Meta::of(Protocol::Rdp).resize()),
+            fake_target_with("vnc-resize", Meta::of(Protocol::Vnc).resize()),
+            fake_target_with("rxa", Meta::of(Protocol::Rxa).clipboard()),
+            fake_target_with("rdp-audio", Meta::of(Protocol::Rdp).audio()),
         ];
         (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
@@ -661,6 +811,16 @@ mod tests {
             .expect("event stream ended unexpectedly")
     }
 
+    /// The next chunk of an audio response, or `None` once it has ended.
+    async fn next_chunk(
+        stream: &mut (impl Stream<Item = Result<Vec<u8>, std::convert::Infallible>> + Unpin),
+    ) -> Option<Vec<u8>> {
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("timed out waiting on the audio response")
+            .map(|chunk| chunk.unwrap())
+    }
+
     /// Assert the next event is the picker status.
     async fn expect_picker(events: &mut mpsc::Receiver<AttachEvent>) {
         assert!(
@@ -670,13 +830,11 @@ mod tests {
     }
 
     /// Assert the next event is the connected status for `name`, carrying the
-    /// expected protocol/resize/clipboard metadata.
+    /// expected capability metadata.
     async fn expect_connected_meta(
         events: &mut mpsc::Receiver<AttachEvent>,
         name: &str,
-        protocol: &str,
-        resize: bool,
-        clipboard: bool,
+        meta: Meta,
     ) {
         match recv(events).await {
             AttachEvent::Msg(ServerMsg::Connected {
@@ -684,21 +842,22 @@ mod tests {
                 protocol: got_protocol,
                 resize: got_resize,
                 clipboard: got_clipboard,
+                audio: got_audio,
             }) => {
                 assert_eq!(got, name);
-                assert_eq!(got_protocol, protocol, "protocol metadata for {name}");
-                assert_eq!(got_resize, resize, "resize metadata for {name}");
-                assert_eq!(got_clipboard, clipboard, "clipboard metadata for {name}");
+                assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
+                assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
+                assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
+                assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
             }
             other => panic!("expected connected({name}), got {other:?}"),
         }
     }
 
-    /// Assert the next event is the connected status for `name`. The plain fake
-    /// targets are VNC with resize and clipboard off, so the metadata is
-    /// checked against that.
+    /// Assert the next event is the connected status for `name`, one of the
+    /// plain fake targets.
     async fn expect_connected(events: &mut mpsc::Receiver<AttachEvent>, name: &str) {
-        expect_connected_meta(events, name, "vnc", false, false).await;
+        expect_connected_meta(events, name, PLAIN).await;
     }
 
     #[tokio::test]
@@ -750,7 +909,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connected_status_carries_protocol_resize_and_clipboard_metadata() {
+    async fn connected_status_carries_the_targets_capability_metadata() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
@@ -760,31 +919,18 @@ mod tests {
         // protocol and resize flag verbatim (the browser keys its manual-resize
         // UI off them). The VNC/no-resize case is covered by every other test's
         // expect_connected.
+        let rdp_resize = Meta::of(Protocol::Rdp).resize();
         mgr.connect(att.id, "rdp-resize").unwrap();
-        expect_connected_meta(
-            &mut att.events,
-            "rdp-resize",
-            "rdp",
-            true,
-            false,
-        )
-        .await;
+        expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
-        let (_input_rx, _frame_tx) = hooks.try_recv().expect("engine spawned on connect");
+        let (_input_rx, _frame_tx, _audio) = hooks.try_recv().expect("engine spawned on connect");
 
         // Reattaching to the running engine reports the same metadata.
         mgr.detach(att.id);
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
-        expect_connected_meta(
-            &mut att.events,
-            "rdp-resize",
-            "rdp",
-            true,
-            false,
-        )
-        .await;
+        expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
 
         // The clipboard flag travels the same way, and independently of resize:
         // the rxa fake target has clipboard on and resize off.
@@ -793,7 +939,16 @@ mod tests {
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rxa").unwrap();
-        expect_connected_meta(&mut att.events, "rxa", "rxa", false, true).await;
+        expect_connected_meta(&mut att.events, "rxa", Meta::of(Protocol::Rxa).clipboard()).await;
+
+        // And so does audio, which is what tells the browser to offer the panel
+        // that points at /api/session/audio.
+        let (mgr, _hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "rdp-audio").unwrap();
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
     }
 
     #[tokio::test]
@@ -819,7 +974,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (_input_rx, frame_tx) = hooks.try_recv().expect("engine spawned on connect");
+        let (_input_rx, frame_tx, _audio) = hooks.try_recv().expect("engine spawned on connect");
 
         frame_tx
             .send(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED })
@@ -865,18 +1020,19 @@ mod tests {
     #[tokio::test]
     async fn detached_engine_expires_after_the_grace_period_for_every_protocol() {
         tokio::time::pause();
-        for (target, protocol, resize, clipboard) in [
-            ("rdp-resize", "rdp", true, false),
-            ("vnc-resize", "vnc", true, false),
-            ("rxa", "rxa", false, true),
+        for (target, meta) in [
+            ("rdp-resize", Meta::of(Protocol::Rdp).resize()),
+            ("vnc-resize", Meta::of(Protocol::Vnc).resize()),
+            ("rxa", Meta::of(Protocol::Rxa).clipboard()),
         ] {
+            let protocol = meta.protocol.name();
             let (mgr, hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, target).unwrap();
-            expect_connected_meta(&mut att.events, target, protocol, resize, clipboard).await;
-            let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+            expect_connected_meta(&mut att.events, target, meta).await;
+            let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
             mgr.detach(att.id);
             tokio::task::yield_now().await;
@@ -899,7 +1055,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (mut input_rx, _frame_tx) = hooks.try_recv().unwrap();
+        let (mut input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
         mgr.detach(att.id);
         tokio::task::yield_now().await;
@@ -921,7 +1077,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
         mgr.expire_attachment(att.id);
         assert!(input_rx.is_closed(), "heartbeat expiry left the engine running");
@@ -935,7 +1091,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (mut input_rx, _frame_tx) = hooks.try_recv().unwrap();
+        let (mut input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
         assert!(
             input_rx.try_recv().is_err(),
             "a fresh engine paints on connect; no refresh needed"
@@ -959,7 +1115,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
         // Switch target: the engine is torn down (its input channel closes) and
         // the browser lands back on the picker without dropping the socket.
@@ -985,7 +1141,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (input_rx, _frame_tx) = hooks.try_recv().unwrap();
+        let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
         mgr.log_out();
 
@@ -1027,7 +1183,7 @@ mod tests {
         expect_picker(&mut att_a.events).await;
         mgr.connect(att_a.id, "fake").unwrap();
         expect_connected(&mut att_a.events, "fake").await;
-        let (mut input_rx, frame_tx) = hooks.try_recv().unwrap();
+        let (mut input_rx, frame_tx, _audio) = hooks.try_recv().unwrap();
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
@@ -1072,7 +1228,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        let (_input_rx, frame_tx) = hooks.try_recv().unwrap();
+        let (_input_rx, frame_tx, _audio) = hooks.try_recv().unwrap();
 
         // The engine reports a final error and dies.
         frame_tx
@@ -1098,5 +1254,126 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// The bridge the endpoint hands out has to be the one the engine was given,
+    /// or audio would arrive somewhere nobody is reading.
+    #[tokio::test]
+    async fn the_audio_listener_reads_what_the_engine_was_given() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "rdp-audio").unwrap();
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        let (_input_rx, _frame_tx, audio) = hooks.try_recv().unwrap();
+        let audio = audio.expect("an audio target's engine is given a bridge");
+
+        let listener = mgr.audio_listener(&token).unwrap();
+        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
+        next_chunk(&mut stream).await.expect("the WAV header");
+        audio.wave(vec![1, 2, 3]);
+        assert_eq!(next_chunk(&mut stream).await.unwrap(), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn the_audio_listener_needs_the_current_claim_and_an_audio_target() {
+        let (mgr, _hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+
+        // On the picker there is no engine, so nothing to listen to.
+        assert!(matches!(
+            mgr.audio_listener(&token),
+            Err(AudioError::NoSource)
+        ));
+
+        // A target that did not opt in stays that way with a desktop up.
+        mgr.connect(att.id, "fake").unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        assert!(matches!(
+            mgr.audio_listener(&token),
+            Err(AudioError::NoSource)
+        ));
+
+        // And an audio target is refused a token that is not the current claim,
+        // for the same reason /ws is: the stream belongs to the claimed session.
+        mgr.disconnect(att.id);
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "rdp-audio").unwrap();
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        assert!(matches!(
+            mgr.audio_listener("not-the-claim"),
+            Err(AudioError::InvalidToken(_))
+        ));
+        assert!(mgr.audio_listener(&token).is_ok());
+    }
+
+    /// The one lifecycle case the engine's own lifetime cannot express: a
+    /// takeover keeps the desktop running for the new browser, so the previous
+    /// browser's audio has to be ended on purpose.
+    #[tokio::test]
+    async fn a_takeover_ends_the_audio_response_while_the_engine_carries_on() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token_a = mgr.claim(false, None).unwrap();
+        let mut att_a = mgr.attach(&token_a).unwrap();
+        expect_picker(&mut att_a.events).await;
+        mgr.connect(att_a.id, "rdp-audio").unwrap();
+        expect_connected_meta(&mut att_a.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
+            .await;
+        let (input_rx, _frame_tx, audio) = hooks.try_recv().unwrap();
+        let audio = audio.unwrap();
+
+        let mut stream = Box::pin(mgr.audio_listener(&token_a).unwrap().into_stream(PCM_CD_QUALITY));
+        next_chunk(&mut stream).await.expect("the WAV header");
+
+        let token_b = mgr.claim(true, None).unwrap();
+        assert!(
+            next_chunk(&mut stream).await.is_none(),
+            "the evicted browser's audio response should have ended"
+        );
+        assert!(!input_rx.is_closed(), "a takeover keeps the engine");
+
+        // And the new holder gets its own stream off the same live engine.
+        let mut stream = Box::pin(mgr.audio_listener(&token_b).unwrap().into_stream(PCM_CD_QUALITY));
+        next_chunk(&mut stream).await.expect("the WAV header");
+        audio.wave(vec![4, 5]);
+        assert_eq!(next_chunk(&mut stream).await.unwrap(), vec![4, 5]);
+    }
+
+    /// Every way an engine ends takes its audio with it, with nothing in those
+    /// paths having to know about audio: the bridge lives on the engine slot, so
+    /// dropping the slot is what ends the response.
+    #[tokio::test]
+    async fn ending_the_engine_ends_the_audio_response() {
+        #[allow(clippy::type_complexity)]
+        let ways: [(&str, Box<dyn Fn(&Arc<SessionManager>, u64)>); 3] = [
+            ("switch target", Box::new(|mgr: &Arc<SessionManager>, id| mgr.disconnect(id))),
+            ("log out", Box::new(|mgr: &Arc<SessionManager>, _| mgr.log_out())),
+            (
+                "heartbeat expiry",
+                Box::new(|mgr: &Arc<SessionManager>, id| mgr.expire_attachment(id)),
+            ),
+        ];
+        for (what, end_it) in ways {
+            let (mgr, hooks) = manager_with_fake_engine();
+            let token = mgr.claim(false, None).unwrap();
+            let mut att = mgr.attach(&token).unwrap();
+            expect_picker(&mut att.events).await;
+            mgr.connect(att.id, "rdp-audio").unwrap();
+            expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
+                .await;
+            let (_input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
+            let mut stream =
+                Box::pin(mgr.audio_listener(&token).unwrap().into_stream(PCM_CD_QUALITY));
+            next_chunk(&mut stream).await.expect("the WAV header");
+
+            end_it(&mgr, att.id);
+            assert!(
+                next_chunk(&mut stream).await.is_none(),
+                "{what} left the audio response open"
+            );
+        }
     }
 }

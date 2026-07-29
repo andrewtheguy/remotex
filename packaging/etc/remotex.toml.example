@@ -86,6 +86,18 @@ password = "change-me"
 # falls back to latin-1 and anything outside it becomes "?".
 #clipboard = false
 
+# Remote audio (opt-in): redirect this target's sound to the browser, where the
+# floating menu's Audio panel plays it. RDP only — MS-RDPEA is the one audio
+# channel the gateway speaks, so this is refused on "vnc" and "rxa" rather than
+# accepted and left doing nothing.
+#
+# The channel has to be negotiated when the connection is made, so an audio
+# target asks the server to redirect from the moment it connects and throws the
+# sound away while nobody is listening. Only 44100 Hz 16-bit stereo PCM is
+# accepted; a server that offers no matching format sends nothing, and the log
+# says so.
+#audio = false
+
 # A VNC target needs host and, usually, one of the two passwords; domain,
 # width/height, and security are ignored. `vnc_password` is the server's own
 # password and is all a server without user accounts takes.

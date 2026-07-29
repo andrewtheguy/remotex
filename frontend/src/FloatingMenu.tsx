@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import AudioPanel from "./AudioPanel.tsx";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
 import type {
@@ -99,7 +100,7 @@ function readViewport(): Viewport {
 // the same canvas inset, so a second one open would sit on the first. Two
 // booleans made that a rule every call site had to remember — open this one,
 // clear the other — and this makes it impossible to express.
-type Panel = "clipboard" | "keyboard" | "display";
+type Panel = "clipboard" | "keyboard" | "display" | "audio";
 
 function usePanel() {
   const [panel, setPanel] = useState<Panel | null>(null);
@@ -124,6 +125,7 @@ function DockedPanel({
   displays,
   activeDisplayId,
   onSelectDisplay,
+  audioUrl,
 }: {
   panel: Panel | null;
   onClose: () => void;
@@ -134,6 +136,7 @@ function DockedPanel({
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
+  audioUrl: string | null;
 }) {
   switch (panel) {
     case "keyboard":
@@ -163,6 +166,17 @@ function DockedPanel({
           onDockedHeightChange={onDockedHeightChange}
         />
       );
+    case "audio":
+      // The URL can go away under an open panel — a reconnect supersedes the
+      // token in it — and the player is unmounted rather than left pointing at a
+      // claim the gateway no longer answers to.
+      return audioUrl ? (
+        <AudioPanel
+          src={audioUrl}
+          onClose={onClose}
+          onDockedHeightChange={onDockedHeightChange}
+        />
+      ) : null;
     default:
       return null;
   }
@@ -206,6 +220,48 @@ function DisplaySection({
         title="Choose which of the remote's displays to view"
       >
         {open ? "Hide displays" : (active?.label ?? "Display")}
+      </button>
+    </div>
+  );
+}
+
+// The drawer's Audio row, which starts and stops playing the remote's sound.
+//
+// Absent rather than disabled when this session has no audio, following Display
+// rather than Clipboard — and for Display's reason. Audio is RDP-only, so for a
+// VNC or rxa target there is no audio feature that was switched off, and a
+// permanently greyed "Audio" would be an explanation of nothing. An RDP target
+// without `audio = true` lands in the same place: the browser is never told a URL,
+// so there is nothing here to press.
+//
+// "Stop audio" rather than "Hide audio" because closing the panel really does
+// stop it — the response ends with the element (see AudioPanel).
+function AudioSection({
+  available,
+  open,
+  onToggle,
+}: {
+  available: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  if (!available) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Audio</span>
+      {/* Opens straight away, like Display and unlike Clipboard: there is
+          nothing to fetch first. This click is also what makes the player's
+          `autoPlay` legitimate — see AudioPanel. */}
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={onToggle}
+        aria-pressed={open}
+        title="Play the remote's sound in this browser"
+      >
+        {open ? "Stop audio" : "Audio"}
       </button>
     </div>
   );
@@ -287,6 +343,7 @@ export default function FloatingMenu({
   displays,
   activeDisplayId,
   onSelectDisplay,
+  audioUrl,
   macKeyOverridesEnabled,
   macKeyOverridesActive,
   isMacHost,
@@ -329,6 +386,13 @@ export default function FloatingMenu({
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
+  // Where this session's live audio can be played from, or null when there is
+  // none — which hides the Audio section rather than disabling it, the same rule
+  // the Display section follows and the opposite of Clipboard's. A greyed
+  // "Audio" would be explaining a feature that does not exist for this target:
+  // audio is RDP-only, so on VNC and rxa there is nothing that could be switched
+  // on. See useRemoteDesktop and AudioPanel.
+  audioUrl: string | null;
   // The Command-to-Control preference and whether it is doing anything. The two
   // differ when the guest is itself a Mac, which is why the section reports the
   // reason rather than just showing the switch off. The whole section is absent
@@ -558,6 +622,14 @@ export default function FloatingMenu({
     setOpen(false);
   }, [togglePanel]);
 
+  // The audio panel opens straight away — there is nothing to fetch, only a
+  // stream to attach to — and closing it is what stops the sound, because the
+  // response ends when its element goes away (see AudioPanel).
+  const onAudio = useCallback(() => {
+    togglePanel("audio");
+    setOpen(false);
+  }, [togglePanel]);
+
   // Same deal for the clipboard panel, except it cannot open straight away: it
   // fetches first and waits for the answer, so it appears already showing what
   // the remote holds right now. Without that it would open on whatever arrived
@@ -689,6 +761,12 @@ export default function FloatingMenu({
             </button>
           </div>
 
+          <AudioSection
+            available={audioUrl !== null}
+            open={panel === "audio"}
+            onToggle={onAudio}
+          />
+
           <div className="toolbar-section">
             <span className="toolbar-label">Special keys</span>
             <div className="toolbar-keys">
@@ -813,6 +891,7 @@ export default function FloatingMenu({
         displays={displays}
         activeDisplayId={activeDisplayId}
         onSelectDisplay={onSelectDisplay}
+        audioUrl={audioUrl}
       />
     </>
   );

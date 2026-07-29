@@ -1161,3 +1161,24 @@ body {
   font-size: 0.75rem;
   color: #8b949e;
 }
+
+/* ── Audio panel (AudioPanel.tsx) ── */
+
+.ap-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Full width because the native control's own layout is the point of this
+   panel: its transport, its buffering state, and its volume are what say
+   whether the gateway's live stream is being played progressively. */
+.ap-player {
+  width: 100%;
+}
+
+.ap-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #8b949e;
+}

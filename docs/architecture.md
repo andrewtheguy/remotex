@@ -11,6 +11,7 @@ session and exposes one browser protocol to a React SPA.
 React SPA
    │  /api: authentication, targets, session claim
    │  /ws: JSON control/input + binary image tiles
+   │  /api/session/audio: live audio/wav, for an <audio> element
    ▼
 axum server ── session slot ── protocol engine
                                   ├─ RDP via IronRDP
@@ -22,6 +23,12 @@ axum server ── session slot ── protocol engine
 RDP and VNC are decoded in the gateway, then emitted as WebP tiles. The optional
 macOS agent already emits browser-ready WebP tiles, so the gateway relays them
 without re-encoding.
+
+Audio is the one thing a session sends that takes none of that path — not the
+tile encoder, not its queue, and not the WebSocket. The browser is already a
+streaming audio client, so the gateway serves the claimed session's sound as an
+ordinary open-ended HTTP response and the SPA points a plain `<audio>` element at
+it ([`remote-audio.md`](remote-audio.md)).
 
 ## Constraints
 
@@ -42,6 +49,7 @@ The main responsibilities are:
 | `session.rs` | the single slot, target selection, takeover, detach/reattach |
 | `ws.rs`, `protocol.rs` | browser WebSocket bridge and wire types |
 | `rdp.rs` | IronRDP connection, framebuffer, input, optional resize |
+| `audio.rs`, `rdp_audio.rs` | the session's audio queue and WAV framing, fed by MS-RDPEA |
 | `vnc.rs` | RFB 3.8 client, framebuffer, cursor, input, optional resize |
 | `rxa.rs` | encrypted Mac-agent connection and tile pass-through |
 | `encode.rs` | WebP encoding off the engines' read loops, in order |
@@ -100,6 +108,11 @@ trusted local network. A server restart logs browsers out.
 Server-to-browser traffic uses JSON for control messages and binary frames for
 screen updates. Control messages cover picker/connected state, desktop size, the
 remote's display list, cursor shape, clipboard text, and errors.
+
+The `connected` message also carries the target's capability flags — `resize`,
+`clipboard`, `audio` — so a client shows only the controls this session can
+actually act on. `audio` is the odd one out: what it permits happens over HTTP and
+not on this socket at all ([`remote-audio.md`](remote-audio.md)).
 
 Every binary frame is a **batch** of records, little-endian throughout:
 
@@ -286,6 +299,25 @@ LF at the boundary. Images, HTML and file transfer are out of scope, and a
 server that never joins the channel leaves the clipboard inert rather than
 ending the session.
 
+With `audio = true`, MS-RDPEA redirects the remote's sound, which reaches the
+browser over HTTP rather than this WebSocket — see
+[`remote-audio.md`](remote-audio.md) for the endpoint, the lifecycle, and how a
+live Windows host was made to cooperate. Four things about it belong
+here, because they are facts about this engine. MS-RDPEA has **two** channels, a
+static `rdpsnd` and a dynamic `AUDIO_PLAYBACK_DVC`, and which one carries the audio
+is the server's choice — IronRDP implements only the static one, so the dynamic
+half is ours (`src/rdp_audio.rs`) and both are registered. An audio target also
+advertises **`rdpdr`** (MS-RDPEFS) with no devices and an inert backend, because
+Windows redirects no audio at all unless device redirection is advertised
+alongside it; nothing is ever redirected through that channel. The channels have
+to be negotiated at connect, so an audio target asks for redirection from the start and
+discards buffers while nobody is listening; there is no way to add one to a live
+connection when a listener appears. And the gateway advertises exactly one format —
+44100 Hz 16-bit stereo PCM — because a wave buffer identifies its format by an
+index, and with one advertised format that index cannot be misread. The cost is
+that a server offering no matching format redirects nothing at all, which the log
+makes plain: the negotiated line appears and the first-buffer line does not.
+
 ### VNC
 
 The built-in client speaks RFB 3.8 with None, classic VncAuth, or Apple's DH
@@ -387,13 +419,14 @@ capture pipeline, protocol, and lifecycle.
 
 The SPA has three states: login, target picker, and remote desktop. The desktop
 uses a canvas for tiles and an overlay for input. It supports desktop mouse and
-keyboard input, touch gestures, an on-screen keyboard, a clipboard panel, target
-switching, takeover, and explicit RDP resize. Clipboard text arriving from the
-server is mirrored into the local OS clipboard, and the local clipboard is sent
-to the remote when the tab regains focus; both are skipped silently wherever the
-Clipboard API is unavailable. The on-screen keyboard and the
-clipboard panel are mutually exclusive: both dock to the bottom edge on mobile
-and report their height so the canvas insets above them.
+keyboard input, touch gestures, an on-screen keyboard, a clipboard panel, an audio
+panel, target switching, takeover, and explicit RDP resize. Clipboard text arriving
+from the server is mirrored into the local OS clipboard, and the local clipboard is
+sent to the remote when the tab regains focus; both are skipped silently wherever
+the Clipboard API is unavailable. The docked panels — keyboard, clipboard, display,
+audio — are mutually exclusive: they dock to the bottom edge on mobile and report
+their height so the canvas insets above them, and only one can be reporting at a
+time.
 
 `Ctrl+Alt+Shift+;` hides the floating button and its drawer, and shows them again.
 It is caught on `window` in the capture phase and stopped there, because the remote

@@ -151,12 +151,16 @@ export type ControlMsg =
   // whether the control appears also needs the shared display to be one the
   // agent made, which arrives later in `displays`.
   // `clipboard` is whether this target opted into the clipboard bridge.
+  // `audio` is the same kind of permission, and the only one whose feature does
+  // not use this socket at all: it says an `<audio>` element may be pointed at
+  // /api/session/audio for this session (see docs/remote-audio.md).
   | {
       type: "connected";
       name: string;
       protocol: string;
       resize: boolean;
       clipboard: boolean;
+      audio: boolean;
     }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // Only the native viewer acts on it, to decide whether a local Command
