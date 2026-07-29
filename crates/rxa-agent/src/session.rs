@@ -1270,11 +1270,13 @@ fn encode_batch_at(
     totals.frames += 1;
     // This frame's share of the running totals, for the per-frame line at the end.
     let before = (totals.tiles, totals.lossy);
+    // A width of zero would encode nothing at all rather than meaning anything.
+    let width = width.max(1);
 
     let mut cells = tiles.into_iter();
-    let mut inflight = std::collections::VecDeque::with_capacity(width.max(1));
+    let mut inflight = std::collections::VecDeque::with_capacity(width);
     loop {
-        while inflight.len() < width.max(1) {
+        while inflight.len() < width {
             let Some(cell) = cells.next() else { break };
             // The rect travels with the job so a failed encode can still be named,
             // and the encode's own cost comes back with it: summed across workers it
