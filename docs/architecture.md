@@ -539,5 +539,6 @@ helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and
 protocol engines; RDP and VNC happy paths use containerized dummy servers, while
 `rxa` uses an in-process fake agent, including an end-to-end check that closing
 the browser releases the agent connection. Session-manager tests verify the
-same detach deadline for all three protocols. Browser automation is
-intentionally not used.
+same detach deadline for all three protocols. Stable headless browser tests
+cover deterministic DOM and control-plane behavior under
+[`tests/playwright`](../tests/playwright/README.md).

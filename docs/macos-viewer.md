@@ -1,478 +1,283 @@
 # macOS viewer
 
-`remotex-viewer.app` is a macOS 26 client that speaks the gateway's HTTP and
-WebSocket protocol directly. There is no `WKWebView` and no web content: the
-viewer owns login, target selection, the session socket, tile decoding,
-framebuffer rendering, pointer and keyboard input, and `NSPasteboard`.
+`remotex-viewer.app` is a native macOS 26 client for the gateway's HTTP and
+WebSocket protocol. It owns login, target selection, session recovery, tile
+decoding, Metal rendering, input, clipboard synchronization, and audio playback.
+It contains no `WKWebView` and shares protocol behavior, not implementation,
+with the browser client.
 
-It shares the *protocol* with the SPA, not an implementation. The SPA remains the
-browser client and is unaffected by anything here.
+The viewer has no RDP, VNC, or RXA implementation. Engine-specific behavior is
+reported by the gateway, with resize policy as the only client-side branch.
+Whether the remote is a Mac is likewise discovered from the gateway's
+`remoteOs` message and affects only keyboard conventions.
 
-There is no RDP, VNC, or RXA branch in the viewer beyond one thing: how the
-remote can be resized (see [Resize](#resize)). Everything else is derived from
-the gateway's control messages, so a difference in behaviour belongs to an engine
-adapter and is tested as backend conformance.
+## Protocol compatibility
 
-Whether the remote is a Mac is discovered, not configured. Each engine settles it
-as it connects and sends `{"type":"remoteOs","macos":…}`: `rxa` is macOS by
-construction, `rdp` never is, and `vnc` reads it off the RFB handshake (Apple's
-Screen Sharing announces protocol revision 003.889 and offers Apple's security
-types). The viewer acts on that one bit and nothing else — a third-party VNC
-server on a Mac reads as not-macOS, which costs a keyboard convention, not
-correctness.
+The viewer and gateway ship independently. Before opening a session, the viewer
+requests `GET /api/config` and requires its `protocolVersion` to match
+`PROTOCOL_VERSION` in `src/protocol.rs`. A mismatch is shown on the login screen.
 
-## Protocol and compatibility
+The version covers client messages, control messages, and binary frame layouts.
+Unknown additive control messages are ignored, but a change that makes an older
+peer fail without a useful error requires a version bump.
 
-The viewer ships as its own artifact, so it can be older or newer than the
-gateway it is pointed at. `GET /api/config` carries a `protocolVersion`
-(`PROTOCOL_VERSION` in `src/protocol.rs`), which the viewer checks before opening
-a session and refuses on mismatch, with the reason shown on the login screen.
-`ProductInfoTests` pins the Swift constant against the Rust one so the two cannot
-drift silently.
+Contract tests protect both sides:
 
-`PROTOCOL_VERSION` covers `ClientMsg`, `ControlMsg`, and the tile frame layout. A
-purely additive control message does not earn a bump on its own: clients are required to
-ignore tags they do not know, and the viewer does (`ServerMessage.unsupported`).
+- `ProductInfoTests` compares the Swift protocol version with the Rust constant;
+- `WireContractTests` compares the Rust message tags with the tags handled by
+  the viewer;
+- `ServerMessage` tests reuse the JSON literals pinned by the Rust protocol
+  tests.
 
-What *does* earn one is a client gaining a **floor** — a field it will not do without.
-Audio is the worked example, and it bumped the number for neither of the obvious reasons:
-the frames are opt-in and the messages additive, so the wire did not change. But this
-viewer now reads `connected.audio` as required, so it cannot speak to a gateway older
-than audio, and without a bump that refusal surfaced as the `connected` frame failing to
-decode — logged, dropped, and indistinguishable from a desktop that never arrives. The
-version check turns that into a sentence on the login screen. The test to apply is not
-"is this additive" but "if this client meets an older gateway, does it say so".
+## Entry and session lifecycle
 
-Two contract tests guard the boundary from the other side.
-`WireContractTests` reads both message enums out of `src/protocol.rs` and
-compares them against the tags the viewer handles, so a message added in Rust
-fails a Swift test rather than becoming a silently skipped frame. The
-`ServerMessage` decoding tests reuse the exact JSON literals that
-`src/protocol.rs`'s own tests pin.
+Entry has two steps:
 
-## Getting in
+1. **Server** validates the address, requests `/api/config`, checks the protocol,
+   and requests `/api/auth/status`. The address is remembered only after the
+   gateway answers.
+2. **Login** submits credentials. This step is skipped while the stored cookie
+   remains valid.
 
-Two steps, because they answer different questions.
+Changing the gateway returns to the server step. Logging out keeps the current
+address and returns to login. A gateway restart invalidates its in-memory login
+sessions, so a later `401` also returns to login.
 
-**Server.** An address, and a **Continue** button that validates it: parse, then
-`GET /api/config` for the branding and the protocol check, then
-`GET /api/auth/status`. Nothing is contacted before that button — reaching a
-gateway is something the user asks for and gets an answer to, not something that
-happens behind a launch spinner. A malformed address is refused without a request
-at all. The address is remembered only once it has answered, so a typo does not
-become what the next launch starts from.
+The viewer keeps login and session ownership separate:
 
-**Login.** Credentials only. The gateway was already validated, so a failure here
-can only be about who you are, which is why the address is shown but not editable
-— **Change** goes back to step one. Logging out returns here rather than to the
-server step: it is the credentials being given up, not the address.
+- the login cookie authorizes the gateway;
+- the claim token owns the program's one active session slot.
 
-This step is also the *only* place the address can be changed, and that link is
-the only way to it — a **Change Gateway** menu item was enabled on this screen and
-nowhere else, which made it a second name for a button already on screen.
-Everything past this step belongs to one gateway — the login cookie is scoped to
-that host, the claim token was minted by it, the socket is attached to it — so
-changing the address from the picker or the desktop was a log out that did not say
-so, and `changeGateway` refuses from anywhere but here. From there the step to
-take first is Log Out, which lands back here.
+`SessionStateMachine` implements claim, attach, reconnect, takeover, and return
+to login as a pure state machine. Network reconnects use capped exponential
+backoff up to 15 seconds. A busy slot and a session taken over by another client
+wait for an explicit user decision because resolving either case may evict the
+current owner.
 
-Step two is skipped when the cookie is still good, so the common case is one
-button. `HTTPCookieStorage.shared` outlives the app; the gateway's auth sessions
-do not outlive *it*, so its restart ends them and any 401 drops back to login
-rather than into a retry loop.
-
-## Session lifecycle
-
-Two independent things: the **login cookie** (may I use this gateway) and the
-**claim token** (do I own the one session slot).
-
-`SessionStateMachine` is the claim/attach/reconnect lifecycle as a pure value,
-transcribed from the web client's. Reconnects are automatic with capped backoff
-(`min(1000·2^n, 15000)` ms); `busy` (a claim answered 409) and `takenOver` (close
-4001) wait for the user, because resolving either evicts whoever is on the
-desktop now. Close 4000 and an ordinary drop take the same path, since the answer
-to both is to claim again.
-
-One rule is easy to get wrong: the backoff resets on **any control message**, not
-on the socket opening. A slot that accepts the upgrade and drops it immediately
-would otherwise retry at full speed forever.
-
-Every interruption clears the framebuffer and releases held input. Clearing is
-cheap to do because the gateway repaints in full whenever a client attaches.
+The reconnect backoff resets after a control message proves that the connection
+is usable, not merely when the WebSocket opens. Any interruption clears the
+framebuffer and releases held input; the gateway requests a full repaint when a
+client attaches again.
 
 ## Rendering
 
-One `MTLTexture` at exactly the remote's size, with the drawable pinned to the
-same size, so nothing is scaled in the renderer. Tiles are written in with
-`replaceRegion`; each tile overwrites its rectangle outright, and there is no
-delta *encoding* — a payload is a whole image of its rectangle. A remote larger
-than the window scrolls; it is never scaled to fit, and zoom is out of scope.
+The viewer maintains one `MTLTexture` at the remote framebuffer's pixel size.
+Tiles overwrite their rectangles with `replaceRegion`, and a paused `MTKView`
+redraws after every complete batch.
 
-What the viewer does keep is a **tile cache**: the gateway may send a record that
-names a slot instead of a payload, meaning "redraw what you have in slot N here".
-The cache is a fixed 256-entry array of *encoded* payloads, re-decoded on a
-reference — a tenth of the memory of keeping decoded pixels, for the same bytes
-saved on the wire (a decoded 320x64 tile is 80 KB; its WebP is a few hundred
-bytes). The viewer never evicts anything: the gateway names the slot to
-overwrite. A reference to a slot it does not hold, or a cached tile that will not
-decode, sends `cacheReset` and is dropped rather than drawn.
+The gateway may replace a tile payload with a reference to one of 256 cache
+slots. The viewer stores encoded WebP payloads in those slots and re-decodes a
+payload when it is referenced. The gateway chooses which slot to overwrite. A
+missing slot or a cached payload that cannot decode sends `cacheReset` and drops
+that record.
 
-A batch is uploaded as a batch: every tile in one frame is written, and then one
-redraw is requested. `MTKView` is paused, so it would have coalesced a burst
-anyway — but only if the burst landed inside one refresh interval, which is a race.
+Frames are processed strictly in arrival order. The socket loop completes every
+decode and upload for one frame before receiving the next, so a resize cannot
+overtake tiles in the preceding coordinate space and older tiles cannot land
+over newer ones.
 
-The framebuffer *view* is laid out at the remote's own point size — its pixels
-over the density `resize` reports — so the layer rasterizes the drawable for
-whichever display the window is on. The picture is therefore scaled by the ratio
-between the remote's density and the host display's, automatically and in both
-directions:
+`TileDecoder` leaves decoded rows in raster order. The Metal shader flips the
+texture's vertical coordinate because Metal clip space and the desktop texture
+use opposite vertical origins.
 
-| guest | host | result |
-|---|---|---|
-| 1x | Retina | magnified 2x, soft — there are no more pixels to have |
-| Retina | 1x | reduced to half, downsampled and sharp |
-| equal | equal | one texel per device pixel, nothing resampled |
+The framebuffer view is laid out at the remote's point size:
 
-Dragging the window between a Retina display and a 1x one switches between those
-by itself: the desktop keeps its physical size, nothing is re-derived, and
-`layer.contentsScale` is the only thing that changes. Laying the view out in the
-host's backing scale instead is what would break this — a 1x remote would come out
-at half its physical size on a Retina Mac rather than magnified.
+```text
+point size = framebuffer pixels / remote backing scale
+```
 
-Two ordering facts the port depends on, both covered by tests because neither can
-be inferred by reading:
+The window's screen then rasterizes that view at its own backing scale. A remote
+larger than the available area scrolls; the viewer does not zoom or fit the
+framebuffer to the window.
 
-- `TileDecoder` does **not** flip the image. A bitmap context's memory is raster
-  order, so the usual translate/scale flip inverts the buffer rather than
-  correcting it.
-- The shader flips `uv.y`, because clip space grows upward while the texture's
-  row 0 is the top of the desktop.
+## Display and resize behavior
 
-Neither can be corrected downstream: a strip is placed into the texture by its
-own `y`, so an inverted buffer or sampler puts every band in the wrong place
-rather than turning the picture upside down.
+`ViewportPolicy` derives behavior from the `connected` message and, for RXA,
+the active display:
 
-Frames are handled strictly in arrival order. One loop reads the socket and fully
-handles each frame — including awaiting every tile decode in it — before asking
-for the next. Parallelising *across* frames would let a `resize` overtake the tiles
-queued behind it and blit stale pixels into a freshly allocated texture.
-
-## Resize
-
-Three behaviours, chosen from the `connected` message. `ViewportPolicy` holds all
-three so they cannot spread into the model as protocol checks.
-
-| target | behaviour |
+| Target | Viewport behavior |
 |---|---|
-| `vnc` | follows the window continuously, debounced and deduped |
-| `rdp` with `resize` | only on **Remote → Resize to Window**; a resize forces a Deactivation-Reactivation |
-| `rxa` with `resize` | only on **Remote → Resize to Window**, and only while the display being shared is one the agent *made* |
-| `rxa` otherwise | sends nothing, ever |
+| VNC with `resize` | follows window changes, debounced and deduplicated |
+| RDP with `resize` | sends a size only for **Remote → Resize to Window** |
+| RXA with `resize`, private display active | sends a size only for **Remote → Resize to Window** |
+| Any other case | sends no viewport request |
 
-There is no resolution menu, for any target: a remote's resolution belongs to the
-machine running it, and the rows above are the cases where that machine hands the
-decision over. `rxa` is the narrowest, and the only one whose answer changes
-mid-session — a Mac's own panel is never resized from here, so switching displays
-from **Remote → Display** turns the item on and off. `ViewportPolicy` starts an
-rxa session ignoring viewports and learns the rest from the `displays` list; see
-`docs/mac-agent-architecture.md`.
+RDP applies an explicit resize through Deactivation-Reactivation. RXA permits it
+only for a display created by the agent; a Mac-owned display is never resized by
+the viewer.
 
-A size mismatch has two directions, and **Remote → Resize to Window** is only one
-of them. Below it, **Resize to Display** takes the other: the window is sized so
-the desktop fits it exactly, and nothing goes on the wire. They are not
-alternatives. A target that takes a size from here can still be sitting at a size
-this window does not match, so both items are live for RDP with `resize` and for
-rxa while an agent-made display is shared, and which end to move is the user's
-call. The rows differ only in the first: **Resize to Window** needs a target that
-takes a size on request, which for rxa is answered per display and so flips as the
-user switches between the Mac's own screens and the agent's; **Resize to Display**
-is greyed for exactly one case, a `vnc` target with `resize`, whose desktop
-follows this window already and would resize to match the window being fitted to
-it. Neither is enabled before there is something to act on — **Resize to Display**
-waits for the desktop to have a remote size, **Resize to Window** for a measured
-viewport to report. Both stay in the menu either way, greyed rather than absent,
-because which direction a target allows is worth reading off the pair rather than
-inferring from an item that is not there. The arithmetic is
-`RemoteGeometry.windowFrame`, taken as a delta on
-the room the scroll view gives the document so the title bar and insets need no
-accounting, anchored at the top-left, and held inside the screen's visible frame —
-a 1x 3840×2160 remote is 3840×2160 points, and the answer there is the largest
-window that fits with the scrollbars that implies. A full-screen window is left
-alone.
+The two resize commands act in opposite directions:
 
-## The window's chrome, and the strip above the desktop
+- **Resize to Window** asks a supported remote to adopt the viewer's available
+  size.
+- **Resize to Display** changes the local window so the current remote desktop
+  fits at its point size; it sends nothing to the gateway.
 
-While a desktop is showing, the toolbar gives way to it. In a window that is worth
-8pt; in full screen it is the whole strip, because macOS keeps the title bar pinned
-for as long as a toolbar is shown and auto-hides it as soon as none is — so a
-full-screen desktop reaches the top of the screen, and the chrome returns on a trip
-to the top edge. View Only and Clipboard are on the **Remote** menu as well as the
-toolbar, which is what makes the toolbar's copies expendable.
+Both commands remain in the Remote menu and are disabled when they do not apply.
+**Resize to Display** is also disabled for a resize-enabled VNC target because
+that remote already follows the window.
 
-The remote surface sits *inside* the safe area. Spanning the window instead put
-40pt of black scroll-view background behind the title bar: it reads as part of the
-picture and is not one, because a title bar drags the window and hands the content
-nothing — clicks aimed at a guest's own menu bar landed in it and did nothing,
-while a *drag* there moved the window. The browser has no chrome over its canvas,
-which is why it never showed this.
+RXA is the only engine that reports individually selectable displays. The
+Display menu sends `selectDisplay` and follows the `active` flag returned by the
+gateway; it does not infer selection locally. RDP and VNC expose one framebuffer
+and therefore no display choice.
 
-In a window the title bar's own 32pt cannot be given back. Reclaiming it means
-dropping `.titled`, and a window without it **cannot become the key window**
-(measured: `canBecomeKey` is false even with `.resizable`), which would leave the
-viewer unable to take a keystroke. Full screen is the answer for a remote whose top
-edge matters; a smaller remote resolution, centred with margin, is the other.
+### Viewport measurement
 
-The **Display** menu is not one. It lists the remote's screens, one checkable
-item each, and picking one sends a `selectDisplay` — which screen to look at,
-never what size it should be. Only `rxa` fills it: RDP and VNC each deliver a
-single framebuffer spanning every remote screen, so for those the menu carries
-one disabled item saying there is nothing to choose from. It stays in the bar
-either way, because a menu bar whose items come and go is harder to learn than
-one item that is sometimes greyed. The viewer holds no display state: the
-checkmark follows the `active` in the gateway's `displays` message, so a
-selection the remote refused leaves the menu agreeing with the canvas.
+The viewer observes the scroll view's `frameDidChange` and reports the scroll
+view's size. It does not use `NSClipView.boundsDidChange`, which represents
+scrolling rather than window resizing, or the clip view's size, which changes
+when legacy scrollbars appear and can cause resize oscillation.
 
-Viewport reports are clamped into `u16` before they are sent. The gateway
-*rejects* an out-of-range value rather than clamping it, and only logs the
-rejection, so an unclamped report would silently stop resizing anything.
+Reports are not sent before initial layout or while the target picker is active.
+Each axis is clamped to `1...u16.max`. Starting a new target clears both the
+policy and outbound-queue deduplication so the first `connected` event can resend
+an already measured viewport.
 
-What gets measured, and when, is two AppKit facts that read backwards:
+### Window chrome
 
-- The trigger is the **scroll view's** `frameDidChange`. `NSClipView`'s
-  `boundsDidChange` sounds like the right signal and is not: it fires on a
-  *scroll*, where the origin moves and no size changes, and stays silent through a
-  window resize, where its frame changes and its bounds size follows. Watching it
-  meant a VNC target never followed the window at all.
-- The measurement is the **scroll view's** size, not the clip view's. A legacy
-  scroller — the style macOS uses once a mouse is attached — takes 17pt off the
-  clip view when the remote overflows. Reporting that would resize the remote
-  smaller, hide the scrollers, report the full size again, and flip between the
-  two forever. The stable alternative is a desktop up to 17pt wider than the
-  visible area, which scrolls.
+The desktop toolbar is hidden while a remote is displayed. The remote surface
+stays inside the window's safe area so the title bar never overlaps interactive
+remote content. The window remains titled because an untitled window cannot
+become key and accept keyboard input; full screen is the chrome-free mode.
 
-Nothing is reported before the first layout. `RemoteGeometry` floors a report at
-1 because the gateway rejects a zero, and an engine that follows the window would
-take that literally. Nothing is reported from the picker either: the surface
-exists there — the framebuffer has to survive a trip to the picker and back — but
-there is no engine to resize.
+## Keyboard and pointer input
 
-The report that sizes a freshly started engine is the one from `connected`, and it
-necessarily repeats a size already measured, so **both** dedupes have to be
-cleared there: `ViewportPolicy`'s, and the queue's. The queue's is otherwise reset
-only on a new socket, and a target switch keeps the socket it has — so without it
-the second target of a session never resized to the window.
+While a connected desktop is focused, an AppKit local event monitor consumes
+`keyDown`, `keyUp`, and `flagsChanged` before application menu equivalents.
+Remote-menu commands therefore have no keyboard shortcuts. macOS-global
+shortcuts such as Command-Tab and Command-Space remain local because the
+application never receives them.
 
-## Keyboard
+The Edit menu remains available for text fields and supplies the standard
+copy/paste/cut/select-all actions through the responder chain. `ViewerMenus`
+restores it when SwiftUI rebuilds the main menu.
 
-An AppKit local event monitor consumes `keyDown`, `keyUp`, and `flagsChanged`
-before application menu equivalents, while a connected desktop is painting. A
-`keyDown` override would not do: the menu bar consumes key equivalents before the
-responder chain, so Command chords would never reach the remote. macOS virtual
-keycodes map to the same physical DOM `code` values the protocol uses.
+Keyboard translation depends on `remoteOs`:
 
-It cuts the other way too, and decides what the **Remote** menu may carry: while
-the desktop is painting and focused, every Command chord AppKit delivers goes
-to the remote, so a key equivalent on one of those items fires only
-on the screens where nothing is captured — and types into the guest on the one
-where the item usually matters. No item on that menu carries one, by rule. The
-four that did (Refresh, Log Out, Change Gateway, Connect to Gateway) were there to
-drive the app from the keyboard in a test, which is not reason enough to ship a
-chord whose meaning depends on which screen is up. The picker's own ⌘1…⌘9 target
-picks stay: nothing is captured there, and they are printed on the rows.
+- for a non-Mac remote, standard Command shortcuts become remote Control
+  shortcuts, a bare Command taps remote Meta, and other Command chords remain
+  Meta chords;
+- for a Mac remote, Command remains remote Meta for every chord.
 
-The **Edit** menu is the one exemption, and `ViewerMenus` builds it rather than
-SwiftUI: Command-C, Command-V, Command-X and Command-A are not built into
-`NSTextField` or `NSTextView` — on macOS they are Edit menu key equivalents, and
-the responder chain is only offered `copy:`/`paste:` because a menu item sent
-them. Stripping the standard menus took the whole mechanism with it, so every text
-field in the app answered Command-V with a beep. It does not reopen the problem
-the rule is about: a focused desktop takes the chord in the monitor before the
-menu bar is offered it, and with no text field in the responder chain the item is
-disabled. The sweep skips this menu by object identity, not by title.
+The default-on **Enable macOS Keyboard Overrides** preference disables the
+Command-to-Control translation when turned off. `PressedInput` tracks every
+pressed code and releases them on focus loss, window deactivation, target
+switch, socket closure, takeover, or teardown.
 
-Installing it is not a launch-time step, and looked like one until it was measured:
-SwiftUI rebuilds the whole menu bar from its own model of it when the first window
-comes up, and a menu this app inserted is not in that model. The bar carried Edit
-for about a second after launch and then went back to `View` in its place, so the
-fix for the beeping read as no change at all. `ViewerMenus.ensureEditMenu` puts the
-menu back whenever the bar no longer holds the one the delegate is holding, off the
-same change notifications the sweep runs from — the bar the app hands out is not
-the last one it gets, and both rules have to outlive a rebuild.
+Before the first `cursor` message, the viewer hides the local pointer because an
+engine may already composite its cursor into the framebuffer. After a cursor
+message, the viewer renders the remote shape; a null image uses a local arrow so
+the pointer remains visible. Hotspots arrive in remote pixels and are converted
+to points.
 
-For a non-Mac remote, standard Mac Command shortcuts map to remote Control
-shortcuts. A bare Command taps remote Meta, and other Command chords are sent as
-remote Meta chords. For a Mac remote, Command remains Meta for every chord, so
-Command-V arrives as Command-V rather than Control-V. Which applies follows the
-discovered `remoteOs` bit. The default-on **Enable macOS Keyboard Overrides**
-item in the **Remote** menu disables Command shortcut translation globally — also
-the fix if a Mac is ever not recognised as one.
-
-The SPA does the same thing for a Mac browser, over a smaller table: eight chords
-rather than fourteen, because a web page never receives Command-W, T, N, L or O.
-The two implementations are meant to agree on every chord they share, so
-`frontend/src/macKeys.test.ts` is deliberately parallel to
-`KeyboardTranslatorTests.swift` — a case in one and not the other is where they
-drift. See docs/architecture.md.
-
-The protocol has no release-everything message, so `PressedInput` tracks what is
-held and sends one release per code. Focus loss, window deactivation, a target
-switch, a socket close, a takeover, and teardown all go through that one path;
-`SessionStateMachine` emits it as an action rather than leaving it to call sites.
-macOS-global shortcuts that never reach the application, including Command-Tab
-and Command-Space, remain local.
-
-## Pointer
-
-Receiving any `cursor` message means the viewer owns pointer rendering from then
-on. Until one arrives the local pointer is a transparent cursor rect, because an
-engine that sends none is compositing its own pointer into the framebuffer and
-two pointers are worse than one. A `cursor` with a null image means the remote
-hid its shape, and a plain arrow stands in — on a remote desktop an invisible
-pointer is worse than a generic one.
-
-Hotspots arrive in remote pixels and are divided into points. The black margin
-around a remote smaller than the window keeps the ordinary arrow.
-
-Scroll deltas invert on both axes: AppKit is positive-up, DOM `deltaY` is
-positive-down. Trackpad deltas pass through as the point-like values a browser
-reports; a notched wheel's line deltas are scaled by 100, which is what the Mac
-agent divides by to recover one scroll line.
+AppKit scroll deltas are inverted on both axes to match DOM wheel direction.
+Trackpad deltas pass through directly; line-based wheel deltas are scaled for the
+Mac agent's line conversion.
 
 ## Clipboard
 
-While a connected target advertises `clipboard`, native code polls the general
-pasteboard's change count:
+For a connected target with `clipboard`, the viewer polls
+`NSPasteboard.changeCount`:
 
-- a local text change sends the ordinary `clipboard` message;
-- an unsolicited remote push writes to `NSPasteboard`;
-- echo guards keep either direction from bouncing the same value back.
+- local text changes send the ordinary `clipboard` message;
+- unsolicited remote changes write to `NSPasteboard`;
+- echo guards prevent either direction from bouncing the same value back.
 
-`requested` is the consent boundary and is load-bearing. The reply to a
-**Clipboard…** fetch fills the panel and never touches `NSPasteboard`; only an
-unsolicited push mirrors. Copy is how the user opts in. The wire carries no
-request id — the synchronizer mints its own so a reply arriving after a close or
-a second fetch cannot land in the wrong panel.
+A response to an explicit **Clipboard…** fetch fills the panel but does not
+write to the local pasteboard. The panel's Copy action is the consent boundary.
+The synchronizer uses a local request token so a late response cannot populate a
+closed or replaced panel.
 
-The ceiling is 64 KiB in either direction, refused rather than truncated: the
-first 64 KiB of a copy could not be told from all of it, so an oversized remote
-clipboard is reported as its size instead.
-
-Command-V queues the current pasteboard value before the translated remote
-Control-V events.
-
-Programmatic pasteboard reads follow macOS's Paste from Other Apps permission.
-The target's `clipboard = true` remains the server-side security boundary.
+Clipboard values are capped at 64 KiB in either direction and refused rather
+than truncated. Command-V queues the current local pasteboard value before
+sending the translated remote paste chord. Programmatic reads follow macOS's
+**Paste from Other Apps** permission, while `clipboard = true` remains the
+gateway-side boundary.
 
 ## Audio
 
-**Remote → Enable Audio** subscribes to the remote's sound, for a target whose
-`connected` carried `audio` (RDP with `audio = true`; the item is greyed otherwise). The
-wire, the queue and the ceiling are the gateway's and are documented in
-[`remote-audio.md`](remote-audio.md) — what follows is only what is specific to this
-client.
+**Remote → Enable Audio** is available when `connected.audio` is true. The
+gateway owns the wire format and bounded audio queue; the viewer owns decoding
+and playback scheduling.
 
-**The decoder is the one macOS already ships.** `AVAudioConverter` with
-`kAudioFormatOpus` decodes the wire's bare packets from an
-`AudioStreamBasicDescription` alone, so the viewer needs no vendored libopus and no
-container: `/System/Library/Components/AudioCodecs.component` is libopus behind an
-`AudioCodec`. Two behaviours of it are load-bearing and were measured, since neither is
-documented — the magic cookie is ignored, and the `OpusHead`'s pre-skip is not honoured,
-so `OpusDecoder` discards it itself by counting what the converter returned rather than
-by dropping a constant (its first call keeps 120 frames of priming, later calls keep
-none).
+The viewer decodes bare Opus packets with `AVAudioConverter` and
+`kAudioFormatOpus`; it needs neither a container nor a vendored decoder.
+`AVAudioConverter` does not apply the `OpusHead` pre-skip, so `OpusDecoder`
+discards the reported priming frames itself.
 
-**The schedule is the viewer's own**, not `AVPlayer`'s, and that is the whole reason this
-is not four lines of AVFoundation: a media element's schedule never skips forward, so a
-delay it accumulates is permanent. Each decoded buffer is handed to an
-`AVAudioPlayerNode` at an explicit `AVAudioTime` — `AudioSchedule` holds the arithmetic,
-with the same 0.1 s cushion and 0.3 s ceiling as the SPA.
+Decoded buffers are scheduled explicitly on an `AVAudioPlayerNode`.
+`AudioSchedule` uses the same 0.1-second start cushion and 0.3-second latency
+ceiling as the browser. When the ceiling is exceeded, the viewer stops the
+player, discards its queued audio, and restarts the timeline at the cushion.
 
-Past the ceiling the viewer **flushes**: `player.stop()` discards everything queued and
-the timeline restarts at the cushion. The SPA instead trims the arriving buffer, because
-Web Audio can truncate audio it has already committed and `AVAudioPlayerNode` cannot —
-its only eraser takes the whole queue. Dropping the backlog is the intent either way; the
-excess is latency, and one audible skip buys back all of it. Note a stopped player node
-rebases its own clock to zero, which is why a flush resets the timeline rather than
-continuing it.
+Audio remains enabled in view-only mode because it sends no input to the remote.
+An ordinary reconnect reasserts the subscription; a target switch clears it.
+The output follows the Mac's default device, rebuilding the engine after
+`AVAudioEngineConfigurationChange`.
 
-Three smaller decisions:
-
-- **Audio is live in view only.** That mode is about nothing this Mac does reaching the
-  remote, and sound travels the other way — watching a desktop without touching it is
-  exactly when it is wanted. The clipboard, which is bidirectional, does go down with it.
-- **A reconnect keeps playing.** The gateway's subscription belongs to an *attachment*, so
-  a reattach arrives with audio off; the viewer re-asserts from `connected`, as it already
-  re-sends the viewport and the host scale there. The SPA needs a fresh click instead,
-  because a browser's `AudioContext` must be created inside a user gesture. A *target
-  switch* does forget the answer, since it was an answer about the target being left.
-- **The output device follows the Mac's default**, including across a change: the engine
-  is torn down and rebuilt on `AVAudioEngineConfigurationChange` rather than restarted,
-  because the node graph was connected with the old device's format and a mismatch there
-  is silence with nothing in the log.
-
-Nothing reports whether sound is *arriving*, because from the gateway's end a quiet remote
-and one that will never redirect are the same thing. What the viewer can report is the
-local device refusing, which is the only failure available to it — unlike the browser,
-where a missing decoder and an insecure origin are both live possibilities.
-
-Playing audio needs no entitlement and there is no `AVAudioSession` on macOS, so nothing
-was added to the bundle for this.
+The viewer can report local decoder or output failures. It cannot distinguish a
+quiet remote from an RDP server that never opens its audio channel; the gateway
+log carries that diagnosis.
 
 ## Networking
 
-Plain HTTP is allowed. A gateway is commonly reached directly over a private
-network, so `Info.plist` carries `NSAllowsArbitraryLoads` — not the
-`…InWebContent` variant, which only ever exempted WebKit, and ATS treats `ws://`
-exactly as it treats `http://`.
+Plain HTTP and `ws://` gateways are allowed for private-network deployments, so
+the app bundle uses `NSAllowsArbitraryLoads`.
 
-The login cookie is attached to the `/ws` upgrade by hand, with
-`httpShouldHandleCookies` off. `HTTPCookieStorage` matches a `Secure` cookie only
-against an `https` scheme, and behind a TLS-terminating proxy the gateway does set
-`Secure` while the socket URL's scheme is `wss` — so relying on implicit
-attachment drops it. `require_auth` runs before the upgrade, so the symptom would
-be a bare 401.
+The viewer attaches the login cookie to the WebSocket upgrade explicitly with
+`httpShouldHandleCookies` disabled. This also handles a `Secure` cookie issued
+behind a TLS-terminating proxy when the socket uses `wss`.
 
-`maximumMessageSize` is raised to 16 MiB. The default is 1 MiB and going past it
-fails the whole socket rather than dropping one frame. Measured with `--probe`, a
-3204×1758 rxa desktop's largest strip was around 100 KB, so this is headroom for
-a wider or worse-compressing desktop rather than a fix for something observed.
+`URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
+limit ends the socket rather than dropping one frame.
 
-## Build and test
+## Build and QA
+
+Run the tests, build the packaged app, and launch QA with isolated settings:
 
 ```sh
 swift test --package-path apps/remotex-viewer
 packaging/macos-viewer/build-viewer-app.sh --no-dmg
-open -n dist/remotex-viewer.app
+open -n dist/remotex-viewer.app --args \
+  --settings qa --gateway http://127.0.0.1:<test-port>
 ```
 
-`--probe` attaches to a gateway from the command line and prints what arrives,
-which is how the two socket-level assumptions above were settled:
+`--settings qa` uses a separate defaults suite and an ephemeral cookie jar. Clear
+that suite with:
+
+```sh
+defaults delete remotex-viewer.qa
+```
+
+Always validate the packaged `.app`; `swift run`, standalone `swift build`, and
+the executable under `.build` bypass bundle menus and `Info.plist` behavior.
+
+For socket-level diagnostics, `--probe` attaches to a gateway and prints
+received control and frame information:
 
 ```sh
 REMOTEX_PROBE_USERNAME=… REMOTEX_PROBE_PASSWORD=… \
   dist/remotex-viewer.app/Contents/MacOS/remotex-viewer \
-  --probe --gateway http://127.0.0.1:52380 --probe-target mac --probe-seconds 90
+  --probe --gateway http://127.0.0.1:52380 \
+  --probe-target mac --probe-seconds 90
 ```
 
-Idling past 60 seconds is the check that `URLSessionWebSocketTask` answers the
-gateway's protocol pings — it does — since the gateway kills the engine after
-that long without a pong.
-
-Audio needs a listener, so the automated tests stop where the sound starts: the framing,
-the arithmetic and the decoding are covered (`AudioFrameTests`, `AudioScheduleTests`,
-`OpusDecoderTests` — the last against fixtures the *gateway's* encoder wrote), and
-playback is checked by ear. The tone harness needs no Windows host:
+Automated tests cover message decoding, frame parsing, tile ordering, geometry,
+audio framing, schedule arithmetic, and Opus fixtures produced by the gateway.
+Audio playback still requires manual QA. The in-process tone harness provides a
+repeatable source without a Windows host:
 
 ```sh
-cargo test --lib serve_a_test_tone -- --ignored --nocapture   # prints a port
-open -n dist/remotex-viewer.app --args --settings qa --gateway http://127.0.0.1:<port>
+cargo test --lib serve_a_test_tone -- --ignored --nocapture
+open -n dist/remotex-viewer.app --args \
+  --settings qa --gateway http://127.0.0.1:<test-port>
 ```
 
-Enable audio during one of its quiet phases and touch nothing: the tone must arrive on
-its own, go away after five seconds, and come back. For stereo, use a source that
-**names** the channel it is playing —
-[audiocheck.net](https://www.audiocheck.net/audiotests_stereo.php) — because a channel
-swap passes every assertion in the suite and every by-ear check with an unlabelled file.
+Enable audio during a quiet phase and verify that the tone starts, stops, and
+returns without another action. Use a source that announces its left and right
+channels when checking stereo order.
 
-See [`../packaging/macos-viewer/README.md`](../packaging/macos-viewer/README.md)
-for installation, signing, permissions, and development launch arguments.
+See
+[`packaging/macos-viewer/README.md`](../packaging/macos-viewer/README.md)
+for signing, packaging, permissions, and development launch details.
