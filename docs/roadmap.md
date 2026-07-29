@@ -6,6 +6,64 @@ that fixed it, and the test that holds it fixed, are the record. The limitations
 imposed on us from outside are recorded beside the mechanism they constrain, which
 is the only place they can be read in context.
 
+## Planned
+
+### Smoother video from an RDP guest
+
+For both clients: the browser and the macOS viewer. The case is a **browser on the
+guest playing a video in a window** — ordinary screen content, no cooperating
+application. That rules out the redirection routes before anyone reaches for them:
+multimedia redirection needs a player that hands its stream to the RDP stack, and a
+browser compositing video into its own window is not that. The pixels arrive as
+graphics updates like everything else, which is why this is a question about our own
+path rather than about a channel we have not turned on.
+
+That path is worst in three places at once. Every frame changes every pixel of the
+video's rectangle, so the shadow copy has nothing to trim out of it; `Rect::bands()`
+splits the rectangle into 64-row strips — seventeen of them if it fills a 1080p
+screen — and `send_tiles` WebP-encodes each strip **synchronously on the RDP read
+loop**. At that encoder's measured cost (`WEBP_LOSSLESS_METHOD`: about 60µs fixed
+plus ~17ns a pixel) a full 1080p frame is 30–40 ms of encoding, so it caps out near
+25–30 fps before the network is involved, with input waiting behind it; a windowed
+video pays the same rate per pixel.
+
+Then each client decodes those strips one at a time, and in both cases on purpose:
+the SPA chains every message through one promise so draws land in arrival order, and
+the viewer's `TileDecoder` is an actor for the same reason. Tiles overwrite their
+rectangles with no delta state, so arrival order is correctness rather than
+tidiness — which is why the fix on the client side is fewer or cheaper payloads per
+frame, not more concurrency.
+
+Three levers, cheapest first. The first two are gateway-side, so both clients get
+them at once, and they are worth measuring before the third is committed to:
+
+- **Lossy WebP in the gateway.** `encode_webp` is lossless with no choice today,
+  while the macOS agent classifies per tile. Video is exactly the content the lossy
+  branch exists for, and both configs are already measured.
+- **Encoding off the read loop**, which is
+  [Encoder parallelism](#encoder-parallelism) and its ordering hazard. A video region
+  makes that hazard the *normal* case rather than an edge one — the same pixels are
+  dirty every frame — so a pool needs ordering and not merely threads.
+- **H.264 passed straight through.** A Windows server already encodes the screen as
+  H.264 over the graphics pipeline, and `ironrdp-egfx` implements that channel with
+  `AVC420`/`AVC444` and a `decode` module of *traits*: it delegates decoding rather
+  than doing it. A passthrough implementation of that trait would carry the server's
+  own bitstream to the clients, and the gateway would stop decoding and re-encoding
+  video at all. The `TILE` record's `format` byte is the seam it arrives through,
+  which is why the byte was kept when the codec collapsed to one value
+  (`src/protocol.rs`). Each client already has somewhere to put the result: the
+  browser has WebCodecs `VideoDecoder`, and in the viewer VideoToolbox decodes to a
+  `CVPixelBuffer` that `CVMetalTextureCache` hands to the same Metal texture
+  `FramebufferRenderer` blits — so the second path ends at the decoder rather than at
+  the renderer.
+
+The third lever is last because of what it costs: `egfx` is a channel the gateway
+does not negotiate at all today, H.264 brings stream state the independent tile
+protocol deliberately does not have — reference frames, keyframe cadence, a decoder
+that cannot be handed tiles out of order — and it is a second decode path in *each*
+client rather than one shared piece of work. `rxa`'s equivalent, encoding with
+VideoToolbox on the Mac, is separate again.
+
 ## Deferred pending measurements
 
 ### Downscaled capture
@@ -19,24 +77,12 @@ sampling it and only for a display of our own, and per-cell change detection and
 the tile cache answer pixels that did *not* change.
 
 That last one is why this waits rather than ships. It leaves downscaling as the
-lever for a remote whose *changing* area is genuinely large — full-screen video, a
-window dragged across a 2x panel — and the measurement it needs is that case:
-encode time as a share of the frame budget while most of the screen is moving. No
-workload here has pushed hard enough to produce it.
-
-### H.264 through the tile format byte
-
-VideoToolbox to encode, browser WebCodecs to decode, as a second payload kind
-rather than a replacement. The `TILE` record's `format` byte is the seam it arrives
-through, which is why the byte was kept when the codec collapsed to a single value
-(`src/protocol.rs`).
-
-It is behind everything else here because it costs more than a codec swap did: a
-second decode path in *both* clients, and stream state — reference frames, keyframe
-cadence, a decoder that cannot be handed tiles out of order — which the independent
-tile protocol deliberately does not have. It is not an `rxa`-only item either: the
-RDP and VNC engines would carry it too. The trigger is the same large moving area
-the section above addresses far more cheaply, which is the order to try them in.
+lever for a remote whose *changing* area is genuinely large, which is the same case
+the video section above is about — but this one costs sharpness everywhere rather
+than only where the picture is moving, so it comes after those levers, not before
+them. The measurement it needs is that case: encode time as a share of the frame
+budget while most of the screen is moving. It is also `rxa`-only, since a Linux or
+Windows box cannot be told what size to capture itself at.
 
 ### Application-level liveness for VNC
 
@@ -77,12 +123,6 @@ the same region, a late tile from the older frame could overwrite newer pixels.
 Keep ordered single-worker encoding unless measurements justify adding explicit
 ordering.
 
-### Audio
-
-No engine currently carries audio. Its transport, synchronization, and browser
-playback design remain unspecified.
-
-
 ### macOS login-window service
 
 The `SMAppService` LaunchAgent runs only in the signed-in user's Aqua session, so
@@ -106,6 +146,15 @@ before pre-boot disk unlock.
 
 
 ## Not planned
+
+### Audio
+
+No engine carries it, and the case that wanted it — a Windows desktop whose sound
+has no route to a Mac — is answered by software that already exists, from the
+official RDP client's own audio redirection down to an AirPlay sender on the Windows
+side. [`remote-audio.md`](remote-audio.md) records those routes and keeps the design
+that was worked out for carrying it ourselves, for whenever one of them stops being
+enough.
 
 ### Multiple sessions
 
