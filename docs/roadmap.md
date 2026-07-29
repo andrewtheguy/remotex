@@ -137,6 +137,12 @@ is the wart that followed them — the endpoint no longer waits for a format it 
 never be sent, and fills a quiet remote's gaps with silence, so audio starts, stops
 and starts again on its own.
 
+What is **not** settled is promptness: a live desktop has been heard a couple of
+seconds behind itself, with the gateway measured out of that as a cause
+([`remote-audio.md`](remote-audio.md)). Before redesigning anything for it, read how
+Apache Guacamole carries RDP audio to a browser — it is the obvious prior art for a
+more robust path, and none of it has been studied here yet.
+
 What is left is two things, neither urgent:
 
 - **The macOS viewer**, which now needs a representation of its own. It could once
