@@ -44,10 +44,20 @@ The main responsibilities are:
 | `rdp.rs` | IronRDP connection, framebuffer, input, optional resize |
 | `vnc.rs` | RFB 3.8 client, framebuffer, cursor, input, optional resize |
 | `rxa.rs` | encrypted Mac-agent connection and tile pass-through |
+| `encode.rs` | WebP encoding off the engines' read loops, in order |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine implements the same input/frame-channel boundary and runs
 independently of the browser WebSocket.
+
+The RDP and VNC engines do not reach that boundary directly: they hand bands of
+pixels to `encode.rs`, which compresses them on worker threads and forwards the
+results **in the order they were handed over**. Encoding used to happen inline on
+the loop that reads the remote's protocol, where it both capped the frame rate and
+delayed input. Order is not a detail — tiles overwrite their rectangles with no
+delta state, so it is what makes a repaint correct (see `wire.rs`), and the queue
+carries resizes and cursors alongside tiles so neither can overtake the other.
+`rxa.rs` needs none of this: the agent has already encoded what it sends.
 
 ## Session lifecycle
 

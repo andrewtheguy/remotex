@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod cli;
 pub mod config;
+pub mod encode;
 pub mod engine;
 pub mod error;
 pub mod keymap;

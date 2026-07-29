@@ -39,9 +39,10 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::config::TargetConfig;
+use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
-use crate::protocol::{ClientMsg, ClipboardSnapshot, MouseButton, ServerMsg, Tile, UNSCALED};
+use crate::protocol::{ClientMsg, ClipboardSnapshot, MouseButton, ServerMsg, UNSCALED};
 use crate::rdp_clipboard::{self, ClipboardEvent};
 use crate::tiles::{Rect, Shadow};
 
@@ -84,10 +85,28 @@ impl PendingClipboardRead {
 ///
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Both closing (browser gone / RDP ended) tears the session down.
+///
+/// A thin wrapper so the flush cannot be missed. Everything this engine sends the
+/// client goes through a [`TileSink`], which forwards from a task of its own — and
+/// the engine thread's runtime dies with this function, so anything the sink still
+/// held would be lost. That includes the session's final `Error`, whose absence
+/// would put the browser back on the picker with nothing to explain why. The body
+/// has several early returns; this has one exit.
 pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
+) {
+    let sink = TileSink::new("rdp", frame_tx);
+    session(config, input_rx, &sink).await;
+    sink.flush().await;
+    sink.report();
+}
+
+async fn session(
+    config: TargetConfig,
+    input_rx: mpsc::UnboundedReceiver<ClientMsg>,
+    sink: &TileSink,
 ) {
     // The clipboard channel processor runs inside `ActiveStage` and can only
     // report through a channel — see [`crate::rdp_clipboard`]. Created here so
@@ -103,7 +122,7 @@ pub async fn run(
         "rdp",
         &dest,
         engine::HANDSHAKE_TIMEOUT,
-        &frame_tx,
+        sink,
         |stream| connect(&config, stream, clip_tx),
     )
     .await
@@ -113,8 +132,8 @@ pub async fn run(
 
     let desktop = connection_result.desktop_size;
     info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
-    if frame_tx
-        .send(ServerMsg::Resize {
+    if sink
+        .msg(ServerMsg::Resize {
             w: desktop.width,
             h: desktop.height,
             scale: UNSCALED,
@@ -125,11 +144,7 @@ pub async fn run(
         return; // browser already gone
     }
     // No RDP server ships for macOS, so a Mac never answers here.
-    if frame_tx
-        .send(ServerMsg::RemoteOs { macos: false })
-        .await
-        .is_err()
-    {
+    if sink.msg(ServerMsg::RemoteOs { macos: false }).await.is_err() {
         return; // browser already gone
     }
 
@@ -140,13 +155,13 @@ pub async fn run(
         config.clipboard,
         clip_rx,
         input_rx,
-        frame_tx.clone(),
+        sink,
     )
     .await
     {
         warn!("rdp: session error: {e:#}");
-        let _ = frame_tx
-            .send(ServerMsg::Error {
+        let _ = sink
+            .msg(ServerMsg::Error {
                 message: format!("RDP session ended: {e}"),
             })
             .await;
@@ -245,7 +260,7 @@ async fn active_loop(
     clipboard: bool,
     mut clip_rx: mpsc::UnboundedReceiver<ClipboardEvent>,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
-    frame_tx: mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
 ) -> anyhow::Result<()> {
     // Retained so a DeactivateAll (the server-side half of a resize) can drive a
     // fresh Deactivation-Reactivation Sequence. The builder below only consumes
@@ -331,18 +346,14 @@ async fn active_loop(
                     // frame dropping while nobody is attached from turning into
                     // a permanently blank region.
                     shadow.forget();
-                    frame_tx
-                        .send(ServerMsg::Resize {
+                    sink
+                        .msg(ServerMsg::Resize {
                             w: desktop.width,
                             h: desktop.height,
                             scale: UNSCALED,
                         })
-                        .await
-                        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
-                    frame_tx
-                        .send(ServerMsg::RemoteOs { macos: false })
-                        .await
-                        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                        .await?;
+                    sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
                     send_tiles(
                         &image,
                         Rect {
@@ -352,7 +363,7 @@ async fn active_loop(
                             bottom: desktop.height.saturating_sub(1),
                         },
                         &mut shadow,
-                        &frame_tx,
+                        sink,
                     )
                     .await?;
                     continue;
@@ -415,15 +426,14 @@ async fn active_loop(
                         let snapshot = remote_clipboard
                             .clone()
                             .unwrap_or_else(ClipboardSnapshot::unobserved);
-                        frame_tx
-                            .send(ServerMsg::Clipboard {
+                        sink
+                            .msg(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
                                 requested: true,
                                 oversized_bytes: snapshot.oversized_bytes,
                             })
-                            .await
-                            .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                            .await?;
                     }
                     continue;
                 }
@@ -496,15 +506,14 @@ async fn active_loop(
                             }
                         };
                         remote_clipboard = Some(snapshot.clone());
-                        frame_tx
-                            .send(ServerMsg::Clipboard {
+                        sink
+                            .msg(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
                                 requested: false,
                                 oversized_bytes: snapshot.oversized_bytes,
                             })
-                            .await
-                            .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                            .await?;
                     }
                     // Nothing to show, and deliberately not forwarded as empty
                     // text: that would wipe the panel over a transient refusal.
@@ -575,7 +584,7 @@ async fn active_loop(
                             bottom: region.bottom,
                         },
                         &mut shadow,
-                        &frame_tx,
+                        sink,
                     )
                     .await?;
                 }
@@ -595,14 +604,13 @@ async fn active_loop(
                         last_pos.0.min(desktop.width.saturating_sub(1)),
                         last_pos.1.min(desktop.height.saturating_sub(1)),
                     );
-                    frame_tx
-                        .send(ServerMsg::Resize {
+                    sink
+                        .msg(ServerMsg::Resize {
                             w: desktop.width,
                             h: desktop.height,
                             scale: UNSCALED,
                         })
-                        .await
-                        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+                        .await?;
                 }
                 _ => {}
             }
@@ -876,14 +884,16 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
 /// nothing upstream filters. Both come back as `None` here and cost nothing but a
 /// pack and a `memcmp`.
 ///
-/// The pack happens either way; only the WebP encode is skipped, and the encode is
-/// where the time goes (~8–10× the hash it replaced, measured in
-/// `protocol::tests::encode_cost_against_hash_cost`).
+/// The pack happens either way; what is skipped is the WebP encode, which is far
+/// the more expensive half (~8–10× the hash it replaced, measured in
+/// `protocol::tests::encode_cost_against_hash_cost`). That encode no longer happens
+/// here — [`TileSink`] runs it elsewhere — so what this loop costs is the pack, the
+/// `memcmp` and an allocation per band.
 async fn send_tiles(
     image: &DecodedImage,
     rect: Rect,
     shadow: &mut Shadow,
-    frame_tx: &mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
 ) -> anyhow::Result<()> {
     let (fb_w, fb_h) = shadow.size();
     if rect.left >= fb_w || rect.top >= fb_h {
@@ -906,23 +916,14 @@ async fn send_tiles(
     };
 
     for band in changed.bands() {
-        // Repacked rather than sliced out of `buf`: a band of the trimmed rectangle
-        // is narrower than the reported one, so its rows are not contiguous there.
-        pack_rgb(image, band, &mut buf);
-        let tile = Tile::from_rgb(band.left, band.top, band.w(), band.h(), &buf)?;
-        debug!(
-            "rdp: tile {}x{} at ({},{}): {} -> {} bytes",
-            band.w(),
-            band.h(),
-            band.left,
-            band.top,
-            buf.len(),
-            tile.data.len()
-        );
-        frame_tx
-            .send(ServerMsg::Tile(tile))
-            .await
-            .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+        // Its own buffer, not the one above: the encoder reads these pixels after
+        // this loop has moved on, and `image` is overwritten by the next PDU.
+        // Repacked rather than sliced, because a band of the *trimmed* rectangle is
+        // narrower than the reported one, so its rows are not contiguous in `buf`.
+        let mut pixels = Vec::new();
+        pack_rgb(image, band, &mut pixels);
+        sink.tile(band.left, band.top, band.w(), band.h(), pixels)
+            .await?;
     }
 
     Ok(())

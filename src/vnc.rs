@@ -52,10 +52,11 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::{Subtype, TargetConfig};
+use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, ServerMsg, Tile,
+    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, ServerMsg,
     UNSCALED, clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
@@ -190,10 +191,25 @@ type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 ///
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Either closing (browser gone / VNC ended) tears the session down.
+///
+/// A thin wrapper so the flush cannot be missed — see [`crate::rdp::run`], which has
+/// the same shape for the same reason: the engine thread's runtime dies with this
+/// function, and the sink forwards from a task of its own.
 pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
+) {
+    let sink = TileSink::new("vnc", frame_tx);
+    session(config, input_rx, &sink).await;
+    sink.flush().await;
+    sink.report();
+}
+
+async fn session(
+    config: TargetConfig,
+    input_rx: mpsc::UnboundedReceiver<ClientMsg>,
+    sink: &TileSink,
 ) {
     // The budget covers the RFB handshake, which can stall on a host that accepts
     // the connection and then says nothing — no socket timeout catches that. The
@@ -204,7 +220,7 @@ pub async fn run(
         "vnc",
         &dest,
         engine::HANDSHAKE_TIMEOUT,
-        &frame_tx,
+        sink,
         |stream| connect(&config, stream),
     )
     .await
@@ -214,8 +230,8 @@ pub async fn run(
 
     let Connected { reader, writer, width, height, macos } = connected;
     info!("vnc: connected, desktop {width}x{height} (macos={macos})");
-    if frame_tx
-        .send(ServerMsg::Resize {
+    if sink
+        .msg(ServerMsg::Resize {
             w: width,
             h: height,
             scale: UNSCALED,
@@ -225,7 +241,7 @@ pub async fn run(
     {
         return; // browser already gone
     }
-    if frame_tx.send(ServerMsg::RemoteOs { macos }).await.is_err() {
+    if sink.msg(ServerMsg::RemoteOs { macos }).await.is_err() {
         return; // browser already gone
     }
 
@@ -235,13 +251,13 @@ pub async fn run(
         (width, height),
         Flags { macos, resize: config.resize, clipboard: config.clipboard },
         input_rx,
-        frame_tx.clone(),
+        sink.clone(),
     )
     .await
     {
         warn!("vnc: session error: {e:#}");
-        let _ = frame_tx
-            .send(ServerMsg::Error {
+        let _ = sink
+            .msg(ServerMsg::Error {
                 message: format!("VNC session ended: {e}"),
             })
             .await;
@@ -388,7 +404,7 @@ async fn active_loop(
     size: (u16, u16),
     flags: Flags,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
-    frame_tx: mpsc::Sender<ServerMsg>,
+    sink: TileSink,
 ) -> anyhow::Result<()> {
     let Flags { macos, resize, clipboard: clipboard_enabled } = flags;
     // The writer is shared: the read loop sends the next update request after
@@ -417,7 +433,7 @@ async fn active_loop(
         reader,
         shared,
         clipboard_enabled,
-        frame_tx.clone(),
+        sink.clone(),
     ));
 
     // RFB pointer events always carry position + full button mask, so both are
@@ -465,27 +481,26 @@ async fn active_loop(
                     // the truth — a browser that just attached has nothing.
                     shadow.lock().unwrap().forget();
                     let size = desktop.lock().unwrap().size;
-                    if frame_tx
-                        .send(ServerMsg::Resize {
+                    if let Err(e) = sink
+                        .msg(ServerMsg::Resize {
                             w: size.0,
                             h: size.1,
                             scale: UNSCALED,
                         })
                         .await
-                        .is_err()
                     {
-                        break Err(anyhow::anyhow!("frame channel closed"));
+                        break Err(e);
                     }
-                    if frame_tx.send(ServerMsg::RemoteOs { macos }).await.is_err() {
-                        break Err(anyhow::anyhow!("frame channel closed"));
+                    if let Err(e) = sink.msg(ServerMsg::RemoteOs { macos }).await {
+                        break Err(e);
                     }
                     // The pointer shape is not part of a repaint — the server
                     // resends it only when it changes — so replay the cached
                     // one, or the fresh browser would draw no pointer at all.
                     if let Some(msg) = cursor_msg(&cursor)
-                        && frame_tx.send(msg).await.is_err()
+                        && let Err(e) = sink.msg(msg).await
                     {
-                        break Err(anyhow::anyhow!("frame channel closed"));
+                        break Err(e);
                     }
                     write_to(&writer, &update_request(false, size)).await
                 } else if matches!(input, ClientMsg::ClipboardRequest) {
@@ -500,17 +515,16 @@ async fn active_loop(
                             .remote
                             .clone()
                             .unwrap_or_else(ClipboardSnapshot::unobserved);
-                        if frame_tx
-                            .send(ServerMsg::Clipboard {
+                        if let Err(e) = sink
+                            .msg(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
                                 requested: true,
                                 oversized_bytes: snapshot.oversized_bytes,
                             })
                             .await
-                            .is_err()
                         {
-                            break Err(anyhow::anyhow!("frame channel closed"));
+                            break Err(e);
                         }
                     }
                     Ok(())
@@ -617,7 +631,7 @@ async fn read_loop(
     mut reader: Reader,
     shared: Shared,
     clipboard_enabled: bool,
-    frame_tx: mpsc::Sender<ServerMsg>,
+    sink: TileSink,
 ) -> anyhow::Result<()> {
     let Shared { writer, desktop, clipboard, .. } = &shared;
     loop {
@@ -652,7 +666,7 @@ async fn read_loop(
                 let rects = reader.read_u16().await?;
                 let mut resized = false;
                 for _ in 0..rects {
-                    resized |= read_rect(&mut reader, &shared, &frame_tx).await?;
+                    resized |= read_rect(&mut reader, &shared, &sink).await?;
                 }
                 // Complete the cycle. A resize invalidates the old contents,
                 // so repaint fully; otherwise ask for the next increment.
@@ -701,8 +715,8 @@ async fn read_loop(
                         state.remote = Some(snapshot.clone());
                         snapshot
                     };
-                    if frame_tx
-                        .send(ServerMsg::Clipboard {
+                    if sink
+                        .msg(ServerMsg::Clipboard {
                             text: snapshot.text,
                             changed_at_ms: snapshot.changed_at_ms,
                             requested: false,
@@ -719,7 +733,7 @@ async fn read_loop(
                 reader.read_exact(&mut bytes).await?;
 
                 if signed < 0 {
-                    if extended_cut_text(&bytes, writer, clipboard, &frame_tx).await? {
+                    if extended_cut_text(&bytes, writer, clipboard, &sink).await? {
                         return Ok(()); // browser link gone
                     }
                     continue;
@@ -733,8 +747,8 @@ async fn read_loop(
                     state.remote = Some(snapshot.clone());
                     snapshot
                 };
-                if frame_tx
-                    .send(ServerMsg::Clipboard {
+                if sink
+                    .msg(ServerMsg::Clipboard {
                         text: snapshot.text,
                         changed_at_ms: snapshot.changed_at_ms,
                         requested: false,
@@ -759,7 +773,7 @@ async fn extended_cut_text(
     body: &[u8],
     writer: &SharedWriter,
     clipboard: &SharedClipboard,
-    frame_tx: &mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let message = match vnc_clipboard::parse(body) {
         Ok(message) => message,
@@ -818,8 +832,8 @@ async fn extended_cut_text(
                 state.remote = Some(snapshot.clone());
                 snapshot
             };
-            if frame_tx
-                .send(ServerMsg::Clipboard {
+            if sink
+                .msg(ServerMsg::Clipboard {
                     text: snapshot.text,
                     changed_at_ms: snapshot.changed_at_ms,
                     requested: false,
@@ -844,8 +858,8 @@ async fn extended_cut_text(
                 state.remote = Some(snapshot.clone());
                 snapshot
             };
-            if frame_tx
-                .send(ServerMsg::Clipboard {
+            if sink
+                .msg(ServerMsg::Clipboard {
                     text: snapshot.text,
                     changed_at_ms: snapshot.changed_at_ms,
                     requested: false,
@@ -891,7 +905,7 @@ async fn extended_cut_text(
 async fn read_rect(
     reader: &mut Reader,
     shared: &Shared,
-    frame_tx: &mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { writer, desktop, cursor, shadow, .. } = shared;
     let x = reader.read_u16().await?;
@@ -905,11 +919,11 @@ async fn read_rect(
         // size, never a framebuffer position — so it skips the bounds check
         // and tile path below entirely.
         ENCODING_CURSOR => {
-            read_cursor(reader, cursor, (x, y, w, h), frame_tx).await?;
+            read_cursor(reader, cursor, (x, y, w, h), sink).await?;
             return Ok(false);
         }
         // DesktopSize: the rect itself is the announcement; no payload.
-        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, shadow, (w, h), frame_tx).await,
+        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, shadow, (w, h), sink).await,
         ENCODING_EXTENDED_DESKTOP_SIZE => {
             return read_extended_desktop_size(
                 reader,
@@ -917,7 +931,7 @@ async fn read_rect(
                 desktop,
                 shadow,
                 (x, y, w, h),
-                frame_tx,
+                sink,
             )
             .await;
         }
@@ -953,25 +967,14 @@ async fn read_rect(
         return Ok(false);
     };
 
-    let mut buf = Vec::new();
     for band in changed.bands() {
         // Cropped out of the rect just read rather than out of the shadow: the
-        // bytes are the same and this needs no lock.
-        tiles::crop(&rgb, rect, band, &mut buf);
-        let tile = Tile::from_rgb(band.left, band.top, band.w(), band.h(), &buf)?;
-        debug!(
-            "vnc: tile {}x{} at ({},{}): {} -> {} bytes",
-            band.w(),
-            band.h(),
-            band.left,
-            band.top,
-            buf.len(),
-            tile.data.len()
-        );
-        frame_tx
-            .send(ServerMsg::Tile(tile))
-            .await
-            .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+        // bytes are the same and this needs no lock. Its own buffer per band, since
+        // the encoder reads it after this function has returned and `rgb` is gone.
+        let mut pixels = Vec::new();
+        tiles::crop(&rgb, rect, band, &mut pixels);
+        sink.tile(band.left, band.top, band.w(), band.h(), pixels)
+            .await?;
     }
     Ok(false)
 }
@@ -988,7 +991,7 @@ async fn read_cursor<R: AsyncRead + Unpin>(
     reader: &mut R,
     cursor: &SharedCursor,
     (hx, hy, w, h): (u16, u16, u16, u16),
-    frame_tx: &mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
 ) -> anyhow::Result<()> {
     let (state, msg) = if w == 0 || h == 0 {
         debug!("vnc: server hid the pointer");
@@ -1015,10 +1018,7 @@ async fn read_cursor<R: AsyncRead + Unpin>(
         }
     };
     *cursor.lock().unwrap() = state;
-    frame_tx
-        .send(msg)
-        .await
-        .map_err(|_| anyhow::anyhow!("frame channel closed"))
+    sink.msg(msg).await
 }
 
 /// The [`ServerMsg`] that reproduces the current pointer state for a browser
@@ -1042,7 +1042,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>
     desktop: &SharedDesktop,
     shadow: &SharedShadow,
     (reason, status, w, h): (u16, u16, u16, u16),
-    frame_tx: &mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let screens = reader.read_u8().await?;
     let mut padding = [0u8; 3];
@@ -1070,7 +1070,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>
         warn!("vnc: server rejected SetDesktopSize (status {status})");
         false
     } else {
-        apply_resize(desktop, shadow, (w, h), frame_tx).await?
+        apply_resize(desktop, shadow, (w, h), sink).await?
     };
 
     // Replay a viewport report that arrived before support was declared.
@@ -1095,7 +1095,7 @@ async fn apply_resize(
     desktop: &SharedDesktop,
     shadow: &SharedShadow,
     new: (u16, u16),
-    frame_tx: &mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
 ) -> anyhow::Result<bool> {
     anyhow::ensure!(
         new.0 > 0 && new.1 > 0,
@@ -1114,14 +1114,13 @@ async fn apply_resize(
     // browser is about to reallocate its canvas.
     shadow.lock().unwrap().resize(new.0, new.1);
     info!("vnc: desktop resized to {}x{}", new.0, new.1);
-    frame_tx
-        .send(ServerMsg::Resize {
+    sink
+        .msg(ServerMsg::Resize {
             w: new.0,
             h: new.1,
             scale: UNSCALED,
         })
-        .await
-        .map_err(|_| anyhow::anyhow!("frame channel closed"))?;
+        .await?;
     Ok(true)
 }
 
@@ -1215,7 +1214,7 @@ fn translate_input(
         // Intercepted by the input loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Intercepted by the input loop (the clipboard bridge, which needs the
-        // shared buffer and frame_tx) before translation.
+        // shared buffer and the tile sink) before translation.
         ClientMsg::Clipboard { .. } | ClientMsg::ClipboardRequest => Vec::new(),
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
@@ -2020,15 +2019,15 @@ mod tests {
     #[tokio::test]
     async fn cursor_rect_is_cached_and_forwarded_as_an_rgba_png() {
         let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
-        let (tx, mut rx) = mpsc::channel(4);
+        let (sink, mut rx) = test_sink();
         // 2x1: an opaque red pixel then a masked-out one.
         let mut payload = vec![0, 0, 255, 0, 9, 9, 9, 0]; // BGRX
         payload.push(0b1000_0000); // mask row
         let mut reader = payload.as_slice();
 
-        read_cursor(&mut reader, &cursor, (1, 2, 2, 1), &tx).await.unwrap();
+        read_cursor(&mut reader, &cursor, (1, 2, 2, 1), &sink).await.unwrap();
 
-        let shape = match rx.try_recv().unwrap() {
+        let shape = match forwarded(&sink, &mut rx).await.unwrap() {
             ServerMsg::Cursor(Some(shape)) => shape,
             other => panic!("unexpected: {other:?}"),
         };
@@ -2044,10 +2043,10 @@ mod tests {
     #[tokio::test]
     async fn empty_cursor_rect_hides_the_pointer() {
         let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
-        let (tx, mut rx) = mpsc::channel(4);
+        let (sink, mut rx) = test_sink();
         // No payload at all for a 0x0 rect.
-        read_cursor(&mut [].as_slice(), &cursor, (0, 0, 0, 0), &tx).await.unwrap();
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Cursor(None))));
+        read_cursor(&mut [].as_slice(), &cursor, (0, 0, 0, 0), &sink).await.unwrap();
+        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(None))));
         // Hidden is still browser-drawn state, so it replays on reattach —
         // unlike ServerDrawn, which must stay silent.
         assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
@@ -2056,18 +2055,18 @@ mod tests {
     #[tokio::test]
     async fn oversized_cursor_is_drained_and_hides_the_pointer() {
         let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
-        let (tx, mut rx) = mpsc::channel(4);
+        let (sink, mut rx) = test_sink();
         let (w, h) = (MAX_CURSOR_DIM + 1, 1);
         let mut payload = vec![0u8; usize::from(w) * BPP + usize::from(w).div_ceil(8)];
         // A trailing byte stands in for the next rect: it must survive.
         payload.push(0xAB);
         let mut reader = payload.as_slice();
 
-        read_cursor(&mut reader, &cursor, (0, 0, w, h), &tx).await.unwrap();
+        read_cursor(&mut reader, &cursor, (0, 0, w, h), &sink).await.unwrap();
         assert_eq!(reader, &[0xAB]);
         // The shape is dropped, but the server still isn't drawing the pointer,
         // so the browser is told to fall back rather than left with nothing.
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Cursor(None))));
+        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(None))));
         assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
     }
 
@@ -2184,6 +2183,26 @@ mod tests {
         Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1)))
     }
 
+    /// A sink and the frame channel behind it.
+    fn test_sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
+        let (frame_tx, frame_rx) = mpsc::channel(8);
+        (TileSink::new("vnc", frame_tx), frame_rx)
+    }
+
+    /// What the sink has forwarded so far, or `None` for nothing.
+    ///
+    /// The flush is the point: a [`TileSink`] forwards from a task of its own, so a
+    /// bare `try_recv` would race it and read `None` for a message that is on its
+    /// way. `None` here means the engine sent nothing, which is what these tests
+    /// mean when they assert it.
+    async fn forwarded(
+        sink: &TileSink,
+        rx: &mut mpsc::Receiver<ServerMsg>,
+    ) -> Option<ServerMsg> {
+        sink.flush().await;
+        rx.try_recv().ok()
+    }
+
     #[tokio::test]
     async fn a_server_that_hangs_up_is_reported_instead_of_ending_quietly() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2196,7 +2215,7 @@ mod tests {
 
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (read_half, write_half) = client.into_split();
-        let (frame_tx, _frame_rx) = mpsc::channel(4);
+        let (sink, _frames) = test_sink();
         let err = read_loop(
             BufReader::new(read_half),
             Shared {
@@ -2207,7 +2226,7 @@ mod tests {
                 shadow: test_shadow((1280, 800)),
             },
             false,
-            frame_tx,
+            sink,
         )
         .await
         .unwrap_err();
@@ -2256,7 +2275,7 @@ mod tests {
     #[tokio::test]
     async fn extended_desktop_size_declares_support_and_replays_pending() {
         let writer = test_writer();
-        let (tx, mut rx) = mpsc::channel(8);
+        let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((1024, 768), None, Some((800, 600)));
         let screen = Screen { id: 3, flags: 0 };
 
@@ -2268,7 +2287,7 @@ mod tests {
             &desktop,
             &test_shadow((1024, 768)),
             (0, 0, 1024, 768),
-            &tx,
+            &sink,
         )
         .await
         .unwrap();
@@ -2281,14 +2300,14 @@ mod tests {
         assert_eq!(screen_id, Some(3), "support recorded");
         assert_eq!(pending, None, "stash consumed");
         // No browser resize (same size), but the stashed report replays.
-        assert!(rx.try_recv().is_err());
+        assert!(forwarded(&sink, &mut rx).await.is_none());
         assert_eq!(written(&writer).await, set_desktop_size((800, 600), screen));
     }
 
     #[tokio::test]
     async fn extended_desktop_size_applies_a_change_and_tells_the_browser() {
         let writer = test_writer();
-        let (tx, mut rx) = mpsc::channel(8);
+        let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((1024, 768), None, None);
 
         // Our SetDesktopSize succeeded (reason 1, status 0) at 800x600.
@@ -2299,21 +2318,22 @@ mod tests {
             &desktop,
             &test_shadow((1024, 768)),
             (1, 0, 800, 600),
-            &tx,
+            &sink,
         )
         .await
         .unwrap();
 
         assert!(resized);
         assert_eq!(desktop.lock().unwrap().size, (800, 600));
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 800, h: 600, scale: UNSCALED })));
+        let resize = forwarded(&sink, &mut rx).await;
+        assert!(matches!(resize, Some(ServerMsg::Resize { w: 800, h: 600, scale: UNSCALED })));
         assert!(written(&writer).await.is_empty(), "nothing left to request");
     }
 
     #[tokio::test]
     async fn rejected_set_desktop_size_leaves_the_size_alone() {
         let writer = test_writer();
-        let (tx, mut rx) = mpsc::channel(8);
+        let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((1024, 768), Some(Screen { id: 1, flags: 0 }), None);
 
         // reason 1, status 1 = our request was prohibited.
@@ -2324,37 +2344,38 @@ mod tests {
             &desktop,
             &test_shadow((1024, 768)),
             (1, 1, 640, 480),
-            &tx,
+            &sink,
         )
         .await
         .unwrap();
 
         assert!(!resized);
         assert_eq!(desktop.lock().unwrap().size, (1024, 768));
-        assert!(rx.try_recv().is_err(), "no resize reported to the browser");
+        assert!(forwarded(&sink, &mut rx).await.is_none(), "no resize reported to the browser");
         assert!(written(&writer).await.is_empty());
     }
 
     #[tokio::test]
     async fn apply_resize_dedupes_and_rejects_zero_sizes() {
-        let (tx, mut rx) = mpsc::channel(8);
+        let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((1024, 768), None, None);
         let shadow = test_shadow((1024, 768));
 
         // Same size: no change, nothing sent to the browser.
-        assert!(!apply_resize(&desktop, &shadow, (1024, 768), &tx).await.unwrap());
-        assert!(rx.try_recv().is_err());
+        assert!(!apply_resize(&desktop, &shadow, (1024, 768), &sink).await.unwrap());
+        assert!(forwarded(&sink, &mut rx).await.is_none());
 
         // A real change updates the state and reaches the browser.
-        assert!(apply_resize(&desktop, &shadow, (640, 480), &tx).await.unwrap());
+        assert!(apply_resize(&desktop, &shadow, (640, 480), &sink).await.unwrap());
         assert_eq!(desktop.lock().unwrap().size, (640, 480));
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
+        let resize = forwarded(&sink, &mut rx).await;
+        assert!(matches!(resize, Some(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
         // And the shadow follows it, or the next rect would be compared against a
         // framebuffer that no longer exists.
         assert_eq!(shadow.lock().unwrap().size(), (640, 480));
 
         // A zero dimension is a protocol violation, not a resize.
-        assert!(apply_resize(&desktop, &shadow, (0, 480), &tx).await.is_err());
+        assert!(apply_resize(&desktop, &shadow, (0, 480), &sink).await.is_err());
     }
 
     /// Feed one key event through `translate_input`, carrying the browser's
