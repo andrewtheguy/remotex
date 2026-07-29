@@ -19,21 +19,29 @@
 // fresh autoplay attempt long after the click that permitted it, which iOS Safari
 // may refuse.
 //
-// **Native `controls`, and that is the point of this panel.** Whether a browser
-// plays such a response *progressively* rather than waiting for it to end is the
-// question this whole path exists to answer, and the browser's own transport
-// controls are where that shows: a stream that is playing, one that is stalled,
-// and one that never started look different here and identical behind a custom
-// button. They are also the fallback the autoplay policy needs — `autoPlay` is
-// honest because this panel is mounted by a click, but a browser may still refuse
-// it, and then there is a visible Play to press.
+// **Enable/disable, not the native transport.** This element carries no `controls`,
+// and that is a change of mind worth recording: the native controls were the point
+// of this panel while the open question was whether a browser plays an open-ended
+// response *progressively*, because a stream that is playing, one that is stalled
+// and one that never started look different in them. That question is answered, so
+// what is left is a control that fits a live stream — and a transport does not. Its
+// scrubber and elapsed time describe a recording that can be returned to, when this
+// has no beginning; and its Pause does not pause the remote, it only drops the
+// listener behind live for the rest of the session, since a media element resumes
+// where it stopped and never skips forward.
 //
-// **Closing the panel stops the sound**, because the element goes with it and the
-// HTTP response ends when its consumer disconnects. That is a real limitation —
-// the panel sits over the bottom of the desktop while it plays — and the trade for
+// So the one control is a toggle, and disabling really disables: the element is
+// unmounted, which ends the HTTP response, and enabling mounts a new one that starts
+// at the live edge. That also makes it the way back if playback ever does fall
+// behind. The trade is that in-page volume goes with the native controls, leaving
+// the system's own; the panel is for listening to a desktop, not for mixing it.
+//
+// **Closing the panel stops the sound**, for the same reason: the element goes with
+// it and the response ends when its consumer disconnects. That is a real limitation
+// — the panel sits over the bottom of the desktop while it plays — and the trade for
 // not portalling one element through two components in a proof of concept.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDockedHeight } from "./SoftKeyboardPanel.tsx";
 
 interface Props {
@@ -50,12 +58,30 @@ export default function AudioPanel({
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   useDockedHeight(panelRef, onDockedHeightChange);
+  const playerRef = useRef<HTMLAudioElement>(null);
+  // Enabled the moment the panel opens. The click that opened it is what permits
+  // playback, so spending that click on a second button would be the worse default.
+  const [enabled, setEnabled] = useState(true);
   // Set from the element's own `error` event, which is how a refusal from the
   // endpoint reaches this side — a media element reports a failed load as an error
   // on itself and never as a rejected promise. A quiet remote is not one of those
   // refusals any more; what is left is a stale claim token (403) and a session with
   // no audio source at all (503).
   const [failed, setFailed] = useState(false);
+  // Autoplay refused. Without the native controls there is no Play button of the
+  // browser's own to fall back on, so this has to be visible: the toggle below says
+  // "Enable audio" again, and pressing it is a fresh gesture.
+  const [blocked, setBlocked] = useState(false);
+
+  // `autoPlay` covers the ordinary case; this covers the one it cannot report,
+  // since a refused autoplay is silent — no event, no rejection to observe. Calling
+  // `play()` ourselves gives us the rejection.
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    playerRef.current?.play().catch(() => setBlocked(true));
+  }, [enabled]);
 
   return (
     <div className="panel" ref={panelRef}>
@@ -72,22 +98,42 @@ export default function AudioPanel({
       </div>
 
       <div className="ap-body">
-        {/* No `muted`: this element exists to be heard. No `loop`, no
-            `preload` — the response has no length to preload and no beginning to
-            return to. */}
-        {/* biome-ignore lint/a11y/useMediaCaption: live desktop audio has no caption track to offer */}
-        <audio
-          className="ap-player"
-          src={src}
-          controls
-          autoPlay
-          onPlaying={() => setFailed(false)}
-          onError={() => setFailed(true)}
-        />
+        <button
+          type="button"
+          className="toolbar-btn ap-toggle"
+          aria-pressed={enabled}
+          onClick={() => {
+            setFailed(false);
+            setBlocked(false);
+            setEnabled((on) => !on);
+          }}
+        >
+          {enabled && !blocked ? "Disable audio" : "Enable audio"}
+        </button>
+        {/* No `muted`: this element exists to be heard. No `loop`, no `preload`,
+            no `controls` — the response has no length to preload, no beginning to
+            return to, and nothing a transport could usefully do to it. */}
+        {enabled && (
+          // biome-ignore lint/a11y/useMediaCaption: live desktop audio has no caption track to offer
+          <audio
+            ref={playerRef}
+            src={src}
+            autoPlay
+            onPlaying={() => {
+              setFailed(false);
+              setBlocked(false);
+            }}
+            onError={() => setFailed(true)}
+          />
+        )}
         <p className="ap-note">
           {failed
             ? "The gateway would not stream this session's audio. It ends when the target disconnects or another browser takes the session over."
-            : "Live sound from the remote desktop, silent until something plays there. Closing this panel stops it."}
+            : blocked
+              ? "This browser would not start playback on its own. Press Enable audio."
+              : enabled
+                ? "Live sound from the remote desktop, silent until something plays there. Closing this panel stops it."
+                : "Audio is off. Enabling it starts a new stream at whatever the remote is playing now."}
         </p>
       </div>
     </div>

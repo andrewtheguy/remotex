@@ -30,9 +30,10 @@ streaming audio client, so the gateway serves the claimed session's sound as an
 ordinary open-ended HTTP response — Ogg/Opus, so a session costs ~96 kbps of
 audio rather than the 1.4 Mbit/s the RDP side delivers — and the SPA points a
 plain `<audio>` element at it ([`remote-audio.md`](remote-audio.md)). That response
-never waits for the remote to make a sound and never goes dry: it fills gaps with
-encoded silence (0.32 kB/s), which is what lets the element start playing on its own
-whenever the remote does, and again after it stops.
+never waits for the remote to make a sound and never goes dry: it trickles encoded
+silence through the gaps (0.09 kB/s, at a fifth of real time so a listener catches
+back up rather than staying behind), which is what lets the element start playing on
+its own whenever the remote does, and again after it stops.
 
 ## Constraints
 

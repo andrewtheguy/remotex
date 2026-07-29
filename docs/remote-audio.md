@@ -9,7 +9,7 @@ Audio does not belong in the desktop WebSocket for this path. The browser alread
 has a streaming audio client:
 
 ```html
-<audio controls src="/api/session/audio?session=…"></audio>
+<audio autoplay src="/api/session/audio?session=…"></audio>
 ```
 
 That leaves the gateway responsible for the RDP side and the HTTP response, and
@@ -133,23 +133,29 @@ panel, which is also the only autoplay attempt a policy has to permit.
 
 Three things about that keepalive are worth knowing:
 
-- **It is anchored to the clock, not to a quiet timer** (`audio::silence_owed`).
-  Real audio counts towards the same frame budget, so a remote delivering at real
-  time is owed no silence and never has filler mixed into its sound, while one that
-  stalls and then delivers its backlog is briefly *ahead* rather than permanently
-  late. A rule that padded after every quiet interval would add that delay on each
-  hiccup and never give it back. The stream is kept 400 ms ahead of real time so the
-  element has something buffered instead of re-stalling at the live edge, a top-up is
-  capped at 1 s per check, and a hole larger than 5 s — a consumer that stopped
-  reading, a laptop that slept — is skipped rather than paid back.
-- **It costs 0.32 kB/s**, measured on the tone harness: 13.45 kB/s while the tone
-  plays, 0.32 kB/s in the gaps, with the boundary seconds landing halfway between.
-  Silence is cheap because Opus is VBR by default, and cheaper still because a whole
-  batch of silence packets shares one Ogg page rather than paying a ~27-byte page
-  header each — audio ends a page per packet, since audio has a reason to be prompt.
-- **It reduces the timeline drift rather than removing it.** Granule positions now
-  advance through a gap, so `currentTime` tracks wall clock: a 26 s pull across five
-  phase changes decoded to 26.25 s.
+- **The silence is deliberately slower than real time**: 100 ms of it every 500 ms,
+  a fifth of the clock. This was first written to *keep pace* with the clock, and
+  that version was wrong in a way worth remembering, because it looked more correct:
+  a media element resumes where it stopped and **never skips forward**, so a
+  keepalive that matches real time preserves whatever the element fell behind by
+  during its start-up buffering or one hiccup, for the rest of the session. Lag
+  accumulated and had nothing to shed it — noticeably, within a few minutes. At a
+  fifth of real time, a quiet remote is instead when a listener catches back up: it
+  plays out its buffer at 1x while receiving 0.2x, so a second of lag is gone after
+  about a second and a quarter of quiet, and the sound arrives at an element that is
+  starved rather than ahead. Measured against the live target: 20 s of a quiet host
+  produced 3.91 s of stream.
+- **The interval is what keeps filler out of real audio.** 500 ms is comfortably more
+  than the ~185 ms a live host leaves between wave buffers, so while audio is
+  arriving the timer never fires. The tone harness confirms it: 13.45 kB/s during the
+  tone, unchanged by the keepalive existing, and a 26 s pull across five phase changes
+  came to 16.99 s of stream — the tone in full, plus a fifth of the quiet.
+- **It costs 0.09 kB/s** in the steady state, and about 7 kB extra across the first
+  four seconds of each gap, because libopus's rate controller takes that long to
+  settle from 240-byte packets down to 9-byte ones. Silence is cheap because Opus is
+  VBR by default, and cheaper still because a whole batch of silence packets shares
+  one Ogg page rather than paying a ~27-byte page header each — audio ends a page per
+  packet, since audio has a reason to be prompt.
 
 The cost of all this is diagnostic, and it is real: a target whose host offers no
 compatible format now sounds exactly like one that is merely quiet. The gateway log
@@ -191,14 +197,29 @@ exactly the substitution the original design reserved the right to make.
 
 **The SPA** offers an Audio row in the floating menu for a session whose
 `connected` message carried `audio` (`frontend/src/AudioPanel.tsx`). It opens a
-docked panel holding a native `<audio controls autoPlay>`. `autoPlay` is honest
-because the panel is mounted by a click, and the native controls are the fallback
-when browser policy refuses it anyway — they are also the reason to use them here
-rather than a button of our own, since a stream that is playing, one that is
-stalled, and one that never started look different in them and identical behind a
-custom control. Closing the panel unmounts the element and so ends the response;
-that is a real limitation, and the trade for not portalling one element through
-two components in a proof of concept.
+docked panel holding an `<audio autoPlay>` with **no `controls`** and one button of
+its own: Disable audio / Enable audio.
+
+The native controls were used here first, and for a reason that expired. While the
+open question was whether a browser plays an open-ended response *progressively*,
+the transport was the instrument: a stream that is playing, one that is stalled and
+one that never started look different in it and identical behind a control of our
+own. That question is answered, and what a native transport offers a live stream is
+now actively wrong — a scrubber and an elapsed time describe a recording that can be
+returned to, and its Pause does not pause the remote, it drops the listener behind
+live for the rest of the session, for the same reason the keepalive has to trickle.
+
+So the panel's one control enables and disables, and disabling means it: the element
+is unmounted, which ends the HTTP response, and enabling mounts a new one that starts
+at the live edge — which also makes it the way back if playback ever does fall
+behind. `autoPlay` is honest because the panel is mounted by a click; `play()` is
+called as well, because a refused autoplay is otherwise silent, and its rejection is
+what puts the button back to "Enable audio" with a line saying so. The trade is that
+in-page volume went with the native controls, leaving the system's own.
+
+Closing the panel unmounts the element and so ends the response; that is a real
+limitation, and the trade for not portalling one element through two components in a
+proof of concept.
 
 ## Lifetime and backpressure
 

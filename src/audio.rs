@@ -45,6 +45,11 @@
 //! opened the panel; nothing to re-load, no second autoplay attempt for a browser
 //! policy to refuse, and no restart delay when sound returns.
 //!
+//! That silence trickles rather than keeping pace with the clock, which is the part
+//! that is easy to get wrong — see [`SILENCE_TRICKLE_FRAMES`]. A media element never
+//! skips forward, so a keepalive that matched real time would make start-up
+//! buffering and every hiccup permanent lag.
+//!
 //! FreeRDP makes the same call one layer down: its `rdpsnd_recv_close_pdu` only
 //! logs, deliberately leaving the local audio device open, and reopens it on the
 //! next wave. A server closing the channel is not a teardown.
@@ -72,50 +77,30 @@ pub const AUDIO_QUEUE_DEPTH: usize = 64;
 const FRAME: Duration =
     Duration::from_nanos(FRAME_FRAMES as u64 * 1_000_000_000 / OPUS_SAMPLE_RATE as u64);
 
-/// How often the keepalive asks whether the stream owes any silence. Nothing is
-/// emitted unless the arithmetic in [`silence_owed`] says so, so this is a polling
-/// interval and not a cadence.
-const SILENCE_CHECK: Duration = Duration::from_millis(200);
-
-/// How far ahead of real time the keepalive keeps the stream, in frames — 400 ms.
+/// How long the keepalive lets the stream go without sending anything.
 ///
-/// Paid once, at the start, and then maintained: without it the element would sit
-/// exactly at the live edge, playing each page out as fast as it arrives and
-/// re-stalling every time it catches up. The cost is that opening the panel while
-/// the remote is already playing inserts 400 ms of silence in front of the sound,
-/// which is indistinguishable from the buffering a media element does anyway.
-const SILENCE_LEAD_FRAMES: u64 = 20;
+/// Comfortably longer than the ~185 ms a live host leaves between wave buffers, so
+/// while real audio is arriving this never fires and no filler is mixed into it.
+const SILENCE_CHECK: Duration = Duration::from_millis(500);
 
-/// Most silence one check may emit: 1 s. Filling a hole should arrive as a top-up
-/// rather than a flood.
-const SILENCE_CATCHUP_FRAMES: u64 = 50;
-
-/// Past this much owed — 5 s — nothing was reading this stream at all: a consumer
-/// that stopped polling, or a laptop that slept. Paying that back in silence would
-/// only delay the next real audio behind it, so the dead period is skipped instead.
-const SILENCE_RESYNC_FRAMES: u64 = 250;
-
-/// How many frames of silence the stream owes, given how long it has been open and
-/// how much it has encoded.
+/// How much silence it sends when it does fire: 100 ms, against that 500 ms wait.
 ///
-/// Anchored to the clock rather than to "nothing has arrived for N ms", and that is
-/// the whole trick: real audio counts towards `encoded` too, so a remote delivering
-/// at real time is owed nothing and never has filler mixed into its sound, while a
-/// remote that stalls and then delivers its backlog is briefly *ahead* rather than
-/// permanently late. A rule that padded after every quiet interval would add that
-/// delay on each hiccup and never give it back.
+/// **Deliberately slower than real time, and that is the whole point of the number.**
+/// A keepalive that kept pace with the clock — which is what this was first — keeps
+/// the element alive but makes every stall permanent: a media element resumes where
+/// it stopped and never skips forward, so whatever it fell behind by during start-up
+/// buffering or one hiccup, it stays behind by, and a session accumulates seconds of
+/// lag with nothing to shed them.
 ///
-/// `skipped` records frames deliberately not paid back, and is why a resync is
-/// permanent rather than re-owed on the next check.
-fn silence_owed(elapsed: Duration, encoded: u64, skipped: &mut u64) -> usize {
-    let target = (elapsed.as_nanos() / FRAME.as_nanos()) as u64 + SILENCE_LEAD_FRAMES;
-    let owed = target.saturating_sub(encoded + *skipped);
-    if owed > SILENCE_RESYNC_FRAMES {
-        *skipped += owed;
-        return 0;
-    }
-    owed.min(SILENCE_CATCHUP_FRAMES) as usize
-}
+/// At a fifth of real time, a quiet remote is instead when a listener catches back
+/// up: the element plays out its buffer at 1x while receiving 0.2x, so a second of
+/// lag is gone after about a second and a quarter of quiet. It arrives at the sound
+/// starved rather than ahead, which is what playing at the live edge means.
+const SILENCE_TRICKLE: Duration = Duration::from_millis(100);
+
+/// The same in Opus frames, which is the unit the encoder cuts silence in.
+const SILENCE_TRICKLE_FRAMES: usize =
+    (SILENCE_TRICKLE.as_nanos() / FRAME.as_nanos()) as usize;
 
 /// Linear PCM parameters: the only kind of audio this path carries.
 ///
@@ -330,12 +315,6 @@ impl AudioListener {
             header: Option<Vec<u8>>,
             waves: broadcast::Receiver<Vec<u8>>,
             stop: oneshot::Receiver<()>,
-            /// When this response opened, which is what the keepalive measures
-            /// against. `tokio`'s clock rather than the standard library's, so
-            /// `tokio::time::pause` can drive it in tests.
-            started: tokio::time::Instant,
-            /// Frames the keepalive decided not to pay back — see [`silence_owed`].
-            skipped: u64,
         }
 
         let (encoder, header) = match OggOpus::new(format) {
@@ -354,8 +333,6 @@ impl AudioListener {
             header,
             waves: self.waves,
             stop: self.stop,
-            started: tokio::time::Instant::now(),
-            skipped: 0,
         };
         futures_util::stream::unfold(state, |mut state| async move {
             if let Some(header) = state.header.take() {
@@ -380,18 +357,12 @@ impl AudioListener {
                         }
                         Err(broadcast::error::RecvError::Closed) => return None,
                     },
-                    // The keepalive. A fresh timer each iteration, so an arriving
-                    // buffer resets it — which costs nothing, since how much
-                    // silence is owed comes from the clock and not from this.
+                    // The keepalive. A fresh timer each iteration, so it only fires
+                    // when nothing has arrived for the whole interval — and it hands
+                    // over less than the interval's worth, so a quiet remote drains
+                    // the listener's backlog instead of holding it.
                     _ = tokio::time::sleep(SILENCE_CHECK) => {
-                        match silence_owed(
-                            state.started.elapsed(),
-                            encoder.frames_encoded(),
-                            &mut state.skipped,
-                        ) {
-                            0 => continue,
-                            owed => encoder.push_silence(owed),
-                        }
+                        encoder.push_silence(SILENCE_TRICKLE_FRAMES)
                     }
                 };
                 match encoded {
@@ -570,39 +541,26 @@ mod tests {
         assert_eq!(page_count(&next(&mut stream).await.unwrap()), 1);
     }
 
-    /// The keepalive's arithmetic, tested as arithmetic: at this scale the rules are
-    /// easier to state in numbers than to observe through an encoder.
+    /// The two properties the keepalive's numbers have to keep, both of which were
+    /// learnt by getting them wrong. Pinned here because they are invisible in the
+    /// arm that uses them: it is two constants and a `sleep`.
     #[test]
-    fn the_keepalive_pays_the_lead_once_and_then_tracks_real_time() {
-        let mut skipped = 0;
-        // Nothing encoded yet: the lead plus the elapsed frames.
-        assert_eq!(silence_owed(FRAME * 10, 0, &mut skipped), 30);
-        // Having paid it, a stream keeping up owes nothing — including one whose
-        // frames are real audio rather than silence.
-        assert_eq!(silence_owed(FRAME * 10, 30, &mut skipped), 0);
-        assert_eq!(silence_owed(FRAME * 100, 120, &mut skipped), 0);
-        // A remote briefly ahead of the clock (a stall, then its backlog) is not
-        // owed negative silence.
-        assert_eq!(silence_owed(FRAME * 100, 500, &mut skipped), 0);
-        assert_eq!(skipped, 0, "nothing here was a dead period");
-    }
-
-    #[test]
-    fn the_keepalive_tops_up_in_bounded_steps_and_skips_a_dead_period() {
-        let mut skipped = 0;
-        // A 3 s hole is filled a second at a time rather than in one flood.
-        assert_eq!(
-            silence_owed(FRAME * 150, 0, &mut skipped),
-            SILENCE_CATCHUP_FRAMES as usize
+    fn the_keepalive_trickles_rather_than_keeps_pace() {
+        // Slower than real time, or a listener that fell behind stays behind: it
+        // plays out at 1x and can only catch up while receiving less than that.
+        assert!(
+            SILENCE_TRICKLE * 2 < SILENCE_CHECK,
+            "silence must arrive well under real time, \
+             got {SILENCE_TRICKLE:?} per {SILENCE_CHECK:?}"
         );
-        assert_eq!(skipped, 0);
-
-        // A minute of not being polled is skipped, permanently: the next check is
-        // owed only the time that passed since it, not the minute.
-        let mut skipped = 0;
-        assert_eq!(silence_owed(FRAME * 3_000, 0, &mut skipped), 0);
-        assert_eq!(skipped, 3_000 + SILENCE_LEAD_FRAMES);
-        assert_eq!(silence_owed(FRAME * 3_010, 0, &mut skipped), 10);
+        // And the frame count has to be that duration, not a number beside it.
+        assert_eq!(FRAME * SILENCE_TRICKLE_FRAMES as u32, SILENCE_TRICKLE);
+        // And long enough not to fire between a live host's wave buffers, which
+        // would mix filler into real audio.
+        assert!(
+            SILENCE_CHECK > Duration::from_millis(370),
+            "a host sends a buffer every ~185 ms; leave it room"
+        );
     }
 
     #[tokio::test]
