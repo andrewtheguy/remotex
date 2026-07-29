@@ -188,11 +188,12 @@ fn main() -> anyhow::Result<()> {
             // reachable.
             let body =
                 format!("{e:#}\n\nFix the config file, then quit and reopen remotex-agent.");
-            report_startup_failure("remotex-agent could not start", &body);
-            if let Some(starting) = starting {
-                starting.fail("remotex-agent could not start", &body);
-            }
-            return Ok(());
+            return Err(startup_error(
+                starting,
+                "remotex-agent could not start",
+                &body,
+                e,
+            ));
         }
     };
 
@@ -245,23 +246,24 @@ fn main() -> anyhow::Result<()> {
                  of remotex-agent, its icon is in the menu bar at the top of the screen.",
                 config.listen
             );
-            report_startup_failure("remotex-agent cannot listen", &body);
-            if let Some(starting) = starting {
-                starting.fail("remotex-agent cannot listen", &body);
-            }
-            return Ok(());
+            return Err(startup_error(
+                starting,
+                "remotex-agent cannot listen",
+                &body,
+                e.into(),
+            ));
         }
         Err(e) => {
             let body = format!(
-                "{} could not be bound: {e}\n\nChange the listen address from the menu \
-                 bar item of the running agent, or in the config file.",
+                "{} could not be bound: {e}\n\nChange the listen address in the config file.",
                 config.listen
             );
-            report_startup_failure("remotex-agent cannot listen", &body);
-            if let Some(starting) = starting {
-                starting.fail("remotex-agent cannot listen", &body);
-            }
-            return Ok(());
+            return Err(startup_error(
+                starting,
+                "remotex-agent cannot listen",
+                &body,
+                e.into(),
+            ));
         }
     };
     info!("agent: listening on {}", config.listen);
@@ -269,11 +271,12 @@ fn main() -> anyhow::Result<()> {
     // reactor.
     if let Err(e) = listener.set_nonblocking(true) {
         let body = format!("{} could not be made non-blocking: {e}", config.listen);
-        report_startup_failure("remotex-agent cannot listen", &body);
-        if let Some(starting) = starting {
-            starting.fail("remotex-agent cannot listen", &body);
-        }
-        return Ok(());
+        return Err(startup_error(
+            starting,
+            "remotex-agent cannot listen",
+            &body,
+            e.into(),
+        ));
     }
 
     // Keep the pre-request Screen Recording state: granting it in the system
@@ -412,11 +415,12 @@ fn main() -> anyhow::Result<()> {
         });
     if let Err(e) = network {
         let body = format!("Could not start the network worker: {e}");
-        report_startup_failure("remotex-agent could not start", &body);
-        if let Some(starting) = starting {
-            starting.fail("remotex-agent could not start", &body);
-        }
-        return Err(e.into());
+        return Err(startup_error(
+            starting,
+            "remotex-agent could not start",
+            &body,
+            e.into(),
+        ));
     }
 
     if args.no_menu {
@@ -440,13 +444,22 @@ fn main() -> anyhow::Result<()> {
     )
 }
 
-/// Record why the serving half of the agent could not start.
+/// Keep GUI startup failures in the degraded menu, or return them to a headless
+/// caller.
 ///
-/// GUI launches already have a status item by this point. Their caller turns it
-/// into a persistent degraded menu and shows the panel; `--no-menu` callers get
-/// this log line on their terminal and return.
-fn report_startup_failure(title: &str, body: &str) {
+/// [`menubar::Starting::fail`] never returns, while `--no-menu` has no
+/// [`menubar::Starting`] and receives the underlying error for a nonzero exit.
+fn startup_error(
+    starting: Option<menubar::Starting>,
+    title: &str,
+    body: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
     warn!("{title}: {body}");
+    if let Some(starting) = starting {
+        starting.fail(title, body);
+    }
+    error
 }
 
 /// Restart the agent to run under a config that has just changed, by asking

@@ -592,16 +592,7 @@ impl Controller {
     /// deliberately empty until it is opened — so it would be greyed out and
     /// could never be opened to fill itself in.
     fn info(&self, title: &str, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
-                None,
-                &NSString::from_str(""),
-            )
-        };
-        item.setEnabled(false);
-        item
+        info_item(title, mtm)
     }
 
     fn action(&self, title: &str, action: Sel, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
