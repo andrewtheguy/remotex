@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.54"
+version = "0.0.55"
 
 [package]
 name = "remotex"
@@ -85,10 +85,11 @@ libwebp-sys = { version = "0.9", features = ["sse41", "avx2"] }
 # packaging/build-tarball.sh sets LIBOPUS_STATIC/LIBOPUS_NO_PKG to force the
 # vendored static build on every runner.
 opus = "0.3"
-# The container. Pure Rust, and Ogg is the streamable one of Opus's containers:
-# a page can be flushed the moment a packet exists, which is what keeps a live
-# response from stalling until a buffer fills.
-ogg = "0.9"
+# There is deliberately no container. Opus packets travel as audio frames on the
+# desktop WebSocket, which already delimits them, and the browser hands them
+# straight to a WebCodecs decoder — so an Ogg dependency would buy framing that is
+# already there. `OpusHead` is still built by hand in src/opus_stream.rs, because a
+# decoder needs it wherever it arrives from.
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.

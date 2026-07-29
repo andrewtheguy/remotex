@@ -155,36 +155,18 @@ async fn websocket_upgrade_without_a_login_fails_with_401() {
     }
 }
 
-/// The audio endpoint's three refusals, which are the whole of its guard: it is
-/// behind the login like the rest of `/api`, and behind the *claim* on top of
-/// that, because a live audio stream belongs to whoever holds the single session
-/// slot rather than to anyone with a cookie.
-///
-/// A 503 rather than a 404 for the last one: this target has no audio and never
-/// connects, which reads the same way to a client as an audio channel that has
-/// not come up yet — both are worth asking about again.
-#[tokio::test]
-async fn the_audio_endpoint_needs_a_login_and_the_current_claim() {
-    let addr = spawn_app().await;
-
-    let (status, _) = get(addr, "/api/session/audio?session=whatever", None).await;
-    assert_eq!(status, 401, "audio must require a login");
-
-    let cookie = common::login(addr).await;
-    let (status, _) = get(addr, "/api/session/audio?session=forged", Some(&cookie)).await;
-    assert_eq!(status, 403, "a token that is not the claim must be refused");
-    let (status, _) = get(addr, "/api/session/audio", Some(&cookie)).await;
-    assert_eq!(status, 403, "no token at all is not the claim either");
-
-    let token = common::claim_session(addr, &cookie).await;
-    let (status, _) = get(
-        addr,
-        &format!("/api/session/audio?session={token}"),
-        Some(&cookie),
-    )
-    .await;
-    assert_eq!(status, 503, "the claim holder still needs a session with audio");
-}
+// Audio has no endpoint of its own to guard any more: it travels on `/ws`, so its
+// guard is the socket's. An endpoint's three refusals used to be tested here, and each
+// one still is, somewhere it can be:
+//
+// - **401 without a login** — `websocket_upgrade_without_a_login_fails_with_401`
+//   above, since the cookie is checked before the upgrade;
+// - **403 for a token that is not the claim** — now close code 4000 rather than a
+//   status, in `protocol_e2e::websocket_without_a_valid_token_is_closed_with_4000`;
+// - **503 for a session with no audio source** — now a no-op subscription, in
+//   `session::tests::asking_for_audio_without_a_source_changes_nothing`.
+//
+// None of them can be an HTTP assertion any more, so none of them is one.
 
 #[tokio::test]
 async fn logout_invalidates_the_session_and_clears_the_cookie() {

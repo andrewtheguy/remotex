@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type AudioPlayer,
+  audioUnavailable,
+  createAudioContext,
+  createAudioPlayer,
+  decodeAudioHead,
+} from "./audioPlayer.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { createSender } from "./outbound.ts";
 import {
   type BatchRecord,
+  binaryFrameKind,
   type ClientMsg,
   type ClipboardSnapshot,
   type ControlMsg,
   type DisplayInfo,
+  decodeAudioFrame,
   decodeBatchFrame,
   MAX_CLIPBOARD_BYTES,
   type MouseButton,
@@ -485,15 +494,21 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
-  // Where the remote's live audio can be played from, for a target that opted
-  // into it — null for every other session (see docs/remote-audio.md).
-  //
-  // The URL rather than a capability flag beside the token, because it *is* the
-  // capability: it carries the claim token this connection holds, so a reconnect
-  // (which mints a fresh token) produces a new URL and whatever is playing
-  // re-requests against the claim that is now current. Nothing else in this hook
-  // touches it — the audio path does not use the WebSocket at all.
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  // True when the connected target opted into audio, which is what puts the Audio
+  // row in the floating menu (see docs/remote-audio.md). It says this session *can*
+  // carry the remote's sound — not that any is playing, and not that the remote's
+  // audio channel is even up, which from the gateway's end are indistinguishable.
+  const [canAudio, setCanAudio] = useState(false);
+  // Whether this browser has asked for the sound. Per attachment and never
+  // remembered: it starts off on every connect and reconnect, because enabling it
+  // has to happen inside a click — that is what makes an AudioContext playable
+  // without an autoplay policy's permission.
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  // Why there is no sound, when there should be. One string with one real cause
+  // behind it today: a browser with no WebCodecs Opus decoder, which is a plain
+  // refusal rather than something to work around — there is no second
+  // representation to fall back to (see audioPlayer.ts).
+  const [audioError, setAudioError] = useState<string | null>(null);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -634,6 +649,30 @@ export function useRemoteDesktop(
   // while the socket is backed up; see `createSender`.
   const sendRef = useRef(createSender(() => wsRef.current));
 
+  // The audio context, from the click that enabled audio until the decoder is built
+  // around it, and null after that — the player owns it from then on. Two refs
+  // rather than one because they are created a round trip apart and for different
+  // reasons: the context has to be born inside the gesture, and the decoder cannot
+  // exist until `audioFormat` says what to decode.
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioPlayerRef = useRef<AudioPlayer | null>(null);
+
+  // Give up the audio hardware, telling the server nothing.
+  //
+  // Separate from the toggle because most of the ways audio ends are not the user
+  // deciding: the target disconnected, the socket dropped, another browser took the
+  // session. In all of those the gateway has already stopped, so a message back
+  // would be answering a question nobody asked — and on a closed socket it would go
+  // nowhere anyway.
+  const releaseAudio = useCallback(() => {
+    // Exactly one of these holds the context, which is what keeps this from calling
+    // `close()` on an already-closed one.
+    audioPlayerRef.current?.close();
+    audioPlayerRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+  }, []);
+
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
     ctxRef.current = canvasRef.current?.getContext("2d") ?? null;
@@ -677,11 +716,12 @@ export function useRemoteDesktop(
       // reference always follows the tile that filled its slot on the same
       // socket.)
       tileCache.fill(null);
-      // The token in the audio URL is about to be superseded by the reclaim, and
-      // the server has already ended that response, so leaving the URL up would
-      // only have the player retry against a claim that is no longer current. The
-      // next `connected` puts back a URL carrying the new token.
-      setAudioUrl(null);
+      // The socket carrying the audio is going away, and a subscription belongs to
+      // one attachment: the gateway has already stopped this one, so holding a
+      // decoder open would only be holding the audio hardware. The next `connected`
+      // starts from off, and getting it back is a click (see `setAudio`).
+      releaseAudio();
+      setAudioEnabled(false);
       syncCursor();
     };
 
@@ -695,11 +735,6 @@ export function useRemoteDesktop(
       attempts += 1;
       retryTimer = setTimeout(() => void connect(false), delay);
     };
-
-    // The token this connection claimed the slot with, so `connected` can build
-    // the audio URL from it. A closure variable and not state: nothing renders
-    // from the token, only from the URL derived from it.
-    let claimToken: string | null = null;
 
     // Claim the session slot. Returns the token, "busy" when another browser
     // holds the slot (409), "unauthorized" when the login is gone (401), or
@@ -751,7 +786,6 @@ export function useRemoteDesktop(
         return;
       }
       sessionStorage.setItem(SESSION_KEY, claimed);
-      claimToken = claimed;
       open(claimed);
     };
 
@@ -910,8 +944,91 @@ export function useRemoteDesktop(
         handleControlMsg(msg);
         return;
       }
-      if (data instanceof ArrayBuffer) {
-        await drawBatch(data);
+      if (!(data instanceof ArrayBuffer)) {
+        return;
+      }
+      // Read the kind before either parser: a batch parser handed audio would spend
+      // its way through an Opus packet looking for tile records.
+      switch (binaryFrameKind(data)) {
+        case "batch":
+          await drawBatch(data);
+          break;
+        case "audio":
+          playAudio(data);
+          break;
+        default:
+          break;
+      }
+    };
+
+    // Audio rides the same promise queue as tiles, which is worth a word because it
+    // sounds wrong: a decode that awaited behind a repaint would be exactly the
+    // head-of-line delay this design is meant to avoid. It does not await — the
+    // packets are handed to WebCodecs, which decodes off-thread and calls back — so
+    // what queues here is a few microseconds of copying, not a decode.
+    const playAudio = (data: ArrayBuffer) => {
+      const packets = decodeAudioFrame(data);
+      if (packets) {
+        audioPlayerRef.current?.push(packets);
+      }
+    };
+
+    // Build the decoder the format describes, around the context the click made.
+    //
+    // Arriving without a context means audio was turned off between the request and
+    // this answer, or that the gateway sent it unasked; either way there is nothing
+    // to build and nothing to report.
+    const startAudio = (msg: Extract<ControlMsg, { type: "audioFormat" }>) => {
+      const context = audioContextRef.current;
+      if (!context) {
+        return;
+      }
+      try {
+        const player = createAudioPlayer(
+          {
+            codec: msg.codec,
+            sampleRate: msg.sampleRate,
+            channels: msg.channels,
+            head: decodeAudioHead(msg.head),
+          },
+          context,
+          {
+            onError: (reason) => {
+              releaseAudio();
+              setAudioEnabled(false);
+              setAudioError(reason);
+              // And stop the packets, which would otherwise keep arriving for a
+              // decoder that has gone.
+              sendRef.current({ type: "audio", enabled: false });
+            },
+            // Only the trims, and they earn a warning: audio was thrown away to
+            // stay near live, which is the ceiling doing its job and also the one
+            // event in this path that should be rare. A steady-state lead needs no
+            // logging — it cannot leave the range the schedule defines (see
+            // audioSchedule.ts), which is the point: if the sound is still late with
+            // no trims recurring, the delay is upstream of this browser.
+            onLead: (lead, trimmed) => {
+              if (trimmed > 0) {
+                console.warn(
+                  `audio: trimmed ${trimmed.toFixed(3)}s to stay near live (lead ${lead.toFixed(3)}s)`,
+                );
+              }
+            },
+          },
+        );
+        audioPlayerRef.current = player;
+        // The player owns the context now, so this must not also close it.
+        audioContextRef.current = null;
+        setAudioError(null);
+      } catch (e) {
+        releaseAudio();
+        setAudioEnabled(false);
+        setAudioError(
+          e instanceof Error
+            ? e.message
+            : "this browser cannot play remote audio",
+        );
+        sendRef.current({ type: "audio", enabled: false });
       }
     };
 
@@ -1097,14 +1214,15 @@ export function useRemoteDesktop(
       setPendingTarget(null);
       setMode("desktop");
       setCanClipboard(msg.clipboard);
-      // Rebuilt on every `connected`, which is what carries a reattach or a
-      // takeover onto the token the slot now answers to. Relative, so it follows
-      // the page's own origin and protocol without deciding either.
-      setAudioUrl(
-        msg.audio && claimToken
-          ? `/api/session/audio?session=${encodeURIComponent(claimToken)}`
-          : null,
-      );
+      setCanAudio(msg.audio);
+      // Audio starts off on every `connected`, reattach and takeover included, and
+      // that is not a reset for tidiness: a subscription belongs to one attachment,
+      // so the gateway is not sending any, and asking again has to come from a click
+      // for the AudioContext to be allowed to play. Whatever was playing belonged to
+      // a socket that is gone.
+      releaseAudio();
+      setAudioEnabled(false);
+      setAudioError(null);
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
         // and never let this window's shape reach the remote again. So every
@@ -1201,6 +1319,9 @@ export function useRemoteDesktop(
         case "connected":
           handleConnected(msg);
           break;
+        case "audioFormat":
+          startAudio(msg);
+          break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
           // into the browser's OS clipboard. Opening/revealing the panel is a
@@ -1248,9 +1369,12 @@ export function useRemoteDesktop(
           rxaResize = false;
           setCanResize(false);
           setCanClipboard(false);
-          // Nothing is streaming any more, and the endpoint would answer 503 —
-          // so the panel goes away rather than showing a player that cannot play.
-          setAudioUrl(null);
+          // No engine, so no queue to subscribe to: the row goes away rather than
+          // offering a control that would be answered with a warning in the log.
+          setCanAudio(false);
+          releaseAudio();
+          setAudioEnabled(false);
+          setAudioError(null);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
@@ -1341,8 +1465,15 @@ export function useRemoteDesktop(
       dprQuery?.removeEventListener("change", onDprChange);
       clearTimeout(resizeTimer);
       ws?.close();
+      releaseAudio();
     };
-  }, [canvasRef, onUnauthorized, syncCursor, settleClipboardWaiters]);
+  }, [
+    canvasRef,
+    onUnauthorized,
+    syncCursor,
+    settleClipboardWaiters,
+    releaseAudio,
+  ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
   // action after being evicted (takenOver).
@@ -1376,6 +1507,41 @@ export function useRemoteDesktop(
   const selectDisplay = useCallback((id: number) => {
     sendRef.current({ type: "selectDisplay", id });
   }, []);
+
+  // Start or stop the remote's sound (the floating menu's Audio button).
+  //
+  // **Must be called from a click**, and the AudioContext is why: a context created
+  // inside a user gesture may play, and one created outside it is suspended on iOS
+  // Safari with no way back. The decoder cannot be built here — `audioFormat` has not
+  // arrived yet — so the context is what the gesture is spent on, and `startAudio`
+  // wraps a decoder around it a round trip later.
+  //
+  // Optimistic, unlike `selectDisplay` next door: nothing acknowledges this, and the
+  // honest reading of "enabled" is that this browser asked and is holding a context
+  // open for the answer. A gateway that has nothing to send simply sends nothing.
+  const setAudio = useCallback(
+    (enabled: boolean) => {
+      setAudioError(null);
+      setAudioEnabled(enabled);
+      releaseAudio();
+      if (enabled) {
+        // Said before the round trip rather than after it: there is no fallback
+        // representation, so nothing about the answer would change this. And it
+        // names which of the two reasons applies — a browser with no decoder, or an
+        // insecure origin, where WebCodecs does not exist however capable the
+        // browser is (see audioUnavailable).
+        const unavailable = audioUnavailable();
+        if (unavailable) {
+          setAudioEnabled(false);
+          setAudioError(unavailable);
+          return;
+        }
+        audioContextRef.current = createAudioContext();
+      }
+      sendRef.current({ type: "audio", enabled });
+    },
+    [releaseAudio],
+  );
 
   // Inject a key chord from the floating toolbar — keys the browser swallows
   // (F5, Ctrl+W, Alt+F4…) or a bare modifier tap. Each DOM `code` is pressed in
@@ -1694,7 +1860,9 @@ export function useRemoteDesktop(
     size,
     canResize,
     canClipboard,
-    audioUrl,
+    canAudio,
+    audioEnabled,
+    audioError,
     displays,
     activeDisplayId,
     remoteClipboard,
@@ -1711,6 +1879,7 @@ export function useRemoteDesktop(
     switchTarget,
     resizeToWindow,
     selectDisplay,
+    setAudio,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,

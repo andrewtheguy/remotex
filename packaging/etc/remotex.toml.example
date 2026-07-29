@@ -87,7 +87,7 @@ password = "change-me"
 #clipboard = false
 
 # Remote audio (opt-in): redirect this target's sound to the browser, where the
-# floating menu's Audio panel plays it. RDP only — MS-RDPEA is the one audio
+# floating menu's Audio button plays it. RDP only — MS-RDPEA is the one audio
 # channel the gateway speaks, so this is refused on "vnc" and "rxa" rather than
 # accepted and left doing nothing.
 #
@@ -96,6 +96,12 @@ password = "change-me"
 # sound away while nobody is listening. Only 44100 Hz 16-bit stereo PCM is
 # accepted; a server that offers no matching format sends nothing, and the log
 # says so.
+#
+# Two things worth knowing before switching this on. The browser decodes the Opus
+# the gateway sends with WebCodecs, which is **secure-context only** — so a gateway
+# reached over plain HTTP on a LAN address has no audio until it is behind TLS
+# (localhost is exempt). And the macOS viewer has no audio at all: audio is sent
+# only to a client that asks for it, and the viewer never does.
 #audio = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain,

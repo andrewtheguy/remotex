@@ -5,11 +5,15 @@
 //! from `POST /api/session`) and attaches to the single session slot
 //! ([`crate::session::SessionManager`]). Inbound `ClientMsg` split two ways:
 //! session-control messages (`connect` to pick a target from the post-login
-//! picker, `disconnect` to switch back to it) act on the slot; everything else
-//! is engine input, routed to the current engine (or dropped in the picker
-//! state). Outbound `ServerMsg` go to the browser — screen tiles as binary
-//! frames, control messages (resize/error, plus the picker/connected status)
-//! as JSON text (see [`crate::protocol`]).
+//! picker, `disconnect` to switch back to it, `audio` to hear the remote) act on
+//! the slot; everything else is engine input, routed to the current engine (or
+//! dropped in the picker state). Outbound `ServerMsg` go to the browser — screen
+//! tiles and audio as binary frames, control messages (resize/error, the
+//! picker/connected status, the audio format) as JSON text (see
+//! [`crate::protocol`]).
+//!
+//! Audio arrives here only for a client that asked, which is what keeps the macOS
+//! viewer's wire unchanged and [`crate::protocol::PROTOCOL_VERSION`] where it was.
 //!
 //! Close codes tell the browser why the socket ended:
 //! - `4000` — the token is missing or superseded; claim again.
@@ -229,6 +233,10 @@ async fn session(
                     }
                 }
                 Ok(ClientMsg::Disconnect) => sessions.disconnect(attach_id),
+                // Audio is this attachment's, not the engine's: it subscribes the
+                // socket to a queue the engine is already filling, so it acts on the
+                // slot like the two above rather than being forwarded.
+                Ok(ClientMsg::Audio { enabled }) => sessions.set_audio(attach_id, enabled),
                 // The client lost the tiles it was told to remember. Both halves
                 // have to act: the outbound task forgets the slots (through the
                 // epoch), and the engine repaints — a repaint alone would come back

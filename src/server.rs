@@ -3,20 +3,17 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    body::Body,
-    extract::{Query, Request, State},
-    http::{HeaderMap, HeaderName, StatusCode, header},
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
-use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use tower::service_fn;
 use tower_http::services::ServeDir;
 
 use crate::{
-    audio::PCM_CD_QUALITY,
     auth::{self, AuthSessions},
     config::AppConfig,
     error::{ApiResult, AppError},
@@ -42,7 +39,9 @@ pub struct AppState {
 /// - the rest of `/api/*` and `/ws` — refuse requests without a valid login
 ///   cookie; unknown `/api/*` paths return 404 rather than the SPA,
 ///   so API clients get an honest error.
-/// - `/ws`    — binary WebSocket carrying the remote-desktop session
+/// - `/ws`    — binary WebSocket carrying the remote-desktop session, audio
+///   included: there is no separate audio endpoint any more, because the browser
+///   needs the packets in hand to schedule them (see docs/remote-audio.md).
 /// - fallback — the built SPA, served from `config.static_dir` on disk. Real
 ///   files are served by [`ServeDir`]; any unknown path returns `index.html`
 ///   with a 200 so client-side routes resolve (matching an SPA's expectations).
@@ -56,8 +55,8 @@ pub fn router(config: AppConfig) -> Router {
 /// [`router`] over a caller-supplied session slot.
 ///
 /// The seam exists for one thing: the manual audio harness
-/// ([`tests::serve_a_test_tone`]) needs the real router — SPA, login, and the
-/// audio endpoint — in front of a scripted engine rather than a real RDP connect.
+/// ([`tests::serve_a_test_tone`]) needs the real router — SPA, login, and `/ws` — in
+/// front of a scripted engine rather than a real RDP connect.
 pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
@@ -99,7 +98,6 @@ pub(crate) fn router_with_sessions(
             Router::new()
                 .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
-                .route("/session/audio", get(audio_handler))
                 .route_layer(require_auth.clone()),
         )
         .fallback(|| async { AppError::NotFound });
@@ -292,96 +290,6 @@ async fn claim_handler(
     Ok(Json(ClaimResponse { session_id }))
 }
 
-#[derive(Deserialize)]
-struct AudioParams {
-    session: Option<String>,
-}
-
-/// The claimed session's live audio, as an open-ended Ogg/Opus response the
-/// browser plays with a plain `<audio>` element (see docs/remote-audio.md).
-///
-/// Deliberately not part of the desktop WebSocket: the browser already has a
-/// streaming audio client, so this hands it one and leaves buffering, decoding
-/// and playback there.
-///
-/// Authorised twice over, and the second half is the point: the login cookie gets
-/// the request past `require_auth`, and the claim token proves the caller holds
-/// the *session* — the same token `/ws` attaches with. So the stream belongs to
-/// whoever has the single session slot, not to anyone with a login.
-///
-/// There is no `Content-Length`, no recording, and no seekable history: a
-/// listener starts at live audio and receives what arrives after it attached. A
-/// `Range` request is answered with this same stream rather than a `206`, since
-/// there is no range of anything to serve.
-///
-/// **It does not wait for the remote's audio to exist, and it never refuses a
-/// session because the desktop is quiet.** The tested Windows host negotiates no
-/// audio format at all until something plays on it, so waiting to find out meant
-/// answering `503` to a perfectly good session — final, since a media element does
-/// not retry. The response opens on the strength of the one format this gateway
-/// advertises and fills with silence until sound arrives (see [`crate::audio`]).
-/// The cost is that a target whose host will *never* redirect now sounds the same
-/// as one that is merely quiet; the log below is where the two differ.
-async fn audio_handler(
-    State(state): State<AppState>,
-    Query(params): Query<AudioParams>,
-) -> ApiResult<Response> {
-    // Every arrival is logged, and so is every refusal. A media element reports a
-    // failed load as nothing more than an `error` event on itself, so without a
-    // line here the difference between "the browser never asked", "the token was
-    // stale" and "the remote has no audio" is invisible from both ends at once —
-    // which is exactly the hole this fills.
-    info!("audio: stream requested");
-    let Some(token) = params.session else {
-        warn!("audio: refused, the request carried no session token");
-        return Err(AppError::Forbidden);
-    };
-    let listener = state.sessions.audio_listener(&token).inspect_err(|e| {
-        warn!("audio: refused, {e}");
-    })?;
-    let negotiated = listener.negotiated_format();
-    let bitrate = crate::opus_stream::OPUS_BITRATE_BPS / 1000;
-    match negotiated {
-        Some(format) => info!(
-            "audio: streaming {} Hz PCM as {bitrate} kbps opus",
-            format.sample_rate
-        ),
-        // Worth its own line rather than a silent assumption: this is the state that
-        // used to answer 503, and the one that looks like a fault when the remote
-        // never redirects at all.
-        None => info!(
-            "audio: streaming as {bitrate} kbps opus, but the remote's audio channel \
-             is not up, so this is silence until it is"
-        ),
-    }
-    // The negotiated format when there is one, and otherwise the only format this
-    // gateway ever advertises — which is not a guess: with one advertised format,
-    // that is the only format a wave buffer can be in (see [`crate::rdp_audio`]),
-    // which is what makes the header writable before any negotiation.
-    let format = negotiated.unwrap_or(PCM_CD_QUALITY);
-    Ok((
-        [
-            // The container as well as the codec: `codecs=opus` is what lets a
-            // client decide it can play this without sniffing the bytes.
-            (header::CONTENT_TYPE, "audio/ogg; codecs=opus"),
-            // Nothing about a live stream may be stored, and nothing may
-            // recompress or re-chunk it on the way — `no-transform` is the half
-            // that speaks to intermediaries rather than to the browser.
-            (header::CACHE_CONTROL, "no-store, no-transform"),
-            // There is no length and no history, so there is nothing to range
-            // over; saying so stops a client probing for one first.
-            (header::ACCEPT_RANGES, "none"),
-            // nginx buffers a proxied response by default, which would hold the
-            // whole point of this endpoint back. Exact proxy configuration is
-            // deployment-specific; this is the one header worth sending
-            // unconditionally because it is inert everywhere else.
-            (HeaderName::from_static("x-accel-buffering"), "no"),
-        ],
-        Body::from_stream(listener.into_stream(format)),
-    )
-        .into_response())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,18 +298,19 @@ mod tests {
     /// audio, so the browser half of the audio path can be listened to without a
     /// server that redirects.
     ///
-    /// It exists because the RDP side and the HTTP side fail independently, and
-    /// only one of them needs a Windows host. Whenever the representation changes
-    /// — and it has, from an open-ended WAV to Ogg/Opus — the question is whether
-    /// *browsers* play what this now sends, live and without stalling. The PCM's
-    /// provenance is irrelevant to that, so this supplies it locally and the
-    /// answer is unambiguous: a failure here is the format, not the remote.
+    /// It exists because the RDP side and the browser side fail independently, and
+    /// only one of them needs a Windows host. Whenever the representation changes —
+    /// and it has twice, from an open-ended WAV to Ogg/Opus to bare Opus packets
+    /// decoded by WebCodecs — the question is whether *browsers* play what this now
+    /// sends, live and without stalling. The PCM's provenance is irrelevant to that,
+    /// so this supplies it locally and the answer is unambiguous: a failure here is
+    /// the format, not the remote.
     ///
     /// The tone comes and goes in five-second phases, with the format published and
     /// cleared around the gaps the way a real host's channel opening and closing
     /// does. That is deliberate: the behaviour worth checking in a browser is no
     /// longer only "does it play" but "does it *start on its own*, stop, and start
-    /// again" — so open the panel during a quiet phase and then touch nothing.
+    /// again" — so enable audio during a quiet phase and then touch nothing.
     ///
     /// `#[ignore]`d and in-crate on purpose: it needs
     /// [`SessionManager::with_test_spawner`], and it must add nothing a real
@@ -412,11 +321,13 @@ mod tests {
     /// cargo test --lib serve_a_test_tone -- --ignored --nocapture
     /// ```
     ///
-    /// Then open the printed URL, log in, pick the target, and open ☰ → Audio. A
-    /// 440 Hz tone means the whole browser-side path works, on that browser. Worth
-    /// running on each one that matters rather than assuming published support
-    /// tables are current — Ogg/Opus in `<audio>` only reached Safari in 18.4, and
-    /// plenty of sources still say it never did.
+    /// Then open the printed URL, log in, pick the target, and press ☰ → Enable
+    /// audio. A 440 Hz tone means the whole browser-side path works, on that
+    /// browser — and **this is where Opus-only is settled**, because there is no
+    /// fallback: a browser whose `AudioDecoder` will not take Opus says so under the
+    /// button and plays nothing. Worth running on each browser that matters rather
+    /// than trusting a support table; the last representation needed Safari 18.4 and
+    /// plenty of published tables still said it was unsupported.
     #[tokio::test]
     #[ignore = "manual: serves a tone for a browser to play, and waits"]
     async fn serve_a_test_tone() {
@@ -552,9 +463,10 @@ mod tests {
 
         // println! rather than log: this is the test's whole user interface.
         println!("\n  Open  http://{addr}/   (admin / hunter2)");
-        println!("  Pick \"test-tone\", then ☰ → Audio. 440 Hz for 5s, quiet for 5s.");
-        println!("  Open the panel during a quiet phase: the tone must arrive on its");
-        println!("  own, go away, and come back, without touching the player.");
+        println!("  Pick \"test-tone\", then ☰ → Enable audio. 440 Hz for 5s, quiet for 5s.");
+        println!("  Press it during a quiet phase and then close the drawer: the tone");
+        println!("  must arrive on its own, go away, and come back, untouched.");
+        println!("  A line under the button instead means this browser has no Opus decoder.");
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;

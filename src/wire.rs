@@ -196,12 +196,25 @@ impl Wire {
                     self.totals.text(json.len());
                     frames.push(WireFrame::Text(json));
                 }
-                // Only a tile has no text encoding. Matched rather than assumed:
-                // this runs on the socket's own task, so a variant added later
-                // without a `text_frame` arm should cost that one message, not the
-                // whole attachment.
+                // Tiles and audio are the two without a text encoding. Matched
+                // rather than assumed: this runs on the socket's own task, so a
+                // variant added later without a `text_frame` arm should cost that
+                // one message, not the whole attachment.
                 None => match msg {
                     ServerMsg::Tile(tile) => self.push(tile, &mut frames),
+                    // **Not** flushed first, which is the one place in this file
+                    // where not flushing is the correct choice. A control message
+                    // flushes because a resize invalidates the tiles before it;
+                    // sound has no such relationship with pixels, so making it wait
+                    // for a batch that is still filling would add latency to the one
+                    // thing here that cannot buy it back — audio shares this socket,
+                    // and the queue behind a full repaint is exactly when a
+                    // scheduler starves.
+                    ServerMsg::Audio(packets) => {
+                        let frame = protocol::audio::frame(&packets);
+                        self.totals.audio(frame.len(), packets.len());
+                        frames.push(WireFrame::Binary(frame));
+                    }
                     other => log::warn!("wire: dropping {other:?}, which has no encoding"),
                 },
             }
@@ -328,10 +341,31 @@ pub struct Totals {
     pub refs: u64,
     pub refs_saved_bytes: u64,
     pub cache_resets: u64,
+    /// Opus packets sent, and the frame bytes they cost.
+    ///
+    /// Counted apart from tiles because the two answer different questions, and one
+    /// of them is the point of this design: audio bytes over a session's length is
+    /// the ~10 kB/s Opus is here to deliver, and it should read as **zero** while the
+    /// remote is quiet — the old silence keepalive spent 0.09 kB/s to keep a media
+    /// element from stalling, and this is where its absence shows.
+    pub audio_frames: u64,
+    pub audio_packets: u64,
+    pub audio_bytes: u64,
 }
 
 impl Totals {
     fn frame(&mut self, len: usize) {
+        self.binary_frames += 1;
+        self.binary_bytes += len as u64;
+        self.largest_binary = self.largest_binary.max(len as u64);
+    }
+
+    fn audio(&mut self, len: usize, packets: usize) {
+        self.audio_frames += 1;
+        self.audio_packets += packets as u64;
+        self.audio_bytes += len as u64;
+        // Audio frames are binary frames too: the ceiling a client's WebSocket
+        // message limit is measured against has to include them.
         self.binary_frames += 1;
         self.binary_bytes += len as u64;
         self.largest_binary = self.largest_binary.max(len as u64);
@@ -361,7 +395,8 @@ impl std::fmt::Display for Totals {
             "{} binary frames / {} bytes carrying {} tile records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} superseded / {} bytes, \
-             {} cache refs saving {} bytes, {} cache resets",
+             {} cache refs saving {} bytes, {} cache resets, \
+             {} audio frames / {} bytes carrying {} opus packets",
             self.binary_frames,
             self.binary_bytes,
             self.tiles,
@@ -374,6 +409,9 @@ impl std::fmt::Display for Totals {
             self.refs,
             self.refs_saved_bytes,
             self.cache_resets,
+            self.audio_frames,
+            self.audio_bytes,
+            self.audio_packets,
         )
     }
 }
@@ -461,6 +499,26 @@ mod tests {
         out
     }
 
+    /// The packets in an audio frame, parsed independently of the writer above —
+    /// a reader that shared the writer's arithmetic would agree with it whatever it
+    /// did.
+    fn packets(frame: &[u8]) -> Vec<Vec<u8>> {
+        assert_eq!(frame[0], protocol::audio::FRAME_KIND);
+        assert_eq!(frame[1], 0, "flags must be zero");
+        let count = u16::from_le_bytes([frame[2], frame[3]]);
+        let mut at = protocol::audio::HEADER_LEN;
+        let mut out = Vec::new();
+        while at < frame.len() {
+            let len = usize::from(u16::from_le_bytes([frame[at], frame[at + 1]]));
+            at += protocol::audio::PACKET_HEADER_LEN;
+            out.push(frame[at..at + len].to_vec());
+            at += len;
+        }
+        assert_eq!(at, frame.len(), "packets must exactly fill the frame");
+        assert_eq!(out.len(), usize::from(count), "the header's count must match");
+        out
+    }
+
     fn binary(frames: &[WireFrame]) -> Vec<&Vec<u8>> {
         frames
             .iter()
@@ -505,6 +563,60 @@ mod tests {
         assert_eq!(frames.len(), 3);
         assert_eq!(records(binary(&frames)[0]).len(), 2);
         assert_eq!(records(binary(&frames)[1]).len(), 1);
+    }
+
+    /// Audio is the exception to the rule above, and this is the assertion that
+    /// keeps it one: sound has no ordering relationship with pixels, so an audio
+    /// frame goes out **without** flushing a batch that is still filling. Making it
+    /// wait would add latency to the one thing on this socket that cannot buy any
+    /// back — a scheduler starves while a full repaint drains.
+    #[test]
+    fn an_audio_frame_neither_flushes_a_pending_batch_nor_disturbs_it() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![
+            tile(0, 50),
+            ServerMsg::Audio(vec![vec![1, 2, 3], vec![4, 5]]),
+            tile(64, 50),
+        ]);
+
+        // Audio first, then one batch holding both tiles — not two batches with the
+        // audio between them.
+        assert_eq!(frames.len(), 2);
+        let binary = binary(&frames);
+        assert_eq!(binary[0][0], protocol::audio::FRAME_KIND);
+        assert_eq!(packets(binary[0]), vec![vec![1, 2, 3], vec![4, 5]]);
+        assert_eq!(binary[1][0], batch::FRAME_KIND);
+        assert_eq!(
+            records(binary[1]).len(),
+            2,
+            "both tiles should still share one batch"
+        );
+
+        assert_eq!(wire.totals.audio_frames, 1);
+        assert_eq!(wire.totals.audio_packets, 2);
+        assert_eq!(
+            wire.totals.binary_frames, 2,
+            "an audio frame is a binary frame too, for the message-size ceiling"
+        );
+    }
+
+    /// A frame with no packets is still a frame a client must be able to read
+    /// without special-casing: the count is what makes it unambiguous.
+    #[test]
+    fn an_audio_frame_carries_its_packet_count() {
+        let frame = protocol::audio::frame(&[]);
+        assert_eq!(frame, vec![protocol::audio::FRAME_KIND, 0, 0, 0]);
+        assert!(packets(&frame).is_empty());
+
+        // Lengths are per packet, so packets of different sizes stay separable —
+        // which a concatenation with one total length would not.
+        let frame = protocol::audio::frame(&[vec![9; 300], vec![7; 1]]);
+        assert_eq!(
+            u16::from_le_bytes([frame[2], frame[3]]),
+            2,
+            "the count, not the byte length"
+        );
+        assert_eq!(packets(&frame), vec![vec![9; 300], vec![7; 1]]);
     }
 
     // Exceeding a client's message ceiling kills the socket rather than dropping a

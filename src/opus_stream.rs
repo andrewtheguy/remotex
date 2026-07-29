@@ -1,9 +1,18 @@
-//! The live audio response's representation: Opus packets in an Ogg stream.
+//! The live audio stream's representation: bare Opus packets, no container.
 //!
 //! See docs/remote-audio.md. This sits between [`crate::audio`]'s queue, which
-//! carries raw PCM in whatever format RDPSND negotiated, and the HTTP body a
-//! browser's `<audio>` element reads. It exists for one reason: 44100 Hz 16-bit
-//! stereo PCM is 176 400 B/s, and Opus carries the same sound at ~96 kbps.
+//! carries raw PCM in whatever format RDPSND negotiated, and the audio frames the
+//! desktop WebSocket carries to a browser. It exists for one reason: 44100 Hz
+//! 16-bit stereo PCM is 176 400 B/s, and Opus carries the same sound at ~96 kbps.
+//!
+//! **No Ogg, and that is a deliberate deletion rather than a simplification for its
+//! own sake.** The container was here to satisfy an `<audio>` element, which needs a
+//! demuxable stream and gives nothing back: it cannot be told to skip forward, so a
+//! delay it accumulated was permanent. The browser now decodes packets itself with
+//! WebCodecs and owns the playback schedule, so a container would be bytes spent on
+//! framing that the WebSocket already provides. What is left of the header is
+//! [`opus_head`], which still has to reach the decoder — as the `audioFormat`
+//! control message rather than as a page.
 //!
 //! ## Why the buffer sizes are what they are
 //!
@@ -23,24 +32,22 @@
 //!   882 input frames @44.1k -> 960 output frames @48k = exactly one 20 ms Opus frame
 //! ```
 //!
-//! So [`OggOpus::push`] accumulates [`Self::frames_per_packet`] frames of input,
+//! So [`OpusStream::push`] accumulates [`Self::frames_per_packet`] frames of input,
 //! resamples that to exactly [`FRAME_FRAMES`], and encodes one packet. When the
 //! negotiated rate is already 48 kHz the resampler is skipped and the two numbers
 //! are the same. Anything left over waits for the next buffer.
 //!
-//! [`OggOpus::push_silence`] is the same machinery with nothing to encode: the
-//! response has to keep flowing while the remote is quiet, so [`crate::audio`] asks
-//! for silence by the frame rather than letting the stream go dry.
+//! There is no silence to generate any more, which went with the container for the
+//! same reason: a media element's timeline had to keep advancing or it stalled, and
+//! a Web Audio schedule simply has a gap in it. A quiet remote now costs nothing.
 //!
 //! ## Why each listener gets its own encoder
 //!
-//! An Ogg stream is not resumable from the middle: a decoder that starts at an
-//! audio page with no `OpusHead` in front of it has nothing to configure itself
-//! with. Since a listener may attach at any time — a page reload mid-session is
-//! the ordinary case — every listener gets a fresh encoder, serial number and
-//! granule counter, and therefore its own header pages. That also keeps this
-//! type free of any sharing or locking: it is owned by the one response writing
-//! it.
+//! An Opus decoder needs the pre-skip and channel count from [`opus_head`] before
+//! the first packet means anything, and a listener may attach at any time — a page
+//! reload mid-session is the ordinary case. Every listener therefore gets a fresh
+//! encoder and its own header, which also keeps this type free of any sharing or
+//! locking: it is owned by the one stream writing it.
 //!
 //! Encoding happens here rather than in the bridge for the same reason the bridge
 //! holds PCM: [`crate::audio::AudioBridge::wave`] is called from the RDP read
@@ -48,11 +55,6 @@
 //! while nobody is listening. Work that only a listener needs belongs on the
 //! listener's side of the queue.
 
-use std::borrow::Cow;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-use ogg::PacketWriteEndInfo;
-use ogg::writing::PacketWriter;
 use opus::{Application, Bitrate, Channels, Encoder};
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Resampler};
@@ -79,16 +81,8 @@ pub const OPUS_BITRATE_BPS: i32 = 96_000;
 /// worth allowing for; at this bitrate a packet is nearer 240.
 const MAX_PACKET_BYTES: usize = 4000;
 
-/// Serial numbers for the Ogg streams this process produces.
-///
-/// A serial only has to be unique among the streams multiplexed into one Ogg
-/// bitstream, and each response is a single stream, so a counter is enough — and
-/// unlike a random value it makes the tests deterministic. Starts at 1 because 0
-/// is a legal but conventionally avoided serial.
-static NEXT_SERIAL: AtomicU32 = AtomicU32::new(1);
-
-/// Turns PCM buffers into the bytes of an Ogg/Opus stream.
-pub struct OggOpus {
+/// Turns PCM buffers into Opus packets.
+pub struct OpusStream {
     encoder: Encoder,
     channels: usize,
     /// `None` when the input is already at [`OPUS_SAMPLE_RATE`].
@@ -115,19 +109,15 @@ pub struct OggOpus {
     /// buffer's first sample is a right channel, and restarting at left here
     /// would swap the channels for the rest of the session.
     next_channel: usize,
-    writer: PacketWriter<'static, Vec<u8>>,
-    serial: u32,
-    granule: u64,
-    /// Frames encoded so far, silence included. The keepalive in [`crate::audio`]
-    /// compares this against the clock to decide how much silence it owes, and
-    /// nothing else can tell it: `granule` carries the pre-skip offset and the
-    /// page bytes carry neither.
+    /// Frames encoded so far. Nothing branches on it; it is the number the
+    /// per-buffer diagnostic in [`crate::audio`] compares against elapsed time,
+    /// which is how a stream drifting from real time shows itself.
     frames_encoded: u64,
 }
 
-impl OggOpus {
-    /// Starts a stream for `format`, returning the encoder and the header pages
-    /// (`OpusHead` then `OpusTags`) that must precede any audio.
+impl OpusStream {
+    /// Starts a stream for `format`, returning the encoder and the `OpusHead` bytes
+    /// a decoder has to be configured with before the first packet.
     ///
     /// Fails if libopus will not encode this shape — in practice only a channel
     /// count other than 1 or 2, which the single advertised format rules out.
@@ -173,8 +163,7 @@ impl OggOpus {
             (Some(resampler), frames_in)
         };
 
-        let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
-        let mut stream = Self {
+        let stream = Self {
             encoder,
             channels: channel_count,
             resampler,
@@ -185,68 +174,29 @@ impl OggOpus {
             packet: vec![0; MAX_PACKET_BYTES],
             odd_byte: None,
             next_channel: 0,
-            writer: PacketWriter::new(Vec::new()),
-            serial,
-            // RFC 7845: granule positions count samples *including* pre-skip, so
-            // that the final position minus pre-skip is the audio's true length.
-            granule: u64::from(pre_skip),
             frames_encoded: 0,
         };
 
-        stream.write_packet(opus_head(format, pre_skip), 0, PacketWriteEndInfo::EndPage)?;
-        stream.write_packet(opus_tags(), 0, PacketWriteEndInfo::EndPage)?;
-        let headers = stream_take(&mut stream.writer);
-        Ok((stream, headers))
+        Ok((stream, opus_head(format, pre_skip)))
     }
 
-    /// Encodes one PCM buffer, returning whatever complete Ogg pages it finished.
+    /// Encodes one PCM buffer into whatever whole Opus packets it completed.
     ///
     /// Empty when the buffer did not add up to a whole 20 ms frame, which is
     /// normal: the remainder is carried.
-    pub fn push(&mut self, pcm: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn push(&mut self, pcm: &[u8]) -> Result<Vec<Vec<u8>>, anyhow::Error> {
         self.accumulate(pcm);
+        let mut packets = Vec::new();
         // The shortest channel, not the first: a buffer ending mid-frame leaves
         // left one sample ahead of right, and encoding then would read past the
         // end of right's samples.
         while self.buffered_frames() >= self.frames_per_packet {
-            self.encode_one_frame(PacketWriteEndInfo::EndPage)?;
+            packets.push(self.encode_one_frame()?);
         }
-        Ok(stream_take(&mut self.writer))
+        Ok(packets)
     }
 
-    /// Encodes `packets` frames of digital silence: what keeps the response
-    /// flowing while the remote is sending nothing (see [`crate::audio`]).
-    ///
-    /// Zeros go through the ordinary accumulate path rather than round the side of
-    /// it, so a partial real frame still comes out in front of the silence and
-    /// silence is resampled exactly like audio.
-    ///
-    /// The whole batch shares **one** Ogg page, unlike [`Self::push`], which ends a
-    /// page per packet so a live listener hears audio as soon as it exists.
-    /// Silence has nothing to be prompt about, and a page header costs ~27 bytes
-    /// against a silent packet's handful — batching is the difference between
-    /// ~1.7 kB/s and ~0.4 kB/s of keepalive.
-    pub fn push_silence(&mut self, packets: usize) -> Result<Vec<u8>, anyhow::Error> {
-        // 16-bit samples, which `accumulate` assumes throughout.
-        let quiet = vec![0u8; self.frames_per_packet * self.channels * 2];
-        for packet in 0..packets {
-            let last = packet + 1 == packets;
-            self.accumulate(&quiet);
-            while self.buffered_frames() >= self.frames_per_packet {
-                self.encode_one_frame(if last {
-                    PacketWriteEndInfo::EndPage
-                } else {
-                    PacketWriteEndInfo::NormalPacket
-                })?;
-            }
-        }
-        // Empty when the batch ended mid-frame — a carried remainder shifts which
-        // packet is the last one — and the open page then flushes with whatever
-        // comes next.
-        Ok(stream_take(&mut self.writer))
-    }
-
-    /// Frames encoded so far, silence included.
+    /// Frames encoded so far.
     pub fn frames_encoded(&self) -> u64 {
         self.frames_encoded
     }
@@ -285,7 +235,7 @@ impl OggOpus {
         self.next_channel = (self.next_channel + 1) % self.channels;
     }
 
-    fn encode_one_frame(&mut self, end: PacketWriteEndInfo) -> Result<(), anyhow::Error> {
+    fn encode_one_frame(&mut self) -> Result<Vec<u8>, anyhow::Error> {
         let taken = self.frames_per_packet;
         if let Some(resampler) = &mut self.resampler {
             let input = SequentialSliceOfVecs::new(&self.pending, self.channels, taken)
@@ -315,43 +265,24 @@ impl OggOpus {
             .encoder
             .encode_float(&self.frame, &mut self.packet)
             .map_err(|e| anyhow::anyhow!("encode an opus packet: {e}"))?;
-        self.granule += FRAME_FRAMES as u64;
         self.frames_encoded += 1;
-        let packet = self.packet[..len].to_vec();
-        let granule = self.granule;
-        self.write_packet(packet, granule, end)
+        Ok(self.packet[..len].to_vec())
     }
-
-    /// Writes one packet, ending the page when `end` says so.
-    ///
-    /// Audio ends a page per packet, rather than letting pages fill: `ogg` buffers
-    /// until a page is full otherwise, and a live listener would hear nothing until
-    /// then. The cost is a ~27-byte page header per ~240-byte packet, which is
-    /// still an order of magnitude below the PCM this replaces. Silence is the one
-    /// thing batched into a shared page — see [`Self::push_silence`].
-    fn write_packet(
-        &mut self,
-        packet: Vec<u8>,
-        granule: u64,
-        end: PacketWriteEndInfo,
-    ) -> Result<(), anyhow::Error> {
-        self.writer
-            .write_packet(Cow::Owned(packet), self.serial, end, granule)
-            .map_err(|e| anyhow::anyhow!("write an ogg page: {e}"))
-    }
-}
-
-/// Takes the bytes the writer has finished, leaving it ready for more.
-fn stream_take(writer: &mut PacketWriter<'static, Vec<u8>>) -> Vec<u8> {
-    std::mem::take(writer.inner_mut())
 }
 
 /// The `OpusHead` identification header (RFC 7845 §5.1).
 ///
+/// Still built, and still mandatory, though there is no longer a container to put
+/// it in: a decoder needs the channel count to lay out its output and the pre-skip
+/// to discard the encoder's own delay rather than play it as leading silence. It
+/// travels as the `audioFormat` control message's `head` instead
+/// ([`crate::protocol::ServerMsg::AudioFormat`]), which is also exactly the byte
+/// string WebCodecs takes as an `AudioDecoderConfig.description`.
+///
 /// `input_sample_rate` is documentation only — it records the rate the audio
 /// arrived at, 44100 here, while the stream itself is always 48 kHz. Decoders
 /// ignore it, but it is the honest value and tools display it.
-fn opus_head(format: PcmFormat, pre_skip: u16) -> Vec<u8> {
+pub fn opus_head(format: PcmFormat, pre_skip: u16) -> Vec<u8> {
     let mut head = Vec::with_capacity(19);
     head.extend_from_slice(b"OpusHead");
     head.push(1); // version
@@ -363,76 +294,10 @@ fn opus_head(format: PcmFormat, pre_skip: u16) -> Vec<u8> {
     head
 }
 
-/// The `OpusTags` comment header (RFC 7845 §5.2). Required to be present, and
-/// there is nothing to say in it: this stream has no title, artist or duration.
-fn opus_tags() -> Vec<u8> {
-    const VENDOR: &[u8] = b"remotex";
-    let mut tags = Vec::with_capacity(8 + 4 + VENDOR.len() + 4);
-    tags.extend_from_slice(b"OpusTags");
-    tags.extend_from_slice(&(VENDOR.len() as u32).to_le_bytes());
-    tags.extend_from_slice(VENDOR);
-    tags.extend_from_slice(&0u32.to_le_bytes()); // no comments
-    tags
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::PCM_CD_QUALITY;
-
-    /// One Ogg page, as far as these tests need to read it.
-    struct Page {
-        granule: u64,
-        serial: u32,
-        /// Every packet on the page, back to back. One packet per page except for
-        /// a batch of silence, which is why [`Page::packets`] exists.
-        body: Vec<u8>,
-        lacing: Vec<u8>,
-    }
-
-    impl Page {
-        /// The page's packets, split by its lacing table: a segment of 255
-        /// continues the packet, anything less ends it.
-        fn packets(&self) -> Vec<Vec<u8>> {
-            let mut out = Vec::new();
-            let (mut start, mut len) = (0usize, 0usize);
-            for segment in &self.lacing {
-                len += usize::from(*segment);
-                if *segment < 255 {
-                    out.push(self.body[start..start + len].to_vec());
-                    start += len;
-                    len = 0;
-                }
-            }
-            out
-        }
-    }
-
-    /// A deliberately separate parser from the writer under test. Reading pages
-    /// back with `ogg`'s own reader would let a wrong page agree with itself; the
-    /// container is also checked from outside entirely, with ffprobe, per
-    /// docs/remote-audio.md.
-    fn pages(mut bytes: &[u8]) -> Vec<Page> {
-        let mut out = Vec::new();
-        while !bytes.is_empty() {
-            assert_eq!(&bytes[0..4], b"OggS", "every page starts with the capture pattern");
-            assert_eq!(bytes[4], 0, "stream structure version 0");
-            let granule = u64::from_le_bytes(bytes[6..14].try_into().unwrap());
-            let serial = u32::from_le_bytes(bytes[14..18].try_into().unwrap());
-            let segments = usize::from(bytes[26]);
-            let table = &bytes[27..27 + segments];
-            let body: usize = table.iter().map(|n| usize::from(*n)).sum();
-            let start = 27 + segments;
-            out.push(Page {
-                granule,
-                serial,
-                body: bytes[start..start + body].to_vec(),
-                lacing: table.to_vec(),
-            });
-            bytes = &bytes[start + body..];
-        }
-        out
-    }
 
     /// 20 ms of 44.1 kHz stereo silence, as bytes on the queue.
     fn silence(frames: usize) -> Vec<u8> {
@@ -440,12 +305,9 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_opens_with_the_two_header_pages() {
-        let (_stream, headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
-        let pages = pages(&headers);
-        assert_eq!(pages.len(), 2, "OpusHead and OpusTags, each on its own page");
-
-        let head = &pages[0].body;
+    fn the_stream_hands_back_a_usable_opus_head() {
+        let (_stream, head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        assert_eq!(head.len(), 19, "the fixed part, with no mapping table");
         assert_eq!(&head[0..8], b"OpusHead");
         assert_eq!(head[8], 1, "version");
         assert_eq!(head[9], 2, "stereo");
@@ -457,16 +319,6 @@ mod tests {
             "OpusHead records the rate the audio arrived at"
         );
         assert_eq!(head[18], 0, "channel mapping family");
-
-        assert_eq!(&pages[1].body[0..8], b"OpusTags");
-        assert_eq!(pages[0].serial, pages[1].serial, "one logical stream");
-    }
-
-    #[test]
-    fn each_stream_gets_its_own_serial() {
-        let (_a, first) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
-        let (_b, second) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
-        assert_ne!(pages(&first)[0].serial, pages(&second)[0].serial);
     }
 
     /// The buffer sizes RDP actually sends do not line up with Opus frames, so
@@ -474,45 +326,41 @@ mod tests {
     /// nothing padded and nothing dropped.
     #[test]
     fn only_whole_frames_are_encoded_and_the_remainder_is_carried() {
-        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
 
         // One frame needs 882 input frames at 44.1 kHz.
         assert!(
-            pages(&stream.push(&silence(881)).expect("push")).is_empty(),
+            stream.push(&silence(881)).expect("push").is_empty(),
             "one frame short of a packet produces nothing"
         );
-        let pages_out = pages(&stream.push(&silence(1)).expect("push"));
-        assert_eq!(pages_out.len(), 1, "the 882nd frame completes a packet");
+        assert_eq!(
+            stream.push(&silence(1)).expect("push").len(),
+            1,
+            "the 882nd frame completes a packet"
+        );
 
         // 32768 bytes is what the tested Windows host sends: 8192 frames, which is
         // nine whole packets (7938 frames) with 254 left over.
-        let pages_out = pages(&stream.push(&silence(8192)).expect("push"));
-        assert_eq!(pages_out.len(), 9);
+        assert_eq!(stream.push(&silence(8192)).expect("push").len(), 9);
         assert_eq!(stream.pending[0].len(), 8192 - 9 * 882);
+        assert_eq!(stream.frames_encoded(), 10);
     }
 
+    /// Every packet has to be a packet — a decoder handed an empty one has nothing
+    /// to do with it, and an empty `Vec` is what a mis-sliced encode would produce.
     #[test]
-    fn granule_positions_advance_by_one_frame_per_packet() {
-        let (mut stream, headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
-        assert_eq!(pages(&headers)[0].granule, 0, "headers carry no audio");
-
-        let bytes = stream.push(&silence(882 * 3)).expect("push");
-        let granules: Vec<u64> = pages(&bytes).iter().map(|page| page.granule).collect();
-        assert_eq!(granules.len(), 3);
-        for pair in granules.windows(2) {
-            assert_eq!(
-                pair[1] - pair[0],
-                FRAME_FRAMES as u64,
-                "one 20 ms frame per page, counted at 48 kHz"
-            );
-        }
+    fn every_packet_carries_bytes() {
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
+        let packets = stream.push(&silence(882 * 3)).expect("push");
+        assert_eq!(packets.len(), 3);
+        assert!(packets.iter().all(|packet| !packet.is_empty()));
     }
 
     /// An odd byte count must not shift the channels against each other for the
     /// rest of the stream, which is what dropping the leftover byte would do.
     #[test]
     fn a_half_sample_at_the_end_of_a_buffer_is_carried_not_dropped() {
-        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
         stream.push(&[0, 0, 0]).expect("push");
         assert_eq!(stream.odd_byte, Some(0), "the third byte is half a sample");
         assert_eq!(stream.pending[0].len(), 1, "left got one sample");
@@ -528,7 +376,7 @@ mod tests {
     /// Pinned here because Opus would happily encode the wrong thing.
     #[test]
     fn resampling_does_not_blend_the_channels() {
-        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
         // Left at full positive, right at full negative, for one packet.
         let mut pcm = Vec::new();
         for _ in 0..882 {
@@ -555,9 +403,15 @@ mod tests {
 
     /// Encode a tone and decode it back, so the test fails if the bytes are
     /// well-framed nonsense — the failure a framing-only assertion would miss.
+    ///
+    /// libopus is doing the decoding, which matters more than it did while there
+    /// was a container: `ffprobe` used to be the check that this agrees with
+    /// something other than itself, and without Ogg there is nothing for a third
+    /// party demuxer to read. The remaining outside readers are this decoder and
+    /// the browser's own (`server::tests::serve_a_test_tone`).
     #[test]
     fn a_tone_survives_the_round_trip() {
-        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
 
         // 441 Hz at 44.1 kHz: exactly 100 samples a cycle, and a whole number of
         // cycles per packet, so there is no discontinuity to blame a failure on.
@@ -568,17 +422,15 @@ mod tests {
             pcm.extend_from_slice(&sample.to_le_bytes());
             pcm.extend_from_slice(&sample.to_le_bytes());
         }
-        let bytes = stream.push(&pcm).expect("push");
+        let packets = stream.push(&pcm).expect("push");
+        assert_eq!(packets.len(), 20);
 
         let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
         let mut decoded = vec![0i16; FRAME_FRAMES * 2];
-        let pages = pages(&bytes);
-        assert_eq!(pages.len(), 20);
-        // Decode a packet from the middle: the first few are the encoder settling.
-        for page in &pages[..15] {
-            decoder
-                .decode(&page.body, &mut decoded, false)
-                .expect("decode");
+        // Decode up to a packet in the middle: the first few are the encoder
+        // settling, and a decoder needs the ones before it either way.
+        for packet in &packets[..15] {
+            decoder.decode(packet, &mut decoded, false).expect("decode");
         }
         let peak = decoded.iter().map(|s| s.abs()).max().expect("samples");
         assert!(
@@ -588,9 +440,9 @@ mod tests {
     }
 
     /// The channels must still be distinguishable after the *whole* path —
-    /// resample, interleave, encode, mux, decode — and not merely after the
-    /// resampler. This is what catches a wrong channel count in `OpusHead` or a
-    /// transposed interleave in the frame buffer, neither of which
+    /// resample, interleave, encode, decode — and not merely after the resampler.
+    /// This is what catches a wrong channel count in `OpusHead` or a transposed
+    /// interleave in the frame buffer, neither of which
     /// [`resampling_does_not_blend_the_channels`] would see.
     ///
     /// It is also the answer to a real false alarm: a live capture from the test
@@ -599,7 +451,7 @@ mod tests {
     /// the only input that tells the two apart.
     #[test]
     fn a_hard_panned_signal_still_has_two_channels_after_a_round_trip() {
-        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
 
         // Left carries a tone, right is silent.
         let mut pcm = Vec::new();
@@ -608,15 +460,13 @@ mod tests {
             pcm.extend_from_slice(&((phase.sin() * 12_000.0) as i16).to_le_bytes());
             pcm.extend_from_slice(&0i16.to_le_bytes());
         }
-        let bytes = stream.push(&pcm).expect("push");
+        let packets = stream.push(&pcm).expect("push");
 
         let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
         let mut decoded = vec![0i16; FRAME_FRAMES * 2];
         // Past the encoder settling, so the silence on the right is really silence.
-        for page in pages(&bytes).iter().take(15) {
-            decoder
-                .decode(&page.body, &mut decoded, false)
-                .expect("decode");
+        for packet in packets.iter().take(15) {
+            decoder.decode(packet, &mut decoded, false).expect("decode");
         }
         let energy = |samples: &[i16]| -> f64 {
             samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>()
@@ -631,73 +481,6 @@ mod tests {
         );
     }
 
-    /// The keepalive's shape: one page for the whole batch, a frame's granule for
-    /// every packet in it, and real silence inside — not a page of nothing, which
-    /// is what an empty encode would also look like from the outside.
-    #[test]
-    fn a_batch_of_silence_shares_one_page() {
-        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
-        let bytes = stream.push_silence(25).expect("silence");
-        let pages = pages(&bytes);
-
-        assert_eq!(pages.len(), 1, "25 packets, one page, not 25 pages");
-        assert_eq!(stream.frames_encoded(), 25);
-        assert_eq!(
-            pages[0].granule,
-            stream.granule,
-            "the page carries the granule of the last packet on it"
-        );
-
-        let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
-        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
-        // Split by the lacing table, not by the page body: the packets are back to
-        // back inside it, so decoding the body whole would be decoding 25 packets
-        // as one.
-        let packets = pages[0].packets();
-        assert_eq!(packets.len(), 25, "one packet per frame asked for");
-        decoder
-            .decode(&packets[0], &mut decoded, false)
-            .expect("decode");
-        assert!(
-            decoded.iter().all(|s| s.abs() < 8),
-            "silence in, silence out"
-        );
-    }
-
-    /// A batch that lands mid-frame carries the remainder like any other buffer,
-    /// and the real audio in front of it is not reordered behind the silence.
-    #[test]
-    fn silence_after_a_partial_buffer_keeps_the_audio_in_front_of_it() {
-        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
-
-        // Half a frame of loud audio, which cannot be encoded on its own.
-        let mut pcm = Vec::new();
-        for _ in 0..441 {
-            pcm.extend_from_slice(&12_000i16.to_le_bytes());
-            pcm.extend_from_slice(&12_000i16.to_le_bytes());
-        }
-        assert!(pages(&stream.push(&pcm).expect("push")).is_empty());
-
-        let bytes = stream.push_silence(2).expect("silence");
-        assert_eq!(stream.frames_encoded(), 2, "two frames out for two asked for");
-        assert_eq!(
-            stream.pending[0].len(),
-            441,
-            "the half frame of audio is repaid out of the silence, not dropped"
-        );
-
-        let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
-        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
-        let packets = pages(&bytes)[0].packets();
-        assert_eq!(packets.len(), 2);
-        decoder.decode(&packets[0], &mut decoded, false).expect("decode");
-        let peak = decoded.iter().map(|s| s.abs()).max().expect("samples");
-        assert!(
-            peak > 2_000,
-            "the first frame should still start with the audio, peak was {peak}"
-        );
-    }
-
     #[test]
     fn a_48_kilohertz_source_skips_the_resampler() {
         let format = PcmFormat {
@@ -705,13 +488,13 @@ mod tests {
             sample_rate: 48_000,
             bits_per_sample: 16,
         };
-        let (mut stream, _headers) = OggOpus::new(format).expect("an encoder");
+        let (mut stream, _head) = OpusStream::new(format).expect("an encoder");
         assert!(stream.resampler.is_none());
         assert_eq!(stream.frames_per_packet, FRAME_FRAMES);
-        let bytes = stream
+        let packets = stream
             .push(&vec![0u8; FRAME_FRAMES * usize::from(format.block_align())])
             .expect("push");
-        assert_eq!(pages(&bytes).len(), 1);
+        assert_eq!(packets.len(), 1);
     }
 
     #[test]
@@ -721,6 +504,6 @@ mod tests {
             sample_rate: 48_000,
             bits_per_sample: 16,
         };
-        assert!(OggOpus::new(format).is_err());
+        assert!(OpusStream::new(format).is_err());
     }
 }

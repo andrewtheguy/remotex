@@ -878,7 +878,8 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
         | ClientMsg::DefaultSize
         | ClientMsg::Connect { .. }
         | ClientMsg::Disconnect
-        | ClientMsg::CacheReset => {
+        | ClientMsg::CacheReset
+        | ClientMsg::Audio { .. } => {
             return None;
         }
     })

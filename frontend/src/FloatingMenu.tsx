@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from "react";
-import AudioPanel from "./AudioPanel.tsx";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
 import type {
@@ -100,7 +99,7 @@ function readViewport(): Viewport {
 // the same canvas inset, so a second one open would sit on the first. Two
 // booleans made that a rule every call site had to remember — open this one,
 // clear the other — and this makes it impossible to express.
-type Panel = "clipboard" | "keyboard" | "display" | "audio";
+type Panel = "clipboard" | "keyboard" | "display";
 
 function usePanel() {
   const [panel, setPanel] = useState<Panel | null>(null);
@@ -125,7 +124,6 @@ function DockedPanel({
   displays,
   activeDisplayId,
   onSelectDisplay,
-  audioUrl,
 }: {
   panel: Panel | null;
   onClose: () => void;
@@ -136,7 +134,6 @@ function DockedPanel({
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
-  audioUrl: string | null;
 }) {
   switch (panel) {
     case "keyboard":
@@ -166,17 +163,6 @@ function DockedPanel({
           onDockedHeightChange={onDockedHeightChange}
         />
       );
-    case "audio":
-      // The URL can go away under an open panel — a reconnect supersedes the
-      // token in it — and the player is unmounted rather than left pointing at a
-      // claim the gateway no longer answers to.
-      return audioUrl ? (
-        <AudioPanel
-          src={audioUrl}
-          onClose={onClose}
-          onDockedHeightChange={onDockedHeightChange}
-        />
-      ) : null;
     default:
       return null;
   }
@@ -225,25 +211,34 @@ function DisplaySection({
   );
 }
 
-// The drawer's Audio row, which starts and stops playing the remote's sound.
+// The drawer's Audio row, which **is** the control: pressing it starts and stops
+// the remote's sound. There is no audio panel any more, and that is the right shape
+// for what is left to decide — a live stream has one question (am I listening to it)
+// and a docked panel spent screen space over the desktop to ask it. What went with
+// the panel is what a panel was for: a native transport whose scrubber and elapsed
+// time described a recording, and an in-page volume slider that the system's own
+// replaces.
 //
 // Absent rather than disabled when this session has no audio, following Display
 // rather than Clipboard — and for Display's reason. Audio is RDP-only, so for a
 // VNC or rxa target there is no audio feature that was switched off, and a
 // permanently greyed "Audio" would be an explanation of nothing. An RDP target
-// without `audio = true` lands in the same place: the browser is never told a URL,
-// so there is nothing here to press.
+// without `audio = true` lands in the same place.
 //
-// "Stop audio" rather than "Hide audio" because closing the panel really does
-// stop it — the response ends with the element (see AudioPanel).
+// **The press matters as much as what it says.** Enabling audio creates an
+// AudioContext, and a context born inside a user gesture is one a browser will let
+// play; created any other way it is suspended, on iOS with no way back. So this
+// button is the gesture the whole path is built on (see audioPlayer.ts).
 function AudioSection({
   available,
-  open,
-  onToggle,
+  enabled,
+  error,
+  onChange,
 }: {
   available: boolean;
-  open: boolean;
-  onToggle: () => void;
+  enabled: boolean;
+  error: string | null;
+  onChange: (enabled: boolean) => void;
 }) {
   if (!available) {
     return null;
@@ -251,18 +246,20 @@ function AudioSection({
   return (
     <div className="toolbar-section">
       <span className="toolbar-label">Audio</span>
-      {/* Opens straight away, like Display and unlike Clipboard: there is
-          nothing to fetch first. This click is also what makes the player's
-          `autoPlay` legitimate — see AudioPanel. */}
       <button
         type="button"
         className="toolbar-btn"
-        onClick={onToggle}
-        aria-pressed={open}
+        onClick={() => onChange(!enabled)}
+        aria-pressed={enabled}
         title="Play the remote's sound in this browser"
       >
-        {open ? "Stop audio" : "Audio"}
+        {enabled ? "Disable audio" : "Enable audio"}
       </button>
+      {/* Only ever shown for a refusal, and there is one real cause: a browser with
+          no WebCodecs Opus decoder. Nothing reports "the remote is quiet", because
+          from the gateway's end a quiet remote and one that will never redirect are
+          the same thing — the difference lives in its log. */}
+      {error && <p className="audio-note">{error}</p>}
     </div>
   );
 }
@@ -343,7 +340,10 @@ export default function FloatingMenu({
   displays,
   activeDisplayId,
   onSelectDisplay,
-  audioUrl,
+  canAudio,
+  audioEnabled,
+  audioError,
+  onAudioChange,
   macKeyOverridesEnabled,
   macKeyOverridesActive,
   isMacHost,
@@ -386,13 +386,20 @@ export default function FloatingMenu({
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
-  // Where this session's live audio can be played from, or null when there is
-  // none — which hides the Audio section rather than disabling it, the same rule
-  // the Display section follows and the opposite of Clipboard's. A greyed
-  // "Audio" would be explaining a feature that does not exist for this target:
-  // audio is RDP-only, so on VNC and rxa there is nothing that could be switched
-  // on. See useRemoteDesktop and AudioPanel.
-  audioUrl: string | null;
+  // Whether this session can carry the remote's sound, which hides the Audio
+  // section rather than disabling it — the same rule the Display section follows
+  // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
+  // feature that does not exist for this target: audio is RDP-only, so on VNC and
+  // rxa there is nothing that could be switched on.
+  //
+  // `audioEnabled` is what this browser has asked for, not proof that sound is
+  // arriving: a quiet remote and one that will never redirect are the same thing
+  // from the gateway's end. `audioError` is the one thing worth reporting — a
+  // browser that cannot decode Opus. See useRemoteDesktop and audioPlayer.ts.
+  canAudio: boolean;
+  audioEnabled: boolean;
+  audioError: string | null;
+  onAudioChange: (enabled: boolean) => void;
   // The Command-to-Control preference and whether it is doing anything. The two
   // differ when the guest is itself a Mac, which is why the section reports the
   // reason rather than just showing the switch off. The whole section is absent
@@ -622,14 +629,6 @@ export default function FloatingMenu({
     setOpen(false);
   }, [togglePanel]);
 
-  // The audio panel opens straight away — there is nothing to fetch, only a
-  // stream to attach to — and closing it is what stops the sound, because the
-  // response ends when its element goes away (see AudioPanel).
-  const onAudio = useCallback(() => {
-    togglePanel("audio");
-    setOpen(false);
-  }, [togglePanel]);
-
   // Same deal for the clipboard panel, except it cannot open straight away: it
   // fetches first and waits for the answer, so it appears already showing what
   // the remote holds right now. Without that it would open on whatever arrived
@@ -762,9 +761,10 @@ export default function FloatingMenu({
           </div>
 
           <AudioSection
-            available={audioUrl !== null}
-            open={panel === "audio"}
-            onToggle={onAudio}
+            available={canAudio}
+            enabled={audioEnabled}
+            error={audioError}
+            onChange={onAudioChange}
           />
 
           <div className="toolbar-section">
@@ -891,7 +891,6 @@ export default function FloatingMenu({
         displays={displays}
         activeDisplayId={activeDisplayId}
         onSelectDisplay={onSelectDisplay}
-        audioUrl={audioUrl}
       />
     </>
   );

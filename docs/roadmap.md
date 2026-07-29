@@ -123,59 +123,56 @@ What is not settled, and should not be decided here first:
 
 ### Prompter audio from an RDP guest
 
-The RDP-to-browser path is done and proven end to end: MS-RDPEA redirection over
-both of its channels (plus the `rdpdr` advertisement Windows requires before it
-will redirect anything), an authenticated live `audio/ogg; codecs=opus` endpoint on
-the claimed session, and an `<audio>` element in the SPA. A live Windows 11 target's
-own sound has been measured arriving through that endpoint. The mechanism, its
-lifecycle and that evidence are recorded in
+The RDP-to-browser path is done: MS-RDPEA redirection over both of its channels (plus
+the `rdpdr` advertisement Windows requires before it will redirect anything), Opus
+frames on the session's own WebSocket, and a browser that decodes them with WebCodecs
+and schedules every buffer itself. A live Windows 11 target's own sound has been heard
+through it. The mechanism, its lifecycle and that evidence are recorded in
 [`remote-audio.md`](remote-audio.md), which is where they belong.
 
-Both open questions the design named are now closed: an open-ended response **is**
-played progressively by a browser, and a real host does redirect to this gateway. So
-is the wart that followed them — the endpoint no longer waits for a format it may
-never be sent, and fills a quiet remote's gaps with silence, so audio starts, stops
-and starts again on its own.
-
-What is **not** settled is promptness, and it is the first of the two things planned
-here: a live desktop has been heard a couple of seconds behind itself, with the
-gateway measured out of it as a cause ([`remote-audio.md`](remote-audio.md)). The
-browser comes first because that is where audio is actually being listened to, and
-because a second client would inherit whatever timing model this settles on rather
-than help to choose it.
-
-**Apache Guacamole is the prior art, and reading it names the problem precisely.**
-Its guacd takes RDP audio through its own rdpsnd handler and sends **raw PCM** —
-`audio/L16;rate=…,channels=…`, 250 ms buffers, as blobs on an in-band stream of the
-same tunnel, so it spends the ~176 kB/s that Opus took us to 10.4. That is the half
-worth *not* copying. The half worth copying is at the other end: its
-`Guacamole.RawAudioPlayer` schedules every packet itself through Web Audio, on a
-timeline it owns, and bounds latency by throwing the excess away:
+Every question the design named has now been answered, including the one whose answer
+reversed it. A browser does play an open-ended response progressively, and a real host
+does redirect to this gateway — but **the schedule of an `<audio>` element belongs to
+the browser and can never be reclaimed**, so a delay it accumulated stayed for the
+session. Guacamole's `RawAudioPlayer` bounds latency in one line, in `sync()`:
 
 ```js
-// guacamole-common-js/modules/AudioPlayer.js, in sync()
+// guacamole-common-js/modules/AudioPlayer.js
 nextPacketTime = Math.min(nextPacketTime, now + maxLatency);   // maxLatency = 0.3
 ```
 
-That runs on every server sync, after each display flush, and an underrun resets the
-timeline to *now* rather than carrying the deficit. **A 300 ms hard cap, by skipping
-ahead** — which is exactly what `<audio src>` cannot do, because the schedule belongs
-to the browser and cannot be reclaimed. It is why the `playbackRate` trim in
-`AudioPanel.tsx` is a workaround for something they solve structurally, and it
-reframes the problem: the fix is not a codec or a container, it is **owning the
-playback clock**.
+That reframed the problem — not a codec, not a container, but **owning the playback
+clock** — and owning it means the bytes have to arrive as bytes, which is what put
+audio on the WebSocket and deleted the endpoint, the Ogg container and the
+silence keepalive together. The one thing not copied is Guacamole's wire: it sends raw
+PCM (`audio/L16`) in-band, spending the ~176 kB/s that Opus takes to about 10, so
+keeping Opus and decoding it with WebCodecs holds both properties where each design
+had only one.
 
-So the shape to aim for, if the remaining latency proves to be browser-side: keep
-Opus on the wire and decode in the client (`AudioDecoder`, or a WASM decoder),
-scheduling the decoded buffers ourselves with a latency cap. That keeps the
-seventeenth-of-PCM bandwidth *and* gains the bounded latency, where Guacamole has
-only the second. It also means the endpoint would stop being something an `<audio>`
-element can point at, which is a real cost and the reason not to start until the
-measurement in [`remote-audio.md`](remote-audio.md) says the browser is where the
-delay is. If instead it turns out to be Windows' own capture path, none of this
-helps and none of it should be built.
+**Promptness is settled, and that is why this section is no longer about it.** The live
+Windows target was heard in Chrome on 2026-07-29 through the in-band path, with the
+couple of seconds the `<audio>` design carried reduced to much less. The delay was
+browser-side, held where nothing could measure it — which is exactly why elimination
+rather than instrumentation was what found it
+([`remote-audio.md`](remote-audio.md)). Whatever is left is Windows' own capture path,
+and no change here reaches that.
 
-Two of Guacamole's other choices are worth recording while they are in view:
+**Safari is settled too, and it is what makes Opus-only defensible rather than a
+gamble**: macOS 26 Safari and a real iPhone both play it. There is no fallback
+representation, so a WebKit refusal would have meant no sound at all on Apple
+platforms — and the decision not to build one speculatively would have cost a second
+encoder, a second frame kind and a second set of failure modes for a browser that turned
+out not to need them. It did not work in the iOS Simulator, and why has not been looked
+into ([`remote-audio.md`](remote-audio.md)).
+
+What is **not** settled is the origin rather than the browser. WebCodecs is
+secure-context only, so audio to a client on a real network needs TLS in front of the
+gateway, and that has not been exercised — every run so far reached it over loopback
+([`remote-audio.md`](remote-audio.md)). Nothing here has to change for it; it is a
+deployment question that now has a hard requirement attached, where the `<audio>` path
+had none.
+
+Two of Guacamole's other choices are worth recording, one of which this now shares:
 
 - **It loads `rdpdr` and `rdpsnd` together**, unconditionally, whenever printing,
   drive redirection *or* audio is enabled. A second independent client therefore
@@ -187,26 +184,32 @@ Two of Guacamole's other choices are worth recording while they are in view:
   encoder stayed `NULL` is still returned and then silently does nothing, since
   `guac_audio_stream_write_pcm` and `_flush` both check the encoder before calling
   it; the protocols' "Sound disabled" log covers the stream failing to allocate at
-  all. Ours is a config flag whose outcome the `connected` message reports instead.
+  all. **Ours is now half of that**: the target's config flag still decides whether a
+  queue exists at all and the `connected` message reports it, but nothing is *sent*
+  until a client asks. Which turned out to matter for a reason Guacamole does not
+  have — it is what let audio frames join a wire the macOS viewer already speaks
+  without bumping the version number the viewer matches on.
 
-**Then the same RDP audio in the macOS viewer, and deliberately second.** It could
-once have pointed `AVPlayer` at this endpoint unchanged; since the response became
-Ogg/Opus it cannot, because AVFoundation has no Ogg demuxer. So viewer audio means a
-second representation from the same queue — Opus in CAF or fragmented MP4, both of
-which AVFoundation reads, or decoding Opus in the viewer. A second representation,
-not a second transport, and not difficult.
+**Then the same RDP audio in the macOS viewer, and deliberately second.** It could once
+have pointed `AVPlayer` at an HTTP endpoint unchanged; Ogg took that away (AVFoundation
+has no Ogg demuxer) and audio frames on the WebSocket take it further — there is no
+response left to point anything at. So viewer audio means a representation of its own
+from the same queue: Opus in CAF or fragmented MP4, both of which AVFoundation reads,
+or decoding Opus in the viewer. A second representation, not a second transport, and
+not difficult.
 
-The order is the argument, not the difficulty: the browser is where this is being
-listened to, and if promptness moves it off `<audio>` and onto a client-scheduled
-decoder, whatever the viewer was built against first would be a representation on its
-way out. Doing the browser first means the viewer copies a settled timing model
-instead of inheriting an unsettled one — and if the delay turns out to be Windows'
-own, nothing about the viewer's representation changes anyway.
+The order was the argument, not the difficulty, and it has already paid: the browser
+path has since moved from an open-ended WAV to Ogg/Opus to raw Opus frames on the
+socket, and anything the viewer had been built against first would have been a
+representation on its way out. What it copies now is a settled *timing* model rather
+than an unsettled one — and note the deletion this leaves it, since the frames it would
+need are opt-in: a viewer that never sends the `audio` message needed no protocol
+version bump and no rebuild.
 
 **Until that work starts, the viewer is not a constraint on the browser path.** It has
-no audio at all, so no change to the endpoint, the encoder or the panel needs checking
-against it, and none should be held up for it. Being planned is not the same as being
-a dependency.
+no audio at all — and now not even a wire it could receive audio on — so no change to
+the encoder, the frames or the control needs checking against it, and none should be
+held up for it. Being planned is not the same as being a dependency.
 
 Audio for `rxa` and VNC, and a microphone going the other way, are
 [not planned](#audio-for-rxa-and-vnc-and-a-microphone).

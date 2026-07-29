@@ -36,7 +36,9 @@ export default function RemoteDesktop({
     size,
     canResize,
     canClipboard,
-    audioUrl,
+    canAudio,
+    audioEnabled,
+    audioError,
     displays,
     activeDisplayId,
     remoteClipboard,
@@ -50,6 +52,7 @@ export default function RemoteDesktop({
     switchTarget,
     resizeToWindow,
     selectDisplay,
+    setAudio,
     sendKeyCombo,
     requestClipboard,
     sendClipboard,
@@ -105,7 +108,10 @@ export default function RemoteDesktop({
           displays={displays}
           activeDisplayId={activeDisplayId}
           onSelectDisplay={selectDisplay}
-          audioUrl={audioUrl}
+          canAudio={canAudio}
+          audioEnabled={audioEnabled}
+          audioError={audioError}
+          onAudioChange={setAudio}
           macKeyOverridesEnabled={macKeyOverridesEnabled}
           macKeyOverridesActive={macKeyOverridesActive}
           isMacHost={isMacHost}

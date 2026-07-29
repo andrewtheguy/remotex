@@ -1,8 +1,9 @@
 // Wire protocol shared (in shape) with the Rust backend `src/protocol.rs`.
 //
 // Browser -> server: input events as JSON text frames.
-// Server -> browser: screen tiles as binary frames (decodeTileFrame below);
-// rare control messages (resize/error) as JSON text frames with a `type` tag.
+// Server -> browser: screen tiles and the remote's audio as binary frames, told
+// apart by their first byte (binaryFrameKind below); rare control messages
+// (resize/error, the audio format) as JSON text frames with a `type` tag.
 
 export type MouseButton = "left" | "middle" | "right";
 
@@ -81,7 +82,15 @@ export type ClientMsg =
   // server empties its slot table and repaints; deliberately not "refresh",
   // which is routed to the engine and would leave the table intact — the repaint
   // would come back as the same references and miss again.
-  | { type: "cacheReset" };
+  | { type: "cacheReset" }
+  // Start or stop the remote's sound on this socket, from the floating menu's Audio
+  // button. Audio is opt-in for a reason: nothing but a browser sends this, which is
+  // what lets the gateway add audio frames without moving the protocol version and
+  // breaking the macOS viewer's exact-match check (see docs/remote-audio.md).
+  //
+  // Sending it from a click is also what makes playback legal — an AudioContext
+  // created inside a user gesture needs no autoplay permission.
+  | { type: "audio"; enabled: boolean };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
 // src/protocol.rs. The backend refuses anything over it in either direction;
@@ -151,9 +160,10 @@ export type ControlMsg =
   // whether the control appears also needs the shared display to be one the
   // agent made, which arrives later in `displays`.
   // `clipboard` is whether this target opted into the clipboard bridge.
-  // `audio` is the same kind of permission, and the only one whose feature does
-  // not use this socket at all: it says an `<audio>` element may be pointed at
-  // /api/session/audio for this session (see docs/remote-audio.md).
+  // `audio` is the same kind of permission: this session *can* carry the remote's
+  // sound, so the floating menu offers the control that asks for it. It does not mean
+  // anything is playing, or that the remote's audio channel is even up — from the
+  // gateway's end those are indistinguishable (see docs/remote-audio.md).
   | {
       type: "connected";
       name: string;
@@ -161,6 +171,17 @@ export type ControlMsg =
       resize: boolean;
       clipboard: boolean;
       audio: boolean;
+    }
+  // How to decode the audio frames that follow, sent once when audio is enabled and
+  // always before the first packet — a decoder configured afterwards has already
+  // thrown away the audio it was meant to decode. `head` is base64 `OpusHead`,
+  // which carries the channel count and the encoder's pre-skip.
+  | {
+      type: "audioFormat";
+      codec: string;
+      sampleRate: number;
+      channels: number;
+      head: string;
     }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // Only the native viewer acts on it, to decide whether a local Command
@@ -205,6 +226,9 @@ export type BatchRecord =
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 4;
+const AUDIO_FRAME_KIND = 0x03;
+const AUDIO_HEADER_LEN = 4;
+const AUDIO_PACKET_HEADER_LEN = 2;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const TILE_HEADER_LEN = 16;
@@ -320,6 +344,64 @@ function decodeTile(
     },
     next: start + len,
   };
+}
+
+// Which kind of binary frame this is, so one socket can carry pixels and sound.
+//
+// Read before either parser rather than by trying them in turn: a frame whose kind
+// is unknown must be dropped whole, and a batch parser handed audio would otherwise
+// spend its way through a packet looking for records.
+export function binaryFrameKind(buf: ArrayBuffer): "batch" | "audio" | null {
+  if (buf.byteLength < 1) {
+    return null;
+  }
+  switch (new DataView(buf).getUint8(0)) {
+    case BATCH_FRAME_KIND:
+      return "batch";
+    case AUDIO_FRAME_KIND:
+      return "audio";
+    default:
+      return null;
+  }
+}
+
+// Parse an audio frame into its Opus packets. Layout (little-endian, matching
+// `audio` in `src/protocol.rs`):
+//
+//   offset 0: u8  frame kind, always 0x03 (audio)
+//   offset 1: u8  flags, always 0
+//   offset 2: u16 packet count
+//   offset 4: packets, each u16 length | length bytes
+//
+// Lengths because an Opus packet does not carry its own size and one frame holds
+// nine or ten of them; a count because a truncated frame would otherwise look like a
+// complete shorter one. Returns null for anything malformed, so a bad frame is
+// dropped whole rather than decoded halfway — a decoder fed a partial packet does not
+// merely skip it, it can be left unable to decode what follows.
+export function decodeAudioFrame(buf: ArrayBuffer): Uint8Array[] | null {
+  if (buf.byteLength < AUDIO_HEADER_LEN) {
+    return null;
+  }
+  const view = new DataView(buf);
+  if (view.getUint8(0) !== AUDIO_FRAME_KIND || view.getUint8(1) !== 0) {
+    return null;
+  }
+  const count = view.getUint16(2, true);
+  const packets: Uint8Array[] = [];
+  let at = AUDIO_HEADER_LEN;
+  while (at < buf.byteLength) {
+    if (at + AUDIO_PACKET_HEADER_LEN > buf.byteLength) {
+      return null;
+    }
+    const len = view.getUint16(at, true);
+    const start = at + AUDIO_PACKET_HEADER_LEN;
+    if (start + len > buf.byteLength) {
+      return null;
+    }
+    packets.push(new Uint8Array(buf, start, len));
+    at = start + len;
+  }
+  return packets.length === count ? packets : null;
 }
 
 // Map DOM MouseEvent.button (0/1/2) to the protocol button name.
