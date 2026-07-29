@@ -67,6 +67,9 @@ struct ViewerSessionState: Equatable {
     /// "Resize to Display"; see `AppModel.canResizeToDisplay`.
     var followsWindow = false
     var canClipboard = false
+    /// Whether this target carries sound at all — an RDP target configured for it. Not
+    /// whether any is playing: see `ServerMessage.Connected.audio`.
+    var canAudio = false
     /// The remote's displays and the one it is sharing, from the last
     /// `displays`. Empty for every engine that cannot offer a choice, which is
     /// what leaves the Display menu with nothing in it.

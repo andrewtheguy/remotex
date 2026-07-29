@@ -2,6 +2,22 @@ import Foundation
 import Testing
 @testable import RemotexViewer
 
+/// The `connected` this suite attaches with. Named because every field is required —
+/// the gateway sends them all and this build refuses a message missing any — so it is
+/// noise in a test about ordering.
+private let connectedJSON = #"""
+{"type":"connected","name":"mac","protocol":"rxa","resize":false,\#
+"clipboard":true,"audio":true}
+"""#
+
+/// A real `audioFormat`, `head` included: the base64 is the gateway's own 19-byte
+/// `OpusHead` from `protocol.rs`'s pinned test, so a decoder built from this is built
+/// from what the wire carries.
+private let audioFormatJSON = #"""
+{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
+"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}
+"""#
+
 @MainActor
 struct GatewayConnectionTests {
     /// The invariant the whole receive loop is shaped around. Tiles decode
@@ -9,15 +25,23 @@ struct GatewayConnectionTests {
     /// would blit stale pixels into a freshly allocated texture, and two
     /// reordered tiles leave the older one on screen. Tiles carry no delta state,
     /// so nothing downstream can repair either.
+    ///
+    /// Audio is in the stream because it shares the invariant for a second reason: an
+    /// `audioFormat` that arrived after the packets it configures configures nothing,
+    /// and Opus packets carry inter-packet state, so a reordered pair is a decoder
+    /// running on wrong history.
     @Test
     func framesReachTheSinkInArrivalOrderAcrossTheAsyncTileDecode() async throws {
         let transport = FakeWebSocketTransport(
             inbound: [
-                .text(#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true}"#),
+                .text(connectedJSON),
                 .text(#"{"type":"resize","w":64,"h":64,"scale":2.0}"#),
                 .binary(try tileFrame(x: 0, y: 0)),
+                .text(audioFormatJSON),
+                .binary(audioFrame([Data(repeating: 7, count: 240)])),
                 .binary(try tileFrame(x: 8, y: 16)),
                 .text(#"{"type":"remoteOs","macos":true}"#),
+                .binary(audioFrame([Data(repeating: 8, count: 12), Data([9])])),
                 .binary(try tileFrame(x: 32, y: 48)),
                 .text(#"{"type":"picker"}"#),
             ],
@@ -30,18 +54,53 @@ struct GatewayConnectionTests {
         await connection.start()
         await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
 
-        let interesting = sink.trace.filter { $0.hasPrefix("control:") || $0.hasPrefix("tiles:") }
+        let interesting = sink.trace.filter {
+            $0.hasPrefix("control:") || $0.hasPrefix("tiles:") || $0.hasPrefix("audio:")
+        }
         #expect(
             interesting == [
                 "control:connected(mac)",
                 "control:resize(64x64@2.0x)",
                 "tiles:0,0,2x2",
+                "control:audioFormat(opus)",
+                "audio:240",
                 "tiles:8,16,2x2",
                 "control:remoteOs(true)",
+                "audio:12|1",
                 "tiles:32,48,2x2",
                 "control:picker",
             ]
         )
+        await connection.stop()
+    }
+
+    /// A binary frame of a kind this build has no parser for is one dropped frame.
+    ///
+    /// Worth its own case because the two binary kinds are now told apart by their
+    /// first byte: before audio existed every binary frame went to the tile parser, so
+    /// this frame would have been reported as a malformed *batch* — a wrong diagnosis
+    /// for a newer gateway, which is what the version check exists to say.
+    @Test
+    func aBinaryFrameOfAnUnknownKindIsDroppedAlone() async throws {
+        let transport = FakeWebSocketTransport(
+            inbound: [
+                .binary(Data([0x04, 0, 1, 0, 5, 5, 5])),
+                .binary(try tileFrame(x: 0, y: 0)),
+                .text(#"{"type":"picker"}"#),
+            ],
+            closeCode: nil
+        )
+        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
+        let sink = RecordingSink()
+        let connection = GatewayConnection(gateway: gateway, sink: sink)
+
+        await connection.start()
+        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
+
+        let delivered = sink.trace.filter {
+            $0.hasPrefix("control:") || $0.hasPrefix("tiles:") || $0.hasPrefix("audio:")
+        }
+        #expect(delivered == ["tiles:0,0,2x2", "control:picker"])
         await connection.stop()
     }
 

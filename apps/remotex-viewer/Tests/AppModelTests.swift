@@ -64,7 +64,8 @@ struct AppModelTests {
                             name: "t",
                             protocolName: expectation.protocolName,
                             resize: expectation.resize,
-                            clipboard: false
+                            clipboard: false,
+                            audio: false
                         )
                     )
                 )
@@ -502,13 +503,15 @@ struct AppModelTests {
     private func connected(
         protocolName: String,
         resize: Bool = false,
-        clipboard: Bool = false
+        clipboard: Bool = false,
+        audio: Bool = false
     ) -> ServerMessage.Connected {
         ServerMessage.Connected(
             name: "mac",
             protocolName: protocolName,
             resize: resize,
-            clipboard: clipboard
+            clipboard: clipboard,
+            audio: audio
         )
     }
 

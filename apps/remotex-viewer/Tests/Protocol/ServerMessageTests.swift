@@ -24,7 +24,10 @@ struct ServerMessageTests {
     @Test
     func connectedCarriesTheProtocolNameAroundTheSwiftKeyword() throws {
         let message = try ServerMessage.decode(
-            #"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true}"#
+            #"""
+            {"type":"connected","name":"mac","protocol":"rxa","resize":false,\#
+            "clipboard":true,"audio":false}
+            """#
         )
         #expect(
             message == .connected(
@@ -32,7 +35,8 @@ struct ServerMessageTests {
                     name: "mac",
                     protocolName: "rxa",
                     resize: false,
-                    clipboard: true
+                    clipboard: true,
+                    audio: false
                 )
             )
         )
@@ -173,10 +177,47 @@ struct ServerMessageTests {
         )
     }
 
+    /// The exact bytes `src/protocol.rs` pins for this message, `head` included: the
+    /// base64 there decodes to the 19-byte `OpusHead` an Opus stream begins with, and
+    /// the pre-skip inside it is what the decoder needs (see `OpusDecoder`).
+    @Test
+    func audioFormatDecodesItsHeadFromBase64() throws {
+        let message = try ServerMessage.decode(#"""
+        {"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
+        "head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}
+        """#)
+        guard case .audioFormat(let format) = message else {
+            Issue.record("expected audioFormat, got \(message)")
+            return
+        }
+        #expect(format.codec == "opus")
+        #expect(format.sampleRate == 48_000)
+        #expect(format.channels == 2)
+        #expect(format.head.count == 19)
+        #expect(format.head.prefix(8) == Data("OpusHead".utf8))
+        // Bytes 10–11, little-endian: the encoder's own delay, which the gateway builds
+        // rather than stubs.
+        #expect(UInt16(format.head[10]) | (UInt16(format.head[11]) << 8) == 312)
+    }
+
     /// A tag this build *does* know, arriving with a payload it cannot read, is
     /// real drift. Reported as such and dropped, rather than silently ignored.
     @Test
     func aKnownTypeWithABadPayloadIsReportedAsMalformed() {
+        // A `head` that is not base64 is caught here, where the tag is still known,
+        // rather than reaching a decoder as an empty `Data` and being reported as "this
+        // Mac cannot play Opus".
+        expectMalformed(
+            #"""
+            {"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
+            "head":"not base64 !!"}
+            """#,
+            type: "audioFormat"
+        )
+        expectMalformed(
+            #"{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2}"#,
+            type: "audioFormat"
+        )
         expectMalformed(#"{"type":"resize","w":1280,"scale":1.0}"#, type: "resize")
         // Including a size with no density: the two are only useful together, and
         // guessing 1x for a Retina Mac would draw its desktop at twice its size.

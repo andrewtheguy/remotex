@@ -220,6 +220,8 @@ final class RecordingSink: GatewaySessionSink {
             case .control(let message): "control:\(Self.label(message))"
             case .tiles(let tiles):
                 "tiles:" + tiles.map { "\($0.x),\($0.y),\($0.w)x\($0.h)" }.joined(separator: "|")
+            case .audio(let packets):
+                "audio:" + packets.map { "\($0.count)" }.joined(separator: "|")
             case .clearFramebuffer: "clear"
             case .releaseInput: "release"
             case .failPendingClipboardFetch: "failFetch"
@@ -264,6 +266,7 @@ final class RecordingSink: GatewaySessionSink {
         case .remoteOs(let macos): "remoteOs(\(macos))"
         case .clipboard: "clipboard"
         case .displays(let active, let displays): "displays(\(displays.count), active \(active))"
+        case .audioFormat(let format): "audioFormat(\(format.codec))"
         case .unsupported(let type): "unsupported(\(type))"
         }
     }
@@ -308,7 +311,8 @@ struct AttachedSession {
     func connect(
         protocolName: String,
         resize: Bool = true,
-        clipboard: Bool = false
+        clipboard: Bool = false,
+        audio: Bool = false
     ) {
         model.apply(
             .control(
@@ -317,7 +321,8 @@ struct AttachedSession {
                         name: "t",
                         protocolName: protocolName,
                         resize: resize,
-                        clipboard: clipboard
+                        clipboard: clipboard,
+                        audio: audio
                     )
                 )
             )
@@ -374,6 +379,26 @@ func batchFrame(_ records: [Data]) -> Data {
         frame.append(record)
     }
     return frame
+}
+
+/// An audio frame wrapping `packets`, whose count the header reports honestly.
+///
+/// Built here rather than by `AudioFrame` so a test using it is not depending on the
+/// parser it is testing; `AudioFrameTests` writes the layout out a third time for the
+/// same reason.
+func audioFrame(_ packets: [Data]) -> Data {
+    var frame = Data([AudioFrame.frameKind, 0])
+    appendLittleEndian(UInt16(packets.count), to: &frame)
+    for packet in packets {
+        appendLittleEndian(UInt16(packet.count), to: &frame)
+        frame.append(packet)
+    }
+    return frame
+}
+
+private func appendLittleEndian(_ value: UInt16, to data: inout Data) {
+    data.append(UInt8(value & 0xFF))
+    data.append(UInt8(value >> 8))
 }
 
 /// A `TILE_REF` record: seven bytes naming a slot and where to redraw it.

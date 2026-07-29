@@ -222,13 +222,14 @@ pub struct TargetConfig {
     /// Unlike [`Self::clipboard`], this is not a permission the session can act
     /// on later. RDPSND has to be negotiated when the connection is established,
     /// so an audio target asks for redirection at connect and discards what
-    /// arrives while nobody is subscribed — a browser asking afterwards cannot add
+    /// arrives while nobody is subscribed — a client asking afterwards cannot add
     /// the channel to a live connection.
     ///
     /// Enabling it does not mean a client will hear anything: audio is sent only to
-    /// one that asks ([`crate::protocol::ClientMsg::Audio`]), the macOS viewer never
-    /// does, and WebCodecs is secure-context only, so a browser reaching this gateway
-    /// over plain HTTP on a LAN address has no decoder to ask with.
+    /// one that asks ([`crate::protocol::ClientMsg::Audio`]), and in a browser
+    /// WebCodecs is secure-context only, so one reaching this gateway over plain HTTP
+    /// on a LAN address has no decoder to ask with. The macOS viewer is exempt from
+    /// that — it decodes with AVFoundation, which does not ask about the origin.
     #[serde(default)]
     pub audio: bool,
     /// The Mac agent's public key (`rxap…`), as its Settings dialog or

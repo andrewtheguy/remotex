@@ -14,7 +14,8 @@ import Testing
 /// not implement belongs in `unsentTags`/`ignoredTags` rather than nowhere: the
 /// decision is then recorded next to the reason, and the test still fails the day a
 /// message appears that nobody has considered. Audio is the case that established
-/// this — the gateway grew it, and a viewer that stays silent is what lets it.
+/// this — the gateway grew it and the viewer stayed silent — and both sets are empty
+/// again now that the viewer speaks it, which is the state they are meant to return to.
 struct WireContractTests {
     @Test
     func everyClientMsgVariantHasATagThisBuildSends() throws {
