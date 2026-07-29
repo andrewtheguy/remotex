@@ -86,12 +86,12 @@ impl PendingClipboardRead {
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Both closing (browser gone / RDP ended) tears the session down.
 ///
-/// A thin wrapper so the flush cannot be missed. Everything this engine sends the
+/// A thin wrapper so the shutdown cannot be missed. Everything this engine sends the
 /// client goes through a [`TileSink`], which forwards from a task of its own — and
 /// the engine thread's runtime dies with this function, so anything the sink still
 /// held would be lost. That includes the session's final `Error`, whose absence
-/// would put the browser back on the picker with nothing to explain why. The body
-/// has several early returns; this has one exit.
+/// would put the browser back on the picker with nothing to explain why. The body has
+/// several early returns; this has one exit, and [`TileSink::finish`] is on it.
 pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
@@ -99,8 +99,7 @@ pub async fn run(
 ) {
     let sink = TileSink::new("rdp", frame_tx);
     session(config, input_rx, &sink).await;
-    sink.flush().await;
-    sink.report();
+    sink.finish().await;
 }
 
 async fn session(

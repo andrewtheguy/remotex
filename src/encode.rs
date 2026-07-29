@@ -176,14 +176,25 @@ impl TileSink {
         self.push(Pending::Msg(msg)).await
     }
 
+    /// Shut the encoder down: deliver what is still in flight, then log what it cost.
+    ///
+    /// The one thing an engine's `run` must do before returning, and one call rather
+    /// than two because the order cannot be got wrong this way. Both halves matter and
+    /// for different reasons: the runtime is dropped when `run` returns, so anything
+    /// the order task still held would be cancelled — including the `ServerMsg::Error`
+    /// that explains why the session ended, leaving the browser on the picker with
+    /// nothing to show — and the totals are only complete once it has stopped adding
+    /// to them.
+    pub async fn finish(&self) {
+        self.flush().await;
+        self.report();
+    }
+
     /// Wait until everything pushed so far has reached the frame channel.
     ///
-    /// Load-bearing at the end of an engine's `run`: the engine thread's runtime is
-    /// dropped when `run` returns, which would cancel the order task and lose
-    /// whatever it still held — including the `ServerMsg::Error` that explains why
-    /// the session ended, leaving the browser on the picker with nothing to show.
-    /// Returns early if the order task is already gone; there is then nothing left
-    /// to wait for.
+    /// Returns early if the order task is already gone; there is then nothing left to
+    /// wait for. Shutdown wants [`Self::finish`] instead; this is for a caller that
+    /// needs to *read* what it pushed, which in practice means a test.
     pub async fn flush(&self) {
         let (ack_tx, ack_rx) = oneshot::channel();
         if self.tx.send(Pending::Flush(ack_tx)).await.is_ok() {
@@ -201,12 +212,13 @@ impl TileSink {
         result.map_err(|_| self.closed())
     }
 
-    /// Log what this engine's encoder cost, once, after the final [`Self::flush`].
+    /// Log what this engine's encoder cost. Private: [`Self::finish`] is the only
+    /// caller, so it cannot be run before the flush that completes the numbers.
     ///
     /// Explicit rather than emitted by the order task on its way out, for the reason
     /// [`Shared`] gives. Silent for an engine that never encoded anything: `rxa`
     /// relays tiles the agent already compressed, and a line of zeroes says nothing.
-    pub fn report(&self) {
+    fn report(&self) {
         let totals = Totals::of(&self.shared);
         if totals.tiles > 0 {
             info!("{}: encode totals: {totals}", self.engine);

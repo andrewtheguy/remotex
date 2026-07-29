@@ -192,7 +192,7 @@ type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Either closing (browser gone / VNC ended) tears the session down.
 ///
-/// A thin wrapper so the flush cannot be missed — see [`crate::rdp::run`], which has
+/// A thin wrapper so the shutdown cannot be missed — see [`crate::rdp::run`], which has
 /// the same shape for the same reason: the engine thread's runtime dies with this
 /// function, and the sink forwards from a task of its own.
 pub async fn run(
@@ -202,8 +202,7 @@ pub async fn run(
 ) {
     let sink = TileSink::new("vnc", frame_tx);
     session(config, input_rx, &sink).await;
-    sink.flush().await;
-    sink.report();
+    sink.finish().await;
 }
 
 async fn session(
