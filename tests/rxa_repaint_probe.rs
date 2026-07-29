@@ -89,10 +89,17 @@ async fn full_desktop_repaints_against_a_real_agent() {
     let settle = tokio::time::Instant::now() + Duration::from_secs(6);
     while tokio::time::Instant::now() < settle {
         if let Ok(Ok(bytes)) = tokio::time::timeout(Duration::from_millis(250), reader.recv()).await
-            && let Ok(AgentMsg::Hello { w, h, .. } | AgentMsg::DisplaySize { w, h, .. }) =
-                AgentMsg::decode(&bytes)
         {
-            size = (w, h);
+            match AgentMsg::decode(&bytes) {
+                Ok(AgentMsg::Hello { w, h, .. } | AgentMsg::DisplaySize { w, h, .. }) => {
+                    size = (w, h);
+                }
+                // The likeliest place for one, since this is where capture starts: a
+                // missing Screen Recording grant arrives here. Silently ignored it
+                // would leave a reading of nearly no tiles and no reason for it.
+                Ok(AgentMsg::Error { message }) => panic!("the agent reported: {message}"),
+                _ => {}
+            }
         }
     }
 
@@ -109,12 +116,16 @@ async fn full_desktop_repaints_against_a_real_agent() {
             next_refresh += REFRESH_EVERY;
         }
         match tokio::time::timeout(REFRESH_EVERY, reader.recv()).await {
-            Ok(Ok(frame)) => {
-                if let Ok(AgentMsg::Tile { data, .. }) = AgentMsg::decode(&frame) {
+            Ok(Ok(frame)) => match AgentMsg::decode(&frame) {
+                Ok(AgentMsg::Tile { data, .. }) => {
                     tiles += 1;
                     bytes_total += data.len() as u64;
                 }
-            }
+                // A capture that died and did not come back, most often. Fatal here
+                // rather than counted: everything after it is measuring nothing.
+                Ok(AgentMsg::Error { message }) => panic!("the agent reported: {message}"),
+                _ => {}
+            },
             Ok(Err(e)) => panic!("the agent closed mid-probe: {e}"),
             // Nothing for a refresh interval, which at a fast width means the agent
             // has run out of damage to report. Not an error, just a quiet moment.

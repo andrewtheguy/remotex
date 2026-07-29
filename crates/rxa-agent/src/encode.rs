@@ -143,9 +143,9 @@ fn encode_webp(w: u16, h: u16, rgb: &[u8], lossless: bool) -> anyhow::Result<Vec
     config.lossless = i32::from(lossless);
     config.quality = if lossless { LOSSLESS_EFFORT } else { LOSSY_QUALITY };
     config.method = WEBP_METHOD;
-    // No libwebp worker thread: the parallelism that matters is a cell at a time
-    // (`ENCODE_WIDTH` in `session.rs`), and a libwebp thread per cell would fight it
-    // for the same cores while splitting far less work.
+    // No libwebp worker thread: the parallelism is outside this call, with
+    // `ENCODE_WIDTH` cells of a frame (`session.rs`) encoding concurrently. Threads
+    // inside each of those would fight the same cores for a much smaller split.
     config.thread_level = 0;
     let encoded = webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
         .encode_advanced(&config)

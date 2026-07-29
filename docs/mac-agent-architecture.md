@@ -145,11 +145,15 @@ the same queue for the same reason.
 The parallelism is for the full repaint rather than for typical damage. A 2x
 1600x1000 display is 3200x2000 captured, which is 320 cells; encoded one at a time
 that outlasted the two-frame buffer between capture and the encoder, so capture
-dropped a frame and asked for a full repaint, which asked for another. Measured on
-the test VM under continuous refresh pressure, eight-wide took that from 7.3 frames
-a second carrying 200 cells each to 28.8 carrying 63 — four times the frame rate,
-and a third of the redundancy, for the same tiles. Time spent handing tiles to the
-socket was under 1% either way, so the encoder really was the whole cost.
+dropped a frame and asked for a full repaint, which asked for another.
+
+Measured by [`tests/rxa_repaint_probe.rs`](../tests/rxa_repaint_probe.rs), which dials
+a live agent directly and holds it under a refresh every 250 ms — on a macOS 26.x
+guest under Apple Virtualization, sharing the agent's own private 2x display at
+3200x2000. Eight-wide took that from 7.3 frames a second carrying 200 cells each to
+28.8 carrying 63: four times the frame rate, and a third of the redundancy, for the
+same tiles. Time spent handing tiles to the socket was under 1% either way, so for a
+client that keeps up the encoder really was the whole cost.
 
 Cursor shapes are read separately from the framebuffer and sent with their
 hotspot. The representation closest to the capture display's backing scale is
