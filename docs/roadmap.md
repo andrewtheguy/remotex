@@ -18,14 +18,16 @@ browser compositing video into its own window is not that. The pixels arrive as
 graphics updates like everything else, which is why this is a question about our own
 path rather than about a channel we have not turned on.
 
-That path is worst in three places at once. Every frame changes every pixel of the
-video's rectangle, so the shadow copy has nothing to trim out of it; `Rect::bands()`
-splits the rectangle into 64-row strips — seventeen of them if it fills a 1080p
-screen — and `send_tiles` WebP-encodes each strip **synchronously on the RDP read
-loop**. At that encoder's measured cost (`WEBP_LOSSLESS_METHOD`: about 60µs fixed
-plus ~17ns a pixel) a full 1080p frame is 30–40 ms of encoding, so it caps out near
-25–30 fps before the network is involved, with input waiting behind it; a windowed
-video pays the same rate per pixel.
+That path is worst in three places at once, one of which has been dealt with. Every
+frame changes every pixel of the video's rectangle, so the shadow copy has nothing to
+trim out of it; `Rect::bands()` splits the rectangle into 64-row strips — seventeen of
+them if it fills a 1080p screen — and each strip is WebP-encoded at a cost of 60µs plus
+~17ns a pixel (`WEBP_LOSSLESS_METHOD`), so a full 1080p frame is 30–40 ms of
+encoding; a windowed video pays the same rate per pixel. `encode.rs` took that off the
+RDP read loop and compresses up to `ENCODE_DEPTH` bands at once, which roughly halved
+a measured 1280x800 repaint and took the read loop's wait for the encoder to zero —
+that second number was the input latency. What it did not do is make the work smaller,
+so the frame rate is still bounded by how much of it there is.
 
 Then each client decodes those strips one at a time, and in both cases on purpose:
 the SPA chains every message through one promise so draws land in arrival order, and
@@ -34,16 +36,17 @@ rectangles with no delta state, so arrival order is correctness rather than
 tidiness — which is why the fix on the client side is fewer or cheaper payloads per
 frame, not more concurrency.
 
-Three levers, cheapest first. The first two are gateway-side, so both clients get
-them at once, and they are worth measuring before the third is committed to:
+Two levers left, cheaper first. The first is gateway-side, so both clients get it at
+once, and it is worth measuring before the second is committed to:
 
-- **Lossy WebP in the gateway.** `encode_webp` is lossless with no choice today,
-  while the macOS agent classifies per tile. Video is exactly the content the lossy
-  branch exists for, and both configs are already measured.
-- **Encoding off the read loop**, which is
-  [Encoder parallelism](#encoder-parallelism) and its ordering hazard. A video region
-  makes that hazard the *normal* case rather than an edge one — the same pixels are
-  dirty every frame — so a pool needs ordering and not merely threads.
+- **Fewer bytes per band, by spending more encoder effort.** Two versions of this,
+  and they are alternatives rather than steps. Lossy: `encode_webp` is lossless with
+  no choice today while the macOS agent classifies per tile, and video is exactly the
+  content that branch exists for. Or stay lossless and raise
+  `WEBP_LOSSLESS_METHOD` — `m2 q50` is 27–47% fewer bytes for an order of magnitude
+  more time, which was refused because it was time the read loop could not spend. It
+  no longer runs there, so that refusal is worth revisiting first: it costs no fidelity
+  at all, and both configs are already measured.
 - **H.264 passed straight through.** A Windows server already encodes the screen as
   H.264 over the graphics pipeline, and `ironrdp-egfx` implements that channel with
   `AVC420`/`AVC444` and a `decode` module of *traits*: it delegates decoding rather
@@ -57,7 +60,7 @@ them at once, and they are worth measuring before the third is committed to:
   `FramebufferRenderer` blits — so the second path ends at the decoder rather than at
   the renderer.
 
-The third lever is last because of what it costs: `egfx` is a channel the gateway
+H.264 is last because of what it costs: `egfx` is a channel the gateway
 does not negotiate at all today, H.264 brings stream state the independent tile
 protocol deliberately does not have — reference frames, keyframe cadence, a decoder
 that cannot be handed tiles out of order — and it is a second decode path in *each*
@@ -115,13 +118,6 @@ teardown during a network blip. It is worthwhile only if stream restart time is
 material relative to the gateway's one-second minimum reconnect backoff.
 Implementing it would move capture ownership from the session task to
 agent-level state.
-
-### Encoder parallelism
-
-A worker pool can complete tiles out of order. When consecutive frames update
-the same region, a late tile from the older frame could overwrite newer pixels.
-Keep ordered single-worker encoding unless measurements justify adding explicit
-ordering.
 
 ### macOS login-window service
 

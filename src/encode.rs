@@ -65,12 +65,43 @@ use crate::protocol::{ServerMsg, Tile};
 /// lets more bands of one frame compress at once, and a full queue is what stalls
 /// the engine.
 ///
-/// Depth 1 keeps the pipeline all but serial while proving the seam — the ordering,
-/// the flush and the error path are all exercised the same at any depth, and the
-/// existing test suite has to stay green before the dial is worth turning. The
-/// measurement that picks the shipping value belongs in this comment, against a
-/// named surface size, as with `WEBP_LOSSLESS_METHOD` in [`crate::protocol`].
-const ENCODE_DEPTH: usize = 1;
+/// **16 is measured, not guessed** — `tests/rdp_repaint_probe.rs`, against a real
+/// Windows desktop at 1280x800, forty full repaints of 13 bands each, two runs per
+/// depth on a 12-core (8 performance) arm64 Mac:
+///
+/// | depth | repaint median | p90 | engine stalled, per repaint |
+/// |---|---|---|---|
+/// | 1 | 15.9, 12.3 ms | 19.1, 15.5 ms | 11.0, 9.3 ms |
+/// | 8 | 7.6, 8.7 ms | 12.4, 11.3 ms | 2.1, 1.9 ms |
+/// | 16 | 8.1, 8.1 ms | 11.2, 11.5 ms | 0.004, 0.008 ms |
+/// | 32 | 7.4, 6.5 ms | 14.0, 8.5 ms | 0.005, 0.003 ms |
+///
+/// The dial does two separate things, and the second is the one this module is for.
+/// It roughly halves a repaint, which is the frame rate. But it takes *all* of what
+/// the engine's own read loop waits for the encoder, which is input latency and
+/// protocol throughput — the thing that was actually wrong.
+///
+/// **The number that matters is one frame's worth of bands.** At 13 bands a depth of
+/// 16 means a whole repaint is in flight and the engine never waits at all, and that
+/// is exactly where the stall column falls off a cliff — 8 still leaves 2ms a repaint
+/// because five bands have to queue behind the rest. Wall clock stops improving at the
+/// same point, so 32 buys nothing but memory (one band buffer each, ~250KB at this
+/// width) and, in one of its two runs, a worse tail.
+///
+/// It does not cover every desktop: 1080p is 17 bands and 1512p is 24, so a taller
+/// screen keeps a little stall. That degrades gracefully, which is why this is a plain
+/// constant — a measurement should be reproducible from the source, and
+/// `available_parallelism` would make one build behave differently on the dev Mac and
+/// the deploy host. A host with fewer cores does not want a smaller number either:
+/// over-committing costs interleaving, not correctness, and the order task waits on
+/// the first band regardless.
+///
+/// Byte counts are *not* comparable between runs of that probe — a live Windows
+/// desktop draws its own clock — but the 520 records of the repaints themselves are,
+/// and were identical at every depth. Earlier 20-repaint runs threw the occasional
+/// 200ms+ repaint at several depths; at 40 they stopped appearing, so they were the
+/// desktop and not the encoder.
+const ENCODE_DEPTH: usize = 16;
 
 /// One item in the ordered queue.
 ///
@@ -419,19 +450,18 @@ mod tests {
         // A payload one byte short of the geometry: `Tile::from_rgb` rejects it
         // rather than letting libwebp panic on a buffer it would read past.
         let short = rgb(32, 32, 0)[1..].to_vec();
+        // Accepted: the queue takes work without running it, so the engine's own
+        // push cannot be what reports this.
         sink.tile(0, 0, 32, 32, short).await.unwrap();
 
-        // The push that discovers it: the failing one was accepted, since the
-        // encode had not run yet.
-        let mut error = None;
-        for _ in 0..4 {
-            if let Err(e) = sink.msg(ServerMsg::RemoteOs { macos: false }).await {
-                error = Some(e);
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let error = error.expect("the sink kept accepting work after a failed encode");
+        // A flush is how a test reaches the failure at any `ENCODE_DEPTH`: it makes
+        // the order task get as far as the bad tile, and returns when the task drops
+        // the ack rather than answering it.
+        sink.flush().await;
+        let error = sink
+            .msg(ServerMsg::RemoteOs { macos: false })
+            .await
+            .expect_err("the sink kept accepting work after a failed encode");
         let text = format!("{error:#}");
         assert!(text.contains("tile encode failed"), "{text}");
         assert!(text.contains("expected 3072"), "the cause is lost: {text}");
@@ -446,15 +476,14 @@ mod tests {
         let sink = TileSink::new("test", frame_tx);
         drop(frame_rx);
 
-        let mut error = None;
-        for i in 0..8u16 {
-            if let Err(e) = sink.tile(0, i * 64, 320, 64, rgb(320, 64, 0)).await {
-                error = Some(e);
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let error = error.expect("the sink accepted work with nowhere to put it");
+        sink.tile(0, 0, 320, 64, rgb(320, 64, 0)).await.unwrap();
+        sink.flush().await; // the order task discovers it has nowhere to forward to
+        let error = sink
+            .msg(ServerMsg::RemoteOs { macos: false })
+            .await
+            .expect_err("the sink accepted work with nowhere to put it");
+        // No encode failed, so this is the plain closed-channel message the engines
+        // reported before the sink existed.
         assert_eq!(format!("{error}"), "frame channel closed");
     }
 }
