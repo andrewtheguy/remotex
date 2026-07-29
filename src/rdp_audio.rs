@@ -29,9 +29,10 @@
 //!
 //! That is also why a server may offer a *compressed* format even though this
 //! asks for PCM: a Windows host given the choice picks AAC. Asking for one PCM
-//! format is what keeps the HTTP side free to re-encode without decoding first —
-//! and, since the one format is known up front, what lets the response open its
-//! Ogg headers before this negotiation has happened at all.
+//! format is what keeps the encoder free to re-encode without decoding first — and,
+//! since the one format is known up front, what lets a subscription describe the
+//! stream to a decoder before this negotiation has happened at all
+//! ([`crate::protocol::ServerMsg::AudioFormat`]).
 //!
 //! ## Why the handler answers nothing
 //!
@@ -132,7 +133,7 @@ impl RdpsndClientHandler for Handler {
     /// own list, and `Rdpsnd` is about to answer with the intersection. So this is
     /// where "the audio channel came up" is recorded, even though it reads as a
     /// getter — there is no other callback for it. Nothing waits on that record
-    /// (the response opens either way); it is what the log reports, and it is
+    /// (a subscription succeeds either way); it is what the log reports, and it is
     /// published here rather than on the first wave buffer because a host that
     /// negotiates and then plays nothing is a different thing to know about than a
     /// host that never negotiated.
@@ -410,6 +411,24 @@ mod tests {
         encode_vec(&pdu).expect("a server PDU encodes")
     }
 
+    /// The next item from a listener's packet stream, or a failure saying so.
+    ///
+    /// Bounded, like the equivalents in [`crate::audio`] and [`crate::session`], and for
+    /// a reason these tests need more than most: what they exercise is a *plumbing*
+    /// path — a wave PDU reaching a listener — and the way that breaks is by producing
+    /// nothing at all. `cargo test` has no per-test timeout, so an unguarded `next()`
+    /// would hang the suite instead of naming the hop that stopped forwarding.
+    async fn next_packets(
+        stream: &mut (impl futures_util::Stream<Item = Vec<Vec<u8>>> + Unpin),
+    ) -> Vec<Vec<u8>> {
+        use futures_util::StreamExt as _;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("timed out waiting for audio to reach the listener")
+            .expect("the listener's stream ended instead of carrying audio")
+    }
+
     /// Enough PCM for exactly one 20 ms Opus frame at the negotiated format.
     /// Smaller buffers are held by the encoder rather than emitted, so a test
     /// that sent a handful of bytes would wait forever for a packet.
@@ -477,8 +496,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_wave_reaches_the_listener_and_a_closed_channel_forgets_the_format() {
-        use futures_util::StreamExt as _;
-
         let bridge = Arc::new(AudioBridge::new());
         let listener = bridge.take_listener();
         let mut handler = Handler::new(Arc::clone(&bridge));
@@ -489,7 +506,7 @@ mod tests {
 
         let frame = one_frame_of_pcm();
         handler.wave(0, 0, Cow::Borrowed(&frame));
-        assert_eq!(stream.next().await.unwrap().len(), 1);
+        assert_eq!(next_packets(&mut stream).await.len(), 1);
 
         // An index we never advertised is dropped rather than played as if it
         // were PCM. Three frames on the bad index against one on the good one, so
@@ -499,7 +516,7 @@ mod tests {
         handler.wave(1, 0, Cow::Borrowed(&bogus));
         handler.wave(0, 0, Cow::Borrowed(&frame));
         assert_eq!(
-            stream.next().await.unwrap().len(),
+            next_packets(&mut stream).await.len(),
             1,
             "the wave on an unadvertised format index should have been dropped"
         );
@@ -541,7 +558,6 @@ mod tests {
     /// mean it.
     #[tokio::test]
     async fn a_server_speaking_rdpsnd_gets_its_audio_onto_a_listener() {
-        use futures_util::StreamExt as _;
         use ironrdp::core::encode_vec;
         use ironrdp::rdpsnd::client::Rdpsnd;
         use ironrdp::rdpsnd::pdu::{
@@ -609,7 +625,7 @@ mod tests {
             "every buffer is confirmed, accepted or dropped"
         );
         assert_eq!(
-            stream.next().await.unwrap().len(),
+            next_packets(&mut stream).await.len(),
             1,
             "the server's PCM should reach the listener as an encoded packet"
         );
@@ -626,8 +642,6 @@ mod tests {
     /// borrowed from IronRDP.
     #[tokio::test]
     async fn a_server_speaking_the_audio_dvc_gets_its_audio_onto_a_listener() {
-        use futures_util::StreamExt as _;
-
         let bridge = Arc::new(AudioBridge::new());
         let listener = bridge.take_listener();
         let mut dvc = AudioPlaybackDvc::new(Arc::clone(&bridge));
@@ -677,7 +691,7 @@ mod tests {
             )
             .expect("the client accepts a wave");
         assert_eq!(answer.len(), 1, "every buffer is confirmed");
-        assert_eq!(stream.next().await.unwrap().len(), 1);
+        assert_eq!(next_packets(&mut stream).await.len(), 1);
 
         dvc.close(1);
         assert_eq!(
@@ -711,8 +725,6 @@ mod tests {
     /// because nothing would report it.
     #[tokio::test]
     async fn the_second_transport_to_arrive_is_ignored() {
-        use futures_util::StreamExt as _;
-
         let bridge = Arc::new(AudioBridge::new());
         let mut dvc = AudioPlaybackDvc::new(Arc::clone(&bridge));
         let mut statik = Handler::new(Arc::clone(&bridge));
@@ -746,7 +758,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            stream.next().await.unwrap().len(),
+            next_packets(&mut stream).await.len(),
             1,
             "the dynamic channel owns the queue, so the static buffer never landed"
         );

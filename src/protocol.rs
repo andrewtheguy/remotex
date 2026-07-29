@@ -378,17 +378,22 @@ pub mod audio {
 
     /// Serialize `packets` into one audio frame.
     ///
-    /// Panics on more than `u16::MAX` packets or a packet over `u16::MAX` bytes,
-    /// neither of which the encoder can produce: it cuts 20 ms frames of at most a
-    /// few hundred bytes, and a wave buffer holds tens of them, not thousands.
+    /// Both `u16` fields are checked rather than truncated, and each panic names the
+    /// invariant it belongs to, because silently wrapping either would produce a frame
+    /// a client parses successfully and wrongly. Neither is reachable from the encoder:
+    /// `opus_stream::MAX_PACKET_BYTES` caps a packet at 4000, and a wave buffer holding
+    /// 65 535 packets of 20 ms would be twenty minutes of audio in one buffer.
     pub fn frame(packets: &[Vec<u8>]) -> Vec<u8> {
         let len: usize = packets.iter().map(|p| PACKET_HEADER_LEN + p.len()).sum();
         let mut frame = Vec::with_capacity(HEADER_LEN + len);
         frame.push(FRAME_KIND);
         frame.push(0); // flags
-        frame.extend_from_slice(&u16::try_from(packets.len()).expect("packet count").to_le_bytes());
+        let count = u16::try_from(packets.len())
+            .expect("an audio frame carries at most u16::MAX packets");
+        frame.extend_from_slice(&count.to_le_bytes());
         for packet in packets {
-            let size = u16::try_from(packet.len()).expect("packet length");
+            let size = u16::try_from(packet.len())
+                .expect("an opus packet is at most u16::MAX bytes");
             frame.extend_from_slice(&size.to_le_bytes());
             frame.extend_from_slice(packet);
         }

@@ -321,14 +321,15 @@ Windows redirects no audio at all unless device redirection is advertised
 alongside it; nothing is ever redirected through that channel. The channels have
 to be negotiated at connect, so an audio target asks for redirection from the start and
 discards buffers while nobody is listening; there is no way to add one to a live
-connection when a listener appears. And the gateway advertises exactly one format —
-44100 Hz 16-bit stereo PCM — because a wave buffer identifies its format by an
-index, and with one advertised format that index cannot be misread — which also
-means the HTTP side knows what a buffer will be before the negotiation happens, and
-so can open its response without waiting for one. The cost is that a server offering
-no matching format redirects nothing at all, and since the response no longer refuses
-a session it cannot hear from, the log is the only place that shows: the negotiated
-line appears and the first-buffer line does not.
+connection when a browser asks for sound. And the gateway advertises exactly one
+format — 44100 Hz 16-bit stereo PCM — because a wave buffer identifies its format by
+an index, and with one advertised format that index cannot be misread. That also
+means the format a buffer will be in is known before the negotiation happens, so the
+`audioFormat` message a subscription answers with can describe the stream
+immediately rather than waiting for the remote to make a sound. The cost is that a
+server offering no matching format redirects nothing at all, and since a subscription
+succeeds either way, the log is the only place that shows: the negotiated line
+appears and the first-buffer line does not.
 
 ### VNC
 

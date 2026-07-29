@@ -6,27 +6,28 @@ its client; remotex requests that channel, re-encodes what arrives as Opus, and
 sends it as audio frames on the session's own WebSocket, where the browser decodes
 and schedules it.
 
-> **The design is settled; what is left is a deployment constraint.** Sound arrives, in
-> the right format, in stereo, starting and stopping on its own, and **the latency the
-> previous design was called experimental for is largely gone**: the live Windows target
-> was heard through the in-band path on 2026-07-29, and the couple of seconds of delay
-> it used to carry is much smaller. That is the schedule ceiling working, and it settles
-> the question in
-> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out) — the
-> delay *was* browser-side, held where nothing could see it, exactly where the old
-> design had no mechanism to reach.
+> **Experimental, and what has been verified is narrower than the design.** Sound
+> arrives, in the right format, in stereo, starting and stopping on its own, and **the
+> latency the previous design was called experimental for is much smaller**: the live
+> Windows target was heard through the in-band path in Chrome on 2026-07-29. Every
+> verified run shares one shape — the **static** `rdpsnd` transport, and a browser on a
+> **loopback** origin — so what is proven is that path, not the design's full reach. See
+> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out).
 >
 > **Opus-only survived contact with Safari**, which was the risk this took: it plays in
 > Chrome, in macOS 26 Safari, and on a real iPhone. It **did not work in the iOS
 > Simulator**, and that is the whole of what is known — the cause has not been looked
 > into, so nothing here should be read as blaming the simulator or clearing this path.
 >
-> Two other things are open, and neither is about a browser refusing the codec. The
-> origin is one: WebCodecs is **secure-context only**, so a client reaching this gateway
-> at a LAN address over plain HTTP has no decoder at all. Every run above went through
-> loopback, so serving audio to a phone on a real network needs TLS and has not been
-> exercised. The other is the dynamic MS-RDPEA transport, which has still never carried
-> a byte from a real server.
+> Three things are therefore open, and only one of them is about a browser:
+>
+> - **the iOS Simulator**, unexplained, which until it is explained could as easily be
+>   something here as something there;
+> - **the origin.** WebCodecs is secure-context only, so a client reaching this gateway
+>   at a LAN address over plain HTTP has no decoder at all. Every run went through
+>   loopback, so serving audio to a phone on a real network needs TLS and is untested;
+> - **the dynamic MS-RDPEA transport**, which has still never carried a byte from a real
+>   server, so a host that chooses it has never been heard from at all.
 >
 > **This is a browser feature, and changing it needs no check against the macOS
 > viewer.** The viewer has no audio at all — no decoder, no setting, and now not even
@@ -375,9 +376,9 @@ end of the same path.
 ## Latency, and what has been ruled out
 
 **A live desktop was heard a couple of seconds behind itself**, under the `<audio>`
-design. This is the open question in this path and the reason to call it experimental.
-What follows is what has been measured rather than what has been theorised, because
-several plausible theories have already been wrong.
+design. That was the question this path carried the longest, and the answer is at the
+end of this section. What follows is what was measured rather than what was theorised,
+because several plausible theories were wrong first.
 
 **The gateway is not adding it.** Per-buffer instrumentation (`RUST_LOG=remotex=debug`,
 the `audio: wave …` line) against the live target, across a 55-second run with music
@@ -412,13 +413,14 @@ zero** — the element was already at the live edge of what it had been sent.
 So what was left, and untested: **Windows' own capture path before rdpsnd sends**, and
 whatever a browser holds *outside* the buffered range, where nothing could see it.
 
-**It was the second one, and it is now gone by construction.** The live target was
-heard in Chrome on 2026-07-29 through this path and the delay is **much smaller** —
-which is the answer to the question this document had been carrying, and it arrived by
-elimination rather than by instrumentation, because the suspect was in the one place
-nothing could measure. A media element's own buffering was holding the audio, and the
-old design had no mechanism to reach it: `buffered` showed nothing because what it held
-was not in `buffered`, and `playbackRate` could not trim a buffer it could not see.
+**The evidence now points hard at the second one.** The live target was heard in Chrome
+on 2026-07-29 through this path and the delay is **much smaller**. That is elimination
+rather than instrumentation — the suspect was in the one place nothing could measure, so
+removing it is the only way it could ever have been tested — and it is one listening
+test, not a number. What can be said precisely: the media element's own buffering was
+the last unexamined candidate, `buffered` showed nothing because what it held was not in
+`buffered`, and `playbackRate` could not trim a buffer it could not see. It is gone, and
+the delay went with most of it.
 
 The schedule is the client's now, and it cannot leave the range the arithmetic defines:
 a fresh start is `now + 0.1 s` and nothing is ever scheduled past `now + 0.3 s`. Where

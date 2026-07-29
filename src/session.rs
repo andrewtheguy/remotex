@@ -181,6 +181,15 @@ struct State {
     /// eventual — the pump would otherwise sit in `recv()` until the remote's next
     /// wave buffer, which on a quiet desktop is never.
     audio_pump: Option<tokio::task::JoinHandle<()>>,
+    /// Bumped by every change to the audio subscription, so a pump built while the
+    /// state lock was released can tell whether it is still the one wanted.
+    ///
+    /// The same device as [`Self::attachment_epoch`], and needed for the same reason:
+    /// [`SessionManager::set_audio`] does its expensive work — an Opus encoder and an
+    /// FFT plan — outside the lock, and "is this still the current attachment" is not
+    /// enough to check afterwards, because a *disable* leaves the attachment exactly as
+    /// it was.
+    audio_epoch: u64,
 }
 
 impl State {
@@ -199,6 +208,10 @@ impl State {
     /// is the wrong answer for sound belonging to a desktop or a browser that has
     /// already gone.
     fn stop_audio(&mut self) {
+        // Bumped even when there is no pump to stop: a subscription may be *being
+        // built* right now, outside the lock, and this is what tells it not to install
+        // itself. Nothing depends on the value, only on it changing.
+        self.audio_epoch = self.audio_epoch.wrapping_add(1);
         if let Some(pump) = self.audio_pump.take() {
             debug!("session: stopping this attachment's audio");
             pump.abort();
@@ -359,23 +372,32 @@ impl SessionManager {
     /// offered the control when [`ServerMsg::Connected`] said `audio`, so reaching
     /// here otherwise is a client bug rather than a state to report.
     pub fn set_audio(&self, attach_id: u64, enabled: bool) {
-        let mut st = self.state.lock().unwrap();
-        if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
-            return;
-        }
-        // Unconditional, and before the enable path: this is also how "replace the
-        // previous subscription" is expressed.
-        st.stop_audio();
-        if !enabled {
-            info!("session: audio disabled by the browser");
-            return;
-        }
-        let Some(bridge) = st.engine.as_ref().and_then(|engine| engine.audio.clone()) else {
-            warn!("session: audio was asked for, but this session has no audio source");
-            return;
-        };
-        let Some(events) = st.client.as_ref().map(|client| client.event_tx.clone()) else {
-            return;
+        // What the construction below needs, taken under the lock and used without it.
+        // Building an encoder means allocating an Opus encoder *and* planning an FFT
+        // for the resampler, which is real work — and this mutex is the one every
+        // mouse move goes through (`forward_input`), so the rule this module states
+        // for itself is that critical sections stay short. `audio_epoch` is what makes
+        // letting go safe.
+        let (bridge, events, epoch) = {
+            let mut st = self.state.lock().unwrap();
+            if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
+                return;
+            }
+            // Unconditional, and before the enable path: this is also how "replace the
+            // previous subscription" is expressed.
+            st.stop_audio();
+            if !enabled {
+                info!("session: audio disabled by the browser");
+                return;
+            }
+            let Some(bridge) = st.engine.as_ref().and_then(|engine| engine.audio.clone()) else {
+                warn!("session: audio was asked for, but this session has no audio source");
+                return;
+            };
+            let Some(events) = st.client.as_ref().map(|client| client.event_tx.clone()) else {
+                return;
+            };
+            (bridge, events, st.audio_epoch)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
@@ -401,6 +423,19 @@ impl SessionManager {
                 return;
             }
         };
+
+        let mut st = self.state.lock().unwrap();
+        // Anything that touched audio while the lock was down wins, and the epoch is
+        // what says so: a disable, a takeover, a reattach and a second enable all bump
+        // it. Checking the attachment alone would miss the first of those, which keeps
+        // the same `attach_id`. Dropping the stream here unsubscribes the listener that
+        // was just taken, so nothing is left reading the queue.
+        if st.audio_epoch != epoch
+            || st.client.as_ref().map(|c| c.attach_id) != Some(attach_id)
+        {
+            debug!("session: discarding an audio subscription that was superseded while it was set up");
+            return;
+        }
         st.audio_pump = Some(tokio::spawn(async move {
             let format = ServerMsg::AudioFormat {
                 codec: "opus",

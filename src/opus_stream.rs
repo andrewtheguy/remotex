@@ -275,8 +275,9 @@ impl OpusStream {
 /// Still built, and still mandatory, though there is no longer a container to put
 /// it in: a decoder needs the channel count to lay out its output and the pre-skip
 /// to discard the encoder's own delay rather than play it as leading silence. It
-/// travels as the `audioFormat` control message's `header` instead, which is also
-/// exactly the byte string WebCodecs takes as an `AudioDecoderConfig.description`.
+/// travels as the `audioFormat` control message's `head` instead
+/// ([`crate::protocol::ServerMsg::AudioFormat`]), which is also exactly the byte
+/// string WebCodecs takes as an `AudioDecoderConfig.description`.
 ///
 /// `input_sample_rate` is documentation only — it records the rate the audio
 /// arrived at, 44100 here, while the stream itself is always 48 kHz. Decoders
