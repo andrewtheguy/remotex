@@ -130,10 +130,10 @@ and schedules every buffer itself. A live Windows 11 target's own sound has been
 through it. The mechanism, its lifecycle and that evidence are recorded in
 [`remote-audio.md`](remote-audio.md), which is where they belong.
 
-Every open question the design named is now closed, including the one that reversed
-it. A browser does play an open-ended response progressively, and a real host does
-redirect to this gateway — but **the schedule of an `<audio>` element belongs to the
-browser and can never be reclaimed**, so a delay it accumulated stayed for the
+Every question the design named has now been answered, including the one whose answer
+reversed it. A browser does play an open-ended response progressively, and a real host
+does redirect to this gateway — but **the schedule of an `<audio>` element belongs to
+the browser and can never be reclaimed**, so a delay it accumulated stayed for the
 session. Guacamole's `RawAudioPlayer` bounds latency in one line, in `sync()`:
 
 ```js
@@ -149,13 +149,19 @@ PCM (`audio/L16`) in-band, spending the ~176 kB/s that Opus takes to about 10, s
 keeping Opus and decoding it with WebCodecs holds both properties where each design
 had only one.
 
-What is **not** settled is promptness against the live host, and it is the first of the
-two things planned here. A live desktop was heard a couple of seconds behind itself
-under the old design, with the gateway measured out of it as a cause; the ceiling is
-aimed at the remaining suspect and has not yet been listened to
-([`remote-audio.md`](remote-audio.md)). If it is still late with no trims recurring,
-the delay is Windows' own capture path and the next step is an A/B against `freerdp`
-rather than any further change here.
+**Promptness is settled, and that is why this section is no longer about it.** The live
+Windows target was heard in Chrome on 2026-07-29 through the in-band path, with the
+couple of seconds the `<audio>` design carried reduced to much less. The delay was
+browser-side, held where nothing could measure it — which is exactly why elimination
+rather than instrumentation was what found it
+([`remote-audio.md`](remote-audio.md)). Whatever is left is Windows' own capture path,
+and no change here reaches that.
+
+What is **not** settled is Safari, on either macOS or iOS, and it is the first of the
+two things planned here. Opus-only means a browser whose `AudioDecoder` refuses gets no
+sound and a line saying so, and adding a fallback representation is precisely the thing
+this design refused to do speculatively — so the question is worth answering on a
+device before deciding it needs one.
 
 Two of Guacamole's other choices are worth recording, one of which this now shares:
 

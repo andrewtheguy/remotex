@@ -6,14 +6,21 @@ its client; remotex requests that channel, re-encodes what arrives as Opus, and
 sends it as audio frames on the session's own WebSocket, where the browser decodes
 and schedules it.
 
-> **Experimental, and the timing model is the reason.** Sound arrives, in the right
-> format, in stereo, starting and stopping on its own — all measured, all below. What
-> is not settled is *promptness*: a live desktop was heard a couple of seconds late
-> under the previous design, and the gateway was measured out of that as a cause. The
-> mechanism that replaced it — a playback schedule the browser owns, with a hard
-> ceiling on how far behind live it can run — is aimed squarely at that, and has not
-> yet been listened to against the live host. See
-> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out).
+> **Experimental, and what remains open is browser coverage rather than the design.**
+> Sound arrives, in the right format, in stereo, starting and stopping on its own, and
+> **the latency the previous design was called experimental for is largely gone**: the
+> live Windows target was heard in Chrome on 2026-07-29 through the in-band path, and
+> the couple of seconds of delay it used to carry is much smaller. That is the schedule
+> ceiling working, and it settles the question in
+> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out) —
+> the delay *was* browser-side, held where nothing could see it, exactly where the old
+> design had no mechanism to reach.
+>
+> What is not settled is **Safari**, on either macOS or iOS. WebKit's WebCodecs Opus
+> support is unverified here, and Opus-only means a refusal is a refusal: no sound and
+> a line saying so. On iOS there is a second trap that is not the browser's fault —
+> WebCodecs is secure-context only, so a phone reaching this gateway at a LAN address
+> over plain HTTP has no decoder at all.
 >
 > **This is a browser feature, and changing it needs no check against the macOS
 > viewer.** The viewer has no audio at all — no decoder, no setting, and now not even
@@ -399,15 +406,26 @@ zero** — the element was already at the live edge of what it had been sent.
 So what was left, and untested: **Windows' own capture path before rdpsnd sends**, and
 whatever a browser holds *outside* the buffered range, where nothing could see it.
 
-**That second suspect is now gone by construction**, which is the point of this
-change. The schedule is the client's, and it cannot leave the range the arithmetic
-defines: a fresh start is `now + 0.1 s` and nothing is ever scheduled past
-`now + 0.3 s`. Where the old design's answer to a delay was "it stays", this one's is
-to skip forward and log it — the SPA warns when it trims, and a recurring trim is the
-sound of the ceiling doing its job. If the live host is *still* heard late with no
-trims recurring, the delay is upstream of this browser, and the clean next experiment
-is the one that was named before: an A/B against `freerdp` playing the same desktop's
-audio, because if it is equally late, no change to this gateway can help.
+**It was the second one, and it is now gone by construction.** The live target was
+heard in Chrome on 2026-07-29 through this path and the delay is **much smaller** —
+which is the answer to the question this document had been carrying, and it arrived by
+elimination rather than by instrumentation, because the suspect was in the one place
+nothing could measure. A media element's own buffering was holding the audio, and the
+old design had no mechanism to reach it: `buffered` showed nothing because what it held
+was not in `buffered`, and `playbackRate` could not trim a buffer it could not see.
+
+The schedule is the client's now, and it cannot leave the range the arithmetic defines:
+a fresh start is `now + 0.1 s` and nothing is ever scheduled past `now + 0.3 s`. Where
+the old design's answer to a delay was "it stays", this one's is to skip forward and
+log it — the SPA warns when it trims, and a recurring trim is the ceiling doing its
+job.
+
+That leaves **Windows' own capture path** as whatever delay is still audible, and it is
+the one thing no change here can help. The experiment for it is unchanged and still
+unrun: an A/B against `freerdp` playing the same desktop's audio, because if it is
+equally late, the remaining latency was never ours. Worth doing only if what is left
+turns out to be worth chasing — the reason to run it before was that two seconds was
+too much to accept, and that reason is now weaker.
 
 ## What has been heard, and what has not
 
@@ -496,10 +514,22 @@ drdynvc capability version (`V3`, same as FreeRDP's), and the Client Info PDU fl
 of it mattered. The one thing not tested until last was the extra channel FreeRDP
 announces, and that was the answer.
 
-**What has not been heard** is this representation, from the live host, by ear. The
-gateway side of it is verified above and the browser side decodes it, but "the guest's
-music, on time, in Chrome and in Safari" is a listening test and has not been done.
-Neither has the dynamic transport: `AudioPlaybackDvc` has never carried a byte from a
+**And this representation has been heard from the live host**, which is the test that
+matters and the one no amount of the above substitutes for: the guest's own sound, in
+Chrome, on 2026-07-29, with the delay **much smaller** than the couple of seconds the
+`<audio>` path carried. Every hop in this document ran at once — MS-RDPEA to the queue,
+the encoder to Opus packets, audio frames on the socket the desktop was already using,
+WebCodecs, and a schedule under a ceiling.
+
+**What has not been heard is Safari**, on macOS or iOS, and it is the one open risk
+left: WebKit's WebCodecs Opus support is unverified here, and Opus-only means a refusal
+is final — no sound, and a line under the button. A headless WebKit would be a useful
+early signal (Playwright ships one, though it is not installed here); the real answer is
+a device. On iOS, check the origin before blaming the browser: a phone reaching this
+gateway at a LAN address over plain HTTP has no `AudioDecoder` at all, whatever Safari
+supports.
+
+**Nor has the dynamic transport.** `AudioPlaybackDvc` has never carried a byte from a
 real server — only from in-crate PDUs — because the one host available serves this
 gateway the static channel. It is written from [MS-RDPEA] and reviewed against
 FreeRDP's client, which is not the same as having run. The first sign of trouble would
