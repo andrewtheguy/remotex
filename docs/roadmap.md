@@ -157,11 +157,20 @@ rather than instrumentation was what found it
 ([`remote-audio.md`](remote-audio.md)). Whatever is left is Windows' own capture path,
 and no change here reaches that.
 
-What is **not** settled is Safari, on either macOS or iOS, and it is the first of the
-two things planned here. Opus-only means a browser whose `AudioDecoder` refuses gets no
-sound and a line saying so, and adding a fallback representation is precisely the thing
-this design refused to do speculatively — so the question is worth answering on a
-device before deciding it needs one.
+**Safari is settled too, and it is what makes Opus-only defensible rather than a
+gamble**: macOS 26 Safari and a real iPhone both play it. There is no fallback
+representation, so a WebKit refusal would have meant no sound at all on Apple
+platforms — and the decision not to build one speculatively would have cost a second
+encoder, a second frame kind and a second set of failure modes for a browser that turned
+out not to need them. It did not work in the iOS Simulator, and why has not been looked
+into ([`remote-audio.md`](remote-audio.md)).
+
+What is **not** settled is the origin rather than the browser. WebCodecs is
+secure-context only, so audio to a client on a real network needs TLS in front of the
+gateway, and that has not been exercised — every run so far reached it over loopback
+([`remote-audio.md`](remote-audio.md)). Nothing here has to change for it; it is a
+deployment question that now has a hard requirement attached, where the `<audio>` path
+had none.
 
 Two of Guacamole's other choices are worth recording, one of which this now shares:
 

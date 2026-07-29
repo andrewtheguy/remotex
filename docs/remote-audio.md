@@ -6,21 +6,27 @@ its client; remotex requests that channel, re-encodes what arrives as Opus, and
 sends it as audio frames on the session's own WebSocket, where the browser decodes
 and schedules it.
 
-> **Experimental, and what remains open is browser coverage rather than the design.**
-> Sound arrives, in the right format, in stereo, starting and stopping on its own, and
-> **the latency the previous design was called experimental for is largely gone**: the
-> live Windows target was heard in Chrome on 2026-07-29 through the in-band path, and
-> the couple of seconds of delay it used to carry is much smaller. That is the schedule
-> ceiling working, and it settles the question in
-> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out) —
-> the delay *was* browser-side, held where nothing could see it, exactly where the old
+> **The design is settled; what is left is a deployment constraint.** Sound arrives, in
+> the right format, in stereo, starting and stopping on its own, and **the latency the
+> previous design was called experimental for is largely gone**: the live Windows target
+> was heard through the in-band path on 2026-07-29, and the couple of seconds of delay
+> it used to carry is much smaller. That is the schedule ceiling working, and it settles
+> the question in
+> [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out) — the
+> delay *was* browser-side, held where nothing could see it, exactly where the old
 > design had no mechanism to reach.
 >
-> What is not settled is **Safari**, on either macOS or iOS. WebKit's WebCodecs Opus
-> support is unverified here, and Opus-only means a refusal is a refusal: no sound and
-> a line saying so. On iOS there is a second trap that is not the browser's fault —
-> WebCodecs is secure-context only, so a phone reaching this gateway at a LAN address
-> over plain HTTP has no decoder at all.
+> **Opus-only survived contact with Safari**, which was the risk this took: it plays in
+> Chrome, in macOS 26 Safari, and on a real iPhone. It **did not work in the iOS
+> Simulator**, and that is the whole of what is known — the cause has not been looked
+> into, so nothing here should be read as blaming the simulator or clearing this path.
+>
+> Two other things are open, and neither is about a browser refusing the codec. The
+> origin is one: WebCodecs is **secure-context only**, so a client reaching this gateway
+> at a LAN address over plain HTTP has no decoder at all. Every run above went through
+> loopback, so serving audio to a phone on a real network needs TLS and has not been
+> exercised. The other is the dynamic MS-RDPEA transport, which has still never carried
+> a byte from a real server.
 >
 > **This is a browser feature, and changing it needs no check against the macOS
 > viewer.** The viewer has no audio at all — no decoder, no setting, and now not even
@@ -521,13 +527,27 @@ Chrome, on 2026-07-29, with the delay **much smaller** than the couple of second
 the encoder to Opus packets, audio frames on the socket the desktop was already using,
 WebCodecs, and a schedule under a ceiling.
 
-**What has not been heard is Safari**, on macOS or iOS, and it is the one open risk
-left: WebKit's WebCodecs Opus support is unverified here, and Opus-only means a refusal
-is final — no sound, and a line under the button. A headless WebKit would be a useful
-early signal (Playwright ships one, though it is not installed here); the real answer is
-a device. On iOS, check the origin before blaming the browser: a phone reaching this
-gateway at a LAN address over plain HTTP has no `AudioDecoder` at all, whatever Safari
-supports.
+**Safari plays it too, which is what makes Opus-only defensible rather than a gamble.**
+macOS 26 Safari and a real iPhone both played the same stream on 2026-07-29. That was
+the open risk in this design — there is no fallback representation, so a WebKit refusal
+would have meant no sound at all on Apple platforms — and it is now the answer rather
+than an assumption. It also means the decision *not* to build a raw-PCM fallback
+speculatively was the right one: it would have been a second encoder, a second frame
+kind and a second set of failure modes maintained for a browser that turned out not to
+need it.
+
+**It did not work in the iOS Simulator**, and that is deliberately all this says. The
+cause has not been investigated: a simulator without the codec, a simulator without a
+working audio output, and a fault in this path would all present the same way from
+here, and guessing between them in a document is how a wrong explanation outlives the
+observation. So: verified on devices, unexplained in the simulator, and worth ten
+minutes with the console before anyone concludes which.
+
+**Every one of those runs reached the gateway over loopback**, including the iPhone's,
+so none of them tested the secure-context rule — they were all exempt from it. A client
+on a real network over plain HTTP still has no `AudioDecoder`, and serving audio to one
+therefore still needs TLS. Untested, and the first thing to suspect when a phone that
+worked at a desk stops working on the wifi.
 
 **Nor has the dynamic transport.** `AudioPlaybackDvc` has never carried a byte from a
 real server — only from in-crate PDUs — because the one host available serves this
