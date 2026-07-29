@@ -72,6 +72,27 @@ webp = { version = "0.3.1", default-features = false }
 # codec that sits on the engine's hot path. arm64 needs nothing here — `neon` is
 # already on by default.
 libwebp-sys = { version = "0.9", features = ["sse41", "avx2"] }
+# Remote audio's representation on the wire: Opus in an Ogg stream, in place of
+# the raw PCM this used to serve (see src/audio.rs and docs/remote-audio.md).
+# ~96 kbps against 1.4 Mbit/s of 44.1 kHz stereo PCM, which is the whole reason
+# for the three crates.
+#
+# `opus` binds libopus through audiopus_sys, which builds it with cmake. C again,
+# and again not a new class of requirement — but unlike libwebp it *prefers a
+# system library*: on Linux/GNU audiopus_sys probes pkg-config first, which would
+# link libopus dynamically and leave the release binary needing libopus0 inside
+# packaging/Dockerfile's debian:trixie-slim, which does not ship it. So
+# packaging/build-tarball.sh sets LIBOPUS_STATIC/LIBOPUS_NO_PKG to force the
+# vendored static build on every runner.
+opus = "0.3"
+# The container. Pure Rust, and Ogg is the streamable one of Opus's containers:
+# a page can be flushed the moment a packet exists, which is what keeps a live
+# response from stalling until a buffer fills.
+ogg = "0.9"
+# 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
+# no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
+# the point: the naive interleaved interpolation blends left into right.
+rubato = "4"
 # Content hashing on the tile path: which pixels changed, and whether a payload
 # has been sent before. Not a checksum for integrity, so it is not cryptographic
 # — but it is 64-bit rather than 32, because a collision here means permanently

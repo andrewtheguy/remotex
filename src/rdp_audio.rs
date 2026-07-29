@@ -403,6 +403,26 @@ mod tests {
         encode_vec(&pdu).expect("a server PDU encodes")
     }
 
+    /// Ogg pages in a chunk of the response body.
+    ///
+    /// The response is Opus now, so these tests can no longer compare the bytes
+    /// they sent against the bytes that came out. What they still prove is the
+    /// plumbing — a wave PDU reaching the HTTP stream — and a page is the
+    /// observable form of that. The encoding itself is covered in
+    /// [`crate::opus_stream`], which decodes what it encoded.
+    fn page_count(chunk: &[u8]) -> usize {
+        chunk.windows(4).filter(|w| *w == b"OggS").count()
+    }
+
+    /// Enough PCM for exactly one 20 ms Opus frame at the negotiated format.
+    /// Smaller buffers are held by the encoder rather than emitted, so a test
+    /// that sent a handful of bytes would wait forever for a page.
+    fn one_frame_of_pcm() -> Vec<u8> {
+        let frames = crate::opus_stream::FRAME_FRAMES * PCM_CD_QUALITY.sample_rate as usize
+            / crate::opus_stream::OPUS_SAMPLE_RATE as usize;
+        vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
+    }
+
     /// The server's format list, announced as MS-RDPEA version 8 — the version
     /// every current Windows host negotiates, and the one that carries `Wave2`.
     fn server_formats(formats: &[AudioFormat]) -> Vec<u8> {
@@ -466,16 +486,24 @@ mod tests {
         handler.get_formats();
         let format = listener.await_format(Duration::from_millis(50)).await.unwrap();
         let mut stream = Box::pin(listener.into_stream(format));
-        stream.next().await.unwrap().unwrap(); // the header
+        stream.next().await.unwrap().unwrap(); // the header pages
 
-        handler.wave(0, 0, Cow::Borrowed(&[1, 2, 3, 4]));
-        assert_eq!(stream.next().await.unwrap().unwrap(), vec![1, 2, 3, 4]);
+        let frame = one_frame_of_pcm();
+        handler.wave(0, 0, Cow::Borrowed(&frame));
+        assert_eq!(page_count(&stream.next().await.unwrap().unwrap()), 1);
 
         // An index we never advertised is dropped rather than played as if it
-        // were PCM.
-        handler.wave(1, 0, Cow::Borrowed(&[9, 9]));
-        handler.wave(0, 0, Cow::Borrowed(&[5, 6]));
-        assert_eq!(stream.next().await.unwrap().unwrap(), vec![5, 6]);
+        // were PCM. Three frames on the bad index against one on the good one, so
+        // the page count says which of them reached the queue — the encoded bytes
+        // no longer carry anything a test could recognise.
+        let bogus = frame.repeat(3);
+        handler.wave(1, 0, Cow::Borrowed(&bogus));
+        handler.wave(0, 0, Cow::Borrowed(&frame));
+        assert_eq!(
+            page_count(&stream.next().await.unwrap().unwrap()),
+            1,
+            "the wave on an unadvertised format index should have been dropped"
+        );
 
         handler.close();
         let mut after_close = bridge.take_listener();
@@ -566,11 +594,12 @@ mod tests {
 
         let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
         assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            crate::audio::wav_header(PCM_CD_QUALITY).to_vec()
+            page_count(&stream.next().await.unwrap().unwrap()),
+            2,
+            "the response opens with OpusHead and OpusTags"
         );
 
-        let samples: Vec<u8> = (0..64).collect();
+        let samples = one_frame_of_pcm();
         let answer = rdpsnd
             .process(&encoded(ServerAudioOutputPdu::Wave2(Wave2Pdu {
                 timestamp: 2,
@@ -585,9 +614,9 @@ mod tests {
             "every buffer is confirmed, accepted or dropped"
         );
         assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            samples,
-            "the server's PCM should reach the HTTP response unchanged"
+            page_count(&stream.next().await.unwrap().unwrap()),
+            1,
+            "the server's PCM should reach the HTTP response as an encoded page"
         );
 
         // And the server closing the channel ends the format, so the next
@@ -647,11 +676,12 @@ mod tests {
 
         let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
         assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            crate::audio::wav_header(PCM_CD_QUALITY).to_vec()
+            page_count(&stream.next().await.unwrap().unwrap()),
+            2,
+            "the response opens with OpusHead and OpusTags"
         );
 
-        let samples: Vec<u8> = (0..48).collect();
+        let samples = one_frame_of_pcm();
         let answer = dvc
             .process(
                 1,
@@ -665,7 +695,7 @@ mod tests {
             )
             .expect("the client accepts a wave");
         assert_eq!(answer.len(), 1, "every buffer is confirmed");
-        assert_eq!(stream.next().await.unwrap().unwrap(), samples);
+        assert_eq!(page_count(&stream.next().await.unwrap().unwrap()), 1);
 
         dvc.close(1);
         assert_eq!(
@@ -711,10 +741,16 @@ mod tests {
         dvc.process(1, &server_formats(&[audio_format(PCM_CD_QUALITY)]))
             .unwrap();
         let mut stream = Box::pin(bridge.take_listener().into_stream(PCM_CD_QUALITY));
-        stream.next().await.unwrap().unwrap(); // the header
+        stream.next().await.unwrap().unwrap(); // the header pages
 
-        // So the static handler's buffers are dropped rather than interleaved.
-        statik.wave(0, 0, Cow::Borrowed(&[0xEE; 8]));
+        // The two buffers are deliberately different lengths, because Opus makes
+        // them otherwise indistinguishable: three frames from the transport that
+        // must be ignored, one from the transport that owns the queue. The first
+        // chunk to arrive therefore says which buffer landed — and it was sent
+        // first, so if it were queued it would be the one read.
+        let ignored = one_frame_of_pcm().repeat(3);
+        let owned = one_frame_of_pcm();
+        statik.wave(0, 0, Cow::Borrowed(&ignored));
         dvc.process(
             1,
             &encode_server(ServerAudioOutputPdu::Wave2(Wave2Pdu {
@@ -722,13 +758,13 @@ mod tests {
                 format_no: 0,
                 block_no: 1,
                 audio_timestamp: 0,
-                data: Cow::Borrowed(&[1, 2]),
+                data: Cow::Borrowed(&owned),
             })),
         )
         .unwrap();
         assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            vec![1, 2],
+            page_count(&stream.next().await.unwrap().unwrap()),
+            1,
             "the dynamic channel owns the queue, so the static buffer never landed"
         );
     }

@@ -34,8 +34,7 @@ implements only the static one, so remotex registers that plus its own
 `AudioPlaybackDvc` — the same conversation over `DvcProcessor`, since `Rdpsnd`'s
 state machine answers in `SvcMessage`s and cannot be reused. Both feed one queue
 and `AudioBridge::claim_transport` decides which one owns it; a server driving both
-would otherwise interleave two streams into one WAV response with nothing to
-report it.
+would otherwise interleave two streams into one response with nothing to report it.
 
 **A third channel is what actually unlocked it: `rdpdr`.** Registering the audio
 channels is not enough. Against a live Windows 11 host, `rdpsnd` plus
@@ -96,7 +95,7 @@ audio while nobody is listening.
 
 ```text
 GET /api/session/audio?session=<claim token>
-Content-Type: audio/wav
+Content-Type: audio/ogg; codecs=opus
 Cache-Control: no-store, no-transform
 Accept-Ranges: none
 X-Accel-Buffering: no
@@ -109,20 +108,52 @@ and will never work, while a session with no audio *yet* — the picker, a targe
 without the flag, or a channel still negotiating — is `503` and worth asking about
 again.
 
-The endpoint waits (up to five seconds) for the negotiated PCM format, writes one
-WAV header for it, and then writes the wave buffers as an open-ended response
-without a `Content-Length`. Both size fields in the header are `0xFFFFFFFF`, the
-convention for a stream whose length is not known. There is no recording and no
-seekable history: a listener starts at live audio and receives only buffers that
-arrive after it attaches, and a `Range` request is answered with the same stream
-rather than a `206`.
+**A silent desktop is one of those 503s, and it is the confusing one.** The tested
+Windows host sends no `ServerAudioFormatPdu` at all while nothing is playing on it,
+so the channel opens, stays quiet, and the endpoint times out after five seconds.
+Three consecutive runs against the same build on 2026-07-29 make it plain: silent
+guest → 503, guest playing music → 200 with waves flowing, playback stopped again →
+503. Nothing on the gateway side differs between them.
 
-An open-ended PCM/WAV response is the cheapest possible representation because
-wrapping PCM requires a header, not an encoder — and it has been heard playing
-progressively from a browser, so it stays (see below). Should some other required
-browser or proxy turn out to buffer it to the end instead, the architecture does not
-move: only this endpoint's media representation becomes a progressively playable
-compressed stream, while the `<audio>` element and the RDP side remain unchanged.
+The practical consequence is a real wart: opening the Audio panel *before* starting
+sound on the remote gives a player that has already failed, and it takes closing and
+reopening the panel to try again. Worth fixing one day by not waiting on the PCM
+format at all — the Ogg headers depend only on the channel count, and the response
+could be opened optimistically and filled when audio appears — but that is a change
+to the endpoint's contract rather than a bug in it.
+
+The endpoint waits (up to five seconds) for the negotiated PCM format, writes the
+Ogg header pages for it, and then writes Opus packets as an open-ended response
+without a `Content-Length`. There is no recording and no seekable history: a
+listener starts at live audio and receives only what arrives after it attaches, and
+a `Range` request is answered with the same stream rather than a `206`.
+
+**Why Opus, and why it was not Opus first.** The response began as raw PCM in an
+open-ended WAV, chosen because wrapping PCM needs a header rather than an encoder,
+and kept until it had answered the question the design was built to ask: *does a
+browser play an open-ended response progressively, or wait for it to end?* It
+does. But PCM at the negotiated format is **176 400 B/s — about 1.4 Mbit/s** — for
+audio, which is wasteful on a LAN and unusable on anything slower. Opus at 96 kbps
+carries the same sound for about a fifteenth of that; measured on the tone harness,
+13.4 kB/s against 176.
+
+The container is Ogg because it is the streamable one: a page can be flushed as
+soon as a packet exists, so nothing waits for a buffer to fill. `src/opus_stream.rs`
+holds the framing, the 44100→48000 resampling libopus forces, and why each listener
+gets its own header pages.
+
+**Ogg/Opus in `<audio>` is newer than most sources say**, which is the part worth
+remembering rather than the choice itself. Safari gained it in **18.4** (macOS 15.4
+/ iOS 18.4, March 2025) — WebKit's release notes for that version say they are
+"adding Ogg container support for both Opus and Vorbis audio" — and plenty of
+still-published compatibility tables and search results assert Safari cannot play
+it at all. Check a device with `server::tests::serve_a_test_tone` rather than a
+table.
+
+The architecture did not move to make this change: the RDP side, the queue, the
+lifecycle, the endpoint's URL and headers, and the `<audio>` element are all as they
+were. Only the bytes between the queue and the socket are different — which is
+exactly the substitution the original design reserved the right to make.
 
 **The SPA** offers an Audio row in the floating menu for a session whose
 `connected` message carried `audio` (`frontend/src/AudioPanel.tsx`). It opens a
@@ -179,17 +210,35 @@ is deployment-specific.
 
 ## What has been heard, and what has not
 
-**The browser half is proven.** An open-ended `audio/wav` response *is* played
-progressively rather than buffered to completion: a 440 Hz tone served from this
-endpoint was audible, continuously and without stalling, in a browser on macOS on
-2026-07-29. So the representation stands, and the fallback this design was hedging
-against — swapping WAV for a progressively playable compressed stream — is not
-needed. `Content-Length`-free, `0xFFFFFFFF`-sized streaming WAV is enough.
+**The browser half is proven.** An open-ended response with no `Content-Length` *is*
+played progressively rather than buffered to completion: a 440 Hz tone served from
+this endpoint was audible, continuously and without stalling, in a browser on macOS
+on 2026-07-29. That was established with the WAV representation and is the finding
+that outlived it — the shape of the delivery was never the problem, so replacing the
+codec did not put it back in doubt.
 
-That was settled with a generated tone rather than a remote's audio, because the
-two halves fail independently and at the time no server had redirected to this
-gateway. The harness stays useful for exactly that reason — it exercises the
-browser half with no RDP host involved.
+The Ogg/Opus stream is verified by a demuxer that is not ours, which is the check
+that catches a container agreeing only with itself. `ffprobe` on six seconds pulled
+from the endpoint reports `Audio: opus, 48000 Hz, stereo`, a 5.99 s duration (so the
+granule positions are right, not merely present), and `start 0.006500` — the
+312-sample encoder pre-skip being honoured. Decoding it back and taking an FFT puts
+the peak at 438.7 Hz, within one bin of the 440 Hz that went in.
+
+**And from the live Windows target**, which is the measurement that justifies the
+change: 12 s pulled while the guest played music came to 125 KB — **10.4 kB/s against
+PCM's 176**, a seventeenth. `ffprobe` reports the same `opus, 48000 Hz, stereo`, and
+the decode is real audio rather than a header with nothing behind it: peak 16112,
+RMS 2175, 99.8% non-zero samples.
+
+One false alarm from that capture is worth keeping, because it will recur. Its two
+channels decoded with an L/R correlation of exactly 1.0000, which is what blended
+channels would look like. It was a dual-mono source. Real audio cannot tell those
+apart — only a hard-panned signal can, which is what
+`opus_stream::tests::a_hard_panned_signal_still_has_two_channels_after_a_round_trip`
+sends through the whole path for exactly this reason.
+
+That was all settled with a generated tone rather than a remote's audio, because the
+two halves fail independently and only one of them needs a Windows host.
 `server::tests::serve_a_test_tone` is that harness: an `#[ignore]`d in-crate test
 serving the real router — SPA, login, endpoint — in front of a scripted engine that
 publishes the negotiated format and fills the queue in real time.
@@ -199,7 +248,7 @@ cargo test --lib serve_a_test_tone -- --ignored --nocapture
 ```
 
 Two things it is worth knowing that harness gets right, because both were wrong
-first and both would have been misread as flaws in the WAV path: it must publish a
+first and both would have been misread as flaws in the response itself: it must publish a
 format (or the endpoint honestly answers 503), and it must pace against a deadline
 rather than sleeping a fixed interval (a fixed 20 ms sleep delivers ~2.5 s of audio
 every 3 s, and the browser stutters on the underrun). It also answers
@@ -241,10 +290,9 @@ Info PDU flags (`NO_AUDIO_PLAYBACK` drops exactly when `audio = true`). All of
 that was true and none of it mattered. The one thing not tested until last was the
 extra channel FreeRDP announces, and that was the answer.
 
-Two smaller things the delivered stream shows, neither a defect: the byte rate
-runs under the format's 176400 B/s over a window that includes the attach (waves
-start when the guest produces sound, not when the response opens), and the WAV
-carries `0xFFFFFFFF` in both size fields with no `Content-Length`, as intended.
+One thing the delivered stream shows that is not a defect: the byte rate runs under
+even Opus's steady rate over a window that includes the attach, because waves start
+when the guest produces sound rather than when the response opens.
 
 The measurement is a scratch script rather than a committed test, because it needs
 that live host and a guest that happens to be making noise; the committed
@@ -253,7 +301,11 @@ coverage is the in-crate pair below.
 The gateway's own half is proven without a cooperating server:
 `rdp_audio::tests::a_server_speaking_rdpsnd_gets_its_audio_onto_a_listener` and its
 `_the_audio_dvc_` twin drive real MS-RDPEA server PDUs through both transports and
-assert the PCM comes out of the HTTP stream behind its WAV header.
+assert an encoded page comes out of the HTTP stream behind its Ogg header pages.
+They can no longer compare the bytes they sent against the bytes that came out, so
+where a buffer must be *ignored* — a second transport, an unadvertised format index
+— they send a different number of frames on each path and read the page count. The
+encoding is checked separately, by `opus_stream`, which decodes what it encoded.
 
 **What has not been heard** is the dynamic transport. `AudioPlaybackDvc` has never
 carried a byte from a real server — only from those in-crate PDUs — because the one
@@ -281,7 +333,11 @@ It does not include:
 - audio records in the remotex WebSocket; or
 - the macOS viewer.
 
-The native viewer can consume the same authenticated endpoint with `AVPlayer`; it
-does not need a second gateway transport. If the open-ended WAV representation
-proves unsuitable for both clients, direct PCM playback in the viewer is a
-fallback, not a reason to complicate the browser path.
+**The viewer can no longer share this endpoint, and that is a cost of the Opus
+change rather than an oversight.** AVFoundation has no Ogg demuxer, so `AVPlayer`
+cannot play what this now serves — where it could play the WAV. Giving the viewer
+sound therefore means giving it a representation of its own: Opus in CAF or in
+fragmented MP4, both of which AVFoundation reads, or decoding Opus in the viewer.
+That is a fair amount of work for a client that has no audio today either way, and
+it was chosen deliberately over serving two representations from one endpoint, which
+would have kept a second code path alive for a user who does not exist yet.

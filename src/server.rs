@@ -308,7 +308,7 @@ struct AudioParams {
 /// audio that is merely slow.
 const AUDIO_FORMAT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The claimed session's live audio, as an open-ended `audio/wav` response the
+/// The claimed session's live audio, as an open-ended Ogg/Opus response the
 /// browser plays with a plain `<audio>` element (see docs/remote-audio.md).
 ///
 /// Deliberately not part of the desktop WebSocket: the browser already has a
@@ -348,10 +348,16 @@ async fn audio_handler(
         );
         return Err(AppError::Unavailable("remote audio"));
     };
-    info!("audio: streaming {} Hz PCM", format.sample_rate);
+    info!(
+        "audio: streaming {} Hz PCM as {} kbps opus",
+        format.sample_rate,
+        crate::opus_stream::OPUS_BITRATE_BPS / 1000
+    );
     Ok((
         [
-            (header::CONTENT_TYPE, "audio/wav"),
+            // The container as well as the codec: `codecs=opus` is what lets a
+            // client decide it can play this without sniffing the bytes.
+            (header::CONTENT_TYPE, "audio/ogg; codecs=opus"),
             // Nothing about a live stream may be stored, and nothing may
             // recompress or re-chunk it on the way — `no-transform` is the half
             // that speaks to intermediaries rather than to the browser.
@@ -378,12 +384,12 @@ mod tests {
     /// audio, so the browser half of the audio path can be listened to without a
     /// server that redirects.
     ///
-    /// This exists because of what the first live test found: the RDP side and the
-    /// HTTP side fail independently, and until a Windows host actually hands this
-    /// gateway a buffer, the question the whole design rests on — **does a browser
-    /// play an open-ended `audio/wav` response progressively, or wait for it to
-    /// end?** — cannot be asked at all. The PCM's provenance is irrelevant to that
-    /// question, so this supplies it locally.
+    /// It exists because the RDP side and the HTTP side fail independently, and
+    /// only one of them needs a Windows host. Whenever the representation changes
+    /// — and it has, from an open-ended WAV to Ogg/Opus — the question is whether
+    /// *browsers* play what this now sends, live and without stalling. The PCM's
+    /// provenance is irrelevant to that, so this supplies it locally and the
+    /// answer is unambiguous: a failure here is the format, not the remote.
     ///
     /// `#[ignore]`d and in-crate on purpose: it needs
     /// [`SessionManager::with_test_spawner`], and it must add nothing a real
@@ -395,8 +401,10 @@ mod tests {
     /// ```
     ///
     /// Then open the printed URL, log in, pick the target, and open ☰ → Audio. A
-    /// 440 Hz tone means the whole browser-side path works. Silence with a stalled
-    /// player is the finding the representation would have to change for.
+    /// 440 Hz tone means the whole browser-side path works, on that browser. Worth
+    /// running on each one that matters rather than assuming published support
+    /// tables are current — Ogg/Opus in `<audio>` only reached Safari in 18.4, and
+    /// plenty of sources still say it never did.
     #[tokio::test]
     #[ignore = "manual: serves a tone for a browser to play, and waits"]
     async fn serve_a_test_tone() {
@@ -417,7 +425,8 @@ mod tests {
             for _ in 0..frames {
                 let t = *phase as f32 / PCM_CD_QUALITY.sample_rate as f32;
                 let sample = ((t * HZ * std::f32::consts::TAU).sin() * 8000.0) as i16;
-                // Both channels, little-endian: what the WAV header promises.
+                // Both channels, little-endian: the layout the queue carries and
+                // the encoder deinterleaves.
                 buf.extend_from_slice(&sample.to_le_bytes());
                 buf.extend_from_slice(&sample.to_le_bytes());
                 *phase = phase.wrapping_add(1);

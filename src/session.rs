@@ -821,6 +821,22 @@ mod tests {
             .map(|chunk| chunk.unwrap())
     }
 
+    /// Ogg pages in a chunk of an audio response. What these tests care about is
+    /// the lifecycle — whose response is open and when it ends — so a page is
+    /// only ever used as proof that audio reached the stream at all. The bytes
+    /// themselves are [`crate::opus_stream`]'s business.
+    fn page_count(chunk: &[u8]) -> usize {
+        chunk.windows(4).filter(|w| *w == b"OggS").count()
+    }
+
+    /// Enough PCM for one 20 ms Opus frame, since a smaller buffer is held by the
+    /// encoder and would leave a `next_chunk` waiting for a page that never comes.
+    fn one_frame_of_pcm() -> Vec<u8> {
+        let frames = crate::opus_stream::FRAME_FRAMES * PCM_CD_QUALITY.sample_rate as usize
+            / crate::opus_stream::OPUS_SAMPLE_RATE as usize;
+        vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
+    }
+
     /// Assert the next event is the picker status.
     async fn expect_picker(events: &mut mpsc::Receiver<AttachEvent>) {
         assert!(
@@ -1271,9 +1287,9 @@ mod tests {
 
         let listener = mgr.audio_listener(&token).unwrap();
         let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        next_chunk(&mut stream).await.expect("the WAV header");
-        audio.wave(vec![1, 2, 3]);
-        assert_eq!(next_chunk(&mut stream).await.unwrap(), vec![1, 2, 3]);
+        next_chunk(&mut stream).await.expect("the ogg header pages");
+        audio.wave(one_frame_of_pcm());
+        assert_eq!(page_count(&next_chunk(&mut stream).await.unwrap()), 1);
     }
 
     #[tokio::test]
@@ -1326,7 +1342,7 @@ mod tests {
         let audio = audio.unwrap();
 
         let mut stream = Box::pin(mgr.audio_listener(&token_a).unwrap().into_stream(PCM_CD_QUALITY));
-        next_chunk(&mut stream).await.expect("the WAV header");
+        next_chunk(&mut stream).await.expect("the ogg header pages");
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(
@@ -1337,9 +1353,9 @@ mod tests {
 
         // And the new holder gets its own stream off the same live engine.
         let mut stream = Box::pin(mgr.audio_listener(&token_b).unwrap().into_stream(PCM_CD_QUALITY));
-        next_chunk(&mut stream).await.expect("the WAV header");
-        audio.wave(vec![4, 5]);
-        assert_eq!(next_chunk(&mut stream).await.unwrap(), vec![4, 5]);
+        next_chunk(&mut stream).await.expect("the ogg header pages");
+        audio.wave(one_frame_of_pcm());
+        assert_eq!(page_count(&next_chunk(&mut stream).await.unwrap()), 1);
     }
 
     /// Every way an engine ends takes its audio with it, with nothing in those
@@ -1367,7 +1383,7 @@ mod tests {
             let (_input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
             let mut stream =
                 Box::pin(mgr.audio_listener(&token).unwrap().into_stream(PCM_CD_QUALITY));
-            next_chunk(&mut stream).await.expect("the WAV header");
+            next_chunk(&mut stream).await.expect("the ogg header pages");
 
             end_it(&mgr, att.id);
             assert!(

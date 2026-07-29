@@ -1,5 +1,6 @@
 //! Remote audio: the queue between an engine that receives sound and the HTTP
-//! response that plays it, and the WAV framing that response needs.
+//! response that plays it. The response's bytes are Ogg/Opus, framed by
+//! [`crate::opus_stream`].
 //!
 //! See docs/remote-audio.md. Audio deliberately does not travel on the desktop
 //! WebSocket: the browser already has a streaming audio client, so the gateway
@@ -36,6 +37,8 @@ use futures_util::Stream;
 use log::{debug, info, warn};
 use tokio::sync::{broadcast, oneshot, watch};
 
+use crate::opus_stream::OggOpus;
+
 /// How many wave buffers the queue holds before the oldest are dropped.
 ///
 /// A Windows server sends a few KiB per buffer — roughly 20–25 ms of CD-quality
@@ -49,9 +52,10 @@ pub const AUDIO_QUEUE_DEPTH: usize = 64;
 ///
 /// PCM because it is the one [RDPSND audio format](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpea/30a6cc00-31c4-4e15-9aa4-95a5c5074697)
 /// clients and servers are both required to support, so accepting a compressed
-/// one would make this depend on what a particular Windows version happens to
-/// offer. It is also what makes the HTTP side cheap: wrapping PCM needs a
-/// header, not an encoder.
+/// RDP format would make this depend on what a particular Windows version happens
+/// to offer. What the *gateway* then sends a browser is a separate question, and
+/// the answer is Opus: PCM is the right thing to ask a server for and the wrong
+/// thing to put on a network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PcmFormat {
     pub channels: u16,
@@ -60,12 +64,13 @@ pub struct PcmFormat {
 }
 
 impl PcmFormat {
-    /// Bytes in one sample across every channel (WAV `nBlockAlign`).
+    /// Bytes in one sample across every channel — RDPSND's `nBlockAlign`.
     pub const fn block_align(self) -> u16 {
         self.channels * (self.bits_per_sample / 8)
     }
 
-    /// Bytes a second of this format occupies (WAV `nAvgBytesPerSec`).
+    /// Bytes a second of this format occupies — RDPSND's `nAvgBytesPerSec`, and
+    /// the number Opus exists to shrink: 176 400 for the format below.
     pub const fn byte_rate(self) -> u32 {
         self.sample_rate * self.block_align() as u32
     }
@@ -82,40 +87,6 @@ pub const PCM_CD_QUALITY: PcmFormat = PcmFormat {
     sample_rate: 44_100,
     bits_per_sample: 16,
 };
-
-/// Bytes in the canonical WAV header written before the first buffer.
-pub const WAV_HEADER_LEN: usize = 44;
-
-/// The RIFF and `data` chunk sizes of a stream whose length is not known.
-///
-/// A live response has no end, so neither field can be filled in. `0xFFFFFFFF`
-/// is the convention for that (rather than 0, which some readers take
-/// literally and treat as an empty file).
-const WAV_UNKNOWN_SIZE: u32 = u32::MAX;
-
-/// The 44-byte RIFF/WAVE header for `format`, with both size fields left
-/// unknown.
-pub fn wav_header(format: PcmFormat) -> [u8; WAV_HEADER_LEN] {
-    let mut header = [0u8; WAV_HEADER_LEN];
-    let mut put = |at: usize, bytes: &[u8]| header[at..at + bytes.len()].copy_from_slice(bytes);
-
-    put(0, b"RIFF");
-    put(4, &WAV_UNKNOWN_SIZE.to_le_bytes());
-    put(8, b"WAVE");
-
-    put(12, b"fmt ");
-    put(16, &16u32.to_le_bytes()); // the PCM fmt chunk is 16 bytes
-    put(20, &1u16.to_le_bytes()); // WAVE_FORMAT_PCM
-    put(22, &format.channels.to_le_bytes());
-    put(24, &format.sample_rate.to_le_bytes());
-    put(28, &format.byte_rate().to_le_bytes());
-    put(32, &format.block_align().to_le_bytes());
-    put(34, &format.bits_per_sample.to_le_bytes());
-
-    put(36, b"data");
-    put(40, &WAV_UNKNOWN_SIZE.to_le_bytes());
-    header
-}
 
 /// The seam between an engine receiving redirected audio and the HTTP response
 /// playing it. Created and owned by the session slot, so its lifetime is the
@@ -264,8 +235,8 @@ impl AudioListener {
         .flatten()
     }
 
-    /// The response body: one WAV header for `format`, then each buffer as it
-    /// arrives.
+    /// The response body: the Ogg header pages for `format`, then Opus packets as
+    /// the PCM to fill them arrives.
     ///
     /// Open-ended by construction — there is no recording and no seekable
     /// history, so a listener starts at live audio and receives only what
@@ -273,15 +244,35 @@ impl AudioListener {
     /// (the target changed, disconnected, or the engine died), when the slot
     /// ends this listener (a takeover, or a second request), or when the
     /// consumer stops reading and this stream is dropped with it.
+    ///
+    /// A wave buffer usually yields several pages and sometimes none — the
+    /// encoder cuts 20 ms frames out of whatever sizes RDP sends, and holds the
+    /// remainder (see [`crate::opus_stream`]).
     pub fn into_stream(self, format: PcmFormat) -> impl Stream<Item = Result<Vec<u8>, Infallible>> {
         struct State {
+            /// `None` once the encoder has failed or refused the format; the
+            /// stream then ends, which is what the endpoint's caller already
+            /// handles for a remote that went away.
+            encoder: Option<OggOpus>,
             header: Option<Vec<u8>>,
             waves: broadcast::Receiver<Vec<u8>>,
             stop: oneshot::Receiver<()>,
         }
 
+        let (encoder, header) = match OggOpus::new(format) {
+            Ok((encoder, header)) => (Some(encoder), Some(header)),
+            Err(e) => {
+                // Reported here rather than as an HTTP status: by this point the
+                // 200 has been sent, and a media element shows a load failure
+                // either way. The log is the only place this can be seen.
+                warn!("audio: cannot encode {format:?} as opus, no audio will be sent: {e}");
+                (None, None)
+            }
+        };
+
         let state = State {
-            header: Some(wav_header(format).to_vec()),
+            encoder,
+            header,
             waves: self.waves,
             stop: self.stop,
         };
@@ -289,21 +280,35 @@ impl AudioListener {
             if let Some(header) = state.header.take() {
                 return Some((Ok(header), state));
             }
+            let encoder = state.encoder.as_mut()?;
             loop {
-                tokio::select! {
+                let samples = tokio::select! {
                     // Resolves on the value *or* on the sender being dropped,
                     // and both mean the same thing here.
                     _ = &mut state.stop => return None,
                     wave = state.waves.recv() => match wave {
-                        Ok(samples) => return Some((Ok(samples), state)),
+                        Ok(samples) => samples,
                         // Old audio was dropped while this consumer was behind.
                         // Skipping forward is the point: the alternative is a
-                        // delay that never comes back.
+                        // delay that never comes back. The encoder carries on:
+                        // Opus frames are independent, so a gap is a gap in the
+                        // sound rather than a broken stream.
                         Err(broadcast::error::RecvError::Lagged(dropped)) => {
                             debug!("audio: listener fell behind, {dropped} buffer(s) dropped");
+                            continue;
                         }
                         Err(broadcast::error::RecvError::Closed) => return None,
                     },
+                };
+                match encoder.push(&samples) {
+                    // Empty when the buffer did not complete a 20 ms frame. Yielding
+                    // nothing would end the stream, so keep reading instead.
+                    Ok(pages) if pages.is_empty() => continue,
+                    Ok(pages) => return Some((Ok(pages), state)),
+                    Err(e) => {
+                        warn!("audio: the opus encoder failed, ending the stream: {e}");
+                        return None;
+                    }
                 }
             }
         })
@@ -315,30 +320,12 @@ mod tests {
     use futures_util::StreamExt as _;
 
     use super::*;
+    use crate::opus_stream::FRAME_FRAMES;
 
-    /// The header is the whole of the "encoder", so its bytes are pinned rather
-    /// than recomputed by the test the same way the code computes them.
+    /// What this format costs on the wire, which is the whole reason the response
+    /// is Opus and not this.
     #[test]
-    fn the_wav_header_is_a_cd_quality_riff_stream_of_unknown_length() {
-        let header = wav_header(PCM_CD_QUALITY);
-        assert_eq!(
-            header,
-            [
-                b'R', b'I', b'F', b'F', //
-                0xff, 0xff, 0xff, 0xff, // length unknown: this response has no end
-                b'W', b'A', b'V', b'E', //
-                b'f', b'm', b't', b' ', //
-                16, 0, 0, 0, // PCM fmt chunk size
-                1, 0, // WAVE_FORMAT_PCM
-                2, 0, // stereo
-                0x44, 0xac, 0, 0, // 44100 Hz
-                0x10, 0xb1, 2, 0, // 176400 bytes a second
-                4, 0, // 4 bytes a sample frame
-                16, 0, // 16 bits a sample
-                b'd', b'a', b't', b'a', //
-                0xff, 0xff, 0xff, 0xff, // and neither does its data chunk
-            ]
-        );
+    fn the_negotiated_format_is_cd_quality_pcm() {
         assert_eq!(PCM_CD_QUALITY.block_align(), 4);
         assert_eq!(PCM_CD_QUALITY.byte_rate(), 176_400);
     }
@@ -354,9 +341,22 @@ mod tests {
         };
         assert_eq!(telephone.block_align(), 1);
         assert_eq!(telephone.byte_rate(), 8_000);
-        let header = wav_header(telephone);
-        assert_eq!(&header[24..28], &8_000u32.to_le_bytes());
-        assert_eq!(&header[28..32], &8_000u32.to_le_bytes());
+    }
+
+    /// One Opus packet's worth of silent PCM at the negotiated format.
+    ///
+    /// Every test here has to hand over whole frames: a buffer too small to
+    /// complete one is held by the encoder, so a stream fed scraps yields nothing
+    /// and a `next()` on it would wait forever rather than fail.
+    fn one_frame_of_pcm() -> Vec<u8> {
+        let frames = FRAME_FRAMES * PCM_CD_QUALITY.sample_rate as usize
+            / crate::opus_stream::OPUS_SAMPLE_RATE as usize;
+        vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
+    }
+
+    /// Ogg pages in a chunk, counted by their capture pattern.
+    fn page_count(chunk: &[u8]) -> usize {
+        chunk.windows(4).filter(|w| *w == b"OggS").count()
     }
 
     async fn next(stream: &mut (impl Stream<Item = Result<Vec<u8>, Infallible>> + Unpin)) -> Option<Vec<u8>> {
@@ -366,12 +366,22 @@ mod tests {
             .map(|chunk| chunk.unwrap())
     }
 
+    /// The header pages, asserted to be exactly that. Every test wants them out
+    /// of the way, and none of them should pass if audio arrived first.
+    async fn expect_headers(
+        stream: &mut (impl Stream<Item = Result<Vec<u8>, Infallible>> + Unpin),
+    ) {
+        let headers = next(stream).await.expect("the ogg header pages");
+        assert_eq!(&headers[0..4], b"OggS");
+        assert_eq!(page_count(&headers), 2, "OpusHead and OpusTags");
+    }
+
     #[tokio::test]
-    async fn a_listener_gets_the_header_then_only_what_arrives_after_it_attached() {
+    async fn a_listener_gets_the_headers_then_only_what_arrives_after_it_attached() {
         let bridge = AudioBridge::new();
         bridge.publish_format(PCM_CD_QUALITY);
         // Discarded: nobody was listening, and there is no history to replay.
-        bridge.wave(vec![1, 1, 1, 1]);
+        bridge.wave(one_frame_of_pcm());
 
         let mut listener = bridge.take_listener();
         assert_eq!(
@@ -380,13 +390,11 @@ mod tests {
             "the format was published before the listener attached"
         );
         let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        assert_eq!(
-            next(&mut stream).await.unwrap(),
-            wav_header(PCM_CD_QUALITY).to_vec()
-        );
+        expect_headers(&mut stream).await;
 
-        bridge.wave(vec![2, 2, 2, 2]);
-        assert_eq!(next(&mut stream).await.unwrap(), vec![2, 2, 2, 2]);
+        bridge.wave(one_frame_of_pcm());
+        let audio = next(&mut stream).await.unwrap();
+        assert_eq!(page_count(&audio), 1, "one frame in, one page out");
     }
 
     #[tokio::test]
@@ -414,7 +422,7 @@ mod tests {
         let bridge = AudioBridge::new();
         let listener = bridge.take_listener();
         let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        next(&mut stream).await.unwrap(); // the header
+        expect_headers(&mut stream).await;
 
         drop(bridge);
         assert!(next(&mut stream).await.is_none());
@@ -427,17 +435,19 @@ mod tests {
         let bridge = AudioBridge::new();
         let listener = bridge.take_listener();
         let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        next(&mut stream).await.unwrap();
+        expect_headers(&mut stream).await;
 
         bridge.stop_listener();
         assert!(next(&mut stream).await.is_none());
 
-        // The bridge is still usable, which is what a takeover needs.
+        // The bridge is still usable, which is what a takeover needs — and the
+        // replacement gets its own headers, without which its Opus packets would
+        // arrive with nothing to configure a decoder.
         let replacement = bridge.take_listener();
         let mut stream = Box::pin(replacement.into_stream(PCM_CD_QUALITY));
-        next(&mut stream).await.unwrap();
-        bridge.wave(vec![7]);
-        assert_eq!(next(&mut stream).await.unwrap(), vec![7]);
+        expect_headers(&mut stream).await;
+        bridge.wave(one_frame_of_pcm());
+        assert_eq!(page_count(&next(&mut stream).await.unwrap()), 1);
     }
 
     #[tokio::test]
@@ -445,7 +455,7 @@ mod tests {
         let bridge = AudioBridge::new();
         let first = bridge.take_listener();
         let mut first = Box::pin(first.into_stream(PCM_CD_QUALITY));
-        next(&mut first).await.unwrap();
+        expect_headers(&mut first).await;
 
         let second = bridge.take_listener();
         let mut second = Box::pin(second.into_stream(PCM_CD_QUALITY));
@@ -453,28 +463,53 @@ mod tests {
             next(&mut first).await.is_none(),
             "the first response should have ended"
         );
-        next(&mut second).await.unwrap();
-        bridge.wave(vec![9]);
-        assert_eq!(next(&mut second).await.unwrap(), vec![9]);
+        expect_headers(&mut second).await;
+        bridge.wave(one_frame_of_pcm());
+        assert_eq!(page_count(&next(&mut second).await.unwrap()), 1);
     }
 
     /// The backpressure rule: the producer is never held up, and what gives way
     /// is old audio. A queue that blocked here would be blocking the RDP read
     /// loop, and one that grew would be building a permanent delay.
-    #[tokio::test]
-    async fn an_unread_queue_drops_its_oldest_buffers_instead_of_blocking() {
+    ///
+    /// Read straight off the queue rather than through [`AudioListener::into_stream`],
+    /// for two reasons: what is under test is the queue's overflow rule, and the
+    /// encoder in between makes buffers unidentifiable, so there would be no way
+    /// to say *which* audio survived. Draining the stream instead is also not
+    /// available — ending the bridge to terminate the drain ends the response
+    /// immediately, by design.
+    #[test]
+    fn an_unread_queue_drops_its_oldest_buffers_instead_of_blocking() {
         let bridge = AudioBridge::new();
-        let listener = bridge.take_listener();
-        let mut stream = Box::pin(listener.into_stream(PCM_CD_QUALITY));
-        next(&mut stream).await.unwrap();
+        let mut listener = bridge.take_listener();
 
         // Twice the depth, none of it read: every one of these returns at once.
-        for i in 0..AUDIO_QUEUE_DEPTH * 2 {
+        let sent = AUDIO_QUEUE_DEPTH * 2;
+        for i in 0..sent {
             bridge.wave(vec![i as u8]);
         }
-        // The reader is told it fell behind (swallowed inside the stream) and
-        // resumes at the oldest buffer still held, not at the first one sent.
-        let resumed = next(&mut stream).await.unwrap();
-        assert_eq!(resumed, vec![AUDIO_QUEUE_DEPTH as u8]);
+
+        let mut lagged = None;
+        let mut survived: Vec<Vec<u8>> = Vec::new();
+        loop {
+            match listener.waves.try_recv() {
+                Ok(buffer) => survived.push(buffer),
+                // Reported once, before the oldest surviving buffer.
+                Err(broadcast::error::TryRecvError::Lagged(dropped)) => lagged = Some(dropped),
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            lagged,
+            Some((sent - AUDIO_QUEUE_DEPTH) as u64),
+            "the reader should be told exactly how much it missed"
+        );
+        assert_eq!(survived.len(), AUDIO_QUEUE_DEPTH, "the queue holds its depth");
+        assert_eq!(
+            survived[0],
+            vec![AUDIO_QUEUE_DEPTH as u8],
+            "it resumes at the oldest buffer still held, not the first one sent"
+        );
     }
 }

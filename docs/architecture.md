@@ -27,8 +27,9 @@ without re-encoding.
 Audio is the one thing a session sends that takes none of that path — not the
 tile encoder, not its queue, and not the WebSocket. The browser is already a
 streaming audio client, so the gateway serves the claimed session's sound as an
-ordinary open-ended HTTP response and the SPA points a plain `<audio>` element at
-it ([`remote-audio.md`](remote-audio.md)).
+ordinary open-ended HTTP response — Ogg/Opus, so a session costs ~96 kbps of
+audio rather than the 1.4 Mbit/s the RDP side delivers — and the SPA points a
+plain `<audio>` element at it ([`remote-audio.md`](remote-audio.md)).
 
 ## Constraints
 
@@ -49,7 +50,7 @@ The main responsibilities are:
 | `session.rs` | the single slot, target selection, takeover, detach/reattach |
 | `ws.rs`, `protocol.rs` | browser WebSocket bridge and wire types |
 | `rdp.rs` | IronRDP connection, framebuffer, input, optional resize |
-| `audio.rs`, `rdp_audio.rs` | the session's audio queue and WAV framing, fed by MS-RDPEA |
+| `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | the session's audio queue, its Ogg/Opus framing, and the MS-RDPEA channels feeding it |
 | `vnc.rs` | RFB 3.8 client, framebuffer, cursor, input, optional resize |
 | `rxa.rs` | encrypted Mac-agent connection and tile pass-through |
 | `encode.rs` | WebP encoding off the engines' read loops, in order |

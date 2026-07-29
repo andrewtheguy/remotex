@@ -11,6 +11,7 @@ pub mod encode;
 pub mod engine;
 pub mod error;
 pub mod keymap;
+pub mod opus_stream;
 pub mod protocol;
 pub mod rdp;
 pub mod rdp_audio;

@@ -1,10 +1,15 @@
 // The remote's sound, played by the browser's own audio element.
 //
 // There is deliberately no audio pipeline here: no WebCodecs, no AudioWorklet,
-// no jitter buffer. The gateway serves the session's live audio as an ordinary
-// open-ended `audio/wav` response and this points an `<audio>` at it, which
-// leaves buffering, decoding and playback to the browser (see
-// docs/remote-audio.md).
+// no jitter buffer, no MSE. The gateway serves the session's live audio as an
+// ordinary open-ended `audio/ogg; codecs=opus` response and this points an
+// `<audio>` at it, which leaves buffering, decoding and playback to the browser
+// (see docs/remote-audio.md).
+//
+// Ogg/Opus rather than the raw PCM this started as, purely for bandwidth: ~96 kbps
+// against 1.4 Mbit/s. Support for it in `<audio>` is recent enough to be worth
+// checking on a device rather than looking up — Safari only gained Ogg/Opus in
+// 18.4 — and `server::tests::serve_a_test_tone` is how to check.
 //
 // **Native `controls`, and that is the point of this panel.** Whether a browser
 // plays such a response *progressively* rather than waiting for it to end is the

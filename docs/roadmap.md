@@ -137,9 +137,13 @@ compressed fallback is needed; and a real host does redirect to this gateway.
 
 What is left is two things, neither urgent:
 
-- **The macOS viewer.** It can consume the same authenticated endpoint with
-  `AVPlayer` and needs no second transport. Nothing blocks it: the representation
-  is settled and there is now a target that carries real audio to test against.
+- **The macOS viewer**, which now needs a representation of its own. It could once
+  have pointed `AVPlayer` at this endpoint unchanged; since the response became
+  Ogg/Opus it cannot, because AVFoundation has no Ogg demuxer. So viewer audio
+  means Opus in CAF or fragmented MP4 (both of which AVFoundation reads) or
+  decoding Opus in the viewer — a second representation from the same queue, not a
+  second transport. Serving two representations was considered and rejected while
+  the viewer has no audio at all; see [`remote-audio.md`](remote-audio.md).
 - **Audio for the other two protocols.** `rxa` would mean capturing sound on the
   Mac, which the agent does not do and which is a feature of the agent rather than
   of this path. VNC has no audio channel to turn on at all, so there is nothing
