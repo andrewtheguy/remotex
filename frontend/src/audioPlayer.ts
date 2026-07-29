@@ -25,6 +25,11 @@
 // fall back to and the WAV one that Opus replaced is gone. That makes browser
 // support something to test (`cargo test --lib serve_a_test_tone -- --ignored`)
 // rather than something to hedge.
+//
+// And one cost of WebCodecs that the element it replaces did not have: it is
+// **secure-context only**, so a gateway reached over plain HTTP on a LAN address has
+// no audio at all until it is behind TLS. See `audioUnavailable`, which says so
+// rather than blaming the browser.
 
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 
@@ -84,9 +89,27 @@ const PACKET_US = 20_000;
  */
 const OPUS_RATE = 48_000;
 
-/** Whether this browser has a decoder at all. Cheap, synchronous, and honest. */
-export function audioSupported(): boolean {
-  return typeof AudioDecoder !== "undefined";
+/**
+ * Why audio cannot play here, or null when it can. Cheap and synchronous.
+ *
+ * Two reasons, and separating them matters because the second is not about the
+ * browser at all: **WebCodecs is secure-context only**, so `AudioDecoder` is simply
+ * undefined on `http://` to anything but localhost. That is a change from the
+ * `<audio>` element this replaces, which played a plain-HTTP response from any
+ * origin — measured on 2026-07-29, where a headless Chromium reported no decoder on
+ * `about:blank` and full support for this exact config on `http://127.0.0.1`. A
+ * gateway reached over LAN HTTP therefore has no audio until it is behind TLS, and
+ * saying "this browser cannot decode Opus" there would send someone looking in
+ * entirely the wrong place.
+ */
+export function audioUnavailable(): string | null {
+  if (typeof AudioDecoder !== "undefined") {
+    return null;
+  }
+  if (!window.isSecureContext) {
+    return "Audio needs a secure context: reach this gateway over HTTPS (or localhost).";
+  }
+  return "This browser has no WebCodecs audio decoder.";
 }
 
 /**
@@ -141,16 +164,18 @@ export interface AudioHandlers {
 /**
  * Start playing on `context`, keeping the schedule under the ceiling.
  *
- * Throws if this browser has no `AudioDecoder`; an *unsupported codec* is not a
- * throw, because WebCodecs reports that asynchronously — it arrives at `onError`.
+ * Throws if there is no `AudioDecoder` to be had (see [`audioUnavailable`]); an
+ * *unsupported codec* is not a throw, because WebCodecs reports that
+ * asynchronously — it arrives at `onError`.
  */
 export function createAudioPlayer(
   format: AudioFormat,
   context: AudioContext,
   handlers: AudioHandlers,
 ): AudioPlayer {
-  if (!audioSupported()) {
-    throw new Error("this browser has no WebCodecs audio decoder");
+  const unavailable = audioUnavailable();
+  if (unavailable) {
+    throw new Error(unavailable);
   }
   let nextAt = 0;
   let timestamp = 0;
@@ -179,8 +204,8 @@ export function createAudioPlayer(
       close();
       handlers.onError(
         e instanceof Error && e.name === "NotSupportedError"
-          ? "this browser cannot decode the audio the gateway sends"
-          : "this browser's audio decoder failed",
+          ? "This browser cannot decode the Opus audio the gateway sends."
+          : "This browser's audio decoder failed.",
       );
     },
   });

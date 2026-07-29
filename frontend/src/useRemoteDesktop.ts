@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AudioPlayer,
-  audioSupported,
+  audioUnavailable,
   createAudioContext,
   createAudioPlayer,
   decodeAudioHead,
@@ -1525,13 +1525,15 @@ export function useRemoteDesktop(
       setAudioEnabled(enabled);
       releaseAudio();
       if (enabled) {
-        if (!audioSupported()) {
-          // Said before the round trip rather than after it: there is no fallback
-          // representation, so nothing about the answer would change this.
+        // Said before the round trip rather than after it: there is no fallback
+        // representation, so nothing about the answer would change this. And it
+        // names which of the two reasons applies — a browser with no decoder, or an
+        // insecure origin, where WebCodecs does not exist however capable the
+        // browser is (see audioUnavailable).
+        const unavailable = audioUnavailable();
+        if (unavailable) {
           setAudioEnabled(false);
-          setAudioError(
-            "this browser cannot decode the audio the gateway sends",
-          );
+          setAudioError(unavailable);
           return;
         }
         audioContextRef.current = createAudioContext();
