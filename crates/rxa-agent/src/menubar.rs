@@ -4,7 +4,8 @@
 //! running, nothing says when somebody is looking at your screen, and stopping
 //! it means finding the process from a terminal — which is a poor deal for
 //! software whose entire job is to let a remote machine watch and drive this
-//! one. So the status item answers three questions at a glance:
+//! one. [`Starting`] therefore creates it before any fallible application
+//! startup work. The status item then answers three questions at a glance:
 //!
 //! 1. **Is it running, and can it work?** The icon is there or it is not, and it
 //!    warns when a permission it cannot do without is missing.
@@ -163,7 +164,7 @@ impl Permissions {
 /// distinguish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Health {
-    /// A permission is missing: nothing will work, whoever connects.
+    /// Startup failed or a permission is missing: the agent cannot serve.
     Blocked,
     Connected,
     Idle,
@@ -401,39 +402,7 @@ impl Controller {
         let Some(item) = self.ivars().status_item.get() else {
             return;
         };
-        let Some(button) = item.button(MainThreadMarker::from(self)) else {
-            return;
-        };
-
-        let (symbol, fallback, description) = match health {
-            // Ahead of "connected" on purpose: a gateway attached to an agent
-            // that cannot capture or inject is the case most worth warning about,
-            // not the one to reassure about.
-            Health::Blocked => (
-                ICON_BLOCKED,
-                ICON_FALLBACK_BLOCKED,
-                "remotex agent, missing permissions",
-            ),
-            Health::Connected => (
-                ICON_CONNECTED,
-                ICON_FALLBACK_CONNECTED,
-                "remotex agent, connected",
-            ),
-            Health::Idle => (ICON_IDLE, ICON_FALLBACK_IDLE, "remotex agent"),
-        };
-        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            &NSString::from_str(symbol),
-            Some(&NSString::from_str(description)),
-        );
-        match image {
-            Some(image) => {
-                // Template: the menu bar tints it, so it stays legible in light
-                // mode, dark mode and under a wallpaper-tinted bar alike.
-                image.setTemplate(true);
-                button.setImage(Some(&image));
-            }
-            None => button.setTitle(&NSString::from_str(fallback)),
-        }
+        set_icon(item, health, MainThreadMarker::from(self));
         self.ivars().icon.set(Some(health));
     }
 
@@ -468,7 +437,9 @@ impl Controller {
     }
 
     fn health(&self) -> Health {
-        if !self.ivars().permissions.get().complete() {
+        if self.ivars().state.failure().is_some()
+            || !self.ivars().permissions.get().complete()
+        {
             Health::Blocked
         } else if self.ivars().state.is_connected() {
             Health::Connected
@@ -486,19 +457,25 @@ impl Controller {
         let saved = settings.saved();
         menu.removeAllItems();
 
-        let connection = ivars.state.current();
-        menu.addItem(&self.info(&state::describe(connection.as_ref(), Instant::now()), mtm));
-        // The address the agent is *serving*, not the one in the file — they
-        // differ until a pending change has been restarted into, and this line is
-        // the one place that has to be true about right now.
-        menu.addItem(&self.info(
-            &format!(
-                "Listening on {} · v{}",
-                settings.running().listen,
-                env!("CARGO_PKG_VERSION")
-            ),
-            mtm,
-        ));
+        if let Some(failure) = ivars.state.failure() {
+            menu.addItem(&self.info("⚠︎ Agent is not serving", mtm));
+            menu.addItem(&self.info(&one_line(&failure), mtm));
+            menu.addItem(&self.info(&format!("v{}", env!("CARGO_PKG_VERSION")), mtm));
+        } else {
+            let connection = ivars.state.current();
+            menu.addItem(&self.info(&state::describe(connection.as_ref(), Instant::now()), mtm));
+            // The address the agent is *serving*, not the one in the file — they
+            // differ until a pending change has been restarted into, and this line is
+            // the one place that has to be true about right now.
+            menu.addItem(&self.info(
+                &format!(
+                    "Listening on {} · v{}",
+                    settings.running().listen,
+                    env!("CARGO_PKG_VERSION")
+                ),
+                mtm,
+            ));
+        }
         if settings.restart_pending() {
             menu.addItem(&self.info("⚠︎ Saved changes apply after a restart", mtm));
         }
@@ -650,9 +627,78 @@ impl Controller {
     }
 }
 
+/// The visible AppKit shell, created before config I/O, login-item registration,
+/// socket binding, permission probes or worker setup.
+///
+/// A menu-bar-only app without this object has no UI at all. Holding the item
+/// from the first lines of a GUI launch means every later outcome can replace
+/// its menu and icon in place instead of making the application disappear.
+pub struct Starting {
+    item: Retained<NSStatusItem>,
+}
+
+impl Starting {
+    pub fn new() -> Self {
+        let mtm = MainThreadMarker::new().expect("the menu bar must start on the main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        // Accessory: a menu bar item, no Dock tile, no menu of our own in the
+        // menu bar, and the agent never steals focus. The bundle's `LSUIElement`
+        // already says this, but a hand-run binary has no Info.plist to read it
+        // from. It does still activate for a modal panel — see crate::panels.
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+        let item =
+            NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+        item.setVisible(true);
+        set_icon(&item, Health::Blocked, mtm);
+
+        let menu =
+            NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("remotex-agent"));
+        menu.setAutoenablesItems(false);
+        menu.addItem(&info_item("Starting remotex-agent…", mtm));
+        item.setMenu(Some(&menu));
+        // `run` comes only after startup succeeds or settles into a degraded
+        // state. Finish the AppKit launch now so the status item is registered
+        // with Control Center before any of that work begins.
+        app.finishLaunching();
+
+        Self { item }
+    }
+
+    /// Keep the status item alive after a handled startup failure.
+    pub fn fail(self, title: &str, body: &str) -> ! {
+        let mtm = MainThreadMarker::new().expect("startup failures run on the main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        let menu =
+            NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("remotex-agent"));
+        menu.setAutoenablesItems(false);
+        menu.addItem(&info_item(&format!("⚠︎ {title}"), mtm));
+        let detail = info_item(&one_line(body), mtm);
+        detail.setToolTip(Some(&NSString::from_str(body)));
+        menu.addItem(&detail);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let quit = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str("Quit remotex-agent"),
+                Some(sel!(terminate:)),
+                &NSString::from_str(""),
+            )
+        };
+        unsafe { quit.setTarget(Some(&*app)) };
+        menu.addItem(&quit);
+        self.item.setMenu(Some(&menu));
+
+        panels::startup_failure(mtm, title, body);
+        app.run();
+        std::process::exit(0);
+    }
+}
+
 /// Take over the main thread: status item, cursor timer, run loop. Never
 /// returns.
 pub fn run(
+    starting: Starting,
     state: Arc<state::AgentState>,
     tracker: Arc<cursor::Tracker>,
     settings: Arc<settings::Settings>,
@@ -662,12 +708,6 @@ pub fn run(
 ) -> ! {
     let mtm = MainThreadMarker::new().expect("menubar::run must be called on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    // Accessory: a menu bar item, no Dock tile, no menu of our own in the menu
-    // bar, and the agent never steals focus. The bundle's `LSUIElement` already
-    // says this, but a hand-run binary has no Info.plist to read it from.
-    //
-    // It does still activate for a modal panel — see crate::panels.
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let controller = Controller::new(
         mtm,
@@ -687,7 +727,7 @@ pub fn run(
         },
     );
 
-    let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+    let item = starting.item;
     // Visible on purpose, at every launch, because the item's visibility is not
     // this process's to remember. macOS persists it per item — as
     // `NSStatusItem VisibleCC Item-0` in this app's preferences, written by
@@ -746,6 +786,62 @@ pub fn run(
     // `run` only returns if something terminated the app, and by then the
     // process should be going away anyway.
     std::process::exit(0);
+}
+
+fn set_icon(item: &NSStatusItem, health: Health, mtm: MainThreadMarker) {
+    let Some(button) = item.button(mtm) else {
+        return;
+    };
+    let (symbol, fallback, description) = match health {
+        // Ahead of "connected" on purpose: a gateway attached to an agent
+        // that cannot capture or inject is the case most worth warning about,
+        // not the one to reassure about.
+        Health::Blocked => (
+            ICON_BLOCKED,
+            ICON_FALLBACK_BLOCKED,
+            "remotex agent, needs attention",
+        ),
+        Health::Connected => (
+            ICON_CONNECTED,
+            ICON_FALLBACK_CONNECTED,
+            "remotex agent, connected",
+        ),
+        Health::Idle => (ICON_IDLE, ICON_FALLBACK_IDLE, "remotex agent"),
+    };
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(symbol),
+        Some(&NSString::from_str(description)),
+    );
+    match image {
+        Some(image) => {
+            // Template: the menu bar tints it, so it stays legible in light
+            // mode, dark mode and under a wallpaper-tinted bar alike.
+            image.setTemplate(true);
+            button.setImage(Some(&image));
+        }
+        None => button.setTitle(&NSString::from_str(fallback)),
+    }
+}
+
+fn info_item(title: &str, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(title),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    item.setEnabled(false);
+    item
+}
+
+fn one_line(text: &str) -> String {
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Unknown startup error")
+        .trim()
+        .to_owned()
 }
 
 /// The settings dialog's read-only list of what this Mac can share, one line per

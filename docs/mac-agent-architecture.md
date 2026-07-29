@@ -391,14 +391,21 @@ Recording permission for capture.
 ## Lifecycle
 
 The app registers its embedded LaunchAgent with `SMAppService` and runs in the
-logged-in user's GUI session. Its menu bar item exposes status, settings,
-permission shortcuts, logs, and the login-item toggle. Neither key is among
-them: both live in the settings dialog, shown in full because neither is a
-secret — this Mac's public key as a read-only label with a Copy button, the
-gateway's as an ordinary field to paste into. The private key is never displayed
-anywhere. Replacing it is a Regenerate identity button in that dialog, behind a
-confirmation, because the cost is not local: every gateway paired with this Mac
-must be given the new public key before it can reach it again.
+logged-in user's GUI session. The menu bar item is the application shell and is
+created before logging, registration, config I/O, socket binding, permission
+probes, virtual-display setup, or the network runtime. It begins in the warning
+state and is upgraded in place after startup. A handled startup failure or a
+fatal network-worker error leaves that shell alive in a degraded state, so the
+diagnosis and Quit never disappear into a launchd respawn loop.
+
+The normal menu exposes status, settings, permission shortcuts, logs, and the
+login-item toggle. Neither key is among them: both live in the settings dialog,
+shown in full because neither is a secret — this Mac's public key as a read-only
+label with a Copy button, the gateway's as an ordinary field to paste into. The
+private key is never displayed anywhere. Replacing it is a Regenerate identity
+button in that dialog, behind a confirmation, because the cost is not local:
+every gateway paired with this Mac must be given the new public key before it can
+reach it again.
 
 An agent with no `gateway_public_key` is unpaired: it listens, refuses every
 connection, and says so in its menu. That is the state a first launch lands in,
