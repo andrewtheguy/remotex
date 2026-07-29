@@ -22,6 +22,13 @@ enum ServerMessage: Sendable, Equatable {
     /// framebuffer spanning every remote screen, so there is nothing to choose
     /// between and the Display menu stays empty.
     case displays(active: UInt32, displays: [DisplayInfo])
+    /// How to decode the audio frames that follow, sent once when a subscription
+    /// starts and never otherwise.
+    ///
+    /// It arrives **before** the first packet, on the same ordered channel, because a
+    /// decoder configured afterwards has already been handed the audio it was meant to
+    /// configure for.
+    case audioFormat(AudioFormat)
     /// A `type` this build does not know.
     ///
     /// Held as a value rather than raised as an error so a gateway that adds a
@@ -51,12 +58,22 @@ enum ServerMessage: Sendable, Equatable {
         let protocolName: String
         let resize: Bool
         let clipboard: Bool
+        /// Whether this session *can* carry sound — an RDP target configured for it —
+        /// not whether any is playing, and not whether the remote's audio channel is
+        /// even up. From this end those are indistinguishable (docs/remote-audio.md).
+        ///
+        /// Required, not defaulted, like `Resize.scale` and for the same reason: a
+        /// gateway old enough to omit it is one this build refuses anyway, and
+        /// defaulting it to false would turn "too old" into "this target has no sound",
+        /// which sends the reader to the target's config instead of to the version.
+        let audio: Bool
 
         private enum CodingKeys: String, CodingKey {
             case name
             case protocolName = "protocol"
             case resize
             case clipboard
+            case audio
         }
     }
 
@@ -85,6 +102,56 @@ enum ServerMessage: Sendable, Equatable {
         }
     }
 
+    /// The `audioFormat` payload: everything needed to build a decoder.
+    ///
+    /// `sampleRate` is 48 000 whatever the remote negotiated — libopus encodes at that
+    /// rate and nothing else, so the gateway resamples on the way in
+    /// (`src/opus_stream.rs`) and this is the rate the packets are actually in.
+    struct AudioFormat: Sendable, Equatable, Decodable {
+        /// `"opus"`, and there is no second codec to branch on: the gateway sends Opus
+        /// with no fallback representation in either direction. Carried rather than
+        /// assumed so a gateway that grew one is *refused* by `OpusDecoder` instead of
+        /// being fed to a decoder built for something else.
+        let codec: String
+        let sampleRate: Double
+        let channels: UInt32
+        /// `OpusHead` (RFC 7845 §5.1), verbatim.
+        ///
+        /// base64 on the wire because a text frame cannot carry bytes — the same reason
+        /// the cursor's PNG is — and 19 bytes once a session is not worth a second
+        /// binary frame kind. macOS takes none of it as a magic cookie (measured: the
+        /// system decoder ignores one), so what this is *for* here is the pre-skip
+        /// inside it; see `OpusDecoder`.
+        let head: Data
+
+        private enum CodingKeys: String, CodingKey {
+            case codec
+            case sampleRate
+            case channels
+            case head
+        }
+
+        /// Hand-written for `head` alone: base64 that will not decode is drift worth
+        /// reporting as `malformed`, right here where the tag is still known, rather
+        /// than an empty `Data` that fails later inside a decoder as "this browser
+        /// cannot play Opus".
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            codec = try container.decode(String.self, forKey: .codec)
+            sampleRate = try container.decode(Double.self, forKey: .sampleRate)
+            channels = try container.decode(UInt32.self, forKey: .channels)
+            let encoded = try container.decode(String.self, forKey: .head)
+            guard let bytes = Data(base64Encoded: encoded) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .head,
+                    in: container,
+                    debugDescription: "head is not base64"
+                )
+            }
+            head = bytes
+        }
+    }
+
     struct Clipboard: Sendable, Equatable, Decodable {
         let text: String
         /// When remotex observed the change. Nil is honest for content that
@@ -102,22 +169,15 @@ enum ServerMessage: Sendable, Equatable {
     /// Every tag this build understands, for the wire-contract test.
     static let allTags: Set<String> = [
         "resize", "cursor", "error", "picker", "connected", "remoteOs",
-        "clipboard", "displays",
+        "clipboard", "displays", "audioFormat",
     ]
 
     /// Tags this build knows exist and deliberately does not implement.
     ///
-    /// Listed rather than left out so the wire-contract test still fails on real
-    /// drift: the question it asks is "has somebody decided about this message",
-    /// and an entry here is that decision written down. One of these would decode
-    /// to `.unsupported` and be stepped over, which is the intended outcome.
-    ///
-    /// - `audioFormat` describes an Opus stream and is only ever sent to a client
-    ///   that asked for audio with `ClientMessage.unsentTags`'s `audio`. This viewer
-    ///   never asks, so it never arrives; when the viewer gains audio it will need
-    ///   its own representation anyway, because AVFoundation cannot play what the
-    ///   browser decodes with WebCodecs (see docs/remote-audio.md).
-    static let ignoredTags: Set<String> = ["audioFormat"]
+    /// Empty, and kept for the same reason as `ClientMessage.unsentTags`: an entry here
+    /// is a decision written down, and none is outstanding. One would decode to
+    /// `.unsupported` and be stepped over.
+    static let ignoredTags: Set<String> = []
 }
 
 /// Why a text frame could not be turned into a `ServerMessage`.
@@ -188,6 +248,8 @@ extension ServerMessage: Decodable {
             case "displays":
                 let payload = try Displays(from: decoder)
                 self = .displays(active: payload.active, displays: payload.displays)
+            case "audioFormat":
+                self = .audioFormat(try AudioFormat(from: decoder))
             default:
                 self = .unsupported(type: type)
             }

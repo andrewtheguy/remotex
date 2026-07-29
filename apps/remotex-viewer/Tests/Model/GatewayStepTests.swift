@@ -227,7 +227,8 @@ struct GatewayStepTests {
                         name: "t",
                         protocolName: "vnc",
                         resize: false,
-                        clipboard: false
+                        clipboard: false,
+                        audio: false
                     )
                 )
             )

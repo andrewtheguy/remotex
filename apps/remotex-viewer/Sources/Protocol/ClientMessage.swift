@@ -75,6 +75,18 @@ enum ClientMessage: Sendable, Equatable {
     /// back, and miss again. This is handled by the socket's own bridge, which
     /// empties the table and asks for the repaint itself.
     case cacheReset
+    /// Start or stop this attachment's sound.
+    ///
+    /// The whole of what subscribes a client to the remote's audio: the gateway answers
+    /// with one `audioFormat` and then binary frames of kind `0x03`, and sends nothing
+    /// to a client that never asks. Which is how audio reached the wire without moving
+    /// `PROTOCOL_VERSION` — this viewer used to be the client that never asked (see
+    /// docs/remote-audio.md).
+    ///
+    /// Per *attachment* rather than per session, so a reconnect arrives with audio off
+    /// and this has to be sent again; `AppModel` re-sends it from `connected` while the
+    /// menu's toggle is on.
+    case audio(enabled: Bool)
 
     /// The `type` tag this encodes as. Public so the wire-contract test can
     /// compare the whole set against the Rust enum.
@@ -94,6 +106,7 @@ enum ClientMessage: Sendable, Equatable {
         case .selectDisplay: "selectDisplay"
         case .hostScale: "hostScale"
         case .cacheReset: "cacheReset"
+        case .audio: "audio"
         }
     }
 
@@ -101,24 +114,23 @@ enum ClientMessage: Sendable, Equatable {
     static let allTags: Set<String> = [
         "mouseMove", "mouseButton", "wheel", "key", "viewport", "defaultSize",
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
-        "selectDisplay", "hostScale", "cacheReset",
+        "selectDisplay", "hostScale", "cacheReset", "audio",
     ]
 
     /// Tags this build knows exist and deliberately never sends.
     ///
-    /// `audio` subscribes a client to the remote's sound, and **not sending it is
-    /// what keeps this viewer working across that gateway change**: audio frames
-    /// only flow to a client that asks, so a viewer that stays silent receives the
-    /// same bytes it did before audio existed — which is why the gateway could add
-    /// it without moving `PROTOCOL_VERSION`, the number this viewer matches on
-    /// exactly (see docs/remote-audio.md).
-    static let unsentTags: Set<String> = ["audio"]
+    /// Empty, and kept rather than deleted: `audio` was here for as long as the
+    /// gateway had sound and the viewer did not, and what the entry recorded was a
+    /// *decision* — the wire-contract test asks whether somebody has considered each
+    /// message, and an empty set is the answer "all of them are implemented" rather
+    /// than the absence of the question.
+    static let unsentTags: Set<String> = []
 }
 
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
         case type, x, y, button, pressed, dx, dy, code, caps, w, h, target, text
-        case id, scale
+        case id, scale, enabled
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -149,6 +161,11 @@ extension ClientMessage: Encodable {
             try container.encode(id, forKey: .id)
         case .hostScale(let scale):
             try container.encode(scale, forKey: .scale)
+        case .audio(let enabled):
+            // Never defaulted on the gateway's side either: `{"type":"audio"}` with
+            // nothing said about it is rejected there rather than read as one of the
+            // two answers (`src/protocol.rs`).
+            try container.encode(enabled, forKey: .enabled)
         case .defaultSize, .refresh, .disconnect, .clipboardRequest, .cacheReset:
             break
         }

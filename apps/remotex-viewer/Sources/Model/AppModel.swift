@@ -405,6 +405,11 @@ final class AppModel: GatewaySessionSink {
             handle(message)
         case .tiles(let tiles):
             renderer?.upload(tiles)
+        case .audio(let packets):
+            // Nothing plays yet: the decoder and the schedule land in the steps after
+            // this one. Dropped rather than buffered — a queue filling behind an
+            // unfinished player would only make the first sound a stale one.
+            _ = packets
         case .clearFramebuffer:
             // Dropping the size is what puts the "waiting for the remote
             // desktop" interstitial back up; the gateway always repaints in full.
@@ -545,6 +550,10 @@ final class AppModel: GatewaySessionSink {
             // Receiving one of these at all means the viewer owns pointer
             // rendering for the rest of the session.
             remoteCursor = payload
+
+        case .audioFormat(let format):
+            // Same as above: the decoder this configures arrives in a later step.
+            _ = format
 
         case .unsupported(let type):
             // A newer gateway. Deliberately nothing: the frame was already

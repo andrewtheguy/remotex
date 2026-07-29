@@ -148,7 +148,8 @@ struct ResizeMenuTargetTests {
             name: "mac",
             protocolName: protocolName,
             resize: resize,
-            clipboard: false
+            clipboard: false,
+            audio: false
         )
     }
 }

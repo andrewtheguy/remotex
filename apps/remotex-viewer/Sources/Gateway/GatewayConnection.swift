@@ -12,6 +12,14 @@ enum SessionEvent: Sendable {
     /// One binary frame's worth of tiles, in wire order. Delivered whole so the
     /// renderer asks for one redraw per frame rather than one per tile.
     case tiles([DecodedTile])
+    /// One wave buffer's worth of Opus packets, in wire order.
+    ///
+    /// Undecoded, deliberately: decoding needs the `audioFormat` that arrived as a
+    /// control message, and putting the decoder here would give this actor an audio
+    /// engine to own and the receive loop something to wait on. The packets go to the
+    /// sink as they came off the socket, which also keeps them in order with the
+    /// `audioFormat` that configures them.
+    case audio([Data])
     case clearFramebuffer
     case releaseInput
     case failPendingClipboardFetch
@@ -317,7 +325,20 @@ actor GatewayConnection {
             case .text(let text):
                 await deliver(text: text)
             case .binary(let data):
-                await deliver(tile: data)
+                // The kind byte is the whole of how the two binary frames are told
+                // apart, and both parsers check it again for themselves. Dispatching
+                // here rather than trying one parser and falling through to the other
+                // keeps a malformed batch from being reported as an unknown kind.
+                switch data.first {
+                case BatchFrame.frameKind:
+                    await deliver(tile: data)
+                case AudioFrame.frameKind:
+                    await deliver(audio: data)
+                default:
+                    log.warning(
+                        "binary frame of unknown kind \(data.first ?? 0, privacy: .public)"
+                    )
+                }
             }
         }
     }
@@ -336,6 +357,20 @@ actor GatewayConnection {
         // the socket really attached to the slot, which is what clears the backoff.
         await handle(.controlReceived)
         await publish(.control(message))
+    }
+
+    private func deliver(audio data: Data) async {
+        guard let packets = AudioFrame.decode(data) else {
+            log.warning("malformed audio frame of \(data.count, privacy: .public) bytes")
+            return
+        }
+        // An empty frame is well formed and means nothing to play. Not published, for
+        // the same reason an empty batch is not: it would only ask the player to do
+        // nothing.
+        guard !packets.isEmpty else {
+            return
+        }
+        await publish(.audio(packets))
     }
 
     private func deliver(tile data: Data) async {
