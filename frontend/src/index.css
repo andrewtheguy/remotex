@@ -1161,3 +1161,25 @@ body {
   font-size: 0.75rem;
   color: #8b949e;
 }
+
+/* ── Audio panel (AudioPanel.tsx) ── */
+
+.ap-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Full width: it is the panel's only control, and a live stream has one thing
+   worth deciding — whether to be listening to it. The element itself renders
+   nothing, carrying no `controls` (see AudioPanel). */
+.ap-toggle {
+  width: 100%;
+  text-align: center;
+}
+
+.ap-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #8b949e;
+}

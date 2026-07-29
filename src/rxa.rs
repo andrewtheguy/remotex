@@ -957,6 +957,7 @@ mod tests {
             security: crate::config::Security::Auto,
             resize: false,
             clipboard: false,
+            audio: false,
             agent_public_key: rxa_proto::key::public_text_of(Role::Agent, &agent_private_key)
                 .unwrap(),
             gateway_private_key,

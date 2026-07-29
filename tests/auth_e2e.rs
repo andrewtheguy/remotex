@@ -36,6 +36,7 @@ async fn spawn_app() -> SocketAddr {
             security: Security::Auto,
             resize: false,
             clipboard: false,
+            audio: false,
             agent_public_key: String::new(),
             gateway_private_key: String::new(),
         }],
@@ -152,6 +153,37 @@ async fn websocket_upgrade_without_a_login_fails_with_401() {
         }
         other => panic!("expected an HTTP 401 handshake failure, got: {other:?}"),
     }
+}
+
+/// The audio endpoint's three refusals, which are the whole of its guard: it is
+/// behind the login like the rest of `/api`, and behind the *claim* on top of
+/// that, because a live audio stream belongs to whoever holds the single session
+/// slot rather than to anyone with a cookie.
+///
+/// A 503 rather than a 404 for the last one: this target has no audio and never
+/// connects, which reads the same way to a client as an audio channel that has
+/// not come up yet — both are worth asking about again.
+#[tokio::test]
+async fn the_audio_endpoint_needs_a_login_and_the_current_claim() {
+    let addr = spawn_app().await;
+
+    let (status, _) = get(addr, "/api/session/audio?session=whatever", None).await;
+    assert_eq!(status, 401, "audio must require a login");
+
+    let cookie = common::login(addr).await;
+    let (status, _) = get(addr, "/api/session/audio?session=forged", Some(&cookie)).await;
+    assert_eq!(status, 403, "a token that is not the claim must be refused");
+    let (status, _) = get(addr, "/api/session/audio", Some(&cookie)).await;
+    assert_eq!(status, 403, "no token at all is not the claim either");
+
+    let token = common::claim_session(addr, &cookie).await;
+    let (status, _) = get(
+        addr,
+        &format!("/api/session/audio?session={token}"),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, 503, "the claim holder still needs a session with audio");
 }
 
 #[tokio::test]

@@ -485,6 +485,15 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
+  // Where the remote's live audio can be played from, for a target that opted
+  // into it — null for every other session (see docs/remote-audio.md).
+  //
+  // The URL rather than a capability flag beside the token, because it *is* the
+  // capability: it carries the claim token this connection holds, so a reconnect
+  // (which mints a fresh token) produces a new URL and whatever is playing
+  // re-requests against the claim that is now current. Nothing else in this hook
+  // touches it — the audio path does not use the WebSocket at all.
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -668,6 +677,11 @@ export function useRemoteDesktop(
       // reference always follows the tile that filled its slot on the same
       // socket.)
       tileCache.fill(null);
+      // The token in the audio URL is about to be superseded by the reclaim, and
+      // the server has already ended that response, so leaving the URL up would
+      // only have the player retry against a claim that is no longer current. The
+      // next `connected` puts back a URL carrying the new token.
+      setAudioUrl(null);
       syncCursor();
     };
 
@@ -681,6 +695,11 @@ export function useRemoteDesktop(
       attempts += 1;
       retryTimer = setTimeout(() => void connect(false), delay);
     };
+
+    // The token this connection claimed the slot with, so `connected` can build
+    // the audio URL from it. A closure variable and not state: nothing renders
+    // from the token, only from the URL derived from it.
+    let claimToken: string | null = null;
 
     // Claim the session slot. Returns the token, "busy" when another browser
     // holds the slot (409), "unauthorized" when the login is gone (401), or
@@ -732,6 +751,7 @@ export function useRemoteDesktop(
         return;
       }
       sessionStorage.setItem(SESSION_KEY, claimed);
+      claimToken = claimed;
       open(claimed);
     };
 
@@ -1077,6 +1097,14 @@ export function useRemoteDesktop(
       setPendingTarget(null);
       setMode("desktop");
       setCanClipboard(msg.clipboard);
+      // Rebuilt on every `connected`, which is what carries a reattach or a
+      // takeover onto the token the slot now answers to. Relative, so it follows
+      // the page's own origin and protocol without deciding either.
+      setAudioUrl(
+        msg.audio && claimToken
+          ? `/api/session/audio?session=${encodeURIComponent(claimToken)}`
+          : null,
+      );
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
         // and never let this window's shape reach the remote again. So every
@@ -1220,6 +1248,9 @@ export function useRemoteDesktop(
           rxaResize = false;
           setCanResize(false);
           setCanClipboard(false);
+          // Nothing is streaming any more, and the endpoint would answer 503 —
+          // so the panel goes away rather than showing a player that cannot play.
+          setAudioUrl(null);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
@@ -1663,6 +1694,7 @@ export function useRemoteDesktop(
     size,
     canResize,
     canClipboard,
+    audioUrl,
     displays,
     activeDisplayId,
     remoteClipboard,

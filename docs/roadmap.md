@@ -121,20 +121,44 @@ What is not settled, and should not be decided here first:
   feature that phones inherit only through the config. Worth resisting the symmetry
   if the menu would be unusable at that size.
 
-### RDP audio through a gateway live stream
+### Audio past the first RDP slice
 
-The browser is already an audio-stream client, so the first audio slice does not
-need to become part of remotex's desktop protocol. The RDP engine requests
-RDPSND audio redirection, the gateway exposes the claimed session through an
-authenticated live HTTP endpoint, and the SPA points a basic `<audio>` element
-at it.
+The RDP-to-browser path is done and proven end to end: MS-RDPEA redirection over
+both of its channels (plus the `rdpdr` advertisement Windows requires before it
+will redirect anything), an authenticated live `audio/ogg; codecs=opus` endpoint on
+the claimed session, and an `<audio>` element in the SPA. A live Windows 11 target's
+own sound has been measured arriving through that endpoint. The mechanism, its
+lifecycle and that evidence are recorded in
+[`remote-audio.md`](remote-audio.md), which is where they belong.
 
-The first PoC wraps negotiated PCM in an open-ended WAV response. Its purpose is
-to prove progressive playback through the browsers and reverse proxy used with
-remotex. If that representation is not consumed progressively, only the HTTP
-media representation changes to a compressed stream; the RDP channel, endpoint,
-and `<audio>` integration remain the path. [`remote-audio.md`](remote-audio.md)
-holds the boundary and lifecycle details.
+Both open questions the design named are now closed: an open-ended response **is**
+played progressively by a browser, and a real host does redirect to this gateway. So
+is the wart that followed them — the endpoint no longer waits for a format it may
+never be sent, and fills a quiet remote's gaps with silence, so audio starts, stops
+and starts again on its own.
+
+What is **not** settled is promptness: a live desktop has been heard a couple of
+seconds behind itself, with the gateway measured out of that as a cause
+([`remote-audio.md`](remote-audio.md)). Before redesigning anything for it, read how
+Apache Guacamole carries RDP audio to a browser — it is the obvious prior art for a
+more robust path, and none of it has been studied here yet.
+
+What is left is two things, neither urgent:
+
+- **The macOS viewer**, which now needs a representation of its own. It could once
+  have pointed `AVPlayer` at this endpoint unchanged; since the response became
+  Ogg/Opus it cannot, because AVFoundation has no Ogg demuxer. So viewer audio
+  means Opus in CAF or fragmented MP4 (both of which AVFoundation reads) or
+  decoding Opus in the viewer — a second representation from the same queue, not a
+  second transport. Serving two representations was considered and rejected while
+  the viewer has no audio at all; see [`remote-audio.md`](remote-audio.md).
+- **Audio for the other two protocols.** `rxa` would mean capturing sound on the
+  Mac, which the agent does not do and which is a feature of the agent rather than
+  of this path. VNC has no audio channel to turn on at all, so there is nothing
+  here to plan — RFB would need an extension both ends invented.
+
+Sound in the other direction — a microphone at the browser reaching the remote —
+is not on this list and has never been designed.
 
 ## Deferred pending measurements
 

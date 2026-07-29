@@ -210,6 +210,22 @@ pub struct TargetConfig {
     /// `NSPasteboard`. The latter two are UTF-8 end to end.
     #[serde(default)]
     pub clipboard: bool,
+    /// Remote audio: redirect this target's sound to the browser, played from an
+    /// `<audio>` element pointed at the gateway (see
+    /// [`remote-audio.md`](../docs/remote-audio.md)). Off by default — a desktop
+    /// nobody is listening to should not be sending sound across the network.
+    ///
+    /// `rdp` only, and rejected elsewhere in [`ConfigFile::parse`]: MS-RDPEA is
+    /// the only audio channel any engine here speaks. RFB has no audio at all,
+    /// and the `rxa` agent does not capture any.
+    ///
+    /// Unlike [`Self::clipboard`], this is not a permission the session can act
+    /// on later. RDPSND has to be negotiated when the connection is established,
+    /// so an audio target asks for redirection at connect and discards what
+    /// arrives while nobody is listening — an HTTP listener appearing afterwards
+    /// cannot add the channel to a live connection.
+    #[serde(default)]
+    pub audio: bool,
     /// The Mac agent's public key (`rxap…`), as its Settings dialog or
     /// `remotex-agent --public-key` reports it. The gateway's own half is
     /// [`RxaSection::private_key`]; between them the Noise handshake
@@ -403,6 +419,18 @@ impl ConfigFile {
                     target.protocol.name()
                 );
             }
+            // Audio is the mirror image of `resize`: refused outright rather than
+            // accepted and left inert, because there is nothing on the other side
+            // of the protocol to be uncertain about. RFB has no audio channel and
+            // the Mac agent captures no sound, so this key could never do anything
+            // for them however they were configured.
+            anyhow::ensure!(
+                !target.audio || target.protocol == Protocol::Rdp,
+                "target {:?} is protocol {:?} but sets audio, which only \"rdp\" targets \
+                 support — MS-RDPEA is the one audio channel the gateway speaks",
+                target.name,
+                target.protocol.name()
+            );
             // Which credentials a VNC target may carry is the subtype's to say,
             // and the two sets do not overlap: `ard` authenticates an account to
             // a Mac, plain VncAuth proves a secret the machine holds. Mixing
@@ -653,6 +681,7 @@ mod tests {
         assert!(t.username.is_empty() && t.password.is_empty() && t.domain.is_none());
         assert!(!t.resize, "dynamic resize is opt-in");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
+        assert!(!t.audio, "remote audio is opt-in");
     }
 
     #[test]
@@ -1312,5 +1341,58 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].clipboard);
+    }
+
+    /// Unlike `clipboard`, which every engine supports, and unlike `resize` on
+    /// `rxa`, which is accepted because this file cannot see the other half of
+    /// the answer: there is no audio channel behind RFB or the Mac agent at all,
+    /// so the key is refused where it could never do anything.
+    #[test]
+    fn audio_is_accepted_for_rdp_and_refused_for_the_other_protocols() {
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            audio = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert!(config.targets[0].audio);
+
+        for (protocol, extra) in [
+            ("vnc", String::new()),
+            ("rxa", format!("agent_public_key = \"{}\"", agent_public_key())),
+        ] {
+            let err = ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [rxa]
+                private_key = "{}"
+
+                [[targets]]
+                name = "nope"
+                protocol = "{protocol}"
+                host = "10.0.0.6"
+                audio = true
+                {extra}
+                "#,
+                site_passwd_line(),
+                gateway_private_key()
+            ))
+            .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains("audio"), "{rendered}");
+            assert!(rendered.contains(protocol), "{rendered}");
+        }
     }
 }

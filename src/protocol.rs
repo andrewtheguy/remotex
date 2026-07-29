@@ -714,11 +714,17 @@ pub enum ServerMsg {
     /// agent made, which arrives later in [`ServerMsg::Displays`]. `clipboard` says whether this
     /// target opted into the clipboard bridge, which is what enables the
     /// floating menu's Clipboard button.
+    ///
+    /// `audio` is the same kind of permission and the only one whose feature does
+    /// not use this WebSocket at all: it says the browser may point an `<audio>`
+    /// element at `GET /api/session/audio` for this session (see
+    /// docs/remote-audio.md).
     Connected {
         name: String,
         protocol: &'static str,
         resize: bool,
         clipboard: bool,
+        audio: bool,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -787,6 +793,7 @@ enum ControlMsg<'a> {
         protocol: &'a str,
         resize: bool,
         clipboard: bool,
+        audio: bool,
     },
     RemoteOs { macos: bool },
     Clipboard {
@@ -853,11 +860,13 @@ impl ServerMsg {
                 protocol,
                 resize,
                 clipboard,
+                audio,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
                 resize: *resize,
                 clipboard: *clipboard,
+                audio: *audio,
             }),
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::Displays { active, displays } => control(&ControlMsg::Displays {
@@ -997,12 +1006,13 @@ mod tests {
             protocol: "rxa",
             resize: false,
             clipboard: true,
+            audio: false,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true}"#
+                r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true,"audio":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }

@@ -80,6 +80,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             security: Security::Auto,
             resize: false,
             clipboard: false,
+            audio: false,
             agent_public_key: String::new(),
             gateway_private_key: String::new(),
         }],

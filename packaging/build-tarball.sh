@@ -66,7 +66,14 @@ else
 fi
 
 echo ">> building release binary"
-cargo build --release
+# libopus is linked *statically*, and this is not a preference. audiopus_sys (via
+# the `opus` crate, for remote audio) probes pkg-config first on Linux/GNU, so on a
+# runner that happens to have libopus-dev the binary would come out needing
+# libopus.so — and packaging/Dockerfile runs this binary on debian:trixie-slim,
+# which does not ship it. That failure would appear only inside the image, only at
+# start-up, after every build and test had passed. Forcing the vendored build here
+# makes every runner produce the same thing.
+LIBOPUS_STATIC=1 LIBOPUS_NO_PKG=1 cargo build --release
 
 echo ">> assembling ${pkg}"
 mkdir -p "$root/bin" "$root/share/doc/remotex" "$root/share/remotex"
