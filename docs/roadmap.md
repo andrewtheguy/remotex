@@ -121,6 +121,21 @@ What is not settled, and should not be decided here first:
   feature that phones inherit only through the config. Worth resisting the symmetry
   if the menu would be unusable at that size.
 
+### RDP audio through a gateway live stream
+
+The browser is already an audio-stream client, so the first audio slice does not
+need to become part of remotex's desktop protocol. The RDP engine requests
+RDPSND audio redirection, the gateway exposes the claimed session through an
+authenticated live HTTP endpoint, and the SPA points a basic `<audio>` element
+at it.
+
+The first PoC wraps negotiated PCM in an open-ended WAV response. Its purpose is
+to prove progressive playback through the browsers and reverse proxy used with
+remotex. If that representation is not consumed progressively, only the HTTP
+media representation changes to a compressed stream; the RDP channel, endpoint,
+and `<audio>` integration remain the path. [`remote-audio.md`](remote-audio.md)
+holds the boundary and lifecycle details.
+
 ## Deferred pending measurements
 
 ### Downscaled capture
@@ -212,15 +227,6 @@ before pre-boot disk unlock.
 
 
 ## Not planned
-
-### Audio
-
-No engine carries it, and the case that wanted it — a Windows desktop whose sound
-has no route to a Mac — is answered by software that already exists, from the
-official RDP client's own audio redirection down to an AirPlay sender on the Windows
-side. [`remote-audio.md`](remote-audio.md) records those routes and keeps the design
-that was worked out for carrying it ourselves, for whenever one of them stops being
-enough.
 
 ### Multiple sessions
 
