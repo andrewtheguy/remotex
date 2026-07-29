@@ -206,22 +206,31 @@ every 3 s, and the browser stutters on the underrun). It also answers
 `ClientMsg::Refresh` by re-announcing the desktop size, as every real engine does —
 without that, any browser but the first to attach waits forever for a desktop.
 
-**The RDP negotiation is now proven too.** A live Windows 11 host
-(`desktop-vnvgdaf`) redirects its audio to this gateway, and the samples arrive
-intact at an HTTP client: on 2026-07-29, 1.34 MB pulled from
-`/api/session/audio` over 10 s decoded as 7.8 s of 44100 Hz 16-bit stereo with
-peak 14728, RMS 1621 and 99.7% non-zero samples — sound, not silence, and not a
-header with nothing behind it.
-
-The gateway log shows the whole chain in order: the `rdpdr` handshake completes
-(`ClientAnnounceReply`, client name, capability response, `UserLoggedon`, no
-devices announced), then `ServerAudioFormatPdu { version: V8, … }` arrives on the
-static channel, our single PCM entry matches, and waves follow —
+**The RDP negotiation is now proven too, and the two halves have been run
+together.** A live Windows 11 host (`desktop-vnvgdaf`) redirects its audio to this
+gateway, and it was *heard* on 2026-07-29 — the guest's own sound, played by the
+SPA's `<audio>` panel in a browser, not a generated tone. The gateway log for that
+session names every hop:
 
 ```text
+INFO remotex::audio]     audio: negotiated 44100 Hz, 2 channel(s), 16-bit PCM
 INFO remotex::rdp_audio] rdp: the remote is redirecting audio over the static
-channel (32768 bytes in the first buffer)
+                         channel (32768 bytes in the first buffer)
+INFO remotex::server]    audio: stream requested
+INFO remotex::session]   session: audio listener attached
+INFO remotex::server]    audio: streaming 44100 Hz PCM
 ```
+
+The samples were separately measured arriving intact at a plain HTTP client, which
+is what rules out a header with nothing behind it: 1.34 MB pulled from
+`/api/session/audio` over 10 s decoded as 7.8 s of 44100 Hz 16-bit stereo with
+peak 14728, RMS 1621 and 99.7% non-zero samples.
+
+Under `RUST_LOG=…,ironrdp_rdpdr=trace,ironrdp_rdpsnd=debug` the negotiation itself
+is legible: the `rdpdr` handshake completes (`ClientAnnounceReply`, client name,
+capability response, `UserLoggedon`, no devices announced), then
+`ServerAudioFormatPdu { version: V8, … }` arrives on the static channel, our single
+PCM entry matches, and `Wave2` PDUs follow.
 
 What the earlier silence was *not*, each ruled out with evidence before `rdpdr`
 was found: audio policy or devices on the host (a Remote Audio endpoint exists and
@@ -245,6 +254,14 @@ The gateway's own half is proven without a cooperating server:
 `rdp_audio::tests::a_server_speaking_rdpsnd_gets_its_audio_onto_a_listener` and its
 `_the_audio_dvc_` twin drive real MS-RDPEA server PDUs through both transports and
 assert the PCM comes out of the HTTP stream behind its WAV header.
+
+**What has not been heard** is the dynamic transport. `AudioPlaybackDvc` has never
+carried a byte from a real server — only from those in-crate PDUs — because the one
+host available serves this gateway the static channel. It is written from
+[MS-RDPEA] and reviewed against FreeRDP's client, which is not the same as having
+run. A host that offers only `AUDIO_PLAYBACK_DVC` would be the thing to test it
+with, and the first sign of trouble would be the `claim_transport` line naming the
+dynamic transport followed by no first-buffer line.
 
 ## Scope
 
