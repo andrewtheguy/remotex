@@ -10,8 +10,8 @@
 //! adds the length prefix. Conventions inside a body:
 //!
 //! - integers little-endian
-//! - `String` as `u16` byte length + UTF-8, for the short strings ([`put_str`])
-//! - long text as `u32` byte length + UTF-8, for clipboard ([`put_text`])
+//! - `String` as `u16` byte length + UTF-8, for the short strings (`put_str`)
+//! - long text as `u32` byte length + UTF-8, for clipboard (`put_text`)
 //! - `Vec<u8>` as `u32` byte length + bytes
 //! - `Option<T>` as `u8` 0/1 followed by `T`'s body when present
 
@@ -71,7 +71,7 @@ const SCALE_MAX: u16 = 4 * SCALE_ONE;
 
 /// A wire `scale` as the ratio clients divide the framebuffer by.
 ///
-/// Anything outside [`SCALE_ONE`]`..=`[`SCALE_MAX`] — a zero from an agent that
+/// Anything outside [`SCALE_ONE`]`..=SCALE_MAX` — a zero from an agent that
 /// could not read the display's mode, a number no panel has — reads as 1×,
 /// which is the answer that leaves the framebuffer alone. A scale below 1 is as
 /// wrong as one above 4: it would blow the desktop up rather than shrink it.
@@ -169,7 +169,7 @@ pub enum AgentMsg {
         /// own size rather than at twice it.
         scale: u16,
     },
-    /// A dirty rectangle, already encoded as WebP (see [`format`]).
+    /// A dirty rectangle, already encoded as WebP (see [`mod@format`]).
     Tile {
         format: u8,
         x: u16,

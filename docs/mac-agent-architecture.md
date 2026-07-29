@@ -134,9 +134,26 @@ gateway's tile cache recognise a repeat by. The cost is that thin damage rounds 
 (a 34×15 cursor rect becomes one cell); measured, that was 0.7% of the bytes
 against the 65% above.
 
-Encoding is intentionally ordered on one worker. Parallel tile completion
-could allow an older tile to overwrite a newer update to the same region.
-Desktop-size changes are ordered with tiles for the same reason.
+A frame's cells are encoded several at a time and forwarded strictly in the order
+capture produced them. Order is not tidiness: the same region is commonly dirty in
+consecutive frames, and an older tile landing on top of a newer one leaves stale
+pixels until something else redraws them. What makes it free is that the capture
+callback hands over a whole frame at once, so a batch is a unit — the cells of one
+are collected by index, and two frames never overlap. Desktop-size changes travel
+the same queue for the same reason.
+
+The parallelism is for the full repaint rather than for typical damage. A 2x
+1600x1000 display is 3200x2000 captured, which is 320 cells; encoded one at a time
+that outlasted the two-frame buffer between capture and the encoder, so capture
+dropped a frame and asked for a full repaint, which asked for another.
+
+Measured by [`tests/rxa_repaint_probe.rs`](../tests/rxa_repaint_probe.rs), which dials
+a live agent directly and holds it under a refresh every 250 ms — on a macOS 26.x
+guest under Apple Virtualization, sharing the agent's own private 2x display at
+3200x2000. Eight-wide took that from 7.3 frames a second carrying 200 cells each to
+28.8 carrying 63: four times the frame rate, and a third of the redundancy, for the
+same tiles. Time spent handing tiles to the socket was under 1% either way, so for a
+client that keeps up the encoder really was the whole cost.
 
 Cursor shapes are read separately from the framebuffer and sent with their
 hotspot. The representation closest to the capture display's backing scale is

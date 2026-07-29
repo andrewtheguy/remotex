@@ -43,7 +43,7 @@
 //!   down, precisely as a full `frame_tx` already did.
 //! - **`spawn_blocking`, not a pool crate.** An engine runs on its own
 //!   current-thread runtime (see [`crate::session`]) which still has a
-//!   multi-threaded blocking pool, in-flight work is bounded by [`ENCODE_DEPTH`] so
+//!   multi-threaded blocking pool, in-flight work is bounded by `ENCODE_DEPTH` so
 //!   it cannot grow into that pool's 512-thread ceiling, and a `Tile` is already
 //!   `Send` because `encode_webp` copies out of libwebp's non-`Send` buffer.
 
@@ -316,8 +316,13 @@ fn micros(since: Instant) -> u64 {
 /// production. Each number earns its place by answering something the others
 /// cannot:
 ///
-/// - `encode` against `waiting` is the parallelism actually achieved. Equal means
-///   serial; `encode` well above `waiting` means bands really did overlap.
+/// - `encode` against `waiting` says whether bands overlapped, and it is **not** the
+///   parallelism achieved — read as that it flatters itself. `waiting` accrues only
+///   while the order task finds a handle *unfinished*, so a band already encoded when
+///   its turn came adds encode time and no waiting at all. The ratio is an upper bound
+///   on the concurrency and can exceed [`ENCODE_DEPTH`] outright. Its low end is the
+///   sound part: 1.0 means every collect blocked for the whole of its band, so nothing
+///   overlapped.
 /// - `stalled` is what the read loop still pays. It is the number that says whether
 ///   [`ENCODE_DEPTH`] is the binding constraint: zero means the engine never waited
 ///   for the encoder at all, which is the point of the whole module.

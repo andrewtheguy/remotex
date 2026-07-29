@@ -170,7 +170,7 @@ async fn login_handler(
 /// the login left the engine to the ordinary detach path — indistinguishable from a
 /// browser that crashed, so the gateway held the target for its reattach grace and a
 /// login inside that minute resumed the desktop instead of showing the picker (see
-/// [`session::SessionManager::log_out`]).
+/// [`crate::session::SessionManager::log_out`]).
 ///
 /// Server-side rather than a `disconnect` the browser sends first: one request does
 /// both, so there is no ordering to get right and no dependence on the WebSocket

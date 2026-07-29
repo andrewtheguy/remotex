@@ -57,7 +57,9 @@ the loop that reads the remote's protocol, where it both capped the frame rate a
 delayed input. Order is not a detail — tiles overwrite their rectangles with no
 delta state, so it is what makes a repaint correct (see `wire.rs`), and the queue
 carries resizes and cursors alongside tiles so neither can overtake the other.
-`rxa.rs` needs none of this: the agent has already encoded what it sends.
+`rxa.rs` needs none of this: the agent has already encoded what it sends — on its own
+worker threads, in the order it captured them, and by a different mechanism for a
+different reason (see [`mac-agent-architecture.md`](mac-agent-architecture.md)).
 
 ## Session lifecycle
 

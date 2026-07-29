@@ -30,11 +30,14 @@ const LOSSY_QUALITY: f32 = 80.0;
 /// the compression above `method = 0` costs 20-80x the encode time for another
 /// 10 points of ratio.
 ///
-/// This thread is not an engine's protocol-read loop — encoding here happens on a
-/// dedicated thread (see `session.rs`) — but the budget is no larger for it. A
-/// Retina frame is a dozen cells, and at `method = 2` one 320x64 cell measured
-/// 4.1ms, so a frame would spend 40ms in the encoder and the desktop would feel
-/// like it.
+/// Neither is on an engine's protocol-read loop, and cells now encode several at a
+/// time (`ENCODE_WIDTH` in `session.rs`) — but the budget is no larger for either of
+/// those. At `method = 2` one 320x64 cell measured 4.1ms, so a dozen-cell Retina frame
+/// would spend 40ms in the encoder, and a full repaint's 320 cells over a second. The
+/// parallelism divides that by the cores it can get, which is the same answer the
+/// gateway's `WEBP_LOSSLESS_METHOD` note reaches from the other direction: overlapping
+/// a cost is not removing one, and here the cores are shared with the very desktop
+/// being captured.
 const WEBP_METHOD: i32 = 0;
 const LOSSLESS_EFFORT: f32 = 20.0;
 
@@ -140,8 +143,9 @@ fn encode_webp(w: u16, h: u16, rgb: &[u8], lossless: bool) -> anyhow::Result<Vec
     config.lossless = i32::from(lossless);
     config.quality = if lossless { LOSSLESS_EFFORT } else { LOSSY_QUALITY };
     config.method = WEBP_METHOD;
-    // No libwebp worker thread: this thread is already the one keeping the capture
-    // path clear, and a thread per tile would cost more than the work it splits.
+    // No libwebp worker thread: the parallelism is outside this call, with
+    // `ENCODE_WIDTH` cells of a frame (`session.rs`) encoding concurrently. Threads
+    // inside each of those would fight the same cores for a much smaller split.
     config.thread_level = 0;
     let encoded = webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
         .encode_advanced(&config)

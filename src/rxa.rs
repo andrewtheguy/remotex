@@ -20,7 +20,7 @@
 //! shared session layer ends the engine when the browser stays absent; RXA's
 //! own ping/pong detects a half-open agent link and drives reconnection.
 //!
-//! Silently, but not forever: see [`RECONNECT_GIVE_UP`]. The link that comes back
+//! Silently, but not forever: see `RECONNECT_GIVE_UP`. The link that comes back
 //! is the one worth hiding, and a Mac that was switched off or had its lid closed
 //! never does — retrying it indefinitely left the browser holding a frozen
 //! desktop that claimed to be live, which is worse than the picker and an error.

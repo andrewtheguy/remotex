@@ -5,6 +5,7 @@
 //! ```text
 //! SCStream callback ──▶ raw tile channel ──▶ encoder thread ──▶ out channel ──▶ pump ──▶ socket
 //!   (dispatch queue)      (bounded, sync)     (std::thread)      (bounded)      (tokio)
+//!                                              └─ ENCODE_WIDTH cells at once
 //! ```
 //!
 //! Three deliberate choices in that chain:
@@ -17,17 +18,25 @@
 //!   sets the full-repaint flag, so falling behind becomes one later, coarser
 //!   repaint. An unbounded queue would grow for as long as the browser is slow
 //!   and then deliver a flood of stale tiles.
-//! - **One encoder thread, not a pool.** A pool would let two frames' tiles
-//!   finish out of order, and the same region *is* commonly dirty in consecutive
-//!   frames — so an older tile could land on top of a newer one and leave stale
-//!   pixels on screen until something else redraws them.
+//! - **Cells of one frame encode in parallel; a frame is never split across two.**
+//!   Order is correctness here rather than tidiness: the same region *is* commonly
+//!   dirty in consecutive frames, tiles overwrite their rectangles with no delta
+//!   state, and an older tile landing on top of a newer one leaves stale pixels on
+//!   screen until something else redraws them.
 //!
-//!   That is a reason for the ordering, not against the parallelism, and the
-//!   gateway now has both: `src/encode.rs` queues the *handle* to each encode and
-//!   collects them FIFO, so order is structural however they finish. The same shape
-//!   would fit here. It has simply not been measured on a Mac, where a frame is a
-//!   dozen cells rather than a 1080p desktop's seventeen bands and the cheaper lever
-//!   for the same problem is downscaled capture (docs/roadmap.md).
+//!   What makes that free is the *shape of the channel*: the callback hands over a
+//!   whole frame at once, so [`encode_batch`] can compress a batch's cells
+//!   concurrently and still collect them by index — output order is input order by
+//!   construction, and two frames cannot interleave because a batch is finished
+//!   before the next is received. The gateway needs a FIFO of `JoinHandle`s for the
+//!   same guarantee (`src/encode.rs`) only because its bands trickle out of a
+//!   protocol-read loop one at a time.
+//!
+//!   The parallelism is worth having because a *full* repaint is not the dozen cells
+//!   typical damage is: a Retina 1600x1000 desktop is 3200x2000 captured, which is
+//!   320 cells of the 320x64 grid and over a tenth of a second of encoding. Every
+//!   attach, Refresh, display switch and capture restart pays it — and so does a
+//!   coalesced frame, which is the shape that can feed itself.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +65,72 @@ const RAW_BACKLOG: usize = 2;
 
 /// Encoded tiles buffered between the encoder and the socket.
 const OUT_BACKLOG: usize = 64;
+
+/// Cells of one frame compressed at once.
+///
+/// The only parallelism dial, and it bounds in-flight work rather than describing a
+/// pool: [`encode_batch`] keeps this many encodes running, collects the oldest, and
+/// forwards it before starting another. So a 320-cell repaint never spawns 320 tasks,
+/// and the first tile still reaches the pump as soon as it is encoded rather than
+/// after the whole frame — which is what keeps back-pressure and the coalescing above
+/// behaving as they did when this was one cell at a time.
+///
+/// **8 is measured, not guessed**, on a 12-core (8 performance) arm64 Mac. First
+/// `encode_width_sweep` below, over a 3200x2000 full repaint's 320 cells, medians of
+/// three runs:
+///
+/// | width | flat UI wall | its CPU | photographic wall | its CPU |
+/// |---|---|---|---|---|
+/// | 1 | 35.5 ms | 33.7 ms | 380 ms | 377 ms |
+/// | 2 | 18.8 ms | 35.7 ms | 198 ms | 390 ms |
+/// | 4 | 10.1 ms | 36.5 ms | 99 ms | 390 ms |
+/// | 8 | **6.3 ms** | 41.3 ms | **51 ms** | 398 ms |
+/// | 12 | 6.0 ms | 42–49 ms | 44 ms | 448 ms |
+///
+/// The CPU column is why this stops at 8 rather than going wider, and it is also what
+/// answers the objection that the agent should be modest because it shares its cores
+/// with the desktop it is capturing. Up to 8, total CPU barely moves — the same work
+/// finishes in a shorter, wider burst, which is *better* for that desktop than pinning
+/// one core for 380 ms while the frame pipeline backs up behind it. At 12 the wall clock
+/// stops improving and the CPU does not: 19% more of it for 15% less time in the
+/// photographic case, and for nothing at all in the flat one.
+///
+/// Then live, under `tests/rxa_repaint_probe.rs` against a real agent — which is where
+/// the number that mattered was, because a synthetic sweep cannot say whether the *link*
+/// was the constraint all along. A macOS 26.x guest under Apple Virtualization sharing
+/// the agent's own private 2x display at 3200x2000; 26s of streaming under a refresh
+/// every 250 ms; width 1 once, width 8 twice and identical:
+///
+/// | width | frames | frames/s | tiles/frame | encode ÷ waiting | stalled |
+/// |---|---|---|---|---|---|
+/// | 1 | 191 | 7.3 | 200 | 0.97 | 0.7% |
+/// | 8 | 749 | 28.8 | 63 | 6.05 | 0.6% |
+///
+/// `stalled` is time handing tiles to the socket, so at well under 1% the encoder was
+/// the whole cost and no part of widening it could be wasted — which is the thing that
+/// had to be checked first and could not be checked synthetically. It is a property of
+/// *that* client, though, not of the agent: on the same 3200x2000 surface, a browser on
+/// the far side of a gateway logged `stalled` at 94% of the encoder's own time
+/// (5.87s against 0.40s of waiting). There the link is the ceiling and no width lifts it.
+///
+/// `encode ÷ waiting` is those two totals divided, and it reads as overlap rather than
+/// as concurrency — see [`EncodeTotals`], which is where the two are defined and where
+/// the reason it can exceed the width is recorded.
+///
+/// **The frame rate roughly quadrupled and the tile count barely moved**, and that pair
+/// is the whole result. `tiles/frame` at 200 is the loop this fixes: a 320-cell repaint
+/// outlived the two-frame raw channel, so capture dropped a frame, set `full_repaint`,
+/// and asked for another 320-cell repaint — an agent that could not keep up was spending
+/// nearly all of its encoder on pixels nobody had changed. At 63 it is reporting real
+/// damage again. So what the encoder gained does not show up as more tiles; it shows up
+/// as four times the frames carrying a third of the redundancy.
+///
+/// A plain constant rather than `available_parallelism`, for the reason
+/// `encode::ENCODE_DEPTH` gives on the gateway: a measurement should be reproducible
+/// from the source, and a build that behaves differently on two Macs makes it not be.
+/// A Mac with fewer cores does not want a smaller number either — over-committing costs
+/// interleaving, not correctness, and the collector waits on the oldest cell regardless.
+const ENCODE_WIDTH: usize = 8;
 
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
@@ -1023,7 +1098,8 @@ async fn pump(
     // Before the join, and load-bearing: an encoder parked in `blocking_send` on
     // a full output channel only wakes when the receiver is gone. Joining first
     // would deadlock exactly in the case this teardown matters most — a browser
-    // that vanished while behind on tiles.
+    // that vanished while behind on tiles. An encoder parked collecting a worker
+    // instead is not a second hazard: an encode is bounded work and completes.
     drop(out_rx);
     if let Some(thread) = encoder_thread {
         // The encoder exits once its channel closes with the sink, or once this
@@ -1076,64 +1152,221 @@ fn start_pipeline(
     });
     let capture = Capture::start(target, sink, full_repaint)?;
 
+    // The encoder is a plain thread but reaches the runtime for its workers, so it
+    // needs a handle to the one this session is running on. Safe to take here
+    // because every caller — `Attach`, a capture restart, `switch_capture` — is
+    // inside `pump`; `Handle::current` panics loudly rather than quietly if that
+    // ever stops being true.
+    let handle = tokio::runtime::Handle::current();
+
     let thread = std::thread::Builder::new()
         .name("rxa-encoder".to_owned())
-        .spawn(move || encode_loop(raw_rx, out_tx))?;
+        .spawn(move || encode_loop(&handle, raw_rx, out_tx))?;
 
     Ok((capture, out_rx, thread))
 }
 
+/// What one pipeline's encoder cost, logged as it ends.
+///
+/// The repo has no benchmark harness, and until this existed nothing in the agent
+/// measured the encoder at all. Like `wire::Totals` on the gateway's browser link,
+/// this line *is* the measurement. Each number answers something the others cannot:
+///
+/// - `frames` against `tiles` is the batch size [`ENCODE_WIDTH`] has to cover. A
+///   width above a frame's cell count buys nothing.
+/// - `encode` (summed across workers) against `waiting` says whether cells overlapped,
+///   and it is **not** the concurrency achieved — read as that it flatters itself.
+///   `waiting` accrues only while a collect finds its cell *unfinished*, so a cell that
+///   was already done when its turn came contributes encode time and no waiting at all.
+///   The ratio is therefore an upper bound on the concurrency and can exceed
+///   [`ENCODE_WIDTH`] outright: one live session logged 12.2 at a width of 8. What it
+///   does say is sound at the bottom, which is where it matters — 1.0 means every
+///   collect blocked for the whole of its cell, so nothing overlapped.
+/// - **`stalled` is the one that decides whether any of this helps.** It is time the
+///   encoder spent blocked handing tiles to the pump, so if it dominates then the
+///   socket is the constraint and widening the encoder cannot make a repaint faster.
+/// - `lossy` is the classifier's split, which nothing downstream can observe because
+///   both branches are WebP. It was a per-frame `debug!` and is now also a total.
+/// - `dropped` counts tiles a failed encode discarded. Each one was already a
+///   `warn!`, but a count is what says whether it happened once or constantly.
+/// - `bytes` cross-checks against the gateway's own `ws: outbound totals`.
+#[derive(Default)]
+struct EncodeTotals {
+    frames: u64,
+    tiles: u64,
+    lossy: u64,
+    dropped: u64,
+    bytes: u64,
+    encode_micros: u64,
+    waited_micros: u64,
+    stalled_micros: u64,
+}
+
+impl std::fmt::Display for EncodeTotals {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} frame(s) / {} tile(s) ({} photographic, {} dropped) / {} bytes, \
+             {}µs encoding across workers in {}µs of waiting, stalled {}µs",
+            self.frames,
+            self.tiles,
+            self.lossy,
+            self.dropped,
+            self.bytes,
+            self.encode_micros,
+            self.waited_micros,
+            self.stalled_micros
+        )
+    }
+}
+
+fn micros(since: std::time::Instant) -> u64 {
+    since.elapsed().as_micros() as u64
+}
+
 /// Encode raw tiles and forward them, until either end of the pipeline closes.
-fn encode_loop(rx: std::sync::mpsc::Receiver<Captured>, tx: mpsc::Sender<Out>) {
+///
+/// One exit, so the totals cannot be lost down the path where the pump has gone —
+/// which is the interesting one, because that is where `stalled` is largest.
+fn encode_loop(
+    handle: &tokio::runtime::Handle,
+    rx: std::sync::mpsc::Receiver<Captured>,
+    tx: mpsc::Sender<Out>,
+) {
+    let mut totals = EncodeTotals::default();
+    let mut ended = "capture stream closed";
+
     while let Ok(msg) = rx.recv() {
-        let out = match msg {
-            Captured::Resized(w, h) => vec![Out::Resized(w, h)],
-            Captured::Failed(message) => vec![Out::Failed(message)],
-            Captured::Tiles(tiles) => {
-                // Counted per batch rather than per tile: the classifier's split is
-                // the only thing about it that can be judged from outside, and one
-                // line a frame says whether it is finding what it should. Every
-                // payload is a WebP either way, so nothing downstream can tell.
-                let mut lossy = 0usize;
-                let out: Vec<_> = tiles
-                    .into_iter()
-                    .filter_map(|tile| {
-                        match encode::encode_tile(tile.rect.w, tile.rect.h, &tile.rgb) {
-                            Ok(encoded) => {
-                                if !encoded.lossless {
-                                    lossy += 1;
-                                }
-                                Some(Out::Tile {
-                                    format: encoded.format,
-                                    rect: tile.rect,
-                                    data: encoded.data,
-                                })
-                            }
-                            Err(e) => {
-                                // One bad tile is a dropped rectangle, not a dead
-                                // session; the next repaint covers it.
-                                warn!("encoder: dropping a tile: {e:#}");
-                                None
-                            }
-                        }
-                    })
-                    .collect();
-                if lossy > 0 {
-                    debug!("encoder: {} tile(s), {lossy} photographic", out.len());
-                }
-                out
-            }
+        let alive = match msg {
+            Captured::Resized(w, h) => send(&tx, Out::Resized(w, h), &mut totals),
+            Captured::Failed(message) => send(&tx, Out::Failed(message), &mut totals),
+            Captured::Tiles(tiles) => encode_batch(handle, tiles, &tx, &mut totals),
         };
-        for item in out {
-            // Blocking is the point: back-pressure from a slow browser reaches
-            // the raw channel, which then coalesces frames rather than queueing
-            // them. `blocking_send` fails only once the pump is gone.
-            if tx.blocking_send(item).is_err() {
-                return;
-            }
+        if !alive {
+            ended = "the pump is gone";
+            break;
         }
     }
-    debug!("encoder: capture stream closed");
+
+    debug!("encoder: {ended}");
+    if totals.tiles > 0 || totals.dropped > 0 {
+        info!("encoder: encode totals: {totals}");
+    }
+}
+
+/// Compress one frame's cells and forward them in the order capture produced them.
+///
+/// Returns `false` once the pump has gone, which is this loop's only reason to stop.
+///
+/// [`ENCODE_WIDTH`] cells are kept in flight and the oldest is always the one
+/// collected, so the order out is the order in *whatever order the encodes finish*.
+/// That is the whole ordering argument: it is a property of the queue rather than
+/// something the code has to be careful about.
+fn encode_batch(
+    handle: &tokio::runtime::Handle,
+    tiles: Vec<RawTile>,
+    tx: &mpsc::Sender<Out>,
+    totals: &mut EncodeTotals,
+) -> bool {
+    encode_batch_at(handle, ENCODE_WIDTH, tiles, tx, totals)
+}
+
+/// [`encode_batch`] with the width given rather than taken from the constant, which
+/// is how `encode_width_sweep` measures what the constant should be.
+fn encode_batch_at(
+    handle: &tokio::runtime::Handle,
+    width: usize,
+    tiles: Vec<RawTile>,
+    tx: &mpsc::Sender<Out>,
+    totals: &mut EncodeTotals,
+) -> bool {
+    totals.frames += 1;
+    // This frame's share of the running totals, for the per-frame line at the end.
+    let before = (totals.tiles, totals.lossy);
+    // A width of zero would encode nothing at all rather than meaning anything.
+    let width = width.max(1);
+
+    let mut cells = tiles.into_iter();
+    let mut inflight = std::collections::VecDeque::with_capacity(width);
+    loop {
+        while inflight.len() < width {
+            let Some(cell) = cells.next() else { break };
+            // The rect travels with the job so a failed encode can still be named,
+            // and the encode's own cost comes back with it: summed across workers it
+            // is the CPU this frame took, which is not the wall clock any more.
+            inflight.push_back(handle.spawn_blocking(move || {
+                let started = std::time::Instant::now();
+                let encoded = encode::encode_tile(cell.rect.w, cell.rect.h, &cell.rgb);
+                (cell.rect, encoded, micros(started))
+            }));
+        }
+        let Some(job) = inflight.pop_front() else { break };
+
+        let started = std::time::Instant::now();
+        let joined = handle.block_on(job);
+        totals.waited_micros += micros(started);
+
+        let (rect, encoded, encode_micros) = match joined {
+            Ok(finished) => finished,
+            // Only reachable by cancellation, and only if the runtime is going away
+            // under us — in which case the session is ending anyway.
+            Err(e) => {
+                warn!("encoder: a tile encode did not finish: {e}");
+                totals.dropped += 1;
+                continue;
+            }
+        };
+        totals.encode_micros += encode_micros;
+
+        let encoded = match encoded {
+            Ok(encoded) => encoded,
+            // One bad tile is a dropped rectangle, not a dead session; the next
+            // repaint covers it. (The gateway cannot afford this — its shadow has
+            // already recorded those pixels as sent.)
+            Err(e) => {
+                warn!("encoder: dropping a tile: {e:#}");
+                totals.dropped += 1;
+                continue;
+            }
+        };
+        totals.tiles += 1;
+        totals.lossy += u64::from(!encoded.lossless);
+        totals.bytes += encoded.data.len() as u64;
+
+        if !send(
+            tx,
+            Out::Tile {
+                format: encoded.format,
+                rect,
+                data: encoded.data,
+            },
+            totals,
+        ) {
+            return false;
+        }
+    }
+
+    // Counted per frame as well as in the totals: the classifier's split is the only
+    // thing about it that can be judged from outside, and one line a frame says
+    // whether it is finding what it should. Every payload is a WebP either way, so
+    // nothing downstream can tell.
+    let (tiles, lossy) = (totals.tiles - before.0, totals.lossy - before.1);
+    if lossy > 0 {
+        debug!("encoder: {tiles} tile(s), {lossy} photographic");
+    }
+    true
+}
+
+/// Hand one item to the pump, timing the wait. `false` means the pump has gone.
+///
+/// Blocking is the point: back-pressure from a slow browser reaches the raw channel,
+/// which then coalesces frames rather than queueing them.
+fn send(tx: &mpsc::Sender<Out>, item: Out, totals: &mut EncodeTotals) -> bool {
+    let started = std::time::Instant::now();
+    let delivered = tx.blocking_send(item).is_ok();
+    // Sub-microsecond sends truncate to zero, so this counts only real waiting.
+    totals.stalled_micros += micros(started);
+    delivered
 }
 
 async fn read_loop(mut reader: FrameReader<OwnedReadHalf>, tx: mpsc::Sender<GatewayMsg>) {
@@ -1217,5 +1450,249 @@ mod tests {
     fn a_targets_id_is_the_display_it_names() {
         assert_eq!(capture::Target::Real(4).id(), 4);
         assert_eq!(owned().id(), OURS);
+    }
+
+    // ---- the encoder pipeline ----------------------------------------------
+    //
+    // These are plain `#[test]`s with a runtime built by hand rather than
+    // `#[tokio::test]`, and that is not a style choice: `encode_batch` collects its
+    // workers with `Handle::block_on`, which *panics* inside an asynchronous
+    // context. The encoder is a `std::thread` in production for the same reason, so
+    // a test has to stand outside the runtime too — which also lets it drain the
+    // output with `blocking_recv`.
+
+    /// A runtime to spawn encodes onto, from a thread that is not running on it.
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the encoder's workers")
+    }
+
+    fn cell(x: u16, y: u16, w: u16, h: u16) -> RawTile {
+        RawTile {
+            rect: capture::Rect { x, y, w, h },
+            // Content is irrelevant to ordering; only the length has to match.
+            rgb: vec![0x40; usize::from(w) * usize::from(h) * 3],
+        }
+    }
+
+    /// Every rect that reached the pump, in the order it arrived.
+    fn drain_rects(rx: &mut mpsc::Receiver<Out>) -> Vec<capture::Rect> {
+        let mut rects = Vec::new();
+        while let Ok(out) = rx.try_recv() {
+            match out {
+                Out::Tile { rect, .. } => rects.push(rect),
+                other => panic!("expected a tile, got {}", label(&other)),
+            }
+        }
+        rects
+    }
+
+    fn label(out: &Out) -> &'static str {
+        match out {
+            Out::Tile { .. } => "a tile",
+            Out::Resized(..) => "a resize",
+            Out::Failed(_) => "a failure",
+        }
+    }
+
+    /// Cell widths descending, so they cost visibly different amounts to encode and a
+    /// loop that forwarded whatever finished first would almost certainly interleave
+    /// them. The assertion is on order alone, which holds however fast the machine is.
+    ///
+    /// Through `encode_batch_at` with the widths named here rather than through
+    /// [`ENCODE_WIDTH`], and deliberately: at width 1 nothing overlaps, so a test
+    /// that read the constant would silently stop proving anything the day it was
+    /// tuned back down.
+    #[test]
+    fn a_frames_cells_are_forwarded_in_the_order_capture_produced_them() {
+        let runtime = runtime();
+        for width in [1usize, 2, 8, 64] {
+            let (tx, mut rx) = mpsc::channel(256);
+            let mut totals = EncodeTotals::default();
+
+            let cells: Vec<RawTile> = (0..32u16)
+                .map(|i| cell(0, i * 64, 320 - i * 8, 64))
+                .collect();
+            let expected: Vec<capture::Rect> = cells.iter().map(|cell| cell.rect).collect();
+
+            assert!(encode_batch_at(runtime.handle(), width, cells, &tx, &mut totals));
+            assert_eq!(
+                drain_rects(&mut rx),
+                expected,
+                "cells left the encoder reordered at width {width}"
+            );
+            assert_eq!((totals.frames, totals.tiles, totals.dropped), (1, 32, 0));
+        }
+    }
+
+    /// The hazard a side channel for control messages would create, and the one
+    /// `tests/rxa_resize_e2e.rs` asserts end to end: the browser must learn a new
+    /// size *before* a tile drawn in the new coordinate space arrives. Through the
+    /// real loop and the real channel, since that ordering is the loop's to keep.
+    #[test]
+    fn a_resize_cannot_overtake_the_tiles_before_it() {
+        let runtime = runtime();
+        let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel(RAW_BACKLOG);
+        let (out_tx, mut out_rx) = mpsc::channel(256);
+
+        let handle = runtime.handle().clone();
+        let encoder = std::thread::spawn(move || encode_loop(&handle, raw_rx, out_tx));
+
+        raw_tx
+            .send(Captured::Tiles((0..8u16).map(|i| cell(0, i * 64, 320, 64)).collect()))
+            .unwrap();
+        raw_tx.send(Captured::Resized(640, 480)).unwrap();
+        raw_tx.send(Captured::Tiles(vec![cell(0, 0, 64, 64)])).unwrap();
+        drop(raw_tx);
+        encoder.join().unwrap();
+
+        let mut out = Vec::new();
+        while let Ok(item) = out_rx.try_recv() {
+            out.push(item);
+        }
+        assert_eq!(out.len(), 10, "{:?}", out.iter().map(label).collect::<Vec<_>>());
+        for (i, item) in out.iter().take(8).enumerate() {
+            match item {
+                Out::Tile { rect, .. } => assert_eq!(rect.y, i as u16 * 64),
+                other => panic!("expected a tile at {i}, got {}", label(other)),
+            }
+        }
+        assert!(
+            matches!(out[8], Out::Resized(640, 480)),
+            "the resize did not keep its place"
+        );
+        assert!(matches!(out[9], Out::Tile { .. }));
+    }
+
+    /// One tile the encoder cannot compress is a dropped rectangle, not a dead
+    /// session — the next repaint covers it. The opposite of the gateway, whose
+    /// shadow has already recorded those pixels as sent by then.
+    #[test]
+    fn one_unencodable_cell_is_dropped_and_the_rest_keep_their_order() {
+        let runtime = runtime();
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut totals = EncodeTotals::default();
+
+        let mut cells = vec![cell(0, 0, 320, 64), cell(0, 64, 320, 64), cell(0, 128, 320, 64)];
+        // A payload one byte short of its geometry, which `encode_tile` rejects
+        // rather than letting libwebp read past the buffer.
+        cells[1].rgb.pop();
+
+        // Width 4, so the good cells really are in flight beside the bad one.
+        assert!(encode_batch_at(runtime.handle(), 4, cells, &tx, &mut totals));
+        assert_eq!(
+            drain_rects(&mut rx)
+                .into_iter()
+                .map(|rect| rect.y)
+                .collect::<Vec<_>>(),
+            vec![0, 128]
+        );
+        assert_eq!((totals.tiles, totals.dropped), (2, 1));
+    }
+
+    /// What picks [`ENCODE_WIDTH`]: how well the fan-out scales over a full
+    /// repaint's worth of cells. Synthetic on purpose — the quantity is CPU-bound,
+    /// so it needs no VM, no deploy and no real screen, and a measurement that can
+    /// be re-run from the source beats one nobody can reproduce.
+    ///
+    /// Run it in **release**: an encode is several times slower in a debug build,
+    /// which would flatter the fan-out by making the fixed costs disappear.
+    ///
+    /// ```sh
+    /// cargo test -p rxa-agent --release --lib -- --ignored --nocapture encode_width
+    /// ```
+    #[test]
+    #[ignore = "prints timings; run explicitly in release"]
+    fn encode_width_sweep() {
+        // A Retina 1600x1000 desktop: 3200x2000 captured, cut by `split_cells` into
+        // ten columns of 320 and 32 rows of 64 with the last row clipped to 16.
+        let (cols, rows) = (10u16, 32u16);
+        let runtime = runtime();
+
+        for (label, fill) in [("flat  ", flat_cell as fn(u16, u16) -> Vec<u8>), ("photo ", photo_cell)] {
+            println!("\n{label} {cols}x{rows} cells of a 3200x2000 full repaint");
+            let mut serial = None;
+            for width in [1usize, 2, 4, 8, 12] {
+                let cells: Vec<RawTile> = (0..rows)
+                    .flat_map(|row| {
+                        (0..cols).map(move |col| {
+                            let h = if row == rows - 1 { 16 } else { 64 };
+                            RawTile {
+                                rect: capture::Rect {
+                                    x: col * 320,
+                                    y: row * 64,
+                                    w: 320,
+                                    h,
+                                },
+                                rgb: fill(320, h),
+                            }
+                        })
+                    })
+                    .collect();
+                let count = cells.len();
+
+                // Wide enough that the drain never blocks: this measures encoding,
+                // not the pump, and `stalled` in a live session measures the pump.
+                let (tx, mut rx) = mpsc::channel(count + 1);
+                let mut totals = EncodeTotals::default();
+                let started = std::time::Instant::now();
+                assert!(encode_batch_at(runtime.handle(), width, cells, &tx, &mut totals));
+                let wall = started.elapsed();
+                assert_eq!(drain_rects(&mut rx).len(), count);
+
+                let speedup = serial.map_or(1.0, |first: std::time::Duration| {
+                    first.as_secs_f64() / wall.as_secs_f64()
+                });
+                if serial.is_none() {
+                    serial = Some(wall);
+                }
+                println!(
+                    "  width {width:>2}: {count} cells in {wall:>9.2?} \
+                     ({:>7.2?} encoding across workers, {speedup:.2}x)",
+                    std::time::Duration::from_micros(totals.encode_micros)
+                );
+            }
+        }
+    }
+
+    /// Flat UI: a couple of colours and hard edges, the lossless branch's content.
+    fn flat_cell(w: u16, h: u16) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for y in 0..h {
+            for x in 0..w {
+                if (y / 16) % 2 == 0 && (x / 7) % 3 == 0 {
+                    rgb.extend_from_slice(&[20, 20, 24]);
+                } else {
+                    rgb.extend_from_slice(&[246, 246, 248]);
+                }
+            }
+        }
+        rgb
+    }
+
+    /// Continuous tone with real noise in it, so it reaches the lossy branch and
+    /// prediction cannot win — the same fixture shape `encode.rs`'s tests use, and
+    /// for the reason recorded there.
+    fn photo_cell(w: u16, h: u16) -> Vec<u8> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for y in 0..h {
+            for x in 0..w {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let jitter = ((state >> 56) as i32 - 128) / 5;
+                for channel in [
+                    u32::from(x) * 7 + u32::from(y) * 3,
+                    u32::from(x) * 3 + u32::from(y) * 11 + 40,
+                    u32::from(x) * 13 + u32::from(y) * 5 + 90,
+                ] {
+                    rgb.push(((channel as i32 % 256 + jitter).clamp(0, 255)) as u8);
+                }
+            }
+        }
+        rgb
     }
 }

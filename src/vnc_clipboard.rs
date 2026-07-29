@@ -230,7 +230,7 @@ pub fn request(formats: u32) -> Vec<u8> {
 /// Refused over [`MAX_CLIPBOARD_BYTES`], not truncated: this is the deferred
 /// half of a browser copy, so the text comes from a Provide request that can
 /// land long after the copy did, and a partial answer here would reach the
-/// remote looking like the whole clipboard. [`MAX_INFLATED`] on the way back in
+/// remote looking like the whole clipboard. `MAX_INFLATED` on the way back in
 /// assumes the same ceiling.
 pub fn provide(text: &str) -> anyhow::Result<Vec<u8>> {
     use std::io::Write as _;
