@@ -12,6 +12,14 @@ ordinary live HTTP audio response.
 > [Latency, and what has been ruled out](#latency-and-what-has-been-ruled-out).
 > Treat the timing behaviour, and the two mechanisms that exist to manage it, as
 > subject to change.
+>
+> **This is a browser feature, and changing it needs no check against the macOS
+> viewer.** The viewer has no audio at all — no endpoint client, no decoder, no
+> setting — so there is nothing there for a change here to break, and asking whether
+> one still suits the viewer is friction bought for nothing. Viewer audio is planned
+> ([`roadmap.md`](roadmap.md)) as a *second* representation from the same queue; when
+> it exists it will bring its own tests, and until then this path answers only to a
+> browser.
 
 Audio does not belong in the desktop WebSocket for this path. The browser already
 has a streaming audio client:

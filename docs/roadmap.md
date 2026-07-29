@@ -121,7 +121,7 @@ What is not settled, and should not be decided here first:
   feature that phones inherit only through the config. Worth resisting the symmetry
   if the menu would be unusable at that size.
 
-### Audio past the first RDP slice
+### Prompter audio from an RDP guest
 
 The RDP-to-browser path is done and proven end to end: MS-RDPEA redirection over
 both of its channels (plus the `rdpdr` advertisement Windows requires before it
@@ -137,12 +137,12 @@ is the wart that followed them — the endpoint no longer waits for a format it 
 never be sent, and fills a quiet remote's gaps with silence, so audio starts, stops
 and starts again on its own.
 
-What is **not** settled is promptness, and that is the next thing here: a live
-desktop has been heard a couple of seconds behind itself, with the gateway measured
-out of it as a cause ([`remote-audio.md`](remote-audio.md)). **This is RDP-to-browser
-work and it comes before the viewer** — the browser is where audio is actually being
-listened to, and a second client would only inherit whatever the timing model turns
-out to be.
+What is **not** settled is promptness, and it is the first of the two things planned
+here: a live desktop has been heard a couple of seconds behind itself, with the
+gateway measured out of it as a cause ([`remote-audio.md`](remote-audio.md)). The
+browser comes first because that is where audio is actually being listened to, and
+because a second client would inherit whatever timing model this settles on rather
+than help to choose it.
 
 **Apache Guacamole is the prior art, and reading it names the problem precisely.**
 Its guacd takes RDP audio through its own rdpsnd handler and sends **raw PCM** —
@@ -189,27 +189,27 @@ Two of Guacamole's other choices are worth recording while they are in view:
   it; the protocols' "Sound disabled" log covers the stream failing to allocate at
   all. Ours is a config flag whose outcome the `connected` message reports instead.
 
-After promptness, two things are left, neither urgent:
+**Then the same RDP audio in the macOS viewer, and deliberately second.** It could
+once have pointed `AVPlayer` at this endpoint unchanged; since the response became
+Ogg/Opus it cannot, because AVFoundation has no Ogg demuxer. So viewer audio means a
+second representation from the same queue — Opus in CAF or fragmented MP4, both of
+which AVFoundation reads, or decoding Opus in the viewer. A second representation,
+not a second transport, and not difficult.
 
-- **The macOS viewer**, which now needs a representation of its own. It could once
-  have pointed `AVPlayer` at this endpoint unchanged; since the response became
-  Ogg/Opus it cannot, because AVFoundation has no Ogg demuxer. So viewer audio
-  means Opus in CAF or fragmented MP4 (both of which AVFoundation reads) or
-  decoding Opus in the viewer — a second representation from the same queue, not a
-  second transport. Serving two representations was considered and rejected while
-  the viewer has no audio at all; see [`remote-audio.md`](remote-audio.md).
-- **Audio for the other two protocols.** `rxa` would mean capturing sound on the
-  Mac, which the agent does not do and which is a feature of the agent rather than
-  of this path. VNC has no audio channel to turn on at all — and Guacamole's answer
-  to that is worth knowing, because it is the option written off here as "RFB would
-  need an extension both ends invented": guacd does not touch RFB at all. It opens a
-  **separate PulseAudio connection** to a sound server on the remote host
-  (`audio-servername`, compile-time optional behind `--with-pulse`), and feeds the
-  same audio stream the RDP path uses. Out-of-band from a sound server, rather than
-  an extension. Still not planned here, but no longer for the reason given.
+The order is the argument, not the difficulty: the browser is where this is being
+listened to, and if promptness moves it off `<audio>` and onto a client-scheduled
+decoder, whatever the viewer was built against first would be a representation on its
+way out. Doing the browser first means the viewer copies a settled timing model
+instead of inheriting an unsettled one — and if the delay turns out to be Windows'
+own, nothing about the viewer's representation changes anyway.
 
-Sound in the other direction — a microphone at the browser reaching the remote —
-is not on this list and has never been designed.
+**Until that work starts, the viewer is not a constraint on the browser path.** It has
+no audio at all, so no change to the endpoint, the encoder or the panel needs checking
+against it, and none should be held up for it. Being planned is not the same as being
+a dependency.
+
+Audio for `rxa` and VNC, and a microphone going the other way, are
+[not planned](#audio-for-rxa-and-vnc-and-a-microphone).
 
 ## Deferred pending measurements
 
@@ -308,3 +308,22 @@ before pre-boot disk unlock.
 remotex permanently has one active session slot. A new browser takes over and
 evicts the previous holder. Concurrent sessions, shared sessions, and a session
 broker are outside the product model.
+
+### Audio for `rxa` and VNC, and a microphone
+
+Remote audio is an **RDP** feature here, to both clients
+([`remote-audio.md`](remote-audio.md)). The other two protocols are not a matter of
+priority — each would be a different feature wearing the same name:
+
+- **`rxa`.** Capturing the Mac's own output is a feature of the agent, not of this
+  path, and the agent does not do it.
+- **VNC.** RFB carries no audio, and the interesting part is that Guacamole does not
+  extend it either: guacd opens a **separate PulseAudio connection** to a sound
+  server on the remote host (`audio-servername`, compile-time optional behind
+  `--with-pulse`) and feeds the same audio stream its RDP path uses. So the option
+  this roadmap once wrote off as "RFB would need an extension both ends invented" is
+  real and out-of-band — it is just a different product, requiring a sound server
+  configured and reachable on every target.
+
+A microphone at the browser reaching the remote is also not planned, and has never
+been designed.
