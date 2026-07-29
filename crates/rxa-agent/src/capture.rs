@@ -1,33 +1,7 @@
-//! ScreenCaptureKit capture: native dirty rects in, packed-RGB tiles out.
+//! ScreenCaptureKit dirty rectangles in, packed-RGB tiles out.
 //!
-//! ## Why dirty rects are load-bearing
-//!
-//! ScreenCaptureKit hands us the regions that actually changed, in the
-//! `SCStreamFrameInfo.dirtyRects` attachment on each `CMSampleBuffer`. Encoding
-//! only those is the difference between a usable Retina session and one that
-//! pegs a core diffing full frames. This is the single most important API
-//! detail in the whole agent, and it is why `screencapturekit` was chosen over
-//! `objc2-screen-capture-kit`: it exposes the attachment directly.
-//!
-//! ## The seam
-//!
-//! Everything above this module deals only in [`RawTile`] — a rectangle plus
-//! packed RGB888 — via the [`FrameSink`] trait. Swapping the binding crate, or
-//! moving to full-frame diffing if a future macOS stops reporting dirty rects,
-//! is contained here.
-//!
-//! ## Two bugs this module exists to not have
-//!
-//! - **Stride.** `CVPixelBuffer::bytes_per_row` is *not* `width * 4`; macOS
-//!   pads rows for alignment. Every read goes row by row at the reported
-//!   stride. Assuming `width * 4` produces a picture that shears progressively
-//!   further right as it goes down — the classic ScreenCaptureKit bug.
-//! - **Backing scale.** A Retina display is captured at pixel dimensions that
-//!   differ from the point dimensions `CGEventPost` wants. We capture at full
-//!   pixel size for fidelity and report the measured scale so
-//!   [`crate::input`] can divide by it. The scale is *measured* from the
-//!   surface rather than assumed, because assuming it is how clicks end up in
-//!   the wrong place.
+//! Pixel reads honor the buffer's reported row stride. Capture stays at native
+//! pixel size and reports the measured backing scale for point-based input.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,24 +11,8 @@ use screencapturekit::stream::delegate_trait::ErrorHandler;
 use screencapturekit::cv::CVPixelBufferLockFlags;
 use screencapturekit::prelude::*;
 
-/// The canonical tile grid, in surface pixels. Mirrors the gateway's
-/// `protocol::CELL_W` / `CELL_H`, which is where the size is justified.
-///
-/// Damage is snapped **outward** onto this grid rather than sent at the shape
-/// ScreenCaptureKit reported, for two reasons that both come from measurement:
-///
-/// - **Its rects are coarse.** On the test Mac, 65% of all bytes reaching the
-///   browser were full-width `1600x64` strips at ~62 KB each, and most of every
-///   one of them was pixels the viewer already had. A strip that changed in one
-///   place now costs the cells that changed, not the strip.
-/// - **A cell is a stable identity.** The same position always yields the same
-///   geometry, so the per-cell hash below and the gateway's tile cache can both
-///   recognise a repeat. A rect at whatever shape the compositor happened to
-///   report matches nothing, ever.
-///
-/// The cost is that a thin change is rounded up — a 34x15 cursor rect becomes one
-/// 320x64 cell. That is paid for by the hash gate and, on this content, was 0.7% of
-/// the bytes measured against the 65% above.
+/// Stable surface-pixel grid shared with the gateway. Dirty rectangles expand
+/// outward to cell boundaries so hashing and cache identities remain reusable.
 const CELL_W: u16 = 320;
 const CELL_H: u16 = 64;
 
@@ -88,28 +46,13 @@ pub trait FrameSink: Send + Sync + 'static {
     fn failed(&self, message: String);
 }
 
-/// Which display a session shares.
-///
-/// Both arms name a `CGDirectDisplayID`, which is also what a client selects by
-/// ([`rxa_proto::msg::DisplayEntry::id`]). Position in the shareable list is
-/// deliberately not an identity: attaching or unplugging a screen renumbers
-/// every display after it, so a target held across that would quietly become a
-/// different screen.
-///
-/// Two kinds all the same, because a display of our own needs its creation size
-/// carried alongside its id: that size is the fallback for reading its backing
-/// scale (see [`owned_display_scale`]) and the ceiling `maxPixels` fixed at
-/// creation. Its mode *is* readable, contrary to what this said before.
+/// Display selected by stable CoreGraphics id. Owned displays also retain their
+/// immutable creation envelope for scale fallback and resize clamping.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
     /// One of the Mac's own displays, by CoreGraphics display id.
     Real(u32),
-    /// A display we created, by id, plus the point size it was created at.
-    ///
-    /// The display shows up in System Settings like any other, so whoever is
-    /// using the Mac can put it in any mode on the list macOS derived —
-    /// including the `(low resolution)` 1x entries. The size is what
-    /// [`owned_scale`] falls back to when the mode cannot be read.
+    /// Agent-created display and its creation size in points.
     Owned { id: u32, base_points: (u32, u32) },
 }
 
@@ -142,49 +85,14 @@ pub fn main_display() -> u32 {
     unsafe { CGMainDisplayID() }
 }
 
-/// The backing scale of a display of our own.
-///
-/// Read from the CoreGraphics mode, exactly as a real display's is. These
-/// displays *do* publish one — measured on macOS 26.5.2 in the test VM, where
-/// `CGDisplayCopyDisplayMode` returns `3800x2400 px / 1900x1200 pt` for a 2x
-/// display and `1900x1200 px / 1900x1200 pt` for the same display switched to
-/// 1x. Earlier notes here said it returned NULL for them and built a heuristic
-/// around that; it does not, and the heuristic was wrong in a way nothing else
-/// could catch (see [`owned_scale`]).
-///
-/// [`owned_scale`] remains the fallback for a macOS where the mode really is
-/// absent, since nothing promises a private display keeps publishing one.
+/// Backing scale of an owned display. Prefer the live CoreGraphics mode and use
+/// the creation envelope only when the private display publishes no mode.
 fn owned_display_scale(id: u32, points: (f64, f64), base: (u32, u32)) -> f64 {
     mode_scale(id).unwrap_or_else(|| owned_scale(points, base))
 }
 
-/// Fallback scale for a display of our own, from the size it was created at.
-///
-/// `maxPixels` was set to [`crate::virtualdisplay::SCALE`] times the created
-/// size and cannot be changed, so that size is exactly the largest mode macOS
-/// can put twice the pixels behind: at or under it, assume it did; over it, it
-/// provably did not and the mode is 1x.
-///
-/// **It cannot see the case that matters.** macOS lists a `(low resolution)` 1x
-/// entry beside each HiDPI one *at the same point size* — the mode list for a
-/// 1900x1200 display holds both `1900x1200 pt / 3800x2400 px` and
-/// `1900x1200 pt / 1900x1200 px` — and both are "at or under the created size",
-/// so this answers 2x for either. Whichever one macOS restored for the identity
-/// then decided whether the agent was right, which is what made the reported
-/// density look random from the outside. Only [`owned_display_scale`]'s mode
-/// read separates them; this is the degraded answer when there is no mode.
-///
-/// Since [`crate::virtualdisplay::VirtualDisplay::set_size`] exists, the blind
-/// spot also covers a case remotex *causes* rather than merely observes: a client
-/// can resize the display below roughly 57% of the created width, where the mode
-/// leaves the HiDPI window and comes back 1x at a size this still calls 2x. That
-/// makes the mode read load-bearing rather than merely preferred, which is the
-/// reason it is tried first and this is only reached where a macOS publishes no
-/// mode for these displays at all.
-///
-/// Getting this wrong is expensive in one direction — reading a 3200x2000 1x
-/// mode as 2x would ask ScreenCaptureKit for a 6400x4000 surface and hand the
-/// encoder four times the pixels for an upscale of the same desktop.
+/// Degraded scale estimate from the immutable creation envelope. It cannot
+/// distinguish same-size 1x and 2x modes, so callers must prefer a live mode.
 fn owned_scale(points: (f64, f64), base: (u32, u32)) -> f64 {
     if points.0 <= f64::from(base.0) && points.1 <= f64::from(base.1) {
         crate::virtualdisplay::SCALE
@@ -372,27 +280,8 @@ pub struct Capture {
 /// answers "is ScreenCaptureKit delivering anything, and what?" immediately.
 const FRAMES_TO_LOG: u64 = 3;
 
-/// What was last sent for each cell, so a cell whose pixels did not change costs
-/// neither an encode nor a place on the wire.
-///
-/// This exists because ScreenCaptureKit's dirty rects are *coarse*. Measured on
-/// the test Mac at 3200x2000 with nobody touching the screen, 15 to 21 of the 32
-/// full-width strips covering it come back dirty on every frame, and each one is
-/// then packed to RGB and PNG-encoded at ~95 KB. Almost all of that is pixels the
-/// viewer is already showing.
-///
-/// Keyed by cell, which is what makes it exact rather than approximate: cells
-/// partition the surface, so a cell's remembered digest describes a region nothing
-/// else ever half-overwrites.
-///
-/// The gateway drops the repeats it can recognise, but it can only compare
-/// *encoded* payloads — by which point the PNG has been built and pushed across
-/// the LAN. Hashing the source pixels here skips both, so this is a CPU saving as
-/// much as a bandwidth one: the hash reads the same bytes the packer would have,
-/// once, and then nothing else happens.
-///
-/// 64-bit rather than 32 because a collision is not a retry: it is a cell left
-/// showing stale pixels until something else changes it.
+/// Last 64-bit pixel digest sent for each stable cell. Hashing before encoding
+/// removes ScreenCaptureKit's coarse false-positive damage.
 #[derive(Default)]
 struct CellMemo {
     sent: std::collections::HashMap<(u16, u16, u16, u16), u64>,
@@ -536,27 +425,9 @@ impl Capture {
         self.shared.full_repaint.store(true, Ordering::Relaxed);
     }
 
-    /// Re-measure the captured display and resize the stream's surface to match.
-    ///
-    /// A running stream's surface size is **fixed at the size it was configured
-    /// with**. When the display then changes mode, ScreenCaptureKit does not
-    /// resize the surface — it scales the new desktop into the old one. So the
-    /// frames keep arriving at the old dimensions, the handler never sees a size
-    /// change, and nothing tells the browser anything happened; what it shows is
-    /// a squashed picture of the new resolution. That holds however the mode
-    /// changed: a mode switch made on the Mac itself, or the
-    /// host resizing a VM's virtual display.
-    ///
-    /// This does not notify anyone. It resizes the surface, and the next frame
-    /// then arrives at the new size, which is what makes the handler's existing
-    /// resize path fire — one announcement path for every cause.
-    ///
-    /// Returns the geometry now being captured, or `None` when nothing was done
-    /// — either the display has not in fact changed, or it is mid-reconfigure
-    /// and momentarily has no mode to read. The second is not an error: it is
-    /// the normal state for a few polls around a resize, and reporting it as one
-    /// would log a warning every 100ms through exactly the event this exists to
-    /// handle. The poll after it sees the new mode.
+    /// Reconfigure the fixed-size SCStream surface after a display mode change.
+    /// The next frame uses the ordinary resize notification path. `None` means
+    /// unchanged or temporarily unreadable while the display settles.
     pub fn follow_display(&mut self) -> anyhow::Result<Option<Geometry>> {
         let Some(live) = geometry_for_target(self.target, self.geometry.id) else {
             debug!(

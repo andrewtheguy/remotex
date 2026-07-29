@@ -211,24 +211,8 @@ function DisplaySection({
   );
 }
 
-// The drawer's Audio row, which **is** the control: pressing it starts and stops
-// the remote's sound. There is no audio panel any more, and that is the right shape
-// for what is left to decide — a live stream has one question (am I listening to it)
-// and a docked panel spent screen space over the desktop to ask it. What went with
-// the panel is what a panel was for: a native transport whose scrubber and elapsed
-// time described a recording, and an in-page volume slider that the system's own
-// replaces.
-//
-// Absent rather than disabled when this session has no audio, following Display
-// rather than Clipboard — and for Display's reason. Audio is RDP-only, so for a
-// VNC or rxa target there is no audio feature that was switched off, and a
-// permanently greyed "Audio" would be an explanation of nothing. An RDP target
-// without `audio = true` lands in the same place.
-//
-// **The press matters as much as what it says.** Enabling audio creates an
-// AudioContext, and a context born inside a user gesture is one a browser will let
-// play; created any other way it is suspended, on iOS with no way back. So this
-// button is the gesture the whole path is built on (see audioPlayer.ts).
+// The direct audio toggle is also the user gesture required to create a
+// playable AudioContext. Targets without audio omit the row.
 function AudioSection({
   available,
   enabled,
@@ -255,36 +239,14 @@ function AudioSection({
       >
         {enabled ? "Disable audio" : "Enable audio"}
       </button>
-      {/* Only ever shown for a refusal, and there is one real cause: a browser with
-          no WebCodecs Opus decoder. Nothing reports "the remote is quiet", because
-          from the gateway's end a quiet remote and one that will never redirect are
-          the same thing — the difference lives in its log. */}
+      {/* Quiet remotes have no distinct client-visible state. */}
       {error && <p className="audio-note">{error}</p>}
     </div>
   );
 }
 
-// The Command-to-Control switch, on Mac hosts only: nothing else has a Command
-// key to reinterpret, and a section explaining that to a Windows user is worse
-// than no section. Disabled rather than hidden for a Mac guest, matching the
-// viewer's menu item — the preference still exists, it just has nothing to do
-// while Command already means Command at the other end.
-//
-// The label names the state rather than the action, and says "on"/"off" out loud
-// to do it. `aria-pressed` is the honest place for that, but nothing in the
-// stylesheet draws a pressed toolbar button, so the text is the only channel a
-// sighted user has — which is why the other toggles here spell their state as
-// "Hide displays" and "Hide keyboard".
-//
-// This one cannot borrow that trick. "Hide" is unmistakably an action, whereas
-// "⌘ → Ctrl" describes a key mapping, so as a bare label it reads as what pressing
-// the button would *do* rather than what is already happening — and it meant the
-// opposite of that. The viewer has no such problem: AppKit puts a checkmark beside
-// a fixed "Enable macOS Keyboard Overrides", so its name never has to move.
-//
-// Three states are still worth distinguishing, and a Mac guest is the one that is
-// genuinely not a state of this preference but a reason it has nothing to do. See
-// macKeys.ts.
+// macOS-only Command-to-Control preference. It remains visible but inactive for
+// a Mac guest, where Command already has native meaning.
 function MacKeyboardSection({
   enabled,
   active,
@@ -503,25 +465,7 @@ export default function FloatingMenu({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [helpOpen]);
 
-  // Ctrl+Alt+Shift+Semicolon hides the floating chrome and shows it again — for a
-  // screen recording, or to uncover whatever the button is sitting on top of.
-  //
-  // Two things make the chord workable. It is caught on `window` in the **capture**
-  // phase and stopped there, because the remote surface forwards every key it sees
-  // to the guest (see useRemoteDesktop): a bubble-phase listener would toggle the
-  // button *and* type the chord at the remote. And capturing on the window rather
-  // than the surface means it still works when focus has wandered off the desktop,
-  // which matters when the way back is the only way back.
-  //
-  // Three modifiers because the chord this steals from is the guest's, not the
-  // browser's — whatever it binds never reaches the remote again. Ctrl+Shift+; was
-  // tried and is Excel's "insert the current time", and Ctrl+Alt+anything is AltGr
-  // on Windows and X11, so on a non-US layout it can be a character somebody means
-  // to type. Adding Shift lands on a fourth modifier level that few layouts
-  // populate, and no browser or desktop binds.
-  //
-  // Deliberately not persisted: a chrome-less desktop with no visible way to
-  // recover it should not survive a reload.
+  // Capture the non-persisted chrome shortcut before remote input forwarding.
   const [hidden, setHidden] = useState(false);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {

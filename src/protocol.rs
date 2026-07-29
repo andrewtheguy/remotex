@@ -1,27 +1,6 @@
-//! Wire protocol shared (in shape) with the frontend `src/protocol.ts`.
-//!
-//! `ClientMsg` flows browser -> server (input events) as JSON text frames.
-//! Server -> browser, the transport is split by weight (see
-//! docs/architecture.md):
-//!
-//! - **Screen updates** are binary WebSocket frames, each one a *batch* of
-//!   records rather than a single tile — see [`batch`]. A payload is a WebP
-//!   image the client decodes natively — lossless for screen content, lossy for
-//!   the photographic tiles the macOS agent classifies as such.
-//!   Binary replaced base64 RGBA inside JSON text, which inflated the
-//!   bottleneck backend->browser link by ~4.3x (4 bytes/px, +33% base64);
-//!   batching then replaced one frame per tile, which cost a WebSocket frame, a
-//!   client event and a separate decode for every strip of a repaint.
-//! - **Control messages** (`resize`, `error`, `cursor`, …) are rare and small;
-//!   they stay JSON text frames with a `type` tag. `cursor` carries a base64
-//!   PNG — a pointer shape is a couple of hundred bytes and changes a handful
-//!   of times a session, so it is not worth a second binary frame kind, and it
-//!   is the one place PNG survives the move to WebP (see [`CursorShape`]).
-//!
-//! Ordering between the two is the WebSocket's, and it is load-bearing: a
-//! `resize` reallocates the client's canvas, so a tile that arrived before it
-//! must be *sent* before it. [`crate::wire`] is what preserves that while
-//! batching.
+//! Client wire types: tagged JSON for control and input, binary batches for
+//! WebP tiles and Opus audio. WebSocket ordering is required because resize
+//! messages change the coordinate space of following tiles.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -31,43 +10,10 @@ use serde::{Deserialize, Serialize};
 /// produce one huge WebSocket message.
 pub const STRIP_ROWS: u16 = 64;
 
-/// The revision of everything in this file: [`ClientMsg`], `ControlMsg`, and
-/// the [`batch`] frame layout. Served from `GET /api/config` so a client that
-/// isn't shipped with the gateway can refuse a version it cannot speak.
-///
-/// The SPA doesn't check it — it is served by this same binary, so it cannot
-/// disagree. The macOS viewer is a separate artifact and does, and
-/// `apps/remotex-viewer/Sources/App/ProductInfo.swift` carries the number it
-/// accepts. Bump this only for a change that would break a client compiled
-/// against the old shape; a purely additive control message is not one, because
-/// clients are required to ignore tags they don't know.
-///
-/// 3 was the batch envelope: binary frames stopped being one tile each. 4 is
-/// WebP: one codec replaced PNG *and* JPEG, so a `TILE` record's format byte has
-/// exactly one valid value. That byte alone cannot protect a stale client —
-/// rejecting an unknown format drops the whole frame silently, which looks like a
-/// dead session rather than a version mismatch — so this is what makes the failure
-/// legible.
-///
-/// **Audio did not bump it, and that was right while the browser was the only client
-/// that asked for it.** The [`audio`] frame kind and its two messages are additive *and*
-/// opt-in: nothing arrives until a client sends [`ClientMsg::Audio`], so a viewer's
-/// socket carried the same bytes it had before audio existed. Since the viewer compares
-/// this number for **equality** and ships as its own DMG, a bump would have cost every
-/// installed copy a reinstall to gain nothing.
-///
-/// **5 is the viewer gaining audio, and it is here to make one refusal legible.** The
-/// viewer now decodes `connected.audio` as a required field, so it cannot talk to a
-/// gateway that predates audio — and without this bump that refusal happened at the
-/// worst possible place: the `connected` frame failing to decode, logged and dropped,
-/// leaving the viewer sitting on "waiting for the remote desktop" forever. That is the
-/// same silent-drop failure the WebP note above describes, and the same remedy applies.
-/// A version mismatch is reported on the login screen; a dropped frame is reported
-/// nowhere.
-///
-/// So the rule is not "additive messages never bump this". It is that a bump buys a
-/// legible failure, and is worth it exactly when a client would otherwise fail
-/// illegibly.
+/// Version of [`ClientMsg`], [`ControlMsg`], and the binary layouts. The native
+/// viewer requires an exact match. Bump it when an older peer would otherwise
+/// fail without a useful compatibility error; clients ignore additive control
+/// tags they do not know.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
@@ -158,70 +104,19 @@ pub enum ClientMsg {
         pressed: bool,
         caps: bool,
     },
-    /// The size the client wants the remote desktop to be, in remote pixels:
-    /// the room it has, times the density the remote draws at
-    /// ([`ServerMsg::Resize`]'s `scale`). Engines that can drive the remote size
-    /// act on it (VNC `SetDesktopSize`); the rest ignore it and the client keeps
-    /// its scrollbars.
-    ///
-    /// Not the client's own device pixels, which is what this carried before
-    /// clients scaled their output: a desktop sized to those is a desktop drawn
-    /// at the host's density rather than its own, which on a Retina host is every
-    /// remote's UI at half size.
-    ///
-    /// This is the only way a client asks for a size, and there is deliberately
-    /// no menu of resolutions beside it: a remote's resolution belongs to the
-    /// machine running it. Three engines act on it, each where its protocol hands
-    /// that decision to the client — VNC's `SetDesktopSize` (TigerVNC-family
-    /// servers), continuously; RDP's Display Control channel, on the user's
-    /// request; and `rxa`, also on request and narrower still, because a Mac's
-    /// own panel is never resized because somebody connected. What `rxa` resizes
-    /// is a display the agent *made* to be looked at from here, so the control
-    /// appears only while that display is the one being shared.
+    /// Requested desktop size in remote pixels: available client points
+    /// multiplied by the scale in [`ServerMsg::Resize`]. VNC may follow it
+    /// continuously; RDP and RXA apply it only on explicit requests.
     Viewport { w: u16, h: u16 },
-    /// Put the remote desktop back at whatever size the *far side* considers its
-    /// default: a target's `width`/`height` for VNC and RDP, and for `rxa` the
-    /// point size the agent created its display at.
-    ///
-    /// The contrast with [`ClientMsg::Viewport`] above is the whole reason both
-    /// exist. A `Viewport` is a size the client worked out from the room it has,
-    /// which presumes the client's window is a shape a desktop can usefully be.
-    /// A phone's is not — a portrait window asks for a tall, narrow desktop no
-    /// desktop OS lays out well, and rotating it asks for a different one — so a
-    /// client reading the desktop through pinch zoom carries no number worth
-    /// sending. Deferring to the far side is the only form of the request it can
-    /// make honestly, and it deliberately carries no size for the same reason:
-    /// the default is known where it lives, and the client is the one place that
-    /// does not know it.
-    ///
-    /// Not merely "send nothing", which was the other candidate and is not
-    /// equivalent. A remote's size outlives the client that set it — most
-    /// sharply for `rxa`, where macOS remembers and restores the mode a display
-    /// identity was last put in (see the agent's `virtual_display_initial_size`),
-    /// so a session that stretched that display leaves it stretched for whoever
-    /// connects next. Declining to ask inherits that; this repairs it.
-    ///
-    /// Gated on the target's `resize` opt-in by every engine, exactly as
-    /// `Viewport` is, and subject to the same per-protocol narrowing — `rxa`
-    /// still only resizes a display the agent made.
+    /// Restore the engine's configured or created default size. This carries no
+    /// dimensions so a pinch-zoom client need not invent a desktop shape.
     DefaultSize,
     /// The density of the screen this client's window is on, in hundredths —
     /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
     /// whenever the window moves to a screen of a different density.
     ///
-    /// The counterpart to [`ServerMsg::Resize`]'s `scale`, travelling the other
-    /// way, and the two are read together: that one says what the remote draws
-    /// at, this one says what the client can show. Only the `rxa` engine acts on
-    /// it, and only for a display the agent *made* — a Mac's own panel does not
-    /// change density because someone connected to it. Every other engine
-    /// ignores it.
-    ///
-    /// It does not change how a client presents what it receives: a client always
-    /// lays the remote out at the remote's own point size and lets its host
-    /// rasterize that (see `RemoteGeometry` and `applyCanvasCss`). This asks the
-    /// remote to *have* the density that makes the result one pixel per pixel,
-    /// which is a saving, not a correctness fix — mismatched densities already
-    /// look right, they just cost four times the framebuffer or lose sharpness.
+    /// Only RXA uses this, and only to set the density of an agent-created
+    /// display. Mac-owned displays and other engines ignore it.
     HostScale { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
@@ -229,19 +124,8 @@ pub enum ClientMsg {
     /// wrong, which the viewer offers as Remote > Refresh; the SPA has no such
     /// command and never sends this.
     Refresh,
-    /// "I lost the tiles you told me to remember." Empties the server's slot table
-    /// and repaints, so the next tiles arrive as payloads rather than references.
-    ///
-    /// A client sends this when it cannot decode a tile it was told to cache, or
-    /// when a reference names a slot it does not hold. Both leave the two ends
-    /// disagreeing about what the client has, and **nothing else can repair it** —
-    /// which is why this exists instead of reusing [`ClientMsg::Refresh`]. A
-    /// `Refresh` is routed to the *engine* ([`crate::session`]); the outbound task
-    /// that owns the slot table never sees it, so the engine would repaint,
-    /// the repaint's tiles would still be believed cached, references would be sent
-    /// again, and the client would miss again — a livelock at full-repaint
-    /// bandwidth. This is handled by the socket's own bridge instead, which bumps
-    /// the table's epoch *and* asks the engine to repaint.
+    /// Clear this attachment's tile-cache table and repaint. Unlike
+    /// [`ClientMsg::Refresh`], this repairs disagreement about cache slots.
     CacheReset,
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
@@ -260,44 +144,14 @@ pub enum ClientMsg {
     /// alongside the automatic pushes: a browser attaching mid-session has
     /// missed every one of them. See docs/architecture.md.
     ClipboardRequest,
-    /// Share a different one of the remote's displays: the `id` of an entry from
-    /// the last [`ServerMsg::Displays`].
-    ///
-    /// Not the same kind of request as [`ClientMsg::Viewport`] above, and the
-    /// distinction is the whole reason both can exist: a remote's *resolution*
-    /// belongs to the machine running it, while *which of its screens to look
-    /// at* is only ever a question for the person looking. Only `rxa` can answer
-    /// it — RDP and VNC each deliver a single framebuffer spanning every remote
-    /// screen, with no way to ask for one of them — so those engines never send
-    /// a display list and a client with none shows no picker.
+    /// Share the display identified by the last [`ServerMsg::Displays`].
+    /// Currently supported only by RXA.
     SelectDisplay { id: u32 },
-    /// Start or stop sending this attachment's audio. Handled by the session layer,
-    /// never forwarded to an engine (see [`crate::session::SessionManager::set_audio`]).
-    ///
-    /// **Audio is opt-in for a reason beyond taste, and it is why
-    /// [`PROTOCOL_VERSION`] did not have to move for it.** The macOS viewer checks that
-    /// number for equality and ships separately, so a bump costs every installed copy a
-    /// reinstall. While the browser was the only sender, a viewer's socket carried
-    /// exactly the bytes it carried before audio existed — there was no new wire for it
-    /// to refuse — and when the viewer gained audio it only had to start sending this,
-    /// which is not a wire change either. Guacamole makes the same arrangement from the
-    /// other end: its client declares the audio mimetypes it can decode, and a client
-    /// that declares none gets a stream carrying nothing.
-    ///
-    /// Both clients send it from a control the user pressed — the SPA's floating menu,
-    /// the viewer's Remote menu — but only the browser *needs* that: the gesture is what
-    /// lets it create an `AudioContext` an autoplay policy will let play. Which is also
-    /// why the two differ on reconnect: the viewer re-sends this by itself, and the
-    /// browser waits to be asked again.
+    /// Start or stop audio delivery for this attachment.
     Audio { enabled: bool },
 }
 
 /// The layout of a server -> client binary frame: a **batch** of records.
-///
-/// One frame carries however many screen updates were ready at once, which is
-/// what a full repaint needs — at [`CELL_W`]×[`CELL_H`] a 1600×1000 desktop is
-/// 80 cells, and 80 WebSocket frames cost 80 client events and 80 separately
-/// scheduled decodes to paint one picture.
 ///
 /// ```text
 /// offset 0: u8  frame kind, always 0x02 (batch)
@@ -311,17 +165,7 @@ pub enum ClientMsg {
 /// 0x02 TILE_REF  u16 slot | u16 x | u16 y
 /// ```
 ///
-/// Why each of the header's four bytes earns its place:
-///
-/// - **kind `0x02`** retires the old `0x01` outright rather than extending it, so
-///   a client built against the single-tile frame rejects this as unknown and goes
-///   black instead of drawing garbage out of a misread header.
-/// - **flags** is one reserved byte, and receivers *reject* a non-zero value
-///   rather than ignoring it. Ignoring would make the byte useless later: a client
-///   that skips a flag it does not know cannot be told anything by it.
-/// - **record count**, even though records are self-delimiting and parsing could
-///   simply run to the end of the buffer. A truncated frame would then paint a
-///   silently short batch; with a count it is a detectable error.
+/// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
     pub const HEADER_LEN: usize = 4;
@@ -341,17 +185,7 @@ pub mod batch {
     /// slot at all.
     pub const NO_SLOT: u16 = 0xFFFF;
 
-    /// How many tile slots a client keeps.
-    ///
-    /// Part of the wire contract, not a server-side tuning knob: a client sizes
-    /// its cache by this, and a `slot` at or above it (other than [`NO_SLOT`]) is
-    /// a malformed record rather than something to grow an array for. That makes a
-    /// client's memory a function of the protocol instead of a function of what a
-    /// server chooses to send it.
-    ///
-    /// 256 because both clients cache *encoded* payloads, so the cost is bytes
-    /// received rather than pixels decoded — at the per-slot ceiling below, 8 MiB
-    /// worst case, and a small fraction of that in practice.
+    /// Number of encoded-payload cache slots in the wire contract.
     pub const SLOT_COUNT: u16 = 256;
 
     /// The largest payload worth a slot.
@@ -372,20 +206,8 @@ pub mod batch {
 /// offset 4: packets, each u16 length | length bytes  (little-endian throughout)
 /// ```
 ///
-/// Deliberately the same four-byte header as [`batch`], so a reader of one finds
-/// nothing surprising in the other, and for the same two reasons: a reserved flags
-/// byte a receiver *rejects* rather than ignores, and a count that makes a truncated
-/// frame detectable rather than a silently short one.
-///
-/// **Why lengths at all**, when a WebSocket message is already delimited: an Opus
-/// packet does not carry its own size, and one frame holds several. Nine or ten of
-/// them for the tested host's 32 KiB wave buffers — 20 ms each — which is what keeps
-/// this at ~5 frames a second instead of the 50 a packet-per-frame design would
-/// send.
-///
-/// Audio shares the desktop socket rather than getting one of its own, following
-/// Guacamole, and [`crate::wire`] is where that is made to cost as little as it can:
-/// an audio frame does not wait behind a batch still being built.
+/// Receivers reject nonzero flags. Packet lengths delimit multiple Opus packets
+/// within one WebSocket frame.
 pub mod audio {
     pub const FRAME_KIND: u8 = 0x03;
     pub const HEADER_LEN: usize = 4;
@@ -417,52 +239,11 @@ pub mod audio {
     }
 }
 
-/// The canonical tile grid, in framebuffer pixels.
-///
-/// Origin is pinned at (0,0) and these are compile-time constants: a grid derived
-/// from the desktop size would shift the meaning of every cell whenever the
-/// desktop resized, and cells are about to become cache identities.
-///
-/// **320×64 is measured, not guessed** — see `encode_cost_against_hash_cost`
-/// below. Covering one 3200×64 strip, sending cells instead of the whole strip
-/// costs 1.36× the bytes when every cell genuinely changed, and breaks even when
-/// about 70% of them did; so it wins in every case short of near-total change.
-/// The two obvious alternatives are worse for reasons worth recording, because
-/// both look free until measured:
-///
-/// - **Narrower** is expensive fast. 128 wide costs 2.01× on the same content and
-///   needs fewer than half its cells skippable to break even. An encoder pays a
-///   fixed per-stream cost and loses horizontal redundancy in every one of them.
-/// - **Shorter is not the cheap axis.** 3200×16 costs 1.56–2.57×, often worse than
-///   any narrowing, because filters predict from the row *above*: a short stream
-///   throws away vertical prediction exactly as a narrow one throws away
-///   horizontal. Neither axis is free.
-///
-/// Those ratios were measured with PNG, which is no longer the codec
-/// (`encode_webp`). They are left as they were because the *shape* of the
-/// argument is what chose 320, and WebP does not change it — it too pays a fixed
-/// per-stream cost, and `webp_cost_against_png_cost` measures that cost as the
-/// dominant term at small sizes rather than a marginal one. Re-deriving the exact
-/// break-even under WebP would only be worth it if the cell size were up for
-/// revision.
-///
-/// 20480 px also stays far clear of the agent's `MIN_LOSSY_PIXELS` (32×32), so its
-/// per-tile codec classifier still has enough pixels to judge.
-///
-/// # Where this does *not* apply
-///
-/// All of the above answers "if damage is split into cells, how big should a cell
-/// be". It says nothing about whether damage *should* be split into cells, and for
-/// the gateway's own engines the answer turned out to be no: RDP reports damage
-/// with a median area of 1295 pixels, 92% of it smaller than one cell, so snapping
-/// outward onto this grid cost 8.9× the bytes (see [`crate::tiles`] and
-/// `tests/rdp_bytes_probe.rs`). Those engines compare against a shadow copy of what
-/// the client holds instead, and this grid is left for damage that genuinely
-/// arrives coarse — the macOS agent's, which is reported in full-width strips of a
-/// 3200-pixel desktop.
+/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0). The
+/// fixed geometry gives the RXA agent stable change-detection and cache cells.
+/// Gateway RDP and VNC damage is not snapped to this grid.
 pub const CELL_W: u16 = 320;
-/// See [`CELL_W`]. Also the height a dirty rectangle is split at, which is what
-/// [`STRIP_ROWS`] used to mean on its own.
+/// See [`CELL_W`].
 pub const CELL_H: u16 = STRIP_ROWS;
 
 /// A dirty rectangle of the framebuffer, carried as one `TILE` record inside a
@@ -473,10 +254,8 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// the gateway relays those bytes untouched ([`Tile::encoded`]), choosing lossless
 /// or lossy per tile from the content.
 ///
-/// The `format` byte therefore has one valid value today. It is kept rather than
-/// dropped because it is the seam a second payload kind would arrive through —
-/// `docs/roadmap.md` puts H.264 next — and one byte per tile is not worth
-/// reclaiming and then re-adding.
+/// The `format` byte has one valid value and remains the extension point for
+/// another codec.
 #[derive(Debug, Clone)]
 pub struct Tile {
     /// Payload codec. Always [`Tile::FORMAT_WEBP`]; see the note above.
@@ -630,65 +409,8 @@ fn encode_cursor_png(w: u16, h: u16, rgba: &[u8]) -> anyhow::Result<Vec<u8>> {
 /// `VP8_ENC_ERROR_BAD_DIMENSION`.
 const WEBP_MAX_DIMENSION: u16 = 16383;
 
-/// The lossless effort libwebp is asked for, chosen by measurement.
-///
-/// `method` is its speed/size dial and `quality`, in lossless mode, is an effort
-/// dial rather than a fidelity one. Both are pinned at the cheap end because the
-/// extra compression above them did not pay for itself against the budget these
-/// encodes had — which was an engine's own protocol-read loop:
-///
-/// Bytes against `png::Compression::Fast`, from `webp_cost_against_png_cost` on two
-/// real screenshots — one a working window, one a desktop mostly covered by a
-/// photographic wallpaper. Content matters more than shape does:
-///
-/// | config | UI window | photo wallpaper | time vs PNG-Fast |
-/// |---|---|---|---|
-/// | `m0 q20` | **0.64-0.81x** | 0.83-0.88x | 5-34x |
-/// | `m2 q50` | 0.53-0.73x | 0.66-0.77x | 19-72x |
-///
-/// So the swap buys 19-36% of tile bytes on the content the RDP and VNC engines
-/// mostly carry, and rather less on a photograph — which is the right way round,
-/// since a photograph is what the macOS agent's classifier sends down its lossy
-/// branch instead. The 27-47% on offer at `m2` costs an order of magnitude more
-/// time: 3.1ms for one 320x64 cell.
-///
-/// **One half of that trade changed, and it is not the half that matters.** 3.1ms was
-/// ruled out because it was 3.1ms an engine's protocol-read loop had to stand still
-/// for, and it no longer runs there — [`crate::encode`] moved these encodes onto a
-/// bounded set of workers. But relocating a cost is not removing one: `m2` is still
-/// 7.7x the CPU per encode, `ENCODE_DEPTH` can only overlap that up to the core
-/// count, and on the widest bands it would make a repaint *slower* rather than
-/// faster. So this is not the lever for a screen with a large moving area, which is
-/// the case anyone arrives here wanting to fix.
-///
-/// Where it does pay is the small end, per the note below: nearly free under roughly
-/// 512 pixels, which is most of what the gateway's engines actually send. That makes
-/// a **size-tiered** effort the shape of any future change here, not a new constant.
-///
-/// Two things to get right when reading the numbers above. The size gain's baseline is
-/// the row above and not PNG: against the `m0 q20` that ships, `m2 q50` is about
-/// 10-20% fewer bytes (0.53-0.73x against 0.64-0.81x), where the 27-47% figure is
-/// against PNG-Fast, a codec this tree no longer has. And the effort costs no fidelity
-/// whatever — `quality` is an effort dial here, the mode is still lossless — which is
-/// what distinguishes it from reaching for the lossy branch to save the same bytes.
-///
-/// Two things the same tables say, for whoever revisits this:
-///
-/// - **The cost is mostly fixed per encode, not per pixel.** A 16x16 tile costs
-///   60µs and a 320x64 one — 80x the pixels — costs 402µs. That is what makes the
-///   *ratio* worst on small rectangles even though their absolute cost is trivial,
-///   and it is a second reason the gateway does not snap damage onto a grid (see
-///   [`CELL_W`]).
-/// - **Higher effort is nearly free at the smallest sizes**, for that same reason:
-///   at 16x16, `m2 q50` costs 87µs against `m0 q20`'s 60µs and gives 0.53x rather
-///   than 0.76x. The crossover is sharp — by 64x20 the same swap costs 3.5x the
-///   time for 7% more compression — so a size-tiered effort is a real but *bounded*
-///   win, worth having only below roughly 512 pixels. Left out of this change so the
-///   codec swap can be validated on its own.
-///
-/// Timings are from an arm64 Mac. The x86-64 host the gateway is deployed to came
-/// out faster in every ratio (5.4x rather than 6.8x at 320x64), with byte counts
-/// identical, as they must be.
+/// Low-cost libwebp lossless settings. In lossless mode `quality` is an effort
+/// control, not a fidelity control; higher effort did not justify its CPU cost.
 const WEBP_LOSSLESS_METHOD: i32 = 0;
 const WEBP_LOSSLESS_EFFORT: f32 = 20.0;
 
@@ -797,22 +519,9 @@ pub enum ServerMsg {
     /// to an idle slot, on disconnect ("switch target"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
     Picker,
-    /// A target session is live: show the desktop. Sent on attach to a running
-    /// engine and right after a [`ClientMsg::Connect`]. `name` is the target
-    /// profile the session is bound to; `protocol` (`"rdp"`/`"vnc"`/`"rxa"`) and
-    /// `resize` let the browser choose its resize behaviour — VNC resizes
-    /// automatically with the viewport, RDP only on the user's request (the
-    /// floating menu's "Resize to window"). For `rxa` these two settle only half
-    /// of it: `resize` is the target's permission, and whether the control
-    /// actually appears also depends on the display being shared being one the
-    /// agent made, which arrives later in [`ServerMsg::Displays`]. `clipboard` says whether this
-    /// target opted into the clipboard bridge, which is what enables the
-    /// floating menu's Clipboard button.
-    ///
-    /// `audio` is the same kind of permission: it says this session *can* carry the
-    /// remote's sound, so a browser may ask for it with [`ClientMsg::Audio`] (see
-    /// docs/remote-audio.md). It does not mean any is playing, or that the remote's
-    /// audio channel is even up — from this end those are indistinguishable.
+    /// A live target and its client-visible capabilities. RXA resize also
+    /// depends on whether [`ServerMsg::Displays`] marks the active display as
+    /// agent-created. `audio` reports capability, not whether sound is arriving.
     Connected {
         name: String,
         protocol: &'static str,
@@ -857,16 +566,8 @@ pub enum ServerMsg {
         /// [`MAX_CLIPBOARD_BYTES`] — see [`ClipboardSnapshot::oversized_bytes`].
         oversized_bytes: Option<u64>,
     },
-    /// How to decode the audio frames that follow, sent once when a client's
-    /// [`ClientMsg::Audio`] subscription starts — and *before* the first packet,
-    /// because a decoder cannot be configured by the audio it is meant to decode.
-    ///
-    /// `sample_rate` and `channels` are the *stream's*, which is 48 kHz whatever
-    /// rate the remote negotiated: libopus encodes at 48 kHz and nothing else.
-    /// `head` is `OpusHead` (RFC 7845 §5.1) — base64 on the wire, and exactly the
-    /// byte string WebCodecs wants as an `AudioDecoderConfig.description`. It is
-    /// what carries the encoder's pre-skip, so a decoder discards its own delay
-    /// instead of playing it as leading silence.
+    /// Audio decoder configuration, sent before the first packet. `head` is the
+    /// RFC 7845 `OpusHead`; the stream rate is 48 kHz regardless of remote PCM.
     AudioFormat {
         codec: &'static str,
         sample_rate: u32,

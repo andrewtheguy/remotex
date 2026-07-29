@@ -1,17 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Puts the remote surface in a scroll view and keeps it in step with the model.
+/// Hosts the point-sized remote surface in a scrolling AppKit view.
 ///
-/// The scroll view is what handles a remote larger than the window: the desktop
-/// is shown at its own size and scrolls, rather than being scaled down to fit.
-///
-/// It sits *inside* the safe area, deliberately. Spanning the window instead put
-/// 40pt of black scroll-view background behind the title bar, which reads as part
-/// of the picture and is not: a title bar drags the window and hands the content
-/// nothing, so clicks aimed at a guest's menu bar landed in it. What cannot be
-/// given back in a window can be in full screen, which is what `hidesToolbar`
-/// below is for.
+/// Content stays inside the safe area so title-bar chrome is never mistaken for
+/// clickable remote pixels. Oversized desktops scroll instead of scaling to fit.
 struct RemoteSurfaceHost: NSViewRepresentable {
     let model: AppModel
     /// Passed in rather than read off the model inside `updateNSView`, so the
@@ -107,19 +100,8 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             // and Command chords have to reach the remote.
             keyboard = KeyboardCapture(model: model, surface: surface)
 
-            // One signal for "the room changed", and it is the layout itself.
-            //
-            // Frame notifications were watched here before and are not enough. AppKit
-            // applies the window's title bar as a top `contentInset` partway through
-            // the first layout: with no `NSScroller` left in the view tree for that
-            // inset to move, no frame changes and nothing posts — and the first
-            // viewport report would keep carrying the title bar, which is a Linux
-            // guest's taskbar below the fold for the rest of the session. `tile` runs
-            // for the inset, for every window resize, and for a scrollbar appearing.
-            //
-            // A window-only resize also changes no *observed* state, so SwiftUI never
-            // runs `updateNSView`, and the document would keep a size measured
-            // against the old window — which is the other half of why this exists.
+            // `tile` observes content insets, window resizing, and scroller changes
+            // that frame notifications and SwiftUI state do not reliably expose.
             scrollView.onTile = { [weak self, weak surface] in
                 guard let surface else {
                     return
@@ -139,13 +121,7 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             model.hostScaleReader = { [weak surface] in
                 surface?.window?.backingScaleFactor ?? 1
             }
-            // Deliberately nothing for the window changing display. Every point
-            // size here is the remote's own, so a host scale change has no geometry
-            // to re-derive — the layer resamples the same desktop for whichever
-            // screen the window is on (see `FramebufferView`). It was not always so:
-            // while the desktop was laid out in the host's device pixels, a move to
-            // a Retina display doubled it inside a document that never grew, and the
-            // overflow was not even scrollable.
+            // Host display changes affect layer rasterization, not remote geometry.
             report(from: surface)
         }
 
@@ -160,15 +136,8 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             model.reportViewport(measured)
         }
 
-        /// Size the document to the remote, lay the scrollbars out around it, and
-        /// report the room that is left.
-        ///
-        /// Re-entrant by nature and guarded once, here: this is called *from* the
-        /// scroll view's layout, and it re-tiles at the end because the document's
-        /// size is the other thing the scrollbars depend on. Without that tile a
-        /// desktop that arrived larger than the window got no scrollbar until the
-        /// window was resized by hand — a `resize` message changes the document and
-        /// nothing else, and AppKit does not lay the scroll view out for it.
+        /// Size the document, retile scrollbars, and report remaining room. Guard
+        /// re-entry because this is also called from scroll-view layout.
         func apply(remoteSize: DisplayMode?, guestScale: CGFloat) {
             guard let surface, !isLayingOut else {
                 return
@@ -257,16 +226,7 @@ struct RemoteSurfaceHost: NSViewRepresentable {
             surface?.isViewOnly = isViewOnly
         }
 
-        /// Show or hide the window's toolbar.
-        ///
-        /// Re-applied on every SwiftUI update rather than set once, because the
-        /// toolbar is SwiftUI's and it rebuilds one whenever the commands or the
-        /// scene change — a visibility this app set on the previous one is not
-        /// carried over. Setting it to what it already is costs nothing.
-        ///
-        /// The controls it holds are not lost with it: View Only and Clipboard are
-        /// both on the Remote menu, which is why they can be taken off screen
-        /// without taking them away.
+        /// Reapply toolbar visibility because SwiftUI may replace the toolbar.
         func apply(hidesToolbar: Bool) {
             guard let toolbar = scrollView?.window?.toolbar else {
                 return

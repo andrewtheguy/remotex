@@ -1,80 +1,9 @@
-//! `remotex-agent` — the macOS screen-sharing agent remotex dials over `rxa`.
+//! macOS RXA agent entry point.
 //!
-//! remotex reaches a Mac today over Apple's Screen Sharing (VNC), which drops
-//! and then demands a fresh login on every reconnect — the credential prompt
-//! belongs to Apple's server, so there is nothing to fix on remotex's side of
-//! the RFB connection. This agent replaces that hop: a keypair on each end, a
-//! two-message Noise handshake, and no human in a reconnect ever. See
-//! `docs/mac-agent-architecture.md`.
-//!
-//! ## Installing is dragging it in and opening it
-//!
-//! There is no install script. On first launch the agent
-//!
-//! 1. writes `~/Library/Application Support/remotex-agent/config.toml` with a
-//!    freshly minted keypair, if it is not already there, and
-//! 2. registers itself with `SMAppService` (see [`loginitem`]), which puts it in
-//!    **System Settings → General → Login Items** and starts it at every login.
-//!
-//! Uninstalling is switching **Start at Login** off in the menu and moving the
-//! bundle to the Trash. Trashing it without that leaves a dangling Login Items
-//! entry.
-//!
-//! ## Everything happens in the menu bar
-//!
-//! There are no windows, but there is a status item (see [`menubar`]), and it is
-//! the entire interface: whether a gateway is connected, this Mac's public key
-//! and the gateway's, the listen address, which display is shared, the config
-//! file, the log, the two Privacy panes, the login item, and Quit. Anything the
-//! agent can be asked to do is done there.
-//!
-//! The flags below are launch modes, plus the two that read and write this Mac's
-//! identity. No *operation* has a flag: a permission read from a terminal is the
-//! *terminal's* permission (see [`report_permissions`]).
-//!
-//! The identity flags are not exceptions to that so much as the thing the rule
-//! was about, which is a *secret* in somebody's shell history. `--public-key`
-//! prints the half that is not a secret. `--import-private-key` takes one that
-//! is — from stdin, never an argument, so it reaches neither the history nor
-//! `ps`. The private key is still never printed, by anything.
-//!
-//! ## Two permissions
-//!
-//! - **Screen Recording**, for `SCStream` (see [`capture`]).
-//! - **Accessibility**, for `CGEventPost` (see [`input`]).
-//!
-//! Both are one-time grants in System Settings → Privacy & Security, both are
-//! attached to this bundle's signed identity, and macOS provides no way to grant
-//! them programmatically. Neither is optional, so neither is a setting: the menu
-//! bar treats them as health, warns in its icon and links to the missing one (see
-//! [`menubar`]). Accessibility is the one that bites — without it the screen
-//! paints, the session looks perfectly healthy, and every click and keystroke is
-//! silently discarded.
-//!
-//! Both also require the capture process to live in a GUI session, which is why
-//! the embedded plist is a LaunchAgent and not a LaunchDaemon. The current
-//! per-user `SMAppService` registration runs only in the user's Aqua session. A
-//! system-installed LaunchAgent could also target `LoginWindow`, but this app
-//! does not install that privileged system-wide mode (see `docs/roadmap.md`).
-//!
-//! ## Threading
-//!
-//! AppKit is main-thread-only, and both the menu bar and reading the pointer
-//! shape through `NSCursor` are AppKit — so the **main thread runs the
-//! `NSApplication` run loop** (see [`menubar`]), polling the cursor into a cache
-//! from a timer on it, while the tokio runtime serving the socket runs on a
-//! thread of its own. Sessions only ever read that cache. ScreenCaptureKit needs
-//! no run loop; it delivers frames on its own dispatch queues.
-//!
-//! ## One gateway at a time
-//!
-//! A newly *authenticated* connection evicts the previous one, matching
-//! remotex's single-session model (see CLAUDE.md): multi-session is permanently
-//! out of scope, and a browser that force-claims the gateway's session slot
-//! should not find itself queued behind a stale agent connection.
-//!
-//! Authenticated is the load-bearing word — see [`serve`]. Anything that cannot
-//! complete the handshake is refused without the running session noticing.
+//! AppKit and cursor reads stay on the main thread while the socket runtime and
+//! ScreenCaptureKit callbacks run elsewhere. The menu-bar app requires Screen
+//! Recording and Accessibility, persists one keypair, and serves one
+//! authenticated gateway connection at a time.
 
 // A bare `#![cfg(target_os = "macos")]` would compile the crate away to
 // nothing on Linux and fail at link time with "main function not found",
@@ -218,23 +147,8 @@ fn main() -> anyhow::Result<()> {
         print_first_run(&path, &config.public_key());
     }
 
-    // Bound on the main thread, and early — because "the port is taken" is the
-    // one startup failure a user actually meets, and it has to be answerable on
-    // screen. It happens whenever the app is opened while a copy is already
-    // running, which is the normal way to go looking for the menu bar item.
-    // Binding on the network thread instead left that thread calling `exit(0)`
-    // from under a main thread that had not put up a menu yet: the app bounced
-    // and vanished, and the only way to find out why was to run the binary in a
-    // terminal.
-    //
-    // After the login-item registration above, though, and deliberately: opening
-    // a freshly copied bundle while the old one still runs is how a stale launchd
-    // record gets repaired (see packaging/macos/README.md), and that has to keep
-    // working. Before `report_permissions`, equally deliberately: a duplicate
-    // launch has no business raising a TCC prompt.
-    // Infallible after the load above validated it, the same way `psk_bytes` is —
-    // and `?` here would be one more way for a launch to end with nothing on
-    // screen, which is the thing this whole block exists to stop.
+    // Bind on the main thread after login-item repair but before TCC prompts, so
+    // an existing instance produces a visible error without prompting.
     let addr = config
         .socket_addr()
         .expect("listen validated in Config::validate");
@@ -308,15 +222,8 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // A display of our own, if the config asks for one. Created here, on the
-    // main thread and before any session exists, because a display that came and
-    // went with each connection would rearrange the windows on it every time
-    // (see `crate::virtualdisplay`). Held for the life of the process: dropping
-    // it is what removes the display.
-    //
-    // A failure costs the extra display and nothing else: the Mac's own screens
-    // are still there to share, and a client that wanted the private one will
-    // simply not find it in the list.
+    // The optional display is process-owned and must outlive every session.
+    // Failure leaves the Mac's physical displays available.
     let virtual_display = config
         .virtual_display
         .then(|| match config.virtual_display_initial_points() {
@@ -329,29 +236,11 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .flatten();
-    // A display appearing at the global origin takes the pointer with it: the Mac's
-    // own screen moves aside to make room, so a pointer nobody touched ends up
-    // inside the new display's rectangle and vanishes from the screen the person is
-    // actually looking at. Measured on a redeploy — the agent came up and the
-    // pointer was on the new display before any client had connected.
-    //
-    // Same recovery as the end of a session, and it has to be here as well as
-    // there: this one happens with nobody connected, so no session teardown will
-    // ever come along to fix it.
+    // Restore the pointer if macOS moved it onto the newly created display.
     if let Some(display) = virtual_display.as_ref() {
         input::PointerHome::for_new_display(display.id()).restore();
     }
-    // Creating the display does not select it. It is an *additional* screen —
-    // that is the whole of what `CGVirtualDisplay` does — so it joins the list a
-    // client picks from rather than replacing what the Mac already has. Every
-    // session starts on the main display; the choice after that is the viewer's.
-    //
-    // Which does not mean the Mac's own screen keeps that role. macOS places the
-    // new display, and on the test VM it placed it at the global origin — making it
-    // the main display and pushing the Mac's own screen to its left. Where it lands
-    // is the user's to change in System Settings > Displays, so nothing here moves
-    // it; what the agent does own is not *stranding the pointer* on it, which is
-    // `input::PointerHome` (see `session::pump`).
+    // Creation adds a selectable display; it does not select or arrange it.
     let owned = virtual_display
         .as_ref()
         .map(|display| capture::Target::Owned {
@@ -462,31 +351,8 @@ fn startup_error(
     error
 }
 
-/// Restart the agent to run under a config that has just changed, by asking
-/// launchd to restart its job.
-///
-/// launchd does it, rather than this process doing it to itself. `exec` was the
-/// obvious way and is the wrong one for an app with a menu bar item: the process
-/// keeps the window server connection, the application identity and the Mach
-/// ports the *old* image registered, and the new image's AppKit comes up on top of
-/// them only half working. Measured on the test VM, with the status item forced
-/// visible (see [`menubar::run`]): the icon drew as an empty pill whose menu would
-/// not open, so the agent had saved the setting and could no longer be quit at
-/// all. The same build restarted by launchd comes up clean every time.
-///
-/// Not "spawn a copy and exit" either, which loses a race with its own listener:
-/// the new process binds before this one has let the port go, finds it in use, and
-/// exits cleanly (see [`serve`]), leaving nothing running. launchd has no such
-/// race — it takes this instance down and then starts the next one.
-///
-/// The PID changes now, which nothing depended on; the launchd job and the code
-/// identity the two TCC grants are keyed to are exactly what is preserved. The
-/// gateway sees a dropped connection and reconnects, which it is already built to
-/// do.
-///
-/// Only returns if the restart could not be asked for at all — an agent that is
-/// not registered as a login item has no job to kick — in which case nothing has
-/// changed but the config file, and the caller says so on screen.
+/// Restart the login-item job after a config change. launchd avoids AppKit state
+/// surviving an `exec` and listener races between parent and replacement.
 fn restart() -> anyhow::Error {
     let service = format!("gui/{}/{}", uid(), loginitem::LABEL);
     info!("restarting through launchd: {service}");
@@ -508,40 +374,8 @@ fn restart() -> anyhow::Error {
     }
 }
 
-/// Unless this process *is* the LaunchAgent job, start that job from this bundle
-/// and let the caller exit. Returns whether it did.
-///
-/// One instance of this agent is the right number, and the LaunchAgent job is
-/// which one: it is the copy that survives a logout, that the menu's Quit and a
-/// settings save both restart, and that TCC's grants were issued to. So an
-/// `open` is not a second agent — it is a request that the job be running, from
-/// the bundle that was just opened.
-///
-/// The collision this ends is `open` on a bundle whose job is **registered but
-/// not running** — a fresh install, and every upgrade done the documented way,
-/// which quits the agent first. The opened copy registers the login item, that
-/// registration bootstraps the job, launchd starts it, and now two processes are
-/// starting at once with one port between them. Whichever lost used to park a
-/// modal alert nobody was going to click; on the test VM that left a zombie
-/// process behind every single deploy. Deferring *before* the bind, rather than
-/// reacting after losing it, means there is no race to lose.
-///
-/// The other half of the same problem is not a collision and cannot be fixed
-/// here: opening a new bundle while the old agent still runs launches nothing at
-/// all, because macOS activates the running app instead — so the upgrade quietly
-/// does not happen. That one is answered in the README, by quitting first.
-///
-/// It does mean opening the app restarts a running agent, dropping a session in
-/// progress. That is the trade a settings save already makes and the gateway
-/// already reconnects from; the alternative is an upgrade that cannot take effect
-/// without a logout.
-///
-/// A job that is loaded but not yet running still counts — on a fresh install
-/// that is exactly the state a few milliseconds after registering, and leaving it
-/// to start on its own is how the collision happened. What does not count is a
-/// pid that is ours: then we are the job, and kickstarting would be this process
-/// restarting itself forever. Nor does a `print` that fails, which means no job —
-/// an unregistered or hand-built copy, which should simply serve.
+/// Hand execution to the registered LaunchAgent unless this process is already
+/// that job. This keeps one TCC-authorized instance and avoids bind races.
 fn hand_over_to_launchd() -> bool {
     let service = format!("gui/{}/{}", uid(), loginitem::LABEL);
     let Ok(printed) = std::process::Command::new("/bin/launchctl")
@@ -579,16 +413,7 @@ fn uid() -> u32 {
     unsafe { getuid() }
 }
 
-/// Log to stderr on a terminal, and to a bounded set of files rooted at
-/// `~/Library/Logs/remotex-agent.log` otherwise.
-///
-/// launchd does not expand `~`, so the embedded plist cannot name a per-user log
-/// path and sets no `StandardErrorPath` at all — output would go nowhere. The
-/// agent redirects its own logging instead, which also keeps a hand-run agent
-/// printing to the terminal where you expect it.
-///
-/// Returns the file it chose, if any, so the menu bar can offer to open it —
-/// and, on a terminal, correctly offers nothing.
+/// Log to stderr when interactive, otherwise to bounded per-user files.
 fn init_logging() -> Option<PathBuf> {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
@@ -625,25 +450,8 @@ fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
 /// connect-and-hello 10 seconds, so nothing legitimate is near this.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Accept gateway connections, one at a time.
-///
-/// Takes an already-bound listener: binding is the main thread's job, so a port
-/// that is already taken can be reported on screen rather than from this thread
-/// (see `main`).
-///
-/// ## Only an authenticated peer takes the slot
-///
-/// There is one session slot and a new gateway evicts whoever is in it — but the
-/// eviction happens when a connection *finishes its handshake*, not when it is
-/// accepted. Evicting at accept meant anything that could reach this port could
-/// end a live session by opening a socket, without holding a key or saying a
-/// word: a port scanner, a stale gateway, a mistyped host in someone else's
-/// config. Now a peer that cannot prove it is the paired gateway is refused
-/// without the running session ever noticing.
-///
-/// Handshakes therefore run in their own tasks and report back over a channel,
-/// rather than inline: one peer that connects and stays silent must not hold up
-/// the accept loop, which is why [`HANDSHAKE_TIMEOUT`] exists too.
+/// Accept gateway connections. Handshakes run concurrently, and only an
+/// authenticated peer evicts the current single session.
 /// This Mac's identity and the one gateway it answers.
 ///
 /// `gateway_public` is `None` while the agent is unpaired — a first launch, or a
@@ -751,26 +559,9 @@ async fn serve(
     }
 }
 
-/// Ask for both TCC grants at startup, and report where they stand.
-///
-/// Asking matters, and not only for politeness. Neither grant can be requested
-/// implicitly by using the API:
-///
-/// - `SCShareableContent::get` does not prompt. It fails with "the user
-///   declined TCCs", which reads like a refusal but also happens when the
-///   question was never asked — and until it *is* asked, the agent does not
-///   appear in the Screen Recording list at all, so there is nothing for the
-///   user to switch on. `CGRequestScreenCaptureAccess` is what puts it there.
-/// - `CGEventPost` never fails. Without Accessibility it silently does nothing,
-///   so the screen paints, the session looks perfectly healthy, and every click
-///   and keystroke vanishes.
-///
-/// macOS remembers the answer, so a granted (or firmly refused) permission does
-/// not re-prompt on later launches. The menu bar keeps missing grants visible and
-/// links to their System Settings panes without showing a second dialog.
-///
-/// Returns whether Screen Recording was already granted before requesting it.
-/// A grant made by the request belongs to a newly launched process.
+/// Request both TCC grants and return whether Screen Recording was already
+/// effective at launch. Screen capture must be requested explicitly;
+/// unauthorized input injection fails silently.
 fn report_permissions() -> bool {
     let screen_recording_at_launch = capture::screen_recording_granted();
     if screen_recording_at_launch {
@@ -798,22 +589,7 @@ fn report_permissions() -> bool {
     screen_recording_at_launch
 }
 
-/// Read the key `--import-private-key` imports.
-///
-/// From stdin and nowhere else. As an argument it would be in the shell's
-/// history and visible in `ps` to every user on the machine; this way
-/// `pbpaste | … --import-private-key` or a redirect from a file leaves neither
-/// trace.
-///
-/// The whole of stdin, not a line: a key pasted into a terminal, piped from
-/// `pbpaste`, or read from a file that ends without a newline all have to work,
-/// and none of them is distinguishable here.
-///
-/// Returns the key alone. Every one of those ways of supplying it brings its own
-/// whitespace — a pipe from `pbpaste` most often a trailing newline — and
-/// `config::import_private_key` trims again before it uses one, so this is not
-/// what keeps a newline out of the config file. It is so that what this function
-/// returns is a key, which is what its name promises.
+/// Read an imported private key from stdin so it never appears in argv.
 fn read_private_key_from_stdin() -> anyhow::Result<String> {
     use anyhow::Context as _;
     use std::io::Read as _;

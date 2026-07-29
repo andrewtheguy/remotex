@@ -76,7 +76,7 @@ REMOTEX_PLAYWRIGHT_MAC_SSH='<ssh-user>@<mac-host>' \
 npx playwright test
 ```
 
-That runs both specs. `npm run test:clipboard` and `npm run test:oversized` run
+That runs all specs. `npm run test:clipboard` and `npm run test:oversized` run
 one each; their filters are anchored (`'/clipboard\.spec\.ts$'`) because a
 positional argument is a regex matched against the whole path, and the bare name
 `clipboard.spec.ts` also matches `oversized-clipboard.spec.ts`.

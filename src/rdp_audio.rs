@@ -1,72 +1,9 @@
-//! The MS-RDPEA half of remote audio: advertise one PCM format, and forward every
-//! redirected wave buffer into the session's [`AudioBridge`].
+//! FreeRDP audio redirection into the bounded PCM bridge.
 //!
-//! ## Two transports, and why both are registered
-//!
-//! MS-RDPEA carries audio over either of two channels, and **which one is the
-//! server's choice, not ours**:
-//!
-//! - the *static* virtual channel `rdpsnd`, driven by IronRDP's own [`Rdpsnd`]
-//!   processor with [`Handler`] as its sink; and
-//! - the *dynamic* virtual channel `AUDIO_PLAYBACK_DVC`, which IronRDP does not
-//!   implement at all — [`AudioPlaybackDvc`] here is that half.
-//!
-//! Registering only the static one is how this started, and it produced a
-//! perfectly silent session against a live Windows 11 host: the server accepted
-//! the `rdpsnd` channel and never sent a byte on it. The cause turned out not to
-//! be the transport at all — it was the missing `rdpdr` channel, without which
-//! that host redirects audio over *neither* transport (see the `Rdpdr`
-//! registration in [`crate::rdp`]). With `rdpdr` advertised the same host
-//! redirects over the static channel; FreeRDP, which advertises `rdpsnd` both
-//! statically and dynamically, is served the dynamic one instead. So the choice
-//! really is the server's, and both halves stay registered:
-//! [`AudioBridge::claim_transport`] settles which one is feeding the queue.
-//!
-//! What made this expensive to find is worth keeping in mind for the next
-//! channel: from this end "the channel is open and quiet" is indistinguishable
-//! from "the remote is not playing anything", and no amount of gateway logging
-//! closes that gap. What closed it was reading another client's source.
-//!
-//! That is also why a server may offer a *compressed* format even though this
-//! asks for PCM: a Windows host given the choice picks AAC. Asking for one PCM
-//! format is what keeps the encoder free to re-encode without decoding first — and,
-//! since the one format is known up front, what lets a subscription describe the
-//! stream to a decoder before this negotiation has happened at all
-//! ([`crate::protocol::ServerMsg::AudioFormat`]).
-//!
-//! ## Why the handler answers nothing
-//!
-//! The same reason as [`crate::rdp_clipboard`]: IronRDP drives both of these from
-//! inside `ActiveStage::process`, on the loop that reads the remote's PDUs. So
-//! nothing here may block. On the static channel `Rdpsnd` runs the whole
-//! conversation, including the wave confirmation after every buffer; on the
-//! dynamic channel [`AudioPlaybackDvc`] runs the same conversation itself, because
-//! there is no library code for it. Either way a confirmation means the buffer was
-//! accepted or deliberately dropped, never that a browser's speakers played it.
-//!
-//! ## Why exactly one advertised format
-//!
-//! Two reasons, and the second is the one that would bite.
-//!
-//! PCM is the format both ends of MS-RDPEA are required to support, so it is the
-//! only one that does not make this depend on what a particular Windows version
-//! happens to offer.
-//!
-//! And a wave buffer names its format by *index* into the list the **client**
-//! advertised. `Rdpsnd::client_formats` builds that list as the intersection of
-//! ours and the server's, collected through a `HashSet` whose order is not
-//! defined, and `Rdpsnd::get_format` then resolves an index against the *server's*
-//! list instead — two different orderings for one index. With one advertised
-//! format the intersection holds at most one entry, so the index can only mean
-//! that entry and none of the ambiguity is reachable. A second format would make
-//! the format of any given buffer a guess.
-//!
-//! The cost is that a server which does not offer this exact format redirects
-//! nothing: the negotiated set is empty and no buffer ever arrives. That is
-//! diagnosable in one run — the "negotiated" line from
-//! [`AudioBridge::publish_format`] appears and the first-buffer line never does.
-//!
-//! [`Rdpsnd`]: ironrdp::rdpsnd::client::Rdpsnd
+//! Register both static `rdpsnd` and dynamic `AUDIO_PLAYBACK_DVC`; the server
+//! chooses between them, and the static form also depends on `rdpdr` registered
+//! by the session. Callbacks advertise one PCM format and only copy complete
+//! buffers, keeping resampling and Opus encoding off the RDP read loop.
 
 use std::sync::Arc;
 

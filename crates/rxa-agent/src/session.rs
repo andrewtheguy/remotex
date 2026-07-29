@@ -1,42 +1,12 @@
-//! One gateway connection, from handshake to hangup.
-//!
-//! ## The pipeline
+//! One authenticated gateway connection and its capture pipeline.
 //!
 //! ```text
-//! SCStream callback ──▶ raw tile channel ──▶ encoder thread ──▶ out channel ──▶ pump ──▶ socket
-//!   (dispatch queue)      (bounded, sync)     (std::thread)      (bounded)      (tokio)
-//!                                              └─ ENCODE_WIDTH cells at once
+//! SCStream callback -> bounded raw frames -> encoder thread -> bounded output -> socket
 //! ```
 //!
-//! Three deliberate choices in that chain:
-//!
-//! - **The capture callback never encodes and never blocks.** It extracts the
-//!   dirty pixels and hands them on. Blocking ScreenCaptureKit's dispatch queue
-//!   stalls capture itself.
-//! - **Both channels are bounded, and a full raw channel coalesces.** Rather
-//!   than queueing frames the link cannot carry, the sink drops the frame and
-//!   sets the full-repaint flag, so falling behind becomes one later, coarser
-//!   repaint. An unbounded queue would grow for as long as the browser is slow
-//!   and then deliver a flood of stale tiles.
-//! - **Cells of one frame encode in parallel; a frame is never split across two.**
-//!   Order is correctness here rather than tidiness: the same region *is* commonly
-//!   dirty in consecutive frames, tiles overwrite their rectangles with no delta
-//!   state, and an older tile landing on top of a newer one leaves stale pixels on
-//!   screen until something else redraws them.
-//!
-//!   What makes that free is the *shape of the channel*: the callback hands over a
-//!   whole frame at once, so [`encode_batch`] can compress a batch's cells
-//!   concurrently and still collect them by index — output order is input order by
-//!   construction, and two frames cannot interleave because a batch is finished
-//!   before the next is received. The gateway needs a FIFO of `JoinHandle`s for the
-//!   same guarantee (`src/encode.rs`) only because its bands trickle out of a
-//!   protocol-read loop one at a time.
-//!
-//!   The parallelism is worth having because a *full* repaint is not the dozen cells
-//!   typical damage is: a Retina 1600x1000 desktop is 3200x2000 captured, which is
-//!   320 cells of the 320x64 grid and over a tenth of a second of encoding. Every
-//!   attach, Refresh, display switch and capture restart pays it — and so does a
-//!   coalesced frame, which is the shape that can feed itself.
+//! Capture callbacks never block or encode. A full raw queue drops the frame and
+//! requests a later full repaint. Cells within a frame encode concurrently but
+//! retain input order, and one frame finishes before the next begins.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,91 +36,17 @@ const RAW_BACKLOG: usize = 2;
 /// Encoded tiles buffered between the encoder and the socket.
 const OUT_BACKLOG: usize = 64;
 
-/// Cells of one frame compressed at once.
-///
-/// The only parallelism dial, and it bounds in-flight work rather than describing a
-/// pool: [`encode_batch`] keeps this many encodes running, collects the oldest, and
-/// forwards it before starting another. So a 320-cell repaint never spawns 320 tasks,
-/// and the first tile still reaches the pump as soon as it is encoded rather than
-/// after the whole frame — which is what keeps back-pressure and the coalescing above
-/// behaving as they did when this was one cell at a time.
-///
-/// **8 is measured, not guessed**, on a 12-core (8 performance) arm64 Mac. First
-/// `encode_width_sweep` below, over a 3200x2000 full repaint's 320 cells, medians of
-/// three runs:
-///
-/// | width | flat UI wall | its CPU | photographic wall | its CPU |
-/// |---|---|---|---|---|
-/// | 1 | 35.5 ms | 33.7 ms | 380 ms | 377 ms |
-/// | 2 | 18.8 ms | 35.7 ms | 198 ms | 390 ms |
-/// | 4 | 10.1 ms | 36.5 ms | 99 ms | 390 ms |
-/// | 8 | **6.3 ms** | 41.3 ms | **51 ms** | 398 ms |
-/// | 12 | 6.0 ms | 42–49 ms | 44 ms | 448 ms |
-///
-/// The CPU column is why this stops at 8 rather than going wider, and it is also what
-/// answers the objection that the agent should be modest because it shares its cores
-/// with the desktop it is capturing. Up to 8, total CPU barely moves — the same work
-/// finishes in a shorter, wider burst, which is *better* for that desktop than pinning
-/// one core for 380 ms while the frame pipeline backs up behind it. At 12 the wall clock
-/// stops improving and the CPU does not: 19% more of it for 15% less time in the
-/// photographic case, and for nothing at all in the flat one.
-///
-/// Then live, under `tests/rxa_repaint_probe.rs` against a real agent — which is where
-/// the number that mattered was, because a synthetic sweep cannot say whether the *link*
-/// was the constraint all along. A macOS 26.x guest under Apple Virtualization sharing
-/// the agent's own private 2x display at 3200x2000; 26s of streaming under a refresh
-/// every 250 ms; width 1 once, width 8 twice and identical:
-///
-/// | width | frames | frames/s | tiles/frame | encode ÷ waiting | stalled |
-/// |---|---|---|---|---|---|
-/// | 1 | 191 | 7.3 | 200 | 0.97 | 0.7% |
-/// | 8 | 749 | 28.8 | 63 | 6.05 | 0.6% |
-///
-/// `stalled` is time handing tiles to the socket, so at well under 1% the encoder was
-/// the whole cost and no part of widening it could be wasted — which is the thing that
-/// had to be checked first and could not be checked synthetically. It is a property of
-/// *that* client, though, not of the agent: on the same 3200x2000 surface, a browser on
-/// the far side of a gateway logged `stalled` at 94% of the encoder's own time
-/// (5.87s against 0.40s of waiting). There the link is the ceiling and no width lifts it.
-///
-/// `encode ÷ waiting` is those two totals divided, and it reads as overlap rather than
-/// as concurrency — see [`EncodeTotals`], which is where the two are defined and where
-/// the reason it can exceed the width is recorded.
-///
-/// **The frame rate roughly quadrupled and the tile count barely moved**, and that pair
-/// is the whole result. `tiles/frame` at 200 is the loop this fixes: a 320-cell repaint
-/// outlived the two-frame raw channel, so capture dropped a frame, set `full_repaint`,
-/// and asked for another 320-cell repaint — an agent that could not keep up was spending
-/// nearly all of its encoder on pixels nobody had changed. At 63 it is reporting real
-/// damage again. So what the encoder gained does not show up as more tiles; it shows up
-/// as four times the frames carrying a third of the redundancy.
-///
-/// A plain constant rather than `available_parallelism`, for the reason
-/// `encode::ENCODE_DEPTH` gives on the gateway: a measurement should be reproducible
-/// from the source, and a build that behaves differently on two Macs makes it not be.
-/// A Mac with fewer cores does not want a smaller number either — over-committing costs
-/// interleaving, not correctness, and the collector waits on the oldest cell regardless.
+/// Maximum cell encodes in flight for one frame. The ordered collector preserves
+/// tile order while bounding work during full repaints.
 const ENCODE_WIDTH: usize = 8;
 
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);
 
-/// How often the set of attached displays is re-listed, so a screen plugged in
-/// mid-session reaches the client's menu without a reconnect.
-///
-/// Far slower than [`CURSOR_POLL`], which shares the same tick: listing means
-/// `SCShareableContent::get`, a round trip to a system service, where the cursor
-/// poll is a local read. Plugging a monitor in is not a thing that needs
-/// answering within 100 ms.
+/// Display-list refresh interval; enumeration crosses a system service.
 const DISPLAY_POLL: Duration = Duration::from_secs(2);
 
-/// Waits before each attempt to restart a capture stream that died, and with
-/// their length, the number of attempts.
-///
-/// A display being reconfigured is briefly absent from the shareable-content
-/// list altogether, so the first attempt is expected to fail and the total has
-/// to cover a mode switch settling — about a second on the VMs this was measured
-/// on. Beyond that the display really is gone and the session says so.
+/// Backoff for capture restarts while a display configuration settles.
 const CAPTURE_RESTART_BACKOFF: &[Duration] = &[
     Duration::from_millis(250),
     Duration::from_millis(500),
@@ -366,22 +262,8 @@ pub async fn serve(
     let display = owned.handle.clone();
     let owned = owned.target;
 
-    // Every session starts on the Mac's main display, whichever that is. It is
-    // *not* reliably the Mac's own screen: an earlier note here said a display of
-    // ours joins as an extended one and never takes that role, and measurement
-    // says otherwise — on the test VM the agent's display came up at the global
-    // origin, which is what being the main display means, with the Mac's own screen
-    // pushed to its left. macOS decides that placement and the arrangement is the
-    // user's to set in System Settings, so this reads the answer rather than
-    // assuming one.
-    //
-    // A selection is session state, not agent state: the person at the far end
-    // picks a screen for as long as they are looking at it, and the next connection
-    // starts from the same place rather than from wherever the last one wandered
-    // off to.
-    //
-    // Through `resolve` so that a Mac whose *only* display is ours still measures
-    // it as ours — its backing scale cannot be read back from the system.
+    // Start each session on the live main display. macOS owns display arrangement;
+    // remote selection is session state. Preserve owned-display identity on resolve.
     let target = resolve(capture::main_display(), owned);
 
     // The size has to be known before `Attach`, so it is probed without starting

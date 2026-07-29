@@ -1,51 +1,8 @@
-//! Remote audio: the queue between an engine that receives sound and the stream of
-//! Opus packets a client plays. The packets are cut by [`crate::opus_stream`].
+//! Bounded handoff from engine-produced PCM to one live Opus listener.
 //!
-//! See docs/remote-audio.md. This module knows nothing about how those packets
-//! reach anyone — no frames, no sockets, no HTTP — because what carries them has
-//! already changed once and may again. It used to be an open-ended `audio/ogg`
-//! response read by an `<audio>` element; it is now audio frames on the desktop
-//! WebSocket, decoded and scheduled by the browser (see [`crate::protocol`] and
-//! [`crate::session`]). What survived both is this queue.
-//!
-//! Nothing here is RDP-specific either, though RDPSND is its only producer today
-//! (see [`crate::rdp_audio`]).
-//!
-//! ## Why a broadcast channel
-//!
-//! [`AudioBridge::wave`] is called from inside the RDP read loop, so the queue
-//! has to be one that cannot block it and cannot grow a delay. `broadcast` is
-//! exactly that, and each of its properties answers a requirement:
-//!
-//! - `send` never awaits, so the read loop never waits for a consumer;
-//! - a full ring drops the **oldest** buffer, so a slow consumer loses old audio
-//!   rather than accumulating latency;
-//! - a consumer that fell behind is told (`Lagged`) and skips forward, which is
-//!   the same choice made again on the reading side;
-//! - with no receiver attached, `send` simply fails, which is how an
-//!   audio-enabled target discards sound while nobody is listening.
-//!
-//! There is at most one consumer, because there is one session (see CLAUDE.md).
-//!
-//! ## A quiet remote sends nothing, and that took two designs to get to
-//!
-//! A remote is quiet most of the time, and the tested Windows host does not merely
-//! stop sending buffers when nothing is playing — it never opens the audio channel
-//! at all until something does, and closes it again afterwards. So "no audio yet"
-//! and "no audio ever" look identical from here.
-//!
-//! While an `<audio>` element was the player, that could not be left alone. A media
-//! element whose stream goes dry stalls, and it never skips forward, so the stream
-//! had to keep flowing with encoded silence — trickling below real time, because
-//! silence that kept pace with the clock made start-up buffering and every hiccup
-//! into permanent lag. All of that machinery is gone. A Web Audio schedule simply
-//! has a gap in it: the client resumes at its own start lead when packets return,
-//! so quiet costs zero bytes and nothing has to be kept alive. The WebSocket's ping
-//! covers the connection, which an HTTP body could not do without sending audio.
-//!
-//! FreeRDP makes the same call one layer down, which is worth knowing before
-//! treating a server's `Close` as a teardown: its `rdpsnd_recv_close_pdu` only logs,
-//! deliberately leaving the local audio device open, and reopens it on the next wave.
+//! The broadcast queue never blocks the engine read loop and drops its oldest
+//! complete buffer when a listener falls behind. Encoding happens only while a
+//! client is attached; quiet remotes emit nothing.
 
 use std::sync::Mutex;
 
@@ -55,21 +12,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::opus_stream::OpusStream;
 
-/// How many wave buffers the queue holds before the oldest are dropped.
-///
-/// This is deep: the tested host sends **32 KiB per buffer, 186 ms** of CD-quality
-/// stereo, so 64 of them is **11.8 seconds** — not the "second and a half" this
-/// comment claimed while it assumed a few KiB a buffer. Worth knowing before relying
-/// on the drop rule to bound latency, because it does not: a consumer that ran one
-/// buffer per second slow would be eleven seconds behind before anything was
-/// dropped.
-///
-/// It has never come to that. Measured against the live target, 299 consecutive
-/// buffers arrived with the queue at **zero** every time — the host paces itself to
-/// real time (one buffer every ~189 ms) and the encode side keeps up with room to
-/// spare. So the depth is doing nothing but absorbing a scheduling hiccup, which is
-/// what it is for, and shrinking it would only make a drop more likely without
-/// making anything faster.
+/// Complete PCM wave buffers retained before the oldest one is dropped.
 pub const AUDIO_QUEUE_DEPTH: usize = 64;
 
 /// Linear PCM parameters: the only kind of audio this path carries.
@@ -112,9 +55,7 @@ pub const PCM_CD_QUALITY: PcmFormat = PcmFormat {
     bits_per_sample: 16,
 };
 
-/// The seam between an engine receiving redirected audio and the HTTP response
-/// playing it. Created and owned by the session slot, so its lifetime is the
-/// engine's: dropping it ends any response reading from it.
+/// The seam between an engine receiving PCM and the session encoding it.
 #[derive(Debug)]
 pub struct AudioBridge {
     waves: broadcast::Sender<Vec<u8>>,
@@ -214,15 +155,7 @@ impl AudioBridge {
         self.waves.receiver_count()
     }
 
-    /// Subscribe to the queue from now on.
-    ///
-    /// Nothing here can *end* a listener, and it used to: a `oneshot` lived beside
-    /// this so a takeover could cut the previous browser's stream while the engine
-    /// carried on. That belonged to a stream whose lifetime was an HTTP request's.
-    /// Now a listener is read by one attachment's pump task, so ending it is
-    /// [`crate::session`]'s business — it holds the task — and the two cases that
-    /// need it (a takeover, and disabling audio) are both cases where the session
-    /// layer is already acting.
+    /// Subscribe from the live edge. The attachment owns listener cancellation.
     pub fn take_listener(&self) -> AudioListener {
         AudioListener {
             waves: self.waves.subscribe(),
@@ -256,32 +189,8 @@ impl AudioListener {
         *self.format.borrow()
     }
 
-    /// `OpusHead` and the Opus packets cut from the PCM that arrives after this
-    /// listener attached — one item per wave buffer that completed at least one
-    /// 20 ms frame.
-    ///
-    /// The header comes back *beside* the stream rather than as its first item,
-    /// because it does not travel with the audio: a decoder is configured by it
-    /// before the first packet, and on this wire that means a text control message
-    /// ahead of the binary frames (see [`crate::protocol::ServerMsg::AudioFormat`]).
-    /// Returning both from one call is what makes it impossible to start a stream
-    /// and forget to say how to decode it.
-    ///
-    /// The error is a format libopus will not encode — in practice a channel count
-    /// other than 1 or 2, which the single advertised format rules out. Refusing here
-    /// rather than sending a stream that will never carry anything is the difference
-    /// between one log line and a client waiting forever.
-    ///
-    /// Open-ended by construction: there is no recording and no history, so a
-    /// listener starts at live audio and receives only what arrives after it
-    /// attached. It ends when the engine's bridge is dropped (the target changed,
-    /// disconnected, or the engine died), or when the consumer stops reading and this
-    /// stream is dropped with it.
-    ///
-    /// A wave buffer usually yields several packets and sometimes none — the encoder
-    /// cuts 20 ms frames out of whatever sizes RDP sends and holds the remainder —
-    /// and it yields **nothing at all** while the remote is quiet, which is the whole
-    /// difference from the silence-filled version this replaced.
+    /// Return the decoder header and a live-only stream of 20 ms packet batches.
+    /// The stream ends with the bridge or consumer; unsupported formats fail here.
     pub fn into_packets(
         self,
         format: PcmFormat,

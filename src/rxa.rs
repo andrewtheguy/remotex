@@ -1,33 +1,6 @@
-//! The `rxa` engine: the gateway half of the purpose-built macOS agent
-//! protocol (`crates/rxa-proto`, `crates/rxa-agent`,
-//! docs/mac-agent-architecture.md).
-//!
-//! Same seam as [`crate::rdp`] and [`crate::vnc`] — connect, announce the
-//! desktop size, then pump tiles out and [`ClientMsg`] input back in — with two
-//! differences that are the entire reason this engine exists:
-//!
-//! **Tiles pass straight through.** The agent encodes each dirty rectangle as
-//! WebP on the Mac and this engine relays the bytes into
-//! [`Tile::encoded`] without decoding a pixel. There is no framebuffer here and
-//! no strip loop; the agent already split the work.
-//!
-//! **A dropped agent link reconnects silently while the browser is live.**
-//! Against Apple's Screen Sharing every disconnect meant a fresh credential
-//! prompt, because the prompt belonged to Apple's server. Here each end's key
-//! lives in its own config file, so an established link retries with capped
-//! backoff rather than surfacing an error and bouncing the browser back to the
-//! picker. The
-//! shared session layer ends the engine when the browser stays absent; RXA's
-//! own ping/pong detects a half-open agent link and drives reconnection.
-//!
-//! Silently, but not forever: see `RECONNECT_GIVE_UP`. The link that comes back
-//! is the one worth hiding, and a Mac that was switched off or had its lid closed
-//! never does — retrying it indefinitely left the browser holding a frozen
-//! desktop that claimed to be live, which is worse than the picker and an error.
-//!
-//! An *initial* connect failure is still fatal and reported: a wrong host, or a
-//! Mac that is not the one this target is paired with, has to be visible
-//! immediately rather than hidden behind an infinite retry.
+//! Gateway side of RXA. Agent-encoded WebP tiles pass through unchanged.
+//! Established authenticated links reconnect with a bounded retry window;
+//! initial connection and authentication failures are reported immediately.
 
 use std::time::Duration;
 
@@ -54,22 +27,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(15);
 
-/// How long an established link may stay down before the browser is told.
-///
-/// The silent retry exists for the link that comes back — a Wi-Fi roam, a DHCP
-/// renewal, an agent restarting after a settings save. A Mac that was switched
-/// off, or whose lid was closed, never does, and retrying it forever leaves a
-/// frozen desktop on screen claiming to be live. That is worse than the picker.
-///
-/// Twice [`BACKOFF_MAX`], so the window always holds at least five attempts
-/// (t ≈ 1, 3, 7, 15, 30) including one at the cap, and under the session layer's
-/// 60-second reattach grace, so the user learns the reason rather than watching
-/// the engine expire for an unrelated one.
-///
-/// Measured from the moment the link dropped and restarted by a successful
-/// connect, which means the agent answered a handshake and sent `Hello`. An agent
-/// that does that and dies immediately, over and over, is still retried
-/// indefinitely — a flap is not something this bound tries to catch.
+/// Maximum continuous outage before reporting failure. It includes several
+/// capped-backoff attempts and remains below the session reattach grace.
 const RECONNECT_GIVE_UP: Duration = Duration::from_secs(30);
 
 /// The reconnect policy, as a value so tests can shrink the clock.
@@ -143,25 +102,8 @@ struct Carried {
     relayed: RelayMemo,
 }
 
-/// What the browser was last sent for each rectangle, so an agent that re-encodes
-/// pixels it already sent does not cost the link twice.
-///
-/// Worth having because ScreenCaptureKit reports damage *coarsely*. Measured on
-/// the test Mac at 3200x2000 with nobody touching it, 15 to 21 of the 32
-/// full-width strips that cover the desktop come back dirty on every capture
-/// frame, each one a ~95 KB payload. Most of that is unchanged pixels.
-///
-/// The gateway cannot look inside an agent tile — not decoding one is the entire
-/// point of this engine — so the only thing it can compare is the encoded bytes.
-/// That is enough: the agent's encoders are deterministic, so identical pixels at
-/// identical dimensions produce an identical payload. What it cannot catch is the
-/// same content arriving at a *different* rectangle, which is a job for a real
-/// tile cache further down the link.
-///
-/// Hashed rather than kept, because holding the payloads would cost a second copy
-/// of the screen for nothing. 64-bit rather than 32 because a collision here is
-/// not a retry: it is a rectangle left showing stale pixels until something else
-/// happens to change it.
+/// Digest of the last deterministic payload for each rectangle. This suppresses
+/// duplicate coarse damage without decoding or retaining a second framebuffer.
 #[derive(Default)]
 struct RelayMemo {
     sent: std::collections::HashMap<(u16, u16, u16, u16), u64>,
@@ -754,48 +696,9 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Translate browser input into an agent message.
-///
-/// `None` for messages this engine has nothing to send for:
-/// `Connect`/`Disconnect` because the session layer handles those and never
-/// forwards them, and the clipboard pair and `Viewport` when the target did not
-/// opt in — the clients hide those controls then, so this is the belt to that
-/// UI's braces.
-///
-/// `Viewport` used to be dropped unconditionally, and why it no longer is wants
-/// stating precisely, because most of the old reason still holds. A Mac's
-/// resolution is the Mac's: nobody's physical panel changes because someone
-/// connected to it, and there is still no way to ask one to. What *can* be asked
-/// for is the size of a display the agent **made** — a display that exists only to
-/// be looked at from here, and whose only user is the person asking. So the
-/// request goes through for a target whose profile allows it, and the agent
-/// refuses it for anything else.
-///
-/// Two gates, answering different questions, which is why neither is enough
-/// alone. `resize` is the operator's — may this target be resized at all — and is
-/// checked here because it is this process's fact. "Is the shared display one I
-/// made" is the agent's, and is checked there because it is the only place that
-/// cannot be stale; this engine deliberately does not add a third from its own
-/// cached display list, which is retained across a silent agent reconnect and can
-/// therefore outlive the display it describes.
-///
-/// `w`/`h` arrive as the remote's **pixels** (see [`ClientMsg::Viewport`]) and go
-/// out as **points**, divided by the `scale` this engine last announced. That
-/// division is exact by construction — it undoes the multiplication the client
-/// did against the same number — where dividing by the agent's live density would
-/// not be, since a display publishes no mode to read for tens of milliseconds
-/// around a density change.
-///
-/// `DefaultSize` is the same request with no size on it, for a client whose window
-/// is not a shape a desktop can usefully be — a phone. It needs no division for
-/// the same reason it needs no gate of its own: there is no number to convert, and
-/// the size it means is one only the agent can name. See [`ClientMsg::DefaultSize`].
-///
-/// `SelectDisplay` and `HostScale` pass through too, and the four together are
-/// the whole of what a client decides: *which* screen to look at, *how dense* to
-/// draw it, and *how large* to make it — either by saying, or by deferring. The
-/// first is about the person looking; the rest apply only to a display that exists
-/// for them.
+/// Translate client input to RXA. Viewports are gated by target capability and
+/// converted from remote pixels to points with the last announced scale; the
+/// agent independently restricts resize to its own active display.
 fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
     Some(match msg {
         ClientMsg::MouseMove { x, y } => GatewayMsg::PointerMove {

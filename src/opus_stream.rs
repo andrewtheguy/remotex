@@ -1,59 +1,8 @@
-//! The live audio stream's representation: bare Opus packets, no container.
+//! Convert live PCM wave buffers into bare 20 ms Opus packets.
 //!
-//! See docs/remote-audio.md. This sits between [`crate::audio`]'s queue, which
-//! carries raw PCM in whatever format RDPSND negotiated, and the audio frames the
-//! desktop WebSocket carries to a browser. It exists for one reason: 44100 Hz
-//! 16-bit stereo PCM is 176 400 B/s, and Opus carries the same sound at ~96 kbps.
-//!
-//! **No Ogg, and that is a deliberate deletion rather than a simplification for its
-//! own sake.** The container was here to satisfy an `<audio>` element, which needs a
-//! demuxable stream and gives nothing back: it cannot be told to skip forward, so a
-//! delay it accumulated was permanent. The browser now decodes packets itself with
-//! WebCodecs and owns the playback schedule, so a container would be bytes spent on
-//! framing that the WebSocket already provides. What is left of the header is
-//! [`opus_head`], which still has to reach the decoder — as the `audioFormat`
-//! control message rather than as a page.
-//!
-//! ## Why the buffer sizes are what they are
-//!
-//! Neither end of this is free to choose its framing.
-//!
-//! libopus accepts input at 8/12/16/24/48 kHz and **nothing else** — 44100, the
-//! rate every Windows host offers, is not among them — and it encodes fixed
-//! frames. RDP, meanwhile, delivers wave buffers of whatever size it likes
-//! (~32 KiB in practice, ~185 ms). So every buffer has to be resampled and
-//! re-cut before libopus will look at it.
-//!
-//! The two rates divide exactly, which is worth exploiting rather than carrying
-//! a general-purpose ring buffer:
-//!
-//! ```text
-//! 44100/48000 = 441/480, so
-//!   882 input frames @44.1k -> 960 output frames @48k = exactly one 20 ms Opus frame
-//! ```
-//!
-//! So [`OpusStream::push`] accumulates [`Self::frames_per_packet`] frames of input,
-//! resamples that to exactly [`FRAME_FRAMES`], and encodes one packet. When the
-//! negotiated rate is already 48 kHz the resampler is skipped and the two numbers
-//! are the same. Anything left over waits for the next buffer.
-//!
-//! There is no silence to generate any more, which went with the container for the
-//! same reason: a media element's timeline had to keep advancing or it stalled, and
-//! a Web Audio schedule simply has a gap in it. A quiet remote now costs nothing.
-//!
-//! ## Why each listener gets its own encoder
-//!
-//! An Opus decoder needs the pre-skip and channel count from [`opus_head`] before
-//! the first packet means anything, and a listener may attach at any time — a page
-//! reload mid-session is the ordinary case. Every listener therefore gets a fresh
-//! encoder and its own header, which also keeps this type free of any sharing or
-//! locking: it is owned by the one stream writing it.
-//!
-//! Encoding happens here rather than in the bridge for the same reason the bridge
-//! holds PCM: [`crate::audio::AudioBridge::wave`] is called from the RDP read
-//! loop, which must not block or do real work, and audio is discarded outright
-//! while nobody is listening. Work that only a listener needs belongs on the
-//! listener's side of the queue.
+//! RDP's 44.1 kHz PCM is retained across buffers, resampled in exact groups to
+//! 48 kHz, and framed as 960-sample packets. Each listener owns fresh codec
+//! state downstream of the nonblocking RDP queue; quiet remotes emit nothing.
 
 use opus::{Application, Bitrate, Channels, Encoder};
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
@@ -270,18 +219,8 @@ impl OpusStream {
     }
 }
 
-/// The `OpusHead` identification header (RFC 7845 §5.1).
-///
-/// Still built, and still mandatory, though there is no longer a container to put
-/// it in: a decoder needs the channel count to lay out its output and the pre-skip
-/// to discard the encoder's own delay rather than play it as leading silence. It
-/// travels as the `audioFormat` control message's `head` instead
-/// ([`crate::protocol::ServerMsg::AudioFormat`]), which is also exactly the byte
-/// string WebCodecs takes as an `AudioDecoderConfig.description`.
-///
-/// `input_sample_rate` is documentation only — it records the rate the audio
-/// arrived at, 44100 here, while the stream itself is always 48 kHz. Decoders
-/// ignore it, but it is the honest value and tools display it.
+/// RFC 7845 identification header carried by `AudioFormat`.
+/// Opus decodes at 48 kHz; the input sample rate is metadata.
 pub fn opus_head(format: PcmFormat, pre_skip: u16) -> Vec<u8> {
     let mut head = Vec::with_capacity(19);
     head.extend_from_slice(b"OpusHead");

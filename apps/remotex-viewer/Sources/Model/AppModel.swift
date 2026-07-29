@@ -32,26 +32,8 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
-    /// View only: the session stays attached and painting, and nothing the user
-    /// does reaches the remote — no key, no pointer, no wheel, and no clipboard.
-    ///
-    /// What it is *for* is `KeyboardCapture`. That monitor takes every Command chord
-    /// the system delivers to this app, so a focused desktop means this Mac has no
-    /// shortcuts of its own — not even Quit; this is the switch that suspends it. The
-    /// pointer and the clipboard follow because a mode that gave the keyboard back
-    /// while still driving the remote with the mouse would be a confusing half of an
-    /// idea.
-    ///
-    /// The clipboard goes with the rest because nothing on that link is
-    /// user-initiated: the synchronizer polls this Mac's pasteboard and pushes
-    /// whatever it finds, so leaving it up would keep writing to the remote while
-    /// the toggle said otherwise. That it is off is what the disabled Clipboard
-    /// button next to this one shows.
-    ///
-    /// Not remembered anywhere: not in defaults, unlike the keyboard overrides —
-    /// that is a convention this Mac keeps — and not across a target switch either.
-    /// A session is answered for as it starts, by the picker's checkbox or the
-    /// toolbar's toggle, and the answer goes back with the target it was about.
+    /// Per-target view-only intent. It blocks keyboard, pointer, wheel, and
+    /// clipboard traffic while leaving rendering and inbound audio active.
     var isViewOnly = false {
         didSet {
             guard isViewOnly != oldValue else {
@@ -113,20 +95,8 @@ final class AppModel: GatewaySessionSink {
     /// every frame, and a VNC target acts on each one it is told about.
     @ObservationIgnored
     private var viewportDebounce: Task<Void, Never>?
-    /// Reads the backing scale of the screen this window is currently on.
-    ///
-    /// A closure rather than a stored value, and that is the bug it fixes. Caching
-    /// what `viewDidChangeBackingProperties` last pushed means trusting that the
-    /// notification fired *and* fired last on the final screen. It does not: a
-    /// window is created on the main screen and only then restored to its saved
-    /// frame, so on a Mac whose main screen is Retina and whose saved frame is on a
-    /// 1x screen, the one notification carries 2 and no second one follows. The
-    /// viewer then asked for a 2x desktop on a 1x screen, and only moving the
-    /// window to another display and back — two more notifications — corrected it.
-    /// Read at send time there is nothing to be stale.
-    ///
-    /// Installed by the surface's coordinator, which is the only thing here that
-    /// holds a window, exactly as `fitWindowToRemote` is.
+    /// Reads current host backing scale on demand; cached screen-change
+    /// notifications can be stale after AppKit restores a saved window frame.
     @ObservationIgnored
     var hostScaleReader: (() -> CGFloat)?
     /// The last value reported to the remote. `nil` means nothing has been
@@ -217,19 +187,8 @@ final class AppModel: GatewaySessionSink {
         session.canResize && viewportSize != nil
     }
 
-    /// "Resize to Display" is the other direction: the *window* is sized to the
-    /// desktop, and nothing goes on the wire.
-    ///
-    /// Not the complement of the item above, deliberately. A target that resizes
-    /// on request — RDP with `resize`, or rxa while sharing a display the agent
-    /// made — can still be sitting at a size this window does not match, and
-    /// meeting that from either end is a choice worth leaving to the user rather
-    /// than deciding for them. So both items are live for those.
-    ///
-    /// VNC is the one case this is wrong for, and the only thing greying it: a
-    /// desktop that follows the window resizes to match the window this would be
-    /// fitting to it, so the item would aim at something that moves as it is aimed
-    /// at. `session.followsWindow` is exactly that case and nothing else.
+    /// Whether the local window may fit the remote. Disabled for a VNC desktop
+    /// that continuously follows the window.
     var canResizeToDisplay: Bool {
         session.screen == .desktop && session.remoteSize != nil && !session.followsWindow
     }
@@ -244,16 +203,8 @@ final class AppModel: GatewaySessionSink {
 
     // MARK: - The server step
 
-    /// Adopt whatever is in the Server field and confirm the gateway answers.
-    ///
-    /// The server step's only action, and the only place a gateway is validated.
-    /// Nothing probes on launch: reaching an address is a thing the user asks for
-    /// and gets an answer to, not something that happens to them while a spinner
-    /// is up. It also means an unreachable gateway is reported next to the field
-    /// that caused it, before any credentials have been typed.
-    ///
-    /// Where it lands depends on the cookie, which outlives the app: still signed
-    /// in and this goes straight to the session, skipping the login step.
+    /// Validate the entered gateway, persist it only after success, and continue
+    /// to login or session according to the existing cookie.
     func connectToGateway() async {
         guard !isBusy else {
             return
@@ -482,12 +433,8 @@ final class AppModel: GatewaySessionSink {
             session.protocolName = payload.protocolName
             session.pendingTarget = nil
             session.connectError = nil
-            // The three resize behaviours, as `useRemoteDesktop.ts` picks between
-            // them. RDP resizes only on request because a resize forces a heavy
-            // Deactivation-Reactivation; VNC follows the window; rxa is on
-            // request too, but only for a display the agent *made* — a Mac's own
-            // panel is never resized because somebody connected — so it starts
-            // out at "never" here and may be raised by the first `displays`.
+            // RXA remains non-resizable until a display list identifies an owned
+            // display; VNC and RDP are settled here.
             viewportPolicy = ViewportPolicy(
                 protocolName: payload.protocolName,
                 resize: payload.resize
@@ -662,13 +609,7 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
-    /// Copy the policy onto the session, where the two Remote-menu items can see
-    /// it: `ViewportPolicy` is `@ObservationIgnored`, so a computed property
-    /// reading it directly would never invalidate a menu.
-    ///
-    /// Called wherever the policy changes. For RDP and VNC that is `connected`
-    /// and only `connected`; for rxa every `displays` can still move it, which is
-    /// why this is a method rather than two lines written once.
+    /// Publish ignored policy state so Observation invalidates menu enablement.
     private func publishViewportPolicy() {
         session.canResize = viewportPolicy.manualOnly
         session.followsWindow = viewportPolicy.followsWindow

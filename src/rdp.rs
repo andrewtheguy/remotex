@@ -92,9 +92,8 @@ impl PendingClipboardRead {
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Both closing (browser gone / RDP ended) tears the session down.
 ///
-/// `audio` is `Some` for a target that opted into remote audio, and is the one
-/// thing this engine emits that does not go through `frame_tx` at all — it goes
-/// to an HTTP response instead (see [`crate::audio`] and docs/remote-audio.md).
+/// When present, `audio` receives redirected PCM. Each attachment subscribes
+/// independently and sends encoded packets over the session WebSocket.
 ///
 /// A thin wrapper so the shutdown cannot be missed. Everything this engine sends the
 /// client goes through a [`TileSink`], which forwards from a task of its own — and

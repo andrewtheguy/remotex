@@ -20,39 +20,16 @@ export type ClientMsg =
   // already on at connect time). Synthetic sends without a real event pass
   // false — they express case through an explicit Shift code instead.
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
-  // The only way to ask for a remote size, and deliberately not paired with a
-  // menu of resolutions: a remote's resolution belongs to the machine running
-  // it. Three engines act on this, each where its protocol hands that decision
-  // to the client — VNC continuously, RDP on request, and rxa on request and
-  // only for the display the agent made, since a Mac's own panel is never
-  // resized because somebody connected to it.
+  // Requested framebuffer size in remote pixels. Engines apply their own policy.
   | { type: "viewport"; w: number; h: number }
-  // The same request with no size on it: put the remote back at whatever size
-  // the far side considers its default — a target's configured width/height for
-  // VNC and RDP, the point size the agent created its display at for rxa.
-  //
-  // For a client whose window is not a shape a desktop can usefully be, which
-  // is every phone: a portrait window asks for a tall, narrow desktop no desktop
-  // OS lays out well, and rotating it asks for a second one. Pinch zoom is how
-  // that picture gets read, so the useful size is the one the *guest* lays out
-  // well, and this browser is the one place that does not know it. Deliberately
-  // sizeless for that reason.
-  //
-  // Not the same as sending nothing. A remote's size outlives the client that
-  // set it — most sharply for rxa, where macOS restores the mode a display was
-  // last put in — so a desktop session that stretched it leaves it stretched for
-  // the phone that connects next. See useRemoteDesktop's mobile branch.
+  // Restore the target-defined default size; distinct from sending no request.
   | { type: "defaultSize" }
   // The density of the screen this browser window is on, in hundredths:
   // `devicePixelRatio * 100`, so 100 for a 1x screen and 200 for a Retina one.
   // Sent on connect and again whenever the window moves to a screen of a
   // different density.
   //
-  // This does *not* change how the canvas is presented — that stays the remote's
-  // own point size, with the browser rasterizing it for whatever screen it is on
-  // (see `applyCanvasCss`). It asks the remote to *have* the density that makes
-  // that one pixel per pixel. Only an rxa target with a display the agent made
-  // can act on it; everything else ignores it.
+  // Only an owned RXA display acts on this; it does not affect canvas layout.
   | { type: "hostScale"; scale: number }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
@@ -67,15 +44,7 @@ export type ClientMsg =
   // where the browser permits reading it. Nothing is retained here.
   | { type: "clipboard"; text: string }
   | { type: "clipboardRequest" }
-  // Share a different one of the remote's displays, by the `id` of an entry
-  // from the last `displays` control message.
-  //
-  // The counterpart to "viewport" above, and the contrast is the point: a
-  // remote's *resolution* belongs to the machine running it, while *which of
-  // its screens to look at* is only a question for the person looking. Only rxa
-  // answers it — RDP and VNC each deliver one framebuffer spanning every remote
-  // screen — so for other protocols no display list arrives and no picker is
-  // shown.
+  // Select an opaque id from the latest `displays` message.
   | { type: "selectDisplay"; id: number }
   // "I lost the tiles you told me to remember." Sent when a cached tile will not
   // decode, or when a reference names a slot this client does not hold. The
@@ -83,13 +52,7 @@ export type ClientMsg =
   // which is routed to the engine and would leave the table intact — the repaint
   // would come back as the same references and miss again.
   | { type: "cacheReset" }
-  // Start or stop the remote's sound on this socket, from the floating menu's Audio
-  // button. Audio is opt-in for a reason: nothing but a browser sends this, which is
-  // what lets the gateway add audio frames without moving the protocol version and
-  // breaking the macOS viewer's exact-match check (see docs/remote-audio.md).
-  //
-  // Sending it from a click is also what makes playback legal — an AudioContext
-  // created inside a user gesture needs no autoplay permission.
+  // Start or stop audio on this attachment. The UI click also authorizes playback.
   | { type: "audio"; enabled: boolean };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
@@ -160,10 +123,7 @@ export type ControlMsg =
   // whether the control appears also needs the shared display to be one the
   // agent made, which arrives later in `displays`.
   // `clipboard` is whether this target opted into the clipboard bridge.
-  // `audio` is the same kind of permission: this session *can* carry the remote's
-  // sound, so the floating menu offers the control that asks for it. It does not mean
-  // anything is playing, or that the remote's audio channel is even up — from the
-  // gateway's end those are indistinguishable (see docs/remote-audio.md).
+  // `audio` advertises capability, not current activity.
   | {
       type: "connected";
       name: string;
@@ -346,11 +306,7 @@ function decodeTile(
   };
 }
 
-// Which kind of binary frame this is, so one socket can carry pixels and sound.
-//
-// Read before either parser rather than by trying them in turn: a frame whose kind
-// is unknown must be dropped whole, and a batch parser handed audio would otherwise
-// spend its way through a packet looking for records.
+// Read the binary kind before choosing the independent batch or audio parser.
 export function binaryFrameKind(buf: ArrayBuffer): "batch" | "audio" | null {
   if (buf.byteLength < 1) {
     return null;

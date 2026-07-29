@@ -1,56 +1,7 @@
-//! What the client has already been shown, and what of a damage rectangle is
-//! therefore worth sending.
-//!
-//! # Why this is a shadow copy and not a grid of hashes
-//!
-//! The plan this change follows called for snapping damage outward onto a fixed
-//! [`crate::protocol::CELL_W`]×[`crate::protocol::CELL_H`] grid and hashing each cell,
-//! on the premise that IronRDP reports damage as a coarse bounding box. **That premise
-//! is wrong for RDP, and measuring it is the only reason we know.** Over a 240-position
-//! mouse sweep across a 1280×800 xrdp desktop, the engine reported 310 damage
-//! rectangles with a *median area of 1295 pixels* — and 92% of them were smaller than
-//! a single 320×64 cell. Snapping those outward and letting the gate pay for it cost
-//! **8.9× more bytes** than sending the rectangles as they came (1,030,637 against
-//! 115,751). A grid is the right unit for damage that arrives coarse — which is
-//! exactly what the macOS agent's ScreenCaptureKit does, 15 to 21 full-width
-//! strips of a 3200-pixel desktop per frame — and the wrong unit here.
-//!
-//! So the unit stays the damage rectangle, and the question becomes precise
-//! instead of approximate: keep a copy of the pixels the client was last sent, and
-//! answer *exactly* which part of a rectangle differs from it.
-//!
-//! That is strictly better than a hash gate, for three reasons and not only the
-//! obvious one:
-//!
-//! - **It trims.** A rectangle that is mostly unchanged is sent as the sub-rectangle
-//!   that changed, not as a cell-aligned approximation of it and not whole. A hash
-//!   can only ever answer yes or no.
-//! - **There is no aliasing hazard.** A hash memo keyed by rectangle is unsafe as
-//!   soon as rectangles overlap partially, which is the normal case here: send a
-//!   200×100 rect, then a small rect inside it, and the big rect's remembered hash
-//!   now describes a region the client no longer has. Suppressing on that hash
-//!   leaves stale pixels. A shadow copy cannot drift, because it *is* the record of
-//!   every byte sent.
-//! - **No collisions.** A 64-bit collision in a hash gate is not a retry, it is a
-//!   region left stale until something else happens to repaint it.
-//!
-//! The cost is one `w * h * 3` buffer — 3 MB at 1280×800, 25 MB at 4K — and a
-//! `memcmp` per damage rectangle, which for the median rectangle above is under a
-//! microsecond. Only a session with a client attached has one, and there is only
-//! ever one session.
-//!
-//! # Forgetting is a correctness requirement
-//!
-//! The session layer drops frames while no browser is attached
-//! ([`crate::session`]), so a shadow kept across a detach would claim the *next*
-//! client has pixels it has never seen, leaving regions permanently blank.
-//! `Refresh` is injected on every attach and after a takeover, so clearing there
-//! covers detach, reattach and eviction with one rule.
-//!
-//! Cleared means *black*, which is not a placeholder: a client that has just been
-//! told to resize shows black, and one that was not resized keeps pixels the
-//! shadow now under-claims. Under-claiming only costs bytes. Over-claiming would
-//! cost correctness, and nothing here can do it.
+//! Exact shadow of pixels sent to the client. Damage is trimmed to the changed
+//! sub-rectangle without grid expansion, hash collisions, or overlap aliasing.
+//! The shadow is cleared before a repaint for a new attachment so it never
+//! claims that client has pixels it did not receive.
 
 use crate::protocol::CELL_H;
 

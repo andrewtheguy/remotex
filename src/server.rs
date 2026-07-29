@@ -39,9 +39,7 @@ pub struct AppState {
 /// - the rest of `/api/*` and `/ws` — refuse requests without a valid login
 ///   cookie; unknown `/api/*` paths return 404 rather than the SPA,
 ///   so API clients get an honest error.
-/// - `/ws`    — binary WebSocket carrying the remote-desktop session, audio
-///   included: there is no separate audio endpoint any more, because the browser
-///   needs the packets in hand to schedule them (see docs/remote-audio.md).
+/// - `/ws` — binary WebSocket carrying the remote-desktop session, including audio.
 /// - fallback — the built SPA, served from `config.static_dir` on disk. Real
 ///   files are served by [`ServeDir`]; any unknown path returns `index.html`
 ///   with a 200 so client-side routes resolve (matching an SPA's expectations).

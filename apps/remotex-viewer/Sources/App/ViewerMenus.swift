@@ -4,21 +4,8 @@ import AppKit
 /// equivalent, and the Edit menu is the single exemption.
 @MainActor
 enum ViewerMenus {
-    /// The standard editing chords, put back as a menu of our own.
-    ///
-    /// Command-C, Command-V, Command-X and Command-A are not built into
-    /// `NSTextField` or `NSTextView`. On macOS they are Edit menu key
-    /// equivalents, and the responder chain sees `copy:`/`paste:` at all only
-    /// because a menu item sent them. Taking the standard menus down took that
-    /// with it, so every text field in the app — the login credentials, the
-    /// gateway address, the clipboard draft — answered Command-V with a beep.
-    ///
-    /// Exempting this menu does not weaken the no-key-equivalents rule, which is
-    /// about a chord whose meaning depends on which screen is up. These items
-    /// have one meaning wherever they fire: while the desktop is focused
-    /// `KeyboardCapture` takes the chord before the menu bar is offered it, and
-    /// with no text field in the responder chain to answer `paste:` the item is
-    /// disabled anyway. They light up exactly where they say what they do.
+    /// Restore standard text-editing actions. AppKit text controls depend on Edit
+    /// menu key equivalents; remote keyboard capture intercepts them first.
     static func makeEditMenu() -> NSMenu {
         let menu = NSMenu(title: "Edit")
         // `undo:` and `redo:` are declared nowhere public — AppKit's own Edit menu
@@ -44,20 +31,7 @@ enum ViewerMenus {
         return menu
     }
 
-    /// Put the Edit menu into `mainMenu` unless `current` is already in it, and
-    /// return the one that is there now — to hold for the next check, and to hand
-    /// the sweep as its exemption.
-    ///
-    /// Installing it once at launch looked like it had done nothing, and very
-    /// nearly had: SwiftUI rebuilds the whole bar from its own model of it — when
-    /// the first window comes up, and again whenever `commandsReplaced`
-    /// re-evaluates — and an item this app inserted is not in that model. The menu
-    /// was in the bar for about a second after launch and then gone, so every text
-    /// field went back to beeping at Command-V.
-    ///
-    /// Membership is checked by object identity, for the same reason the sweep's
-    /// exemption is: an item titled "Edit" in a rebuilt bar is not evidence that
-    /// this menu survived it.
+    /// Ensure the identity-tracked Edit menu survives SwiftUI menu-bar rebuilds.
     static func ensureEditMenu(in mainMenu: NSMenu, current: NSMenu?) -> NSMenu {
         // After the application menu, where a Mac app's Edit menu goes.
         let wanted = min(1, mainMenu.items.count)
@@ -81,24 +55,8 @@ enum ViewerMenus {
         return menu
     }
 
-    /// Put the two resize items above AppKit's full-screen item.
-    ///
-    /// They live in AppKit's View menu rather than being declared in
-    /// `RemoteCommands`, which says why: a `CommandMenu("View")` is dropped by
-    /// SwiftUI and leaves the bar with two View menus holding nothing.
-    ///
-    /// Found by the full-screen item rather than by menu title, and that is the
-    /// whole of how this locates itself: the item is the thing being sat above, it
-    /// is AppKit's own, and its menu is whichever one AppKit put it in. A title is
-    /// a localized string, and this app has already been bitten by two menus
-    /// answering to "View".
-    ///
-    /// Does nothing until that item exists — which for a window that cannot go
-    /// full screen is never. There is no View menu to add to before then, and a
-    /// menu of our own is what this is avoiding.
-    ///
-    /// Idempotent, which is what makes it safe to run from a menu-change
-    /// notification: inserting these items posts three more of those.
+    /// Insert resize actions above AppKit's full-screen item. Locate it by action,
+    /// not localized menu title, and remain idempotent under menu notifications.
     static func ensureResizeItems(in mainMenu: NSMenu, target: AnyObject) {
         for item in mainMenu.items {
             guard
@@ -147,15 +105,7 @@ enum ViewerMenus {
         ResizeMenuTarget.resizeToDisplayFromMenu(_:)
     )
 
-    /// Clear every key equivalent in `menu`, except in `exempt` and below it.
-    ///
-    /// Idempotent, which is what keeps it safe to run from a change notification:
-    /// clearing an equivalent posts one of those in turn, and an item that has
-    /// none already is left alone. A modifier mask with no character is inert.
-    ///
-    /// The exemption is by object identity rather than by title: the menu to keep
-    /// is one this app built, and a title is a localized string that anything
-    /// could also be called.
+    /// Clear key equivalents except beneath the identity-tracked Edit menu.
     static func stripKeyEquivalents(from menu: NSMenu?, except exempt: NSMenu?) {
         guard let menu else {
             return

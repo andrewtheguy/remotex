@@ -1,41 +1,10 @@
-// When each buffer of remote audio should play, and how much of it to throw away.
-//
-// Split out from audioPlayer.ts because it is the whole idea of this change
-// expressed as arithmetic, and arithmetic can be tested without a browser. The
-// player around it does the parts that cannot: an AudioContext, a WebCodecs
-// decoder, and the Web Audio nodes.
-//
-// **The point: the client owns the schedule.** The gateway used to serve audio as
-// an open-ended Ogg/Opus response and an `<audio>` element played it, which sounds
-// simpler and gives away the one thing that matters — a media element resumes where
-// it stopped and *never skips forward*, so whatever it fell behind by during
-// start-up buffering or one hiccup, it stayed behind by. Both of the gateway's old
-// latency devices existed because of that (a keepalive trickling silence below real
-// time so a listener could drain back toward live; a `playbackRate` nudge that was
-// never once observed to engage), and neither could bound the delay.
-//
-// Apache Guacamole's RawAudioPlayer bounds it in one line, in `sync()`:
-//
-//   nextPacketTime = Math.min(nextPacketTime, now + maxLatency);   // 0.3
-//
-// This is that, with two deliberate differences — see the constants.
+// Pure scheduling policy for decoded remote-audio buffers. It maintains a small
+// start cushion and discards excess lead rather than accumulating latency.
 
-/// The furthest ahead of the clock the schedule may run.
-///
-/// Guacamole's `maxLatency`, and the same number: a third of a second is comfortably
-/// more than the ~186 ms wave buffer the tested Windows host sends, so a link
-/// delivering at real time never reaches it, and a burst cannot bank more than one
-/// buffer's worth of delay.
+/// Furthest ahead of the audio clock the schedule may run.
 export const MAX_LEAD_S = 0.3;
 
-/// How far ahead a fresh start — or a recovery from an underrun — is scheduled.
-///
-/// Guacamole has no equivalent: it schedules at `max(now, nextPacketTime)`, so a
-/// stream that has just started, or has just run dry, is playing with **zero**
-/// cushion and the very next jitter is another gap. The host paces itself to real
-/// time but not to a clock — measured inter-arrival ran 169–200 ms around a 186 ms
-/// buffer — so a cushion in that range costs a tenth of a second of latency and buys
-/// out the ordinary case.
+/// Cushion used for a first buffer or recovery from underrun.
 export const START_LEAD_S = 0.1;
 
 export interface Scheduled {
@@ -58,27 +27,8 @@ export interface Scheduled {
   clamped: boolean;
 }
 
-/**
- * Place one decoded buffer on the timeline.
- *
- * `nextAt` is where the previous buffer left the timeline (`0` before anything has
- * played), `now` is `AudioContext.currentTime`, and `duration` is the buffer's own
- * length in seconds.
- *
- * Three cases, and the first two are Guacamole's:
- *
- * - **Back to back.** The ordinary case: this buffer follows the last one exactly,
- *   with no gap to hear and no overlap to muddy.
- * - **Behind the clock.** The schedule has run dry — a first buffer, or a gap while
- *   the remote was quiet — so it restarts at `now + START_LEAD_S`. Anything earlier
- *   than `now` cannot play at all, and anything without the cushion is one jitter
- *   from another underrun.
- * - **Too far ahead.** More audio has arrived than real time can absorb. The
- *   schedule is pulled back to the ceiling and the front of this buffer is thrown
- *   away, so the *delay* is discarded rather than the sound being played late.
- *   Skipping forward to stay near live is the same choice the gateway's queue
- *   already makes when a consumer falls behind.
- */
+/** Place a decoded buffer back-to-back, after an underrun cushion, or at the
+ * maximum lead with its excess front trimmed. */
 export function scheduleBuffer(
   nextAt: number,
   now: number,

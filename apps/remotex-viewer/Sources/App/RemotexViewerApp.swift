@@ -4,15 +4,7 @@ import SwiftUI
 
 @MainActor
 private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
-    /// The top-level menus this app declares in `RemoteCommands`, beside the app
-    /// menu and the Edit menu inserted below.
-    ///
-    /// Matched by title, unlike the Edit menu's identity check, because these are
-    /// SwiftUI's to build and it hands back a new `NSMenu` on every rebuild —
-    /// there is no object to keep. Anything else in the bar is AppKit's own and
-    /// is removed. A `CommandMenu` added to `RemoteCommands` without its title
-    /// here is stripped on the next rebuild, which looks like a menu that
-    /// flickers and then vanishes.
+    /// SwiftUI-owned top-level menus, matched by title across rebuilds.
     private static let ownMenuTitles: Set<String> = ["Remote", "Display"]
 
     /// The one menu whose chords are kept — see `ViewerMenus.makeEditMenu`. Held
@@ -49,26 +41,8 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     private var isEnforcingMenuBarRules = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Both menu bar rules are enforced as items arrive rather than once over what
-        // is there at launch, because the bar this app hands out is not the last one
-        // it gets. AppKit builds the View menu holding Enter Full Screen only when a
-        // window can go full screen, which is later than this, and it arrives with
-        // Control-Command-F on it: that chord is delivered to this app like any other,
-        // so a focused desktop captures it and the guest gets it instead — the item
-        // would name a shortcut that does something else entirely. SwiftUI, for its
-        // part, rebuilds the whole bar from its own model when the first window comes
-        // up, which drops the Edit menu inserted below. Each rebuild is another
-        // arrival, and both rules are re-applied over it.
-        // `RemoteCommands` says the rest of why; this is the half of it that AppKit's
-        // own items can only be held to here.
-        //
-        // A *removal* is one of the three, and the one that matters most for the Edit
-        // menu being there at all. A rebuild that drops our item and adds nothing
-        // after it posts only this notification: without it the menu came back on the
-        // next unrelated change to the bar — a clipboard fetch starting, a display
-        // list arriving — which is a menu that appears while you are looking at it,
-        // and a bar whose entries move under the pointer. It goes back the moment it
-        // goes.
+        // SwiftUI and AppKit build and rebuild menus after launch. Reapply the
+        // Edit-menu and no-shortcut rules on additions, changes, and removals.
         for name in [
             NSMenu.didAddItemNotification,
             NSMenu.didChangeItemNotification,
@@ -162,12 +136,7 @@ struct RemotexViewerApp: App {
                 .task { applicationDelegate.bind(model: model) }
         }
         .defaultSize(width: 1440, height: 900)
-        // The compact bar, because the toolbar's height is the desktop's loss: the
-        // title bar arrives as a top `contentInset` on the scroll view, so every
-        // point of it is a point the remote is not shown in (and, for a guest that
-        // follows the window, not *given*). The default unified style is 52pt tall
-        // for one button; compact measures 40 and reads the same — a VNC guest
-        // that follows the window came back 12 rows taller for it.
+        // Toolbar height reduces the viewport reported to a following guest.
         .windowToolbarStyle(.unifiedCompact)
         .commandsReplaced {
             RemoteCommands(model: model)

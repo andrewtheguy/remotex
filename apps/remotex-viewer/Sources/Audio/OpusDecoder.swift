@@ -1,26 +1,10 @@
 import AVFoundation
 import OSLog
 
-/// The remote's Opus packets, turned into PCM by the decoder macOS already has.
+/// Decode bare Opus packets with macOS's `kAudioFormatOpus` converter.
 ///
-/// **No dependency and no container.** macOS ships a real Opus decoder —
-/// `/System/Library/Components/AudioCodecs.component` exports `ACOpusDecoderFactory`
-/// and calls `opus_decoder_create` — and `AVAudioConverter` reaches it through
-/// `kAudioFormatOpus`. It accepts the wire's **bare** packets described by nothing but
-/// an `AudioStreamBasicDescription`, which is what makes this possible at all: without
-/// that, viewer audio would have meant either vendoring libopus into this package or
-/// wrapping every wave buffer in a CAF for the system's parser to unwrap again.
-///
-/// That was measured before it was designed on (2026-07-29, against fixtures from both
-/// `opusenc` and this gateway's own encoder), along with the two facts below that this
-/// file exists to handle. It is worth knowing they were measured rather than read: none
-/// of it is documented, and `kAudioFormatOpus` existing says nothing about whether the
-/// converter's front end will take packets without a container around them.
-///
-/// **The magic cookie is ignored.** Setting `converter.magicCookie` to the `OpusHead`
-/// reads back `nil` and changes no output byte — the decoder takes its rate and channel
-/// count from the ASBD, which is all libopus needs. So one is deliberately not set, and
-/// the `OpusHead` is used here for the one thing it still carries: the pre-skip.
+/// The ASBD supplies rate and channels; CoreAudio ignores an OpusHead magic
+/// cookie, so the header is read only for encoder pre-skip.
 final class OpusDecoder {
     /// libopus encodes at 48 kHz and nothing else, so this is the rate the packets are
     /// in whatever the remote negotiated — the gateway resamples on the way in
@@ -39,16 +23,7 @@ final class OpusDecoder {
     /// The encoder's own delay, from the `OpusHead`: audio the stream was never meant
     /// to contain. 312 frames in practice.
     private let preSkip: Int
-    /// How much of `preSkip` is still to be discarded.
-    ///
-    /// Counted down rather than applied as a constant to the first buffer, because the
-    /// converter swallows some of it itself: its **first** call returns 120 frames fewer
-    /// than its packets hold, and every call after that returns exactly its own — a
-    /// one-off priming trim, not a per-call loss (a per-call loss would have been a skew
-    /// growing all session, which is why it was worth measuring rather than assuming).
-    /// 120 is not 312, so the decoder is plainly not honouring the pre-skip itself, and
-    /// what is left has to go. Deriving it from what actually came back means the
-    /// priming figure is CoreAudio's business and may change without this being wrong.
+    /// Remaining encoder delay after accounting for frames CoreAudio withheld.
     private var preSkipRemaining: Int
     private let log = Logger(subsystem: "dev.remotex.viewer", category: "audio")
 

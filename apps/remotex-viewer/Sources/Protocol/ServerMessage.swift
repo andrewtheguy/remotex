@@ -58,9 +58,7 @@ enum ServerMessage: Sendable, Equatable {
         let protocolName: String
         let resize: Bool
         let clipboard: Bool
-        /// Whether this session *can* carry sound — an RDP target configured for it —
-        /// not whether any is playing, and not whether the remote's audio channel is
-        /// even up. From this end those are indistinguishable (docs/remote-audio.md).
+        /// Audio capability, not current playback or remote channel activity.
         ///
         /// Required, not defaulted, like `Resize.scale` and for the same reason: a
         /// gateway old enough to omit it is one this build refuses anyway, and

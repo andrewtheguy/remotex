@@ -1,67 +1,18 @@
-//! Turning a run of [`ServerMsg`] into the frames one client's socket sends.
-//!
-//! Everything stateful about the server -> client transport lives here, and it is
-//! per *attachment* rather than per session or per engine. That is not tidiness:
-//! [`crate::session`]'s pump drops frames while no browser is attached, so
-//! anything remembering "the client already has this" must sit **downstream** of
-//! that drop or it will withhold pixels from a client that never received them.
-//! One outbound task owns one of these, and its lifetime is exactly one socket
-//! ([`crate::ws`]).
-//!
-//! Deliberately a plain owned struct with a pure `encode` — no sockets, no async,
-//! no channels. There is no benchmark harness in this repo, so a unit test over a
-//! synthetic run of messages is the only way the byte cost of the transport can be
-//! checked in CI at all, and that requires being able to call it without a client.
-//!
-//! Four rules the tests pin, each of which is a correctness matter rather than a
-//! tuning knob:
-//!
-//! - **A control message flushes the pending batch.** Tiles and control messages
-//!   share one ordered socket, and `resize` reallocates the client's canvas. A
-//!   tile that arrived before a resize has to be *sent* before it, or it lands on
-//!   a canvas that has already been cleared and thrown away.
-//! - **A batch is bounded in bytes.** Not for tidiness: exceeding a client's
-//!   WebSocket message ceiling fails the whole socket rather than dropping one
-//!   frame, and a full repaint of a Retina desktop is megabytes of payload. The
-//!   cap also keeps a slow link from waiting on one enormous write.
-//! - **A partial batch never outlives the run that built it.** `encode` returns
-//!   every frame for the messages it was given, so nothing is held back waiting
-//!   for work that may not arrive.
-//! - **A pending tile a later one completely covers is dropped.** Safe only
-//!   *within* one batch, and only because the client applies a frame's records in
-//!   order: the covered paint would be overwritten before anything was displayed.
-//!   It is not safe across a flush (those bytes are already gone) and it is not
-//!   safe across a `Resize` (the two rects are in different coordinate spaces) —
-//!   the flush rule above is what makes both impossible rather than merely
-//!   avoided.
+//! Per-attachment conversion from [`ServerMsg`] to WebSocket frames. Control
+//! messages flush tile batches to preserve coordinate-space ordering, batches
+//! are bounded, and a tile covered later in the same batch may be dropped.
+//! Cache state lives here because frames are discarded before attachment.
 
 use crate::protocol::{self, ServerMsg, Tile, WireFrame, batch};
 
-/// How many bytes of records a single batch frame may carry before it is flushed
-/// and a new one started.
-///
-/// The ceiling that matters is the client's: `URLSessionWebSocketTask` defaults to
-/// 1 MiB and the viewer raises it to 16 MiB, and going past it kills the socket
-/// instead of dropping a frame. This sits far below either, because the reason to
-/// batch is to stop paying per-frame costs on a burst of small tiles — not to send
-/// a whole repaint as one write, which would only move the latency somewhere else.
+/// Record bytes per batch, below client WebSocket limits and large enough to
+/// amortize per-frame overhead without making a full repaint one work unit.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 
-/// How many records a single batch frame may carry.
-///
-/// Two reasons, and the smaller one is the hard one: the header's count is a
-/// `u16`, so 65535 is a limit the format cannot exceed whatever the byte cap says.
-/// This sits far below that because a frame is also a unit of client work — every
-/// record in it is decoded before anything is presented — and a desktop's full
-/// repaint is a few hundred records, not thousands.
+/// Records per batch, bounded below the `u16` wire limit and client work limit.
 const MAX_BATCH_RECORDS: usize = 4096;
 
-/// One remembered tile, as the client holds it.
-///
-/// The payload is kept, not only its hash. A hash alone would make a collision
-/// into permanently wrong pixels with no recovery path, and 64 bits over a few
-/// hundred entries is only *almost* never — where comparing the bytes is never,
-/// for at most [`batch::MAX_CACHED_BYTES`] each.
+/// One client cache entry. Payload comparison makes hash collisions harmless.
 struct Cached {
     digest: u64,
     format: u8,
@@ -70,14 +21,7 @@ struct Cached {
     data: Vec<u8>,
 }
 
-/// What the client has been told to remember, and where.
-///
-/// Keyed by *content*, addressed by *slot*. The client never chooses a slot and
-/// never evicts: it holds a fixed array and overwrites whatever slot a `TILE`
-/// names. That asymmetry is the point — a content-addressed cache would need both
-/// ends to run an identical eviction policy over an identical cost metric, and
-/// they cannot: the server knows encoded bytes, a client knows what its decoder
-/// made of them.
+/// Server-owned content lookup and round-robin client slot assignment.
 struct Slots {
     /// `SLOT_COUNT` entries, `None` until first used.
     entries: Vec<Option<Cached>>,
@@ -202,14 +146,8 @@ impl Wire {
                 // one message, not the whole attachment.
                 None => match msg {
                     ServerMsg::Tile(tile) => self.push(tile, &mut frames),
-                    // **Not** flushed first, which is the one place in this file
-                    // where not flushing is the correct choice. A control message
-                    // flushes because a resize invalidates the tiles before it;
-                    // sound has no such relationship with pixels, so making it wait
-                    // for a batch that is still filling would add latency to the one
-                    // thing here that cannot buy it back — audio shares this socket,
-                    // and the queue behind a full repaint is exactly when a
-                    // scheduler starves.
+                    // Audio has no pixel-order dependency, so do not delay it
+                    // behind the current tile batch.
                     ServerMsg::Audio(packets) => {
                         let frame = protocol::audio::frame(&packets);
                         self.totals.audio(frame.len(), packets.len());
@@ -309,23 +247,7 @@ impl Wire {
     }
 }
 
-/// What one attachment cost on the wire, logged when it ends.
-///
-/// The repo has no benchmark harness, so this line is the only measurement of the
-/// browser link that exists in production. Three things it reports that a plain
-/// byte total cannot:
-///
-/// - **records separately from frames**, which is the whole point of batching: the
-///   two moved apart, and only seeing both says by how much;
-/// - **payload bytes separately from frame bytes**, so envelope overhead is
-///   visible rather than assumed;
-/// - **the largest single frame**, which is the number a client's WebSocket
-///   message ceiling is measured against;
-/// - **what was superseded**, because a dedup that never fires is worth removing
-///   and one that fires constantly says something about the engine feeding it;
-/// - **what the tile cache saved**, as both the count of references sent and the
-///   payload bytes they stood in for. A cache is the kind of thing that looks
-///   obviously worthwhile and turns out to fire twice an hour.
+/// Per-attachment wire counters logged on teardown.
 #[derive(Default)]
 pub struct Totals {
     pub binary_frames: u64,
@@ -341,13 +263,7 @@ pub struct Totals {
     pub refs: u64,
     pub refs_saved_bytes: u64,
     pub cache_resets: u64,
-    /// Opus packets sent, and the frame bytes they cost.
-    ///
-    /// Counted apart from tiles because the two answer different questions, and one
-    /// of them is the point of this design: audio bytes over a session's length is
-    /// the ~10 kB/s Opus is here to deliver, and it should read as **zero** while the
-    /// remote is quiet — the old silence keepalive spent 0.09 kB/s to keep a media
-    /// element from stalling, and this is where its absence shows.
+    /// Opus packets and their binary-frame bytes, separate from tile traffic.
     pub audio_frames: u64,
     pub audio_packets: u64,
     pub audio_bytes: u64,

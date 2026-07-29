@@ -1,68 +1,10 @@
-//! A display of our own, from the private `CGVirtualDisplay` API.
+//! Optional 2x display built with the private `CGVirtualDisplay` API.
 //!
-//! The Mac's real screen belongs to whoever is sitting at it: it cannot be
-//! resized without rearranging their windows, and on a VM guest it has no HiDPI
-//! mode at any size, so a Retina browser draws it magnified and soft. A display
-//! we create ourselves has neither problem — we choose its pixel size, and we
-//! choose to have it drawn at 2x.
-//!
-//! ## The API is private, and it lies about the result
-//!
-//! There is no entitlement and no compatibility promise, which is why a failure
-//! to create one costs the sharpness and nothing else (see
-//! `docs/mac-agent-architecture.md`). What matters more day to day is that a *wrong*
-//! configuration does not fail — it silently produces a 1x display, and three
-//! of the obvious ways to check report success anyway:
-//!
-//! - `CGDisplayBounds` gives the intended **point** size whether or not the
-//!   backing store is 2x, so it cannot tell the two apart on its own. What it
-//!   *can* do is catch the failure: a display that dropped to 1x comes back at
-//!   *twice* the requested point size, which is past the ceiling `maxPixels`
-//!   fixes — so bounds at or under the created size mean HiDPI engaged. That is
-//!   the check [`await_hidpi_bounds`] makes, by the same rule
-//!   `capture::owned_scale` reads a live mode with.
-//! - `CGDisplayCopyDisplayMode` **does** work, and is the one reading that does
-//!   not lie: measured on macOS 26.5.2 it returns `3800x2400 px / 1900x1200 pt`
-//!   at 2x and `1900x1200 px / 1900x1200 pt` for the same display at 1x, so
-//!   pixels over points is the true backing scale. An earlier note here claimed
-//!   it returned NULL for these displays; it does not, and believing that cost a
-//!   heuristic that could not see a `(low resolution)` mode at all — see
-//!   `capture::owned_scale`. `CGDisplayCopyAllDisplayModes` works too,
-//!   and lists both entries at each point size.
-//! - `SCContentFilter.pointPixelScale` reports 1.00 on a genuine 2x display, so
-//!   capture size must be set from what we asked for, never derived from it.
-//!
-//! ## Created once, and then it belongs to whoever is looking through it
-//!
-//! The display appears in System Settings > Displays like any other screen, with
-//! the mode list macOS derives from the descriptor — including a
-//! `(low resolution)` 1x entry beside each HiDPI one — and whoever is using the
-//! Mac can change it there. Two of its properties can also be set from here, and
-//! the reason is the same for both: nobody sits in front of this display, so it
-//! has no right density and no right size of its own, only the right ones for the
-//! window someone is looking at it through. [`VirtualDisplay::set_scale`] follows
-//! the client's screen automatically; [`VirtualDisplay::set_size`] follows the
-//! client's window when the person asks. Whatever the cause, the agent notices
-//! the new geometry the same way it notices one on a real display and tells the
-//! gateway (`capture::Capture::follow_display`) — one announcement path for every
-//! cause.
-//!
-//! What the descriptor fixes forever is the room all of that has to work in.
-//! `sizeInMillimeters` and `maxPixels` cannot be changed afterwards, and HiDPI
-//! engages only while pixel density — mode pixels over physical size — stays
-//! inside a window measured at roughly 149 to 264 dpi on macOS 26.5.2. The
-//! display is created with its density at the *top* of that window ([`MAX_DPI`]),
-//! which is also where `maxPixels` sits. So the configured size is the largest
-//! mode that can be 2x, and it bounds a resize in both directions at once:
-//!
-//! - **Up**, hard. Past `maxPixels` nothing refuses — `applySettings:` returns YES
-//!   and silently halves the result — so [`size_in_envelope`] clamps there or
-//!   nowhere.
-//! - **Down**, softly. Everything below has density to spare until roughly 57% of
-//!   the created width, where the mode walks out of the bottom of the window and
-//!   comes back 1x whichever entry is asked for. Recovering 2x below that would
-//!   need a *new* display, hence a new `displayID` and a new identity for macOS to
-//!   file an arrangement against, so it is reported rather than prevented.
+//! Creation verifies the asynchronous result because `applySettings:` may
+//! succeed while macOS silently selects a 1x mode. The live CoreGraphics mode
+//! is authoritative; ScreenCaptureKit's point scale is not. The creation size
+//! fixes an immutable density and pixel envelope for later client-driven size
+//! and scale changes. Private-API failure degrades to a real display.
 
 use log::{debug, info, warn};
 use objc2::rc::{Allocated, Retained};
@@ -85,29 +27,11 @@ pub const SCALE: f64 = 2.0;
 /// display is the common case, and every step down costs density.
 const MAX_DPI: f64 = 250.0;
 
-/// Floor for a created display, in points: 800x600.
-///
-/// Nothing enforces a minimum in the API. The floor here was once a guard
-/// against nonsense rather than a size — it let a 320-point desktop through,
-/// which is smaller than the dialogs macOS would put on it — and 800x600 is the
-/// smallest thing that reads as a screen at all.
-///
-/// It is also the one bound that cannot be recovered from later, which is why it
-/// is worth being strict about: the created size is simultaneously the *ceiling*
-/// (see [`VirtualDisplay::create`]), so every mode this display will ever offer
-/// is this one or smaller.
-///
-/// Public because [`crate::config`] validates against the same two numbers: a
-/// size the config accepts and the clamp below then quietly changes would be a
-/// saved setting that does not describe the display.
+/// Minimum useful display size. Config validation uses the same bounds.
 pub const MIN_WIDTH_POINTS: u32 = 800;
 pub const MIN_HEIGHT_POINTS: u32 = 600;
 
-/// How long to wait for the WindowServer to publish a new configuration.
-///
-/// Applying settings is asynchronous: `applySettings:` returns immediately and
-/// `CGDisplayBounds` catches up a moment later. Measured at 134–580 ms across
-/// seven live resizes, so a second and a half is generous without being a hang.
+/// Deadline for the asynchronous WindowServer configuration update.
 const SETTLE_TIMEOUT_MS: u64 = 1500;
 const SETTLE_POLL_MS: u64 = 25;
 
@@ -250,31 +174,9 @@ impl VirtualDisplay {
         self.base_points
     }
 
-    /// Put the display at [`SCALE`] or at 1x, keeping the point size it is in.
-    ///
-    /// One of two things about this display that are not the Mac's to decide,
-    /// because they are the two no one at the Mac is choosing *for*: a display
-    /// nobody sits in front of has no right density of its own, only the right
-    /// density for whoever is looking through it. So a client's screen sets it —
-    /// see [`rxa_proto::msg::GatewayMsg::HostScale`]. Its size is the other; see
-    /// [`VirtualDisplay::set_size`].
-    ///
-    /// Point size is deliberately preserved: the desktop keeps its layout and only
-    /// the pixels behind it change, so windows are not rearranged by a client
-    /// connecting from a different screen. Measured on macOS 26.5.2, applying
-    /// `hiDPI = 0` at the current point size gives `1900x1200 px / 1900x1200 pt`
-    /// and `hiDPI = 1` gives it back at `3800x2400 px`, on the same `displayID`.
-    ///
-    /// The point size is read here rather than passed in, so that both readings
-    /// this needs are taken under the caller's lock. Passed in, it was measured
-    /// before the lock and could be stale by the time the mode is applied — with
-    /// nothing else changing the size that was harmless, but a
-    /// [`VirtualDisplay::set_size`] running just ahead of this one would have its
-    /// resize silently undone by the older number.
-    ///
-    /// Returns whether anything was asked of the WindowServer: `Ok(false)` means
-    /// the display was already at that density, which is the common case and is
-    /// not worth a reconfigure — every apply relays the desktop's windows.
+    /// Set 1x or 2x while preserving current point size. Size is read under the
+    /// caller's lock so a concurrent resize cannot be overwritten. Returns
+    /// `false` when no WindowServer change is needed.
     pub fn set_scale(&self, want_hidpi: bool) -> anyhow::Result<bool> {
         let now = crate::capture::display_scale(self.id);
         // Compared against the midpoint rather than for equality: `now` is a

@@ -42,14 +42,17 @@ For development against a specific gateway:
 ```sh
 packaging/macos-viewer/build-viewer-app.sh --no-dmg
 open -n dist/remotex-viewer.app --args \
-  --gateway http://127.0.0.1:52380
+  --settings qa --gateway http://127.0.0.1:52380
 ```
 
-`--gateway` only prefills the first screen's address field. Getting in is two
+`--settings qa` isolates defaults and cookies from normal use. `--gateway` only
+prefills the first screen's address field. Getting in is two
 steps: **Continue** validates the gateway (reachable, and speaking a protocol
 this build knows), then the credentials. Step two is skipped while the login
 cookie is still good, and the last address that answered is what the next launch
 starts from. There is no Settings window.
+
+Clear the QA defaults with `defaults delete remotex-viewer.qa`.
 
 Always launch the packaged `.app` during development. `swift run`, a standalone
 `swift build`, and directly launching the executable under `.build` bypass the

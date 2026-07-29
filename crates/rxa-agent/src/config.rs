@@ -1,18 +1,8 @@
-//! The agent's TOML config, in the house style of
-//! `packaging/etc/remotex.toml.example`.
+//! GUI-owned agent configuration.
 //!
-//! Deliberately tiny. The agent has no notion of users, targets or sessions —
-//! it listens on one port, accepts one gateway at a time, and shares one
-//! display. Everything else is the gateway's business.
-//!
-//! ## The file is written by the GUI, not by hand
-//!
-//! Every value in here is editable from the menu bar (see [`crate::menubar`]),
-//! and [`crate::settings`] rewrites the file from scratch on each change. So the
-//! file is a *rendering* of the config rather than a document with its own
-//! identity: comments come from [`render`], and anything a user adds to it by
-//! hand is lost the next time they change a setting from the menu. That is the
-//! deal a GUI-owned config makes, and the header comment in the file says so.
+//! The menu bar rewrites the whole file, so rendered comments are canonical and
+//! manual additions are not retained. The agent listens for one paired gateway
+//! and optionally creates one virtual display.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -52,46 +42,9 @@ pub struct Config {
     /// it, so it is created once at startup and lives as long as the agent.
     #[serde(default)]
     pub virtual_display: bool,
-    /// The **initial** size of that display in points, as `WIDTHxHEIGHT`, no
-    /// smaller than 800x600 on either axis.
-    ///
-    /// Initial, not current, and the distinction is the whole of how this setting
-    /// behaves. It is the size the display is created at the *first* time this Mac
-    /// sees it. After that its resolution belongs to the Mac like any other
-    /// screen's: it appears in System Settings > Displays, macOS remembers
-    /// whatever is picked there against the display's identity and restores it on
-    /// the next launch — so this value stops being what the display comes up at,
-    /// and changing it will not move a display that has already been arranged.
-    ///
-    /// **Set the size here, and then resize that display from the client rather
-    /// than in System Settings.** Either client's **Resize to window** asks the
-    /// agent to match the window it is being viewed in, on a target with
-    /// `resize = true`, and it is the safe way to change this display's size: it
-    /// stays inside the bounds below and keeps the density the display is in.
-    /// macOS will resize it too — it is an ordinary display to the rest of the
-    /// system — but nothing in that panel says which of its offers are worth
-    /// taking, and neither the agent nor a client can undo one afterwards:
-    ///
-    /// - every size is listed twice, once HiDPI and once `(low resolution)`, and
-    ///   the second is a 1x desktop that reads as the same choice in the list;
-    /// - below roughly 57% of the created width the mode falls out of the HiDPI
-    ///   density window altogether, so it comes back 1x whichever entry was
-    ///   picked, and only a *new* display recovers it — which means a new
-    ///   identity, and the arrangement macOS filed against the old one lost;
-    /// - whatever was picked is then remembered and restored, so the discrepancy
-    ///   outlives the session that caused it.
-    ///
-    /// Density is not a manual choice either, any more: a client reports the
-    /// density of the screen its window is on and the agent matches this display
-    /// to it (`GatewayMsg::HostScale`), so a hand-picked 1x or 2x is undone by
-    /// the next connection from a screen that disagrees.
-    ///
-    /// What this value fixes forever is the *envelope*: `maxPixels` and
-    /// `sizeInMillimeters` are set from it at creation and cannot be changed, so
-    /// this is the largest mode macOS can render on it at 2x, every smaller size
-    /// it offers has density to spare, and it is the ceiling a Resize to window
-    /// clamps to. Twice this many pixels get captured and encoded per frame,
-    /// which is the reason not to ask for the largest display imaginable.
+    /// Creation size in points (`WIDTHxHEIGHT`, minimum 800x600). It fixes the
+    /// virtual display's immutable pixel/density envelope; later client resizes
+    /// are clamped to it, while macOS may remember a different current mode.
     #[serde(default = "default_virtual_display_initial_size")]
     pub virtual_display_initial_size: String,
 }

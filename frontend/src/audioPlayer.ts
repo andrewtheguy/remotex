@@ -1,35 +1,6 @@
-// The remote's sound, decoded and scheduled by this browser.
-//
-// Replaces an `<audio>` element pointed at a live Ogg/Opus response, and the reason
-// is latency rather than tidiness: a media element gives no way to shed a delay it
-// has accumulated — it resumes where it stopped and never skips forward — so a
-// hiccup at any point stayed in the session for the rest of it. Here the schedule is
-// ours (see audioSchedule.ts, which is that argument as arithmetic), following
-// Guacamole's RawAudioPlayer.
-//
-// Three pieces, and each is doing the least it can:
-//
-// - **WebCodecs** decodes the Opus packets. Bare packets arrive on the desktop
-//   WebSocket as audio frames; there is no container, because a container exists to
-//   delimit and describe packets and the socket already delimits them while
-//   `audioFormat` describes them.
-// - **Web Audio** plays each decoded buffer at a time we choose, which is the whole
-//   point: `source.start(when, offset)` takes both the moment and how much of the
-//   front to skip, so catching up costs no copying.
-// - **the AudioContext is created inside the click** that enables audio, which is
-//   what an autoplay policy wants. The old element had to argue for `autoPlay` and
-//   report a refusal; a context resumed from a gesture simply plays.
-//
-// **Opus only, with no fallback in either direction.** If `AudioDecoder` will not
-// take Opus here, this reports that and plays nothing — there is no raw-PCM path to
-// fall back to and the WAV one that Opus replaced is gone. That makes browser
-// support something to test (`cargo test --lib serve_a_test_tone -- --ignored`)
-// rather than something to hedge.
-//
-// And one cost of WebCodecs that the element it replaces did not have: it is
-// **secure-context only**, so a gateway reached over plain HTTP on a LAN address has
-// no audio at all until it is behind TLS. See `audioUnavailable`, which says so
-// rather than blaming the browser.
+// Browser-owned remote audio: WebCodecs decodes bare Opus packets and Web Audio
+// schedules them with bounded lead. AudioContext creation stays in the enabling
+// click, and non-local origins require HTTPS for WebCodecs.
 
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 
@@ -89,19 +60,7 @@ const PACKET_US = 20_000;
  */
 const OPUS_RATE = 48_000;
 
-/**
- * Why audio cannot play here, or null when it can. Cheap and synchronous.
- *
- * Two reasons, and separating them matters because the second is not about the
- * browser at all: **WebCodecs is secure-context only**, so `AudioDecoder` is simply
- * undefined on `http://` to anything but localhost. That is a change from the
- * `<audio>` element this replaces, which played a plain-HTTP response from any
- * origin — measured on 2026-07-29, where a headless Chromium reported no decoder on
- * `about:blank` and full support for this exact config on `http://127.0.0.1`. A
- * gateway reached over LAN HTTP therefore has no audio until it is behind TLS, and
- * saying "this browser cannot decode Opus" there would send someone looking in
- * entirely the wrong place.
- */
+/** Why audio cannot play here, distinguishing insecure origin from no decoder. */
 export function audioUnavailable(): string | null {
   if (typeof AudioDecoder !== "undefined") {
     return null;
@@ -151,13 +110,7 @@ export interface AudioHandlers {
    * reported rather than worked around.
    */
   onError: (reason: string) => void;
-  /**
-   * The current lead in seconds and the seconds trimmed, on every scheduled
-   * buffer — the numbers that answer the open question in docs/remote-audio.md. If
-   * the lead sits at the ceiling with trims recurring, the delay was arriving as
-   * buffered audio and this sheds it; if it hovers at the cushion and the sound is
-   * *still* late, the remaining delay is upstream of the gateway.
-   */
+  /** Current scheduling lead and seconds trimmed from this buffer. */
   onLead?: (lead: number, trimmed: number) => void;
 }
 
@@ -180,11 +133,7 @@ export function createAudioPlayer(
   let nextAt = 0;
   let timestamp = 0;
   let closed = false;
-  // Buffers scheduled but not finished. Needed only for the ceiling: pulling the
-  // schedule back means audio is already queued *past* the new start time, and it
-  // has to be stopped there or the two overlap and mix. Guacamole lets them overlap
-  // and hides the seam by splitting packets at their quietest point; stopping the
-  // tail instead means there is no seam to hide.
+  // Buffers scheduled past a lead clamp must be stopped to prevent overlap.
   let playing: AudioBufferSourceNode[] = [];
 
   const decoder = new AudioDecoder({

@@ -1,132 +1,99 @@
 # Architecture
 
-remotex is a single-user web gateway for RDP and VNC desktops. Macs can use
-their built-in Screen Sharing service as VNC targets or the optional
-`remotex-agent` companion over `rxa`. A Rust backend owns the remote protocol
-session and exposes one browser protocol to a React SPA.
+remotex is a single-user gateway for RDP, VNC, and the optional RXA macOS
+agent. A Rust backend owns the remote protocol session and exposes one common
+HTTP/WebSocket interface to the React SPA and native macOS viewer.
 
 ## Data path
 
-```
-React SPA
+```text
+browser SPA or macOS viewer
    │  /api: authentication, targets, session claim
-   │  /ws: JSON control/input + binary image tiles + opus audio frames
+   │  /ws: JSON control/input, binary image batches, Opus audio
    ▼
-axum server ── session slot ── protocol engine
-                                  ├─ RDP via IronRDP
-                                  ├─ VNC via built-in RFB client
-                                  │    └─ includes macOS Screen Sharing
-                                  └─ rxa via optional remotex-agent on macOS
+axum server ── single session slot ── protocol engine
+                                         ├─ RDP through IronRDP
+                                         ├─ built-in RFB 3.8 client
+                                         └─ RXA macOS agent
 ```
 
-RDP and VNC are decoded in the gateway, then emitted as WebP tiles. The optional
-macOS agent already emits browser-ready WebP tiles, so the gateway relays them
-without re-encoding.
-
-Audio shares that socket but not the tile encoder or its queue: the gateway
-re-encodes the remote's PCM as Opus (~96 kbps against the 1.4 Mbit/s the RDP side
-delivers) and sends it as its own binary frame kind, which a batch still being
-filled does not delay ([`remote-audio.md`](remote-audio.md)). It flows only for a
-client that asks, which is why audio needed no protocol-version bump — a client that
-sends no `audio` message receives the bytes it received before audio existed — and why a
-quiet remote costs nothing at all.
-
-**Both clients decode and schedule it themselves**, which is the one thing a media
-element cannot do: its schedule belongs to the player and never skips forward, so a delay
-it accumulated stayed for the session. Owning the clock is what bounds it (a 300 ms
-ceiling, following Guacamole), and it is why audio moved onto this socket at all — the
-bytes have to arrive as bytes rather than as a media source. The browser decodes with
-WebCodecs; the viewer with the Opus decoder macOS already ships, reached through
-`AVAudioConverter`, so neither needs a container and the gateway sends one
-representation.
+RDP and VNC frames are decoded in the gateway and encoded as WebP tiles. The
+RXA agent sends browser-ready WebP, which the gateway relays unchanged. RDP
+audio is converted from PCM to Opus and sent on the same WebSocket independently
+of the tile encoder and batching queue.
 
 ## Constraints
 
-- There is one active session slot. A new browser may take it over, evicting the
-  previous browser; concurrent or shared sessions are not supported.
-- Remote credentials stay in the server-side TOML config.
-- The browser knows only the common remotex protocol, never RDP, RFB, or `rxa`.
-- Protocol engines use broadly supported baseline features rather than
-  server-specific workarounds.
+- There is one active session slot. A new client may force a takeover and evict
+  the previous holder; concurrent and shared sessions are not supported.
+- Remote credentials remain in the server-side TOML configuration.
+- Clients speak only the remotex protocol and never implement RDP, RFB, or RXA.
+- Protocol engines prefer broadly supported baseline features over
+  server-specific behavior.
 
 ## Backend
-
-The main responsibilities are:
 
 | Module | Responsibility |
 |---|---|
 | `server.rs`, `auth.rs` | HTTP routes, SPA serving, login sessions |
-| `session.rs` | the single slot, target selection, takeover, detach/reattach |
-| `ws.rs`, `protocol.rs` | browser WebSocket bridge and wire types |
-| `rdp.rs` | IronRDP connection, framebuffer, input, optional resize |
-| `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | the session's audio queue, its Opus encoder, and the MS-RDPEA channels feeding it |
-| `vnc.rs` | RFB 3.8 client, framebuffer, cursor, input, optional resize |
-| `rxa.rs` | encrypted Mac-agent connection and tile pass-through |
-| `encode.rs` | WebP encoding off the engines' read loops, in order |
+| `session.rs` | target selection, takeover, detach, and reattach |
+| `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
+| `rdp.rs` | RDP connection, framebuffer, input, clipboard, audio, resize |
+| `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
+| `rxa.rs` | authenticated Mac-agent connection and tile relay |
+| `encode.rs`, `tiles.rs` | ordered WebP encoding and change detection |
+| `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding, MS-RDPEA |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
-Each engine implements the same input/frame-channel boundary and runs
-independently of the browser WebSocket.
+Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
+RDP and VNC pass dirty pixels through the ordered encoder before reaching that
+boundary. RXA already carries encoded tiles.
 
-The RDP and VNC engines do not reach that boundary directly: they hand bands of
-pixels to `encode.rs`, which compresses them on worker threads and forwards the
-results **in the order they were handed over**. Encoding used to happen inline on
-the loop that reads the remote's protocol, where it both capped the frame rate and
-delayed input. Order is not a detail — tiles overwrite their rectangles with no
-delta state, so it is what makes a repaint correct (see `wire.rs`), and the queue
-carries resizes and cursors alongside tiles so neither can overtake the other.
-`rxa.rs` needs none of this: the agent has already encoded what it sends — on its own
-worker threads, in the order it captured them, and by a different mechanism for a
-different reason (see [`mac-agent-architecture.md`](mac-agent-architecture.md)).
+Ordering is a correctness requirement throughout the frame path. Tiles replace
+rectangles without delta state, and a resize changes their coordinate space.
+The encoding and outbound queues therefore keep tiles, resizes, and cursor
+updates in source order even when individual tile encodes finish concurrently.
 
 ## Session lifecycle
 
-Authentication answers whether a browser may use the service. The session slot
-separately records which browser owns the desktop and which target is active.
+Authentication and desktop ownership are separate:
 
-1. The browser authenticates with `POST /api/auth/login`.
-2. `POST /api/session` claims the slot. A conflicting claim returns `409`
-   unless it is a reclaim or forced takeover.
-3. `/ws?session=<token>` attaches to the slot. An idle slot reports the target
-   picker; an active slot reports the connected target and requests a repaint.
+1. `POST /api/auth/login` creates the login cookie.
+2. `POST /api/session` claims the single slot. A conflicting claim returns
+   `409` unless the request reclaims its token or forces takeover.
+3. `/ws?session=<token>` attaches to the slot and reports either the target
+   picker or the current connected target.
 4. `connect` starts the selected engine. `disconnect` stops it and returns to
    the picker.
-5. Losing the WebSocket detaches the browser. The RDP, VNC, or `rxa` engine
-   remains available for a 60-second reattach grace period and discards frames
-   while detached. If no browser returns, the engine stops and the slot returns
-   to the picker.
-6. `POST /api/auth/logout` ends the login *and* the session with it: the engine
-   stops, the selection and the claim are released, and an attached WebSocket is
-   closed. Deliberately not the grace-period path — a log out is not a browser
-   that might come back, and leaving the engine running meant a login inside that
-   minute resumed the desktop that had just been logged out of.
+5. Losing the WebSocket detaches the client. The engine remains available for a
+   60-second reattach grace period while frames are discarded.
+6. Logging out ends the login and session immediately, closes the engine, and
+   releases the claim.
 
-A forced takeover closes the previous WebSocket and preserves the engine and
-selected target when the new browser attaches within the same grace period. If
-an engine ends, the slot returns to the picker.
+A forced takeover closes the previous WebSocket but preserves the selected
+target and engine for the replacement client. Attaching to an existing engine
+requests a full repaint.
 
-Login tokens are stored in memory with a sliding expiry and delivered through
-an `HttpOnly`, `SameSite=Strict` cookie. Session and target endpoints, including
-the WebSocket upgrade, require a valid login. The cookie is marked `Secure`
-only when `x-forwarded-proto` reports HTTPS, allowing direct HTTP use on a
-trusted local network. A server restart logs browsers out.
+Login tokens are held in memory with sliding expiry and delivered through an
+`HttpOnly`, `SameSite=Strict` cookie. The cookie is marked `Secure` when
+`x-forwarded-proto` reports HTTPS. Restarting the gateway invalidates all
+logins.
 
-## Browser protocol
+## Client protocol
 
-`src/protocol.rs` and `frontend/src/protocol.ts` define the two sides.
+`src/protocol.rs`, `frontend/src/protocol.ts`, and the viewer's `Protocol`
+sources define the client contract. `GET /api/config` publishes the protocol
+version so the independently shipped viewer can reject an incompatible gateway.
 
-Server-to-browser traffic uses JSON for control messages and binary frames for
-screen updates. Control messages cover picker/connected state, desktop size, the
-remote's display list, cursor shape, clipboard text, and errors.
+Control and input messages are tagged JSON. Server messages cover picker and
+connected state, desktop size, display selection, cursor shape, clipboard,
+audio format, and errors. The `connected` message includes `resize`,
+`clipboard`, and `audio` capability flags so clients expose only supported
+controls.
 
-The `connected` message also carries the target's capability flags — `resize`,
-`clipboard`, `audio` — so a client shows only the controls this session can
-actually act on. `audio` says the session *can* carry the remote's sound, which is
-not the same as any arriving: a client has to ask, and from the gateway's end a quiet
-remote and one that will never redirect are indistinguishable
-([`remote-audio.md`](remote-audio.md)).
+### Image batches
 
-Every binary frame is a **batch** of records, little-endian throughout:
+Screen updates use little-endian binary frames:
 
 ```text
 u8 kind = 0x02 | u8 flags = 0 | u16 record count | records
@@ -136,409 +103,196 @@ TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 TILE_REF op 0x02: u16 slot | u16 x | u16 y
 ```
 
-One frame carries however many updates were ready at once, so a repaint costs
-one client event, one round of decoding and one paint rather than one of each per
-tile. The record count earns its two bytes: records are self-delimiting, so
-without it a truncated frame would parse cleanly as a complete but smaller batch.
-A non-zero `flags` is *rejected* rather than ignored, which is what makes the byte
-usable for an additive change later.
+The only tile format is WebP. One frame carries multiple ready updates so a
+repaint does not require one WebSocket event per tile. Receivers reject nonzero
+flags, unknown operations, truncated records, and unsupported formats.
 
-The payload format is WebP (`format` 3), and it is the only value the byte takes:
-one container covers the lossless screen content the gateway's engines encode and
-the lossy tiles the macOS agent classifies, so the choice between them never
-reaches the wire. The byte survives as the seam a second codec would arrive
-through. `format` 1 and 2 were PNG and JPEG, retired together in protocol
-version 4 — a client built against 3 rejects a v4 frame rather than mis-decoding
-it, and the `protocolVersion` check refuses the session before that can happen.
+`TILE` draws a payload and optionally stores it in a gateway-selected cache
+slot. `TILE_REF` redraws the encoded payload already stored in that slot.
+`NO_SLOT` means the payload must not be retained. Clients keep a fixed
+`SLOT_COUNT` array and never choose eviction themselves.
 
-Cursor shapes are the exception: they stay PNG on the JSON control channel, where
-a few hundred bytes a handful of times a session buys nothing from a codec change,
-and where the macOS agent's shapes arrive already encoded by AppKit.
+A client that cannot decode a cached tile or receives a reference to a missing
+slot sends `cacheReset`. This clears the outbound slot table and requests a
+repaint. A normal `refresh` alone cannot repair a cache disagreement because it
+does not reset the table.
 
-`slot` is the tile cache. `TILE` means "draw this, and keep it in slot N";
-`TILE_REF` means "draw what you have in slot N here", in seven bytes instead of a
-payload. `NO_SLOT` (0xFFFF) means "draw this and do not keep it" — used for
-payloads too large to be worth a slot. A client's cache is a fixed array of
-`SLOT_COUNT` (256) entries and it never evicts: the gateway names the slot to
-overwrite. That asymmetry is deliberate, because a content-addressed cache would
-need both ends running an identical eviction policy over an identical cost metric,
-and they cannot have one — the gateway knows encoded bytes, a client knows what
-its decoder made of them. Both clients keep the encoded payload and re-decode on a
-reference.
+### Audio frames
 
-A client that cannot decode a tile it was told to keep, or that meets a reference
-to a slot it does not hold, sends `cacheReset`. That is a separate message from
-`refresh` for a reason: `refresh` is routed to the engine, which would repaint
-into an unchanged slot table, send the same references back, and miss again.
+RDP audio is opt-in per attachment. A client sends:
 
-Browser-to-server traffic is JSON:
+```json
+{"type":"audio","enabled":true}
+```
 
-- session control: connect or disconnect;
-- input: mouse movement/buttons, wheel, and DOM keyboard codes;
-- display control: viewport size and a display selection;
-- a full repaint request, and a tile-cache reset;
-- clipboard: send text to the remote, or request the remote's text.
+The gateway answers with `audioFormat`, describing bare Opus packets at 48 kHz
+stereo and carrying `OpusHead`, followed by binary frames:
 
-Pointer motion is coalesced at the client: while the socket has bytes still
-queued, only the newest move is kept. Anything that is not a move flushes the
-held one first, because a click has to follow the move that positioned it.
+```text
+u8 kind = 0x03 | u8 flags = 0 | u16 packet count
+repeated: u16 packet length | packet bytes
+```
 
-Viewport reports affect only engines configured for resize, and there is no
-other way for a client to ask for a size — no menu of resolutions, for any
-protocol. RDP resize is explicit from the UI; VNC resize follows the browser
-when the server advertises the extension. `rxa` is explicit too and narrower
-still: what it resizes is the private display the agent can create, never one of
-the Mac's own screens, so the control appears only while that display is the one
-being shared. A remote's resolution is otherwise set on the remote and reaches
-the client only as a `resize`.
+An audio-enabled RDP engine negotiates one 44.1 kHz, 16-bit stereo PCM format
+when it connects. Windows requires `rdpdr` to be advertised alongside the
+static `rdpsnd` or dynamic `AUDIO_PLAYBACK_DVC` channel; both audio transports
+feed the same bounded queue. The gateway resamples PCM to 48 kHz and encodes
+20 ms Opus packets.
 
-Choosing *which* of a remote's displays to view is a separate matter, and one a
-client does decide: an engine that can offer a choice sends a `displays` list and
-acts on `selectDisplay`. Only `rxa` can — RDP and VNC each deliver a single
-framebuffer spanning every remote screen — so those clients show no picker.
-Switching changes nothing about resolution: the size that follows is the size the
-chosen display was already at. What it does change is whether a resize may be
-asked for at all, since only the agent's own display can take one.
+The queue never blocks the RDP read loop. A slow consumer loses old buffers
+instead of accumulating latency, and no receiver means audio is discarded.
+Audio frames bypass a tile batch still being collected, although a batch already
+being written may delay them.
+
+Both clients own their playback schedule. They start with a 0.1-second cushion
+and discard backlog beyond a 0.3-second ceiling. The browser uses WebCodecs and
+therefore requires HTTPS or localhost; the native viewer uses
+`AVAudioConverter`. A quiet remote and one that never negotiates audio are
+indistinguishable to the client, so detailed negotiation status remains in the
+gateway log.
+
+### Client input and display control
+
+Client JSON messages cover pointer, wheel, keyboard, clipboard, display
+selection, viewport size, refresh, cache reset, and session control. Pointer
+motion is coalesced while the socket has queued bytes; any non-motion input
+flushes the latest held position first.
+
+Resize behavior is engine-specific:
+
+| Engine | Behavior |
+|---|---|
+| VNC with resize | follows desktop-client viewport changes |
+| RDP with resize | changes only on an explicit resize request |
+| RXA with resize | changes only on explicit request while the agent's private display is active |
+
+RDP and VNC expose one framebuffer. RXA can report individual displays and acts
+on `selectDisplay`; choosing a display does not itself change that display's
+resolution.
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
-layer injects it after attaching to an existing engine, so a new canvas does not
-depend on updates seen by the previous client. A client may also send it to
-recover a canvas that has gone wrong: the viewer offers it as **Remote →
-Refresh**, and the SPA does not — it has no equivalent command and never sends
-the message.
+layer injects it after attaching to an existing engine.
 
-The clipboard is per-target opt-in (`clipboard = true`, supported by every
-engine) and works two ways at once. The backend owns the data: the VNC engine
-forwards `ServerCutText` as it arrives and also buffers it, the RDP engine asks
-for the text as soon as the remote announces a copy, and the Mac agent watches
-its pasteboard and pushes changes. On top of that the browser can always
-request the current text, which is what a browser attaching mid-session does,
-having missed every push so far. Each cached value carries when remotex last
-observed the remote clipboard change; fetching it later preserves that activity
-time instead of replacing it with the fetch time. Replies to that explicit
-request are marked separately from unsolicited changes: only the latter drive
-automatic remote-to-local clipboard sync. Opening or revealing the panel is a
-read operation, and its Copy button is the explicit local write.
+### Clipboard
 
-In the browser every arrival feeds the clipboard panel, while unsolicited
-changes also feed the local OS clipboard where the Clipboard API is available.
-Automatic sync is best effort by design — `navigator.clipboard` is absent on a
-non-secure origin, the usual LAN deployment over plain HTTP, and Safari will not
-read the clipboard without a paste gesture. The panel needs no permission: it
-opens on a concealed CRC32/length/activity-time summary, reveals the fetched
-text into its editable box on request, and offers explicit Send and Copy
-actions. The feature therefore degrades to manual rather than breaking. One
-transfer is capped at 64 KiB in each direction.
+Clipboard support is a per-target opt-in available on all engines. The backend
+holds the latest remote value and its observed change time:
 
-The gateway sends a WebSocket protocol ping every five seconds. Browsers answer
-with a protocol pong in their networking stack, so background-tab JavaScript
-timer throttling does not affect liveness. A connection with no pong for about
-60 seconds is expired and its engine stops immediately because the missing-pong
-wait has already consumed the reattach grace period. An orderly WebSocket close
-starts a fresh 60-second reattach window — except after a log out, which has
-already ended the engine before the socket closes. These frames are transport-level and
-do not appear in the JSON browser protocol.
+- VNC forwards and buffers `ServerCutText` or Extended Clipboard data;
+- RDP requests `CF_UNICODETEXT` after a remote format announcement;
+- RXA watches the Mac pasteboard while the gateway enables the watch.
 
-The connection out to a remote gets the matching treatment, in one place for all
-three protocols (`src/engine.rs`). Every engine socket is opened through the same
-helper: `TCP_NODELAY`, a 20-second connect budget, a 30-second handshake budget,
-and TCP keepalive tuned to notice silence — probing after 10 seconds idle, every
-5 seconds, giving up after 3 unanswered probes, so a host that stops answering is
-reported in about 25 seconds instead of the kernel default's couple of hours.
-Without it a host that vanishes with no FIN — powered off, or cut off — leaves
-the engine blocked on a read forever and the client holding a frozen desktop with
-nothing to say. On Linux the socket also gets a 30-second `TCP_USER_TIMEOUT`,
-because keepalive probes are only sent on an *idle* connection: the moment
-somebody clicks at a desktop that has frozen, unacknowledged data makes the
-retransmission budget own the socket instead, and that runs to about fifteen
-minutes. macOS has no equivalent option.
+Clients may request the current value after attaching, since they may have
+missed earlier pushes. Replies to that explicit request are marked separately
+from unsolicited changes. Only unsolicited changes are eligible for automatic
+remote-to-local synchronization; an explicit fetch fills the UI until the user
+chooses Copy.
 
-What this proves is narrow: that the peer's kernel is still answering. For RDP and
-VNC that is all there is, so a remote whose kernel answers while its server
-process is wedged still reads as an idle desktop: a hung `Xvnc`, a `SIGSTOP`ped
-server, a sleeping display, or a VM that was *suspended* rather than powered off
-all keep answering, and the client cannot tell any of them from a desktop nobody
-is touching. Neither protocol offers a way to ask better — RFB has no ping, and
-IronRDP's Heartbeat PDU is server-to-client only — so switching target by hand is
-the way out. A probe that would close the RFB half is in
-[`roadmap.md`](roadmap.md).
+Transfers are capped at 64 KiB and refused rather than truncated. Browser
+clipboard integration is best effort because insecure origins and Safari
+permission rules may prevent automatic access.
 
-RXA asks the agent process itself as well, which closes that half for it: a Mac
-whose agent has wedged or gone is reported. What that still does not prove is that
-pixels are flowing. The agent answers pings from its message loop while capture
-delivers on its own queues, so a capture stream that is alive but producing nothing
-leaves the link provably healthy and the picture frozen — rarer than the RDP and
-VNC case, and narrower, but the same symptom.
+### Liveness
+
+The gateway sends a WebSocket ping every five seconds. Browsers and the viewer
+answer at the protocol layer, independent of application timers. About 60
+seconds without a pong ends the engine; an orderly close starts a fresh
+60-second reattach window.
+
+All remote sockets use `TCP_NODELAY`, a 20-second connect budget, a 30-second
+handshake budget, and TCP keepalive. Linux also uses `TCP_USER_TIMEOUT` to bound
+unacknowledged writes. These checks prove only that the peer's kernel responds.
+RDP and RFB have no portable application ping; RXA adds its own ping/pong to
+verify the agent process and reconnect transient failures.
 
 ## Engines
 
 ### RDP
 
 IronRDP handles TLS and optional NLA/CredSSP. The engine maintains a decoded
-framebuffer, converts dirty rectangles to RGB, and sends them to the browser as
-WebP tiles at most 64 rows tall. Input uses fast-path PDUs after mapping DOM codes
-to scancodes.
+framebuffer, compares dirty rectangles with a shadow of pixels already sent,
+splits remaining damage into bands, and encodes WebP off the protocol read loop.
+Input uses fast-path PDUs after DOM-code-to-scancode mapping.
 
-Before anything is encoded, the rectangle is compared against a *shadow copy* of
-the pixels this client was last sent (`src/tiles.rs`). An update that changed
-nothing is dropped; one that changed a little is sent as the part that changed.
-That matters most here: the RDP pointer is composited into the framebuffer, so
-every mouse event produces a damage rectangle, and this engine also repaints
-regions that did not change. Measured on the dummy xrdp container, a scripted
-240-position mouse sweep went from 115,747 bytes to 27,634 with the tile cache
-behind it (`tests/rdp_bytes_probe.rs`).
-
-The shadow tracks which pixels it actually knows, and a repaint (`refresh`) drops
-that knowledge rather than assuming the client is showing black — both clients
-keep their pixels when a `resize` repeats the size they already have, so assuming
-black would withhold every region that is *now* black.
-
-With `resize = true`, the Display Control Virtual Channel resizes the remote
-desktop when requested from the browser. Otherwise the configured initial
-width and height remain fixed. Those two are also what `defaultSize` resolves to
-here — and for a VNC target, whose own size is otherwise the server's: the key is
-read at connect only by RDP, but by both engines when a client asks for whatever
-size this end considers right.
-
-With `clipboard = true`, the MS-RDPECLIP static virtual channel carries
-`CF_UNICODETEXT` in both directions. RDP uses delayed rendering: a copy
-announces only the available formats, and the text costs a second round trip.
-The engine hides that from the browser by requesting the text as soon as the
-remote announces it, so a remote copy arrives unprompted as it does for the
-other engines; in the other direction the browser's text is advertised and held
-until the remote actually pastes. Line endings are converted between CRLF and
-LF at the boundary. Images, HTML and file transfer are out of scope, and a
-server that never joins the channel leaves the clipboard inert rather than
-ending the session.
-
-With `audio = true`, MS-RDPEA redirects the remote's sound, which reaches whichever
-client asked for it as Opus frames on this same WebSocket — see
-[`remote-audio.md`](remote-audio.md) for the wire, the lifecycle, and how a
-live Windows host was made to cooperate. Four things about it belong
-here, because they are facts about this engine. MS-RDPEA has **two** channels, a
-static `rdpsnd` and a dynamic `AUDIO_PLAYBACK_DVC`, and which one carries the audio
-is the server's choice — IronRDP implements only the static one, so the dynamic
-half is ours (`src/rdp_audio.rs`) and both are registered. An audio target also
-advertises **`rdpdr`** (MS-RDPEFS) with no devices and an inert backend, because
-Windows redirects no audio at all unless device redirection is advertised
-alongside it; nothing is ever redirected through that channel. The channels have
-to be negotiated at connect, so an audio target asks for redirection from the start and
-discards buffers while nobody is listening; there is no way to add one to a live
-connection when a client asks for sound. And the gateway advertises exactly one
-format — 44100 Hz 16-bit stereo PCM — because a wave buffer identifies its format by
-an index, and with one advertised format that index cannot be misread. That also
-means the format a buffer will be in is known before the negotiation happens, so the
-`audioFormat` message a subscription answers with can describe the stream
-immediately rather than waiting for the remote to make a sound. The cost is that a
-server offering no matching format redirects nothing at all, and since a subscription
-succeeds either way, the log is the only place that shows: the negotiated line
-appears and the first-buffer line does not.
+With `resize = true`, the Display Control Virtual Channel applies explicit
+desktop-size requests. With `clipboard = true`, MS-RDPECLIP carries
+`CF_UNICODETEXT` with CRLF/LF conversion. With `audio = true`, the engine
+negotiates the static and dynamic MS-RDPEA transports described above.
 
 ### VNC
 
-The built-in client speaks RFB 3.8 with None, classic VncAuth, or Apple's DH
-security. It
-requests raw 32-bit true-colour pixels, converts them to RGB, and supports the
-Cursor pseudo-encoding. Rects go through the same shadow comparison as RDP's, so a
-server that re-sends unchanged pixels — and they do — costs the browser link
-nothing. `refresh` still asks the server for a non-incremental update rather than
-answering from the shadow: the shadow holds what the *browser* was sent, which goes
-stale across a detach because the session layer drops frames while nobody is
-attached, and trading the server's ground truth for bytes on a LAN hop is not the
-trade this is trying to make. This path can connect directly to macOS Screen Sharing;
-the companion agent is not required for Mac targets.
+The built-in RFB 3.8 client supports None, classic VNC authentication, and
+Apple's Diffie-Hellman security. It requests raw 32-bit true-color pixels,
+supports the Cursor pseudo-encoding, and uses the same shadow and encoder path
+as RDP.
 
-A Mac target says so: `subtype = "ard"`, which selects Apple's DH authentication
-(RFB security type 30) and makes the credentials the *macOS account's* rather
-than the Screen Sharing password. What that buys is the Mac's own screen. A
-password alone authenticates nobody in particular — macOS logs the connection as
-`uid -2` — and macOS answers an anonymous viewer by creating a new login-window
-session on a virtual display, so the client lands on a login screen that will not
-take the account already signed in on the console, while that session carries on
-unshared beside it. Named, the same connection resolves to that user's session.
+`subtype = "ard"` selects Apple's authentication and requires the macOS account
+username and password. Plain VNC uses `vnc_password`. The explicit subtype
+prevents an anonymous macOS Screen Sharing connection from landing at a
+separate login-window session.
 
-The subtype is declared rather than inferred from which credential fields are
-filled, because the two dialects want different ones and guessing is how a good
-password ends up authenticating nobody. It therefore requires `username` and
-`password`, rejects `vnc_password`, and rejects `resize` — macOS accepts the
-resize negotiation and then ignores every request, so the key would promise a
-control that does nothing, and there is no agent-made display behind this
-protocol for it to mean something about. A plain `vnc` target is the mirror image: it takes
-`vnc_password` only. Reaching a Mac as a plain target is allowed and warned about
-once, in the log, at the moment it can still be changed.
+With `resize = true`, the client advertises DesktopSize and
+ExtendedDesktopSize. macOS Screen Sharing accepts but ignores these requests, so
+an ARD target rejects the option during configuration. Clipboard support uses
+Extended Clipboard when the server advertises it and falls back to Latin-1
+`ServerCutText` otherwise.
 
-With `resize = true`, it advertises DesktopSize/ExtendedDesktopSize and sends
-`SetDesktopSize` after the server confirms support. Non-raw encodings are not
-implemented. macOS Screen Sharing is the one server known to accept that
-negotiation and then ignore the request: a Mac reached as a plain `vnc` target
-never resizes, with no error, and the only way to change it is on the Mac itself.
-(An `ard` target refuses the key at startup instead, so this is only reachable by
-not declaring what the target is.)
+### RXA
 
-With `clipboard = true`, `ServerCutText` is forwarded to the browser as it
-arrives and also fills a per-session buffer that answers a later fetch, and a
-browser send becomes `ClientCutText`.
+RXA connects to the optional `remotex-agent` through a mutually authenticated
+Noise session. The agent captures and encodes the selected Mac display, while
+the gateway relays tiles and adapts messages to the common client protocol.
 
-Two encodings are possible, and which one applies is the server's choice. The
-Extended Clipboard pseudo-encoding (`0xc0a1e5ce`) carries UTF-8 and is
-advertised whenever the target opts in; a server that supports it answers with
-a capability message, and from then on text moves through the lazy
-notify/request/provide exchange, deflated, with CRLF line endings converted at
-the boundary. TigerVNC does this. A server that stays silent — TightVNC, for
-one — leaves the baseline latin-1 cut text in use, where anything outside
-latin-1 becomes `?` on the way out and cannot be represented on the way in.
-That limit is the server's, not the gateway's.
+Established links reconnect with capped backoff for up to 30 seconds and request
+a repaint on recovery. Input during an outage is discarded. Initial connection
+or authentication failures return immediately to the picker.
 
-Pointer button state is tracked across RFB pointer events. Keyboard input maps
-DOM codes to X11 keysyms using live Shift and browser-reported Caps Lock state.
-The latest cursor shape is cached and replayed on refresh because servers send
-it only when it changes.
+See [`mac-agent-architecture.md`](mac-agent-architecture.md) for transport,
+capture, private-display, permission, and lifecycle details.
 
-### rxa
+## Clients
 
-As an alternative to macOS Screen Sharing over VNC, the gateway can connect to
-the optional `remotex-agent` with a Noise session authenticated by a long-lived
-X25519 keypair on each end, each pinning the other's public key. This provides
-RealVNC-like reconnect behavior: the keys are the connection credential, so a
-reconnect does not return to Screen Sharing's login gate. The agent captures
-and encodes the Mac display, and the gateway relays its tiles. Established
-connections retry with capped backoff after transient failures and request a
-repaint on recovery. Input generated while disconnected is discarded. Initial
-connection and authentication failures return to the picker instead of
-retrying indefinitely, and so does an established link that stays down for 30
-seconds — long enough to hide a Wi-Fi roam or an agent restart, short enough that
-a Mac which was switched off does not leave a frozen desktop on screen.
+### Browser SPA
 
-A client picks which of the Mac's displays to share, and the agent reports the
-set it has. A Mac's own screens keep their mode: nothing on this wire asks a
-physical panel to change resolution, and it is changed on the Mac, in System
-Settings, with the agent reporting the new size when it sees it. The private
-display the agent can create for itself is the exception — nobody is sitting at
-it, so a client may ask for its size with `resize = true` on the target and that
-display being the one shared. See
-[`mac-agent-architecture.md`](mac-agent-architecture.md).
+The React SPA has login, target picker, and remote desktop states. It renders
+tiles to a canvas, applies incoming frames serially, and overlays mouse,
+keyboard, touch, clipboard, display, and audio controls.
 
-RXA has a separate application ping/pong between the gateway and agent to detect
-a half-open agent TCP connection quickly and reconnect it — faster than the
-socket keepalive every engine gets, and answered by the agent process rather than
-its kernel, so it also catches a Mac that is reachable while the agent is wedged.
-Because that ping goes out every five seconds, this engine's own socket is never
-idle and its keepalive timer effectively never arms. Browser lifetime
-remains owned by the shared session layer under the same rules as RDP and VNC.
-When that layer ends an RXA engine, it closes the agent connection, stops
-capture, and clears the agent's sharing status.
+The canvas is presented at the remote's point size, derived from framebuffer
+pixels and remote scale. Desktop clients scroll when necessary. Touch clients
+use fit-to-width presentation, pinch zoom, pan, a virtual cursor, and
+multi-finger gestures without changing framebuffer coordinates.
 
-See [`mac-agent-architecture.md`](mac-agent-architecture.md) for the agent,
-capture pipeline, protocol, and lifecycle.
+On a Mac host connected to a non-Mac remote, selected Command shortcuts are
+translated to Control. A Mac-keyboard toggle disables translation, and the
+gateway's `remoteOs` message suppresses it for Mac remotes.
 
-## Frontend
-
-The SPA has three states: login, target picker, and remote desktop. The desktop
-uses a canvas for tiles and an overlay for input. It supports desktop mouse and
-keyboard input, touch gestures, an on-screen keyboard, a clipboard panel, remote
-audio, target switching, takeover, and explicit RDP resize. Clipboard text arriving
-from the server is mirrored into the local OS clipboard, and the local clipboard is
-sent to the remote when the tab regains focus; both are skipped silently wherever
-the Clipboard API is unavailable. The docked panels — keyboard, clipboard,
-display — are mutually exclusive: they dock to the bottom edge on mobile and report
-their height so the canvas insets above them, and only one can be reporting at a
-time.
-
-`Ctrl+Alt+Shift+;` hides the floating button and its drawer, and shows them again.
-It is caught on `window` in the capture phase and stopped there, because the remote
-surface forwards every key it sees — a bubble-phase listener would toggle the
-button and type the chord at the guest. Three modifiers because the chord it takes
-is the guest's rather than the browser's: `Ctrl+Shift+;` is Excel's insert-time,
-and `Ctrl+Alt` is AltGr on Windows and X11. Not persisted: a chrome-less desktop
-with no visible way back should not survive a reload.
-
-On a Mac host driving a non-Mac remote, the SPA translates Command chords the way
-the macOS viewer does (see `frontend/src/macKeys.ts` and docs/macos-viewer.md):
-Command plus A, C, F, P, S, V, X or Z becomes a remote Control chord, a bare
-Command taps remote Meta, and any other Command chord is forwarded as a Meta
-chord. Eight rather than the viewer's fourteen, because a web page never receives
-Command-W, T, N, L or O — the browser keeps those — and Command-R is left alone
-deliberately, since a leaked reload would drop the session. A **Mac keyboard**
-toggle in the floating menu turns translation off, and it is inapplicable (and
-disabled) for a Mac remote, which is what the `remoteOs` message decides. Command
-releasing also flushes any translated key still held, because macOS browsers can
-withhold `keyup` while Command is down.
-
-Incoming image decodes are serialized so tiles and resize messages are applied
-in wire order. A remote cursor shape is installed as a CSS cursor for mouse
-input and rendered separately for touch input.
-
-Each tab stores its session token in `sessionStorage`, allowing network
-reconnects to reclaim the same slot without prompting for takeover. A busy slot
-waits for an explicit takeover; an evicted tab waits for an explicit reclaim.
-
-Desktop rendering presents the remote at its own size — `resize` carries the
-density the remote draws at, and the canvas is that many framebuffer pixels per
-CSS pixel — and uses scrollbars when the desktop is larger than the viewport. The
-ratio between that density and the host display's is what scales the picture,
-automatically and in both directions: a 1x guest on a Retina host is magnified 2x
-and soft, a Retina guest on a 1x host is reduced to half and sharp, and equal
-densities are 1:1 in device pixels with nothing resampled. A window dragged
-between displays of different scale switches between those on its own and needs
-no re-derivation — the browser rasterizes the same CSS size at the new density.
-Viewport reports are in the remote's pixels for the same reason.
-Touch devices use fit-to-width rendering with pinch zoom, pan, a virtual cursor,
-and multi-finger gestures. View transforms affect presentation and input
-coordinate mapping, not framebuffer resolution.
-
-A pinch-zoom device never drives the remote's size from its window, and "Resize to
-window" is not offered on one. A portrait phone's window asks for a tall, narrow
-desktop no desktop OS lays out well, and rotating it asks for a different one — so
-the size is asked for once, on connect, and nothing afterwards changes it. A tablet
-asks for its own landscape dimensions, fixed for the life of the tab, so landscape
-is about 1:1 and portrait pinch-zooms that same picture. A phone sends
-`defaultSize`, which carries no size at all: the browser is the one end that cannot
-name a sensible one, so each engine resolves its own — the target's configured
-`width`/`height` for RDP and VNC, and for `rxa` the point size the agent created its
-display at. That last case is why declining to ask is not equivalent to asking for
-the default: macOS restores the mode a display identity was last put in, so a
-desktop session that stretched it leaves it stretched for whoever connects next.
+Each tab stores its claim token in `sessionStorage`, allowing reconnects to
+reclaim the same slot. Busy and evicted states require explicit takeover or
+reclaim actions.
 
 ### Native macOS viewer
 
-The optional macOS 26 viewer is a second client of the same protocol, not a shell
-around this one. It speaks `/api/*` and `/ws` itself: its own login and target
-picker, its own claim/attach/reconnect state machine, Metal framebuffer
-rendering, AppKit input, `NSPasteboard`, and — through `AVAudioConverter` and
-`AVAudioEngine` — its own Opus decoding and playback schedule. Nothing web is
-involved, and the SPA is unaffected by it.
+The optional viewer is a separate native client of the same HTTP and WebSocket
+protocol. It implements its own session state machine, Metal rendering, AppKit
+input, pasteboard synchronization, and Opus playback.
 
-Because the two artifacts ship separately, `GET /api/config` carries a
-`protocolVersion` (`PROTOCOL_VERSION` in `src/protocol.rs`) that the viewer
-refuses to open a session against if it does not recognise. Additive control
-messages do not bump it: clients must ignore tags they do not know.
-
-The viewer has one protocol-engine branch, and only one: which of the three
-resize behaviours a target uses. Everything else follows from the control
-messages, so any other difference belongs to an engine adapter.
-
-See [`macos-viewer.md`](macos-viewer.md) for its protocol, rendering, keyboard,
-clipboard, and packaging design.
+See [`macos-viewer.md`](macos-viewer.md) for compatibility, resize behavior,
+native platform constraints, and QA.
 
 ## Configuration and testing
 
-Configuration is one global TOML file with `[server]` and `[[targets]]`
-sections. See [`install.md`](install.md) and
-[`packaging/etc/remotex.toml.example`](../packaging/etc/remotex.toml.example).
+Configuration is one TOML file with `[server]` and `[[targets]]` sections.
+Protocol-specific fields are validated at startup, including mutually exclusive
+credential fields, RXA key roles and checksums, and unsupported feature
+combinations.
 
-Protocol-specific fields are validated during startup. In particular, `rxa`
-requires a checksum-valid `[rxa].private_key` and a checksum-valid
-`agent_public_key` per target, each rejected if it is the wrong *kind* of key —
-the role is in the prefix, so a gateway key pasted where an agent's belongs is
-named rather than left to fail at the handshake. Incompatible fields are rejected
-rather than silently accepted, `resize` on a `subtype = "ard"` target among
-them.
+Unit tests cover protocol parsing, configuration, authentication, key mapping,
+audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
+flow and protocol engines. Containerized dummy servers cover RDP and VNC, while
+RXA uses an in-process fake agent plus optional live-agent probes.
 
-Unit tests cover protocol, config, authentication, key mapping, and engine
-helpers. Tests under `tests/` exercise the HTTP/WebSocket session flow and
-protocol engines; RDP and VNC happy paths use containerized dummy servers, while
-`rxa` uses an in-process fake agent, including an end-to-end check that closing
-the browser releases the agent connection. Session-manager tests verify the
-same detach deadline for all three protocols. Stable headless browser tests
-cover deterministic DOM and control-plane behavior under
-[`tests/playwright`](../tests/playwright/README.md).
+Stable headless browser tests under
+[`tests/playwright`](../tests/playwright/README.md) cover deterministic DOM,
+control-plane, HTTP, and WebSocket behavior. Rendering races and timing
+measurements remain in raw-protocol and container tests.

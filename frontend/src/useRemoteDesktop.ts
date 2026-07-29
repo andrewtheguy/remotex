@@ -87,17 +87,7 @@ function readMacKeyOverridesPreference(): boolean {
     return true; // storage disabled or blocked; the default is still the default
   }
 }
-// Whether this device pinch-zooms: a touch device with at least two contact
-// points. Exported so RemoteDesktop.tsx can switch the screen into touch layout
-// (overflow hidden + viewport-fixed overlay — see index.css), and read here for
-// the one thing mobile decides differently about size — that the remote's size
-// never follows this window.
-//
-// Deriving it from the window, as this once did, is the wrong shape twice over: a
-// portrait phone asks for a tall, narrow desktop no desktop OS lays out well, and
-// rotating it asks for a different one. Mobile reads the desktop through
-// fit-to-width and pinch zoom instead, so the size worth asking for is the one
-// the *guest* lays out well, and it can be settled once — see MOBILE_GUEST_SIZE.
+// Touch clients keep a fixed guest size and use fit-to-width plus pinch zoom.
 export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
 
 // Phone or tablet, off the screen's short side in CSS pixels. Deliberately the
@@ -106,22 +96,8 @@ export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
 // no real device occupies and nothing near it has an answer worth getting right.
 const TABLET_MIN_SHORT_SIDE = 600;
 
-// The size a mobile client asks the remote to be, settled once here and never
-// re-derived — a rotation cannot move it, which is the point.
-//
-// A tablet asks for its own landscape dimensions, whichever way it happens to be
-// held when this runs: landscape then shows the remote about 1:1 and portrait
-// pinch-zooms that same picture. Long side by short side rather than a real
-// device's aspect ratio, which is close enough for a desktop to lay out in.
-//
-// A phone gets `null`, meaning "ask the far side for its own default" — there is
-// no landscape shape of a phone worth handing a desktop OS. That request is
-// `defaultSize` (see protocol.ts) and it carries no number, because the number
-// lives at the other end: a target's configured width/height, or the size the
-// rxa agent created its display at.
-//
-// `screen` rather than the viewport for both readings, because neither may change
-// when the device rotates or the URL bar slides away.
+// Tablets request their screen's landscape dimensions; phones request the
+// target default. Screen dimensions keep rotation and browser chrome irrelevant.
 const MOBILE_GUEST_SIZE: { w: number; h: number } | null = (() => {
   const long = Math.max(screen.width, screen.height);
   const short = Math.min(screen.width, screen.height);
@@ -168,31 +144,9 @@ const MAX_RETRY_DELAY_MS = 15_000;
 // never answered at all.
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
-// Full-screen canvas: display the framebuffer at the remote's own size —
-// CSS size = remote pixels / the remote's density. The browser rasterizes that
-// for whichever screen it is on, so the picture is scaled by the ratio between
-// the two densities, automatically and in both directions:
-//
-//   1x guest,     Retina host -> magnified 2x, soft (as every remote desktop
-//                                client is: there are no more pixels to have)
-//   Retina guest, 1x host     -> reduced to half, downsampled and sharp
-//   equal densities           -> one framebuffer pixel per device pixel,
-//                                nothing resampled
-//
-// Dragging the window to a display of a different density switches between
-// those on its own, which is why `devicePixelRatio` appears nowhere *here*.
-// Following the host's density is the behaviour; not naming it is how it is
-// obtained. Dividing by it in this function, as it once did, is what *broke* the
-// table above — the canvas was then sized in the host's device pixels, so a 1x
-// guest came out at half its physical size on a Retina screen, not magnified.
-//
-// The ratio is read elsewhere in this file (`sendHostScale`) for an unrelated
-// job: telling the *remote* what this screen is, so a display the agent made can
-// match it and turn row one or two of that table into row three. That changes
-// what arrives, never how what arrives is drawn.
-//
-// No letterboxing; when the desktop is larger than the viewport the canvas
-// overflows and the screen container scrolls.
+// Lay out the framebuffer at remote pixels / remote scale CSS pixels. Host
+// devicePixelRatio is intentionally absent: browser rasterization handles the
+// host display, while sendHostScale separately configures owned RXA displays.
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
@@ -329,22 +283,8 @@ function cursorImage(remote: RemoteCursor | null): CursorImage | null {
   return remote.image ?? fallbackCursor();
 }
 
-// Wear the shape as an element's CSS cursor, sized to `view` — the desktop's
-// on-screen scale, framebuffer pixels to CSS pixels.
-//
-// A cursor image is laid out at its intrinsic size in CSS pixels, and shapes
-// arrive in remote framebuffer pixels, so on a Retina remote the hardware
-// pointer came out at twice the size of the desktop it sits on (a half-scale
-// canvas, a full-scale pointer). `cursor` has no width to set, so the scale
-// travels as an image-set() resolution instead: 2x says "two image pixels per
-// CSS pixel", which is what a 2x shape on a half-scale canvas is. The hotspot
-// scales with it — those coordinates are in CSS pixels of the laid-out image,
-// not in image pixels.
-//
-// Written twice on purpose. image-set() inside `cursor` is not universal, and an
-// unsupported value is rejected by the CSSOM rather than applied, which leaves
-// the plain url() standing: a pointer at the wrong size beats no pointer at all,
-// which is what this element's stylesheet `cursor: none` would otherwise give.
+// Scale a framebuffer-pixel cursor with image-set resolution. Keep a plain URL
+// fallback because unsupported image-set values are rejected as a whole.
 function applyCursorCss(el: HTMLElement, image: CursorImage, view: number) {
   el.style.cursor = `${cssUrl(image.url)} ${image.hx} ${image.hy}, default`;
   if (!(view > 0) || !Number.isFinite(view) || Math.abs(view - 1) < 0.01) {
@@ -427,21 +367,7 @@ async function postClaim(force: boolean): Promise<Response | null> {
   }
 }
 
-// A viewport report: the size this client wants the remote desktop to be,
-// clamped to the protocol's u16 range.
-//
-// One size only — no floors, no per-device cases. This window's room in CSS
-// pixels times the density the remote draws at, so a desktop that comes back
-// fills the window and is shown one point per point. Mobile never calls this with
-// its own geometry; it has one fixed size or none at all (see MOBILE_GUEST_SIZE),
-// which is what leaves this the plain derivation it reads as.
-//
-// The multiplication is exactly what the rxa engine divides back out to reach a
-// display mode's points, and that is the consumer where getting it wrong is
-// visible as a wrongly-sized Mac desktop rather than as scrollbars here. It is
-// self-consistent by construction: applyCanvasCss lays the canvas out at
-// `w / scale` CSS px, so `clientWidth × scale` recovers the pixels that produced
-// that layout.
+// Requested CSS viewport converted to remote pixels and clamped to wire `u16`.
 function viewportMsg(
   size: { w: number; h: number },
   guestScale: number,
@@ -452,24 +378,9 @@ function viewportMsg(
   return { type: "viewport", w: dim(size.w), h: dim(size.h) };
 }
 
-// Claims the single session slot (POST /api/session) and opens the /ws
-// WebSocket with the claim token. The attached socket starts in the post-login
-// **picker** (`mode === "picker"`): call `connect(name)` to start a target
-// session (`mode` flips to "desktop"), and `switchTarget()` to tear it down and
-// return to the picker. In desktop mode it renders incoming screen tiles onto
-// `canvasRef` and forwards mouse + keyboard input (plus touch gestures on
-// pinch-zoom-capable devices — see touchGestures.ts) captured over `overlayRef`
-// as ClientMsg. Reconnects automatically after drops; busy/takenOver surface to
-// the caller with `takeOver` to resolve them.
-//
-// `pointerRef` is the image element the client-side pointer is drawn on when
-// the engine sends cursor shapes rather than compositing them (see
-// paintCursor); it is positioned imperatively and stays hidden otherwise.
-//
-// `onUnauthorized` fires when a claim answers 401 — the login is gone, so the
-// caller swaps back to the login screen. It must be referentially stable
-// (useCallback) or the connection/input effects tear down and redo. Logout is
-// the floating menu's Log out button (see FloatingMenu.tsx), not this hook.
+// Own the single-session claim, WebSocket lifecycle, picker/desktop state,
+// rendering, and input forwarding. `onUnauthorized` must be referentially stable
+// because it participates in the connection effects.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
@@ -494,10 +405,7 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
-  // True when the connected target opted into audio, which is what puts the Audio
-  // row in the floating menu (see docs/remote-audio.md). It says this session *can*
-  // carry the remote's sound — not that any is playing, and not that the remote's
-  // audio channel is even up, which from the gateway's end are indistinguishable.
+  // Whether this target offers remote audio; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
   // Whether this browser has asked for the sound. Per attachment and never
   // remembered: it starts off on every connect and reconnect, because enabling it
@@ -817,25 +725,8 @@ export function useRemoteDesktop(
       lastViewport = { w: msg.w, h: msg.h };
       sendRef.current(msg);
     };
-    // The mobile request, and the whole of what a pinch-zoom device asks about
-    // size. Sent once per connection and by nothing else: this window's shape is
-    // not a shape a desktop can usefully be, so no later event should change the
-    // answer — not a rotation, not the URL bar, not the soft keyboard.
-    //
-    // Armed by `handleConnected` and fired from the first `resize`, not from
-    // `connected` itself, because a tablet's request is in the remote's pixels and
-    // the first `resize` is what names the density to convert with. Sending a
-    // moment earlier would multiply by a placeholder 1 while the rxa engine divided
-    // by the 2 it had already announced, and an iPad would ask for 1366 points and
-    // be given 683. The desktop path never had to think about this: rxa suppresses
-    // its connect-time report altogether, so its only sender is a button pressed
-    // long after the scale is known.
-    //
-    // A tablet names its size and a phone defers (see MOBILE_GUEST_SIZE). The
-    // tablet's goes through `viewportMsg` like any other, density and all, so it
-    // means what the desktop path means — the CSS pixels I want, in the remote's
-    // own pixels — and the multiplication is undone by the same number that
-    // produced it.
+    // Send one mobile size after the first resize supplies the remote density.
+    // Rotations and browser chrome do not revise it.
     let mobileSizePending = false;
     const sendMobileSize = () => {
       mobileSizePending = false;
@@ -860,12 +751,7 @@ export function useRemoteDesktop(
     // Which display the remote is sharing, as its last `displays` reported it.
     // Only so a switch can be told from the first list of a session.
     let sharedDisplay: number | null = null;
-    // The rxa half of "may this target be resized": the target's own `resize`
-    // flag. On its own it enables nothing, because what the agent can resize is a
-    // display it *made* — so the button appears only once a `displays` says that
-    // is the display being shared, and goes away again on a switch to a real
-    // screen. A closure variable rather than state: `handleDisplays` reads it on
-    // every list and must not re-run this effect to do so.
+    // RXA resize requires both target permission and an active owned display.
     let rxaResize = false;
     const sendHostScale = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1032,19 +918,8 @@ export function useRemoteDesktop(
       }
     };
 
-    // One binary frame carries however many tiles were ready at once.
-    //
-    // Every record decodes concurrently and the batch is drawn in one pass, so a
-    // repaint costs one paint instead of one per tile, and the decodes overlap
-    // instead of queueing behind each other. Order still holds: `Promise.all`
-    // keeps the array in wire order, and the draws are a synchronous loop, so a
-    // later tile covering an earlier one still wins.
-    //
-    // A malformed batch is dropped whole rather than partly applied: half a
-    // repaint leaves the canvas in a state nothing will correct, where dropping
-    // it costs one refresh. A single *undecodable record* is different — it is
-    // dropped alone, because abandoning its batch would drop tiles that decoded
-    // perfectly well and leave the region they cover stale.
+    // Decode records concurrently, then draw synchronously in wire order.
+    // Malformed framing drops the batch; individual decode failures drop a tile.
     const drawBatch = async (data: ArrayBuffer) => {
       const records = decodeBatchFrame(data);
       if (!records) {
@@ -1055,12 +930,7 @@ export function useRemoteDesktop(
       resetAsked = false;
       const jobs = records.map(resolveRecord);
       paintBatch(jobs, await Promise.all(jobs.map(decodeJob)));
-      // Emptied once, after the batch, rather than the moment a reference misses.
-      // Clearing mid-pass would throw away slots this batch's own earlier records
-      // filled, so a reference naming one of them — legal, and something the
-      // gateway emits within a single batch — would be dropped for company. By
-      // here nothing left reads the cache, and the next batch arrives holding
-      // nothing, which is what the server's own reset will agree with.
+      // Clear after the pass so references may use slots filled earlier in it.
       if (resetAsked) {
         tileCache.fill(null);
       }
@@ -1603,25 +1473,8 @@ export function useRemoteDesktop(
     sendRef.current({ type: "clipboard", text });
   }, []);
 
-  // Push the local clipboard to the remote whenever this tab becomes active,
-  // so a paste inside the remote desktop — context menu, middle click, or a
-  // Ctrl+V the remote app handles itself — sees what was last copied here.
-  //
-  // Focus is the trigger because reading the clipboard is only permitted for a
-  // focused document, and it is also the moment the user has plausibly just
-  // copied something elsewhere. Everything here is best effort: `readText` is
-  // absent on a non-secure origin, and Safari refuses it outright without a
-  // paste gesture. The panel's Send covers those.
-  //
-  // An oversized clipboard is skipped rather than sent for the gateway to
-  // truncate: this fires on focus with no user action behind it, and the whole
-  // string would ride the socket first — past 64 MiB (axum's default
-  // max_message_size) that drops the session, which reconnect then hides. The
-  // remote therefore keeps whatever it had; the panel's Send is the path that
-  // reports the limit, since autosync has no UI to report it in.
-  //
-  // The inbound half (mirrorRemoteClipboard) needs no check: everything on that
-  // link is already clamped by the gateway (see src/protocol.rs).
+  // Best-effort clipboard push on focus, when reads are permitted. Oversized
+  // values are skipped locally; the explicit panel reports the limit.
   useEffect(() => {
     if (mode !== "desktop" || !canClipboard) {
       return;

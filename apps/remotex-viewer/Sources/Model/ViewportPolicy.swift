@@ -1,22 +1,10 @@
 import Foundation
 
-/// Decides whether a measured window becomes a `viewport` message.
+/// Maps measured windows to viewport messages.
 ///
-/// Its own type because this is the one place three protocols disagree, and left
-/// inline it would rot into `if protocolName ==` checks spread across the model.
-/// Pure, so all three behaviours are testable without a socket.
-///
-/// The three, as `frontend/src/useRemoteDesktop.ts` picks between them:
-///
-/// - **VNC** follows the window continuously. It is the only engine that can
-///   resize cheaply.
-/// - **RDP** resizes only when the user asks, because a resize forces a
-///   Deactivation-Reactivation — an expensive, visible renegotiation.
-/// - **rxa** resizes only when the user asks, and only a display the *agent
-///   made* for the purpose. A Mac's own panel is set on that Mac, in System
-///   Settings, and no message asks it to change — so which of the two is being
-///   shared decides whether the request may be made at all, and that is not
-///   known until a `displays` arrives.
+/// VNC may follow continuously; RDP is request-only; RXA is request-only while
+/// sharing an agent-created display. The pure policy keeps those differences
+/// out of socket and UI code.
 struct ViewportPolicy: Equatable {
     /// Suppress automatic reports; only an explicit request gets through. RDP
     /// with `resize`, and rxa with `resize` while sharing an agent-made display.
@@ -25,22 +13,8 @@ struct ViewportPolicy: Equatable {
     /// being shared turns out to be one the agent made.
     var ignoresViewport = false
 
-    /// The remote takes this window's size on its own, unasked, and keeps taking
-    /// it: a VNC target the operator opted in, and nothing else.
-    ///
-    /// Read only by "Resize to Display", the item that sizes the *window* to the
-    /// desktop. That direction is meaningful for every other target — including
-    /// the ones that also take a size from here, since a desktop can be left at a
-    /// size the window does not match and either end may be the one the user
-    /// wants to move. It is meaningless only here: a following desktop resizes to
-    /// match the window the moment the window moves, so fitting the window to the
-    /// desktop aims at something that moves as it is aimed at.
-    ///
-    /// Stored rather than read off the two flags above, which cannot tell this
-    /// apart: `manualOnly` and `ignoresViewport` are both false for an RDP or VNC
-    /// target *without* `resize` too. Those still report — the reports are simply
-    /// dropped at the gateway (`src/rdp.rs`, `src/vnc.rs`) — so their desktops
-    /// hold still to be measured, and this is false for them.
+    /// Whether the remote continuously follows the window. Stored separately
+    /// because the two gating flags do not distinguish resize-disabled targets.
     private(set) var followsWindow = false
 
     /// The target's `resize`, for an rxa target only.
@@ -59,13 +33,8 @@ struct ViewportPolicy: Equatable {
         self.ignoresViewport = ignoresViewport
     }
 
-    /// Derive the policy from a `connected` message.
-    ///
-    /// The whole decision for VNC and RDP. For rxa it is only half of one: the
-    /// session starts out ignoring viewports and may gain a manual report later,
-    /// when a `displays` says which screen is being shared. That is the one thing
-    /// about this type a `connected` no longer settles, and it is why the update
-    /// below exists rather than a second initializer.
+    /// Derive initial policy. RXA stays disabled until `displays` identifies an
+    /// owned display.
     init(protocolName: String, resize: Bool) {
         ignoresViewport = protocolName == "rxa"
         manualOnly = protocolName == "rdp" && resize
@@ -73,19 +42,8 @@ struct ViewportPolicy: Equatable {
         rxaResizeAllowed = protocolName == "rxa" && resize
     }
 
-    /// A `displays` arrived: `isVirtual` says whether the display now being
-    /// shared is one the agent made rather than one of the Mac's own screens.
-    ///
-    /// Only an agent-made display can be resized from here — a real panel's mode
-    /// is changed on the Mac, by whoever is sitting at it — so this is what turns
-    /// "Resize to Window" on for an rxa session, and off again the instant the
-    /// user picks a real screen from the Display menu. It stays request-only
-    /// either way: even a display made to be looked at from here is not dragged
-    /// around by this window.
-    ///
-    /// A no-op for RDP and VNC, and deliberately so rather than by their never
-    /// sending a display list: a gateway that somehow sent one must not be able to
-    /// change how those two behave.
+    /// Enable request-only RXA resizing only for an owned display. No-op for
+    /// other protocols.
     mutating func sharing(virtualDisplay isVirtual: Bool) {
         guard rxaResizeAllowed else {
             return
@@ -114,14 +72,7 @@ struct ViewportPolicy: Equatable {
         return .viewport(w: size.w, h: size.h)
     }
 
-    /// Forget the dedupe. Called on every `connected`: the size the gateway knew
-    /// about went away with the previous socket, so the first report on a new one
-    /// has to go out even if it matches.
-    ///
-    /// Deliberately *not* called on a display switch. The memo means "the display
-    /// being resized is already this size", and switching away and back leaves
-    /// that display at exactly the size it was left at — so clearing it would buy
-    /// a redundant round trip and no correctness.
+    /// Forget the per-connection dedupe. Display switches retain it.
     mutating func resetForNewConnection() {
         lastSent = nil
     }

@@ -1,11 +1,4 @@
-//! The seam between an engine's protocol-read loop and the WebP encoder.
-//!
-//! Every tile the RDP and VNC engines produce used to be encoded *inside* the loop
-//! that reads the remote's protocol: while a frame compressed, no PDU was read and
-//! no protocol response was written. At the encoder's measured cost (about 60µs
-//! fixed plus ~17ns a pixel — see [`crate::protocol`]) a desktop fully in motion
-//! spent tens of milliseconds a frame there, which was both a frame-rate ceiling
-//! and an input-latency floor. This module moves that work off the loop.
+//! Ordered WebP encoding outside the RDP and VNC protocol-read loops.
 //!
 //! ```text
 //! read loop:  pack → Shadow::accept → bands()
@@ -18,34 +11,10 @@
 //!                                order task: await handles FIFO → frame_tx
 //! ```
 //!
-//! What the shape is answering:
-//!
-//! - **Ordering is structural, not sequence-numbered.** The order task awaits
-//!   `JoinHandle`s out of a FIFO, so what reaches `frame_tx` is in push order
-//!   however the encodes finish. That is not a nicety: tiles overwrite their
-//!   rectangles with no delta state, [`crate::wire`] drops a pending tile a later
-//!   one covers and names slots in placement order, and both clients apply a
-//!   frame's records strictly in arrival order. A reordering bug shows up as stale
-//!   pixels, never as an error — so it is worth having by construction rather than
-//!   by care.
-//! - **Control messages share the queue.** A `Resize` travels the same channel as
-//!   tiles rather than going straight to `frame_tx`, so it can never overtake the
-//!   tiles it invalidates — the client must learn the new size *before* a tile in
-//!   the new coordinate space arrives. The macOS agent's pipeline avoids the same
-//!   hazard the same way (`crates/rxa-agent/src/session.rs`). This is why the
-//!   engines no longer hold a `frame_tx` at all.
-//! - **Back-pressure, not coalescing.** The agent drops a whole frame and asks for
-//!   a coarser repaint when its encoder falls behind. The gateway cannot copy that:
-//!   `Shadow::accept` has *already* recorded those pixels as sent by the time a
-//!   band reaches here, so dropping one would need a `forget()` and a full repaint
-//!   — worse than waiting, under exactly the sustained-motion case this is for. So
-//!   a full queue blocks the engine, which lets the remote's own flow control slow
-//!   down, precisely as a full `frame_tx` already did.
-//! - **`spawn_blocking`, not a pool crate.** An engine runs on its own
-//!   current-thread runtime (see [`crate::session`]) which still has a
-//!   multi-threaded blocking pool, in-flight work is bounded by `ENCODE_DEPTH` so
-//!   it cannot grow into that pool's 512-thread ceiling, and a `Tile` is already
-//!   `Send` because `encode_webp` copies out of libwebp's non-`Send` buffer.
+//! FIFO collection preserves source order even when encodes finish out of order.
+//! Control messages share the queue so a resize cannot overtake related tiles.
+//! A full queue backpressures the engine because its shadow has already recorded
+//! submitted pixels.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,49 +27,8 @@ use tokio::task::JoinHandle;
 
 use crate::protocol::{ServerMsg, Tile};
 
-/// How many encodes may be queued ahead of the one being collected.
-///
-/// This is the channel's capacity, so encodes in flight are at most this many plus
-/// the one the order task is awaiting. It is the only parallelism dial: raising it
-/// lets more bands of one frame compress at once, and a full queue is what stalls
-/// the engine.
-///
-/// **16 is measured, not guessed** — `tests/rdp_repaint_probe.rs`, against a real
-/// Windows desktop at 1280x800, forty full repaints of 13 bands each, two runs per
-/// depth on a 12-core (8 performance) arm64 Mac:
-///
-/// | depth | repaint median | p90 | engine stalled, per repaint |
-/// |---|---|---|---|
-/// | 1 | 15.9, 12.3 ms | 19.1, 15.5 ms | 11.0, 9.3 ms |
-/// | 8 | 7.6, 8.7 ms | 12.4, 11.3 ms | 2.1, 1.9 ms |
-/// | 16 | 8.1, 8.1 ms | 11.2, 11.5 ms | 0.004, 0.008 ms |
-/// | 32 | 7.4, 6.5 ms | 14.0, 8.5 ms | 0.005, 0.003 ms |
-///
-/// The dial does two separate things, and the second is the one this module is for.
-/// It roughly halves a repaint, which is the frame rate. But it takes *all* of what
-/// the engine's own read loop waits for the encoder, which is input latency and
-/// protocol throughput — the thing that was actually wrong.
-///
-/// **The number that matters is one frame's worth of bands.** At 13 bands a depth of
-/// 16 means a whole repaint is in flight and the engine never waits at all, and that
-/// is exactly where the stall column falls off a cliff — 8 still leaves 2ms a repaint
-/// because five bands have to queue behind the rest. Wall clock stops improving at the
-/// same point, so 32 buys nothing but memory (one band buffer each, ~250KB at this
-/// width) and, in one of its two runs, a worse tail.
-///
-/// It does not cover every desktop: 1080p is 17 bands and 1512p is 24, so a taller
-/// screen keeps a little stall. That degrades gracefully, which is why this is a plain
-/// constant — a measurement should be reproducible from the source, and
-/// `available_parallelism` would make one build behave differently on the dev Mac and
-/// the deploy host. A host with fewer cores does not want a smaller number either:
-/// over-committing costs interleaving, not correctness, and the order task waits on
-/// the first band regardless.
-///
-/// Byte counts are *not* comparable between runs of that probe — a live Windows
-/// desktop draws its own clock — but the 520 records of the repaints themselves are,
-/// and were identical at every depth. Earlier 20-repaint runs threw the occasional
-/// 200ms+ repaint at several depths; at 40 they stopped appearing, so they were the
-/// desktop and not the encoder.
+/// Maximum queued encodes ahead of the handle currently collected. This covers
+/// roughly one 1280×800 repaint while bounding memory and worker pressure.
 const ENCODE_DEPTH: usize = 16;
 
 /// One item in the ordered queue.

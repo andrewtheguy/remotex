@@ -1,51 +1,6 @@
-//! The session layer: the single session slot and the protocol-engine seam
-//! (docs/architecture.md).
-//!
-//! ## The engine seam
-//!
-//! Every engine exposes the same contract: an async
-//! `run(config, input_rx, frame_tx)` that connects to the target, consumes
-//! browser input as [`ClientMsg`], emits the uniform [`ServerMsg`] stream
-//! (resize, tiles, error), and returns when the session ends. That shared
-//! signature *is* the seam — with three engines and no dynamic dispatch, a
-//! `match` beats a trait object (which IronRDP's non-`Send` futures could not
-//! implement cleanly anyway).
-//!
-//! One engine bends the "returns when the session ends" rule on purpose:
-//! [`crate::rxa`] reconnects to its agent silently rather than ending, because
-//! its keypair handshake needs no human. See that module.
-//!
-//! ## The single session slot
-//!
-//! [`SessionManager`] decouples the engine session (backend ↔ remote host)
-//! from the browser attachment (backend ↔ WebSocket). The slot also holds the
-//! **selected target**: `None` is the post-login *picker* state (authenticated,
-//! no connection started), `Some` is a live desktop. Which target is selected
-//! is slot state, so a takeover inherits it — the new browser lands on the
-//! picker or the desktop exactly where the previous holder was.
-//!
-//! - **Claim** (`POST /api/session`): a browser obtains the slot token. If
-//!   another browser's WebSocket is live, the claim needs `force` (takeover)
-//!   or the current token (reclaim after a network drop).
-//!   Claiming evicts the previous WebSocket but *keeps the engine running*.
-//! - **Attach** (`/ws?session=<token>`): the WebSocket joins the slot. Attach
-//!   does *not* start an engine — it reports the current state to the browser
-//!   ([`ServerMsg::Picker`] or [`ServerMsg::Connected`]). A reattach to a
-//!   running engine sends it [`ClientMsg::Refresh`] (re-announce the size and
-//!   repaint from the server-owned copy).
-//! - **Connect** ([`ClientMsg::Connect`]): the browser picks a target; the
-//!   engine is spawned for it and survives a brief detach so the browser can
-//!   reattach. Every protocol ends after the same browser-absence grace period.
-//! - **Disconnect** ([`ClientMsg::Disconnect`], "switch target"): the engine is
-//!   torn down and the slot returns to the picker, without dropping the
-//!   WebSocket. An engine that ends on its own (remote hung up, connect
-//!   failure) returns the slot to the picker the same way.
-//! - **Detach**: the WebSocket went away. Frames keep flowing from a live
-//!   engine and are dropped here during a short reattach grace period. If no
-//!   browser returns, the session layer drops the engine input channel.
-//!
-//! One slot, permanently: takeover replaces the attached browser, never adds
-//! one (see the tenet in docs/architecture.md).
+//! The single session slot and common engine boundary. A claim owns the slot,
+//! an attachment supplies its WebSocket, and the selected engine may outlive a
+//! brief detach. Takeover replaces the attachment without adding a session.
 
 use std::sync::{Arc, Mutex};
 
@@ -324,10 +279,7 @@ impl SessionManager {
             info!("session: superseding the previous attachment");
             let _ = old.event_tx.try_send(AttachEvent::Evicted);
         }
-        // Audio is per attachment and starts off: the pump feeds the *previous*
-        // socket's channel, and the browser arriving here has neither an
-        // `AudioContext` nor a decoder yet. It asks again if it wants sound, which is
-        // also what keeps that request inside a click.
+        // Audio is per attachment and starts disabled until the client asks.
         st.stop_audio();
 
         let (event_tx, events) = mpsc::channel(FRAME_BUFFER);
@@ -358,19 +310,8 @@ impl SessionManager {
         Ok(Attachment { id, events })
     }
 
-    /// Start or stop forwarding this attachment's audio ([`ClientMsg::Audio`]).
-    ///
-    /// Authorised by the attachment rather than by a token, which is the whole
-    /// simplification of putting audio on the socket: the login cookie was checked
-    /// before the upgrade and the claim token on attach, so being the current client
-    /// *is* the authorisation. Nothing here can be reached by anyone else, and there
-    /// is no second request to refuse.
-    ///
-    /// Enabling replaces whatever was running, so a repeated request cannot end up
-    /// with two pumps on one queue. A session with no audio source — the picker, or a
-    /// target that did not opt in — is a no-op with a log line: a client is only
-    /// offered the control when [`ServerMsg::Connected`] said `audio`, so reaching
-    /// here otherwise is a client bug rather than a state to report.
+    /// Start or stop audio for the current authenticated attachment. Enabling
+    /// replaces any existing pump; sessions without an audio source ignore it.
     pub fn set_audio(&self, attach_id: u64, enabled: bool) {
         // What the construction below needs, taken under the lock and used without it.
         // Building an encoder means allocating an Opus encoder *and* planning an FFT
@@ -608,25 +549,8 @@ impl SessionManager {
         }
     }
 
-    /// End everything the slot holds — engine, target selection, claim, and any
-    /// attached browser. What logging out means.
-    ///
-    /// The third of three ways a session can end, and the distinction is the whole
-    /// point of having it:
-    ///
-    /// - [`Self::disconnect`] ("switch target") ends the engine and keeps the claim,
-    ///   because the same browser is about to pick again.
-    /// - [`Self::detach`] keeps the *engine* for [`REATTACH_GRACE_PERIOD`], because a
-    ///   browser whose socket closed may be coming back — a reload, a blip, a laptop
-    ///   lid.
-    /// - a log out is neither. The login that authorised the session is gone, so
-    ///   nothing about it should outlive the request.
-    ///
-    /// Logging out used to take the `detach` path by default, because closing the
-    /// socket is all the browser did and that is indistinguishable from a browser
-    /// that crashed. So the remote stayed connected for the full grace period and a
-    /// login inside that minute silently resumed the desktop instead of showing the
-    /// picker — the session survived the credential that opened it.
+    /// End engine, target, claim, and attachment on logout. Unlike disconnect or
+    /// detach, no state survives after the authorizing login ends.
     ///
     /// Takes no attachment id and checks nothing about who is calling. One login,
     /// one slot, one person (see CLAUDE.md — multi-session is out of scope, not

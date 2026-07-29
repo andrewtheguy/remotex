@@ -1,33 +1,8 @@
-//! The agent's modal panels: everything the GUI needs beyond a menu item.
+//! Settings and error panels for the menu-bar app.
 //!
-//! [`config`] is the settings dialog — one panel holding every setting the agent
-//! has. [`error`] reports the failures a menu cannot show on its own.
-//! [`startup_failure`] is [`error`] from before there is a menu at all, which is
-//! the only thing standing between a failed launch and an app that appears to do
-//! nothing when opened.
-//!
-//! Settings is an `NSPanel`, with a title bar and content owned completely here.
-//! It used to be an `NSAlert` with an accessory view, but an alert reserves room
-//! for its application icon and moves that icon above the title when the
-//! accessory is wide. Hiding the image does not recover the reserved room. A
-//! normal panel has no alert-icon slot, so the useful explanation and the form
-//! both fit without trying to alter AppKit's private alert layout.
-//!
-//! ## Every panel activates the app first
-//!
-//! An accessory app (`LSUIElement`) is never the active application. A modal it
-//! puts up without activating opens *behind* whatever the user is looking at —
-//! invisible, and, being modal, not reachable from the menu bar item that opened
-//! it. That is a hang as far as anyone can tell. So [`activate`] runs first,
-//! every time.
-//!
-//! ## Modal from a menu action is fine
-//!
-//! `runModal` spins its own run loop, which would be a problem *inside* a menu
-//! tracking loop. It is not one here: AppKit closes the menu and unwinds its
-//! tracking before it sends the item's action, so by the time any of this runs
-//! the menu is gone. The cursor timer keeps firing throughout, because it is
-//! registered in `NSRunLoopCommonModes` (see [`crate::menubar`]).
+//! The accessory app must activate before presenting a modal or the panel can
+//! open behind another application. A regular `NSPanel` owns the settings form;
+//! `runModal` is entered only after menu tracking has ended.
 
 use std::cell::RefCell;
 
@@ -48,15 +23,7 @@ use objc2_foundation::{
     NSTimer,
 };
 
-/// Width of the settings form, in points.
-///
-/// What sets it is the key rows: a 50-character key has to fit on one line in a
-/// 12pt monospaced font, because one that scrolls is one somebody copies half of
-/// by hand. Menlo 12 advances ~7.23pt per character, so 50 of them need ~361pt
-/// plus the field's insets. `540` was the measured minimum for that field alone;
-/// this is wider so its Copy button can sit on the same row without shortening
-/// the value, making the button's target unambiguous. The resulting 670pt panel
-/// still fits the 800pt-wide test Mac.
+/// Fits a complete key and its Copy button on the minimum supported display.
 const WIDTH: f64 = 630.0;
 
 /// The ordinary window chrome is outside this rectangle; these are the panel's

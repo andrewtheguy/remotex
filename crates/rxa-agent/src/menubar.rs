@@ -1,54 +1,10 @@
-//! The menu bar item: the only interface the agent has.
+//! Main-thread menu-bar UI for status, permissions, settings, login-item
+//! control, and Quit.
 //!
-//! Without it the agent is completely invisible. Nothing says whether it is
-//! running, nothing says when somebody is looking at your screen, and stopping
-//! it means finding the process from a terminal — which is a poor deal for
-//! software whose entire job is to let a remote machine watch and drive this
-//! one. [`Starting`] therefore creates it before any fallible application
-//! startup work. The status item then answers three questions at a glance:
-//!
-//! 1. **Is it running, and can it work?** The icon is there or it is not, and it
-//!    warns when a permission it cannot do without is missing.
-//! 2. **Is anyone connected?** The icon changes, and the first menu line names
-//!    the peer.
-//! 3. **How do I stop it?** Quit, which really quits — see below.
-//!
-//! ## Everything is here, because there is nowhere else
-//!
-//! This menu is the agent's whole interface — the CLI is three launch flags and
-//! no operations at all. It copies this Mac's public key, opens the one settings
-//! dialog, reveals the config, opens the log, offers the Privacy panes when a
-//! grant is missing, toggles the login item, and quits. The panels live in
-//! [`crate::panels`]; what a saved change means lives in [`crate::settings`].
-//!
-//! ## Permissions are health, not settings
-//!
-//! Screen Recording and Accessibility are not options with a checkbox each: the
-//! agent is useless without either. So they are reported by the icon and given a
-//! menu row *only* while one is missing — see [`Permissions`] and [`Health`]. The
-//! native permission requests happen at startup in [`crate::report_permissions`].
-//!
-//! They are also read on different schedules, because they *behave* differently:
-//! Accessibility applies the instant it is granted, so it is polled until it is.
-//! Screen Recording only reaches a fresh launch, so its effective state is fixed
-//! at startup; a non-polling recheck when the menu opens can offer the required
-//! quit and reopen without falsely reporting the current process healthy.
-//!
-//! ## Quit has to defeat launchd
-//!
-//! The embedded LaunchAgent plist sets `KeepAlive` to `SuccessfulExit: false`
-//! rather than a plain `true`, precisely so this menu can work: a clean exit
-//! stays exited, while a crash is still restarted. With `KeepAlive: true` the
-//! Quit item would be a lie — launchd would bring the agent straight back.
-//!
-//! ## Why the main thread ends up here
-//!
-//! AppKit is main-thread-only, and so is the `NSCursor` the agent reads the
-//! pointer shape from (see [`crate::cursor`]). Running an `NSApplication` needs
-//! that same thread, so the run loop owns it and the cursor poll is an `NSTimer`
-//! on that loop. The timer is added in `NSRunLoopCommonModes` so the pointer
-//! keeps updating while the menu is open — in the default mode alone it would
-//! stall for as long as the user held the menu down.
+//! Accessibility is polled because it becomes effective immediately; Screen
+//! Recording requires relaunch. The cursor timer runs in common run-loop modes
+//! so menu tracking does not pause updates. A clean Quit remains stopped because
+//! the LaunchAgent restarts only unsuccessful exits.
 
 use std::cell::{Cell, OnceCell};
 use std::path::PathBuf;
@@ -76,12 +32,7 @@ use crate::{capture, config, cursor, input, loginitem, panels, pasteboard, setti
 /// window edge.
 const TICK: f64 = 0.1;
 
-/// Re-read Accessibility every tenth tick, so once a second, until it is granted.
-///
-/// It has to be polled at all because it is granted in System Settings, outside
-/// this process, with no notification to subscribe to. It does not have to be
-/// polled ten times a second, and it does not have to be polled once it is on —
-/// see [`Controller::refresh_accessibility`].
+/// Poll Accessibility once a second until granted; macOS sends no notification.
 const PERMISSION_EVERY: u32 = 10;
 
 /// The status item: blocked, idle, and with a gateway attached.

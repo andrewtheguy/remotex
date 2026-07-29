@@ -1,22 +1,5 @@
-//! Per-tile codec choice and encoding.
-//!
-//! Screen content is two very different things sharing one framebuffer. A menu,
-//! a code editor, a terminal: a handful of flat colours and hard edges, where
-//! lossless compression is both *smaller* and sharper than lossy. A photo, a
-//! video, a map: a continuous gradient where lossless barely compresses and lossy
-//! wins by an order of magnitude. Picking per tile gets both.
-//!
-//! The classifier has to be cheap enough to run on every tile of every frame, so
-//! it samples rather than scanning: a strided subset of pixels into a small
-//! bitset of distinct colours. Few distinct colours means UI or text, so
-//! lossless; many means photographic, so lossy.
-//!
-//! Both are WebP, which is why that choice never leaves this file. It used to pick
-//! between two *containers* — PNG and JPEG — and the format byte carried the
-//! answer all the way to the browser's `createImageBitmap`. Now the container is
-//! the same either way, the format byte has one value, and a misclassification
-//! costs quality on one tile rather than sending a codec the other end has to
-//! branch on.
+//! Per-tile WebP encoding. A sampled distinct-color classifier sends flat UI
+//! losslessly and photographic content lossily.
 
 use rxa_proto::msg::format;
 
@@ -24,20 +7,8 @@ use rxa_proto::msg::format;
 /// under the lossless size for the same content; text never reaches this path.
 const LOSSY_QUALITY: f32 = 80.0;
 
-/// libwebp's speed/size dial, and — in lossless mode — the effort dial `quality`
-/// becomes. Both at the cheap end, for the same reason the gateway's are
-/// (`WEBP_LOSSLESS_METHOD` in `src/protocol.rs`, which records the measurements):
-/// the compression above `method = 0` costs 20-80x the encode time for another
-/// 10 points of ratio.
-///
-/// Neither is on an engine's protocol-read loop, and cells now encode several at a
-/// time (`ENCODE_WIDTH` in `session.rs`) — but the budget is no larger for either of
-/// those. At `method = 2` one 320x64 cell measured 4.1ms, so a dozen-cell Retina frame
-/// would spend 40ms in the encoder, and a full repaint's 320 cells over a second. The
-/// parallelism divides that by the cores it can get, which is the same answer the
-/// gateway's `WEBP_LOSSLESS_METHOD` note reaches from the other direction: overlapping
-/// a cost is not removing one, and here the cores are shared with the very desktop
-/// being captured.
+/// Cheap libwebp settings keep interactive encoding bounded; parallelism does
+/// not change total CPU cost.
 const WEBP_METHOD: i32 = 0;
 const LOSSLESS_EFFORT: f32 = 20.0;
 

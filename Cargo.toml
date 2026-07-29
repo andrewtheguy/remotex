@@ -72,10 +72,7 @@ webp = { version = "0.3.1", default-features = false }
 # codec that sits on the engine's hot path. arm64 needs nothing here — `neon` is
 # already on by default.
 libwebp-sys = { version = "0.9", features = ["sse41", "avx2"] }
-# Remote audio's representation on the wire: Opus in an Ogg stream, in place of
-# the raw PCM this used to serve (see src/audio.rs and docs/remote-audio.md).
-# ~96 kbps against 1.4 Mbit/s of 44.1 kHz stereo PCM, which is the whole reason
-# for the three crates.
+# Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus` binds libopus through audiopus_sys, which builds it with cmake. C again,
 # and again not a new class of requirement — but unlike libwebp it *prefers a
@@ -145,7 +142,7 @@ rxa-proto = { path = "crates/rxa-proto" }
 # expose the Display Control Virtual Channel used for client-driven resize;
 # `cliprdr` is the MS-RDPECLIP static channel behind the clipboard bridge
 # (see src/rdp_clipboard.rs), and `rdpsnd` is MS-RDPEA behind remote audio
-# (see src/rdp_audio.rs and docs/remote-audio.md). `rdpdr` is MS-RDPEFS, which
+# (see src/rdp_audio.rs). `rdpdr` is MS-RDPEFS, which
 # remote audio needs registered even though nothing is ever redirected through
 # it — see the Rdpdr registration in src/rdp.rs for why.
 ironrdp = { version = "0.17", features = ["cliprdr", "connector", "session", "graphics", "dvc", "displaycontrol", "svc", "rdpsnd", "rdpdr"] }

@@ -2,28 +2,11 @@ import AVFoundation
 import Observation
 import OSLog
 
-/// The remote's sound: subscribed to, decoded, and scheduled on a clock this viewer
-/// owns.
+/// Main-actor owner of remote audio subscription, decode, and playback.
 ///
-/// Shaped like `ClipboardSynchronizer` — an observable the model owns, with a `send`
-/// closure for its one outbound message and an `update(enabled:)` the model calls as the
-/// session changes underneath it. The two are the viewer's only per-session side
-/// channels, and they have the same lifetime problems, so they are worth reading
-/// together.
-///
-/// **The schedule is the whole point** (`AudioSchedule`, and docs/remote-audio.md for
-/// how the browser got here first). Each decoded buffer is handed to an
-/// `AVAudioPlayerNode` at an explicit time, so a delay can be *dropped* rather than
-/// carried: past the ceiling the queue is thrown away and the timeline restarts at the
-/// cushion. Pointing `AVPlayer` at a stream would give the opposite — a schedule that
-/// belongs to the player and never skips forward, which is exactly the failure the SPA
-/// spent two designs on.
-///
-/// **On the main actor deliberately.** Decoding 200 ms of Opus is sub-millisecond work
-/// arriving five times a second. An actor would buy threading and lose *ordering*, since
-/// separate `Task`s into an actor are not ordered and audio buffers are; the tile path
-/// can hand work to an actor precisely because the receive loop awaits it, and nothing
-/// here should make that loop wait on an audio engine.
+/// Explicit scheduling bounds latency. Keeping decode and scheduling on the main
+/// actor preserves packet order without making the socket receive loop await the
+/// audio engine.
 @MainActor
 @Observable
 final class AudioOutput {
@@ -41,18 +24,7 @@ final class AudioOutput {
     @ObservationIgnored
     var send: (@MainActor (ClientMessage) -> Void)?
 
-    /// Why sound is not playing, reported once rather than stored.
-    ///
-    /// Held as a hook instead of as observable state because the only thing to do with
-    /// it is *say* it: a stored string would need clearing on every path that leaves the
-    /// failure behind (a target switch, a disconnection, a fresh subscription), and
-    /// missing one of those leaves a stale reason attached to a session it is not about.
-    /// `AppModel` routes this to the alert.
-    ///
-    /// Only ever the local audio device refusing, or a codec this build has no decoder
-    /// for — which is drift rather than an expected branch, since the gateway sends Opus
-    /// and nothing else. Unlike the browser, a missing decoder and an insecure origin are
-    /// not among the possibilities here.
+    /// One-shot error reporting avoids stale observable state across sessions.
     @ObservationIgnored
     var report: (@MainActor (String) -> Void)?
 
@@ -62,9 +34,7 @@ final class AudioOutput {
     private var player: AVAudioPlayerNode?
     @ObservationIgnored
     private var decoder: OpusDecoder?
-    /// Where the timeline stands, in seconds on the player's own clock. Reset by
-    /// anything that stops the node, because a stopped `AVAudioPlayerNode` rebases its
-    /// clock to zero (measured).
+    /// Timeline position on the player clock; stopping the node rebases it.
     @ObservationIgnored
     private var nextAt = 0.0
     @ObservationIgnored

@@ -1,17 +1,5 @@
-//! TOML configuration: a `[server]` block plus `[[targets]]` profiles (see
-//! docs/architecture.md).
-//!
-//! Config comes **only** from the TOML file (plus the `--config` selector).
-//! There are deliberately no environment variables and no `.env` loading — env
-//! files shadowing the real environment caused subtle setup bugs, and
-//! credentials belong in one 600-mode file. The target is not selected on the
-//! command line either: the server serves *every* `[[targets]]` profile and the
-//! browser picks one after login (the post-login target picker), so there is a
-//! single pathway to choosing a target.
-//!
-//! The config is **global-only**: the installed `<prefix>/etc/remotex.toml`, or
-//! an explicit `--config <path>`. No per-user or working-directory files are
-//! searched — one deployment, one config, no shadowing.
+//! Global TOML configuration: one `[server]` block and `[[targets]]` profiles.
+//! Only the selected config file is read; target credentials remain server-side.
 
 use std::path::{Path, PathBuf};
 
@@ -179,23 +167,8 @@ pub struct TargetConfig {
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
-    /// Dynamic resize: drive the remote desktop size from the client's window.
-    /// VNC (`SetDesktopSize`, TigerVNC-family servers) resizes automatically as
-    /// the viewport changes. RDP negotiates the Display Control channel and
-    /// resizes only when the user asks (the floating menu's "Resize to window"),
-    /// since RDP's Deactivation-Reactivation is heavier than VNC's resize.
-    ///
-    /// `rxa` is the third shape and the narrowest: on request, like RDP, and only
-    /// while the display being shared is one the *agent made* for the purpose. A
-    /// Mac's own panel is never resized because somebody connected to it, so this
-    /// key does nothing at all for an agent configured without a private display
-    /// (`virtual_display` in the agent's own config), and the control disappears
-    /// again the moment a client switches to a real screen. That half cannot be
-    /// checked from here, which is why this is accepted for `rxa` rather than
-    /// validated.
-    ///
-    /// Off by default; without it (or on servers that can't resize) the desktop
-    /// keeps its connect-time size and the client shows scrollbars.
+    /// Allow client-driven resize. VNC follows viewport changes; RDP applies an
+    /// explicit request; RXA applies one only to an active agent-created display.
     #[serde(default)]
     pub resize: bool,
     /// Clipboard bridge: let the browser read and write this target's
@@ -210,56 +183,14 @@ pub struct TargetConfig {
     /// `NSPasteboard`. The latter two are UTF-8 end to end.
     #[serde(default)]
     pub clipboard: bool,
-    /// Remote audio: redirect this target's sound to the browser, which decodes it
-    /// and schedules it itself (see [`remote-audio.md`](../docs/remote-audio.md)).
-    /// Off by default — a desktop nobody is listening to should not be sending
-    /// sound across the network.
-    ///
-    /// `rdp` only, and rejected elsewhere in [`ConfigFile::parse`]: MS-RDPEA is
-    /// the only audio channel any engine here speaks. RFB has no audio at all,
-    /// and the `rxa` agent does not capture any.
-    ///
-    /// Unlike [`Self::clipboard`], this is not a permission the session can act
-    /// on later. RDPSND has to be negotiated when the connection is established,
-    /// so an audio target asks for redirection at connect and discards what
-    /// arrives while nobody is subscribed — a client asking afterwards cannot add
-    /// the channel to a live connection.
-    ///
-    /// Enabling it does not mean a client will hear anything: audio is sent only to
-    /// one that asks ([`crate::protocol::ClientMsg::Audio`]), and in a browser
-    /// WebCodecs is secure-context only, so one reaching this gateway over plain HTTP
-    /// on a LAN address has no decoder to ask with. The macOS viewer is exempt from
-    /// that — it decodes with AVFoundation, which does not ask about the origin.
+    /// Negotiate RDP audio at connect. Packets are sent only while the attached
+    /// client subscribes. Rejected for VNC and RXA.
     #[serde(default)]
     pub audio: bool,
-    /// The Mac agent's public key (`rxap…`), as its Settings dialog or
-    /// `remotex-agent --public-key` reports it. The gateway's own half is
-    /// [`RxaSection::private_key`]; between them the Noise handshake
-    /// authenticates both ends, so a reconnect never involves a person.
-    /// Required for `rxa`, rejected for anything else — see
-    /// [`ConfigFile::parse`].
-    ///
-    /// Not a secret, unlike every other credential on this struct: it is one
-    /// half of a keypair whose private half never leaves that Mac. That is what
-    /// lets both machines display their key plainly instead of behind a Copy
-    /// button, which is the whole reason the protocol stopped using a
-    /// pre-shared key.
-    ///
-    /// `#[serde(default)]` because [`TargetConfig`] is one struct for every
-    /// protocol and `deny_unknown_fields` leaves no room for a per-protocol
-    /// shape — the same arrangement as the RDP-only `security` and the
-    /// RDP-and-VNC `width`/`height`.
+    /// Mac agent public key (`rxap…`). Required for RXA and rejected elsewhere.
     #[serde(default)]
     pub agent_public_key: String,
-    /// This gateway's own private key, copied in from [`RxaSection`] by
-    /// [`ConfigFile::resolve`] — never read from a `[[targets]]` table, which
-    /// is what `skip` enforces.
-    ///
-    /// It lives here rather than being threaded alongside the target because
-    /// the session layer passes engines exactly one thing: [`crate::session`]
-    /// holds a `Vec<TargetConfig>` and its engine spawner takes a
-    /// `TargetConfig`. Fanning the one server identity out at resolve time
-    /// keeps that seam as it is.
+    /// Gateway private key copied from [`RxaSection`] during resolution.
     #[serde(skip)]
     pub gateway_private_key: String,
 }
@@ -406,16 +337,8 @@ impl ConfigFile {
                     .map_err(|e| {
                         anyhow::anyhow!("target {:?} has an invalid agent_public_key: {e}", target.name)
                     })?;
-                // Deliberately nothing about `resize` here, where there used to be
-                // a rejection. It is accepted for "rxa" now, and there is nothing
-                // left to check from this side: what the agent can resize is a
-                // display it *made* for the purpose, and whether it made one lives
-                // in that Mac's own config file. So this key is only the
-                // operator's half of the permission; the display's half is settled
-                // per session, from the `displays` list, in both clients and again
-                // in the agent. On a Mac with no such display the key is inert and
-                // no control appears — which is a thing to document on
-                // `TargetConfig::resize`, not to refuse a correct config over.
+                // RXA resize capability also depends on agent-owned display state,
+                // which cannot be validated from gateway configuration.
             } else {
                 anyhow::ensure!(
                     target.agent_public_key.is_empty(),

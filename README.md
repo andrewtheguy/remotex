@@ -10,8 +10,8 @@ over a common WebSocket protocol.
   Sharing.
 - The optional macOS companion `remotex-agent` provides a dedicated-agent
   alternative over the encrypted `rxa` protocol.
-- The optional macOS 26 `remotex-viewer` hosts the same web client with native
-  keyboard capture, Command shortcut translation, menus, and clipboard access.
+- The optional macOS 26 `remotex-viewer` is a native client with Metal
+  rendering, AppKit input, menus, clipboard access, and audio playback.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/mac-agent-architecture.md`](docs/mac-agent-architecture.md) for the
@@ -93,7 +93,7 @@ The main directories are:
 |---|---|
 | `src/` | gateway, session management, and RDP/VNC/`rxa` engines |
 | `frontend/` | React SPA |
-| `apps/remotex-viewer/` | macOS 26 SwiftUI/WKWebView viewer |
+| `apps/remotex-viewer/` | native macOS 26 SwiftUI/Metal viewer |
 | `crates/rxa-proto/` | protocol shared by gateway and macOS agent |
 | `crates/rxa-agent/` | macOS agent |
 | `tests/` | protocol and engine end-to-end tests |

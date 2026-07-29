@@ -1,40 +1,6 @@
-//! Server-side VNC session: a minimal RFB client (RFC 6143).
-//!
-//! Guacamole-style baseline (docs/architecture.md): protocol 3.8,
-//! security None or classic VncAuth, and the **Raw encoding only** — the one
-//! encoding every VNC server must support. No per-implementation workarounds:
-//! the backend↔VNC hop is LAN, so clever wire encodings buy nothing there;
-//! the browser link is optimized by the shared tile transport instead.
-//!
-//! One security type past the baseline: **Apple's DH authentication**, used
-//! when a target sets a `username`. It is not an optimization but the
-//! difference between seeing a Mac's screen and seeing a login window it made
-//! up for you — see `ard_authenticate`.
-//!
-//! On top of the baseline, the **Cursor pseudo-encoding** is always
-//! advertised: a server that supports it stops compositing the pointer into
-//! the framebuffer and sends the shape instead, which the browser draws
-//! locally ([`ServerMsg::Cursor`]). This is what makes the pointer visible on
-//! servers that never composited it in the first place — macOS Screen Sharing
-//! draws no cursor into the framebuffer at all, so without this the desktop
-//! arrives with no pointer anywhere on it.
-//!
-//! On top of the baseline, **dynamic resize** is available per
-//! target opt-in (`resize = true`): the DesktopSize/ExtendedDesktopSize
-//! pseudo-encodings are advertised, and browser viewport reports
-//! ([`ClientMsg::Viewport`]) become `SetDesktopSize` requests once the server
-//! declares support, so TigerVNC-family servers render at the browser's size.
-//! Servers (or targets) without it keep the connect-time size.
-//!
-//! Also per target opt-in (`clipboard = true`): the **cut text** messages.
-//! `ServerCutText` fills a buffer the browser fetches on demand, and the
-//! browser's sends become `ClientCutText`. Baseline only — the Extended
-//! Clipboard pseudo-encoding (UTF-8, zlib, a capability handshake) is not
-//! negotiated, so this text is latin-1 and anything outside it becomes `?`.
-//!
-//! Mirrors [`crate::rdp`]'s shape behind the [`crate::session`] seam: connect,
-//! report the desktop size as [`ServerMsg::Resize`], then pump framebuffer
-//! updates out as tiles and browser [`ClientMsg`] input back in.
+//! RFB 3.8 client using Raw framebuffer updates, cursor and resize
+//! pseudo-encodings, classic or Apple DH authentication, and baseline or
+//! Extended Clipboard. Decoded damage joins the common ordered tile path.
 
 use std::collections::HashMap;
 use std::sync::Arc;

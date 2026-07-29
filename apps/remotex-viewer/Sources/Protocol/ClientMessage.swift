@@ -75,17 +75,7 @@ enum ClientMessage: Sendable, Equatable {
     /// back, and miss again. This is handled by the socket's own bridge, which
     /// empties the table and asks for the repaint itself.
     case cacheReset
-    /// Start or stop this attachment's sound.
-    ///
-    /// The whole of what subscribes a client to the remote's audio: the gateway answers
-    /// with one `audioFormat` and then binary frames of kind `0x03`, and sends nothing
-    /// to a client that never asks. Which is how audio reached the wire without moving
-    /// `PROTOCOL_VERSION` — this viewer used to be the client that never asked (see
-    /// docs/remote-audio.md).
-    ///
-    /// Per *attachment* rather than per session, so a reconnect arrives with audio off
-    /// and this has to be sent again; `AppModel` re-sends it from `connected` while the
-    /// menu's toggle is on.
+    /// Start or stop this attachment's audio. Reconnects require reassertion.
     case audio(enabled: Bool)
 
     /// The `type` tag this encodes as. Public so the wire-contract test can
