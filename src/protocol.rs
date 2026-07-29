@@ -532,20 +532,25 @@ const WEBP_MAX_DIMENSION: u16 = 16383;
 /// branch instead. The 27-47% on offer at `m2` costs an order of magnitude more
 /// time: 3.1ms for one 320x64 cell.
 ///
-/// **That last trade is worth revisiting, and this is the note for whoever does.**
-/// 3.1ms was ruled out because it was 3.1ms an engine's protocol-read loop had to
-/// stand still for. It no longer runs there — [`crate::encode`] moved these encodes
-/// onto a bounded set of workers — so the cost is now wall-clock the engine mostly
-/// does not wait on. Deliberately not changed here: one thing at a time, and the
-/// measurement belongs to whoever makes the swap.
+/// **One half of that trade changed, and it is not the half that matters.** 3.1ms was
+/// ruled out because it was 3.1ms an engine's protocol-read loop had to stand still
+/// for, and it no longer runs there — [`crate::encode`] moved these encodes onto a
+/// bounded set of workers. But relocating a cost is not removing one: `m2` is still
+/// 7.7x the CPU per encode, `ENCODE_DEPTH` can only overlap that up to the core
+/// count, and on the widest bands it would make a repaint *slower* rather than
+/// faster. So this is not the lever for a screen with a large moving area, which is
+/// the case anyone arrives here wanting to fix.
 ///
-/// Read the size gain off the right baseline, which is the row above and not PNG:
-/// against the `m0 q20` that ships, `m2 q50` is about 10-20% fewer bytes
-/// (0.53-0.73x against 0.64-0.81x), rising to ~30% at the smallest tiles per the
-/// note below. The 27-47% figure in the previous paragraph is against PNG-Fast, a
-/// codec this tree no longer has. And it costs no fidelity whatever — `quality` is
-/// an effort dial here, the mode is still lossless — which is what distinguishes it
-/// from reaching for the lossy branch to save the same bytes.
+/// Where it does pay is the small end, per the note below: nearly free under roughly
+/// 512 pixels, which is most of what the gateway's engines actually send. That makes
+/// a **size-tiered** effort the shape of any future change here, not a new constant.
+///
+/// Two things to get right when reading the numbers above. The size gain's baseline is
+/// the row above and not PNG: against the `m0 q20` that ships, `m2 q50` is about
+/// 10-20% fewer bytes (0.53-0.73x against 0.64-0.81x), where the 27-47% figure is
+/// against PNG-Fast, a codec this tree no longer has. And the effort costs no fidelity
+/// whatever — `quality` is an effort dial here, the mode is still lossless — which is
+/// what distinguishes it from reaching for the lossy branch to save the same bytes.
 ///
 /// Two things the same tables say, for whoever revisits this:
 ///
