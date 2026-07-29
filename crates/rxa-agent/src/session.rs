@@ -75,9 +75,54 @@ const OUT_BACKLOG: usize = 64;
 /// after the whole frame — which is what keeps back-pressure and the coalescing above
 /// behaving as they did when this was one cell at a time.
 ///
-/// 1 is exactly the old serial behaviour. The measured value replaces it once the
-/// sweep and a live session have been read; see `encode_width_sweep` below.
-const ENCODE_WIDTH: usize = 1;
+/// **8 is measured, not guessed**, on a 12-core (8 performance) arm64 Mac. First
+/// `encode_width_sweep` below, over a 3200x2000 full repaint's 320 cells, medians of
+/// three runs:
+///
+/// | width | flat UI wall | its CPU | photographic wall | its CPU |
+/// |---|---|---|---|---|
+/// | 1 | 35.5 ms | 33.7 ms | 380 ms | 377 ms |
+/// | 2 | 18.8 ms | 35.7 ms | 198 ms | 390 ms |
+/// | 4 | 10.1 ms | 36.5 ms | 99 ms | 390 ms |
+/// | 8 | **6.3 ms** | 41.3 ms | **51 ms** | 398 ms |
+/// | 12 | 6.0 ms | 42–49 ms | 44 ms | 448 ms |
+///
+/// The CPU column is why this stops at 8 rather than going wider, and it is also what
+/// answers the objection that the agent should be modest because it shares its cores
+/// with the desktop it is capturing. Up to 8, total CPU barely moves — the same work
+/// finishes in a shorter, wider burst, which is *better* for that desktop than pinning
+/// one core for 380 ms while the frame pipeline backs up behind it. At 12 the wall clock
+/// stops improving and the CPU does not: 19% more of it for 15% less time in the
+/// photographic case, and for nothing at all in the flat one.
+///
+/// Then live, against the agent on the test VM's 3200x2000 display under
+/// `tests/rxa_repaint_probe.rs` — which is where the number that mattered was, because a
+/// synthetic sweep cannot say whether the *link* was the constraint all along. 26s of
+/// streaming under a refresh every 250 ms; width 1 once, width 8 twice and identical:
+///
+/// | width | frames | frames/s | tiles/frame | encode ÷ waiting | stalled |
+/// |---|---|---|---|---|---|
+/// | 1 | 191 | 7.3 | 200 | 0.97 | 0.7% |
+/// | 8 | 749 | 28.8 | 63 | 6.05 | 0.6% |
+///
+/// `stalled` is time handing tiles to the socket, so at well under 1% the encoder was
+/// the whole cost and no part of widening it could be wasted — which is the thing that
+/// had to be checked first and could not be checked synthetically.
+///
+/// **The frame rate roughly quadrupled and the tile count barely moved**, and that pair
+/// is the whole result. `tiles/frame` at 200 is the loop this fixes: a 320-cell repaint
+/// outlived the two-frame raw channel, so capture dropped a frame, set `full_repaint`,
+/// and asked for another 320-cell repaint — an agent that could not keep up was spending
+/// nearly all of its encoder on pixels nobody had changed. At 63 it is reporting real
+/// damage again. So the 6x in the encoder does not show up as 6x the tiles; it shows up
+/// as four times the frames carrying a third of the redundancy.
+///
+/// A plain constant rather than `available_parallelism`, for the reason
+/// `encode::ENCODE_DEPTH` gives on the gateway: a measurement should be reproducible
+/// from the source, and a build that behaves differently on two Macs makes it not be.
+/// A Mac with fewer cores does not want a smaller number either — over-committing costs
+/// interleaving, not correctness, and the collector waits on the oldest cell regardless.
+const ENCODE_WIDTH: usize = 8;
 
 /// How often the pointer shape is compared against what this session last sent.
 const CURSOR_POLL: Duration = Duration::from_millis(100);

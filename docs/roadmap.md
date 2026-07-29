@@ -91,9 +91,18 @@ That last one is why this waits rather than ships. It leaves downscaling as the
 lever for a remote whose *changing* area is genuinely large, which is the same case
 the video section above is about — but this one costs sharpness everywhere rather
 than only where the picture is moving, so it comes after those levers, not before
-them. The measurement it needs is that case: encode time as a share of the frame
-budget while most of the screen is moving. It is also `rxa`-only, since a Linux or
-Windows box cannot be told what size to capture itself at.
+them. It is also `rxa`-only, since a Linux or Windows box cannot be told what size
+to capture itself at.
+
+The measurement it was waiting on is now taken, and it moved this further back
+rather than nearer. `ENCODE_WIDTH` (`crates/rxa-agent/src/session.rs`) records it:
+encoding a 3200x2000 repaint's 320 cells eight at a time instead of one took the
+frame rate from 7.3 to 28.8 a second, and the *redundancy* with it — every frame had
+been a full repaint, because one that could not finish in time made capture ask for
+another. Downscaling would have bought a 4x on the same axis by discarding three
+quarters of the pixels permanently; parallelism bought 4x by spending cores that
+were idle. So what is left for this lever is the case where the cores really are
+gone, which is a smaller Mac than any measurement here has been run on.
 
 ### Application-level liveness for VNC
 
