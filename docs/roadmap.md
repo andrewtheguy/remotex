@@ -137,13 +137,59 @@ is the wart that followed them — the endpoint no longer waits for a format it 
 never be sent, and fills a quiet remote's gaps with silence, so audio starts, stops
 and starts again on its own.
 
-What is **not** settled is promptness: a live desktop has been heard a couple of
-seconds behind itself, with the gateway measured out of that as a cause
-([`remote-audio.md`](remote-audio.md)). Before redesigning anything for it, read how
-Apache Guacamole carries RDP audio to a browser — it is the obvious prior art for a
-more robust path, and none of it has been studied here yet.
+What is **not** settled is promptness, and that is the next thing here: a live
+desktop has been heard a couple of seconds behind itself, with the gateway measured
+out of it as a cause ([`remote-audio.md`](remote-audio.md)). **This is RDP-to-browser
+work and it comes before the viewer** — the browser is where audio is actually being
+listened to, and a second client would only inherit whatever the timing model turns
+out to be.
 
-What is left is two things, neither urgent:
+**Apache Guacamole is the prior art, and reading it names the problem precisely.**
+Its guacd takes RDP audio through its own rdpsnd handler and sends **raw PCM** —
+`audio/L16;rate=…,channels=…`, 250 ms buffers, as blobs on an in-band stream of the
+same tunnel, so it spends the ~176 kB/s that Opus took us to 10.4. That is the half
+worth *not* copying. The half worth copying is at the other end: its
+`Guacamole.RawAudioPlayer` schedules every packet itself through Web Audio, on a
+timeline it owns, and bounds latency by throwing the excess away:
+
+```js
+// guacamole-common-js/modules/AudioPlayer.js, in sync()
+nextPacketTime = Math.min(nextPacketTime, now + maxLatency);   // maxLatency = 0.3
+```
+
+That runs on every server sync, after each display flush, and an underrun resets the
+timeline to *now* rather than carrying the deficit. **A 300 ms hard cap, by skipping
+ahead** — which is exactly what `<audio src>` cannot do, because the schedule belongs
+to the browser and cannot be reclaimed. It is why the `playbackRate` trim in
+`AudioPanel.tsx` is a workaround for something they solve structurally, and it
+reframes the problem: the fix is not a codec or a container, it is **owning the
+playback clock**.
+
+So the shape to aim for, if the remaining latency proves to be browser-side: keep
+Opus on the wire and decode in the client (`AudioDecoder`, or a WASM decoder),
+scheduling the decoded buffers ourselves with a latency cap. That keeps the
+seventeenth-of-PCM bandwidth *and* gains the bounded latency, where Guacamole has
+only the second. It also means the endpoint would stop being something an `<audio>`
+element can point at, which is a real cost and the reason not to start until the
+measurement in [`remote-audio.md`](remote-audio.md) says the browser is where the
+delay is. If instead it turns out to be Windows' own capture path, none of this
+helps and none of it should be built.
+
+Two of Guacamole's other choices are worth recording while they are in view:
+
+- **It loads `rdpdr` and `rdpsnd` together**, unconditionally, whenever printing,
+  drive redirection *or* audio is enabled. A second independent client therefore
+  never ships `rdpsnd` without `rdpdr` — which is why nothing documents that Windows
+  needs it, and why reading another client's source is what found it here.
+- **Audio is negotiated with the client rather than configured.** Both protocols call
+  one `guac_audio_stream_alloc`, which picks an encoder from the mimetypes the
+  connected user declared — the owner's first, then any user's. A stream whose
+  encoder stayed `NULL` is still returned and then silently does nothing, since
+  `guac_audio_stream_write_pcm` and `_flush` both check the encoder before calling
+  it; the protocols' "Sound disabled" log covers the stream failing to allocate at
+  all. Ours is a config flag whose outcome the `connected` message reports instead.
+
+After promptness, two things are left, neither urgent:
 
 - **The macOS viewer**, which now needs a representation of its own. It could once
   have pointed `AVPlayer` at this endpoint unchanged; since the response became
@@ -154,8 +200,13 @@ What is left is two things, neither urgent:
   the viewer has no audio at all; see [`remote-audio.md`](remote-audio.md).
 - **Audio for the other two protocols.** `rxa` would mean capturing sound on the
   Mac, which the agent does not do and which is a feature of the agent rather than
-  of this path. VNC has no audio channel to turn on at all, so there is nothing
-  here to plan — RFB would need an extension both ends invented.
+  of this path. VNC has no audio channel to turn on at all — and Guacamole's answer
+  to that is worth knowing, because it is the option written off here as "RFB would
+  need an extension both ends invented": guacd does not touch RFB at all. It opens a
+  **separate PulseAudio connection** to a sound server on the remote host
+  (`audio-servername`, compile-time optional behind `--with-pulse`), and feeds the
+  same audio stream the RDP path uses. Out-of-band from a sound server, rather than
+  an extension. Still not planned here, but no longer for the reason given.
 
 Sound in the other direction — a microphone at the browser reaching the remote —
 is not on this list and has never been designed.
