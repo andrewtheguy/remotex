@@ -104,6 +104,20 @@ enum ServerMessage: Sendable, Equatable {
         "resize", "cursor", "error", "picker", "connected", "remoteOs",
         "clipboard", "displays",
     ]
+
+    /// Tags this build knows exist and deliberately does not implement.
+    ///
+    /// Listed rather than left out so the wire-contract test still fails on real
+    /// drift: the question it asks is "has somebody decided about this message",
+    /// and an entry here is that decision written down. One of these would decode
+    /// to `.unsupported` and be stepped over, which is the intended outcome.
+    ///
+    /// - `audioFormat` describes an Opus stream and is only ever sent to a client
+    ///   that asked for audio with `ClientMessage.unsentTags`'s `audio`. This viewer
+    ///   never asks, so it never arrives; when the viewer gains audio it will need
+    ///   its own representation anyway, because AVFoundation cannot play what the
+    ///   browser decodes with WebCodecs (see docs/remote-audio.md).
+    static let ignoredTags: Set<String> = ["audioFormat"]
 }
 
 /// Why a text frame could not be turned into a `ServerMessage`.

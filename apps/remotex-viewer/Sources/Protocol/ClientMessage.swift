@@ -103,6 +103,16 @@ enum ClientMessage: Sendable, Equatable {
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
         "selectDisplay", "hostScale", "cacheReset",
     ]
+
+    /// Tags this build knows exist and deliberately never sends.
+    ///
+    /// `audio` subscribes a client to the remote's sound, and **not sending it is
+    /// what keeps this viewer working across that gateway change**: audio frames
+    /// only flow to a client that asks, so a viewer that stays silent receives the
+    /// same bytes it did before audio existed — which is why the gateway could add
+    /// it without moving `PROTOCOL_VERSION`, the number this viewer matches on
+    /// exactly (see docs/remote-audio.md).
+    static let unsentTags: Set<String> = ["audio"]
 }
 
 extension ClientMessage: Encodable {
