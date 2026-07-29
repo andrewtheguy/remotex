@@ -36,19 +36,25 @@ rectangles with no delta state, so arrival order is correctness rather than
 tidiness — which is why the fix on the client side is fewer or cheaper payloads per
 frame, not more concurrency.
 
-Two levers left, cheaper first. The first is gateway-side, so both clients get it at
-once, and it is worth measuring before the second is committed to:
+Two levers left. The first is gateway-side, so both clients get it at once, and it is
+worth measuring before the second is committed to:
 
-- **Fewer bytes per band.** Two ways, and they are alternatives rather than steps.
-  **Lossy WebP**: `encode_webp` is lossless with no choice today while the macOS agent
-  classifies per tile, and video is exactly the content that branch exists for — but it
-  degrades the picture, which on a desktop is also text. Or **more lossless effort**:
-  raising `WEBP_LOSSLESS_METHOD` to `m2 q50` is about 10–20% fewer bytes than the `m0`
-  that ships (~30% on the smallest tiles) for an order of magnitude more encoder time,
-  and it costs no fidelity at all, because in lossless mode libwebp reads `quality` as
-  effort rather than as quality. That was refused only because the time was time the
-  read loop could not spend, and it no longer runs there — so it is the one to try
-  first, and both configs are already measured.
+- **Lossy WebP in the gateway.** `encode_webp` is lossless with no choice today, while
+  the macOS agent classifies per tile and sends photographic content down a lossy
+  branch. Video is exactly what that branch exists for. The cost is that a desktop is
+  mostly text, so this cannot be a blanket switch — it needs the agent's classifier, or
+  something like it, on this side of the wire.
+
+  **Spending more encoder effort instead is not an alternative here, and the reason is
+  worth keeping.** `m2 q50` is lossless, so it costs no fidelity — but at 320x64 it is
+  7.7x the CPU of the shipping `m0 q20` (3.1ms against 402µs) for only 10–17% fewer
+  bytes, and a video's bands are wider still. Moving encoding off the read loop did not
+  make that cheap, it only stopped it blocking input; the CPU is unchanged and
+  `ENCODE_DEPTH` can only overlap it up to the core count. On the largest shapes it
+  would *raise* the per-repaint wall clock, which is the frame rate this item is about.
+  Higher effort pays only below roughly 512 pixels, where it is nearly free (1.45x the
+  time for 30% fewer bytes at 16x16) — a **size-tiered** effort, and a general
+  small-rect win rather than anything to do with video. See `WEBP_LOSSLESS_METHOD`.
 - **H.264 passed straight through.** A Windows server already encodes the screen as
   H.264 over the graphics pipeline, and `ironrdp-egfx` implements that channel with
   `AVC420`/`AVC444` and a `decode` module of *traits*: it delegates decoding rather
