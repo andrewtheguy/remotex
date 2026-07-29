@@ -27,6 +27,12 @@ pub struct Connection {
 #[derive(Default)]
 pub struct AgentState {
     connection: Mutex<Option<Connection>>,
+    /// A fatal worker failure that left the menu bar alive but stopped serving.
+    ///
+    /// Startup and the AppKit shell have separate lifetimes: the status item is
+    /// the user's way to diagnose and quit the agent, so a dead network worker
+    /// must not take it down with itself.
+    failure: Mutex<Option<String>>,
     /// Only ever incremented, so an id is never reused within a run.
     last_id: AtomicU64,
 }
@@ -58,6 +64,15 @@ impl AgentState {
 
     pub fn is_connected(&self) -> bool {
         self.connection.lock().unwrap().is_some()
+    }
+
+    /// Leave the UI alive and record why the agent can no longer serve.
+    pub fn failed(&self, error: impl Into<String>) {
+        *self.failure.lock().unwrap() = Some(error.into());
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().clone()
     }
 }
 
@@ -111,6 +126,17 @@ mod tests {
         let state = AgentState::new();
         assert!(!state.is_connected());
         assert!(state.current().is_none());
+        assert!(state.failure().is_none());
+    }
+
+    #[test]
+    fn a_worker_failure_is_retained_for_the_menu_bar() {
+        let state = AgentState::new();
+        state.failed("cannot build the network runtime");
+        assert_eq!(
+            state.failure().as_deref(),
+            Some("cannot build the network runtime")
+        );
     }
 
     #[test]

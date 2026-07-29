@@ -109,7 +109,7 @@ use std::time::{Duration, Instant};
 use file_rotate::{
     ContentLimit, FileRotate, compression::Compression, suffix::AppendCount,
 };
-use log::{info, warn};
+use log::{error, info, warn};
 use tokio::time::timeout;
 
 /// How often the main thread re-reads the system cursor when `--no-menu` has
@@ -120,9 +120,6 @@ const LOG_FILE_BACKUPS: usize = 3;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
-    let log_path = init_logging();
-
-    let loaded = config::load_or_create(args.config.as_deref());
 
     // Answered before the login item, the bind and the TCC prompts: this is a
     // question about the config file, not a launch, and asking it must not
@@ -130,21 +127,19 @@ fn main() -> anyhow::Result<()> {
     //
     // `load_or_create`, so the first thing anyone does over SSH on a fresh Mac
     // mints the identity and prints it in one go. And `?` rather than the
-    // report-and-exit-0 below, which exists so launchd's KeepAlive does not loop
-    // on a broken config — for a question asked from a shell that would answer
-    // with silence.
+    // persistent degraded GUI below: a question asked from a shell has no menu
+    // bar and must answer failure with a nonzero exit instead of silence.
     if args.public_key {
-        let (config, _, _) = loaded?;
+        let _ = init_logging();
+        let (config, _, _) = config::load_or_create(args.config.as_deref())?;
         println!("{}", config.public_key());
         return Ok(());
     }
 
     // Same reasoning, and the same place in the launch: a config edit, not a
-    // launch. Drops `loaded` because the import re-reads and rewrites the file
-    // itself — and because on a Mac with no config yet, the identity that load
-    // just minted is the one being replaced.
+    // launch.
     if args.import_private_key {
-        drop(loaded);
+        let _ = init_logging();
         let key = read_private_key_from_stdin()?;
         let config = config::import_private_key(args.config.as_deref(), &key)?;
         // The public half, because that is the value to check against whatever
@@ -153,18 +148,52 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // The status item is the application shell, not a reward for successful
+    // startup. Put it on screen before registration, config I/O, binding,
+    // permission probes, virtual-display setup or the network runtime can fail.
+    let starting = (!args.no_menu).then(menubar::Starting::new);
+    let log_path = init_logging();
+
+    // Registering is idempotent, so doing it on every launch keeps a bundle that
+    // was copied to a new machine (or a new user account) working without a
+    // separate setup step. It belongs after the visible shell but before config
+    // parsing: a broken config must still leave a normal login item and a tray
+    // from which the user can diagnose and quit the application.
+    //
+    // `--no-register` is for running it by hand in a terminal while developing,
+    // where a login item would be in the way.
+    if !args.no_register {
+        match loginitem::register() {
+            Ok(()) => info!("login item: registered ({})", loginitem::status()),
+            // Not fatal: an agent started by hand should still serve. Most
+            // likely causes are an unsigned bundle or no bundle at all.
+            Err(e) => warn!("login item: could not register: {e:#}"),
+        }
+    }
+
+    // A normal `open` hands execution to the registered LaunchAgent. Do this
+    // only after creating the tray so even a slow handoff is visibly in
+    // progress; the job that takes over creates its own tray before it does any
+    // work too.
+    if !args.no_menu && !args.no_register && hand_over_to_launchd() {
+        return Ok(());
+    }
+
+    let loaded = config::load_or_create(args.config.as_deref());
     let (config, path, created) = match loaded {
         Ok(loaded) => loaded,
         Err(e) => {
-            // Exits 0 despite failing, so launchd's KeepAlive leaves it alone: no
-            // number of restarts fixes a config file, and each one would put this
-            // panel back on screen.
-            report_startup_failure(
-                &args,
+            // No number of restarts fixes a config file. Leave the tray up in a
+            // degraded state so the failure remains visible and Quit remains
+            // reachable.
+            let body =
+                format!("{e:#}\n\nFix the config file, then quit and reopen remotex-agent.");
+            return Err(startup_error(
+                starting,
                 "remotex-agent could not start",
-                &format!("{e:#}\n\nFix the config file, then open remotex-agent again."),
-            );
-            return Ok(());
+                &body,
+                e,
+            ));
         }
     };
 
@@ -179,19 +208,6 @@ fn main() -> anyhow::Result<()> {
             "config: created {} with a fresh identity, unpaired",
             path.display()
         );
-    }
-
-    // Registering is idempotent, so doing it on every launch keeps a bundle that
-    // was copied to a new machine (or a new user account) working without a
-    // separate setup step. `--no-register` is for running it by hand in a
-    // terminal while developing, where a login item would be in the way.
-    if !args.no_register {
-        match loginitem::register() {
-            Ok(()) => info!("login item: registered ({})", loginitem::status()),
-            // Not fatal: an agent started by hand should still serve. Most
-            // likely causes are an unsigned bundle or no bundle at all.
-            Err(e) => warn!("login item: could not register: {e:#}"),
-        }
     }
 
     // Only worth printing where somebody can read it. The public key *is* in it
@@ -219,54 +235,48 @@ fn main() -> anyhow::Result<()> {
     // Infallible after the load above validated it, the same way `psk_bytes` is —
     // and `?` here would be one more way for a launch to end with nothing on
     // screen, which is the thing this whole block exists to stop.
-    // Before the bind, not after losing it: whoever is not the LaunchAgent job
-    // defers to the job, whether or not it would have won the port. The two
-    // `--no-` flags are hand-run developer copies, which have no business
-    // restarting the installed agent.
-    if !args.no_menu && !args.no_register && hand_over_to_launchd() {
-        return Ok(());
-    }
-
     let addr = config
         .socket_addr()
         .expect("listen validated in Config::validate");
     let listener = match std::net::TcpListener::bind(addr) {
         Ok(listener) => listener,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            report_startup_failure(
-                &args,
-                "remotex-agent cannot listen",
-                &format!(
-                    "{} is already in use by another process.\n\nIf that process is another copy \
-                     of remotex-agent, its icon is in the menu bar at the top of the screen.",
-                    config.listen
-                ),
+            let body = format!(
+                "{} is already in use by another process.\n\nIf that process is another copy \
+                 of remotex-agent, its icon is in the menu bar at the top of the screen.",
+                config.listen
             );
-            return Ok(());
+            return Err(startup_error(
+                starting,
+                "remotex-agent cannot listen",
+                &body,
+                e.into(),
+            ));
         }
         Err(e) => {
-            report_startup_failure(
-                &args,
-                "remotex-agent cannot listen",
-                &format!(
-                    "{} could not be bound: {e}\n\nChange the listen address from the menu \
-                     bar item of the running agent, or in the config file.",
-                    config.listen
-                ),
+            let body = format!(
+                "{} could not be bound: {e}\n\nChange the listen address in the config file.",
+                config.listen
             );
-            return Ok(());
+            return Err(startup_error(
+                starting,
+                "remotex-agent cannot listen",
+                &body,
+                e.into(),
+            ));
         }
     };
     info!("agent: listening on {}", config.listen);
     // tokio adopts it below, and only a non-blocking socket can be driven by a
     // reactor.
     if let Err(e) = listener.set_nonblocking(true) {
-        report_startup_failure(
-            &args,
+        let body = format!("{} could not be made non-blocking: {e}", config.listen);
+        return Err(startup_error(
+            starting,
             "remotex-agent cannot listen",
-            &format!("{} could not be made non-blocking: {e}", config.listen),
-        );
-        return Ok(());
+            &body,
+            e.into(),
+        ));
     }
 
     // Keep the pre-request Screen Recording state: granting it in the system
@@ -359,16 +369,20 @@ fn main() -> anyhow::Result<()> {
         handle: virtual_display.map(|display| Arc::new(std::sync::Mutex::new(display))),
     };
     let serve_owned = owned.clone();
+    let keep_ui_on_failure = !args.no_menu;
 
-    std::thread::Builder::new()
+    let network = std::thread::Builder::new()
         .name("rxa-net".to_owned())
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
                 Ok(runtime) => runtime,
                 Err(e) => {
-                    // Without a runtime there is no agent; exiting lets
-                    // launchd's KeepAlive restart us.
-                    eprintln!("remotex-agent: cannot build the tokio runtime: {e}");
+                    let error = format!("Cannot build the network runtime: {e}");
+                    error!("agent: {error}");
+                    if keep_ui_on_failure {
+                        serve_state.failed(error);
+                        return;
+                    }
                     std::process::exit(1);
                 }
             };
@@ -377,15 +391,37 @@ fn main() -> anyhow::Result<()> {
                 keys,
                 serve_owned,
                 serve_tracker,
-                serve_state,
+                Arc::clone(&serve_state),
             )) {
-                Ok(()) => std::process::exit(0),
+                Ok(()) => {
+                    let error = "The network service stopped unexpectedly".to_owned();
+                    error!("agent: {error}");
+                    if keep_ui_on_failure {
+                        serve_state.failed(error);
+                    } else {
+                        std::process::exit(0);
+                    }
+                }
                 Err(e) => {
-                    eprintln!("remotex-agent: {e:#}");
-                    std::process::exit(1);
+                    let error = format!("{e:#}");
+                    error!("agent: {error}");
+                    if keep_ui_on_failure {
+                        serve_state.failed(error);
+                    } else {
+                        std::process::exit(1);
+                    }
                 }
             }
-        })?;
+        });
+    if let Err(e) = network {
+        let body = format!("Could not start the network worker: {e}");
+        return Err(startup_error(
+            starting,
+            "remotex-agent could not start",
+            &body,
+            e.into(),
+        ));
+    }
 
     if args.no_menu {
         // No run loop, so nothing drives an NSTimer: poll the pointer shape the
@@ -398,6 +434,7 @@ fn main() -> anyhow::Result<()> {
 
     // Hands the main thread to AppKit and never returns.
     menubar::run(
+        starting.expect("a GUI launch creates its status item before startup"),
         state,
         tracker,
         settings,
@@ -407,27 +444,22 @@ fn main() -> anyhow::Result<()> {
     )
 }
 
-/// Say why the agent is about to give up, on screen as well as in the log.
+/// Keep GUI startup failures in the degraded menu, or return them to a headless
+/// caller.
 ///
-/// Everything this reports happens before the menu bar exists, which is what
-/// makes it worth a function: the agent has no window, so a startup that fails
-/// silently is a double-click that does nothing at all — no icon, no error, and
-/// no way to find out short of running the binary in a terminal. That is not a
-/// diagnosis anyone should have to make.
-///
-/// `--no-menu` gets the log line only. There is no window server to put a panel
-/// in over SSH, and the caller is a terminal that can read the message.
-fn report_startup_failure(args: &Args, title: &str, body: &str) {
+/// [`menubar::Starting::fail`] never returns, while `--no-menu` has no
+/// [`menubar::Starting`] and receives the underlying error for a nonzero exit.
+fn startup_error(
+    starting: Option<menubar::Starting>,
+    title: &str,
+    body: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
     warn!("{title}: {body}");
-    if args.no_menu {
-        return;
+    if let Some(starting) = starting {
+        starting.fail(title, body);
     }
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        // Startup failures are all reported from `main`, so this is unreachable —
-        // and a wrong-thread AppKit call is worse than a missing panel.
-        return;
-    };
-    panels::startup_failure(mtm, title, body);
+    error
 }
 
 /// Restart the agent to run under a config that has just changed, by asking

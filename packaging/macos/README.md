@@ -121,8 +121,11 @@ bar reports the current setting once macOS has one to report.
 
 ## Menu and settings
 
-The status icon distinguishes idle, connected, and missing-permission states.
-Its menu provides:
+The status icon is the first part of the app created. It starts in the warning
+state, before config I/O, login-item registration, socket setup, or permission
+checks, then changes to idle or connected only after startup succeeds. A startup
+or network-worker failure leaves the warning icon and diagnostic menu alive
+instead of exiting into a launchd restart loop. Its normal menu provides:
 
 - connection and listen-address status, and a **Not paired** row while no
   gateway key is set;
@@ -144,7 +147,8 @@ stops and the menu returns to **No gateway connected**. Reopening the browser
 during that grace period reuses the existing session.
 
 Opening the app while it is already running keeps the existing process and
-points the user to the menu bar. Startup errors are shown in a panel.
+points the user to the menu bar. Startup errors are shown in a panel and remain
+visible from the degraded menu bar item after that panel is dismissed.
 
 ## Files
 

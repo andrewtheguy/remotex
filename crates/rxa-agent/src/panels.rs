@@ -618,13 +618,11 @@ impl InForce {
     }
 }
 
-/// Report a failure from before the menu bar exists, and give up.
+/// Report a failure while the menu bar remains in its degraded state.
 ///
-/// Same panel as [`error`], with the activation policy set first. That normally
-/// happens in [`crate::menubar::run`], which a failing startup never reaches — and
-/// without it macOS gives the agent a Dock tile and a menu of its own for as long
-/// as the panel is up, which is a strange last impression for an app that is about
-/// to exit.
+/// Same panel as [`error`], with the activation policy kept explicit so this
+/// helper remains safe for any startup call site. [`crate::menubar::Starting`]
+/// has already created the status item and set the ordinary GUI launch policy.
 pub fn startup_failure(mtm: MainThreadMarker, title: &str, body: &str) {
     NSApplication::sharedApplication(mtm)
         .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
