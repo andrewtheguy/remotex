@@ -4,12 +4,12 @@
 //! # Why this is a shadow copy and not a grid of hashes
 //!
 //! The plan this change follows called for snapping damage outward onto a fixed
-//! [`CELL_W`]×[`CELL_H`] grid and hashing each cell, on the premise that IronRDP
-//! reports damage as a coarse bounding box. **That premise is wrong for RDP, and
-//! measuring it is the only reason we know.** Over a 240-position mouse sweep
-//! across a 1280×800 xrdp desktop, the engine reported 310 damage rectangles with
-//! a *median area of 1295 pixels* — and 92% of them were smaller than a single
-//! 320×64 cell. Snapping those outward and letting the gate pay for it cost
+//! [`crate::protocol::CELL_W`]×[`crate::protocol::CELL_H`] grid and hashing each cell,
+//! on the premise that IronRDP reports damage as a coarse bounding box. **That premise
+//! is wrong for RDP, and measuring it is the only reason we know.** Over a 240-position
+//! mouse sweep across a 1280×800 xrdp desktop, the engine reported 310 damage
+//! rectangles with a *median area of 1295 pixels* — and 92% of them were smaller than
+//! a single 320×64 cell. Snapping those outward and letting the gate pay for it cost
 //! **8.9× more bytes** than sending the rectangles as they came (1,030,637 against
 //! 115,751). A grid is the right unit for damage that arrives coarse — which is
 //! exactly what the macOS agent's ScreenCaptureKit does, 15 to 21 full-width

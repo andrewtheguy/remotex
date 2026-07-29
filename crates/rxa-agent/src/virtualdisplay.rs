@@ -20,14 +20,14 @@
 //!   *twice* the requested point size, which is past the ceiling `maxPixels`
 //!   fixes — so bounds at or under the created size mean HiDPI engaged. That is
 //!   the check [`await_hidpi_bounds`] makes, by the same rule
-//!   [`crate::capture::owned_scale`] reads a live mode with.
+//!   `capture::owned_scale` reads a live mode with.
 //! - `CGDisplayCopyDisplayMode` **does** work, and is the one reading that does
 //!   not lie: measured on macOS 26.5.2 it returns `3800x2400 px / 1900x1200 pt`
 //!   at 2x and `1900x1200 px / 1900x1200 pt` for the same display at 1x, so
 //!   pixels over points is the true backing scale. An earlier note here claimed
 //!   it returned NULL for these displays; it does not, and believing that cost a
 //!   heuristic that could not see a `(low resolution)` mode at all — see
-//!   [`crate::capture::owned_scale`]. `CGDisplayCopyAllDisplayModes` works too,
+//!   `capture::owned_scale`. `CGDisplayCopyAllDisplayModes` works too,
 //!   and lists both entries at each point size.
 //! - `SCContentFilter.pointPixelScale` reports 1.00 on a genuine 2x display, so
 //!   capture size must be set from what we asked for, never derived from it.
@@ -488,8 +488,8 @@ fn await_bounds(id: u32, accept: impl Fn((u32, u32)) -> bool) -> Option<(u32, u3
 /// Whether `size` is a mode a display created at `created` points can put
 /// [`SCALE`] times the pixels behind.
 ///
-/// The same rule [`crate::capture::owned_scale`] reads a live mode with, and it
-/// shares that rule's one blind spot: a `(low resolution)` 1x mode at or under
+/// The same rule `capture::owned_scale` reads a live mode with, and it shares that
+/// rule's one blind spot: a `(low resolution)` 1x mode at or under
 /// the created size reads as 2x here too. Nothing can tell them apart — the three
 /// geometry reads in the module docs all refuse to — and the failure this check
 /// exists for is not that one. A display whose *creation* did not engage HiDPI

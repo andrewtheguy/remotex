@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 /// produce one huge WebSocket message.
 pub const STRIP_ROWS: u16 = 64;
 
-/// The revision of everything in this file: [`ClientMsg`], [`ControlMsg`], and
+/// The revision of everything in this file: [`ClientMsg`], `ControlMsg`, and
 /// the [`batch`] frame layout. Served from `GET /api/config` so a client that
 /// isn't shipped with the gateway can refuse a version it cannot speak.
 ///
@@ -319,7 +319,7 @@ pub mod batch {
 ///   horizontal. Neither axis is free.
 ///
 /// Those ratios were measured with PNG, which is no longer the codec
-/// ([`encode_webp`]). They are left as they were because the *shape* of the
+/// (`encode_webp`). They are left as they were because the *shape* of the
 /// argument is what chose 320, and WebP does not change it — it too pays a fixed
 /// per-stream cost, and `webp_cost_against_png_cost` measures that cost as the
 /// dominant term at small sizes rather than a marginal one. Re-deriving the exact

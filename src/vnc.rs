@@ -9,7 +9,7 @@
 //! One security type past the baseline: **Apple's DH authentication**, used
 //! when a target sets a `username`. It is not an optimization but the
 //! difference between seeing a Mac's screen and seeing a login window it made
-//! up for you — see [`ard_authenticate`].
+//! up for you — see `ard_authenticate`.
 //!
 //! On top of the baseline, the **Cursor pseudo-encoding** is always
 //! advertised: a server that supports it stops compositing the pointer into
@@ -273,7 +273,7 @@ struct Flags {
 }
 
 /// An established, handshaken RFB link, plus what the handshake revealed about
-/// the far side. Mirrors [`crate::rxa::Session`] rather than returning a tuple
+/// the far side. Mirrors `rxa.rs`'s own `Session` rather than returning a tuple
 /// nobody can read at the call site.
 struct Connected {
     reader: Reader,

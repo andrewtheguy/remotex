@@ -1,3 +1,12 @@
+//! The command line, as clap derives it.
+//!
+//! Every doc comment below is also this binary's `--help` text, which is why TOML
+//! table syntax and `<prefix>` placeholders sit in them unquoted: backticks would be
+//! printed literally on somebody's terminal. rustdoc reads `[server]` as a link and
+//! `<prefix>` as an HTML tag and complains about both, so its two lints are off here
+//! rather than the help text being bent to suit a renderer nobody reads it in.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};

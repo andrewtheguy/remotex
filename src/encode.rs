@@ -43,7 +43,7 @@
 //!   down, precisely as a full `frame_tx` already did.
 //! - **`spawn_blocking`, not a pool crate.** An engine runs on its own
 //!   current-thread runtime (see [`crate::session`]) which still has a
-//!   multi-threaded blocking pool, in-flight work is bounded by [`ENCODE_DEPTH`] so
+//!   multi-threaded blocking pool, in-flight work is bounded by `ENCODE_DEPTH` so
 //!   it cannot grow into that pool's 512-thread ceiling, and a `Tile` is already
 //!   `Send` because `encode_webp` copies out of libwebp's non-`Send` buffer.
 
