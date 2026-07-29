@@ -83,6 +83,7 @@ final class AppModel: GatewaySessionSink {
     private(set) var remoteCursor: ServerMessage.Cursor?
 
     let clipboard: ClipboardSynchronizer
+    let audio = AudioOutput()
 
     @ObservationIgnored
     private let defaults: UserDefaults
@@ -369,6 +370,9 @@ final class AppModel: GatewaySessionSink {
         clipboard.send = { [weak connection] message in
             connection?.send(message)
         }
+        audio.send = { [weak connection] message in
+            connection?.send(message)
+        }
         // Provisional: the gateway's `picker` or `connected` decides which of the
         // two post-login screens this really is, and the interstitial covers the
         // wait either way.
@@ -385,6 +389,8 @@ final class AppModel: GatewaySessionSink {
         connection = nil
         clipboard.send = nil
         clipboard.update(enabled: false)
+        audio.send = nil
+        audio.reset()
     }
 
     private func handleUnauthorized() async {
@@ -401,15 +407,13 @@ final class AppModel: GatewaySessionSink {
         case .status(let status):
             session.connectionStatus = status
             updateClipboardEnablement()
+            updateAudioAvailability()
         case .control(let message):
             handle(message)
         case .tiles(let tiles):
             renderer?.upload(tiles)
         case .audio(let packets):
-            // Nothing plays yet: the decoder and the schedule land in the steps after
-            // this one. Dropped rather than buffered — a queue filling behind an
-            // unfinished player would only make the first sound a stale one.
-            _ = packets
+            audio.play(packets: packets)
         case .clearFramebuffer:
             // Dropping the size is what puts the "waiting for the remote
             // desktop" interstitial back up; the gateway always repaints in full.
@@ -442,6 +446,7 @@ final class AppModel: GatewaySessionSink {
             session.canResize = false
             session.followsWindow = false
             session.canClipboard = false
+            session.canAudio = false
             // The previous target's screens are not the next one's. Left in
             // place they would fill the Display menu for a target that has none,
             // and picking one would send a `selectDisplay` naming a display on
@@ -453,8 +458,13 @@ final class AppModel: GatewaySessionSink {
             // answer about the session being left, not a setting the next pick
             // inherits, and the picker's checkbox says as much by starting clear.
             isViewOnly = false
+            // Cleared for the same reason as view only: the answer was about the target
+            // being left. Not cleared on a mere disconnection, which is what
+            // `AudioOutput.update(available:)` handles — a reconnect keeps playing.
+            audio.reset()
             viewportPolicy = ViewportPolicy()
             updateClipboardEnablement()
+            updateAudioAvailability()
             clipboard.failPendingFetch()
             Task { await loadTargets() }
 
@@ -477,6 +487,13 @@ final class AppModel: GatewaySessionSink {
             publishViewportPolicy()
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
+            session.canAudio = payload.audio
+            updateAudioAvailability()
+            // The gateway's audio subscription belongs to an *attachment*, so a
+            // reconnect arrives with it off while the menu still says on. Re-asserted
+            // here for the same reason the viewport and the host scale are below: a
+            // freshly attached session knows nothing about this client.
+            audio.reassert()
             // A freshly started engine knows nothing about this window, and both
             // dedupes would swallow the first report for repeating a size already
             // sent — for the previous target, or for the picker. Both have to be
@@ -552,8 +569,7 @@ final class AppModel: GatewaySessionSink {
             remoteCursor = payload
 
         case .audioFormat(let format):
-            // Same as above: the decoder this configures arrives in a later step.
-            _ = format
+            audio.start(format: format)
 
         case .unsupported(let type):
             // A newer gateway. Deliberately nothing: the frame was already
@@ -584,6 +600,19 @@ final class AppModel: GatewaySessionSink {
                 && session.connectionStatus == .connected
                 && session.canClipboard
                 && !isViewOnly
+        )
+    }
+
+    /// Whether the Remote menu's audio toggle can be used.
+    ///
+    /// Unlike the clipboard's, view only is *not* one of the conditions: that mode is
+    /// about nothing this Mac does reaching the remote, and sound travels the other way.
+    /// Watching a desktop without touching it is exactly when audio is wanted.
+    private func updateAudioAvailability() {
+        audio.update(
+            available: session.screen == .desktop
+                && session.connectionStatus == .connected
+                && session.canAudio
         )
     }
 

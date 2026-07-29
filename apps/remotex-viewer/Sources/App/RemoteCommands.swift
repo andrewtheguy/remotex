@@ -74,6 +74,23 @@ struct RemoteCommands: Commands {
             }
             .disabled(!model.clipboard.isEnabled || model.clipboard.isFetching)
 
+            // Sound from the remote. Greyed rather than hidden for a target that has
+            // none — a menu whose items come and go is harder to learn than one item
+            // that is sometimes disabled — and deliberately live in view only, which is
+            // about nothing reaching the *remote*: watching a desktop without touching
+            // it is exactly when this is wanted.
+            //
+            // The item says nothing about whether sound is arriving, because from this
+            // end a quiet remote and one that will never redirect are the same thing.
+            Toggle(
+                "Enable Audio",
+                isOn: Binding(
+                    get: { model.audio.isEnabled },
+                    set: { model.audio.setEnabled($0) }
+                )
+            )
+            .disabled(!model.audio.isAvailable)
+
             // The escape hatch for a framebuffer that has gone wrong: re-announce
             // the size and repaint everything.
             Button("Refresh") {
