@@ -12,7 +12,7 @@
 //! everything a gateway would add here is between the measurement and the thing
 //! measured:
 //!
-//!     REMOTEX_RXA_HOST='[fdb8:…:a:20]:52381' \
+//!     REMOTEX_RXA_HOST='...:52381' \
 //!     REMOTEX_RXA_PRIVATE_KEY=rxgs… \
 //!     REMOTEX_RXA_AGENT_PUBLIC_KEY=rxap… \
 //!       cargo test --release --test rxa_repaint_probe -- --ignored --nocapture

@@ -6,7 +6,7 @@
 //! backing scale, and whether the agent then measures and reports the new one.
 //! Everything either side of that is covered without a Mac in `rxa_e2e.rs`.
 //!
-//!     REMOTEX_RXA_HOST='[fdb8:…:a:20]:52381' \
+//!     REMOTEX_RXA_HOST='...:52381' \
 //!     REMOTEX_RXA_PRIVATE_KEY=rxgs… \
 //!     REMOTEX_RXA_AGENT_PUBLIC_KEY=rxap… \
 //!     cargo test --test rxa_host_scale_e2e -- --ignored --nocapture
