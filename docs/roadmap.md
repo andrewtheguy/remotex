@@ -39,14 +39,16 @@ frame, not more concurrency.
 Two levers left, cheaper first. The first is gateway-side, so both clients get it at
 once, and it is worth measuring before the second is committed to:
 
-- **Fewer bytes per band, by spending more encoder effort.** Two versions of this,
-  and they are alternatives rather than steps. Lossy: `encode_webp` is lossless with
-  no choice today while the macOS agent classifies per tile, and video is exactly the
-  content that branch exists for. Or stay lossless and raise
-  `WEBP_LOSSLESS_METHOD` — `m2 q50` is 27–47% fewer bytes for an order of magnitude
-  more time, which was refused because it was time the read loop could not spend. It
-  no longer runs there, so that refusal is worth revisiting first: it costs no fidelity
-  at all, and both configs are already measured.
+- **Fewer bytes per band.** Two ways, and they are alternatives rather than steps.
+  **Lossy WebP**: `encode_webp` is lossless with no choice today while the macOS agent
+  classifies per tile, and video is exactly the content that branch exists for — but it
+  degrades the picture, which on a desktop is also text. Or **more lossless effort**:
+  raising `WEBP_LOSSLESS_METHOD` to `m2 q50` is about 10–20% fewer bytes than the `m0`
+  that ships (~30% on the smallest tiles) for an order of magnitude more encoder time,
+  and it costs no fidelity at all, because in lossless mode libwebp reads `quality` as
+  effort rather than as quality. That was refused only because the time was time the
+  read loop could not spend, and it no longer runs there — so it is the one to try
+  first, and both configs are already measured.
 - **H.264 passed straight through.** A Windows server already encodes the screen as
   H.264 over the graphics pipeline, and `ironrdp-egfx` implements that channel with
   `AVC420`/`AVC444` and a `decode` module of *traits*: it delegates decoding rather

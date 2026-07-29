@@ -536,9 +536,16 @@ const WEBP_MAX_DIMENSION: u16 = 16383;
 /// 3.1ms was ruled out because it was 3.1ms an engine's protocol-read loop had to
 /// stand still for. It no longer runs there — [`crate::encode`] moved these encodes
 /// onto a bounded set of workers — so the cost is now wall-clock the engine mostly
-/// does not wait on, and buying another 27-47% of the bytes for it may well beat the
-/// cheaper levers. Deliberately not changed here: one thing at a time, and the
+/// does not wait on. Deliberately not changed here: one thing at a time, and the
 /// measurement belongs to whoever makes the swap.
+///
+/// Read the size gain off the right baseline, which is the row above and not PNG:
+/// against the `m0 q20` that ships, `m2 q50` is about 10-20% fewer bytes
+/// (0.53-0.73x against 0.64-0.81x), rising to ~30% at the smallest tiles per the
+/// note below. The 27-47% figure in the previous paragraph is against PNG-Fast, a
+/// codec this tree no longer has. And it costs no fidelity whatever — `quality` is
+/// an effort dial here, the mode is still lossless — which is what distinguishes it
+/// from reaching for the lossy branch to save the same bytes.
 ///
 /// Two things the same tables say, for whoever revisits this:
 ///
