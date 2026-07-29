@@ -55,8 +55,8 @@ pub fn router(config: AppConfig) -> Router {
 /// [`router`] over a caller-supplied session slot.
 ///
 /// The seam exists for one thing: the manual audio harness
-/// ([`tests::serve_a_test_tone`]) needs the real router — SPA, login, and the
-/// audio endpoint — in front of a scripted engine rather than a real RDP connect.
+/// ([`tests::serve_a_test_tone`]) needs the real router — SPA, login, and `/ws` — in
+/// front of a scripted engine rather than a real RDP connect.
 pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
@@ -298,18 +298,19 @@ mod tests {
     /// audio, so the browser half of the audio path can be listened to without a
     /// server that redirects.
     ///
-    /// It exists because the RDP side and the HTTP side fail independently, and
-    /// only one of them needs a Windows host. Whenever the representation changes
-    /// — and it has, from an open-ended WAV to Ogg/Opus — the question is whether
-    /// *browsers* play what this now sends, live and without stalling. The PCM's
-    /// provenance is irrelevant to that, so this supplies it locally and the
-    /// answer is unambiguous: a failure here is the format, not the remote.
+    /// It exists because the RDP side and the browser side fail independently, and
+    /// only one of them needs a Windows host. Whenever the representation changes —
+    /// and it has twice, from an open-ended WAV to Ogg/Opus to bare Opus packets
+    /// decoded by WebCodecs — the question is whether *browsers* play what this now
+    /// sends, live and without stalling. The PCM's provenance is irrelevant to that,
+    /// so this supplies it locally and the answer is unambiguous: a failure here is
+    /// the format, not the remote.
     ///
     /// The tone comes and goes in five-second phases, with the format published and
     /// cleared around the gaps the way a real host's channel opening and closing
     /// does. That is deliberate: the behaviour worth checking in a browser is no
     /// longer only "does it play" but "does it *start on its own*, stop, and start
-    /// again" — so open the panel during a quiet phase and then touch nothing.
+    /// again" — so enable audio during a quiet phase and then touch nothing.
     ///
     /// `#[ignore]`d and in-crate on purpose: it needs
     /// [`SessionManager::with_test_spawner`], and it must add nothing a real
@@ -320,11 +321,13 @@ mod tests {
     /// cargo test --lib serve_a_test_tone -- --ignored --nocapture
     /// ```
     ///
-    /// Then open the printed URL, log in, pick the target, and open ☰ → Audio. A
-    /// 440 Hz tone means the whole browser-side path works, on that browser. Worth
-    /// running on each one that matters rather than assuming published support
-    /// tables are current — Ogg/Opus in `<audio>` only reached Safari in 18.4, and
-    /// plenty of sources still say it never did.
+    /// Then open the printed URL, log in, pick the target, and press ☰ → Enable
+    /// audio. A 440 Hz tone means the whole browser-side path works, on that
+    /// browser — and **this is where Opus-only is settled**, because there is no
+    /// fallback: a browser whose `AudioDecoder` will not take Opus says so under the
+    /// button and plays nothing. Worth running on each browser that matters rather
+    /// than trusting a support table; the last representation needed Safari 18.4 and
+    /// plenty of published tables still said it was unsupported.
     #[tokio::test]
     #[ignore = "manual: serves a tone for a browser to play, and waits"]
     async fn serve_a_test_tone() {
@@ -460,9 +463,10 @@ mod tests {
 
         // println! rather than log: this is the test's whole user interface.
         println!("\n  Open  http://{addr}/   (admin / hunter2)");
-        println!("  Pick \"test-tone\", then ☰ → Audio. 440 Hz for 5s, quiet for 5s.");
-        println!("  Open the panel during a quiet phase: the tone must arrive on its");
-        println!("  own, go away, and come back, without touching the player.");
+        println!("  Pick \"test-tone\", then ☰ → Enable audio. 440 Hz for 5s, quiet for 5s.");
+        println!("  Press it during a quiet phase and then close the drawer: the tone");
+        println!("  must arrive on its own, go away, and come back, untouched.");
+        println!("  A line under the button instead means this browser has no Opus decoder.");
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;

@@ -1162,23 +1162,14 @@ body {
   color: #8b949e;
 }
 
-/* ── Audio panel (AudioPanel.tsx) ── */
+/* ── Audio (the drawer's Audio row in FloatingMenu.tsx) ──
 
-.ap-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
+   No panel: the row's button is the whole control. What a docked panel held —
+   a native transport and a volume slider — a live stream has no use for, so
+   audio is one button and, when this browser cannot decode it, one line saying
+   so. */
 
-/* Full width: it is the panel's only control, and a live stream has one thing
-   worth deciding — whether to be listening to it. The element itself renders
-   nothing, carrying no `controls` (see AudioPanel). */
-.ap-toggle {
-  width: 100%;
-  text-align: center;
-}
-
-.ap-note {
+.audio-note {
   margin: 0;
   font-size: 0.75rem;
   color: #8b949e;

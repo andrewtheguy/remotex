@@ -37,10 +37,30 @@ export interface AudioFormat {
   head: Uint8Array;
 }
 
+/**
+ * The `head` field of an `audioFormat` message as the bytes a decoder wants.
+ *
+ * base64 because a text frame cannot carry bytes — the same reason the cursor's PNG
+ * is base64 — and 19 bytes once a session is not worth a second binary frame kind.
+ */
+export function decodeAudioHead(head: string): Uint8Array {
+  const binary = atob(head);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 export interface AudioPlayer {
   /** One audio frame's Opus packets, in arrival order. */
   push(packets: Uint8Array[]): void;
-  /** Stop playing and release the decoder and the context. */
+  /**
+   * Stop playing, and release the decoder **and the context** — the player takes
+   * ownership of the context it was handed, so a caller needs one call rather than
+   * two and cannot leave the audio hardware held open. Getting sound back means a
+   * fresh context, which is no imposition: that only happens on a click.
+   */
   close(): void;
 }
 
@@ -54,18 +74,39 @@ export interface AudioPlayer {
  */
 const PACKET_US = 20_000;
 
-/** Whether this browser can decode what the gateway sends. */
-export async function canPlayOpus(format: AudioFormat): Promise<boolean> {
-  if (typeof AudioDecoder === "undefined") {
-    return false;
-  }
-  try {
-    const support = await AudioDecoder.isConfigSupported(decoderConfig(format));
-    return support.supported === true;
-  } catch {
-    // A config this browser cannot even parse is an unsupported one.
-    return false;
-  }
+/**
+ * The rate everything here runs at.
+ *
+ * Not a preference and not negotiable: libopus encodes at 48 kHz and nothing else,
+ * so this is the rate the gateway's stream is in whatever the remote negotiated
+ * (see src/opus_stream.rs). Naming it here lets the context be built before the
+ * `audioFormat` message arrives, which is the whole trick below.
+ */
+const OPUS_RATE = 48_000;
+
+/** Whether this browser has a decoder at all. Cheap, synchronous, and honest. */
+export function audioSupported(): boolean {
+  return typeof AudioDecoder !== "undefined";
+}
+
+/**
+ * The audio context, built **inside the click** that enables audio.
+ *
+ * Separate from the player because of *when* rather than what: the format needed to
+ * configure a decoder arrives a round trip later, and by then the gesture is over.
+ * Safari will hand back a suspended context and refuse to resume one outside a user
+ * gesture, so the context has to be created here and the decoder wrapped around it
+ * when the format lands.
+ */
+export function createAudioContext(): AudioContext {
+  const context = new AudioContext({
+    // The stream's own rate, so the common case needs no resampling at all. A
+    // device whose hardware disagrees resamples anyway, which is its business.
+    sampleRate: OPUS_RATE,
+    latencyHint: "interactive",
+  });
+  void context.resume();
+  return context;
 }
 
 function decoderConfig(format: AudioFormat): AudioDecoderConfig {
@@ -80,28 +121,37 @@ function decoderConfig(format: AudioFormat): AudioDecoderConfig {
   };
 }
 
+export interface AudioHandlers {
+  /**
+   * The decoder gave up, which on this path means one thing in practice: this
+   * browser will not decode Opus. There is no fallback to switch to, so this is
+   * reported rather than worked around.
+   */
+  onError: (reason: string) => void;
+  /**
+   * The current lead in seconds and the seconds trimmed, on every scheduled
+   * buffer — the numbers that answer the open question in docs/remote-audio.md. If
+   * the lead sits at the ceiling with trims recurring, the delay was arriving as
+   * buffered audio and this sheds it; if it hovers at the cushion and the sound is
+   * *still* late, the remaining delay is upstream of the gateway.
+   */
+  onLead?: (lead: number, trimmed: number) => void;
+}
+
 /**
- * Start playing, and keep the schedule under the ceiling.
+ * Start playing on `context`, keeping the schedule under the ceiling.
  *
- * `onLead` is called with the current lead in seconds on every scheduled buffer —
- * the number that answers the open question in docs/remote-audio.md. If it sits at
- * the ceiling with trims recurring, the delay was arriving as buffered audio and
- * this sheds it; if it hovers at the cushion and the sound is *still* late, the
- * remaining delay is upstream of the gateway.
+ * Throws if this browser has no `AudioDecoder`; an *unsupported codec* is not a
+ * throw, because WebCodecs reports that asynchronously — it arrives at `onError`.
  */
 export function createAudioPlayer(
   format: AudioFormat,
-  onLead?: (lead: number, trimmed: number) => void,
+  context: AudioContext,
+  handlers: AudioHandlers,
 ): AudioPlayer {
-  // The stream's rate, so the common case needs no resampling at all. A device whose
-  // hardware disagrees resamples anyway, which is the browser's business.
-  const context = new AudioContext({
-    sampleRate: format.sampleRate,
-    latencyHint: "interactive",
-  });
-  // Created inside a click, but Safari can still hand back a suspended context.
-  void context.resume();
-
+  if (!audioSupported()) {
+    throw new Error("this browser has no WebCodecs audio decoder");
+  }
   let nextAt = 0;
   let timestamp = 0;
   let closed = false;
@@ -121,10 +171,17 @@ export function createAudioPlayer(
       }
     },
     // Nothing is recoverable here: a decoder that has failed will not decode the
-    // next packet either, and there is no second representation to switch to.
+    // next packet either, and there is no second representation to switch to. This
+    // is also where "this browser cannot decode Opus" lands — `configure` accepts an
+    // unsupported codec and fails asynchronously.
     error: (e) => {
       console.error("audio: the decoder failed", e);
       close();
+      handlers.onError(
+        e instanceof Error && e.name === "NotSupportedError"
+          ? "this browser cannot decode the audio the gateway sends"
+          : "this browser's audio decoder failed",
+      );
     },
   });
   decoder.configure(decoderConfig(format));
@@ -146,7 +203,7 @@ export function createAudioPlayer(
       }
     }
     nextAt = at.nextAt;
-    onLead?.(at.nextAt - context.currentTime, at.trim);
+    handlers.onLead?.(at.nextAt - context.currentTime, at.trim);
     if (at.trim >= buffer.duration) {
       return; // nothing of it is still worth playing
     }
