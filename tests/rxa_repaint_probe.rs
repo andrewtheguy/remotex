@@ -24,10 +24,19 @@
 //! Read two things out of a run: this probe's `PROBE:` line for wall clock per repaint,
 //! and `encoder: encode totals:` in the agent's own log
 //! (`~/Library/Logs/remotex-agent.log`), which it prints when this connection drops.
-//! In those totals `encoding across workers` against `of waiting` is the parallelism
-//! actually achieved, and **`stalled`** is time the encoder spent handing tiles to the
-//! socket — if that dominates, no width can make a repaint faster and the link is the
-//! constraint.
+//!
+//! Two numbers in those totals, and only one of them is a measurement of the encoder.
+//! **`stalled`** is time spent handing tiles to the socket, so if it dominates then no
+//! width can make a repaint faster and the link is the ceiling — check it before
+//! believing anything else here. `encoding across workers` against `of waiting` says
+//! whether cells overlapped but is *not* the concurrency achieved and can read above the
+//! width; `EncodeTotals` in `crates/rxa-agent/src/session.rs` records why.
+//!
+//! A caution about `stalled` that this probe is the cause of: it discards tiles as fast
+//! as they arrive over a local link, which is close to the best case a client can be. A
+//! browser on the far side of a gateway is not — on the same surface one logged `stalled`
+//! at 94% of the encoder's own time. So a low reading here is evidence about the encoder,
+//! not a promise about what a real client will feel.
 //!
 //! Two runs only compare at the same surface size, so the line prints what it measured.
 //! Byte counts *are* comparable here in a way `rdp_repaint_probe`'s are not — the agent

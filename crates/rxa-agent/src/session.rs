@@ -95,10 +95,11 @@ const OUT_BACKLOG: usize = 64;
 /// stops improving and the CPU does not: 19% more of it for 15% less time in the
 /// photographic case, and for nothing at all in the flat one.
 ///
-/// Then live, against the agent on the test VM's 3200x2000 display under
-/// `tests/rxa_repaint_probe.rs` — which is where the number that mattered was, because a
-/// synthetic sweep cannot say whether the *link* was the constraint all along. 26s of
-/// streaming under a refresh every 250 ms; width 1 once, width 8 twice and identical:
+/// Then live, under `tests/rxa_repaint_probe.rs` against a real agent — which is where
+/// the number that mattered was, because a synthetic sweep cannot say whether the *link*
+/// was the constraint all along. A macOS 26.x guest under Apple Virtualization sharing
+/// the agent's own private 2x display at 3200x2000; 26s of streaming under a refresh
+/// every 250 ms; width 1 once, width 8 twice and identical:
 ///
 /// | width | frames | frames/s | tiles/frame | encode ÷ waiting | stalled |
 /// |---|---|---|---|---|---|
@@ -107,14 +108,21 @@ const OUT_BACKLOG: usize = 64;
 ///
 /// `stalled` is time handing tiles to the socket, so at well under 1% the encoder was
 /// the whole cost and no part of widening it could be wasted — which is the thing that
-/// had to be checked first and could not be checked synthetically.
+/// had to be checked first and could not be checked synthetically. It is a property of
+/// *that* client, though, not of the agent: on the same 3200x2000 surface, a browser on
+/// the far side of a gateway logged `stalled` at 94% of the encoder's own time
+/// (5.87s against 0.40s of waiting). There the link is the ceiling and no width lifts it.
+///
+/// `encode ÷ waiting` is those two totals divided, and it reads as overlap rather than
+/// as concurrency — see [`EncodeTotals`], which is where the two are defined and where
+/// the reason it can exceed the width is recorded.
 ///
 /// **The frame rate roughly quadrupled and the tile count barely moved**, and that pair
 /// is the whole result. `tiles/frame` at 200 is the loop this fixes: a 320-cell repaint
 /// outlived the two-frame raw channel, so capture dropped a frame, set `full_repaint`,
 /// and asked for another 320-cell repaint — an agent that could not keep up was spending
 /// nearly all of its encoder on pixels nobody had changed. At 63 it is reporting real
-/// damage again. So the 6x in the encoder does not show up as 6x the tiles; it shows up
+/// damage again. So what the encoder gained does not show up as more tiles; it shows up
 /// as four times the frames carrying a third of the redundancy.
 ///
 /// A plain constant rather than `available_parallelism`, for the reason
@@ -1166,9 +1174,14 @@ fn start_pipeline(
 ///
 /// - `frames` against `tiles` is the batch size [`ENCODE_WIDTH`] has to cover. A
 ///   width above a frame's cell count buys nothing.
-/// - `encode` (summed across workers) against `waiting` (wall clock) is the
-///   parallelism actually achieved: equal means serial, `encode` well above
-///   `waiting` means cells really did overlap.
+/// - `encode` (summed across workers) against `waiting` says whether cells overlapped,
+///   and it is **not** the concurrency achieved — read as that it flatters itself.
+///   `waiting` accrues only while a collect finds its cell *unfinished*, so a cell that
+///   was already done when its turn came contributes encode time and no waiting at all.
+///   The ratio is therefore an upper bound on the concurrency and can exceed
+///   [`ENCODE_WIDTH`] outright: one live session logged 12.2 at a width of 8. What it
+///   does say is sound at the bottom, which is where it matters — 1.0 means every
+///   collect blocked for the whole of its cell, so nothing overlapped.
 /// - **`stalled` is the one that decides whether any of this helps.** It is time the
 ///   encoder spent blocked handing tiles to the pump, so if it dominates then the
 ///   socket is the constraint and widening the encoder cannot make a repaint faster.
