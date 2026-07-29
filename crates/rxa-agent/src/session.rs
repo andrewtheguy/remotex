@@ -20,8 +20,13 @@
 //! - **One encoder thread, not a pool.** A pool would let two frames' tiles
 //!   finish out of order, and the same region *is* commonly dirty in consecutive
 //!   frames — so an older tile could land on top of a newer one and leave stale
-//!   pixels on screen until something else redraws them. Ordering is worth more
-//!   than the parallelism until measurement says otherwise, and the cheaper lever
+//!   pixels on screen until something else redraws them.
+//!
+//!   That is a reason for the ordering, not against the parallelism, and the
+//!   gateway now has both: `src/encode.rs` queues the *handle* to each encode and
+//!   collects them FIFO, so order is structural however they finish. The same shape
+//!   would fit here. It has simply not been measured on a Mac, where a frame is a
+//!   dozen cells rather than a 1080p desktop's seventeen bands and the cheaper lever
 //!   for the same problem is downscaled capture (docs/roadmap.md).
 
 use std::sync::Arc;

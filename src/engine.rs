@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use log::warn;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 
+use crate::encode::TileSink;
 use crate::protocol::ServerMsg;
 
 /// Idle time before the kernel starts probing a silent peer.
@@ -120,7 +120,7 @@ pub async fn connect_and_handshake<T, F, Fut>(
     protocol: &str,
     dest: &str,
     budget: Duration,
-    frame_tx: &mpsc::Sender<ServerMsg>,
+    sink: &TileSink,
     handshake: F,
 ) -> Option<T>
 where
@@ -128,7 +128,7 @@ where
     Fut: Future<Output = anyhow::Result<T>>,
 {
     let report = async |message: String| {
-        let _ = frame_tx.send(ServerMsg::Error { message }).await;
+        let _ = sink.msg(ServerMsg::Error { message }).await;
     };
     let stream = match tcp_connect(dest).await {
         Ok(stream) => stream,
@@ -197,7 +197,16 @@ pub fn clamp_u16(v: i32) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+
     use super::*;
+
+    /// A sink and the channel behind it. `TileSink` forwards through a task of its
+    /// own, so a test reads the channel only after [`TileSink::flush`].
+    fn sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
+        let (frame_tx, frame_rx) = mpsc::channel(4);
+        (TileSink::new("test", frame_tx), frame_rx)
+    }
 
     // The detection itself is not testable here, and the reason is the same one
     // that bounds what this feature can promise: any peer you can reach has a
@@ -242,14 +251,15 @@ mod tests {
     #[tokio::test]
     async fn a_completed_handshake_passes_its_value_through() {
         let (dest, accept) = accepting_listener().await;
-        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+        let (sink, mut frame_rx) = sink();
 
-        let value = connect_and_handshake("test", &dest, HANDSHAKE_TIMEOUT, &frame_tx, |_stream| {
+        let value = connect_and_handshake("test", &dest, HANDSHAKE_TIMEOUT, &sink, |_stream| {
             std::future::ready(Ok(7u8))
         })
         .await;
 
         assert_eq!(value, Some(7));
+        sink.flush().await;
         assert!(frame_rx.try_recv().is_err(), "nothing to report");
         accept.abort();
     }
@@ -260,18 +270,19 @@ mod tests {
     #[tokio::test]
     async fn a_stalled_handshake_is_reported_against_its_own_budget() {
         let (dest, accept) = accepting_listener().await;
-        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+        let (sink, mut frame_rx) = sink();
 
         let value: Option<()> = connect_and_handshake(
             "test",
             &dest,
             Duration::from_millis(50),
-            &frame_tx,
+            &sink,
             |_stream| std::future::pending(),
         )
         .await;
 
         assert!(value.is_none());
+        sink.flush().await;
         let ServerMsg::Error { message } = frame_rx.try_recv().unwrap() else {
             panic!("expected an error for the picker");
         };
@@ -288,18 +299,19 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dest = listener.local_addr().unwrap().to_string();
         drop(listener);
-        let (frame_tx, mut frame_rx) = mpsc::channel(4);
+        let (sink, mut frame_rx) = sink();
 
         let value: Option<()> = connect_and_handshake(
             "test",
             &dest,
             HANDSHAKE_TIMEOUT,
-            &frame_tx,
+            &sink,
             |_stream| std::future::ready(Ok(())),
         )
         .await;
 
         assert!(value.is_none());
+        sink.flush().await;
         let ServerMsg::Error { message } = frame_rx.try_recv().unwrap() else {
             panic!("expected an error for the picker");
         };

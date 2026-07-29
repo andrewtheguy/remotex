@@ -504,17 +504,18 @@ fn encode_cursor_png(w: u16, h: u16, rgba: &[u8]) -> anyhow::Result<Vec<u8>> {
 ///
 /// PNG had no such limit, so this is a new way for an encode to fail. It is
 /// unreachable in practice — a `u16` framebuffer could in principle be wider, and
-/// no desktop is — but the failure would land inside an engine's protocol-read
-/// loop, so it is checked here and reported rather than left to libwebp's
+/// no desktop is — but it would end the session ([`crate::encode`] treats a failed
+/// encode as fatal, because the shadow has already recorded those pixels as sent),
+/// so it is checked here and reported rather than left to libwebp's
 /// `VP8_ENC_ERROR_BAD_DIMENSION`.
 const WEBP_MAX_DIMENSION: u16 = 16383;
 
 /// The lossless effort libwebp is asked for, chosen by measurement.
 ///
 /// `method` is its speed/size dial and `quality`, in lossless mode, is an effort
-/// dial rather than a fidelity one. Both are pinned at the cheap end because these
-/// encodes are synchronous on an engine's own protocol-read loop, and because the
-/// extra compression above them does not pay for itself:
+/// dial rather than a fidelity one. Both are pinned at the cheap end because the
+/// extra compression above them did not pay for itself against the budget these
+/// encodes had — which was an engine's own protocol-read loop:
 ///
 /// Bytes against `png::Compression::Fast`, from `webp_cost_against_png_cost` on two
 /// real screenshots — one a working window, one a desktop mostly covered by a
@@ -529,7 +530,22 @@ const WEBP_MAX_DIMENSION: u16 = 16383;
 /// mostly carry, and rather less on a photograph — which is the right way round,
 /// since a photograph is what the macOS agent's classifier sends down its lossy
 /// branch instead. The 27-47% on offer at `m2` costs an order of magnitude more
-/// time: 3.1ms for one 320x64 cell, which an engine's read loop cannot spend.
+/// time: 3.1ms for one 320x64 cell.
+///
+/// **That last trade is worth revisiting, and this is the note for whoever does.**
+/// 3.1ms was ruled out because it was 3.1ms an engine's protocol-read loop had to
+/// stand still for. It no longer runs there — [`crate::encode`] moved these encodes
+/// onto a bounded set of workers — so the cost is now wall-clock the engine mostly
+/// does not wait on. Deliberately not changed here: one thing at a time, and the
+/// measurement belongs to whoever makes the swap.
+///
+/// Read the size gain off the right baseline, which is the row above and not PNG:
+/// against the `m0 q20` that ships, `m2 q50` is about 10-20% fewer bytes
+/// (0.53-0.73x against 0.64-0.81x), rising to ~30% at the smallest tiles per the
+/// note below. The 27-47% figure in the previous paragraph is against PNG-Fast, a
+/// codec this tree no longer has. And it costs no fidelity whatever — `quality` is
+/// an effort dial here, the mode is still lossless — which is what distinguishes it
+/// from reaching for the lossy branch to save the same bytes.
 ///
 /// Two things the same tables say, for whoever revisits this:
 ///
@@ -580,8 +596,9 @@ fn encode_webp(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
     config.lossless = 1;
     config.quality = WEBP_LOSSLESS_EFFORT;
     config.method = WEBP_LOSSLESS_METHOD;
-    // No libwebp worker thread. A tile is small and this runs on the engine's read
-    // loop, so a thread per tile would cost more than the work it splits.
+    // No libwebp worker thread. A tile is small, and the parallelism that pays is
+    // one band per worker ([`crate::encode`]) rather than one tile split across
+    // threads — libwebp's own would compete with that for the same cores.
     config.thread_level = 0;
     let encoded = webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
         .encode_advanced(&config)
@@ -1286,8 +1303,8 @@ mod tests {
     }
 
     // WebP cannot describe a tile wider or taller than 16383, where PNG could.
-    // Unreachable from any real desktop, but the failure would land inside an
-    // engine's protocol-read loop, so it has to be an error and not a panic.
+    // Unreachable from any real desktop, but the failure ends the session rather
+    // than dropping a tile, so it has to be an error and not a panic.
     #[test]
     fn a_tile_beyond_webps_dimension_limit_is_rejected() {
         let w = WEBP_MAX_DIMENSION + 1;
@@ -1436,8 +1453,8 @@ mod tests {
         config.lossless = i32::from(lossless);
         config.quality = quality;
         config.method = method;
-        // No worker thread: these encodes run on an engine's protocol-read loop,
-        // where spawning a thread per small tile would cost more than it saves.
+        // No worker thread, matching `encode_webp`: a tile is too small for
+        // libwebp's own threads to beat one worker per band.
         config.thread_level = 0;
         webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h))
             .encode_advanced(&config)
@@ -1728,9 +1745,8 @@ mod tests {
     ///    whole shape range, summing a sampled tiling of the screenshot — so the
     ///    byte column is a repaint total, not one lucky tile. Gateway damage is
     ///    *small*: RDP's median is 1295 px, 92% of it under one cell (see
-    ///    [`CELL_W`]), and those encodes run synchronously on the engine's
-    ///    protocol-read loop, so the small end is the binding case, not the
-    ///    3200-wide strip.
+    ///    [`CELL_W`]), so the small end is the binding case, not the 3200-wide
+    ///    strip.
     /// 3. **Can JPEG go?** Section 3 puts WebP lossy against `jpeg-encoder` at the
     ///    quality the agent ships. If WebP is competitive the wire drops to one
     ///    codec. Section 4 repeats both against uniform noise, the worst case
