@@ -210,10 +210,10 @@ pub struct TargetConfig {
     /// `NSPasteboard`. The latter two are UTF-8 end to end.
     #[serde(default)]
     pub clipboard: bool,
-    /// Remote audio: redirect this target's sound to the browser, played from an
-    /// `<audio>` element pointed at the gateway (see
-    /// [`remote-audio.md`](../docs/remote-audio.md)). Off by default — a desktop
-    /// nobody is listening to should not be sending sound across the network.
+    /// Remote audio: redirect this target's sound to the browser, which decodes it
+    /// and schedules it itself (see [`remote-audio.md`](../docs/remote-audio.md)).
+    /// Off by default — a desktop nobody is listening to should not be sending
+    /// sound across the network.
     ///
     /// `rdp` only, and rejected elsewhere in [`ConfigFile::parse`]: MS-RDPEA is
     /// the only audio channel any engine here speaks. RFB has no audio at all,
@@ -222,8 +222,13 @@ pub struct TargetConfig {
     /// Unlike [`Self::clipboard`], this is not a permission the session can act
     /// on later. RDPSND has to be negotiated when the connection is established,
     /// so an audio target asks for redirection at connect and discards what
-    /// arrives while nobody is listening — an HTTP listener appearing afterwards
-    /// cannot add the channel to a live connection.
+    /// arrives while nobody is subscribed — a browser asking afterwards cannot add
+    /// the channel to a live connection.
+    ///
+    /// Enabling it does not mean a client will hear anything: audio is sent only to
+    /// one that asks ([`crate::protocol::ClientMsg::Audio`]), the macOS viewer never
+    /// does, and WebCodecs is secure-context only, so a browser reaching this gateway
+    /// over plain HTTP on a LAN address has no decoder to ask with.
     #[serde(default)]
     pub audio: bool,
     /// The Mac agent's public key (`rxap…`), as its Settings dialog or

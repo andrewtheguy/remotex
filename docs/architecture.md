@@ -10,8 +10,7 @@ session and exposes one browser protocol to a React SPA.
 ```
 React SPA
    │  /api: authentication, targets, session claim
-   │  /ws: JSON control/input + binary image tiles
-   │  /api/session/audio: live audio/ogg (opus), for an <audio> element
+   │  /ws: JSON control/input + binary image tiles + opus audio frames
    ▼
 axum server ── session slot ── protocol engine
                                   ├─ RDP via IronRDP
@@ -24,16 +23,19 @@ RDP and VNC are decoded in the gateway, then emitted as WebP tiles. The optional
 macOS agent already emits browser-ready WebP tiles, so the gateway relays them
 without re-encoding.
 
-Audio is the one thing a session sends that takes none of that path — not the
-tile encoder, not its queue, and not the WebSocket. The browser is already a
-streaming audio client, so the gateway serves the claimed session's sound as an
-ordinary open-ended HTTP response — Ogg/Opus, so a session costs ~96 kbps of
-audio rather than the 1.4 Mbit/s the RDP side delivers — and the SPA points a
-plain `<audio>` element at it ([`remote-audio.md`](remote-audio.md)). That response
-never waits for the remote to make a sound and never goes dry: it trickles encoded
-silence through the gaps (0.09 kB/s, at a fifth of real time so a listener catches
-back up rather than staying behind), which is what lets the element start playing on
-its own whenever the remote does, and again after it stops.
+Audio shares that socket but not the tile encoder or its queue: the gateway
+re-encodes the remote's PCM as Opus (~96 kbps against the 1.4 Mbit/s the RDP side
+delivers) and sends it as its own binary frame kind, which a batch still being
+filled does not delay ([`remote-audio.md`](remote-audio.md)). It flows only for a
+client that asks — the browser sends an `audio` message, the viewer never does — so
+audio needed no protocol-version bump, and a quiet remote costs nothing at all.
+
+The browser decodes it with WebCodecs and schedules every buffer itself, which is the
+one thing an `<audio>` element cannot do: a media element's schedule belongs to the
+browser and never skips forward, so a delay it accumulated stayed for the session.
+Owning the clock is what bounds it (a 300 ms ceiling, following Guacamole), and it is
+why audio moved onto this socket at all — the bytes have to arrive as bytes rather
+than as a media source.
 
 ## Constraints
 
@@ -54,7 +56,7 @@ The main responsibilities are:
 | `session.rs` | the single slot, target selection, takeover, detach/reattach |
 | `ws.rs`, `protocol.rs` | browser WebSocket bridge and wire types |
 | `rdp.rs` | IronRDP connection, framebuffer, input, optional resize |
-| `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | the session's audio queue, its Ogg/Opus framing, and the MS-RDPEA channels feeding it |
+| `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | the session's audio queue, its Opus encoder, and the MS-RDPEA channels feeding it |
 | `vnc.rs` | RFB 3.8 client, framebuffer, cursor, input, optional resize |
 | `rxa.rs` | encrypted Mac-agent connection and tile pass-through |
 | `encode.rs` | WebP encoding off the engines' read loops, in order |
@@ -116,8 +118,10 @@ remote's display list, cursor shape, clipboard text, and errors.
 
 The `connected` message also carries the target's capability flags — `resize`,
 `clipboard`, `audio` — so a client shows only the controls this session can
-actually act on. `audio` is the odd one out: what it permits happens over HTTP and
-not on this socket at all ([`remote-audio.md`](remote-audio.md)).
+actually act on. `audio` says the session *can* carry the remote's sound, which is
+not the same as any arriving: a client has to ask, and from the gateway's end a quiet
+remote and one that will never redirect are indistinguishable
+([`remote-audio.md`](remote-audio.md)).
 
 Every binary frame is a **batch** of records, little-endian throughout:
 
@@ -305,8 +309,8 @@ server that never joins the channel leaves the clipboard inert rather than
 ending the session.
 
 With `audio = true`, MS-RDPEA redirects the remote's sound, which reaches the
-browser over HTTP rather than this WebSocket — see
-[`remote-audio.md`](remote-audio.md) for the endpoint, the lifecycle, and how a
+browser as Opus frames on this same WebSocket — see
+[`remote-audio.md`](remote-audio.md) for the wire, the lifecycle, and how a
 live Windows host was made to cooperate. Four things about it belong
 here, because they are facts about this engine. MS-RDPEA has **two** channels, a
 static `rdpsnd` and a dynamic `AUDIO_PLAYBACK_DVC`, and which one carries the audio
@@ -427,12 +431,12 @@ capture pipeline, protocol, and lifecycle.
 
 The SPA has three states: login, target picker, and remote desktop. The desktop
 uses a canvas for tiles and an overlay for input. It supports desktop mouse and
-keyboard input, touch gestures, an on-screen keyboard, a clipboard panel, an audio
-panel, target switching, takeover, and explicit RDP resize. Clipboard text arriving
+keyboard input, touch gestures, an on-screen keyboard, a clipboard panel, remote
+audio, target switching, takeover, and explicit RDP resize. Clipboard text arriving
 from the server is mirrored into the local OS clipboard, and the local clipboard is
 sent to the remote when the tab regains focus; both are skipped silently wherever
-the Clipboard API is unavailable. The docked panels — keyboard, clipboard, display,
-audio — are mutually exclusive: they dock to the bottom edge on mobile and report
+the Clipboard API is unavailable. The docked panels — keyboard, clipboard,
+display — are mutually exclusive: they dock to the bottom edge on mobile and report
 their height so the canvas insets above them, and only one can be reporting at a
 time.
 
