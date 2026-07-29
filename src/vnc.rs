@@ -248,7 +248,12 @@ async fn session(
         reader,
         writer,
         (width, height),
-        Flags { macos, resize: config.resize, clipboard: config.clipboard },
+        Flags {
+            macos,
+            resize: config.resize,
+            clipboard: config.clipboard,
+            default_size: (config.width, config.height),
+        },
         input_rx,
         sink.clone(),
     )
@@ -265,11 +270,22 @@ async fn session(
 }
 
 /// The per-session switches [`active_loop`] needs: one discovered from the
-/// handshake, two opted into by the target profile.
+/// handshake, the rest read off the target profile.
 struct Flags {
     macos: bool,
     resize: bool,
     clipboard: bool,
+    /// The target's configured `width`/`height`, which is what
+    /// [`ClientMsg::DefaultSize`] resolves to here. Carried rather than read from
+    /// the config at the point of use because [`active_loop`] is given the
+    /// handshaken link and these switches, not the profile behind them.
+    ///
+    /// A VNC target's size was ignored before this: the server's own size was
+    /// the connect-time size and nothing here could name another. Honouring it
+    /// costs nothing at connect — it is only ever consulted for a client that
+    /// asks — and it is what lets an operator say what a phone should get
+    /// without a second constant existing anywhere.
+    default_size: (u16, u16),
 }
 
 /// An established, handshaken RFB link, plus what the handshake revealed about
@@ -405,7 +421,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: TileSink,
 ) -> anyhow::Result<()> {
-    let Flags { macos, resize, clipboard: clipboard_enabled } = flags;
+    let Flags { macos, resize, clipboard: clipboard_enabled, default_size } = flags;
     // The writer is shared: the read loop sends the next update request after
     // each update, the input side sends pointer/key/resize messages.
     let writer: SharedWriter = Arc::new(Mutex::new(writer));
@@ -457,10 +473,20 @@ async fn active_loop(
                     break Ok(());
                 };
                 // Viewport reports drive dynamic resize, not an input event;
-                // dropped entirely unless the target opted in.
-                let sent = if let ClientMsg::Viewport { w, h } = input {
+                // dropped entirely unless the target opted in. `DefaultSize` is
+                // the same request with the size supplied from here instead of by
+                // the client — see [`ClientMsg::DefaultSize`] — so the two resolve
+                // to a size first and share the one call, which is also how the
+                // second inherits the stash-until-supported and drop-the-no-op
+                // behaviour `request_resize` already has.
+                let wanted_size = match input {
+                    ClientMsg::Viewport { w, h } => Some((w, h)),
+                    ClientMsg::DefaultSize => Some(default_size),
+                    _ => None,
+                };
+                let sent = if let Some(size) = wanted_size {
                     if resize {
-                        request_resize(&writer, &desktop, (w, h)).await
+                        request_resize(&writer, &desktop, size).await
                     } else {
                         Ok(())
                     }
@@ -1209,7 +1235,7 @@ fn translate_input(
             }
         }
         // Intercepted by the input loop (request_resize) before translation.
-        ClientMsg::Viewport { .. } => Vec::new(),
+        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize => Vec::new(),
         // Intercepted by the input loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Intercepted by the input loop (the clipboard bridge, which needs the

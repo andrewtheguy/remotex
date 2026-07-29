@@ -1002,9 +1002,34 @@ async fn a_viewport_reaches_the_agent_as_display_points() {
     );
 }
 
+// The sizeless request beside it, which is what a phone sends: no arithmetic on
+// the way through, because there is no number on it to convert. Asserted through
+// the socket for the same reason as the test above — the unit conversion is the one
+// mistake nothing downstream would report, and the way to prove it cannot happen
+// here is to watch a `defaultSize` arrive with no size attached.
+#[tokio::test]
+async fn a_default_size_request_reaches_the_agent_carrying_no_size() {
+    let keys = pair();
+    let (port, _connections, _active, mut input) = spawn_fake_agent(keys.agent, false).await;
+    let addr = spawn_app_with_resize(port, &keys, true).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+
+    ws.send(Message::text(r#"{"type":"defaultSize"}"#))
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_input(&mut input).await,
+        GatewayMsg::DefaultDisplaySize,
+        "the created size is the agent's to name, so nothing is sent with the request"
+    );
+}
+
 // The other half of the gate. `resize` is the operator's permission, and without
 // it the request stops at the gateway — the clients hide the control too, so this
-// is the belt to their braces.
+// is the belt to their braces. Both size requests answer to it: the sizeless one is
+// not a way around a target that said no.
 #[tokio::test]
 async fn a_viewport_stops_at_the_gateway_when_the_target_did_not_opt_in() {
     let keys = pair();
@@ -1015,9 +1040,10 @@ async fn a_viewport_stops_at_the_gateway_when_the_target_did_not_opt_in() {
     assert_first_paint(&expect_paint(&mut ws).await);
 
     // Sent *before* a message that does travel, so the assertion below proves the
-    // viewport was dropped rather than merely slower than the test.
+    // two size requests were dropped rather than merely slower than the test.
     for text in [
         r#"{"type":"viewport","w":1280,"h":800}"#,
+        r#"{"type":"defaultSize"}"#,
         r#"{"type":"mouseMove","x":10,"y":20}"#,
     ] {
         ws.send(Message::text(text)).await.unwrap();
@@ -1025,7 +1051,7 @@ async fn a_viewport_stops_at_the_gateway_when_the_target_did_not_opt_in() {
     assert_eq!(
         expect_input(&mut input).await,
         GatewayMsg::PointerMove { x: 10, y: 20 },
-        "the viewport should not have reached the agent at all"
+        "neither size request should have reached the agent at all"
     );
 }
 

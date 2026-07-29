@@ -514,6 +514,28 @@ pub enum GatewayMsg {
     /// changed on the Mac are reported identically — and a request that changed
     /// nothing is not reported at all.
     ResizeDisplay { w: u16, h: u16 },
+    /// Put the shared display back at the point size the agent *created* it at.
+    ///
+    /// [`GatewayMsg::ResizeDisplay`] with no size on it, and narrow in the same
+    /// two ways: only a display the agent made can act on it, and it is asked for
+    /// rather than followed. What it adds is a size the gateway cannot name. The
+    /// created size is the agent's `virtual_display_initial_size`, which no
+    /// message on this wire carries — [`DisplayEntry`] reports what a display *is*
+    /// now, never what it was made as — so a client that wants it can only ask
+    /// for it by name.
+    ///
+    /// Which is worth having because that size does not survive on its own: macOS
+    /// remembers the mode a display identity was last put in and restores it, so a
+    /// `ResizeDisplay` outlives the session that sent it and greets whoever
+    /// connects next. This is how a client with no size of its own worth sending —
+    /// a phone, whose window is not a shape a desktop can usefully be — gets a
+    /// desktop back to something a desktop should be.
+    ///
+    /// Answered exactly as `ResizeDisplay` is: no acknowledgement, and whatever
+    /// size results arrives as an [`AgentMsg::DisplaySize`] through the ordinary
+    /// display poll. A display already at its created size reports nothing,
+    /// because nothing changed.
+    DefaultDisplaySize,
 }
 
 impl GatewayMsg {
@@ -530,6 +552,7 @@ impl GatewayMsg {
     const T_SELECT_DISPLAY: u8 = 0x0b;
     const T_HOST_SCALE: u8 = 0x0c;
     const T_RESIZE_DISPLAY: u8 = 0x0d;
+    const T_DEFAULT_DISPLAY_SIZE: u8 = 0x0e;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -587,6 +610,7 @@ impl GatewayMsg {
                 put_u16(&mut out, *w);
                 put_u16(&mut out, *h);
             }
+            GatewayMsg::DefaultDisplaySize => out.push(Self::T_DEFAULT_DISPLAY_SIZE),
         }
         out
     }
@@ -626,6 +650,7 @@ impl GatewayMsg {
                 w: r.u16()?,
                 h: r.u16()?,
             },
+            Self::T_DEFAULT_DISPLAY_SIZE => GatewayMsg::DefaultDisplaySize,
             other => return Err(MsgError::UnknownType(other)),
         };
         r.finish()?;
@@ -931,6 +956,10 @@ mod tests {
                 w: u16::MAX,
                 h: u16::MAX,
             },
+            // The sizeless one beside them: a whole message in a single byte,
+            // which is what makes "the created size" expressible at all — no
+            // number on this wire carries it.
+            GatewayMsg::DefaultDisplaySize,
         ]
     }
 
@@ -963,7 +992,7 @@ mod tests {
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 13, "thirteen gateway message types");
+        assert_eq!(gateway.len(), 14, "fourteen gateway message types");
     }
 
     // The count on the wire is the peer's claim about what follows. A body that

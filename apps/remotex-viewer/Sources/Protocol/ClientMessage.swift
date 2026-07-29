@@ -30,6 +30,18 @@ enum ClientMessage: Sendable, Equatable {
     /// times the density the remote draws at. Followed continuously by VNC, acted on
     /// only by request for RDP, ignored entirely by rxa.
     case viewport(w: UInt16, h: UInt16)
+    /// `viewport` with no size on it: put the remote back at whatever size the far
+    /// side considers its default — a target's configured `width`/`height` for RDP
+    /// and VNC, the point size the agent created its display at for rxa. Gated on
+    /// the same target opt-in and acted on by the same three engines.
+    ///
+    /// It exists for a client whose window is not a shape a desktop can usefully
+    /// be, which is the browser on a phone rather than anything here — this viewer
+    /// always has a real window to measure. Carried anyway because this enum is the
+    /// gateway's `ClientMsg`, not a subset of it, and the wire-contract test holds
+    /// the two identical: a variant this build could not express is drift waiting to
+    /// be discovered at runtime.
+    case defaultSize
     /// Re-announce the desktop size and repaint everything. The gateway injects
     /// one itself on reattach, so this is the manual escape hatch.
     case refresh
@@ -73,6 +85,7 @@ enum ClientMessage: Sendable, Equatable {
         case .wheel: "wheel"
         case .key: "key"
         case .viewport: "viewport"
+        case .defaultSize: "defaultSize"
         case .refresh: "refresh"
         case .connect: "connect"
         case .disconnect: "disconnect"
@@ -86,7 +99,7 @@ enum ClientMessage: Sendable, Equatable {
 
     /// Every tag this build can send, for the wire-contract test.
     static let allTags: Set<String> = [
-        "mouseMove", "mouseButton", "wheel", "key", "viewport",
+        "mouseMove", "mouseButton", "wheel", "key", "viewport", "defaultSize",
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
         "selectDisplay", "hostScale", "cacheReset",
     ]
@@ -126,7 +139,7 @@ extension ClientMessage: Encodable {
             try container.encode(id, forKey: .id)
         case .hostScale(let scale):
             try container.encode(scale, forKey: .scale)
-        case .refresh, .disconnect, .clipboardRequest, .cacheReset:
+        case .defaultSize, .refresh, .disconnect, .clipboardRequest, .cacheReset:
             break
         }
     }

@@ -27,6 +27,13 @@ const TILE_FORMAT_WEBP: u8 = 3;
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
 
+/// The target's configured size, which is what a `defaultSize` request resolves
+/// to. Deliberately none of the other geometries this test sees — not the server's
+/// own 1024x768 and not the 800x600 the viewport asks for — so an assertion on it
+/// cannot pass by accident.
+const DEFAULT_W: u32 = 1280;
+const DEFAULT_H: u32 = 800;
+
 /// Wait until the VNC server actually answers RFB on the published port.
 ///
 /// A bare TCP-accept probe is not enough: rootless podman's port forwarder
@@ -72,8 +79,10 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             password: String::new(),
             vnc_password: "secret42".to_owned(),
             domain: None,
-            width: 1280,
-            height: 800,
+            // Not the connect-time size for VNC — the server keeps its own — but
+            // the size a `defaultSize` request resolves to.
+            width: DEFAULT_W as u16,
+            height: DEFAULT_H as u16,
             security: Security::Auto, // RDP-only knob, ignored for VNC
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
@@ -291,9 +300,57 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
     .await
     .expect("timed out waiting for the resize + repaint");
 
+    // The sizeless request, which is what a client with no desktop-shaped window
+    // of its own sends: the engine supplies the target's configured size rather
+    // than the client naming one. Asserted here because this is the only place the
+    // resolution can be checked against a real server — a unit test can only prove
+    // which number was passed, not that the server accepted it and the browser was
+    // told the truth about what it landed on.
+    ws.send(Message::Text(r#"{"type":"defaultSize"}"#.into()))
+        .await
+        .unwrap();
+
+    let mut restored = false;
+    let mut covered: u64 = 0;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(
+                        !text.contains(r#""type":"error""#),
+                        "session failed: {text}"
+                    );
+                    if text.contains(r#""type":"resize""#) {
+                        assert_eq!(
+                            text,
+                            format!(r#"{{"type":"resize","w":{DEFAULT_W},"h":{DEFAULT_H},"scale":1.0}}"#),
+                            "defaultSize must resolve to the target's configured size"
+                        );
+                        restored = true;
+                    }
+                }
+                Message::Binary(frame) => {
+                    if !restored {
+                        continue;
+                    }
+                    covered += check_tile_frame(&mut stream, &frame, DEFAULT_W, DEFAULT_H);
+                    if covered >= u64::from(DEFAULT_W) * u64::from(DEFAULT_H) {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("websocket closed after {covered} px of restored tiles");
+    })
+    .await
+    .expect("timed out waiting for the defaultSize resize + repaint");
+
     // Detach/reattach: drop the browser, reclaim the slot with the
     // same token, and reattach. The still-running engine must re-announce the
-    // (resized) geometry and repaint the full desktop through a real server.
+    // geometry the session is *now* at — the configured size the request above
+    // restored, not the viewport before it — and repaint the full desktop through
+    // a real server.
     ws.close(None).await.unwrap();
     drop(ws);
 
@@ -322,7 +379,7 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if text.contains(r#""type":"resize""#) {
                         assert_eq!(
                             text,
-                            format!(r#"{{"type":"resize","w":{VIEWPORT_W},"h":{VIEWPORT_H},"scale":1.0}}"#),
+                            format!(r#"{{"type":"resize","w":{DEFAULT_W},"h":{DEFAULT_H},"scale":1.0}}"#),
                             "reattach must announce the session's current size"
                         );
                         reannounced = true;
@@ -342,10 +399,8 @@ async fn vnc_session_paints_the_full_desktop_as_tiles_and_resizes() {
                     if !reannounced {
                         continue;
                     }
-                    covered += check_tile_frame(&mut stream, &frame, VIEWPORT_W, VIEWPORT_H);
-                    if covered >= u64::from(VIEWPORT_W) * u64::from(VIEWPORT_H)
-                        && replayed_cursor
-                    {
+                    covered += check_tile_frame(&mut stream, &frame, DEFAULT_W, DEFAULT_H);
+                    if covered >= u64::from(DEFAULT_W) * u64::from(DEFAULT_H) && replayed_cursor {
                         return;
                     }
                 }

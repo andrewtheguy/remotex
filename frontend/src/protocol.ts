@@ -26,6 +26,22 @@ export type ClientMsg =
   // only for the display the agent made, since a Mac's own panel is never
   // resized because somebody connected to it.
   | { type: "viewport"; w: number; h: number }
+  // The same request with no size on it: put the remote back at whatever size
+  // the far side considers its default — a target's configured width/height for
+  // VNC and RDP, the point size the agent created its display at for rxa.
+  //
+  // For a client whose window is not a shape a desktop can usefully be, which
+  // is every phone: a portrait window asks for a tall, narrow desktop no desktop
+  // OS lays out well, and rotating it asks for a second one. Pinch zoom is how
+  // that picture gets read, so the useful size is the one the *guest* lays out
+  // well, and this browser is the one place that does not know it. Deliberately
+  // sizeless for that reason.
+  //
+  // Not the same as sending nothing. A remote's size outlives the client that
+  // set it — most sharply for rxa, where macOS restores the mode a display was
+  // last put in — so a desktop session that stretched it leaves it stretched for
+  // the phone that connects next. See useRemoteDesktop's mobile branch.
+  | { type: "defaultSize" }
   // The density of the screen this browser window is on, in hundredths:
   // `devicePixelRatio * 100`, so 100 for a 1x screen and 200 for a Retina one.
   // Sent on connect and again whenever the window moves to a screen of a

@@ -297,11 +297,16 @@ export default function FloatingMenu({
   // Return to the post-login target picker ("switch target"): disconnects the
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
-  // Resize the remote desktop to the browser window. Present only for an RDP
-  // target with `resize = true`, whose protocol puts the desktop size in the
-  // client's hands but makes changing it expensive enough to be worth asking
-  // for. VNC follows the viewport automatically and needs no button; every
-  // other remote's resolution is set on the remote. See useRemoteDesktop.
+  // Resize the remote desktop to the browser window. Present for an RDP target
+  // with `resize = true`, whose protocol puts the desktop size in the client's
+  // hands but makes changing it expensive enough to be worth asking for, and for
+  // an rxa target while the display being shared is one the agent made. VNC
+  // follows the viewport automatically and needs no button; every other remote's
+  // resolution is set on the remote.
+  //
+  // Never present on a pinch-zoom device, whatever the target allows: a phone's
+  // window is not a shape to hand a desktop, which is the whole of what mobile
+  // decides differently about size. See useRemoteDesktop.
   onResizeToWindow?: () => void;
   sendKeyCombo: (codes: string[]) => void;
   // Reports the open docked panel's height so the touch canvas can inset above

@@ -78,20 +78,46 @@ function readMacKeyOverridesPreference(): boolean {
     return true; // storage disabled or blocked; the default is still the default
   }
 }
-// Mobile sizing: pinch-zoom-capable touch devices size the session in CSS
-// pixels (no dpr multiplication — a phone's 3x dpr would mint an enormous
-// desktop), floored per axis at a fixed 1024x768 — so a portrait phone raises
-// only the height to its own viewport, never a width-derived height that makes
-// the desktop absurdly tall. The floor is a constant rather than geometry
-// found on connect: the engine (and a VNC server) outlives the browser here,
-// so a connect-time floor would inherit whatever damage a previous session
-// left (e.g. a too-tall desktop) and never shrink it — with a constant floor
-// the phone repairs it on connect.
-// Exported so RemoteDesktop.tsx can switch the screen into touch layout
-// (overflow hidden + viewport-fixed overlay — see index.css).
+// Whether this device pinch-zooms: a touch device with at least two contact
+// points. Exported so RemoteDesktop.tsx can switch the screen into touch layout
+// (overflow hidden + viewport-fixed overlay — see index.css), and read here for
+// the one thing mobile decides differently about size — that the remote's size
+// never follows this window.
+//
+// Deriving it from the window, as this once did, is the wrong shape twice over: a
+// portrait phone asks for a tall, narrow desktop no desktop OS lays out well, and
+// rotating it asks for a different one. Mobile reads the desktop through
+// fit-to-width and pinch zoom instead, so the size worth asking for is the one
+// the *guest* lays out well, and it can be settled once — see MOBILE_GUEST_SIZE.
 export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
-const TOUCH_MIN_WIDTH = 1024;
-const TOUCH_MIN_HEIGHT = 768;
+
+// Phone or tablet, off the screen's short side in CSS pixels. Deliberately the
+// crudest test that separates them: the largest phone is around 440 CSS px across
+// its short side and the smallest tablet around 740, so the boundary sits in a gap
+// no real device occupies and nothing near it has an answer worth getting right.
+const TABLET_MIN_SHORT_SIDE = 600;
+
+// The size a mobile client asks the remote to be, settled once here and never
+// re-derived — a rotation cannot move it, which is the point.
+//
+// A tablet asks for its own landscape dimensions, whichever way it happens to be
+// held when this runs: landscape then shows the remote about 1:1 and portrait
+// pinch-zooms that same picture. Long side by short side rather than a real
+// device's aspect ratio, which is close enough for a desktop to lay out in.
+//
+// A phone gets `null`, meaning "ask the far side for its own default" — there is
+// no landscape shape of a phone worth handing a desktop OS. That request is
+// `defaultSize` (see protocol.ts) and it carries no number, because the number
+// lives at the other end: a target's configured width/height, or the size the
+// rxa agent created its display at.
+//
+// `screen` rather than the viewport for both readings, because neither may change
+// when the device rotates or the URL bar slides away.
+const MOBILE_GUEST_SIZE: { w: number; h: number } | null = (() => {
+  const long = Math.max(screen.width, screen.height);
+  const short = Math.min(screen.width, screen.height);
+  return short >= TABLET_MIN_SHORT_SIDE ? { w: long, h: short } : null;
+})();
 
 // The touch view transform: the pinch zoom and pan offset the
 // gestures drive, layered on top of the fit-to-width base scale. One object
@@ -392,13 +418,14 @@ async function postClaim(force: boolean): Promise<Response | null> {
   }
 }
 
-// The viewport report sent to the server: the desired remote
-// desktop size, clamped to the protocol's u16 range. Desktop asks in the
-// remote's own pixels — its room in CSS pixels times the density the remote
-// draws at, so a desktop that comes back fills the window and is shown one point
-// per point. Touch asks for CSS pixels floored per axis at 1024x768 (the mobile
-// bounds — see CAN_PINCH_ZOOM), where fit-to-width decides the presentation
-// instead.
+// A viewport report: the size this client wants the remote desktop to be,
+// clamped to the protocol's u16 range.
+//
+// One size only — no floors, no per-device cases. This window's room in CSS
+// pixels times the density the remote draws at, so a desktop that comes back
+// fills the window and is shown one point per point. Mobile never calls this with
+// its own geometry; it has one fixed size or none at all (see MOBILE_GUEST_SIZE),
+// which is what leaves this the plain derivation it reads as.
 //
 // The multiplication is exactly what the rxa engine divides back out to reach a
 // display mode's points, and that is the consumer where getting it wrong is
@@ -407,17 +434,13 @@ async function postClaim(force: boolean): Promise<Response | null> {
 // `w / scale` CSS px, so `clientWidth × scale` recovers the pixels that produced
 // that layout.
 function viewportMsg(
+  size: { w: number; h: number },
   guestScale: number,
 ): Extract<ClientMsg, { type: "viewport" }> {
-  const el = document.documentElement;
-  const density = CAN_PINCH_ZOOM || !(guestScale > 0) ? 1 : guestScale;
-  const dim = (cssPx: number, min: number) =>
-    Math.min(65535, Math.max(min, Math.round(cssPx * density)));
-  return {
-    type: "viewport",
-    w: dim(el.clientWidth, CAN_PINCH_ZOOM ? TOUCH_MIN_WIDTH : 1),
-    h: dim(el.clientHeight, CAN_PINCH_ZOOM ? TOUCH_MIN_HEIGHT : 1),
-  };
+  const density = guestScale > 0 ? guestScale : 1;
+  const dim = (cssPx: number) =>
+    Math.min(65535, Math.max(1, Math.round(cssPx * density)));
+  return { type: "viewport", w: dim(size.w), h: dim(size.h) };
 }
 
 // Claims the single session slot (POST /api/session) and opens the /ws
@@ -455,7 +478,9 @@ export function useRemoteDesktop(
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
   // True when the connected target supports resize but only on request (RDP):
   // the floating menu shows a "Resize to window" button and automatic viewport
-  // reports are suppressed. VNC resizes automatically, so it stays false.
+  // reports are suppressed. VNC resizes automatically, so it stays false — and so
+  // does every case on a pinch-zoom device, where the window this would resize to
+  // is not one to hand a remote desktop (see CAN_PINCH_ZOOM).
   const [canResize, setCanResize] = useState(false);
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
@@ -564,8 +589,10 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
-  // Manual-resize mode (RDP with resize enabled): while set, automatic viewport
-  // reports are suppressed and only the menu's "Resize to window" sends one.
+  // Manual-resize mode (RDP with resize enabled, rxa, and every mobile session):
+  // while set, automatic viewport reports are suppressed and only the menu's
+  // "Resize to window" sends one — which on mobile is nothing, since the button is
+  // not offered there.
   const manualResizeRef = useRef(false);
   // Set by the connection effect so the menu's "Resize to window" can push the
   // current viewport even in manual-resize mode.
@@ -721,7 +748,11 @@ export function useRemoteDesktop(
       if (!opts?.manual && manualResizeRef.current) {
         return;
       }
-      const msg = viewportMsg(sizeRef.current?.scale ?? 1);
+      const el = document.documentElement;
+      const msg = viewportMsg(
+        { w: el.clientWidth, h: el.clientHeight },
+        sizeRef.current?.scale ?? 1,
+      );
       if (
         lastViewport &&
         lastViewport.w === msg.w &&
@@ -731,6 +762,37 @@ export function useRemoteDesktop(
       }
       lastViewport = { w: msg.w, h: msg.h };
       sendRef.current(msg);
+    };
+    // The mobile request, and the whole of what a pinch-zoom device asks about
+    // size. Sent once per connection and by nothing else: this window's shape is
+    // not a shape a desktop can usefully be, so no later event should change the
+    // answer — not a rotation, not the URL bar, not the soft keyboard.
+    //
+    // Armed by `handleConnected` and fired from the first `resize`, not from
+    // `connected` itself, because a tablet's request is in the remote's pixels and
+    // the first `resize` is what names the density to convert with. Sending a
+    // moment earlier would multiply by a placeholder 1 while the rxa engine divided
+    // by the 2 it had already announced, and an iPad would ask for 1366 points and
+    // be given 683. The desktop path never had to think about this: rxa suppresses
+    // its connect-time report altogether, so its only sender is a button pressed
+    // long after the scale is known.
+    //
+    // A tablet names its size and a phone defers (see MOBILE_GUEST_SIZE). The
+    // tablet's goes through `viewportMsg` like any other, density and all, so it
+    // means what the desktop path means — the CSS pixels I want, in the remote's
+    // own pixels — and the multiplication is undone by the same number that
+    // produced it.
+    let mobileSizePending = false;
+    const sendMobileSize = () => {
+      mobileSizePending = false;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      sendRef.current(
+        MOBILE_GUEST_SIZE
+          ? viewportMsg(MOBILE_GUEST_SIZE, sizeRef.current?.scale ?? 1)
+          : { type: "defaultSize" },
+      );
     };
     // The manual "Resize to window" action: report the viewport even in
     // manual-resize mode. Dedup still applies, so re-clicking at the same
@@ -965,6 +1027,12 @@ export function useRemoteDesktop(
       sizeRef.current = s;
       setSize(s);
       syncCursor();
+      // The mobile size request, now that there is a density to convert with —
+      // see sendMobileSize. Fired from the *first* resize of a connection only, so
+      // the answer this produces does not immediately re-trigger it.
+      if (mobileSizePending) {
+        sendMobileSize();
+      }
     };
 
     // The remote's display list, and the one follow-up a change of display
@@ -1008,28 +1076,44 @@ export function useRemoteDesktop(
       setConnectError(null);
       setPendingTarget(null);
       setMode("desktop");
-      // Three behaviours, and only two of them are settled here. VNC follows the
-      // viewport automatically. RDP resizes only when asked, because its
-      // reactivation is heavy — so viewport reports are suppressed and the menu's
-      // "Resize to window" is the one caller. rxa is only-when-asked too, but
-      // *whether it may be asked* is a fact about the display being shared rather
-      // than about the target, so it is settled in `handleDisplays`: a Mac's own
-      // panel is never resized because somebody connected, and only a display the
-      // agent made for the purpose can be.
-      const manual = msg.protocol === "rdp" && msg.resize;
-      rxaResize = msg.protocol === "rxa" && msg.resize;
-      // Suppressing the automatic senders is unconditional for rxa, whatever the
-      // target allows: even a display made to be looked at from here is not
-      // dragged around by this window, and the report three lines down is one of
-      // the sends this has to stop.
-      manualResizeRef.current = manual || msg.protocol === "rxa";
-      // For rxa this starts false and stays false until the first `displays`.
-      setCanResize(manual);
       setCanClipboard(msg.clipboard);
-      // A freshly-started engine needs the current viewport; the report is sent
-      // here (once the protocol is known), undeduped.
-      lastViewport = null;
-      sendViewport();
+      if (CAN_PINCH_ZOOM) {
+        // Mobile has one rule and it does not vary by protocol: ask once, here,
+        // and never let this window's shape reach the remote again. So every
+        // automatic sender is suppressed and "Resize to window" is never offered —
+        // the window it would resize to is the one this client deliberately does
+        // not ask the remote to be.
+        //
+        // Gated on the target's `resize` because there is nothing to say
+        // otherwise: an engine drops both requests without it, and this keeps the
+        // browser from asking for something the operator declined.
+        manualResizeRef.current = true;
+        rxaResize = false;
+        setCanResize(false);
+        mobileSizePending = msg.resize;
+      } else {
+        // Three behaviours, and only two of them are settled here. VNC follows the
+        // viewport automatically. RDP resizes only when asked, because its
+        // reactivation is heavy — so viewport reports are suppressed and the menu's
+        // "Resize to window" is the one caller. rxa is only-when-asked too, but
+        // *whether it may be asked* is a fact about the display being shared rather
+        // than about the target, so it is settled in `handleDisplays`: a Mac's own
+        // panel is never resized because somebody connected, and only a display the
+        // agent made for the purpose can be.
+        const manual = msg.protocol === "rdp" && msg.resize;
+        rxaResize = msg.protocol === "rxa" && msg.resize;
+        // Suppressing the automatic senders is unconditional for rxa, whatever the
+        // target allows: even a display made to be looked at from here is not
+        // dragged around by this window, and the report three lines down is one of
+        // the sends this has to stop.
+        manualResizeRef.current = manual || msg.protocol === "rxa";
+        // For rxa this starts false and stays false until the first `displays`.
+        setCanResize(manual);
+        // A freshly-started engine needs the current viewport; the report is sent
+        // here (once the protocol is known), undeduped.
+        lastViewport = null;
+        sendViewport();
+      }
       // And this screen's density, which is what lets a display the agent made
       // come up matching the window it is about to be shown in rather than at
       // whatever density it was left at.

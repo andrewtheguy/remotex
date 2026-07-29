@@ -150,8 +150,11 @@ async fn session(
     if let Err(e) = active_loop(
         connection_result,
         framed,
-        config.resize,
-        config.clipboard,
+        Flags {
+            resize: config.resize,
+            clipboard: config.clipboard,
+            default_size: (config.width, config.height),
+        },
         clip_rx,
         input_rx,
         sink,
@@ -252,15 +255,26 @@ async fn connect(
 /// the backend: the backend is called from inside `ActiveStage`, which this
 /// function owns exclusively, so keeping the state on this side avoids sharing
 /// it through a lock.
+/// What [`active_loop`] needs off the target profile, grouped the way
+/// [`crate::vnc`]'s own `Flags` is: three values that always travel together and
+/// are only ever read from the same place.
+struct Flags {
+    resize: bool,
+    clipboard: bool,
+    /// The target's configured `width`/`height` — the size this session asked the
+    /// server for at connect, and so what [`ClientMsg::DefaultSize`] means here.
+    default_size: (u16, u16),
+}
+
 async fn active_loop(
     connection_result: ConnectionResult,
     mut framed: UpgradedFramed,
-    resize: bool,
-    clipboard: bool,
+    flags: Flags,
     mut clip_rx: mpsc::UnboundedReceiver<ClipboardEvent>,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &TileSink,
 ) -> anyhow::Result<()> {
+    let Flags { resize, clipboard, default_size } = flags;
     // Retained so a DeactivateAll (the server-side half of a resize) can drive a
     // fresh Deactivation-Reactivation Sequence. The builder below only consumes
     // the channel/share fields, so pull this out first.
@@ -371,9 +385,20 @@ async fn active_loop(
                 // automatic resize, the browser only sends this when the user
                 // asks for it (the menu's "Resize to window") — reactivation is
                 // heavier than VNC's SetDesktopSize. Ignored unless negotiated.
-                if let ClientMsg::Viewport { w, h } = input {
+                //
+                // `DefaultSize` is the same request with the size supplied from
+                // here: the target's configured `width`/`height`, which is already
+                // what this session connected at — so it is a no-op unless
+                // something moved the desktop off it. See
+                // [`ClientMsg::DefaultSize`].
+                let wanted_size = match input {
+                    ClientMsg::Viewport { w, h } => Some((w, h)),
+                    ClientMsg::DefaultSize => Some(default_size),
+                    _ => None,
+                };
+                if let Some((w, h)) = wanted_size {
                     if resize {
-                        resize_desktop(&mut active_stage, &mut framed, w, h).await?;
+                        resize_desktop(&mut active_stage, &mut framed, desktop, w, h).await?;
                     }
                     continue;
                 }
@@ -625,13 +650,30 @@ async fn active_loop(
 /// to 8192 per axis). A no-op if the channel isn't connected yet (the server
 /// hasn't sent its capabilities); the browser can simply ask again. The server
 /// answers by deactivating the session — see the `DeactivateAll` arm.
+///
+/// Also a no-op when the desktop is already that size, and that guard earns its
+/// place here rather than at the callers: this is the one engine where asking for
+/// the size you already have is *expensive*, since the server answers any request
+/// with a full Deactivation-Reactivation. VNC and `rxa` both drop an unchanged
+/// request themselves, so this is what makes the two client requests idempotent
+/// across all three — which matters most for the automatic
+/// [`ClientMsg::DefaultSize`] a mobile client sends on every reattach.
+///
+/// Compared after `adjust_display_size`, because that is the size that would
+/// actually be asked for: an odd width lands on the even one beside it, and
+/// comparing before the adjustment would call that a change when it is not.
 async fn resize_desktop(
     active_stage: &mut ActiveStage,
     framed: &mut UpgradedFramed,
+    current: DesktopSize,
     w: u16,
     h: u16,
 ) -> anyhow::Result<()> {
     let (w, h) = MonitorLayoutEntry::adjust_display_size(u32::from(w), u32::from(h));
+    if (w, h) == (u32::from(current.width), u32::from(current.height)) {
+        debug!("rdp: the desktop is already {w}x{h}; not asking for a reactivation");
+        return Ok(());
+    }
     match active_stage.encode_resize(w, h, None, None) {
         Some(Ok(frame)) => {
             info!("rdp: requesting resize to {w}x{h}");
@@ -849,8 +891,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
             }
         },
         // Handled by the active loop (client-initiated resize) before
-        // translation, so this arm is unreachable in practice.
-        ClientMsg::Viewport { .. } => Vec::new(),
+        // translation, so these arms are unreachable in practice.
+        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Handled by the active loop (MS-RDPECLIP, a static virtual channel)

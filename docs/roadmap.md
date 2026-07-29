@@ -75,6 +75,52 @@ that cannot be handed tiles out of order — and it is a second decode path in *
 client rather than one shared piece of work. `rxa`'s equivalent, encoding with
 VideoToolbox on the Mac, is separate again.
 
+### A remote size that is chosen rather than derived
+
+A client on a real desktop works its size out from its own window, and mobile is
+where that stops being possible: a portrait phone's window asks for a tall, narrow
+desktop no desktop OS lays out well, and rotating it asks for a different one. So a
+pinch-zoom client derives nothing. A tablet asks for its own landscape dimensions off
+`screen`, and a phone sends `ClientMsg::DefaultSize` — a request carrying no size at
+all, which each engine answers with the target's configured `width`/`height`, or with
+the point size the `rxa` agent created its display at.
+
+Those are defensible guesses, not answers. An iPad's landscape shape is a
+tablet's, not a resolution anybody picked for the desktop behind it, and the
+`width`/`height` default of 1280x800 is the size that was reasonable for RDP's
+connect. The person looking at the desktop knows what they want it to be, and
+nothing anywhere asks them — the phone/tablet split in `useRemoteDesktop.ts` exists
+only because the client has to guess, and a chosen size would delete it.
+
+A chosen size needs nothing new on the wire: `ClientMsg::Viewport` already carries an
+arbitrary size and all three engines already act on it. `DefaultSize` is not a step
+towards it and does not grow into it — deferring to whatever the far side calls its
+default is the opposite of naming a resolution, and it remains what a phone sends
+whatever this adds beside it.
+
+What a chosen size revises is the stance recorded on `Viewport`, that a remote's
+resolution belongs to the machine running it. That is true of a Mac's own panel —
+which is why `rxa` resizes only a display the agent made, and that stays true — and
+false of a headless VNC server or a display created for one client, whose size exists
+only for whoever is connected.
+
+What is not settled, and should not be decided here first:
+
+- **Where the choice lives.** Per target in the config is the least mechanism and
+  survives a reconnect; per session in the floating menu is where somebody
+  actually wants it while looking at a desktop that is the wrong size; both, with
+  the config as the default the menu starts from, is the likely answer and the most
+  state.
+- **What the list contains.** A fixed set of common resolutions is trivial and will
+  be wrong for somebody's ultrawide. The guest's own modes are the honest list, and
+  only `rxa` can produce one — RFB and RDP have no way to enumerate what the far
+  side would accept, so a VNC or RDP target can only be asked and told after the
+  fact whether it worked. `AgentMsg::Displays` is the seam that would carry the Mac's.
+- **What a phone does with it.** Possibly nothing: pinch zoom over a desktop-shaped
+  remote is already how a phone reads one, and a chosen size is a desktop and tablet
+  feature that phones inherit only through the config. Worth resisting the symmetry
+  if the menu would be unusable at that size.
+
 ## Deferred pending measurements
 
 ### Downscaled capture
