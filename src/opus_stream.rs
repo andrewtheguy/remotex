@@ -28,6 +28,10 @@
 //! negotiated rate is already 48 kHz the resampler is skipped and the two numbers
 //! are the same. Anything left over waits for the next buffer.
 //!
+//! [`OggOpus::push_silence`] is the same machinery with nothing to encode: the
+//! response has to keep flowing while the remote is quiet, so [`crate::audio`] asks
+//! for silence by the frame rather than letting the stream go dry.
+//!
 //! ## Why each listener gets its own encoder
 //!
 //! An Ogg stream is not resumable from the middle: a decoder that starts at an
@@ -114,6 +118,11 @@ pub struct OggOpus {
     writer: PacketWriter<'static, Vec<u8>>,
     serial: u32,
     granule: u64,
+    /// Frames encoded so far, silence included. The keepalive in [`crate::audio`]
+    /// compares this against the clock to decide how much silence it owes, and
+    /// nothing else can tell it: `granule` carries the pre-skip offset and the
+    /// page bytes carry neither.
+    frames_encoded: u64,
 }
 
 impl OggOpus {
@@ -181,10 +190,11 @@ impl OggOpus {
             // RFC 7845: granule positions count samples *including* pre-skip, so
             // that the final position minus pre-skip is the audio's true length.
             granule: u64::from(pre_skip),
+            frames_encoded: 0,
         };
 
-        stream.write_packet(opus_head(format, pre_skip), 0)?;
-        stream.write_packet(opus_tags(), 0)?;
+        stream.write_packet(opus_head(format, pre_skip), 0, PacketWriteEndInfo::EndPage)?;
+        stream.write_packet(opus_tags(), 0, PacketWriteEndInfo::EndPage)?;
         let headers = stream_take(&mut stream.writer);
         Ok((stream, headers))
     }
@@ -199,9 +209,46 @@ impl OggOpus {
         // left one sample ahead of right, and encoding then would read past the
         // end of right's samples.
         while self.buffered_frames() >= self.frames_per_packet {
-            self.encode_one_frame()?;
+            self.encode_one_frame(PacketWriteEndInfo::EndPage)?;
         }
         Ok(stream_take(&mut self.writer))
+    }
+
+    /// Encodes `packets` frames of digital silence: what keeps the response
+    /// flowing while the remote is sending nothing (see [`crate::audio`]).
+    ///
+    /// Zeros go through the ordinary accumulate path rather than round the side of
+    /// it, so a partial real frame still comes out in front of the silence and
+    /// silence is resampled exactly like audio.
+    ///
+    /// The whole batch shares **one** Ogg page, unlike [`Self::push`], which ends a
+    /// page per packet so a live listener hears audio as soon as it exists.
+    /// Silence has nothing to be prompt about, and a page header costs ~27 bytes
+    /// against a silent packet's handful — batching is the difference between
+    /// ~1.7 kB/s and ~0.4 kB/s of keepalive.
+    pub fn push_silence(&mut self, packets: usize) -> Result<Vec<u8>, anyhow::Error> {
+        // 16-bit samples, which `accumulate` assumes throughout.
+        let quiet = vec![0u8; self.frames_per_packet * self.channels * 2];
+        for packet in 0..packets {
+            let last = packet + 1 == packets;
+            self.accumulate(&quiet);
+            while self.buffered_frames() >= self.frames_per_packet {
+                self.encode_one_frame(if last {
+                    PacketWriteEndInfo::EndPage
+                } else {
+                    PacketWriteEndInfo::NormalPacket
+                })?;
+            }
+        }
+        // Empty when the batch ended mid-frame — a carried remainder shifts which
+        // packet is the last one — and the open page then flushes with whatever
+        // comes next.
+        Ok(stream_take(&mut self.writer))
+    }
+
+    /// Frames encoded so far, silence included.
+    pub fn frames_encoded(&self) -> u64 {
+        self.frames_encoded
     }
 
     /// Splits interleaved little-endian 16-bit PCM into per-channel `f32`.
@@ -238,7 +285,7 @@ impl OggOpus {
         self.next_channel = (self.next_channel + 1) % self.channels;
     }
 
-    fn encode_one_frame(&mut self) -> Result<(), anyhow::Error> {
+    fn encode_one_frame(&mut self, end: PacketWriteEndInfo) -> Result<(), anyhow::Error> {
         let taken = self.frames_per_packet;
         if let Some(resampler) = &mut self.resampler {
             let input = SequentialSliceOfVecs::new(&self.pending, self.channels, taken)
@@ -269,25 +316,27 @@ impl OggOpus {
             .encode_float(&self.frame, &mut self.packet)
             .map_err(|e| anyhow::anyhow!("encode an opus packet: {e}"))?;
         self.granule += FRAME_FRAMES as u64;
+        self.frames_encoded += 1;
         let packet = self.packet[..len].to_vec();
         let granule = self.granule;
-        self.write_packet(packet, granule)
+        self.write_packet(packet, granule, end)
     }
 
-    /// Writes one packet as its own Ogg page.
+    /// Writes one packet, ending the page when `end` says so.
     ///
-    /// A page per packet, rather than letting pages fill: `ogg` buffers until a
-    /// page is full otherwise, and a live listener would hear nothing until then.
-    /// The cost is a ~27-byte page header per ~240-byte packet, which is still an
-    /// order of magnitude below the PCM this replaces.
-    fn write_packet(&mut self, packet: Vec<u8>, granule: u64) -> Result<(), anyhow::Error> {
+    /// Audio ends a page per packet, rather than letting pages fill: `ogg` buffers
+    /// until a page is full otherwise, and a live listener would hear nothing until
+    /// then. The cost is a ~27-byte page header per ~240-byte packet, which is
+    /// still an order of magnitude below the PCM this replaces. Silence is the one
+    /// thing batched into a shared page — see [`Self::push_silence`].
+    fn write_packet(
+        &mut self,
+        packet: Vec<u8>,
+        granule: u64,
+        end: PacketWriteEndInfo,
+    ) -> Result<(), anyhow::Error> {
         self.writer
-            .write_packet(
-                Cow::Owned(packet),
-                self.serial,
-                PacketWriteEndInfo::EndPage,
-                granule,
-            )
+            .write_packet(Cow::Owned(packet), self.serial, end, granule)
             .map_err(|e| anyhow::anyhow!("write an ogg page: {e}"))
     }
 }
@@ -335,7 +384,28 @@ mod tests {
     struct Page {
         granule: u64,
         serial: u32,
-        packet: Vec<u8>,
+        /// Every packet on the page, back to back. One packet per page except for
+        /// a batch of silence, which is why [`Page::packets`] exists.
+        body: Vec<u8>,
+        lacing: Vec<u8>,
+    }
+
+    impl Page {
+        /// The page's packets, split by its lacing table: a segment of 255
+        /// continues the packet, anything less ends it.
+        fn packets(&self) -> Vec<Vec<u8>> {
+            let mut out = Vec::new();
+            let (mut start, mut len) = (0usize, 0usize);
+            for segment in &self.lacing {
+                len += usize::from(*segment);
+                if *segment < 255 {
+                    out.push(self.body[start..start + len].to_vec());
+                    start += len;
+                    len = 0;
+                }
+            }
+            out
+        }
     }
 
     /// A deliberately separate parser from the writer under test. Reading pages
@@ -356,7 +426,8 @@ mod tests {
             out.push(Page {
                 granule,
                 serial,
-                packet: bytes[start..start + body].to_vec(),
+                body: bytes[start..start + body].to_vec(),
+                lacing: table.to_vec(),
             });
             bytes = &bytes[start + body..];
         }
@@ -374,7 +445,7 @@ mod tests {
         let pages = pages(&headers);
         assert_eq!(pages.len(), 2, "OpusHead and OpusTags, each on its own page");
 
-        let head = &pages[0].packet;
+        let head = &pages[0].body;
         assert_eq!(&head[0..8], b"OpusHead");
         assert_eq!(head[8], 1, "version");
         assert_eq!(head[9], 2, "stereo");
@@ -387,7 +458,7 @@ mod tests {
         );
         assert_eq!(head[18], 0, "channel mapping family");
 
-        assert_eq!(&pages[1].packet[0..8], b"OpusTags");
+        assert_eq!(&pages[1].body[0..8], b"OpusTags");
         assert_eq!(pages[0].serial, pages[1].serial, "one logical stream");
     }
 
@@ -506,7 +577,7 @@ mod tests {
         // Decode a packet from the middle: the first few are the encoder settling.
         for page in &pages[..15] {
             decoder
-                .decode(&page.packet, &mut decoded, false)
+                .decode(&page.body, &mut decoded, false)
                 .expect("decode");
         }
         let peak = decoded.iter().map(|s| s.abs()).max().expect("samples");
@@ -544,7 +615,7 @@ mod tests {
         // Past the encoder settling, so the silence on the right is really silence.
         for page in pages(&bytes).iter().take(15) {
             decoder
-                .decode(&page.packet, &mut decoded, false)
+                .decode(&page.body, &mut decoded, false)
                 .expect("decode");
         }
         let energy = |samples: &[i16]| -> f64 {
@@ -557,6 +628,73 @@ mod tests {
         assert!(
             right * 10.0 < left,
             "the right channel should be far quieter than the left, got {right} against {left}"
+        );
+    }
+
+    /// The keepalive's shape: one page for the whole batch, a frame's granule for
+    /// every packet in it, and real silence inside — not a page of nothing, which
+    /// is what an empty encode would also look like from the outside.
+    #[test]
+    fn a_batch_of_silence_shares_one_page() {
+        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
+        let bytes = stream.push_silence(25).expect("silence");
+        let pages = pages(&bytes);
+
+        assert_eq!(pages.len(), 1, "25 packets, one page, not 25 pages");
+        assert_eq!(stream.frames_encoded(), 25);
+        assert_eq!(
+            pages[0].granule,
+            stream.granule,
+            "the page carries the granule of the last packet on it"
+        );
+
+        let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
+        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
+        // Split by the lacing table, not by the page body: the packets are back to
+        // back inside it, so decoding the body whole would be decoding 25 packets
+        // as one.
+        let packets = pages[0].packets();
+        assert_eq!(packets.len(), 25, "one packet per frame asked for");
+        decoder
+            .decode(&packets[0], &mut decoded, false)
+            .expect("decode");
+        assert!(
+            decoded.iter().all(|s| s.abs() < 8),
+            "silence in, silence out"
+        );
+    }
+
+    /// A batch that lands mid-frame carries the remainder like any other buffer,
+    /// and the real audio in front of it is not reordered behind the silence.
+    #[test]
+    fn silence_after_a_partial_buffer_keeps_the_audio_in_front_of_it() {
+        let (mut stream, _headers) = OggOpus::new(PCM_CD_QUALITY).expect("an encoder");
+
+        // Half a frame of loud audio, which cannot be encoded on its own.
+        let mut pcm = Vec::new();
+        for _ in 0..441 {
+            pcm.extend_from_slice(&12_000i16.to_le_bytes());
+            pcm.extend_from_slice(&12_000i16.to_le_bytes());
+        }
+        assert!(pages(&stream.push(&pcm).expect("push")).is_empty());
+
+        let bytes = stream.push_silence(2).expect("silence");
+        assert_eq!(stream.frames_encoded(), 2, "two frames out for two asked for");
+        assert_eq!(
+            stream.pending[0].len(),
+            441,
+            "the half frame of audio is repaid out of the silence, not dropped"
+        );
+
+        let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
+        let mut decoded = vec![0i16; FRAME_FRAMES * 2];
+        let packets = pages(&bytes)[0].packets();
+        assert_eq!(packets.len(), 2);
+        decoder.decode(&packets[0], &mut decoded, false).expect("decode");
+        let peak = decoded.iter().map(|s| s.abs()).max().expect("samples");
+        assert!(
+            peak > 2_000,
+            "the first frame should still start with the audio, peak was {peak}"
         );
     }
 

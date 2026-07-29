@@ -11,6 +11,14 @@
 // checking on a device rather than looking up — Safari only gained Ogg/Opus in
 // 18.4 — and `server::tests::serve_a_test_tone` is how to check.
 //
+// **Nothing here waits for the remote to be making a sound.** The endpoint answers
+// straight away and sends silence until sound arrives, so opening this panel on a
+// quiet desktop gives a player that is playing and will start on its own — and keep
+// going when the remote goes quiet again and comes back. That is the reason there is
+// one element mounted once rather than a reload on each silence: a re-load is a
+// fresh autoplay attempt long after the click that permitted it, which iOS Safari
+// may refuse.
+//
 // **Native `controls`, and that is the point of this panel.** Whether a browser
 // plays such a response *progressively* rather than waiting for it to end is the
 // question this whole path exists to answer, and the browser's own transport
@@ -42,9 +50,11 @@ export default function AudioPanel({
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   useDockedHeight(panelRef, onDockedHeightChange);
-  // Set from the element's own `error` event, which is how a 403 or 503 from the
-  // endpoint reaches this side — a media element reports a failed load as an
-  // error on itself and never as a rejected promise.
+  // Set from the element's own `error` event, which is how a refusal from the
+  // endpoint reaches this side — a media element reports a failed load as an error
+  // on itself and never as a rejected promise. A quiet remote is not one of those
+  // refusals any more; what is left is a stale claim token (403) and a session with
+  // no audio source at all (503).
   const [failed, setFailed] = useState(false);
 
   return (
@@ -77,7 +87,7 @@ export default function AudioPanel({
         <p className="ap-note">
           {failed
             ? "The gateway would not stream this session's audio. It ends when the target disconnects or another browser takes the session over."
-            : "Live sound from the remote desktop. Closing this panel stops it."}
+            : "Live sound from the remote desktop, silent until something plays there. Closing this panel stops it."}
         </p>
       </div>
     </div>

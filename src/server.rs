@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -17,6 +16,7 @@ use tower::service_fn;
 use tower_http::services::ServeDir;
 
 use crate::{
+    audio::PCM_CD_QUALITY,
     auth::{self, AuthSessions},
     config::AppConfig,
     error::{ApiResult, AppError},
@@ -297,17 +297,6 @@ struct AudioParams {
     session: Option<String>,
 }
 
-/// How long to wait for the remote's audio channel to finish negotiating before
-/// answering 503.
-///
-/// There is something to wait for because a browser can ask the moment the
-/// desktop appears, while MS-RDPEA is still exchanging formats a few PDUs behind
-/// it. Bounded because the other reason nothing has been negotiated is that
-/// nothing ever will be — a server that offers no format this gateway asked for
-/// (see [`crate::rdp_audio`]) — and a request that hung for that would look like
-/// audio that is merely slow.
-const AUDIO_FORMAT_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// The claimed session's live audio, as an open-ended Ogg/Opus response the
 /// browser plays with a plain `<audio>` element (see docs/remote-audio.md).
 ///
@@ -324,6 +313,15 @@ const AUDIO_FORMAT_TIMEOUT: Duration = Duration::from_secs(5);
 /// listener starts at live audio and receives what arrives after it attached. A
 /// `Range` request is answered with this same stream rather than a `206`, since
 /// there is no range of anything to serve.
+///
+/// **It does not wait for the remote's audio to exist, and it never refuses a
+/// session because the desktop is quiet.** The tested Windows host negotiates no
+/// audio format at all until something plays on it, so waiting to find out meant
+/// answering `503` to a perfectly good session — final, since a media element does
+/// not retry. The response opens on the strength of the one format this gateway
+/// advertises and fills with silence until sound arrives (see [`crate::audio`]).
+/// The cost is that a target whose host will *never* redirect now sounds the same
+/// as one that is merely quiet; the log below is where the two differ.
 async fn audio_handler(
     State(state): State<AppState>,
     Query(params): Query<AudioParams>,
@@ -338,21 +336,29 @@ async fn audio_handler(
         warn!("audio: refused, the request carried no session token");
         return Err(AppError::Forbidden);
     };
-    let mut listener = state.sessions.audio_listener(&token).inspect_err(|e| {
+    let listener = state.sessions.audio_listener(&token).inspect_err(|e| {
         warn!("audio: refused, {e}");
     })?;
-    let Some(format) = listener.await_format(AUDIO_FORMAT_TIMEOUT).await else {
-        warn!(
-            "audio: refused, the remote negotiated no audio format within {}s",
-            AUDIO_FORMAT_TIMEOUT.as_secs()
-        );
-        return Err(AppError::Unavailable("remote audio"));
-    };
-    info!(
-        "audio: streaming {} Hz PCM as {} kbps opus",
-        format.sample_rate,
-        crate::opus_stream::OPUS_BITRATE_BPS / 1000
-    );
+    let negotiated = listener.negotiated_format();
+    let bitrate = crate::opus_stream::OPUS_BITRATE_BPS / 1000;
+    match negotiated {
+        Some(format) => info!(
+            "audio: streaming {} Hz PCM as {bitrate} kbps opus",
+            format.sample_rate
+        ),
+        // Worth its own line rather than a silent assumption: this is the state that
+        // used to answer 503, and the one that looks like a fault when the remote
+        // never redirects at all.
+        None => info!(
+            "audio: streaming as {bitrate} kbps opus, but the remote's audio channel \
+             is not up, so this is silence until it is"
+        ),
+    }
+    // The negotiated format when there is one, and otherwise the only format this
+    // gateway ever advertises — which is not a guess: with one advertised format,
+    // that is the only format a wave buffer can be in (see [`crate::rdp_audio`]),
+    // which is what makes the header writable before any negotiation.
+    let format = negotiated.unwrap_or(PCM_CD_QUALITY);
     Ok((
         [
             // The container as well as the codec: `codecs=opus` is what lets a
@@ -390,6 +396,12 @@ mod tests {
     /// *browsers* play what this now sends, live and without stalling. The PCM's
     /// provenance is irrelevant to that, so this supplies it locally and the
     /// answer is unambiguous: a failure here is the format, not the remote.
+    ///
+    /// The tone comes and goes in five-second phases, with the format published and
+    /// cleared around the gaps the way a real host's channel opening and closing
+    /// does. That is deliberate: the behaviour worth checking in a browser is no
+    /// longer only "does it play" but "does it *start on its own*, stop, and start
+    /// again" — so open the panel during a quiet phase and then touch nothing.
     ///
     /// `#[ignore]`d and in-crate on purpose: it needs
     /// [`SessionManager::with_test_spawner`], and it must add nothing a real
@@ -469,10 +481,6 @@ mod tests {
                     if frame_tx.blocking_send(size.clone()).is_err() {
                         return;
                     }
-                    // What a real negotiation publishes, and what the endpoint
-                    // waits for: without it the response is the honest 503 rather
-                    // than a header for a format nothing agreed on.
-                    audio.publish_format(PCM_CD_QUALITY);
                     // Paced against a deadline rather than by sleeping a fixed
                     // 20 ms: the per-iteration overhead makes a fixed sleep
                     // deliver ~2.5 s of audio every 3 s, and a browser would
@@ -481,8 +489,25 @@ mod tests {
                     let buffer = std::time::Duration::from_millis(20);
                     let mut phase = 0u32;
                     let mut due = std::time::Instant::now();
+                    // 250 buffers of 20 ms: five seconds of tone, then five of the
+                    // remote being quiet, which on a real host means the audio
+                    // channel closing and negotiating again.
+                    let mut left_in_phase = 0u32;
+                    let mut playing = false;
                     while !frame_tx.is_closed() {
-                        audio.wave(tone(&mut phase));
+                        if left_in_phase == 0 {
+                            playing = !playing;
+                            left_in_phase = 250;
+                            if playing {
+                                audio.publish_format(PCM_CD_QUALITY);
+                            } else {
+                                audio.clear_format();
+                            }
+                        }
+                        left_in_phase -= 1;
+                        if playing {
+                            audio.wave(tone(&mut phase));
+                        }
                         // Answer `Refresh` by re-announcing the size, which is what
                         // every real engine does and what a reattaching browser
                         // depends on: the session layer injects it on every attach,
@@ -527,7 +552,9 @@ mod tests {
 
         // println! rather than log: this is the test's whole user interface.
         println!("\n  Open  http://{addr}/   (admin / hunter2)");
-        println!("  Pick \"test-tone\", then ☰ → Audio. You should hear 440 Hz.");
+        println!("  Pick \"test-tone\", then ☰ → Audio. 440 Hz for 5s, quiet for 5s.");
+        println!("  Open the panel during a quiet phase: the tone must arrive on its");
+        println!("  own, go away, and come back, without touching the player.");
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;

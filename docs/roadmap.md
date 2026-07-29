@@ -125,15 +125,17 @@ What is not settled, and should not be decided here first:
 
 The RDP-to-browser path is done and proven end to end: MS-RDPEA redirection over
 both of its channels (plus the `rdpdr` advertisement Windows requires before it
-will redirect anything), an authenticated live `audio/wav` endpoint on the claimed
-session, and an `<audio>` element in the SPA. A live Windows 11 target's own sound
-has been measured arriving through that endpoint. The mechanism, its lifecycle and
-that evidence are recorded in [`remote-audio.md`](remote-audio.md), which is where
-they belong.
+will redirect anything), an authenticated live `audio/ogg; codecs=opus` endpoint on
+the claimed session, and an `<audio>` element in the SPA. A live Windows 11 target's
+own sound has been measured arriving through that endpoint. The mechanism, its
+lifecycle and that evidence are recorded in
+[`remote-audio.md`](remote-audio.md), which is where they belong.
 
-Both open questions the design named are now closed: an open-ended WAV response
-**is** played progressively by a browser, so the representation stays and no
-compressed fallback is needed; and a real host does redirect to this gateway.
+Both open questions the design named are now closed: an open-ended response **is**
+played progressively by a browser, and a real host does redirect to this gateway. So
+is the wart that followed them — the endpoint no longer waits for a format it may
+never be sent, and fills a quiet remote's gaps with silence, so audio starts, stops
+and starts again on its own.
 
 What is left is two things, neither urgent:
 

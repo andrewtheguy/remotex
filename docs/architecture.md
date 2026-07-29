@@ -11,7 +11,7 @@ session and exposes one browser protocol to a React SPA.
 React SPA
    │  /api: authentication, targets, session claim
    │  /ws: JSON control/input + binary image tiles
-   │  /api/session/audio: live audio/wav, for an <audio> element
+   │  /api/session/audio: live audio/ogg (opus), for an <audio> element
    ▼
 axum server ── session slot ── protocol engine
                                   ├─ RDP via IronRDP
@@ -29,7 +29,10 @@ tile encoder, not its queue, and not the WebSocket. The browser is already a
 streaming audio client, so the gateway serves the claimed session's sound as an
 ordinary open-ended HTTP response — Ogg/Opus, so a session costs ~96 kbps of
 audio rather than the 1.4 Mbit/s the RDP side delivers — and the SPA points a
-plain `<audio>` element at it ([`remote-audio.md`](remote-audio.md)).
+plain `<audio>` element at it ([`remote-audio.md`](remote-audio.md)). That response
+never waits for the remote to make a sound and never goes dry: it fills gaps with
+encoded silence (0.32 kB/s), which is what lets the element start playing on its own
+whenever the remote does, and again after it stops.
 
 ## Constraints
 
@@ -315,9 +318,12 @@ to be negotiated at connect, so an audio target asks for redirection from the st
 discards buffers while nobody is listening; there is no way to add one to a live
 connection when a listener appears. And the gateway advertises exactly one format —
 44100 Hz 16-bit stereo PCM — because a wave buffer identifies its format by an
-index, and with one advertised format that index cannot be misread. The cost is
-that a server offering no matching format redirects nothing at all, which the log
-makes plain: the negotiated line appears and the first-buffer line does not.
+index, and with one advertised format that index cannot be misread — which also
+means the HTTP side knows what a buffer will be before the negotiation happens, and
+so can open its response without waiting for one. The cost is that a server offering
+no matching format redirects nothing at all, and since the response no longer refuses
+a session it cannot hear from, the log is the only place that shows: the negotiated
+line appears and the first-buffer line does not.
 
 ### VNC
 

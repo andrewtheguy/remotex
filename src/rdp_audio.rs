@@ -29,7 +29,9 @@
 //!
 //! That is also why a server may offer a *compressed* format even though this
 //! asks for PCM: a Windows host given the choice picks AAC. Asking for one PCM
-//! format is what keeps the HTTP side an encoder-free WAV header.
+//! format is what keeps the HTTP side free to re-encode without decoding first —
+//! and, since the one format is known up front, what lets the response open its
+//! Ogg headers before this negotiation has happened at all.
 //!
 //! ## Why the handler answers nothing
 //!
@@ -127,11 +129,13 @@ fn audio_format(format: PcmFormat) -> AudioFormat {
 
 impl RdpsndClientHandler for Handler {
     /// Being asked for our formats *is* the negotiation: the server has sent its
-    /// own list, and `Rdpsnd` is about to answer with the intersection. So this
-    /// is where the endpoint's "the audio channel came up" signal is published,
-    /// even though it reads as a getter — there is no other callback for it, and
-    /// the alternative is an endpoint that writes a header before anything has
-    /// agreed on one.
+    /// own list, and `Rdpsnd` is about to answer with the intersection. So this is
+    /// where "the audio channel came up" is recorded, even though it reads as a
+    /// getter — there is no other callback for it. Nothing waits on that record
+    /// (the response opens either way); it is what the log reports, and it is
+    /// published here rather than on the first wave buffer because a host that
+    /// negotiates and then plays nothing is a different thing to know about than a
+    /// host that never negotiated.
     fn get_formats(&self) -> &[AudioFormat] {
         if self.bridge.claim_transport(STATIC_TRANSPORT) {
             self.bridge.publish_format(PCM_CD_QUALITY);
@@ -173,9 +177,13 @@ impl RdpsndClientHandler for Handler {
         debug!("rdp: ignoring a remote audio pitch change: {pitch:?}");
     }
 
-    /// The remote closed the audio channel, or is about to renegotiate it. The
-    /// format no longer describes anything, so a listener that attaches now
-    /// waits rather than being handed a header for a stream that stopped.
+    /// The remote closed the audio channel, or is about to renegotiate it.
+    ///
+    /// A live host does this whenever nothing is playing on it, so this is the
+    /// ordinary quiet case and not a fault: an open response stays open and fills
+    /// with silence, and the next buffer resumes it. FreeRDP's `rdpsnd` handles a
+    /// close the same way, by leaving its audio device open and reopening it on the
+    /// next wave. All that is given up here is the record that the channel is up.
     fn close(&mut self) {
         debug!("rdp: the remote closed the static audio channel");
         self.seen_wave = false;
@@ -230,8 +238,8 @@ impl AudioPlaybackDvc {
     ///
     /// The reply carries our format only when the server offered exactly it. An
     /// empty list is the honest answer otherwise — the server then redirects
-    /// nothing, which is better than agreeing to a format we would mislabel in
-    /// the WAV header.
+    /// nothing, which is better than agreeing to a format whose buffers the
+    /// encoder downstream would then read as the format it was told to expect.
     fn answer_formats(&mut self, offered: &[AudioFormat], version: Version) -> Vec<DvcMessage> {
         let ours = audio_format(PCM_CD_QUALITY);
         let formats = if offered.contains(&ours) {
@@ -391,7 +399,6 @@ impl DvcEncode for Message {}
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
-    use std::time::Duration;
 
     use ironrdp::core::encode_vec;
     use ironrdp::rdpsnd::pdu::{ServerAudioFormatPdu, TrainingPdu, Wave2Pdu};
@@ -450,11 +457,11 @@ mod tests {
     #[tokio::test]
     async fn one_pcm_format_is_advertised_and_publishing_it_is_the_negotiation() {
         let bridge = Arc::new(AudioBridge::new());
-        let mut listener = bridge.take_listener();
+        let listener = bridge.take_listener();
         let handler = Handler::new(Arc::clone(&bridge));
 
         // Nothing has asked for the formats, so nothing has been negotiated.
-        assert_eq!(listener.await_format(Duration::from_millis(50)).await, None);
+        assert_eq!(listener.negotiated_format(), None);
 
         let formats = handler.get_formats();
         assert_eq!(
@@ -470,10 +477,7 @@ mod tests {
             }],
             "exactly one format, or a buffer's format index becomes a guess"
         );
-        assert_eq!(
-            listener.await_format(Duration::from_millis(50)).await,
-            Some(PCM_CD_QUALITY)
-        );
+        assert_eq!(listener.negotiated_format(), Some(PCM_CD_QUALITY));
     }
 
     #[tokio::test]
@@ -481,10 +485,10 @@ mod tests {
         use futures_util::StreamExt as _;
 
         let bridge = Arc::new(AudioBridge::new());
-        let mut listener = bridge.take_listener();
+        let listener = bridge.take_listener();
         let mut handler = Handler::new(Arc::clone(&bridge));
         handler.get_formats();
-        let format = listener.await_format(Duration::from_millis(50)).await.unwrap();
+        let format = listener.negotiated_format().expect("answering the formats negotiates");
         let mut stream = Box::pin(listener.into_stream(format));
         stream.next().await.unwrap().unwrap(); // the header pages
 
@@ -506,11 +510,11 @@ mod tests {
         );
 
         handler.close();
-        let mut after_close = bridge.take_listener();
+        let after_close = bridge.take_listener();
         assert_eq!(
-            after_close.await_format(Duration::from_millis(50)).await,
+            after_close.negotiated_format(),
             None,
-            "a closed channel has no format to hand the next listener"
+            "a closed channel is no longer a live negotiation"
         );
     }
 
@@ -555,7 +559,7 @@ mod tests {
         }
 
         let bridge = Arc::new(AudioBridge::new());
-        let mut listener = bridge.take_listener();
+        let listener = bridge.take_listener();
         let mut rdpsnd = Rdpsnd::new(Box::new(Handler::new(Arc::clone(&bridge))));
 
         // A decoy at index 0, so a format index resolved against the server's
@@ -579,9 +583,9 @@ mod tests {
             .expect("the client answers the server's formats");
         assert!(!answer.is_empty(), "the client must reply with its formats");
         assert_eq!(
-            listener.await_format(Duration::from_millis(50)).await,
+            listener.negotiated_format(),
             Some(PCM_CD_QUALITY),
-            "answering the format list is what tells the endpoint audio is up"
+            "answering the format list is what records that audio is up"
         );
 
         let answer = rdpsnd
@@ -622,13 +626,7 @@ mod tests {
         // And the server closing the channel ends the format, so the next
         // listener waits rather than being handed a header for a dead stream.
         rdpsnd.process(&encoded(ServerAudioOutputPdu::Close)).unwrap();
-        assert_eq!(
-            bridge
-                .take_listener()
-                .await_format(Duration::from_millis(50))
-                .await,
-            None
-        );
+        assert_eq!(bridge.negotiated_format(), None);
     }
 
     /// The same conversation over the dynamic channel, which is the transport a
@@ -640,7 +638,7 @@ mod tests {
         use futures_util::StreamExt as _;
 
         let bridge = Arc::new(AudioBridge::new());
-        let mut listener = bridge.take_listener();
+        let listener = bridge.take_listener();
         let mut dvc = AudioPlaybackDvc::new(Arc::clone(&bridge));
         assert_eq!(dvc.channel_name(), "AUDIO_PLAYBACK_DVC");
         assert!(
@@ -658,10 +656,7 @@ mod tests {
             2,
             "the formats reply, and a quality mode for a V8 server"
         );
-        assert_eq!(
-            listener.await_format(Duration::from_millis(50)).await,
-            Some(PCM_CD_QUALITY)
-        );
+        assert_eq!(listener.negotiated_format(), Some(PCM_CD_QUALITY));
 
         let answer = dvc
             .process(
@@ -699,28 +694,26 @@ mod tests {
 
         dvc.close(1);
         assert_eq!(
-            bridge
-                .take_listener()
-                .await_format(Duration::from_millis(50))
-                .await,
+            bridge.negotiated_format(),
             None,
-            "a closed channel has no format to hand the next listener"
+            "a closed channel is no longer a live negotiation"
         );
     }
 
     /// A server that offers nothing we can carry is told so with an empty format
-    /// list, and no format is published — which is what turns into the endpoint's
-    /// 503 rather than a WAV header describing a stream that will never arrive.
+    /// list, and no format is published. Nothing refuses the listener over it — the
+    /// response is silence either way — so this negotiation and the log line it
+    /// drives are the only place that shows.
     #[tokio::test]
     async fn a_server_offering_no_pcm_is_answered_with_no_formats() {
         let bridge = Arc::new(AudioBridge::new());
-        let mut listener = bridge.take_listener();
+        let listener = bridge.take_listener();
         let mut dvc = AudioPlaybackDvc::new(Arc::clone(&bridge));
 
         let answer = dvc.process(1, &server_formats(&[decoy_format()])).unwrap();
         assert_eq!(answer.len(), 2, "still answered, just with nothing offered");
         assert_eq!(
-            listener.await_format(Duration::from_millis(50)).await,
+            listener.negotiated_format(),
             None,
             "nothing was negotiated, so nothing may be published"
         );

@@ -104,29 +104,63 @@ X-Accel-Buffering: no
 The claim token identifies the owner of the single active session, just as it
 does for `/ws`; the login cookie authenticates the request. Two refusals, and they
 mean different things to a client: a token that is not the current claim is `403`
-and will never work, while a session with no audio *yet* — the picker, a target
-without the flag, or a channel still negotiating — is `503` and worth asking about
-again.
+and will never work, while a session with no audio *source* — the picker, a target
+without the flag, a dead engine — is `503` and worth asking about again.
 
-**A silent desktop is one of those 503s, and it is the confusing one.** The tested
-Windows host sends no `ServerAudioFormatPdu` at all while nothing is playing on it,
-so the channel opens, stays quiet, and the endpoint times out after five seconds.
-Three consecutive runs against the same build on 2026-07-29 make it plain: silent
-guest → 503, guest playing music → 200 with waves flowing, playback stopped again →
-503. Nothing on the gateway side differs between them.
+The endpoint writes the Ogg header pages, then Opus packets, as an open-ended
+response without a `Content-Length`. There is no recording and no seekable history:
+a listener starts at live audio and receives only what arrives after it attaches,
+and a `Range` request is answered with the same stream rather than a `206`.
 
-The practical consequence is a real wart: opening the Audio panel *before* starting
-sound on the remote gives a player that has already failed, and it takes closing and
-reopening the panel to try again. Worth fixing one day by not waiting on the PCM
-format at all — the Ogg headers depend only on the channel count, and the response
-could be opened optimistically and filled when audio appears — but that is a change
-to the endpoint's contract rather than a bug in it.
+**A quiet remote is not a refusal, and getting there took a design change.** The
+tested Windows host sends no `ServerAudioFormatPdu` at all while nothing is playing
+on it: the channel opens, stays quiet, and closes again. Three consecutive runs on
+2026-07-29 made it plain — silent guest → nothing negotiated, guest playing music →
+waves flowing, playback stopped → nothing again — and nothing on the gateway side
+differs between "quiet right now" and "will never redirect". So an endpoint that
+waited five seconds for a format and then answered `503` was refusing perfectly good
+sessions, *finally*: a media element does not retry, so the panel had to be closed
+and reopened, and doing that before the remote made a sound simply failed again.
 
-The endpoint waits (up to five seconds) for the negotiated PCM format, writes the
-Ogg header pages for it, and then writes Opus packets as an open-ended response
-without a `Content-Length`. There is no recording and no seekable history: a
-listener starts at live audio and receives only what arrives after it attaches, and
-a `Range` request is answered with the same stream rather than a `206`.
+It no longer waits. The response opens on the strength of the one format this
+gateway advertises — with a single advertised format, that is the only format a wave
+buffer can be in, which is what makes the header writable before any negotiation —
+and while no buffers arrive it carries **encoded silence**. So the element keeps
+playing, real audio replaces the silence when the remote starts, and it starts again
+after the remote stops and starts. Nothing in the browser retries, reloads or
+reconnects; there is one element and one `play()`, from the click that opened the
+panel, which is also the only autoplay attempt a policy has to permit.
+
+Three things about that keepalive are worth knowing:
+
+- **It is anchored to the clock, not to a quiet timer** (`audio::silence_owed`).
+  Real audio counts towards the same frame budget, so a remote delivering at real
+  time is owed no silence and never has filler mixed into its sound, while one that
+  stalls and then delivers its backlog is briefly *ahead* rather than permanently
+  late. A rule that padded after every quiet interval would add that delay on each
+  hiccup and never give it back. The stream is kept 400 ms ahead of real time so the
+  element has something buffered instead of re-stalling at the live edge, a top-up is
+  capped at 1 s per check, and a hole larger than 5 s — a consumer that stopped
+  reading, a laptop that slept — is skipped rather than paid back.
+- **It costs 0.32 kB/s**, measured on the tone harness: 13.45 kB/s while the tone
+  plays, 0.32 kB/s in the gaps, with the boundary seconds landing halfway between.
+  Silence is cheap because Opus is VBR by default, and cheaper still because a whole
+  batch of silence packets shares one Ogg page rather than paying a ~27-byte page
+  header each — audio ends a page per packet, since audio has a reason to be prompt.
+- **It reduces the timeline drift rather than removing it.** Granule positions now
+  advance through a gap, so `currentTime` tracks wall clock: a 26 s pull across five
+  phase changes decoded to 26.25 s.
+
+The cost of all this is diagnostic, and it is real: a target whose host offers no
+compatible format now sounds exactly like one that is merely quiet. The gateway log
+is where they differ — `audio: negotiated …` when the channel comes up, the
+`no … PCM audio format` warning when the host offers nothing usable, and a line at
+every attach saying whether the channel is up at that moment.
+
+FreeRDP makes the same call one layer down, which is worth knowing before treating a
+server's `Close` as a teardown: `rdpsnd_recv_close_pdu` only logs, deliberately
+leaving the local audio device open, and `rdpsnd_ensure_device_is_open` reopens it on
+the next wave.
 
 **Why Opus, and why it was not Opus first.** The response began as raw PCM in an
 open-ended WAV, chosen because wrapping PCM needs a header rather than an encoder,
@@ -244,27 +278,33 @@ the centre. Worth doing by ear rather than only in code, because a channel *swap
 passes every assertion above; only a listener who knows which side the source is
 playing can catch it.
 
-That session also shows the idle-host 503 in ordinary use, and how it looks from the
-outside: the panel was opened before the file started, so the endpoint refused after
-its five seconds; the format negotiated 33 s later when playback began; and it took a
-second attach — closing and reopening the panel — to get the stream. Nothing was
-wrong, which is what makes it worth writing down.
+That session is also where the idle-host `503` showed itself in ordinary use, and it
+reads as the case for the keepalive above: the panel was opened before the file
+started, so the endpoint refused after its five seconds; the format negotiated 33 s
+later when playback began; and it took a second attach — closing and reopening the
+panel — to get the stream. Nothing was wrong, which is what made it worth writing
+down, and the sequence is now the one thing the endpoint is built to handle.
 
 That was all settled with a generated tone rather than a remote's audio, because the
 two halves fail independently and only one of them needs a Windows host.
 `server::tests::serve_a_test_tone` is that harness: an `#[ignore]`d in-crate test
 serving the real router — SPA, login, endpoint — in front of a scripted engine that
-publishes the negotiated format and fills the queue in real time.
+fills the queue in real time.
 
 ```sh
 cargo test --lib serve_a_test_tone -- --ignored --nocapture
 ```
 
-Two things it is worth knowing that harness gets right, because both were wrong
-first and both would have been misread as flaws in the response itself: it must publish a
-format (or the endpoint honestly answers 503), and it must pace against a deadline
-rather than sleeping a fixed interval (a fixed 20 ms sleep delivers ~2.5 s of audio
-every 3 s, and the browser stutters on the underrun). It also answers
+It plays five seconds of tone and then goes quiet for five, publishing and clearing
+the format around the gaps the way a real host's channel opening and closing does.
+That is what makes it QA for the behaviour rather than only for the codec: open the
+panel *during a quiet phase* and touch nothing, and the tone must arrive on its own,
+go away, and come back.
+
+One other thing it is worth knowing the harness gets right, because it was wrong
+first and would have been misread as a flaw in the response itself: it paces against
+a deadline rather than sleeping a fixed interval (a fixed 20 ms sleep delivers ~2.5 s
+of audio every 3 s, and the browser stutters on the underrun). It also answers
 `ClientMsg::Refresh` by re-announcing the desktop size, as every real engine does —
 without that, any browser but the first to attach waits forever for a desktop.
 

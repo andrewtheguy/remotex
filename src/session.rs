@@ -368,7 +368,19 @@ impl SessionManager {
             .as_ref()
             .and_then(|engine| engine.audio.as_ref())
             .ok_or(AudioError::NoSource)?;
-        info!("session: audio listener attached");
+        // Whether the remote's audio channel is up is worth saying here rather than
+        // at the endpoint, which holds only a listener: it decides nothing (the
+        // response opens either way and fills with silence), so the log is the only
+        // place the difference between a quiet remote and one that will never
+        // redirect can be seen at all.
+        info!(
+            "session: audio listener attached, the remote's audio channel is {}",
+            if audio.negotiated_format().is_some() {
+                "up"
+            } else {
+                "not up yet"
+            }
+        );
         Ok(audio.take_listener())
     }
 
