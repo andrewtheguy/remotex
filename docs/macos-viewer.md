@@ -31,8 +31,17 @@ a session and refuses on mismatch, with the reason shown on the login screen.
 drift silently.
 
 `PROTOCOL_VERSION` covers `ClientMsg`, `ControlMsg`, and the tile frame layout. A
-purely additive control message does not earn a bump: clients are required to
+purely additive control message does not earn a bump on its own: clients are required to
 ignore tags they do not know, and the viewer does (`ServerMessage.unsupported`).
+
+What *does* earn one is a client gaining a **floor** — a field it will not do without.
+Audio is the worked example, and it bumped the number for neither of the obvious reasons:
+the frames are opt-in and the messages additive, so the wire did not change. But this
+viewer now reads `connected.audio` as required, so it cannot speak to a gateway older
+than audio, and without a bump that refusal surfaced as the `connected` frame failing to
+decode — logged, dropped, and indistinguishable from a desktop that never arrives. The
+version check turns that into a sentence on the login screen. The test to apply is not
+"is this additive" but "if this client meets an older gateway, does it say so".
 
 Two contract tests guard the boundary from the other side.
 `WireContractTests` reads both message enums out of `src/protocol.rs` and

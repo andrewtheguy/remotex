@@ -524,9 +524,65 @@ mod tests {
     #[test]
     #[ignore = "writes files into the viewer's test bundle; run explicitly"]
     fn write_swift_opus_fixtures() {
-        let dir = std::path::Path::new("apps/remotex-viewer/Tests/Fixtures/opus");
-        std::fs::create_dir_all(dir).expect("fixture directory");
+        let dir = swift_fixture_dir();
+        std::fs::create_dir_all(&dir).expect("fixture directory");
+        let (head, framed) = swift_opus_fixture_bytes();
 
+        std::fs::write(dir.join("head.bin"), &head).unwrap();
+        std::fs::write(dir.join("packets.bin"), &framed).unwrap();
+        println!("wrote head.bin ({} bytes) and packets.bin ({} bytes)", head.len(), framed.len());
+    }
+
+    /// The checked-in fixtures still match what this encoder produces.
+    ///
+    /// **Not `#[ignore]`d, and that is the point of it.** The writer above is explicit
+    /// because it touches another target's source tree, which means nothing forces it to
+    /// be re-run: change the bitrate, the frame size or the resampler and the fixtures
+    /// silently become the *old* encoder's output. The viewer's `OpusDecoderTests` would
+    /// keep passing on them — stale Opus decodes perfectly well — so the drift would
+    /// surface as the cross-end check quietly no longer being one.
+    ///
+    /// A byte comparison is the right strength here. libopus is deterministic for a given
+    /// input and configuration, so this only fails when something real moved: an encoder
+    /// setting in this file, the framing, or the vendored libopus version — and every one
+    /// of those is a case where the fixtures *should* be regenerated rather than trusted.
+    #[test]
+    fn the_checked_in_opus_fixtures_match_this_encoder() {
+        let dir = swift_fixture_dir();
+        let (head, framed) = swift_opus_fixture_bytes();
+
+        for (name, produced) in [("head.bin", head), ("packets.bin", framed)] {
+            let path = dir.join(name);
+            let checked_in = std::fs::read(&path).unwrap_or_else(|e| {
+                panic!(
+                    "read {}: {e}\nregenerate with \
+                     `cargo test --lib -- --ignored --nocapture swift_opus_fixtures`",
+                    path.display()
+                )
+            });
+            assert!(
+                checked_in == produced,
+                "{name} is {} bytes and this encoder now produces {} — the viewer's \
+                 cross-end decode test is checking stale bytes. Regenerate with \
+                 `cargo test --lib -- --ignored --nocapture swift_opus_fixtures`",
+                checked_in.len(),
+                produced.len()
+            );
+        }
+    }
+
+    /// Absolute, so both of the tests above work whatever directory cargo was run from.
+    fn swift_fixture_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("apps/remotex-viewer/Tests/Fixtures/opus")
+    }
+
+    /// The fixture bytes: an `OpusHead` and the packets in the wire's own framing.
+    ///
+    /// Shared by the writer and the check above so the two cannot disagree about what a
+    /// fixture *is* — which would make the check pass while the files on disk were still
+    /// wrong.
+    fn swift_opus_fixture_bytes() -> (Vec<u8>, Vec<u8>) {
         let (mut stream, head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
         assert_eq!(head.len(), 19, "OpusHead is 19 bytes");
 
@@ -546,14 +602,7 @@ mod tests {
             framed.extend_from_slice(&size.to_le_bytes());
             framed.extend_from_slice(packet);
         }
-
-        std::fs::write(dir.join("head.bin"), &head).unwrap();
-        std::fs::write(dir.join("packets.bin"), &framed).unwrap();
-        println!(
-            "wrote head.bin (19 bytes) and packets.bin ({} packets, {} bytes)",
-            packets.len(),
-            framed.len()
-        );
+        (head, framed)
     }
 
     #[test]

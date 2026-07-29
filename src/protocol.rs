@@ -49,18 +49,26 @@ pub const STRIP_ROWS: u16 = 64;
 /// dead session rather than a version mismatch — so this is what makes the failure
 /// legible.
 ///
-/// **Audio did not bump it, and that was a decision rather than an oversight.** The
-/// [`audio`] frame kind and its two messages are additive *and* opt-in: nothing arrives
-/// until a client sends [`ClientMsg::Audio`]. While the browser was the only client that
-/// did, a viewer's socket carried the same bytes it had before audio existed — and since
-/// the viewer compares this number for **equality** and ships as its own DMG, a bump
-/// would have cost every installed copy a reinstall to gain nothing.
+/// **Audio did not bump it, and that was right while the browser was the only client
+/// that asked for it.** The [`audio`] frame kind and its two messages are additive *and*
+/// opt-in: nothing arrives until a client sends [`ClientMsg::Audio`], so a viewer's
+/// socket carried the same bytes it had before audio existed. Since the viewer compares
+/// this number for **equality** and ships as its own DMG, a bump would have cost every
+/// installed copy a reinstall to gain nothing.
 ///
-/// The viewer has since gained audio, and it did not bump this either, for the same
-/// reason from the other direction: it started *sending* a message this gateway already
-/// understood. What did change is the viewer's floor — it decodes `connected.audio` as a
-/// required field, so it refuses a gateway older than the release that added it.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// **5 is the viewer gaining audio, and it is here to make one refusal legible.** The
+/// viewer now decodes `connected.audio` as a required field, so it cannot talk to a
+/// gateway that predates audio — and without this bump that refusal happened at the
+/// worst possible place: the `connected` frame failing to decode, logged and dropped,
+/// leaving the viewer sitting on "waiting for the remote desktop" forever. That is the
+/// same silent-drop failure the WebP note above describes, and the same remedy applies.
+/// A version mismatch is reported on the login screen; a dropped frame is reported
+/// nowhere.
+///
+/// So the rule is not "additive messages never bump this". It is that a bump buys a
+/// legible failure, and is worth it exactly when a client would otherwise fail
+/// illegibly.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The clipboard transfer cap and its test, defined in `rxa-proto` so the
 /// browser link, the gateway and the Mac agent cannot drift apart on it (the
@@ -1113,8 +1121,8 @@ mod tests {
             ClientMsg::SelectDisplay { id: u32::MAX }
         ));
         assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"selectDisplay","id":-1}"#).is_err());
-        // The audio subscription, which is also the FAB's enable/disable control.
-        // Both directions matter: nothing sends this but a browser, and a viewer
+        // The audio subscription, which is also each client's enable/disable control.
+        // Both directions matter: a client that never sends it hears nothing, and one
         // that never sends it is why [`PROTOCOL_VERSION`] did not have to move.
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(r#"{"type":"audio","enabled":true}"#).unwrap(),

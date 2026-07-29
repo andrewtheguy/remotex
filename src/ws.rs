@@ -12,8 +12,10 @@
 //! picker/connected status, the audio format) as JSON text (see
 //! [`crate::protocol`]).
 //!
-//! Audio arrives here only for a client that asked, which is what keeps the macOS
-//! viewer's wire unchanged and [`crate::protocol::PROTOCOL_VERSION`] where it was.
+//! Audio arrives here only for a client that asked. That is what let audio join this
+//! socket without changing what any existing client received — see
+//! [`crate::protocol::PROTOCOL_VERSION`], which held at 4 for exactly that reason and
+//! moved only when the viewer gained a *floor* worth reporting.
 //!
 //! Close codes tell the browser why the socket ended:
 //! - `4000` — the token is missing or superseded; claim again.

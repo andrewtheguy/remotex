@@ -205,14 +205,23 @@ Four things about that shape are decisions rather than defaults:
   become 9 or 10 packets of 20 ms, so this is ~5 WebSocket messages a second rather
   than 50.
 
-**Audio is opt-in, and that is what keeps the macOS viewer working.** The viewer
-compares `protocolVersion` for **equality** (`GatewayClient.swift`) and ships as its
-own DMG, so bumping that number would cost every installed copy a reinstall. Nothing
-but a browser sends `{"type":"audio"}`, so a viewer's socket carries exactly the bytes
-it carried before audio existed — there is no new wire for it to refuse, and
-`PROTOCOL_VERSION` stays at 4. Guacamole arranges the same thing from the client end:
-its client declares the audio mimetypes it can decode, and one that declares none gets
-a stream that carries nothing.
+**Audio is opt-in, and that is what let it reach the wire without breaking the macOS
+viewer.** The viewer compares `protocolVersion` for **equality**
+(`GatewayClient.swift`) and ships as its own DMG, so bumping that number costs every
+installed copy a reinstall. While only the browser sent `{"type":"audio"}`, a viewer's
+socket carried exactly the bytes it carried before audio existed — no new wire to refuse,
+and `PROTOCOL_VERSION` stayed at 4. Guacamole arranges the same thing from the client
+end: its client declares the audio mimetypes it can decode, and one that declares none
+gets a stream that carries nothing.
+
+The version did move to **5** when the viewer gained audio, and not because the wire
+changed — it did not. The viewer now decodes `connected.audio` as a *required* field, so
+it cannot speak to a gateway older than audio, and without a bump that refusal landed in
+the worst place available: the `connected` frame failing to decode, logged and dropped,
+leaving the viewer waiting for a desktop that never arrives. A version mismatch is
+reported on the login screen. So the rule is not "additive messages never bump it" — it
+is that a bump buys a legible failure, and earns its cost when the alternative is a
+silent one.
 
 **Audio does not wait behind pixels.** One socket carries both, so `src/wire.rs` gives
 audio the one exemption in that file: an audio frame is emitted immediately and does

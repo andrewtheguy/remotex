@@ -373,6 +373,13 @@ final class AppModel: GatewaySessionSink {
         audio.send = { [weak connection] message in
             connection?.send(message)
         }
+        // The local audio device refusing is worth an alert: the user pressed Enable
+        // Audio and nothing happened, and this is the only failure on that path a
+        // client can actually distinguish. A remote that is merely quiet says nothing,
+        // here or in the SPA.
+        audio.report = { [weak self] message in
+            self?.showError(message)
+        }
         // Provisional: the gateway's `picker` or `connected` decides which of the
         // two post-login screens this really is, and the interstitial covers the
         // wait either way.
@@ -390,6 +397,7 @@ final class AppModel: GatewaySessionSink {
         clipboard.send = nil
         clipboard.update(enabled: false)
         audio.send = nil
+        audio.report = nil
         audio.reset()
     }
 

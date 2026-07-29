@@ -37,14 +37,24 @@ final class AudioOutput {
     /// Whether the toggle can be used at all: a live desktop whose target carries sound.
     private(set) var isAvailable = false
 
-    /// Why sound is not playing, when there is something to say. Only ever the local
-    /// audio device refusing — a missing decoder is not among the possibilities on this
-    /// platform, which is the difference from the browser, where it is the likeliest one.
-    private(set) var error: String?
-
     /// Set by `AppModel` for as long as a session is attached.
     @ObservationIgnored
     var send: (@MainActor (ClientMessage) -> Void)?
+
+    /// Why sound is not playing, reported once rather than stored.
+    ///
+    /// Held as a hook instead of as observable state because the only thing to do with
+    /// it is *say* it: a stored string would need clearing on every path that leaves the
+    /// failure behind (a target switch, a disconnection, a fresh subscription), and
+    /// missing one of those leaves a stale reason attached to a session it is not about.
+    /// `AppModel` routes this to the alert.
+    ///
+    /// Only ever the local audio device refusing, or a codec this build has no decoder
+    /// for — which is drift rather than an expected branch, since the gateway sends Opus
+    /// and nothing else. Unlike the browser, a missing decoder and an insecure origin are
+    /// not among the possibilities here.
+    @ObservationIgnored
+    var report: (@MainActor (String) -> Void)?
 
     @ObservationIgnored
     private var engine: AVAudioEngine?
@@ -79,7 +89,6 @@ final class AudioOutput {
             return
         }
         isEnabled = enabled
-        error = nil
         if !enabled {
             teardown()
         }
@@ -104,7 +113,6 @@ final class AudioOutput {
     func reset() {
         isEnabled = false
         isAvailable = false
-        error = nil
         teardown()
     }
 
@@ -135,7 +143,7 @@ final class AudioOutput {
         }
         guard let decoder = OpusDecoder(format: format) else {
             log.error("no decoder for codec \(format.codec, privacy: .public)")
-            error = "This Mac cannot decode the audio the gateway is sending (\(format.codec))."
+            report?("This Mac cannot decode the audio the gateway is sending (\(format.codec)).")
             return
         }
         self.decoder = decoder
@@ -143,7 +151,7 @@ final class AudioOutput {
             try startEngine(format: decoder.format)
         } catch {
             log.error("audio engine: \(error.localizedDescription, privacy: .public)")
-            self.error = "The audio device could not be started."
+            report?("The audio device could not be started.")
             self.decoder = nil
             return
         }
@@ -205,6 +213,12 @@ final class AudioOutput {
         // The default output device changing under the engine — headphones, a display's
         // speakers, a Bluetooth link going away. The engine stops itself, and the old
         // timeline means nothing on the new device.
+        //
+        // Deregistered before re-registering, not only in `teardown`:
+        // `restartAfterConfigurationChange` calls straight back into here, so without
+        // this the old token is overwritten while still registered — leaking one block
+        // per device change, permanently, since `teardown` can only remove the last one.
+        removeConfigurationObserver()
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -232,7 +246,7 @@ final class AudioOutput {
             try startEngine(format: format)
         } catch {
             log.error("audio restart: \(error.localizedDescription, privacy: .public)")
-            self.error = "The audio device could not be restarted."
+            report?("The audio device could not be restarted.")
         }
     }
 
@@ -252,11 +266,15 @@ final class AudioOutput {
         return Double(playerTime.sampleTime) / playerTime.sampleRate
     }
 
-    private func teardown() {
+    private func removeConfigurationObserver() {
         if let configurationObserver {
             NotificationCenter.default.removeObserver(configurationObserver)
             self.configurationObserver = nil
         }
+    }
+
+    private func teardown() {
+        removeConfigurationObserver()
         player?.stop()
         engine?.stop()
         player = nil

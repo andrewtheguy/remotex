@@ -127,11 +127,16 @@ struct AudioControlTests {
     /// played as silence. The gateway sends Opus and nothing else, so this is drift
     /// rather than an expected branch — and reporting it is what keeps "no sound" from
     /// looking like a quiet remote.
+    ///
+    /// Asserted through the model's alert rather than on a property of `AudioOutput`,
+    /// because that is the whole journey: a reason nothing displays is the same as no
+    /// reason at all, and this failed to be displayed at first.
     @Test
-    func aFormatThisBuildCannotDecodeIsReported() async throws {
+    func aFormatThisBuildCannotDecodeReachesTheAlert() async throws {
         let session = try await AttachedSession.attached(suite: "AudioControlTests")
         session.connect(protocolName: "rdp", audio: true)
         session.model.audio.setEnabled(true)
+        #expect(session.model.actionError == nil)
 
         session.model.apply(
             .control(
@@ -140,7 +145,32 @@ struct AudioControlTests {
                 )
             )
         )
-        #expect(session.model.audio.error != nil)
+        let reported = try #require(session.model.actionError)
+        #expect(reported.contains("vorbis"), "the alert should name what arrived: \(reported)")
+    }
+
+    /// An Opus format is *not* reported — the ordinary path must be silent in the alert
+    /// sense, or the interesting case above proves nothing.
+    @Test
+    func theOrdinaryFormatSaysNothing() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        session.model.audio.setEnabled(true)
+
+        session.model.apply(
+            .control(
+                .audioFormat(
+                    .init(
+                        codec: "opus",
+                        sampleRate: 48_000,
+                        channels: 2,
+                        // The gateway's own 19-byte OpusHead, as protocol.rs pins it.
+                        head: Data(base64Encoded: "T3B1c0hlYWQBAjgBRKwAAAAAAA==")!
+                    )
+                )
+            )
+        )
+        #expect(session.model.actionError == nil)
     }
 }
 
