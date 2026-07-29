@@ -237,6 +237,19 @@ apart — only a hard-panned signal can, which is what
 `opus_stream::tests::a_hard_panned_signal_still_has_two_channels_after_a_round_trip`
 sends through the whole path for exactly this reason.
 
+**Stereo has also been confirmed by ear**, which is the part no test can claim: a
+hard-panned file played on the live Windows target on 2026-07-29 arrived correctly
+separated in the browser — left on the left, right on the right, no collapse toward
+the centre. Worth doing by ear rather than only in code, because a channel *swap*
+passes every assertion above; only a listener who knows which side the source is
+playing can catch it.
+
+That session also shows the idle-host 503 in ordinary use, and how it looks from the
+outside: the panel was opened before the file started, so the endpoint refused after
+its five seconds; the format negotiated 33 s later when playback began; and it took a
+second attach — closing and reopening the panel — to get the stream. Nothing was
+wrong, which is what makes it worth writing down.
+
 That was all settled with a generated tone rather than a remote's audio, because the
 two halves fail independently and only one of them needs a Windows host.
 `server::tests::serve_a_test_tone` is that harness: an `#[ignore]`d in-crate test
