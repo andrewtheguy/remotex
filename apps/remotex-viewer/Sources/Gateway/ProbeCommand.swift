@@ -21,6 +21,11 @@ import Foundation
 /// Deliberately built on `GatewayClient` and the raw transport rather than on
 /// `GatewayConnection`: both questions are about the socket, and a diagnostic
 /// that reports frame sizes needs the bytes before anything decodes them.
+///
+/// It probes **this app's own gateway**, started the same way the app starts it, since
+/// there is no other gateway for this build to talk to. So there is no address and no
+/// credentials to pass: only which target to open and for how long.
+@MainActor
 enum ProbeCommand {
     static let flag = "--probe"
 
@@ -30,7 +35,7 @@ enum ProbeCommand {
         guard CommandLine.arguments.contains(flag) else {
             return
         }
-        Task.detached {
+        Task {
             let ok = await run()
             Foundation.exit(ok ? EXIT_SUCCESS : EXIT_FAILURE)
         }
@@ -41,35 +46,36 @@ enum ProbeCommand {
     }
 
     private static func run() async -> Bool {
-        let address = argument("--gateway") ?? "http://127.0.0.1:52380"
         let seconds = Int(argument("--probe-seconds") ?? "") ?? 90
-        guard let gateway = try? GatewayLocation.parse(address) else {
-            print("probe: \(address) is not a usable gateway address")
+        let instance = InstanceDirectory.resolved()
+        guard let binary = GatewayBinary.inBundle() else {
+            print("probe: no gateway in this bundle — run the probe from remotex.app")
             return false
         }
-        print("probe: \(gateway.url.absoluteString), \(seconds)s")
-        let client = GatewayClient(gateway: gateway)
+        let gateway = EmbeddedGateway(instance: instance, binary: binary)
+        let handshake: EmbeddedGateway.Handshake
+        do {
+            handshake = try await gateway.start()
+        } catch {
+            print("probe: the gateway did not start: \(error.localizedDescription)")
+            print(gateway.log())
+            return false
+        }
+        // Stopped explicitly as well as by the pipe, so a probe that ends by
+        // `Foundation.exit` below does not depend on the EOF racing the exit.
+        defer { gateway.terminateNow() }
+
+        let location = GatewayLocation.loopback(port: handshake.port)
+        print("probe: \(location.url.absoluteString), \(seconds)s")
+        let client = GatewayClient(
+            gateway: location,
+            token: handshake.token,
+            session: URLSession(configuration: .ephemeral)
+        )
 
         do {
             let config = try await client.configuration()
             print("probe: branding=\(config.branding) protocolVersion=\(config.protocolVersion)")
-
-            if try await !client.isAuthenticated() {
-                guard let username = environment("REMOTEX_PROBE_USERNAME"),
-                      let password = environment("REMOTEX_PROBE_PASSWORD")
-                else {
-                    print(
-                        "probe: not signed in; set REMOTEX_PROBE_USERNAME and REMOTEX_PROBE_PASSWORD"
-                    )
-                    return false
-                }
-                let outcome = try await client.logIn(username: username, password: password)
-                guard outcome == .ok else {
-                    print("probe: login refused (\(outcome))")
-                    return false
-                }
-            }
-            print("probe: signed in")
 
             guard case .claimed(let token) = try await client.claimSession(
                 force: true,
@@ -213,9 +219,5 @@ enum ProbeCommand {
             return nil
         }
         return arguments[index + 1]
-    }
-
-    private static func environment(_ name: String) -> String? {
-        ProcessInfo.processInfo.environment[name].flatMap { $0.isEmpty ? nil : $0 }
     }
 }

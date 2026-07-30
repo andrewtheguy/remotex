@@ -13,7 +13,6 @@ import Testing
 struct ConnectErrorTests {
     private func freshModel() -> AppModel {
         AppModel(
-            defaults: UserDefaults(suiteName: "ConnectErrorTests.\(UUID().uuidString)")!,
             clipboard: ClipboardSynchronizer(
                 pasteboard: NSPasteboard.withUniqueName(),
                 startsPolling: false

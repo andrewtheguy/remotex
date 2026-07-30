@@ -39,15 +39,26 @@ struct GatewayClientTests {
         }
     }
 
+    /// The token goes on **every** request, including the public one.
+    ///
+    /// `/api/config` needs no credential, which is exactly why this is worth pinning:
+    /// a client that only authenticates the routes it believes are guarded is one
+    /// route away from a 401 nobody expected, and there is no cost to sending it.
     @Test
-    func loginOutcomesMapFromStatus() async throws {
-        #expect(try await client { _ in (200, #"{"ok":true}"#) }
-            .logIn(username: "admin", password: "pw") == .ok)
-        // The gateway deliberately does not say which field was wrong.
-        #expect(try await client { _ in (401, "unauthorized") }
-            .logIn(username: "admin", password: "pw") == .invalidCredentials)
-        #expect(try await client { _ in (500, "boom") }
-            .logIn(username: "admin", password: "pw") == .failed(status: 500))
+    func everyRequestCarriesTheBearerToken() async throws {
+        let recorded = Recorder()
+        let client = client { request in
+            recorded.store(request)
+            return (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+        _ = try await client.configuration()
+        #expect(
+            recorded.request?.value(forHTTPHeaderField: "Authorization") == "Bearer tok-abc"
+        )
+        #expect(
+            recorded.request?.httpShouldHandleCookies == false,
+            "there are no cookies in this arrangement"
+        )
     }
 
     @Test
@@ -121,29 +132,35 @@ struct GatewayClientTests {
 
     // MARK: - The upgrade request
 
+    /// Two different tokens meet on this one request and neither may end up where the
+    /// other belongs: the claim decides whose turn it is and rides in the query, the
+    /// bearer decides whether this client may ask at all and rides in the header.
     @Test
-    func theUpgradeRequestCarriesTheTokenAndTheCookie() throws {
-        let session = stubSession()
-        let gateway = try GatewayLocation.parse("http://127.0.0.1:52675")
-        store(cookie: "tok-7", for: gateway, in: session)
-        let client = GatewayClient(gateway: gateway, session: session)
+    func theUpgradeRequestCarriesBothTokensInTheirOwnPlaces() throws {
+        let client = GatewayClient(
+            gateway: .loopback(port: 52675),
+            token: "tok-abc",
+            session: stubSession()
+        )
 
-        let request = try client.webSocketRequest(sessionToken: "tok-7")
-        #expect(request.url?.absoluteString == "ws://127.0.0.1:52675/ws?session=tok-7")
+        let request = try client.webSocketRequest(sessionToken: "claim-7")
+        #expect(request.url?.absoluteString == "ws://127.0.0.1:52675/ws?session=claim-7")
         #expect(
-            request.value(forHTTPHeaderField: "Cookie") == "remotex_session=tok-7",
-            "the cookie has to be set by hand — see webSocketRequest"
+            request.value(forHTTPHeaderField: "Authorization") == "Bearer tok-abc",
+            "require_auth runs before the upgrade — see webSocketRequest"
         )
-        #expect(
-            request.httpShouldHandleCookies == false,
-            "URLSession must not also attach one, or a Secure cookie is dropped on wss"
-        )
+        #expect(request.value(forHTTPHeaderField: "Cookie") == nil, "no cookies anywhere")
+        #expect(request.httpShouldHandleCookies == false)
     }
 
+    /// The scheme still follows the gateway's, even though this build only ever talks
+    /// to loopback: it is `GatewayLocation` that decides, and a `wss` gateway one day
+    /// must not silently downgrade.
     @Test
     func anHTTPSGatewayUpgradesOverWSS() throws {
         let client = GatewayClient(
             gateway: try GatewayLocation.parse("https://remote.example.com"),
+            token: "tok-abc",
             session: stubSession()
         )
         let request = try client.webSocketRequest(sessionToken: "a b")
@@ -154,48 +171,12 @@ struct GatewayClientTests {
         )
     }
 
+    /// The app builds its address from a number the gateway printed, so the one thing
+    /// worth pinning is that the number lands in the port and nowhere else.
     @Test
-    func withoutALoginCookieTheUpgradeCarriesNoCookieHeader() throws {
-        let client = GatewayClient(
-            gateway: try GatewayLocation.parse("http://127.0.0.1:52675"),
-            session: stubSession()
-        )
-        let request = try client.webSocketRequest(sessionToken: "tok-7")
-        #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
-    }
-
-    /// Changing the gateway address must not leave a token for the old host
-    /// behind: it would be sent to the new one and 401 with nothing to explain it.
-    @Test
-    func forgettingTheCookieDropsIt() throws {
-        let session = stubSession()
-        let gateway = try GatewayLocation.parse("http://127.0.0.1:52675")
-        store(cookie: "tok-7", for: gateway, in: session)
-        let client = GatewayClient(gateway: gateway, session: session)
-
-        #expect(client.sessionCookieHeader() != nil)
-        client.forgetSessionCookie()
-        #expect(client.sessionCookieHeader() == nil)
-    }
-
-    /// The cookie name is the gateway's, so it is read out of the gateway rather
-    /// than trusted to stay spelled the same in two places.
-    @Test
-    func theCookieNameMatchesTheGateway() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: root.appending(path: "src/auth.rs"),
-            encoding: .utf8
-        )
-        #expect(
-            source.contains(#"COOKIE_NAME: &str = "\#(GatewayClient.cookieName)""#),
-            "src/auth.rs no longer declares \(GatewayClient.cookieName)"
-        )
+    func theLoopbackLocationIsBuiltFromThePortAlone() {
+        #expect(GatewayLocation.loopback(port: 49213).url.absoluteString == "http://127.0.0.1:49213/")
+        #expect(GatewayLocation.loopback(port: 1).url.port == 1)
     }
 
     // MARK: - Plumbing
@@ -205,7 +186,8 @@ struct GatewayClientTests {
     ) -> GatewayClient {
         StubURLProtocol.handler = handler
         return GatewayClient(
-            gateway: try! GatewayLocation.parse("http://127.0.0.1:52675"),
+            gateway: .loopback(port: 52675),
+            token: "tok-abc",
             session: stubSession()
         )
     }
@@ -214,16 +196,6 @@ struct GatewayClientTests {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         return URLSession(configuration: configuration)
-    }
-
-    private func store(cookie value: String, for gateway: GatewayLocation, in session: URLSession) {
-        let cookie = HTTPCookie(properties: [
-            .name: GatewayClient.cookieName,
-            .value: value,
-            .domain: gateway.url.host() ?? "",
-            .path: "/",
-        ])!
-        session.configuration.httpCookieStorage?.setCookie(cookie)
     }
 }
 

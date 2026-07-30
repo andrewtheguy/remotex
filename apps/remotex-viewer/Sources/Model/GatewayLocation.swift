@@ -7,6 +7,24 @@ struct GatewayLocation: Equatable {
         Origin(url: url)
     }
 
+    /// This app's own gateway, at the port it reported.
+    ///
+    /// Built rather than parsed: the port comes from a `UInt16` the gateway printed
+    /// after binding it, so there is no text to be wrong and no failure to handle.
+    /// `127.0.0.1` and not `localhost` — the gateway binds one address and that is
+    /// the one it binds, so resolving a name here could only find the other loopback
+    /// and fail.
+    static func loopback(port: UInt16) -> GatewayLocation {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = Int(port)
+        components.path = "/"
+        // Unwrapped deliberately: these four fields always compose, and a `nil` here
+        // would mean Foundation cannot build `http://127.0.0.1:1/`.
+        return GatewayLocation(url: components.url!)
+    }
+
     static func parse(_ input: String) throws -> GatewayLocation {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {

@@ -291,8 +291,12 @@ struct AttachedSession {
     static func attached(suite: String) async throws -> AttachedSession {
         let socket = FakeWebSocketTransport(closeAfterDraining: false)
         let pasteboard = NSPasteboard.withUniqueName()
+        // No gateway and no preferences file: the subject of every suite that uses
+        // this is what reaches the wire, and the socket under it is scripted — so
+        // there is nothing for a real gateway process to do here. `suite` survives as
+        // a label for the failure message rather than as a defaults domain.
+        _ = suite
         let model = AppModel(
-            defaults: UserDefaults(suiteName: "\(suite).\(UUID().uuidString)")!,
             clipboard: ClipboardSynchronizer(
                 pasteboard: pasteboard,
                 startsPolling: false

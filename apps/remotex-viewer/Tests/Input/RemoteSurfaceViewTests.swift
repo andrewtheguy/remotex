@@ -365,9 +365,6 @@ struct RemoteSurfaceViewTests {
 
         static func makeModel() -> AppModel {
             AppModel(
-                defaults: UserDefaults(
-                    suiteName: "RemoteSurfaceViewTests.\(UUID().uuidString)"
-                )!,
                 clipboard: ClipboardSynchronizer(
                     pasteboard: NSPasteboard.withUniqueName(),
                     startsPolling: false

@@ -37,12 +37,6 @@ enum ClaimOutcome: Sendable, Equatable {
     case unauthorized
 }
 
-enum LoginOutcome: Sendable, Equatable {
-    case ok
-    case invalidCredentials
-    case failed(status: Int)
-}
-
 enum GatewayClientError: LocalizedError, Equatable {
     /// URLSession could not complete the request: no such host, nothing listening,
     /// a certificate this Mac will not trust, App Transport Security declining a
@@ -110,28 +104,36 @@ enum GatewayClientError: LocalizedError, Equatable {
 
 /// The gateway's HTTP surface, plus the session socket it hands out.
 ///
-/// One `URLSession` for the whole client so the login cookie is shared across
-/// every call. Built from `.default`, whose cookie storage is
-/// `HTTPCookieStorage.shared` and therefore persists across launches — which is
-/// what `websiteDataStore = .default()` bought while this was a WKWebView, and
-/// why quitting the app still lands you on the picker.
+/// Authentication is one bearer token, minted by the gateway this app started and
+/// handed over on a pipe before the first request (see `EmbeddedGateway`). So there
+/// is no login to perform, no cookie to keep, and nothing about this client that
+/// outlives the process it talks to: the token is a fact about *that* gateway, and a
+/// new gateway means a new client.
 struct GatewayClient: Sendable, SessionGateway {
-    /// `COOKIE_NAME` in src/auth.rs.
-    static let cookieName = "remotex_session"
-
-    /// The session the app runs on. Built from `.default` rather than being
-    /// `URLSession.shared`, so `configuration` is really this client's own —
-    /// `sessionCookieHeader` and `forgetSessionCookie` read the cookie storage off
-    /// it — and so a timeout, a delegate, or a proxy stays something that can be
-    /// configured here, which the shared session does not allow.
-    static let defaultSession = URLSession(configuration: .default)
+    /// The session the app runs on. Built from a configuration of its own rather
+    /// than being `URLSession.shared` so a timeout, a delegate, or a proxy stays
+    /// something that can be configured here, which the shared session does not
+    /// allow.
+    static let defaultSession = URLSession(configuration: .ephemeral)
 
     let gateway: GatewayLocation
+    /// The gateway's token, sent on every request and on the socket upgrade.
+    private let token: String
     private let session: URLSession
 
-    init(gateway: GatewayLocation, session: URLSession = GatewayClient.defaultSession) {
+    init(
+        gateway: GatewayLocation,
+        token: String,
+        session: URLSession = GatewayClient.defaultSession
+    ) {
         self.gateway = gateway
+        self.token = token
         self.session = session
+    }
+
+    /// `Bearer <token>`, the one credential this client has.
+    private var authorization: String {
+        "Bearer \(token)"
     }
 
     // MARK: - HTTP
@@ -148,38 +150,6 @@ struct GatewayClient: Sendable, SessionGateway {
             )
         }
         return config
-    }
-
-    func isAuthenticated() async throws -> Bool {
-        struct Status: Decodable {
-            let authenticated: Bool
-        }
-        let status: Status = try await get("api/auth/status")
-        return status.authenticated
-    }
-
-    func logIn(username: String, password: String) async throws -> LoginOutcome {
-        struct Credentials: Encodable {
-            let username: String
-            let password: String
-        }
-        let (_, status) = try await send(
-            "api/auth/login",
-            body: Credentials(username: username, password: password)
-        )
-        switch status {
-        case 200:
-            return .ok
-        // The gateway deliberately does not say which field was wrong.
-        case 401:
-            return .invalidCredentials
-        default:
-            return .failed(status: status)
-        }
-    }
-
-    func logOut() async throws {
-        _ = try await send("api/auth/logout", body: Optional<Never>.none)
     }
 
     func targets() async throws -> [TargetInfo] {
@@ -226,13 +196,15 @@ struct GatewayClient: Sendable, SessionGateway {
 
     /// The upgrade request for `/ws?session=<token>`.
     ///
-    /// The `Cookie` header is set by hand, with `httpShouldHandleCookies` off, for
-    /// two reasons. `HTTPCookieStorage` matches a `Secure` cookie only against an
-    /// `https` scheme — and behind a TLS-terminating proxy the gateway does set
-    /// `Secure` (`cookie_flags` in src/server.rs) while this URL's scheme is
-    /// `wss`, so the cookie would be dropped. And `require_auth` runs *before* the
-    /// upgrade, so the result of getting it wrong is a bare 401 with nothing to
-    /// go on. This is what `tests/common/mod.rs` does too.
+    /// Two different tokens meet here and they are not interchangeable: the query's
+    /// is the *session claim*, which decides whose turn it is, and the
+    /// `Authorization` header's is this client's credential, which decides whether it
+    /// may ask at all. `require_auth` runs before the upgrade, so a missing header is
+    /// a bare 401 rather than a socket that closes with a reason.
+    ///
+    /// `httpShouldHandleCookies` stays off: there are no cookies in this arrangement,
+    /// and leaving URLSession's cookie machinery out of a request that carries its own
+    /// credential is one less thing that can decide to add or drop a header.
     func webSocketRequest(sessionToken: String) throws -> URLRequest {
         var components = try socketComponents()
         components.queryItems = [URLQueryItem(name: "session", value: sessionToken)]
@@ -242,37 +214,8 @@ struct GatewayClient: Sendable, SessionGateway {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.httpShouldHandleCookies = false
-        if let cookie = sessionCookieHeader() {
-            request.setValue(cookie, forHTTPHeaderField: "Cookie")
-        }
+        request.setValue(authorization, forHTTPHeaderField: "Authorization")
         return request
-    }
-
-    /// `name=value` for the login cookie, read against the *HTTP* origin the
-    /// cookie was set on.
-    func sessionCookieHeader() -> String? {
-        guard let storage = session.configuration.httpCookieStorage,
-              let cookies = storage.cookies(for: gateway.url)
-        else {
-            return nil
-        }
-        guard let cookie = cookies.first(where: { $0.name == Self.cookieName }) else {
-            return nil
-        }
-        return "\(cookie.name)=\(cookie.value)"
-    }
-
-    /// Forget the login for this gateway. Called when the address changes: a
-    /// leftover token for another host is a 401 with no obvious cause.
-    func forgetSessionCookie() {
-        guard let storage = session.configuration.httpCookieStorage,
-              let cookies = storage.cookies(for: gateway.url)
-        else {
-            return
-        }
-        for cookie in cookies where cookie.name == Self.cookieName {
-            storage.deleteCookie(cookie)
-        }
     }
 
     private func socketComponents() throws -> URLComponents {
@@ -289,7 +232,7 @@ struct GatewayClient: Sendable, SessionGateway {
     // MARK: - Plumbing
 
     private func get<Response: Decodable>(_ path: String) async throws -> Response {
-        let (data, status) = try await perform(URLRequest(url: url(path)))
+        let (data, status) = try await perform(request(path))
         switch status {
         case 200:
             guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
@@ -304,13 +247,25 @@ struct GatewayClient: Sendable, SessionGateway {
     }
 
     private func send(_ path: String, body: (some Encodable)?) async throws -> (Data, Int) {
-        var request = URLRequest(url: url(path))
+        var request = self.request(path)
         request.httpMethod = "POST"
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder().encode(body)
         }
         return try await perform(request)
+    }
+
+    /// A request to `path` carrying this client's credential.
+    ///
+    /// Every request goes through here, which is the point: the token is not optional
+    /// on any route — even `/api/config`, which is public — so there is no path where
+    /// forgetting it is possible.
+    private func request(_ path: String) -> URLRequest {
+        var request = URLRequest(url: url(path))
+        request.httpShouldHandleCookies = false
+        request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        return request
     }
 
     private func perform(_ request: URLRequest) async throws -> (Data, Int) {
