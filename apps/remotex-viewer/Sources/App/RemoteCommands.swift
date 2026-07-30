@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct RemoteCommands: Commands {
-    @Bindable var model: AppModel
+    let model: AppModel
 
     var body: some Commands {
         // `commandsReplaced` takes the standard app menu down with the rest, Quit
@@ -10,8 +10,8 @@ struct RemoteCommands: Commands {
         // Put back deliberately, and — like every item below — without a chord: the
         // Command-Q the muscle memory reaches for belongs to the guest while a
         // desktop is focused, so advertising it on this item would be advertising a
-        // shortcut that does something else. View only, or moving focus off the
-        // desktop, is what makes the menu reachable from the keyboard again.
+        // shortcut that does something else. Moving focus off the desktop is what
+        // makes the menu reachable from the keyboard again.
         CommandGroup(replacing: .appTermination) {
             Button("Quit remotex") {
                 NSApp.terminate(nil)
@@ -33,12 +33,6 @@ struct RemoteCommands: Commands {
 
             Divider()
 
-            // Also a toolbar button, and this is the copy that survives: the toolbar
-            // gives way to the desktop while one is showing, so on the screen where
-            // view only means anything the button is not on screen.
-            Toggle("View Only", isOn: $model.isViewOnly)
-                .disabled(model.session.screen != .desktop)
-
             Button(
                 model.clipboard.isFetching
                     ? "Fetching Clipboard…"
@@ -49,10 +43,8 @@ struct RemoteCommands: Commands {
             .disabled(!model.clipboard.isEnabled || model.clipboard.isFetching)
 
             // Sound from the remote. Greyed rather than hidden for a target that has
-            // none — a menu whose items come and go is harder to learn than one item
-            // that is sometimes disabled — and deliberately live in view only, which is
-            // about nothing reaching the *remote*: watching a desktop without touching
-            // it is exactly when this is wanted.
+            // none: a menu whose items come and go is harder to learn than one item
+            // that is sometimes disabled.
             //
             // The item says nothing about whether sound is arriving, because from this
             // end a quiet remote and one that will never redirect are the same thing.

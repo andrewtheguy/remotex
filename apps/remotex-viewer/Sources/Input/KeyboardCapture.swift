@@ -127,12 +127,10 @@ final class KeyboardCapture {
             releaseAll()
             return false
         }
-        // Nothing to capture for: no desktop, no first frame yet, or view only —
-        // which suspends capture outright, so every chord goes back to meaning
-        // locally what it says. Whatever the translator was part way through goes
-        // with it: a Command left pending, or the synthetic Control a mapped chord
-        // rides on, would otherwise be resumed against a remote whose releases have
-        // already been sent.
+        // Nothing to capture for: no desktop, or no first frame yet. Whatever the
+        // translator was part way through goes with it: a Command left pending, or
+        // the synthetic Control a mapped chord rides on, would otherwise be resumed
+        // against a remote whose releases have already been sent.
         guard model.canCaptureKeyboardNow else {
             releaseAll()
             return false
@@ -143,8 +141,8 @@ final class KeyboardCapture {
         // anything bound in System Settings) it never delivers here to begin with.
         // Exempting a few would make the meaning of a chord depend on which one it
         // was, and Quit in particular was a keystroke that ended the session while
-        // the user was typing at the guest. The view only toggle is the way to get
-        // the whole keyboard back.
+        // the user was typing at the guest. Moving focus off the desktop is the way
+        // to get the whole keyboard back.
         let mapCommandToControl = model.macOSKeyboardOverridesActive
         if event.type == .keyDown,
            KeyboardTranslator.domCode(for: event.keyCode) == "KeyV",

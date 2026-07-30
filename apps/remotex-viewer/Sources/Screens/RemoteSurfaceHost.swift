@@ -15,9 +15,6 @@ struct RemoteSurfaceHost: NSViewRepresentable {
     /// needed to lay the desktop out, so both arrive together.
     let guestScale: CGFloat
     let cursor: ServerMessage.Cursor?
-    /// Passed in for the same reason as the rest: it decides what the pointer over
-    /// the desktop looks like, and `updateNSView` has to run when it changes.
-    let isViewOnly: Bool
     /// Whether the window's toolbar gives way to the desktop.
     ///
     /// Its 8pt is the smaller half of what this buys. The larger half is full
@@ -62,7 +59,6 @@ struct RemoteSurfaceHost: NSViewRepresentable {
     func updateNSView(_ scrollView: RemoteScrollView, context: Context) {
         context.coordinator.apply(remoteSize: remoteSize, guestScale: guestScale)
         context.coordinator.apply(cursor: cursor)
-        context.coordinator.apply(isViewOnly: isViewOnly)
         context.coordinator.apply(hidesToolbar: hidesToolbar)
     }
 
@@ -218,12 +214,6 @@ struct RemoteSurfaceHost: NSViewRepresentable {
                     for: RemoteCursor.shape(for: cursor, guestScale: surface.guestScale)
                 )
             )
-        }
-
-        /// The pointer's own dedupe is the surface's — an unchanged value invalidates
-        /// no cursor rects.
-        func apply(isViewOnly: Bool) {
-            surface?.isViewOnly = isViewOnly
         }
 
         /// Reapply toolbar visibility because SwiftUI may replace the toolbar.

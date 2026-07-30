@@ -167,7 +167,7 @@ struct AppModelTests {
         #expect(!model.autoResizes)
     }
 
-    /// It goes with the session, like view only: the next target is asked about
+    /// It goes with the session, like the audio answer: the next target is asked about
     /// separately rather than inheriting an answer given for another machine.
     @Test
     func autoResizeIsForgottenOnTheWayToThePicker() {

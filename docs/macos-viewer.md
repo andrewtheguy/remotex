@@ -216,7 +216,6 @@ Decoded buffers are scheduled explicitly on an `AVAudioPlayerNode`.
 ceiling as the browser. When the ceiling is exceeded, the viewer stops the
 player, discards its queued audio, and restarts the timeline at the cushion.
 
-Audio remains enabled in view-only mode because it sends no input to the remote.
 An ordinary reconnect reasserts the subscription; a target switch clears it.
 The output follows the Mac's default device, rebuilding the engine after
 `AVAudioEngineConfigurationChange`.

@@ -72,8 +72,8 @@ struct AudioControlTests {
     }
 
     /// A target switch clears the answer, because it was an answer about the target
-    /// being left — the same rule view only follows, and the picker is where both are
-    /// forgotten.
+    /// being left — the same rule the resize mode follows, and the picker is where
+    /// both are forgotten.
     @Test
     func aTargetSwitchForgetsTheAnswer() async throws {
         let session = try await AttachedSession.attached(suite: "AudioControlTests")
@@ -91,22 +91,6 @@ struct AudioControlTests {
         try await session.settle()
         #expect(!session.model.audio.isEnabled, "the new target starts silent")
         #expect(session.audioMessages == [true], "nothing was re-asserted for a fresh target")
-    }
-
-    /// Sound travels the other way from input, so view only — which is about nothing
-    /// this Mac does reaching the remote — must leave it alone. Watching a desktop
-    /// without touching it is exactly when audio is wanted.
-    @Test
-    func viewOnlyLeavesAudioAlone() async throws {
-        let session = try await AttachedSession.attached(suite: "AudioControlTests")
-        session.connect(protocolName: "rdp", audio: true)
-        session.model.audio.setEnabled(true)
-        try await session.settle()
-
-        session.model.isViewOnly = true
-        #expect(session.model.audio.isAvailable, "view only is not about the speakers")
-        #expect(session.model.audio.isEnabled)
-        #expect(!session.model.clipboard.isEnabled, "and the clipboard still goes")
     }
 
     /// A reconnection in progress greys the item — there is no attachment to subscribe
