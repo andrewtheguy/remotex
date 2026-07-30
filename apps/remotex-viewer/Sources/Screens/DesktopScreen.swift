@@ -16,7 +16,6 @@ struct DesktopScreen: View {
                 remoteSize: model.session.remoteSize,
                 guestScale: model.session.remoteScale,
                 cursor: model.remoteCursor,
-                isViewOnly: model.isViewOnly,
                 // The toolbar is the desktop's to take while one is showing. In full
                 // screen that is what lets the title bar auto-hide, so the remote
                 // reaches the top of the screen and its own menu bar is a target

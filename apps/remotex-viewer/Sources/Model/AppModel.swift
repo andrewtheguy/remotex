@@ -32,20 +32,6 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
-    /// Per-target view-only intent. It blocks keyboard, pointer, wheel, and
-    /// clipboard traffic while leaving rendering and inbound audio active.
-    var isViewOnly = false {
-        didSet {
-            guard isViewOnly != oldValue else {
-                return
-            }
-            // Whatever is held was pressed while input was still going through, and
-            // the paths that would have released it are the ones just closed.
-            releaseInput()
-            updateClipboardEnablement()
-        }
-    }
-
     private(set) var gateway: GatewayLocation
     private(set) var branding = "remotex"
     private(set) var session = ViewerSessionState()
@@ -171,18 +157,20 @@ final class AppModel: GatewaySessionSink {
     }
 
     /// Whether anything the user does may reach the remote. The single gate every
-    /// outbound input path is written against, and the whole of what view only
-    /// means.
+    /// outbound input path is written against.
+    ///
+    /// A live desktop and nothing else. Whether a *target* takes input at all is the
+    /// target's own question, answered where it is configured — this client has no
+    /// say in it and offers no way to hold input back.
     var canSendInput: Bool {
-        session.canCaptureKeyboard && !isViewOnly
+        session.canCaptureKeyboard
     }
 
     /// Whether `KeyboardCapture` takes key events for the remote at all.
     ///
-    /// False in view only, and that is the point of the mode rather than a
-    /// consequence of it: capture is a local event monitor that swallows every
-    /// Command chord the system hands this app, so while it is up this Mac's keyboard
-    /// belongs to the guest. Suspending it is the only way to get the chords back.
+    /// Capture is a local event monitor that swallows every Command chord the system
+    /// hands this app, so while it is up this Mac's keyboard belongs to the guest.
+    /// Moving focus off the desktop is what hands the chords back.
     var canCaptureKeyboardNow: Bool {
         canSendInput && session.remoteSize != nil
     }
@@ -469,8 +457,8 @@ final class AppModel: GatewaySessionSink {
             // any resize has arrived.
             session.remoteScale = 1
             session.canResize = false
-            // The mode goes with the session that was left, like view only below:
-            // the next target is asked about separately.
+            // The mode goes with the session that was left, like the audio answer
+            // below: the next target is asked about separately.
             session.autoResize = false
             session.canClipboard = false
             session.canAudio = false
@@ -481,12 +469,9 @@ final class AppModel: GatewaySessionSink {
             session.displays = []
             session.activeDisplayID = nil
             remoteCursor = nil
-            // Cleared with the rest of what belonged to that target: view only is an
-            // answer about the session being left, not a setting the next pick
-            // inherits, and the picker's checkbox says as much by starting clear.
-            isViewOnly = false
-            // Cleared for the same reason as view only: the answer was about the target
-            // being left. Not cleared on a mere disconnection, which is what
+            // Cleared with the rest of what belonged to that target: the answer was
+            // about the target being left, not a setting the next pick inherits. Not
+            // cleared on a mere disconnection, which is what
             // `AudioOutput.update(available:)` handles — a reconnect keeps playing.
             audio.reset()
             viewportPolicy = ViewportPolicy()
@@ -648,15 +633,10 @@ final class AppModel: GatewaySessionSink {
             enabled: session.screen == .desktop
                 && session.connectionStatus == .connected
                 && session.canClipboard
-                && !isViewOnly
         )
     }
 
     /// Whether the Remote menu's audio toggle can be used.
-    ///
-    /// Unlike the clipboard's, view only is *not* one of the conditions: that mode is
-    /// about nothing this Mac does reaching the remote, and sound travels the other way.
-    /// Watching a desktop without touching it is exactly when audio is wanted.
     private func updateAudioAvailability() {
         audio.update(
             available: session.screen == .desktop
@@ -862,8 +842,8 @@ final class AppModel: GatewaySessionSink {
     /// Gated here as well as in `KeyboardCapture`, which is the only caller: this
     /// is where "nothing reaches the remote" is a property of the model rather than
     /// of one event monitor. Unlike a mouse button there is no exception for a
-    /// release, because there is nothing left to release — switching view only on
-    /// let go of everything held.
+    /// release, because every path that closes the gate calls `releaseInput` first,
+    /// so there is nothing left to release.
     func sendKey(code: String, pressed isPressed: Bool, caps: Bool) {
         guard canSendInput else {
             return
@@ -877,11 +857,10 @@ final class AppModel: GatewaySessionSink {
         // as held — which is the whole case the exception is for: a press that did
         // go through, whose mouseUp lands after the screen changed under it.
         //
-        // Held is the part that has to be checked rather than assumed. Switching
-        // view only on releases everything first, so the physical mouseUp that
-        // follows is for a button the remote has already been told about; forwarding
-        // it would be the one input event to get past the toggle, on a path whose
-        // own tests say nothing does.
+        // Held is the part that has to be checked rather than assumed. Every path
+        // that closes the gate releases what was held first, so the physical mouseUp
+        // that follows one is for a button the remote has already been told about;
+        // forwarding it would be the one input event to get past a closed gate.
         guard canSendInput || (!isPressed && pressed.isHeld(button)) else {
             return
         }
