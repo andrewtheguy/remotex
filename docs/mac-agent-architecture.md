@@ -141,7 +141,8 @@ The private API requires defensive checks:
 - the mode is configured at its point size with HiDPI enabled;
 - `SCContentFilter.pointPixelScale` is not used to determine the private
   display's capture scale;
-- `CGDisplayCopyDisplayMode` supplies the active pixel and point dimensions;
+- `CGDisplayBounds` supplies the point size; the density is **measured from
+  pixels** and never read from the display's mode (see below);
 - creation verifies that the display is online and active;
 - configuration changes are asynchronous, so the agent waits for
   `CGDisplayBounds` to settle before releasing the display lock.
@@ -156,6 +157,31 @@ changed in response to this report.
 Changing density affects the pixels behind the desktop, not its point-space
 layout. Clients still render every remote at the point size reported by the
 gateway.
+
+Three properties of the private API make this harder than it reads, all three
+measured on the test VM and all three load-bearing:
+
+- **The creating process is told the wrong mode.** For its own virtual display,
+  `CGDisplayCopyDisplayMode` in the agent reports the mode it asked for rather
+  than the one macOS is scanning out, and `NSScreen.backingScaleFactor` — derived
+  from the same mode — agrees with it. A display whose framebuffer is provably
+  3200×2000 reads as 1x in the agent and 2x in any other process. It is not a
+  stale cache: reconfiguration callbacks arrive and the reading does not change.
+  So the density comes from a one-point framebuffer capture, which is the only
+  reading that is true in that process. Mac-owned displays still use their mode.
+- **A live capture stream pins the density.** With a ScreenCaptureKit stream
+  attached, `applySettings:` returns YES and the display stays 1x. The agent
+  stops the stream, applies, then restarts it and announces the resulting
+  geometry — for both densities and for every resize, since a resize re-applies
+  the density in order to keep it.
+- **HiDPI engages only at the creation size.** Asked to raise the density of a
+  display smaller than its envelope, macOS keeps the framebuffer and halves the
+  point size instead. A density rise is therefore applied at the creation size,
+  and the size the display was in is restored afterwards by a shrink at the new
+  density.
+
+A density change is skipped entirely when the display already measures what was
+asked for, so a client reporting its screen on every connect costs nothing.
 
 ### Explicit resize
 

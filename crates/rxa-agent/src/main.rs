@@ -280,6 +280,7 @@ fn main() -> anyhow::Result<()> {
         target: owned,
         handle: virtual_display.map(|display| Arc::new(std::sync::Mutex::new(display))),
     };
+    engage_hidpi(owned.handle.clone());
     let serve_owned = owned.clone();
     let keep_ui_on_failure = !args.no_menu;
 
@@ -354,6 +355,40 @@ fn main() -> anyhow::Result<()> {
         screen_recording_at_launch,
         owned.target,
     )
+}
+
+/// Settle the new display's density on a thread of its own.
+///
+/// Spawned rather than called, because the work is *waiting for the main thread to
+/// get out of the way*: a `CGVirtualDisplay` publishes no mode and accepts no
+/// reconfigure until the main queue is being served, which here means after this
+/// function returns and the run loop starts. The argument for all of that, and for
+/// why it cannot live in `VirtualDisplay::create`, is in
+/// [`virtualdisplay::VirtualDisplay::engage_hidpi`].
+///
+/// Takes the shared handle rather than the display, so a client's `HostScale`
+/// landing in the same second waits its turn instead of racing this.
+fn engage_hidpi(handle: Option<Arc<std::sync::Mutex<virtualdisplay::VirtualDisplay>>>) {
+    let Some(handle) = handle else {
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("rxa-hidpi".to_owned())
+        .spawn(move || {
+            let engaged = handle
+                .lock()
+                .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
+                .and_then(|display| display.engage_hidpi());
+            if let Err(e) = engaged {
+                warn!(
+                    "virtualdisplay: {e:#} — the desktop is soft until a client on a Retina \
+                     screen asks for 2x"
+                );
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("virtualdisplay: cannot check the new display's density: {e}");
+    }
 }
 
 /// Keep GUI startup failures in the degraded menu, or return them to a headless

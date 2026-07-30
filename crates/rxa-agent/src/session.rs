@@ -175,52 +175,60 @@ fn shared_owned_display(
     }
 }
 
-/// Resize a display the agent made, off the session loop.
+/// The size a client's request means, or `None` for the size the display was
+/// *created* at.
 ///
-/// `points` is the size to ask for, or `None` for the size the display was
-/// *created* at — which is read here, under the same lock that is about to apply
-/// it, rather than being passed in. That is the only way the created size can be
-/// asked for at all: the client that wants it cannot name it (nothing on the wire
-/// carries it) and neither can the gateway, so
+/// The created size cannot be named by anyone else: nothing on the wire carries it
+/// and the gateway does not know it, so
 /// [`rxa_proto::msg::GatewayMsg::DefaultDisplaySize`] defers to the one place that
-/// holds it. Reading it inside the lock also keeps it honest against a
-/// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`] landing a moment earlier —
-/// `base_points` is fixed at creation and cannot drift, but taking both readings
-/// together is the habit `VirtualDisplay::set_scale` documents and there is no
-/// reason to break it here.
+/// holds it — which is why this is resolved inside the closures that run under the
+/// display's lock rather than here.
+type RequestedSize = Option<(u32, u32)>;
+
+/// A change a client asked for in the display the agent made.
 ///
-/// Detached from the caller twice over, because this is the slower of the two
-/// reconfigures a client can ask for — it waits for the WindowServer to settle
-/// before releasing the lock, and awaiting that on the session's `select!` loop
-/// would hold tiles, cursor updates and input injection for the whole of it.
-///
-/// `try_lock` rather than `lock`, and the drop is deliberate. A held lock means a
-/// reconfigure is already running, and a display cannot be two sizes at once, so
-/// whoever asked can ask again once the desktop has settled. Waiting instead
-/// would let a person mashing the button queue one WindowServer round trip per
-/// press — exactly the shape that wedges a guest's display stack until it is
-/// rebooted — and would park a blocking-pool thread per press while it did.
-fn resize_shared_display(display: DisplayHandle, points: Option<(u32, u32)>) {
-    tokio::spawn(async move {
-        let done = tokio::task::spawn_blocking(move || match display.try_lock() {
-            Ok(display) => display
-                .set_size(points.unwrap_or_else(|| display.base_points()))
-                .map(Some),
-            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                Err(anyhow::anyhow!("the display lock is poisoned"))
-            }
-        })
-        .await;
-        match done {
-            Ok(Ok(Some(_))) => {}
-            Ok(Ok(None)) => debug!(
-                "session: a display reconfigure is already running; dropping this resize"
-            ),
-            Ok(Err(e)) => warn!("session: cannot resize the display: {e:#}"),
-            Err(e) => warn!("session: the resize did not run: {e}"),
+/// The two arms are the two things a client may decide about a desktop nobody is
+/// sitting in front of, and they are one type because
+/// [`reconfigure_shared_display`] treats them identically: both need the capture
+/// stream down, both are asked "would this change anything?" before that happens,
+/// and both answer with the geometry to announce afterwards.
+#[derive(Debug, Clone, Copy)]
+enum Reconfigure {
+    /// Match the client's screen: [`rxa_proto::msg::GatewayMsg::HostScale`].
+    Density { hidpi: bool },
+    /// Match the client's window, or the size the display was created at:
+    /// [`rxa_proto::msg::GatewayMsg::ResizeDisplay`] and
+    /// [`rxa_proto::msg::GatewayMsg::DefaultDisplaySize`].
+    Size(RequestedSize),
+}
+
+impl Reconfigure {
+    /// Whether this would ask anything of the WindowServer. Same lock, same reading,
+    /// same answer [`Reconfigure::apply`] would reach on its own.
+    fn needed(self, display: &crate::virtualdisplay::VirtualDisplay) -> anyhow::Result<bool> {
+        match self {
+            Self::Density { hidpi } => display.needs_scale(hidpi),
+            Self::Size(points) => Ok(display.needs_size(self.points(points, display))),
         }
-    });
+    }
+
+    fn apply(self, display: &crate::virtualdisplay::VirtualDisplay) -> anyhow::Result<bool> {
+        match self {
+            Self::Density { hidpi } => display.set_scale(hidpi),
+            Self::Size(points) => display.set_size(self.points(points, display)),
+        }
+    }
+
+    /// The requested size, or the created one for a request that carries none —
+    /// resolved here, under the display's lock, because nothing outside the display
+    /// knows what it was created at (see [`RequestedSize`]).
+    fn points(
+        self,
+        requested: RequestedSize,
+        display: &crate::virtualdisplay::VirtualDisplay,
+    ) -> (u32, u32) {
+        requested.unwrap_or_else(|| display.base_points())
+    }
 }
 
 /// A gateway that has completed the Noise handshake, and is therefore *the*
@@ -415,6 +423,137 @@ fn spawn_display_probe(owned: Option<capture::Target>, tx: mpsc::Sender<Vec<Disp
 ///
 /// On failure nothing is left running, and the caller decides whether to fall
 /// back to the display it came from or give up.
+/// Reconfigure the display this session is sharing, with the capture stream down
+/// for the duration, and bring the stream back on whatever geometry results.
+///
+/// The teardown is the point, not hygiene. **A `CGVirtualDisplay`'s HiDPI flag is
+/// ignored while a ScreenCaptureKit stream is attached to it**: `applySettings:`
+/// answers YES and the display comes back 1x. Measured on the test VM, and it costs
+/// exactly the two things a client can ask for —
+///
+/// * [`rxa_proto::msg::GatewayMsg::HostScale`] raising 1x to 2x never took, so a
+///   Retina client attaching to a desktop a 1x client had left at 1x was soft for
+///   the whole session; with no stream attached the same call lands in about 300 ms.
+/// * [`rxa_proto::msg::GatewayMsg::ResizeDisplay`] re-applies the density it read in
+///   order to keep it, so "Resize to window" on a 2x desktop silently returned a 1x
+///   one — the size took and the density did not.
+///
+/// Nothing arrives from a stopped stream, so awaiting here holds tiles that were not
+/// going to be produced; a display switch blocks this loop for the same reason (see
+/// [`switch_capture`]). Both directions of a density change and every resize go
+/// through here even though only a rise strictly needs it: a reconfigure already
+/// resizes the surface and forces a full repaint, so the restart adds a
+/// `SCShareableContent` round trip to something that was never cheap, and one path is
+/// one thing to reason about.
+///
+/// `needed` is asked first and separately, because the stream must not come down for
+/// a request that changes nothing — a client reports its density on every connect and
+/// "Resize to window" is pressed twice on windows that did not move, and both of
+/// those have to be free. It runs under the same lock and answers the same question
+/// the operation would answer for itself; see
+/// [`crate::virtualdisplay::VirtualDisplay::needs_scale`].
+///
+/// `Ok(None)` is nothing to do, or nothing having been streaming — either way the
+/// caller has no geometry to announce.
+async fn reconfigure_shared_display(
+    handle: DisplayHandle,
+    change: Reconfigure,
+    target: capture::Target,
+    full_repaint: &Arc<AtomicBool>,
+    capture: &mut Option<Capture>,
+    out_rx: &mut Option<mpsc::Receiver<Out>>,
+    encoder_thread: &mut Option<std::thread::JoinHandle<()>>,
+) -> anyhow::Result<Option<capture::Geometry>> {
+    let asking = Arc::clone(&handle);
+    let worth_it = tokio::task::spawn_blocking(move || {
+        asking
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
+            .and_then(|display| change.needed(&display))
+    })
+    .await;
+    match worth_it {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return Ok(None),
+        // Both are reasons not to touch the display: an unmeasurable one is
+        // mid-reconfigure, and a poisoned lock means the last reconfigure panicked.
+        Ok(Err(e)) => {
+            warn!("session: not reconfiguring the display: {e:#}");
+            return Ok(None);
+        }
+        Err(e) => {
+            warn!("session: could not ask whether the display needs reconfiguring: {e}");
+            return Ok(None);
+        }
+    }
+
+    let streaming = capture.is_some();
+    stop_capture(capture, out_rx, encoder_thread);
+    let done = tokio::task::spawn_blocking(move || {
+        handle
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
+            .and_then(|display| change.apply(&display))
+    })
+    .await;
+    match done {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => warn!("session: cannot reconfigure the display: {e:#}"),
+        Err(e) => warn!("session: the display reconfigure did not run: {e}"),
+    }
+    if !streaming {
+        return Ok(None);
+    }
+    // Whatever came of it, the stream has to go back: the desktop is frozen until it
+    // does, and the geometry it comes back at is the answer to send on.
+    switch_capture(target, full_repaint, capture, out_rx, encoder_thread)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("lost the capture stream while reconfiguring the display: {e}"))
+}
+
+/// Adopt a restarted stream, and return the size to tell the client about.
+///
+/// Ordered the way a restart requires: input conversion and cursor scale re-derived
+/// before the first event on the new geometry, the whole surface marked dirty, and
+/// the caller sends the message before any tile drawn at that size.
+fn adopt_restart(
+    live: capture::Geometry,
+    injector: &mut Injector,
+    cursor_tracker: &cursor::Tracker,
+    cursor_seen: &mut u64,
+    full_repaint: &Arc<AtomicBool>,
+) -> AgentMsg {
+    *injector = Injector::new(live.scale, live.origin);
+    cursor_tracker.set_scale(live.scale);
+    *cursor_seen = cursor::UNSEEN;
+    full_repaint.store(true, Ordering::Relaxed);
+    AgentMsg::DisplaySize {
+        w: live.width,
+        h: live.height,
+        scale: wire_scale(live.scale),
+    }
+}
+
+/// Take the pipeline down: stream, tile channel and encoder thread, in that order.
+///
+/// Split out of [`switch_capture`] because one caller needs the display *not* being
+/// captured rather than being captured differently — a density change cannot happen
+/// underneath a live ScreenCaptureKit stream (see the `HostScale` branch in
+/// [`pump`]). The encoder thread is joined rather than left to finish: it holds the
+/// far end of the channel being dropped here, and two of them alive at once would
+/// interleave tiles from two surface sizes.
+fn stop_capture(
+    capture: &mut Option<Capture>,
+    out_rx: &mut Option<mpsc::Receiver<Out>>,
+    encoder_thread: &mut Option<std::thread::JoinHandle<()>>,
+) {
+    *capture = None;
+    *out_rx = None;
+    if let Some(thread) = encoder_thread.take() {
+        let _ = thread.join();
+    }
+}
+
 fn switch_capture(
     target: capture::Target,
     full_repaint: &Arc<AtomicBool>,
@@ -422,11 +561,7 @@ fn switch_capture(
     out_rx: &mut Option<mpsc::Receiver<Out>>,
     encoder_thread: &mut Option<std::thread::JoinHandle<()>>,
 ) -> anyhow::Result<capture::Geometry> {
-    *capture = None;
-    *out_rx = None;
-    if let Some(thread) = encoder_thread.take() {
-        let _ = thread.join();
-    }
+    stop_capture(capture, out_rx, encoder_thread);
     let (started, rx, thread) = start_pipeline(target, Arc::clone(full_repaint))?;
     let live = started.geometry;
     *capture = Some(started);
@@ -684,55 +819,74 @@ async fn pump(
                     // successful change arrives through the display poll like any
                     // other reconfigure — so the task only has to outlive the
                     // message, and reports for itself.
-                    GatewayMsg::HostScale { scale } => {
-                        let wanted = rxa_proto::msg::scale_ratio(scale) >= 1.5;
-                        // `None` is a client reporting something true that this
-                        // session cannot use.
-                        if let Some(display) =
+                    // The three things a client may decide about the display the
+                    // agent made: how dense it is
+                    // (`rxa_proto::msg::GatewayMsg::HostScale`, matching the screen
+                    // the client is being shown on), how large
+                    // (`rxa_proto::msg::GatewayMsg::ResizeDisplay`, matching its
+                    // window), and how large by name rather than by number
+                    // (`rxa_proto::msg::GatewayMsg::DefaultDisplaySize`, the size the
+                    // display was created at — see `RequestedSize`).
+                    //
+                    // One arm, because they differ only in what is asked for.
+                    // `reconfigure_shared_display` is where the identical part lives,
+                    // including why the capture stream comes down for all three.
+                    GatewayMsg::HostScale { .. }
+                    | GatewayMsg::ResizeDisplay { .. }
+                    | GatewayMsg::DefaultDisplaySize => {
+                        let change = match msg {
+                            GatewayMsg::HostScale { scale } => Reconfigure::Density {
+                                hidpi: rxa_proto::msg::scale_ratio(scale) >= 1.5,
+                            },
+                            GatewayMsg::ResizeDisplay { w, h } => {
+                                Reconfigure::Size(Some((u32::from(w), u32::from(h))))
+                            }
+                            _ => Reconfigure::Size(None),
+                        };
+                        // `None` is a request naming a Mac's own screen, or a display
+                        // this session is not sharing: a client reporting something
+                        // true that this session cannot use, or a button that did
+                        // nothing. Ignored rather than answered with an `Error`, which
+                        // the gateway treats as fatal — a request that did nothing must
+                        // never be what ends a session.
+                        if let Some(handle) =
                             shared_owned_display(display.as_ref(), target, owned)
                         {
-                            tokio::spawn(async move {
-                                let done = tokio::task::spawn_blocking(move || {
-                                    display
-                                        .lock()
-                                        .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
-                                        .and_then(|display| display.set_scale(wanted))
-                                })
-                                .await;
-                                match done {
-                                    Ok(Ok(_)) => {}
-                                    Ok(Err(e)) => warn!("session: cannot set the display density: {e:#}"),
-                                    Err(e) => warn!("session: the density change did not run: {e}"),
+                            let live = reconfigure_shared_display(
+                                handle,
+                                change,
+                                target,
+                                &full_repaint,
+                                &mut capture,
+                                &mut out_rx,
+                                &mut encoder_thread,
+                            )
+                            .await;
+                            match live {
+                                Ok(Some(live)) => {
+                                    target = target.resolved(live.id);
+                                    let size = adopt_restart(
+                                        live,
+                                        &mut injector,
+                                        &cursor_tracker,
+                                        &mut cursor_seen,
+                                        &full_repaint,
+                                    );
+                                    writer.send(&size.encode()).await?;
                                 }
-                            });
-                        }
-                    }
-                    // The size of the client's window, gated exactly as the density
-                    // above is and for the same two reasons. Both size requests
-                    // hand off to `resize_shared_display`, which is where the
-                    // detachment and the drop-if-busy rule are argued.
-                    GatewayMsg::ResizeDisplay { w, h } => {
-                        // `None` is a resize asked of a Mac's own screen, or of a
-                        // display this session is not sharing. Ignored rather than
-                        // answered with an `Error`, which the gateway treats as
-                        // fatal: a button that did nothing must never be what ends
-                        // a session.
-                        if let Some(display) =
-                            shared_owned_display(display.as_ref(), target, owned)
-                        {
-                            resize_shared_display(display, Some((u32::from(w), u32::from(h))));
-                        }
-                    }
-                    // The same request with no size on it, gated the same way and
-                    // run through the same path — the size is read off the display
-                    // under the lock that is about to resize it, which is the whole
-                    // reason it can be asked for by name from a client that could
-                    // not name it. See `rxa_proto::msg::GatewayMsg::DefaultDisplaySize`.
-                    GatewayMsg::DefaultDisplaySize => {
-                        if let Some(display) =
-                            shared_owned_display(display.as_ref(), target, owned)
-                        {
-                            resize_shared_display(display, None);
+                                // Nothing to do, or nothing was streaming; either way
+                                // there is no new geometry to announce.
+                                Ok(None) => {}
+                                // Only one thing reaches here: the stream did not come
+                                // back up. The desktop is frozen without it, so the
+                                // session ends rather than pretending otherwise.
+                                Err(e) => {
+                                    let message = format!("{e:#}");
+                                    warn!("session: {message}");
+                                    writer.send(&AgentMsg::Error { message }.encode()).await?;
+                                    break Ok(());
+                                }
+                            }
                         }
                     }
                     // Which display to look at is the client's to choose, and
