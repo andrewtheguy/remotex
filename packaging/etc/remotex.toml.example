@@ -23,8 +23,17 @@ site_passwd = ""
 #branding = "remotex"
 
 # DEVELOPMENT ONLY, and inert in any deployment. Gives this gateway its own
-# hostname on loopback: a browser opening http://127.0.0.1:<port>/ (or ::1, or
-# localhost) is redirected to http://<label>.localhost:<port>/, keeping the port.
+# hostname on loopback: a browser opening the home page under *any* loopback name
+# that is not this one — 127.0.0.1, ::1, anything in 127/8, localhost, or another
+# gateway's <other>.localhost — is redirected to http://<label>.localhost:<port>/,
+# keeping the port. The port decides which gateway answers, and that gateway names
+# itself, so http://127.0.0.1:52676/ lands on the label configured *here*.
+#
+# Redirecting a mismatched .localhost name matters as much as redirecting a bare
+# address: reaching this gateway at another one's hostname would put this session's
+# cookie under that name, which is the collision below, arrived at by editing the
+# port in the URL bar and not the label.
+#
 # Only the home page is redirected, and only when the request itself arrived on a
 # loopback name — a gateway reached under a real hostname or address ignores this
 # however it is set.
