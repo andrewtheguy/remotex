@@ -158,15 +158,27 @@ pub fn install() -> anyhow::Result<()> {
     // truncated plist to choke on at the next login.
     let temp = path.with_extension("plist.new");
     std::fs::write(&temp, plist_xml(&exe)).with_context(|| format!("writing {}", temp.display()))?;
-    std::fs::rename(&temp, &path).with_context(|| format!("replacing {}", path.display()))?;
+    if let Err(e) = std::fs::rename(&temp, &path) {
+        // Best effort, and worth doing: this directory is one launchd reads, so a
+        // half-written file left in it is litter in the worst possible place.
+        let _ = std::fs::remove_file(&temp);
+        return Err(e).with_context(|| format!("replacing {}", path.display()));
+    }
 
     // Not an error: it is only loaded if this has been done before.
     let _ = launchctl(&["bootout", &service()]);
+    // **Before the bootstrap, not after.** `enable`/`disable` act on the service
+    // *name* and need no loaded job, and launchd refuses to bootstrap a service
+    // that has been disabled — `Bootstrap failed: 5: Input/output error`. Enabling
+    // afterwards was unreachable in exactly the case it existed for: the bootstrap
+    // returned first, so a login item switched off once in System Settings could
+    // never be switched back on from here, and every retry failed identically.
+    //
+    // Best-effort, like the bootout: a service that was never disabled has nothing
+    // to enable, and if it *was* and this somehow fails, the bootstrap below says so.
+    let _ = launchctl(&["enable", &service()]);
     launchctl(&["bootstrap", &domain(), &path.to_string_lossy()])
         .context("loading the login item")?;
-    // In case the user switched it off in System Settings once; a disabled job
-    // stays disabled through a bootstrap and would silently never start.
-    let _ = launchctl(&["enable", &service()]);
     Ok(())
 }
 
