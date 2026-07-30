@@ -1,21 +1,123 @@
-# macOS viewer
+# remotex.app
 
-`remotex-viewer.app` is a native macOS 26 client for the gateway's HTTP and
-WebSocket protocol. It owns login, target selection, session recovery, tile
-decoding, Metal rendering, input, clipboard synchronization, and audio playback.
-It contains no `WKWebView` and shares protocol behavior, not implementation,
-with the browser client.
+`remotex.app` is a native macOS 26 client that carries its own gateway. It starts
+that gateway on an ephemeral loopback port at launch, authenticates to it with a
+token nobody types, and shuts it down when the app quits — so there is no server to
+install, no address to enter, and no login. It owns target selection, session
+recovery, tile decoding, Metal rendering, input, clipboard synchronization, and
+audio playback; it contains no `WKWebView` and shares protocol behavior, not
+implementation, with the browser client.
 
-The viewer has no RDP, VNC, or RXA implementation. Engine-specific behavior is
+The client has no RDP, VNC, or RXA implementation. Engine-specific behavior is
 reported by the gateway, with resize policy as the only client-side branch.
 Whether the remote is a Mac is likewise discovered from the gateway's
 `remoteOs` message and affects only keyboard conventions.
 
+The bundle holds two executables:
+
+| path | what it is |
+|---|---|
+| `Contents/MacOS/remotex-viewer` | the Swift app (`CFBundleExecutable`) |
+| `Contents/MacOS/remotex-gateway` | a copy of the `remotex` gateway binary |
+
+Two files in one directory cannot share a name, and the suffix also makes it obvious
+which process is which in Activity Monitor and to `pgrep`. `CFBundleIdentifier` stays
+`dev.remotex.viewer`, because TCC grants and saved window state are keyed on it.
+
+## The embedded gateway
+
+`remotex serve-embedded --instance-dir <dir>` is not a deployment: it serves the one
+client that started it and dies with it. Everything a deployment would configure is
+therefore decided in code — see `src/embedded.rs` and `config::Audience`:
+
+| | |
+|---|---|
+| address | `127.0.0.1`, one socket |
+| port | `0`, read back off the socket after binding |
+| web UI | none. No `ServeDir`, no index handler; `/` is a 404 |
+| login | refused. `/api/auth/*` answers 403 |
+| credential | one bearer token, minted per launch, held only in memory |
+
+### The two pipes
+
+Opposite directions, unrelated jobs.
+
+**The child's stdout → the app, once.** One JSON line, printed after the socket is
+bound so the port in it is a fact rather than an intention:
+
+```json
+{"port":49213,"token":"…"}
+```
+
+That is how the app learns both the port and the token. stdout carries nothing else
+(logging goes to stderr), and the pipe's read end belongs to the app alone — so the
+token is not in `argv`, where `ps` would show it to every process, not in the
+environment, inherited by anything either side spawns, and not in a file, which would
+outlive the process that made it.
+
+**The app → the child's stdin, never.** Nothing is written on it in either direction.
+The app holds the write end for as long as it lives; when it ends, the kernel closes
+that end, the gateway's blocking read returns end-of-file, and the gateway exits.
+
+### Shutdown, in three layers
+
+1. **The liveness pipe** is what the guarantee rests on. It fires whether the app
+   quit cleanly, crashed, was Force Quit or took a `kill -9`, because no code of ours
+   has to run for the kernel to close a descriptor. macOS has no `PR_SET_PDEATHSIG`,
+   and unlike a `getppid` poll this leaves no window in which an orphan is still
+   listening. `aGatewayIgnoringSignalsStillDiesWithThePipe` asserts it against a
+   child that traps `SIGTERM`.
+2. `SIGTERM`, the ordinary graceful stop.
+3. `applicationWillTerminate` closes the pipe and terminates the child, then kills it
+   after a grace period. Synchronous, because the process may be gone the moment it
+   returns.
+
+### The instance directory
+
+`--instance-dir <path>`, or `~/Library/Application Support/remotex` (mode `0700`).
+Everything this launch reads or writes is under it, and **nothing under
+`/opt/remotex` is ever consulted** — a Mac can run the server install and this app at
+once without either changing what the other does.
+
+| file | |
+|---|---|
+| `remotex.toml` | the only thing a user edits, mode `0600` |
+| `gateway.log` | the gateway's stderr, appended across launches |
+| `viewer.json` | client preferences |
+
+Preferences live here rather than in a `UserDefaults` suite because the directory is
+the unit of isolation: a suite lives in the user's own `Preferences` whatever the rest
+of the app was told, which is the trap the old `--settings` flag existed to work
+around.
+
+A first launch writes a commented template and mints this instance's `[rxa]`
+`private_key`. That key is not a choice — it is the gateway's name on the wire, and
+without it the one protocol written for this app could not be configured without a
+terminal.
+
+### Configuration
+
+**Remote › Configuration…** edits `remotex.toml` in a sheet: the TOML in a monospaced
+editor, Reveal in Finder, Cancel, Save, and this instance's `rxa` public key with a
+Copy button — the value a Mac agent needs in its `authorized_gateways`.
+
+Save validates first, by running the bundled gateway's `check-config --embedded` on
+the candidate text. So what the editor accepts is by construction what the gateway
+starts on, and there is no second idea of what a config means: a refusal keeps the
+sheet open with the text intact, shows the gateway's own complaint verbatim, and
+writes **nothing**. A clean save writes atomically and restarts the gateway, so a new
+target is in the picker by the time the sheet closes.
+
+`[server]` is refused in this file, and having no targets at all is not an error — it
+is what a first launch has, and the picker says so in words.
+
 ## Protocol compatibility
 
-The viewer and gateway ship independently. Before opening a session, the viewer
-requests `GET /api/config` and requires its `protocolVersion` to match
-`PROTOCOL_VERSION` in `src/protocol.rs`. A mismatch is shown on the login screen.
+The check survives even though both halves now ship in one bundle, and it means
+something different: a mismatch is a broken build rather than an old server, which is
+exactly the kind of thing that must not present as a hang. Before opening a session
+the client requests `GET /api/config` and requires its `protocolVersion` to match
+`PROTOCOL_VERSION` in `src/protocol.rs`; a mismatch is reported on the launch screen.
 
 The version covers client messages, control messages, and binary frame layouts.
 Unknown additive control messages are ignored, but a change that makes an older
@@ -31,28 +133,26 @@ Contract tests protect both sides:
 
 ## Entry and session lifecycle
 
-Entry has two steps:
+There is one screen ahead of the target picker and it asks for nothing: `launching`
+shows a spinner, or the reason the gateway did not start with the gateway's own
+stderr beneath it and **Configuration…** / **Try Again** to act on it. A gateway that
+exits while the app is using it lands on the same screen — deliberately not restarted
+automatically, since one that died on a config it accepted will die again, and a
+silent retry loop would hide the output that explains why.
 
-1. **Server** validates the address, requests `/api/config`, checks the protocol,
-   and requests `/api/auth/status`. The address is remembered only after the
-   gateway answers.
-2. **Login** submits credentials. This step is skipped while the stored cookie
-   remains valid.
+Authentication and session ownership stay separate, as before:
 
-Changing the gateway returns to the server step. Logging out keeps the current
-address and returns to login. A gateway restart invalidates its in-memory login
-sessions, so a later `401` also returns to login.
-
-The viewer keeps login and session ownership separate:
-
-- the login cookie authorizes the gateway;
+- the bearer token authorizes this client to the gateway;
 - the claim token owns the program's one active session slot.
 
-`SessionStateMachine` implements claim, attach, reconnect, takeover, and return
-to login as a pure state machine. Network reconnects use capped exponential
-backoff up to 15 seconds. A busy slot and a session taken over by another client
-wait for an explicit user decision because resolving either case may evict the
-current owner.
+A `401` no longer means "sign in again": the token is good for as long as the process
+that minted it lives, so it means the gateway behind that port is not the one that
+issued it. The app restarts the gateway instead.
+
+`SessionStateMachine` implements claim, attach, reconnect and takeover as a pure state
+machine. Network reconnects use capped exponential backoff up to 15 seconds. A busy
+slot and a session taken over by another client wait for an explicit user decision
+because resolving either case may evict the current owner.
 
 The reconnect backoff resets after a control message proves that the connection
 is usable, not merely when the WebSocket opens. Any interruption clears the
@@ -198,7 +298,7 @@ Clipboard values are capped at 64 KiB in either direction and refused rather
 than truncated. Command-V queues the current local pasteboard value before
 sending the translated remote paste chord. Programmatic reads follow macOS's
 **Paste from Other Apps** permission, while `clipboard = true` remains the
-gateway-side boundary.
+boundary — set per target in the app's own configuration.
 
 ## Audio
 
@@ -226,59 +326,73 @@ log carries that diagnosis.
 
 ## Networking
 
-Plain HTTP and `ws://` gateways are allowed for private-network deployments, so
-the app bundle uses `NSAllowsArbitraryLoads`.
+The gateway is reached over plain HTTP on loopback, and ATS treats `ws://` as
+`http://`, so the bundle uses `NSAllowsArbitraryLoads`.
 
-The viewer attaches the login cookie to the WebSocket upgrade explicitly with
-`httpShouldHandleCookies` disabled. This also handles a `Secure` cookie issued
-behind a TLS-terminating proxy when the socket uses `wss`.
+Every request carries `Authorization: Bearer <token>`, including `/api/config`, which
+needs no credential: a client that authenticates only the routes it believes are
+guarded is one route away from a 401 nobody expected. The WebSocket upgrade carries it
+too — `require_auth` runs before the upgrade, so omitting it is a bare 401 rather than
+a socket that closes with a reason. `httpShouldHandleCookies` is off everywhere; there
+are no cookies in this arrangement.
+
+Two different tokens meet on the upgrade and are not interchangeable: the query's
+`session` is the claim, deciding whose turn it is, and the header's is this client's
+credential, deciding whether it may ask at all.
 
 `URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
 limit ends the socket rather than dropping one frame.
 
 ## Build and QA
 
-Run the tests, build the packaged app, and launch QA with isolated settings:
+Run the tests, build the packaged app, and launch QA against a throwaway instance:
 
 ```sh
 swift test --package-path apps/remotex-viewer
 packaging/macos-viewer/build-viewer-app.sh --no-dmg
-open -n dist/remotex-viewer.app --args \
-  --settings qa --gateway http://127.0.0.1:<test-port>
+open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 
-`--settings qa` uses a separate defaults suite and an ephemeral cookie jar. Clear
-that suite with:
+`--instance-dir` is the only argument the app takes, and it is the whole of the
+isolation: config, log and preferences are all under the directory it names, so a QA
+run cannot touch what a real one keeps in
+`~/Library/Application Support/remotex`. Clear the slate by deleting the directory.
 
-```sh
-defaults delete remotex-viewer.qa
-```
+There is deliberately no way to point the app at another gateway — not on the command
+line and not in the UI. The gateway it talks to is the one in its own bundle.
 
 Always validate the packaged `.app`; `swift run`, standalone `swift build`, and
-the executable under `.build` bypass bundle menus and `Info.plist` behavior.
+the executable under `.build` bypass bundle menus, `Info.plist` behavior, and the
+bundled gateway (`Bundle.main.url(forAuxiliaryExecutable:)` finds nothing, so the app
+comes up saying it is incomplete).
 
-For socket-level diagnostics, `--probe` attaches to a gateway and prints
-received control and frame information:
+For socket-level diagnostics, `--probe` starts the same embedded gateway and prints
+received control and frame information. It takes no address or credentials, because
+there is no other gateway for it to reach:
 
 ```sh
-REMOTEX_PROBE_USERNAME=… REMOTEX_PROBE_PASSWORD=… \
-  dist/remotex-viewer.app/Contents/MacOS/remotex-viewer \
-  --probe --gateway http://127.0.0.1:52380 \
+dist/remotex.app/Contents/MacOS/remotex-viewer \
+  --probe --instance-dir "$PWD/tmp/app-instance" \
   --probe-target mac --probe-seconds 90
+```
+
+The bundled gateway is also a full `remotex` binary, which is how an instance is
+inspected from a terminal:
+
+```sh
+dist/remotex.app/Contents/MacOS/remotex-gateway rxa-pubkey \
+  --config ~/Library/Application\ Support/remotex/remotex.toml
 ```
 
 Automated tests cover message decoding, frame parsing, tile ordering, geometry,
 audio framing, schedule arithmetic, and Opus fixtures produced by the gateway.
-Audio playback still requires manual QA. The in-process tone harness provides a
-repeatable source without a Windows host:
+Audio playback still requires manual QA.
 
-```sh
-cargo test --lib serve_a_test_tone -- --ignored --nocapture
-open -n dist/remotex-viewer.app --args \
-  --settings qa --gateway http://127.0.0.1:<test-port>
-```
-
-Enable audio during a quiet phase and verify that the tone starts, stops, and
+The in-process tone harness (`cargo test --lib serve_a_test_tone -- --ignored`) is no
+longer reachable from this app: it serves a *login* gateway on a fixed port, and the
+app can only talk to the one it started for itself. Verify the harness in a browser;
+for the app, configure an `audio = true` RDP target in its own configuration and use
+that. Enable audio during a quiet phase and verify that the tone starts, stops, and
 returns without another action. Use a source that announces its left and right
 channels when checking stereo order.
 

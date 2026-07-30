@@ -2,12 +2,14 @@
 
 remotex is a single-user gateway for RDP, VNC, and the optional RXA macOS
 agent. A Rust backend owns the remote protocol session and exposes one common
-HTTP/WebSocket interface to the React SPA and native macOS viewer.
+HTTP/WebSocket interface to the React SPA and to `remotex.app`, the native macOS
+client — which runs a gateway of its own rather than reaching a deployed one (see
+[`macos-viewer.md`](macos-viewer.md)).
 
 ## Data path
 
 ```text
-browser SPA or macOS viewer
+browser SPA, or remotex.app over loopback
    │  /api: authentication, targets, session claim
    │  /ws: JSON control/input, binary image batches, Opus audio
    ▼
@@ -310,14 +312,22 @@ session changed hands: the login, this gateway's session slot and the browser's
 socket all remain the loser's, and it returns to the target picker with a message
 saying so rather than to the login screen.
 
-### Native macOS viewer
+### remotex.app, the native macOS client
 
-The optional viewer is a separate native client of the same HTTP and WebSocket
-protocol. It implements its own session state machine, Metal rendering, AppKit
-input, pasteboard synchronization, and Opus playback.
+`remotex.app` is a separate native client of the same HTTP and WebSocket protocol,
+with its own session state machine, Metal rendering, AppKit input, pasteboard
+synchronization, and Opus playback.
 
-See [`macos-viewer.md`](macos-viewer.md) for compatibility, resize behavior,
-native platform constraints, and QA.
+It is also its own deployment. The bundle carries the gateway binary and starts it —
+`serve-embedded`, an ephemeral loopback port, no web UI, a bearer token instead of a
+login — so the app needs no server, address or credentials, and the gateway dies with
+it. Two things follow for this document: such a gateway has a second authentication
+mode (`GatewayAuth`, in `src/auth.rs`, of which exactly one is alive per process), and
+its config is held to different rules (`config::Audience`) because the app has already
+decided everything `[server]` would say.
+
+See [`macos-viewer.md`](macos-viewer.md) for the handshake, the shutdown contract, the
+instance directory, compatibility, resize behavior, and QA.
 
 ## Configuration and testing
 
@@ -325,6 +335,13 @@ Configuration is one TOML file with `[server]` and `[[targets]]` sections.
 Protocol-specific fields are validated at startup, including mutually exclusive
 credential fields, RXA key roles and checksums, and unsupported feature
 combinations.
+
+`config::Audience` names the two readers of that schema. A served gateway needs a
+target to offer and a credential to guard it, and is told where to listen. `remotex.app`'s
+gateway is told none of those — it refuses a `[server]` block, and comes up with no
+targets at all, which is what a first launch has. `remotex check-config [--embedded]`
+applies either set of rules without starting anything; the app's configuration editor
+calls it before writing, so what the editor accepts is what the gateway starts on.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
