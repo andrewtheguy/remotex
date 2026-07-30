@@ -92,30 +92,35 @@ framebuffer to the window.
 
 ## Display and resize behavior
 
-`ViewportPolicy` derives behavior from the `connected` message and, for RXA,
-the active display:
+`ViewportPolicy` separates two questions: whether this session may resize the
+remote, which the gateway answers, and whether the window drives it, which this
+viewer does.
 
-| Target | Viewport behavior |
+Permission comes from the `connected` message and, for RXA, the active display:
+
+| Target | May resize |
 |---|---|
-| VNC with `resize` | follows window changes, debounced and deduplicated |
-| RDP with `resize` | sends a size only for **Remote → Resize to Window** |
-| RXA with `resize`, private display active | sends a size only for **Remote → Resize to Window** |
-| Any other case | sends no viewport request |
+| RDP or VNC with `resize` | yes |
+| RXA with `resize`, private display active | yes |
+| Any other case | no — no viewport request is ever sent |
 
-RDP applies an explicit resize through Deactivation-Reactivation. RXA permits it
-only for a display created by the agent; a Mac-owned display is never resized by
-the viewer.
+RXA permits it only for a display created by the agent; a Mac-owned display is
+never resized by the viewer, and switching onto one withdraws the permission
+mid-session.
 
-The two resize commands act in opposite directions:
+The three View menu items are one decision:
 
-- **Resize to Window** asks a supported remote to adopt the viewer's available
-  size.
+- **Auto Resize** hands the remote's size to the window, which then follows every
+  change, debounced and deduplicated. Off by default, per session: it is not
+  remembered, and every connection starts manual.
+- **Resize to Window** asks the remote to adopt the viewer's available size, once.
 - **Resize to Display** changes the local window so the current remote desktop
   fits at its point size; it sends nothing to the gateway.
 
-Both commands remain in the Remote menu and are disabled when they do not apply.
-**Resize to Display** is also disabled for a resize-enabled VNC target because
-that remote already follows the window.
+All three remain in the menu and are disabled when they do not apply. The two
+one-shots are disabled while **Auto Resize** is on: one is what it does
+continuously, and the other cannot fit a window to a desktop that is already
+fitting itself to the window.
 
 RXA is the only engine that reports individually selectable displays. The
 Display menu sends `selectDisplay` and follows the `active` flag returned by the

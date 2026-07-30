@@ -690,10 +690,10 @@ async fn active_loop(
                     }
                     continue;
                 }
-                // A viewport report is a client-initiated resize. Unlike VNC's
-                // automatic resize, the browser only sends this when the user
-                // asks for it (the menu's "Resize to window") — reactivation is
-                // heavier than VNC's SetDesktopSize. Ignored unless negotiated.
+                // A viewport report is a client-initiated resize, applied whenever
+                // one arrives. How often that is — on every window change, or only
+                // when the user asks — is the client's own setting and not
+                // something this end tells apart. Ignored unless negotiated.
                 //
                 // The size arrives in remote *pixels*, already multiplied by the
                 // `scale` this end announced, so it needs no conversion — but it

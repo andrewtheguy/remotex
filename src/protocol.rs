@@ -105,8 +105,10 @@ pub enum ClientMsg {
         caps: bool,
     },
     /// Requested desktop size in remote pixels: available client points
-    /// multiplied by the scale in [`ServerMsg::Resize`]. VNC may follow it
-    /// continuously; RDP and RXA apply it only on explicit requests.
+    /// multiplied by the scale in [`ServerMsg::Resize`]. Applied by any engine the
+    /// target opted into resize for, and dropped by every other. How often one
+    /// arrives — per window change, or only when the user asks — is the client's
+    /// own choice and nothing this end distinguishes.
     Viewport { w: u16, h: u16 },
     /// Restore the engine's configured or created default size. This carries no
     /// dimensions so a pinch-zoom client need not invent a desktop shape.

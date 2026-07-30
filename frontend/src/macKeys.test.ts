@@ -105,6 +105,49 @@ test("a bare Command tap presses and releases the remote's Windows key", () => {
   ]);
 });
 
+// The SPA's own Ctrl+Cmd+Shift+; hides the floating menu and never reaches the
+// input path, so the translator only ever sees the Command — which without this is
+// indistinguishable from the bare tap above, and would open the guest's Start
+// menu every time the toolbar was hidden. See FloatingMenu's hideChromeShortcut.
+test("a chord the client took itself is not a bare Command tap", () => {
+  const t = new MacKeyboardTranslator();
+  assert.deepEqual(t.translate(down("ControlLeft"), true), [
+    sent("ControlLeft", true),
+  ]);
+  assert.deepEqual(t.translate(down("MetaLeft"), true), []);
+  assert.deepEqual(t.translate(down("ShiftLeft", true), true), [
+    sent("ShiftLeft", true),
+  ]);
+  // The Semicolon never arrives; the toolbar reports the chord instead.
+  t.noteCommandUsedLocally();
+  assert.deepEqual(t.translate(up("MetaLeft"), true), []);
+  assert.deepEqual(t.translate(up("ShiftLeft"), true), [
+    sent("ShiftLeft", false),
+  ]);
+  assert.deepEqual(t.translate(up("ControlLeft"), true), [
+    sent("ControlLeft", false),
+  ]);
+  // And the next real bare tap still taps: the flag went with the Command it was
+  // set for, so a client shortcut cannot silently eat the one after it.
+  assert.deepEqual(t.translate(down("MetaLeft"), true), []);
+  assert.deepEqual(t.translate(up("MetaLeft"), true), [
+    sent("MetaLeft", true),
+    sent("MetaLeft", false),
+  ]);
+});
+
+// Nothing is pending, so there is no Command for the report to be about. Setting
+// the flag anyway would swallow the *next* tap instead of this non-existent one.
+test("reporting a client chord with no Command held changes nothing", () => {
+  const t = new MacKeyboardTranslator();
+  t.noteCommandUsedLocally();
+  assert.deepEqual(t.translate(down("MetaLeft"), true), []);
+  assert.deepEqual(t.translate(up("MetaLeft"), true), [
+    sent("MetaLeft", true),
+    sent("MetaLeft", false),
+  ]);
+});
+
 test("an unmapped Command chord forwards Command as itself", () => {
   const t = new MacKeyboardTranslator();
   t.translate(down("MetaLeft"), true);

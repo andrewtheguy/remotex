@@ -2,65 +2,65 @@ import Foundation
 
 /// Maps measured windows to viewport messages.
 ///
-/// VNC may follow continuously; RDP is request-only; RXA is request-only while
-/// sharing an agent-created display. The pure policy keeps those differences
-/// out of socket and UI code.
+/// Two questions, and keeping them apart is the whole of this type.
+///
+/// *May* this session resize the remote — the operator's `resize` on the target,
+/// and for rxa the further condition that the display being shared is one the
+/// agent made rather than one of the Mac's own screens. That is the gateway's
+/// answer and this client cannot argue with it.
+///
+/// *How* — continuously as the window changes, or only when the user asks. That is
+/// this client's answer, and it is the same question on every protocol: an engine
+/// that acts on one viewport report acts on all of them. `autoFollows` starts false
+/// and is asked again for every connection, so connecting never reshapes a remote's
+/// desktop unasked.
 struct ViewportPolicy: Equatable {
-    /// Suppress automatic reports; only an explicit request gets through. RDP
-    /// with `resize`, and rxa with `resize` while sharing an agent-made display.
-    var manualOnly = false
-    /// Send nothing at all. Every rxa target until — and unless — the display
-    /// being shared turns out to be one the agent made.
-    var ignoresViewport = false
+    /// Whether this session may resize the remote at all. Nothing is reported
+    /// while false, asked for or not.
+    private(set) var allowed = false
 
-    /// Whether the remote continuously follows the window. Stored separately
-    /// because the two gating flags do not distinguish resize-disabled targets.
-    private(set) var followsWindow = false
+    /// Whether the remote follows this window unasked. The user's choice, per
+    /// session; every connection starts manual.
+    var autoFollows = false
 
     /// The target's `resize`, for an rxa target only.
     ///
     /// Held rather than acted on: it is the operator's half of the permission and
     /// grants nothing by itself, because what the agent can resize is a display it
     /// *made*. `sharing(virtualDisplay:)` supplies the other half. Left false for
-    /// RDP and VNC, whose behaviour a display list must not be able to touch.
+    /// RDP and VNC, whose permission a display list must not be able to touch.
     private var rxaResizeAllowed = false
 
     /// The last size sent on this connection, for the dedupe below.
     private var lastSent: DisplayMode?
 
-    init(manualOnly: Bool = false, ignoresViewport: Bool = false) {
-        self.manualOnly = manualOnly
-        self.ignoresViewport = ignoresViewport
-    }
+    init() {}
 
-    /// Derive initial policy. RXA stays disabled until `displays` identifies an
+    /// Derive the permission. RXA stays denied until `displays` identifies an
     /// owned display.
     init(protocolName: String, resize: Bool) {
-        ignoresViewport = protocolName == "rxa"
-        manualOnly = protocolName == "rdp" && resize
-        followsWindow = protocolName == "vnc" && resize
         rxaResizeAllowed = protocolName == "rxa" && resize
+        allowed = resize && protocolName != "rxa"
     }
 
-    /// Enable request-only RXA resizing only for an owned display. No-op for
-    /// other protocols.
+    /// Allow request-only RXA resizing for an owned display, and only for one.
+    /// No-op for other protocols.
     mutating func sharing(virtualDisplay isVirtual: Bool) {
         guard rxaResizeAllowed else {
             return
         }
-        ignoresViewport = !isVirtual
-        manualOnly = isVirtual
+        allowed = isVirtual
     }
 
     /// The message to send for a measured window, or nil for none.
     ///
-    /// `manual` marks a report the user asked for ("Resize to Window"), which is
-    /// the only kind that gets past `manualOnly`.
+    /// `manual` marks a report the user asked for — "Resize to Window", or
+    /// switching auto on — which is the only kind that goes out in manual mode.
     mutating func report(_ size: DisplayMode, manual: Bool) -> ClientMessage? {
-        guard !ignoresViewport else {
+        guard allowed else {
             return nil
         }
-        guard manual || !manualOnly else {
+        guard manual || autoFollows else {
             return nil
         }
         // Deduped so dragging a window edge does not send one report per frame to

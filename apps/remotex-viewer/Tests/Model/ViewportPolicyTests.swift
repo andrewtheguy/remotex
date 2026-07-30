@@ -3,46 +3,48 @@ import Testing
 @testable import RemotexViewer
 
 struct ViewportPolicyTests {
-    /// VNC is the only engine that can resize cheaply, so it is the only one
-    /// followed continuously.
+    /// Permission is the gateway's answer and it varies by protocol; the mode is
+    /// this client's and it does not. So every target the operator opted in starts
+    /// the same way — allowed, and manual.
     @Test
-    func vncFollowsTheWindow() {
-        var policy = ViewportPolicy(protocolName: "vnc", resize: true)
-        #expect(!policy.manualOnly)
-        #expect(!policy.ignoresViewport)
-        #expect(
-            policy.report(DisplayMode(w: 1280, h: 800), manual: false)
-                == .viewport(w: 1280, h: 800)
-        )
+    func everyOptedInTargetStartsAllowedAndManual() {
+        for name in ["rdp", "vnc"] {
+            let policy = ViewportPolicy(protocolName: name, resize: true)
+            #expect(policy.allowed, "\(name)")
+            #expect(!policy.autoFollows, "\(name)")
+        }
     }
 
-    /// And it is the only one, which is what "Resize to Display" reads: fitting
-    /// the window to the desktop is meaningless only against a desktop that fits
-    /// itself to the window. Every other target holds still to be measured,
-    /// including the ones that will also take a size from here — and including a
-    /// VNC target the operator did not opt in, whose reports the gateway drops.
+    /// The operator's veto, and it is the whole of it: a target without `resize`
+    /// sends nothing, asked for or not. The engine would drop the request, and
+    /// neither client offers a control that would make one.
     @Test
-    func onlyAnOptedInVncFollowsTheWindow() {
-        #expect(ViewportPolicy(protocolName: "vnc", resize: true).followsWindow)
-        #expect(!ViewportPolicy(protocolName: "vnc", resize: false).followsWindow)
-        #expect(!ViewportPolicy(protocolName: "rdp", resize: true).followsWindow)
-        #expect(!ViewportPolicy(protocolName: "rdp", resize: false).followsWindow)
-        #expect(!ViewportPolicy(protocolName: "rxa", resize: true).followsWindow)
-
-        // Not even the display an rxa target *can* resize: it is resized when
-        // asked, never by the window moving.
-        var policy = ViewportPolicy(protocolName: "rxa", resize: true)
-        policy.sharing(virtualDisplay: true)
-        #expect(!policy.followsWindow)
+    func aTargetWithoutResizeSendsNothingEitherWay() {
+        for name in ["rdp", "vnc", "rxa"] {
+            var policy = ViewportPolicy(protocolName: name, resize: false)
+            #expect(!policy.allowed, "\(name)")
+            #expect(
+                policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil,
+                "\(name)"
+            )
+            #expect(
+                policy.report(DisplayMode(w: 1280, h: 800), manual: true) == nil,
+                "not even on request: \(name)"
+            )
+            policy.autoFollows = true
+            #expect(
+                policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil,
+                "and the mode cannot grant what the operator withheld: \(name)"
+            )
+        }
     }
 
-    /// An RDP resize forces a Deactivation-Reactivation — expensive and visible —
-    /// so it happens only when the user asks for it.
+    /// Manual is the default and it means exactly one thing: measuring sends
+    /// nothing, asking sends. What used to be RDP's rule alone is now every
+    /// target's starting point.
     @Test
-    func rdpOnlyResizesOnRequest() {
+    func manualReportsOnlyWhatWasAskedFor() {
         var policy = ViewportPolicy(protocolName: "rdp", resize: true)
-        #expect(policy.manualOnly)
-
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil)
         #expect(
             policy.report(DisplayMode(w: 1280, h: 800), manual: true)
@@ -50,63 +52,62 @@ struct ViewportPolicyTests {
         )
     }
 
-    /// A Mac's own screen is set on that Mac, in System Settings, so a viewport
-    /// report means nothing to a target the operator did not opt in — and the
-    /// display's half of the permission cannot stand in for the target's.
+    /// And auto means the window drives it, on the same target the case above left
+    /// silent — the difference is the client's choice and nothing else.
     @Test
-    func rxaWithoutResizeIgnoresViewportsEntirely() {
-        var policy = ViewportPolicy(protocolName: "rxa", resize: false)
-        #expect(policy.ignoresViewport)
-        #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil)
+    func autoReportsWhatTheWindowMeasured() {
+        var policy = ViewportPolicy(protocolName: "rdp", resize: true)
+        policy.autoFollows = true
         #expect(
-            policy.report(DisplayMode(w: 1280, h: 800), manual: true) == nil,
-            "not even on request"
-        )
-
-        policy.sharing(virtualDisplay: true)
-        #expect(
-            policy.report(DisplayMode(w: 1280, h: 800), manual: true) == nil,
-            "an agent-made display does not grant what the target withheld"
+            policy.report(DisplayMode(w: 1280, h: 800), manual: false)
+                == .viewport(w: 1280, h: 800)
         )
     }
 
-    /// With `resize` the target allows it, but only a display the agent *made*
-    /// can act on it — so the control appears when that display is shared and
-    /// disappears again on a switch to one of the Mac's own screens.
+    /// A Mac's own screen is set on that Mac, in System Settings, so `resize` on an
+    /// rxa target grants nothing until a display list says the shared display is
+    /// one the agent made — and a switch back to a real screen takes it away again,
+    /// in either mode.
     @Test
-    func rxaResizesOnlyTheDisplayTheAgentMade() {
+    func rxaIsAllowedOnlyTheDisplayTheAgentMade() {
         var policy = ViewportPolicy(protocolName: "rxa", resize: true)
         #expect(
-            policy.ignoresViewport,
+            !policy.allowed,
             "silent until a displays says which screen is being shared"
         )
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: true) == nil)
 
         policy.sharing(virtualDisplay: true)
-        #expect(policy.manualOnly)
-        #expect(
-            policy.report(DisplayMode(w: 1440, h: 900), manual: false) == nil,
-            "still on request only: this display is not dragged around by a window"
-        )
+        #expect(policy.allowed)
         #expect(
             policy.report(DisplayMode(w: 1440, h: 900), manual: true)
                 == .viewport(w: 1440, h: 900)
         )
 
-        policy.sharing(virtualDisplay: false)
-        #expect(policy.ignoresViewport)
+        policy.autoFollows = true
         #expect(
-            policy.report(DisplayMode(w: 1600, h: 1000), manual: true) == nil,
-            "the Mac's own panel is not this window's to resize"
+            policy.report(DisplayMode(w: 1600, h: 1000), manual: false)
+                == .viewport(w: 1600, h: 1000),
+            "a display made to be looked at from here may follow the window, if asked"
         )
+
+        policy.sharing(virtualDisplay: false)
+        #expect(!policy.allowed)
+        #expect(
+            policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil,
+            "the Mac's own panel is not this window's to resize, mode or no mode"
+        )
+        #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: true) == nil)
     }
 
     /// The display list is an rxa message and must stay one. Neither of the other
     /// two protocols has a display the client may resize, so a gateway that sent
-    /// them a list must not be able to change how they behave.
+    /// them a list must not be able to change what they allow.
     @Test
     func aDisplayListCannotChangeRdpOrVnc() {
-        for (name, resize) in [("rdp", true), ("rdp", false), ("vnc", false)] {
+        for (name, resize) in [
+            ("rdp", true), ("rdp", false), ("vnc", true), ("vnc", false),
+        ] {
             var policy = ViewportPolicy(protocolName: name, resize: resize)
             let before = policy
             policy.sharing(virtualDisplay: true)
@@ -132,24 +133,12 @@ struct ViewportPolicyTests {
         #expect(policy.report(DisplayMode(w: 1440, h: 900), manual: true) == nil)
     }
 
-    /// A target that cannot resize is still reported to — the engine ignores it,
-    /// which is what the web client does too, and suppressing it here would mean
-    /// two rules where one suffices.
-    @Test
-    func aTargetWithoutResizeIsStillFollowed() {
-        var policy = ViewportPolicy(protocolName: "vnc", resize: false)
-        #expect(!policy.manualOnly)
-        #expect(
-            policy.report(DisplayMode(w: 800, h: 600), manual: false)
-                == .viewport(w: 800, h: 600)
-        )
-    }
-
-    /// Dragging a window edge measures a new size every frame. Without this, VNC
-    /// would be told to resize on each one.
+    /// Dragging a window edge measures a new size every frame. Without this, an
+    /// auto-following remote would be told to resize on each one.
     @Test
     func anUnchangedSizeIsNotReportedTwice() {
         var policy = ViewportPolicy(protocolName: "vnc", resize: true)
+        policy.autoFollows = true
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) != nil)
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil)
         #expect(policy.report(DisplayMode(w: 1281, h: 800), manual: false) != nil)
@@ -162,12 +151,12 @@ struct ViewportPolicyTests {
     func aNewConnectionReportsEvenTheSameSizeAgain() {
         var policy = ViewportPolicy(protocolName: "vnc", resize: true)
         let size = DisplayMode(w: 1280, h: 800)
-        #expect(policy.report(size, manual: false) != nil)
-        #expect(policy.report(size, manual: false) == nil)
+        #expect(policy.report(size, manual: true) != nil)
+        #expect(policy.report(size, manual: true) == nil)
 
         policy.resetForNewConnection()
 
-        #expect(policy.report(size, manual: false) == .viewport(w: 1280, h: 800))
+        #expect(policy.report(size, manual: true) == .viewport(w: 1280, h: 800))
     }
 
     /// The dedupe applies to a requested report too, so pressing "Resize to

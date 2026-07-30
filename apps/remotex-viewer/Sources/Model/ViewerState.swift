@@ -92,15 +92,16 @@ struct ViewerSessionState: Equatable {
     /// is what keeps the remote the same physical size on either — see
     /// `RemoteGeometry`.
     var remoteScale: CGFloat = 1
-    /// Whether to offer "Resize to Window": RDP with `resize`, and rxa with
-    /// `resize` while the display being shared is one the agent made. VNC follows
-    /// the viewport on its own, and a Mac's own panel is set on that Mac.
+    /// Whether this session may resize the remote at all: the target's `resize`,
+    /// and for rxa a display the agent made rather than one of the Mac's own
+    /// screens. Permission only — all three resize items in the View menu are
+    /// dead without it, and none of them is decided by it alone.
     var canResize = false
-    /// Whether the remote follows this window's size unasked — VNC, and nothing
-    /// else. Mirrored off `ViewportPolicy` for the same reason as `canResize`:
-    /// the policy is not observed, and a menu item reads this. The only reader is
-    /// "Resize to Display"; see `AppModel.canResizeToDisplay`.
-    var followsWindow = false
+    /// Whether the remote follows this window's size unasked. The client's choice
+    /// rather than a fact about the protocol, and not remembered: every connection
+    /// starts manual. Mirrored off `ViewportPolicy` for the same reason as
+    /// `canResize` — the policy is not observed, and three menu items read this.
+    var autoResize = false
     var canClipboard = false
     /// Whether this target carries sound at all — an RDP target configured for it. Not
     /// whether any is playing: see `ServerMessage.Connected.audio`.

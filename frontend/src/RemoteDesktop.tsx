@@ -38,6 +38,7 @@ export default function RemoteDesktop({
     size,
     hostScale,
     canResize,
+    autoResize,
     canClipboard,
     canAudio,
     audioEnabled,
@@ -50,11 +51,13 @@ export default function RemoteDesktop({
     isMacHost,
     remoteIsMac,
     setMacKeyOverridesEnabled,
+    onLocalShortcut,
     takeOver,
     retry,
     connect,
     switchTarget,
     resizeToWindow,
+    setAutoResize,
     selectDisplay,
     setAudio,
     sendKeyCombo,
@@ -102,7 +105,10 @@ export default function RemoteDesktop({
         <FloatingMenu
           onLogout={onLogout}
           onSwitchTarget={switchTarget}
-          onResizeToWindow={canResize ? resizeToWindow : undefined}
+          canResize={canResize}
+          autoResize={autoResize}
+          onAutoResizeChange={setAutoResize}
+          onResizeToWindow={resizeToWindow}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}
           canClipboard={canClipboard}
@@ -123,6 +129,7 @@ export default function RemoteDesktop({
           isMacHost={isMacHost}
           remoteIsMac={remoteIsMac}
           onMacKeyOverridesChange={setMacKeyOverridesEnabled}
+          onLocalShortcut={onLocalShortcut}
         />
       )}
 

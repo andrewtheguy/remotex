@@ -145,6 +145,19 @@ export class MacKeyboardTranslator {
     return this.translateKey(code, pressed, caps, event.meta);
   }
 
+  /// A chord the client took for itself while Command was held. The key Command
+  /// was held with never arrived here, so without this Command's release reads as
+  /// a bare tap and the guest is handed the Windows key — the SPA's own
+  /// Ctrl+Cmd+Shift+; would hide its toolbar *and* open a Start menu.
+  ///
+  /// Only while Command is actually pending: setting the flag at any other moment
+  /// would swallow the next real bare tap instead.
+  noteCommandUsedLocally(): void {
+    if (this.pendingCommandCodes.size > 0) {
+      this.commandWasUsed = true;
+    }
+  }
+
   /// Forget everything held. The caller pairs this with its own release sweep,
   /// so nothing here emits: a chord half-way through must not be resumed against
   /// a remote whose releases have already been sent.

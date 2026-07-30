@@ -51,11 +51,17 @@ const MODIFIER_TAPS: readonly { label: string; code: string }[] = [
   { label: "Super", code: "MetaLeft" },
 ];
 
-// The chrome shortcut, spelled the way the Help card shows it. Written out here so
-// the card and the handler cannot drift — the handler matches this exact
-// combination, and deliberately not with Command held, so a Mac user's own
-// Cmd+Ctrl+Alt+Shift+; stays theirs.
-const HIDE_CHROME_SHORTCUT = "Ctrl + Alt + Shift + ;";
+// The chrome shortcut, spelled the way the Help card and the button's tooltip show
+// it. One source for all three so the card, the tooltip and the handler cannot
+// drift — the handler matches exactly what this returns.
+//
+// The middle modifier is the host's: Command on a Mac, where Option is a
+// character-composing key and Ctrl+Alt chords are Windows vocabulary, and Alt
+// everywhere else. Whichever it is, the *other* one has to be absent, so all four
+// held — a Mac user's own Cmd+Ctrl+Alt+Shift+; hyper chord — stays theirs.
+function hideChromeShortcut(isMacHost: boolean): string {
+  return isMacHost ? "Ctrl + Cmd + Shift + ;" : "Ctrl + Alt + Shift + ;";
+}
 
 // The reference density both ends of this agree on: one CSS pixel per dot, and
 // also what RDP calls 100%. So a 2x screen is 192 dpi whichever end names it.
@@ -66,6 +72,21 @@ const CSS_DPI = 96;
 function dpiLabel(hundredths: number): string {
   return `${Math.round((hundredths / 100) * CSS_DPI)} dpi`;
 }
+
+// What the Mac key override does, which is more than fits on the button that
+// toggles it — hence "Mac key override: on" there and the detail here. Shown only
+// on a Mac host, the only place that button exists. Mirrors macKeys.ts, including
+// the six chords a browser keeps whatever this is set to.
+const MAC_KEY_HELP: readonly { situation: string; effect: string }[] = [
+  {
+    situation: "While on",
+    effect: "⌘A ⌘C ⌘F ⌘P ⌘S ⌘V ⌘X ⌘Z arrive as Ctrl chords",
+  },
+  { situation: "While off", effect: "Every key arrives as pressed" },
+  { situation: "⌘ on its own", effect: "Arrives as the Windows key" },
+  { situation: "Kept by this browser", effect: "⌘W ⌘T ⌘N ⌘L ⌘O ⌘R" },
+  { situation: "A Mac remote", effect: "n/a — ⌘ is sent as ⌘" },
+];
 
 // The touch gesture cheat-sheet, mirroring touchGestures.ts.
 const GESTURE_HELP: readonly { gesture: string; action: string }[] = [
@@ -308,6 +329,59 @@ function AudioSection({
   );
 }
 
+// How this session drives the remote's size, for a session allowed to drive it at
+// all — the target's `resize`, and for the Mac agent a display it made rather than
+// one of the Mac's own screens. Absent otherwise, like Display and Audio and
+// unlike Clipboard: there is no feature here to grey out, only one the operator
+// did not turn on.
+//
+// Both controls in one section because they are one decision. Auto hands the size
+// to the window continuously; manual — the default, and what every connect starts
+// at — sends nothing until the button is pressed. Neither is the protocol's
+// business, so this section looks the same on RDP, VNC and rxa.
+function ResizeSection({
+  available,
+  auto,
+  onAutoChange,
+  onResizeToWindow,
+}: {
+  available: boolean;
+  auto: boolean;
+  onAutoChange: (auto: boolean) => void;
+  onResizeToWindow: () => void;
+}) {
+  if (!available) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Resize</span>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={() => onAutoChange(!auto)}
+        aria-pressed={auto}
+        title="Hand the remote's size to this window, so it follows every resize"
+      >
+        {auto ? "Auto resize: on" : "Auto resize: off"}
+      </button>
+      <button
+        type="button"
+        className="toolbar-btn"
+        onClick={onResizeToWindow}
+        disabled={auto}
+        title={
+          auto
+            ? "The remote is already following this window"
+            : "Resize the remote desktop to the browser window, once"
+        }
+      >
+        Resize to window
+      </button>
+    </div>
+  );
+}
+
 // macOS-only Command-to-Control preference. It remains visible but inactive for
 // a Mac guest, where Command already has native meaning.
 function MacKeyboardSection({
@@ -326,11 +400,15 @@ function MacKeyboardSection({
   if (!isMacHost) {
     return null;
   }
+  // All three states named the same way, with the Help card carrying what the
+  // chord table used to try to say in a button's width. "n/a" rather than "off"
+  // for a Mac guest: the preference may well be on, and it is the guest that
+  // makes it inapplicable.
   const label = remoteIsMac
-    ? "⌘ stays ⌘"
+    ? "Mac key override: n/a"
     : active
-      ? "⌘ → Ctrl: on"
-      : "⌘ → Ctrl: off";
+      ? "Mac key override: on"
+      : "Mac key override: off";
   return (
     <div className="toolbar-section">
       <span className="toolbar-label">Mac keyboard</span>
@@ -355,6 +433,9 @@ function MacKeyboardSection({
 export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
+  canResize,
+  autoResize,
+  onAutoResizeChange,
   onResizeToWindow,
   sendKeyCombo,
   onKeyboardInset,
@@ -376,22 +457,27 @@ export default function FloatingMenu({
   isMacHost,
   remoteIsMac,
   onMacKeyOverridesChange,
+  onLocalShortcut,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
-  // Resize the remote desktop to the browser window. Present for an RDP target
-  // with `resize = true`, whose protocol puts the desktop size in the client's
-  // hands but makes changing it expensive enough to be worth asking for, and for
-  // an rxa target while the display being shared is one the agent made. VNC
-  // follows the viewport automatically and needs no button; every other remote's
-  // resolution is set on the remote.
+  // Whether this session may resize the remote at all — the target's
+  // `resize = true`, and for an rxa target a display the agent made rather than
+  // one of the Mac's own screens. It is the operator's permission and says nothing
+  // about how it is used; that is `autoResize`, and false here hides both.
   //
-  // Never present on a pinch-zoom device, whatever the target allows: a phone's
+  // Never true on a pinch-zoom device, whatever the target allows: a phone's
   // window is not a shape to hand a desktop, which is the whole of what mobile
   // decides differently about size. See useRemoteDesktop.
-  onResizeToWindow?: () => void;
+  canResize: boolean;
+  // Whether the remote is following this window continuously. The client's choice,
+  // per session, and manual is where every connect starts. See ResizeSection.
+  autoResize: boolean;
+  onAutoResizeChange: (auto: boolean) => void;
+  // One resize now, to this window. Offered while `canResize` and manual.
+  onResizeToWindow: () => void;
   sendKeyCombo: (codes: string[]) => void;
   // Reports the open docked panel's height so the touch canvas can inset above
   // it (0 when the panel closes or floats). See useRemoteDesktop. Both panels
@@ -441,6 +527,10 @@ export default function FloatingMenu({
   isMacHost: boolean;
   remoteIsMac: boolean;
   onMacKeyOverridesChange: (enabled: boolean) => void;
+  // A chord this component took for itself, announced to the input path so it can
+  // unwind what it was holding for one. Only the Mac spelling of the chrome
+  // shortcut needs it, and only because Command is in it. See useRemoteDesktop.
+  onLocalShortcut: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -539,24 +629,30 @@ export default function FloatingMenu({
   const [hidden, setHidden] = useState(false);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // All three and no Command: a Mac user's Cmd+Ctrl+Alt+Shift+; stays theirs.
-      if (
-        e.code !== "Semicolon" ||
-        !e.ctrlKey ||
-        !e.altKey ||
-        !e.shiftKey ||
-        e.metaKey
-      ) {
+      // The host's own middle modifier and pointedly not the other one, which is
+      // what leaves the four-modifier hyper chord to its owner. See
+      // hideChromeShortcut.
+      const middle = isMacHost
+        ? e.metaKey && !e.altKey
+        : e.altKey && !e.metaKey;
+      if (e.code !== "Semicolon" || !e.ctrlKey || !e.shiftKey || !middle) {
         return;
       }
       e.preventDefault();
       e.stopPropagation();
+      // Command is held and the key it was held with has just been taken by this
+      // client, so the input path never saw the chord and would read Command's
+      // release as a bare tap — which is how the guest's Start menu opens. Hiding
+      // a button must not do that. See macKeys.ts.
+      if (isMacHost) {
+        onLocalShortcut();
+      }
       setHidden((was) => !was);
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, []);
+  }, [isMacHost, onLocalShortcut]);
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>) => {
@@ -672,7 +768,7 @@ export default function FloatingMenu({
   // Resize the remote desktop to the window, then collapse the drawer so the
   // resized desktop is visible.
   const onResize = useCallback(() => {
-    onResizeToWindow?.();
+    onResizeToWindow();
     setOpen(false);
   }, [onResizeToWindow]);
 
@@ -731,7 +827,7 @@ export default function FloatingMenu({
           aria-expanded={open}
           // The only place the chord is written down in the UI, and it has to be
           // here: once the button is hidden there is nothing left to read it off.
-          title="Ctrl+Alt+Shift+; hides this button"
+          title={`${hideChromeShortcut(isMacHost)} hides this button`}
         >
           {open ? "✕" : "☰"}
         </button>
@@ -747,6 +843,15 @@ export default function FloatingMenu({
               setOpen(false);
               togglePanel("display");
             }}
+          />
+
+          {/* Beside the Display section, which is the other control over what
+              shape the remote is in. */}
+          <ResizeSection
+            available={canResize}
+            auto={autoResize}
+            onAutoChange={onAutoResizeChange}
+            onResizeToWindow={onResize}
           />
 
           <div className="toolbar-section">
@@ -824,16 +929,6 @@ export default function FloatingMenu({
           />
 
           <div className="toolbar-section toolbar-actions">
-            {onResizeToWindow && (
-              <button
-                type="button"
-                className="toolbar-btn"
-                onClick={onResize}
-                title="Resize the remote desktop to the browser window"
-              >
-                Resize to window
-              </button>
-            )}
             <button
               type="button"
               className="toolbar-btn"
@@ -886,9 +981,22 @@ export default function FloatingMenu({
                     ☰ button is hidden there is nothing left on screen to read the
                     way back off, so a shortcut nobody wrote down is a menu that
                     looks gone for good. */}
-                <dd>{HIDE_CHROME_SHORTCUT}</dd>
+                <dd>{hideChromeShortcut(isMacHost)}</dd>
               </div>
             </dl>
+            {isMacHost && (
+              <>
+                <h3>Mac key override</h3>
+                <dl className="help-list">
+                  {MAC_KEY_HELP.map((row) => (
+                    <div key={row.situation} className="help-item">
+                      <dt>{row.situation}</dt>
+                      <dd>{row.effect}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </>
+            )}
             <h3>Touch gestures</h3>
             <dl className="help-list">
               {GESTURE_HELP.map((row) => (
