@@ -5,7 +5,7 @@
 // configuration (workers: 1) rather than by luck — a second browser claiming the
 // slot would evict the first.
 import { execFileSync } from "node:child_process";
-import { expect, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 export const BASE_URL =
   process.env.REMOTEX_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:5173/";
@@ -22,6 +22,65 @@ const REQUIRED_ENV: Record<string, string | undefined> = {
 export const MISSING_ENV = Object.entries(REQUIRED_ENV)
   .filter(([, value]) => !value)
   .map(([name]) => name);
+
+/// Where the Mac agent listens, as `host:port` — and the opt-in for every spec that
+/// needs it to be running.
+///
+/// An endpoint rather than a flag, because it is the specific thing those specs
+/// depend on and the only thing that can be checked: credentials do not tell you a
+/// VM is up, and with the agent's machine merely stopped the specs failed on a
+/// connect timeout deep inside the browser, reading as a bug in whatever was being
+/// changed. Unset by default, so a plain run never assumes an agent — the
+/// browser-side equivalent of `#[ignore]` on the Rust e2e tests that need a
+/// container.
+///
+///     REMOTEX_PLAYWRIGHT_AGENT=192.168.64.14:52381 npx playwright test
+export const AGENT_ENDPOINT = process.env.REMOTEX_PLAYWRIGHT_AGENT;
+
+/// Whether something is listening at [`AGENT_ENDPOINT`].
+///
+/// A TCP connect is all that can be asked without the gateway's keys — the agent
+/// refuses everything else until the Noise handshake. `nc`, because this has to
+/// answer synchronously for a `test.skip` at suite level, and this file already
+/// shells out for the pasteboard. A probe that cannot run at all (no `nc`) answers
+/// `true`: the point is to skip a *known* absent agent, not to guess at one.
+function agentIsListening(endpoint: string): boolean {
+  const at = endpoint.lastIndexOf(":");
+  const host = at > 0 ? endpoint.slice(0, at) : endpoint;
+  const port = at > 0 ? endpoint.slice(at + 1) : "";
+  try {
+    execFileSync("nc", ["-z", "-G", "2", "-w", "2", host, port], {
+      stdio: "ignore",
+      timeout: SSH_TIMEOUT_MS,
+    });
+    return true;
+  } catch (cause) {
+    // `nc` exits non-zero for a refused or timed-out connection, which is the
+    // answer. Anything without an exit status is `nc` itself missing, which is not.
+    return !(cause instanceof Error && "status" in cause);
+  }
+}
+
+/// Skip the enclosing spec or suite unless a live Mac agent was asked for, can be
+/// reached, and the environment to drive it is set. One place for all three, so every
+/// such spec skips for the same reasons and says which one applied.
+export function skipUnlessLiveMac(): void {
+  if (!AGENT_ENDPOINT) {
+    test.skip(
+      true,
+      "set REMOTEX_PLAYWRIGHT_AGENT=host:port to run the specs that need a live Mac agent",
+    );
+    return;
+  }
+  if (MISSING_ENV.length > 0) {
+    test.skip(true, `set ${MISSING_ENV.join(", ")} to run the live-Mac specs`);
+    return;
+  }
+  test.skip(
+    !agentIsListening(AGENT_ENDPOINT),
+    `nothing is listening at ${AGENT_ENDPOINT} — start the Mac agent's machine`,
+  );
+}
 
 // The three above are optional in the environment but required by the time a
 // test body runs, which `test.skip(MISSING_ENV.length > 0, …)` guarantees. This

@@ -73,8 +73,16 @@ REMOTEX_PLAYWRIGHT_USERNAME='<username>' \
 REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_TARGET='mac' \
 REMOTEX_PLAYWRIGHT_MAC_SSH='<ssh-user>@<mac-host>' \
+REMOTEX_PLAYWRIGHT_AGENT='<mac-host>:52381' \
 npx playwright test
 ```
+
+`REMOTEX_PLAYWRIGHT_AGENT` is what asks for the specs that need the Mac agent to be
+*running*; without it they skip, so a plain `npx playwright test` never assumes a VM
+is up. It is also checked: nothing listening at that address skips them too, with
+the address in the reason, rather than failing twenty seconds later inside the
+browser and reading as a bug in whatever was being changed. This is the same bargain
+the Rust e2e tests make with `#[ignore]`.
 
 That runs all specs. `npm run test:clipboard` and `npm run test:oversized` run
 one each; their filters are anchored (`'/clipboard\.spec\.ts$'`) because a

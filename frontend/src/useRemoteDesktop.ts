@@ -50,7 +50,12 @@ export type ConnectionStatus =
   | "connected"
   | "reconnecting"
   | "busy" // another browser holds the session slot (claim answered 409)
-  | "takenOver"; // this socket was evicted by a takeover (close code 4001)
+  | "takenOver" // this socket was evicted by a takeover (close code 4001)
+  // The session could not be opened for a reason waiting cannot change, so nothing
+  // is in flight and nothing is scheduled. Its own state because the alternative was
+  // leaving "Connecting…" up over a connection that had stopped being attempted,
+  // with no way out but a reload; the overlay offers Retry on this one.
+  | "failed";
 
 // Which post-login state the attached session is in, driven by the server's
 // `picker`/`connected` status messages: the target picker, or a live desktop.
@@ -136,6 +141,13 @@ function overClipboardLimit(text: string): boolean {
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
+// How many failed attempts in a row are reported as nothing but "Reconnecting…"
+// before the reason is shown as well. Four, because the backoff above reaches its
+// cap at the fourth attempt: about half a minute, which is long enough that a
+// gateway coming up would have come up, and short enough that nobody has gone to
+// read DNS records yet. Matches `SessionStateMachine.attemptsBeforeReporting` in
+// the macOS viewer, which answers the same complaint.
+const ATTEMPTS_BEFORE_REPORTING = 4;
 
 // How long `requestClipboard` waits for the server's answer before giving up.
 // Generous because it is not all local: a VNC or RDP target answers from an
@@ -350,9 +362,21 @@ function paintCursor(
   pointer.style.display = "block";
 }
 
-// POST /api/session (the slot claim); null on a network failure, which the
-// caller treats as retryable.
-async function postClaim(force: boolean): Promise<Response | null> {
+// Why an attempt to open the session did not open it, and whether waiting could
+// change that.
+//
+// `retryable` is the whole distinction: a fetch that never got an answer could get
+// one a second from now, while a 502, an answer that could not be read, or a
+// refused request are facts that stand still. Retrying the second kind is how every
+// failure came to be reported as "Reconnecting…" forever — see `scheduleRetry`.
+type ClaimFailure = { reason: string; retryable: boolean };
+
+// POST /api/session (the slot claim). A rejected fetch is the only retryable
+// outcome, and its own message says what happened far better than "network error"
+// would — including the cases that are not the network at all.
+async function postClaim(
+  force: boolean,
+): Promise<Response | { failure: ClaimFailure }> {
   try {
     return await fetch("/api/session", {
       method: "POST",
@@ -362,8 +386,14 @@ async function postClaim(force: boolean): Promise<Response | null> {
         sessionId: sessionStorage.getItem(SESSION_KEY) ?? undefined,
       }),
     });
-  } catch {
-    return null;
+  } catch (cause) {
+    return {
+      failure: {
+        reason:
+          cause instanceof Error ? cause.message : "the server did not answer",
+        retryable: true,
+      },
+    };
   }
 }
 
@@ -633,26 +663,36 @@ export function useRemoteDesktop(
       syncCursor();
     };
 
-    const scheduleRetry = () => {
+    // `reason` is what went wrong, when the caller knows: shown once the retries
+    // have stopped explaining themselves (see `ATTEMPTS_BEFORE_REPORTING`), and the
+    // retries carry on either way — a laptop that was asleep for ten minutes still
+    // has to recover by itself, which is what retrying forever is for. What was
+    // wrong was never the retrying; it was that "Reconnecting…" was the only thing
+    // anybody was ever told, so a server answering 502 and a slow network looked
+    // identical for as long as you cared to watch.
+    const scheduleRetry = (reason?: string) => {
       if (disposed) {
         return;
       }
       clearDesktop();
       setStatus("reconnecting");
+      if (reason && attempts >= ATTEMPTS_BEFORE_REPORTING) {
+        setConnectError(reason);
+      }
       const delay = Math.min(1000 * 2 ** attempts, MAX_RETRY_DELAY_MS);
       attempts += 1;
       retryTimer = setTimeout(() => void connect(false), delay);
     };
 
     // Claim the session slot. Returns the token, "busy" when another browser
-    // holds the slot (409), "unauthorized" when the login is gone (401), or
-    // null for failures that should retry.
+    // holds the slot (409), "unauthorized" when the login is gone (401), or the
+    // reason it failed — which the caller reports rather than swallowing.
     const claim = async (
       force: boolean,
-    ): Promise<string | "busy" | "unauthorized" | null> => {
+    ): Promise<string | "busy" | "unauthorized" | ClaimFailure> => {
       const res = await postClaim(force);
-      if (!res) {
-        return null;
+      if ("failure" in res) {
+        return res.failure;
       }
       if (res.status === 409) {
         return "busy";
@@ -660,15 +700,41 @@ export function useRemoteDesktop(
       if (res.status === 401) {
         return "unauthorized";
       }
+      // Not retryable, and this is the case that hurt most: a gateway answering
+      // 502 or 500 was reported as a connection problem forever, with the status
+      // code visible nowhere.
       if (!res.ok) {
-        return null;
+        return {
+          reason: `the server answered ${res.status}`,
+          retryable: false,
+        };
       }
       try {
         const { sessionId } = (await res.json()) as { sessionId: string };
         return sessionId;
       } catch {
-        return null;
+        return {
+          reason: "the server's answer could not be read",
+          retryable: false,
+        };
       }
+    };
+
+    // An attempt that did not open a session. One place for it, so the rule about
+    // what is worth waiting for is written once: a failure that could pass is
+    // retried, and one the server has already decided is said and left alone —
+    // retrying that is what made a definite answer look like weather.
+    const failed = (failure: ClaimFailure) => {
+      if (failure.retryable) {
+        scheduleRetry(failure.reason);
+        return;
+      }
+      clearDesktop();
+      setConnectError(failure.reason);
+      // Not left as "connecting"/"reconnecting": nothing is, and saying so is the
+      // whole point — the reason is shown beside a Retry button instead of under a
+      // status that promises an attempt nobody is making.
+      setStatus("failed");
     };
 
     // Claim the session slot, then open the WebSocket with the token.
@@ -682,6 +748,9 @@ export function useRemoteDesktop(
       }
       if (claimed === "busy") {
         clearDesktop();
+        // Whatever the last attempt failed with is not why this one stopped: the slot
+        // is simply somebody else's, which the status says on its own.
+        setConnectError(null);
         setStatus("busy");
         return;
       }
@@ -689,8 +758,8 @@ export function useRemoteDesktop(
         onUnauthorized(); // unmounts this hook's component
         return;
       }
-      if (claimed === null) {
-        scheduleRetry();
+      if (typeof claimed !== "string") {
+        failed(claimed);
         return;
       }
       sessionStorage.setItem(SESSION_KEY, claimed);
@@ -1267,6 +1336,10 @@ export function useRemoteDesktop(
       clearTimeout(retryTimer);
       attempts = 0;
       clearDesktop();
+      // The budget refills and last time's reason goes with it: it belonged to the
+      // attempt the user just replaced, and leaving it up would blame this attempt
+      // for the previous one's failure.
+      setConnectError(null);
       setStatus("connecting");
       if (ws) {
         const old = ws;
@@ -1348,6 +1421,9 @@ export function useRemoteDesktop(
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
   // action after being evicted (takenOver).
   const takeOver = useCallback(() => startRef.current?.(true), []);
+  /// Try again after a failure that stopped the retries. Unforced, unlike
+  /// `takeOver`: nothing here is holding the slot, so there is nobody to evict.
+  const retry = useCallback(() => startRef.current?.(false), []);
 
   // Pick a target from the picker: start its session over the live socket. The
   // server answers `connected` (→ desktop) or `error` (shown on the picker).
@@ -1728,6 +1804,7 @@ export function useRemoteDesktop(
     remoteIsMac,
     setMacKeyOverridesEnabled,
     takeOver,
+    retry,
     connect,
     switchTarget,
     resizeToWindow,

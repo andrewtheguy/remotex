@@ -45,17 +45,23 @@ struct StatusOverlayView: View {
     }
 
     private var hint: String? {
+        // The reason the session is not up, when there is one, outranks the generic
+        // line for the status: "Reconnecting…" is true and unhelpful next to "An SSL
+        // error has occurred…". Set by `SessionEvent.rejected`.
+        if let error = model.session.connectError {
+            return error
+        }
         switch model.session.connectionStatus {
         case .busy:
-            "This desktop is open in another client."
+            return "This desktop is open in another client."
         case .takenOver:
-            "Another client took over this session."
+            return "Another client took over this session."
         case .connected where model.session.screen == .desktop:
             // The gap between `connected` and the first `resize`: the engine is
             // up but has not announced a size yet.
-            "Waiting for the remote desktop…"
+            return "Waiting for the remote desktop…"
         default:
-            nil
+            return nil
         }
     }
 

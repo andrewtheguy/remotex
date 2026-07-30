@@ -38,8 +38,14 @@ export default function Login({
           ? "Invalid credentials"
           : `Login failed (${res.status})`,
       );
-    } catch {
-      setError("Network error");
+    } catch (cause) {
+      // What went wrong, not the word "network": `fetch` rejects for a request that
+      // never left as well as for one that did, and its own message distinguishes
+      // them. "Network error" sent people to check DNS for problems that were not
+      // there.
+      setError(
+        cause instanceof Error ? cause.message : "Could not reach the server",
+      );
     } finally {
       setSubmitting(false);
     }

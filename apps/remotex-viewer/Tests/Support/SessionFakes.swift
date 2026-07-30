@@ -225,6 +225,7 @@ final class RecordingSink: GatewaySessionSink {
             case .clearFramebuffer: "clear"
             case .releaseInput: "release"
             case .failPendingClipboardFetch: "failFetch"
+            case .rejected(let reason): "rejected:\(reason)"
             case .unauthorized: "unauthorized"
             }
         }

@@ -44,7 +44,24 @@ enum LoginOutcome: Sendable, Equatable {
 }
 
 enum GatewayClientError: LocalizedError, Equatable {
-    case unreachable(String)
+    /// URLSession could not complete the request: no such host, nothing listening,
+    /// a certificate this Mac will not trust, App Transport Security declining a
+    /// plain-HTTP address, a timeout.
+    ///
+    /// One case for all of them, and the system's own description is the message.
+    /// `URLError.localizedDescription` already tells the two apart in the user's
+    /// language — "A server with the specified hostname could not be found" versus
+    /// "An SSL error has occurred and a secure connection to the server cannot be
+    /// made" — so a taxonomy of `URLError.Code`s here would only be a second, worse
+    /// copy of it, and one that goes stale as codes are added. The numeric code
+    /// comes along because it is what a search engine answers questions about.
+    case transport(code: Int, reason: String)
+    /// Not the network at all: the request could never be made. Encoding the body,
+    /// mainly — kept apart from [`transport`] because calling it a connection
+    /// problem is what sends somebody to check DNS for a bug in the client.
+    case requestFailed(String)
+    /// The gateway address itself cannot be turned into a URL.
+    case badAddress(String)
     case incompatible(gateway: Int, viewer: Int)
     case unauthorized
     case unexpectedStatus(Int)
@@ -52,8 +69,12 @@ enum GatewayClientError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .unreachable(let reason):
-            "Could not reach the gateway: \(reason)"
+        case .transport(let code, let reason):
+            "\(reason) (\(code))"
+        case .requestFailed(let reason):
+            "The request could not be made: \(reason)"
+        case .badAddress(let reason):
+            "The gateway address could not be used: \(reason)"
         case .incompatible(let gateway, let viewer):
             """
             This gateway speaks protocol \(gateway) and this viewer speaks \
@@ -65,6 +86,24 @@ enum GatewayClientError: LocalizedError, Equatable {
             "The gateway answered unexpectedly (\(status))."
         case .malformedResponse:
             "The gateway's answer could not be read."
+        }
+    }
+
+    /// Whether waiting and trying again could plausibly change the answer.
+    ///
+    /// A switch over *this* enum rather than over `URLError.Code`: five cases the
+    /// compiler checks, and every one of them is a fact that does not change while
+    /// the viewer waits — the address, the gateway's build, the answer it gave. Only
+    /// the transport case can pass, and a transport failure that *does* not pass is
+    /// caught by the attempt budget instead of by a list of codes (see
+    /// [`SessionStateMachine`]).
+    var isRetryable: Bool {
+        switch self {
+        case .transport:
+            true
+        case .requestFailed, .badAddress, .incompatible, .unauthorized,
+            .unexpectedStatus, .malformedResponse:
+            false
         }
     }
 }
@@ -198,7 +237,7 @@ struct GatewayClient: Sendable, SessionGateway {
         var components = try socketComponents()
         components.queryItems = [URLQueryItem(name: "session", value: sessionToken)]
         guard let url = components.url else {
-            throw GatewayClientError.unreachable("could not build the session URL")
+            throw GatewayClientError.badAddress("could not build the session URL")
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
@@ -238,7 +277,7 @@ struct GatewayClient: Sendable, SessionGateway {
 
     private func socketComponents() throws -> URLComponents {
         guard var components = URLComponents(url: gateway.url, resolvingAgainstBaseURL: false) else {
-            throw GatewayClientError.unreachable("could not read the gateway address")
+            throw GatewayClientError.badAddress("could not read the gateway address")
         }
         // ATS treats ws/wss exactly as it treats http/https, so a plain-HTTP
         // gateway needs NSAllowsArbitraryLoads either way.
@@ -283,8 +322,18 @@ struct GatewayClient: Sendable, SessionGateway {
             return (data, http.statusCode)
         } catch let error as GatewayClientError {
             throw error
+        } catch let error as URLError {
+            // Only URLSession's own failures are about the connection, and its own
+            // description of one is better than anything this could write.
+            throw GatewayClientError.transport(
+                code: error.errorCode,
+                reason: error.localizedDescription
+            )
         } catch {
-            throw GatewayClientError.unreachable(error.localizedDescription)
+            // Encoding the body, or anything else that never reached the network.
+            // Reported as itself: calling this unreachable is what sent people to
+            // check DNS for a bug in the request.
+            throw GatewayClientError.requestFailed(error.localizedDescription)
         }
     }
 

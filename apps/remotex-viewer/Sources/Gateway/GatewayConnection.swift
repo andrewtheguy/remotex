@@ -26,6 +26,11 @@ enum SessionEvent: Sendable {
     /// The login is gone (the gateway's auth sessions live in memory, so its
     /// restart does this). Back to the login screen; retrying cannot help.
     case unauthorized
+    /// The session could not be opened, for a reason that will not change by
+    /// waiting: a refused TLS connection, a gateway of another protocol version, an
+    /// answer that could not be read. Shown to the user, because the alternative is
+    /// what this replaced — "Reconnecting…" forever, with the reason in the log.
+    case rejected(reason: String)
 }
 
 extension SessionStateMachine.Action {
@@ -38,6 +43,7 @@ extension SessionStateMachine.Action {
         case .releaseInput: .releaseInput
         case .failPendingClipboardFetch: .failPendingClipboardFetch
         case .toLogin: .unauthorized
+        case .report(let reason): .rejected(reason: reason)
         case .claim, .openSocket, .scheduleRetry: nil
         }
     }
@@ -199,6 +205,20 @@ actor GatewayConnection {
         }
     }
 
+    /// Which failure event a caught error is.
+    ///
+    /// No inspection of `URLError` codes: `GatewayClientError` has already sorted the
+    /// one transport case from the several that are facts rather than weather (see
+    /// its `isRetryable`), and anything that is not a `GatewayClientError` at all is
+    /// given the benefit of the doubt and retried.
+    private func event(for error: Error) -> SessionStateMachine.Event {
+        let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        if let client = error as? GatewayClientError, !client.isRetryable {
+            return .claimRejected(reason: reason)
+        }
+        return .claimFailed(reason: reason)
+    }
+
     /// The connection's own half of a transition. The sink's half has already been
     /// delivered by `handle`.
     private func perform(_ action: SessionStateMachine.Action) async {
@@ -209,7 +229,8 @@ actor GatewayConnection {
             await openSocket(token: token)
         case .scheduleRetry(let delay):
             scheduleRetry(after: delay)
-        case .clearFramebuffer, .releaseInput, .failPendingClipboardFetch, .toLogin:
+        case .clearFramebuffer, .releaseInput, .failPendingClipboardFetch, .toLogin,
+            .report:
             // `sinkEvent` is what routes these, and `handle` filters them out
             // before calling this.
             break
@@ -247,7 +268,7 @@ actor GatewayConnection {
                 return
             }
             log.warning("claim failed: \(error.localizedDescription, privacy: .public)")
-            await handle(.claimFailed)
+            await handle(event(for: error))
             return
         }
         guard !Task.isCancelled else {
@@ -284,7 +305,7 @@ actor GatewayConnection {
             opened = try await gateway.openSocket(sessionToken: token)
         } catch {
             log.warning("socket open failed: \(error.localizedDescription, privacy: .public)")
-            await handle(.claimFailed)
+            await handle(event(for: error))
             return
         }
         guard running else {

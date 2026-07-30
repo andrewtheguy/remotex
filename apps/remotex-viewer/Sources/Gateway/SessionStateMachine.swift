@@ -25,6 +25,16 @@ struct SessionStateMachine {
     /// in src/ws.rs).
     static let evictedCloseCode = 4001
 
+    /// How many transport failures in a row are reported as nothing but
+    /// "reconnecting" before the reason is put in front of the user as well.
+    ///
+    /// Four, because [`ReconnectPolicy`] reaches its 15-second cap at the fourth
+    /// attempt: by then about half a minute has passed, which is long enough that a
+    /// gateway coming up would have come up, and short enough that nobody has gone to
+    /// read DNS records yet. The budget refills on anything that proves the link
+    /// works — a control message — and on a user-driven `start`.
+    static let attemptsBeforeReporting = 4
+
     private(set) var status: ViewerConnectionStatus = .connecting
     /// Consecutive failed attempts, driving the backoff. See `noteAttached` for
     /// why a successful *open* does not reset this.
@@ -41,7 +51,16 @@ struct SessionStateMachine {
         /// Any endpoint answered 401. The gateway's auth sessions are in memory,
         /// so a restart produces this mid-session.
         case claimUnauthorized
-        case claimFailed
+        /// The attempt failed at the transport, which could pass: nothing answered
+        /// yet, the route is down, it timed out. Retried — but see
+        /// [`attemptsBeforeReporting`], because "could pass" is not "will".
+        case claimFailed(reason: String)
+        /// The attempt failed for a reason that will not pass — the address, the
+        /// gateway's build, an answer that could not be read. Reported as itself and
+        /// never retried: waiting changes none of those, so retrying is how a
+        /// definite failure became "Reconnecting…" forever with the reason nowhere
+        /// the user could see it.
+        case claimRejected(reason: String)
         case socketOpened
         /// Any control message, including one whose type this build does not know.
         case controlReceived
@@ -53,6 +72,9 @@ struct SessionStateMachine {
         case claim(force: Bool)
         case openSocket(token: String)
         case scheduleRetry(after: Duration)
+        /// Say why the session did not open, where the user is looking. No retry
+        /// follows: this is the end of the attempt, not a step in one.
+        case report(reason: String)
         /// Show no stale pixels across an interruption. Cheap to obey: the
         /// gateway always repaints in full on (re)attach.
         case clearFramebuffer
@@ -82,9 +104,26 @@ struct SessionStateMachine {
         case .claimUnauthorized:
             return [.releaseInput, .toLogin]
 
-        case .claimFailed:
+        case .claimFailed(let reason):
             status = .reconnecting
-            return [.scheduleRetry(after: takeRetryDelay())]
+            // The retries carry on past the budget; what changes is that the user is
+            // told what has been going wrong. Retrying forever is worth keeping — a
+            // laptop that was asleep for ten minutes recovers by itself — and it was
+            // never the complaint. The complaint was that "Reconnecting…" was the only
+            // thing anybody was ever told, whatever the reason, so a definite failure
+            // and a slow network looked identical for as long as you cared to watch.
+            //
+            // A budget rather than a list of error codes decides when to say it,
+            // because at the first attempt those two *are* identical, and by the
+            // fourth they are not.
+            var actions: [Action] = attempts < Self.attemptsBeforeReporting
+                ? []
+                : [.report(reason: reason)]
+            actions.append(.scheduleRetry(after: takeRetryDelay()))
+            return actions
+
+        case .claimRejected(let reason):
+            return [.report(reason: reason)]
 
         case .socketOpened:
             status = .connected

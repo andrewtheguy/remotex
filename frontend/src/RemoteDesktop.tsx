@@ -13,6 +13,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   reconnecting: "Reconnecting…",
   busy: "Session in use",
   takenOver: "Session taken over",
+  failed: "Cannot open the session",
 };
 
 export default function RemoteDesktop({
@@ -48,6 +49,7 @@ export default function RemoteDesktop({
     remoteIsMac,
     setMacKeyOverridesEnabled,
     takeOver,
+    retry,
     connect,
     switchTarget,
     resizeToWindow,
@@ -139,6 +141,10 @@ export default function RemoteDesktop({
           <span className={`status status-${status}`}>
             {STATUS_LABEL[status]}
           </span>
+          {/* Why the session is not up, when the reason is known. "Reconnecting…"
+              is true and unhelpful next to "the server answered 502", and the
+              picker is not on screen to carry it while the overlay is. */}
+          {connectError && <span className="status-hint">{connectError}</span>}
           {status === "connected" && mode === "desktop" && !size && (
             <span className="status-hint">Waiting for the remote desktop…</span>
           )}
@@ -155,6 +161,11 @@ export default function RemoteDesktop({
                 Take over
               </button>
             </>
+          )}
+          {status === "failed" && (
+            <button type="button" className="status-action" onClick={retry}>
+              Retry
+            </button>
           )}
           {status === "takenOver" && (
             <>
