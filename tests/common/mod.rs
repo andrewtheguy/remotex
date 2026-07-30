@@ -18,12 +18,59 @@ pub const TEST_USER: &str = "admin";
 #[allow(dead_code)]
 pub const TEST_PASSWORD: &str = "hunter2";
 
-/// The parsed `site_passwd` for [`TEST_USER`]/[`TEST_PASSWORD`], for building
-/// an `AppConfig` directly. bcrypt's minimum cost keeps logins fast in tests.
+/// A web login for [`TEST_USER`]/[`TEST_PASSWORD`], for building an `AppConfig`
+/// directly. bcrypt's minimum cost keeps logins fast in tests.
+///
+/// The login rather than a token because these tests are about the gateway a
+/// browser reaches; the embedded one has its own suite
+/// (`tests/embedded_gateway_e2e.rs`).
 #[allow(dead_code)]
-pub fn test_site_passwd() -> remotex::auth::SitePasswd {
+pub fn test_auth() -> remotex::auth::GatewayAuth {
     let encoded = remotex::auth::generate(TEST_USER, TEST_PASSWORD, 4).unwrap();
-    remotex::auth::SitePasswd::parse(&encoded).unwrap()
+    remotex::auth::GatewayAuth::Login(remotex::auth::SitePasswd::parse(&encoded).unwrap())
+}
+
+/// A directory that removes itself, for a test that needs somewhere to put a
+/// config file.
+///
+/// Hand-rolled rather than a `tempfile` dependency, the same way
+/// `rxa-agent`'s `config::scratch::TempDir` is — and keyed on a counter as well as
+/// the pid, because one test binary makes several of these and two instance
+/// directories that turned out to be the same directory would quietly share a
+/// config.
+#[allow(dead_code)]
+pub struct ScratchDir(std::path::PathBuf);
+
+#[allow(dead_code)]
+impl ScratchDir {
+    pub fn new(tag: &str) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "remotex-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Write `contents` to `name` inside the directory.
+    pub fn write(&self, name: &str, contents: &str) -> std::path::PathBuf {
+        let path = self.0.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Send a raw HTTP/1.1 request (the tests don't pull in an HTTP client) and
