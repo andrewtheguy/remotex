@@ -56,10 +56,10 @@ const SCALE_ATTEMPTS: u32 = 3;
 
 /// Deadline for a freshly created display to publish a mode at all.
 ///
-/// Longer than a settle, because it waits on something that has not started yet
-/// rather than something in flight: nothing is published until the main thread
-/// reaches its run loop, which is the caller's next move after
-/// [`VirtualDisplay::engage_hidpi`] is spawned.
+/// Longer than a settle, because it waits on something that may not have started
+/// yet: a `CGVirtualDisplay` reconfigure completes through the main queue, and
+/// however promptly that queue is being served, the display is created and measured
+/// from another thread entirely.
 const MODE_TIMEOUT_MS: u64 = 5000;
 
 /// A live virtual display. Dropping this removes it from the desktop.
@@ -83,9 +83,11 @@ pub struct VirtualDisplay {
 struct Handle(Retained<AnyObject>);
 
 // SAFETY: `CGVirtualDisplay` is a plain Objective-C object whose methods talk to
-// the WindowServer; nothing in it is tied to a thread the way AppKit's views
-// are. The agent creates it on the main thread at startup and thereafter only
-// holds it — the one call that crosses a thread is the release on drop.
+// the WindowServer; nothing in it is tied to a thread the way AppKit's views are.
+// The agent creates it on its startup worker, hands it to the session behind a
+// mutex, and thereafter only reconfigures it from blocking tasks — never from the
+// main thread, which is AppKit's and which a reconfigure needs free to complete
+// (see [`VirtualDisplay::engage_hidpi`]).
 unsafe impl Send for Handle {}
 
 impl VirtualDisplay {

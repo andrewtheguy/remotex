@@ -5,6 +5,11 @@
 //! Recording requires relaunch. The cursor timer runs in common run-loop modes
 //! so menu tracking does not pause updates. Quit stays quit: the LaunchAgent has
 //! no `KeepAlive`, so nothing restarts the process until the next login.
+//!
+//! Quit is also reachable *before* any of that: [`Starting`] puts the item up with a
+//! loading icon and a working Quit, and pumps AppKit while startup runs on another
+//! thread, so a launch that wedges on a permission prompt or a hung `launchctl` can
+//! still be ended from the menu bar.
 
 use std::cell::{Cell, OnceCell};
 use std::path::PathBuf;
@@ -19,10 +24,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValue, NSControlStateValueOff,
-    NSControlStateValueOn, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength, NSWorkspace,
+    NSControlStateValueOn, NSEventMask, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
 };
-use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSURL};
+use objc2_foundation::{
+    NSDate, NSDefaultRunLoopMode, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSURL,
+};
 
 use crate::{capture, config, cursor, input, loginitem, panels, pasteboard, settings, state};
 
@@ -43,12 +50,17 @@ const PERMISSION_EVERY: u32 = 10;
 const ICON_BLOCKED: &str = "exclamationmark.triangle.fill";
 const ICON_IDLE: &str = "display";
 const ICON_CONNECTED: &str = "eye.fill";
+/// Startup, before anything is known about health. Its own icon rather than
+/// borrowing the warning triangle, which is a claim — that something needs
+/// attention — that nothing has checked yet.
+const ICON_STARTING: &str = "ellipsis.circle";
 
 /// If SF Symbols ever fails us, the item still has to be clickable — an empty
 /// button is an invisible one, and then Quit is unreachable again.
 const ICON_FALLBACK_BLOCKED: &str = "rxa!";
 const ICON_FALLBACK_IDLE: &str = "rxa";
 const ICON_FALLBACK_CONNECTED: &str = "rxa*";
+const ICON_FALLBACK_STARTING: &str = "rxa…";
 
 /// Deep links into the two Privacy panes. There is no API to grant these, and
 /// finding them by hand is four levels down a settings tree.
@@ -115,6 +127,8 @@ impl Permissions {
 /// distinguish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Health {
+    /// Still starting: nothing has been read, bound, granted or refused yet.
+    Starting,
     /// Startup failed or a permission is missing: the agent cannot serve.
     Blocked,
     Connected,
@@ -593,19 +607,70 @@ impl Starting {
         let item =
             NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
         item.setVisible(true);
-        set_icon(&item, Health::Blocked, mtm);
+        set_icon(&item, Health::Starting, mtm);
 
         let menu =
             NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("remotex-agent"));
         menu.setAutoenablesItems(false);
         menu.addItem(&info_item("Starting remotex-agent…", mtm));
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        // Reachable from the first instant, which is the point of this menu: a launch
+        // that wedges before `run` would otherwise leave an icon that does nothing and
+        // a process only `launchctl` or Activity Monitor can end.
+        menu.addItem(&quit_item(mtm));
         item.setMenu(Some(&menu));
-        // `run` comes only after startup succeeds or settles into a degraded
-        // state. Finish the AppKit launch now so the status item is registered
-        // with Control Center before any of that work begins.
+        // Finish the AppKit launch now, so the status item is registered with Control
+        // Center before any startup work begins and so `pump_until` — which the caller
+        // enters immediately — has an application to dequeue events for. `run` itself
+        // still comes only once startup has succeeded or settled into a degraded state.
         app.finishLaunching();
 
         Self { item }
+    }
+
+    /// Pump AppKit until `startup` answers, and hand back what it said.
+    ///
+    /// The whole reason the status item goes up before startup begins is so there is
+    /// a way out of a launch that is stuck — an unanswered Screen Recording prompt, a
+    /// `launchctl` that will not return, a display the WindowServer is thinking
+    /// about. That only works if AppKit is *running*: an item whose run loop has not
+    /// started is on screen and unclickable, which is the worst of both, so the menu
+    /// it shows says "Starting…" over a Quit that works.
+    ///
+    /// `nextEventMatchingMask:` rather than `NSRunLoop::runMode:` — running the run
+    /// loop turns its input sources, but it is AppKit dequeuing events that opens a
+    /// menu. A click on the item starts menu tracking in its own nested loop from
+    /// inside `sendEvent:`, so Quit is reached without this loop needing to know
+    /// anything about it.
+    ///
+    /// The date is short rather than distant so the channel is checked promptly once
+    /// startup finishes; a launch that goes well spends a fraction of a second here.
+    pub fn pump_until<T>(&self, startup: &std::sync::mpsc::Receiver<T>) -> T {
+        let mtm = MainThreadMarker::new().expect("the startup pump runs on the main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        loop {
+            match startup.try_recv() {
+                Ok(outcome) => return outcome,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                // The worker is gone without an answer, which is a panic in it. There
+                // is nothing to serve and nothing to show; the panic already said why.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    std::process::exit(1);
+                }
+            }
+            let until = NSDate::dateWithTimeIntervalSinceNow(TICK);
+            let event = unsafe {
+                app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                    NSEventMask::Any,
+                    Some(&until),
+                    NSDefaultRunLoopMode,
+                    true,
+                )
+            };
+            if let Some(event) = event {
+                app.sendEvent(&event);
+            }
+        }
     }
 
     /// Keep the status item alive after a handled startup failure.
@@ -620,16 +685,7 @@ impl Starting {
         detail.setToolTip(Some(&NSString::from_str(body)));
         menu.addItem(&detail);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let quit = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str("Quit remotex-agent"),
-                Some(sel!(terminate:)),
-                &NSString::from_str(""),
-            )
-        };
-        unsafe { quit.setTarget(Some(&*app)) };
-        menu.addItem(&quit);
+        menu.addItem(&quit_item(mtm));
         self.item.setMenu(Some(&menu));
 
         panels::startup_failure(mtm, title, body);
@@ -731,6 +787,25 @@ pub fn run(
     std::process::exit(0);
 }
 
+/// "Quit remotex-agent", targeting the application itself.
+///
+/// Shared by the startup menu, the degraded failure menu and the ordinary one,
+/// because it is the one item that has to be there in every state this app can be
+/// in — including the states where nothing else in the menu means anything yet.
+fn quit_item(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let app = NSApplication::sharedApplication(mtm);
+    let quit = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Quit remotex-agent"),
+            Some(sel!(terminate:)),
+            &NSString::from_str(""),
+        )
+    };
+    unsafe { quit.setTarget(Some(&*app)) };
+    quit
+}
+
 fn set_icon(item: &NSStatusItem, health: Health, mtm: MainThreadMarker) {
     let Some(button) = item.button(mtm) else {
         return;
@@ -750,6 +825,11 @@ fn set_icon(item: &NSStatusItem, health: Health, mtm: MainThreadMarker) {
             "remotex agent, connected",
         ),
         Health::Idle => (ICON_IDLE, ICON_FALLBACK_IDLE, "remotex agent"),
+        Health::Starting => (
+            ICON_STARTING,
+            ICON_FALLBACK_STARTING,
+            "remotex agent, starting",
+        ),
     };
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(symbol),
@@ -868,7 +948,7 @@ mod tests {
     // names here rather than discovering it on a user's menu bar.
     #[test]
     fn every_status_icon_exists_in_sf_symbols() {
-        let looked_up: Vec<_> = [ICON_BLOCKED, ICON_IDLE, ICON_CONNECTED]
+        let looked_up: Vec<_> = [ICON_BLOCKED, ICON_IDLE, ICON_CONNECTED, ICON_STARTING]
             .into_iter()
             .map(|symbol| {
                 let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
