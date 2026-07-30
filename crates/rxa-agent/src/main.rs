@@ -114,6 +114,7 @@ fn main() -> anyhow::Result<()> {
             "remotex-agent could not start",
             &body,
             e.into(),
+            None,
         ));
     }
 
@@ -130,8 +131,22 @@ fn main() -> anyhow::Result<()> {
     let ready = match outcome {
         // The registered job is running this bundle now; this copy is done.
         Startup::StoodDown => return Ok(()),
-        Startup::Failed { title, body, error } => {
-            return Err(startup_error(starting, &title, &body, error));
+        Startup::Failed {
+            title,
+            body,
+            error,
+            settings,
+        } => {
+            // The menu that is left behind can offer Settings when there is a config
+            // to edit — which is the difference between "that port is in use" being a
+            // dead end and being a thing you fix from the menu bar.
+            let degraded = settings.map(|settings| menubar::Degraded {
+                settings,
+                state,
+                tracker,
+                log_path,
+            });
+            return Err(startup_error(starting, &title, &body, error, degraded));
         }
         Startup::Ready(ready) => ready,
     };
@@ -177,6 +192,9 @@ enum Startup {
         title: String,
         body: String,
         error: anyhow::Error,
+        /// The config, once there is one to edit. What makes the degraded menu's
+        /// **Settings…** work — see [`menubar::Degraded`].
+        settings: Option<Arc<settings::Settings>>,
     },
     /// This copy handed over to the registered job and has nothing left to do.
     StoodDown,
@@ -197,10 +215,14 @@ fn start_up(
 ) -> Startup {
     macro_rules! fail {
         ($title:expr, $body:expr, $error:expr) => {
+            fail!($title, $body, $error, None)
+        };
+        ($title:expr, $body:expr, $error:expr, $settings:expr) => {
             return Startup::Failed {
                 title: ($title).to_owned(),
                 body: $body,
                 error: $error,
+                settings: $settings,
             }
         };
     }
@@ -266,6 +288,11 @@ fn start_up(
         }
     };
 
+    // Built as soon as the file parses, before anything that can fail with it in
+    // hand: a bind that finds the port taken is the failure whose fix is a *setting*,
+    // and the degraded menu can only offer Settings if this exists by then.
+    let settings = settings::Settings::new(config.clone(), path.clone());
+
     info!(
         "remotex-agent {} — rxa/{}, config {}",
         env!("CARGO_PKG_VERSION"),
@@ -297,17 +324,29 @@ fn start_up(
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             let body = format!(
                 "{} is already in use by another process.\n\nIf that process is another copy \
-                 of remotex-agent, its icon is in the menu bar at the top of the screen.",
+                 of remotex-agent, its icon is in the menu bar at the top of the screen. \
+                 Otherwise, pick another port in Settings — it is in this agent's menu.",
                 config.listen
             );
-            fail!("remotex-agent cannot listen", body, e.into());
+            fail!(
+                "remotex-agent cannot listen",
+                body,
+                e.into(),
+                Some(Arc::clone(&settings))
+            );
         }
         Err(e) => {
             let body = format!(
-                "{} could not be bound: {e}\n\nChange the listen address in the config file.",
+                "{} could not be bound: {e}\n\nChange the listen address in Settings, in \
+                 this agent's menu.",
                 config.listen
             );
-            fail!("remotex-agent cannot listen", body, e.into());
+            fail!(
+                "remotex-agent cannot listen",
+                body,
+                e.into(),
+                Some(Arc::clone(&settings))
+            );
         }
     };
     info!("agent: listening on {}", config.listen);
@@ -315,7 +354,12 @@ fn start_up(
     // reactor.
     if let Err(e) = listener.set_nonblocking(true) {
         let body = format!("{} could not be made non-blocking: {e}", config.listen);
-        fail!("remotex-agent cannot listen", body, e.into());
+        fail!(
+                "remotex-agent cannot listen",
+                body,
+                e.into(),
+                Some(Arc::clone(&settings))
+            );
     }
 
     // Keep the pre-request Screen Recording state: granting it in the system
@@ -324,9 +368,6 @@ fn start_up(
     // for a permission effective in this launch.
     let screen_recording_at_launch = report_permissions();
 
-    // The GUI's view of the config: what this process is serving, and what the
-    // file says after any edits made from the menu (see `crate::settings`).
-    let settings = settings::Settings::new(config.clone(), path);
 
     // The socket runs on its own thread so the main thread stays free for
     // AppKit, which owns the menu bar and the pointer shape both.
@@ -428,7 +469,12 @@ fn start_up(
         });
     if let Err(e) = network {
         let body = format!("Could not start the network worker: {e}");
-        fail!("remotex-agent could not start", body, e.into());
+        fail!(
+            "remotex-agent could not start",
+            body,
+            e.into(),
+            Some(Arc::clone(&settings))
+        );
     }
 
     Startup::Ready(Ready {
@@ -482,10 +528,11 @@ fn startup_error(
     title: &str,
     body: &str,
     error: anyhow::Error,
+    degraded: Option<menubar::Degraded>,
 ) -> anyhow::Error {
     warn!("{title}: {body}");
     if let Some(starting) = starting {
-        starting.fail(title, body);
+        starting.fail(title, body, degraded);
     }
     error
 }

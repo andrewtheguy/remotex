@@ -594,6 +594,22 @@ pub struct Starting {
     item: Retained<NSStatusItem>,
 }
 
+/// What a handled startup failure still has to work with.
+///
+/// Carried so the degraded menu can offer **Settings…**, which is the whole point of
+/// having one: the failure a user actually meets is "that port is already in use",
+/// and the port is a setting. Without this the menu said what was wrong, offered
+/// Quit, and left editing `config.toml` by hand as the only way out.
+///
+/// `None` where there is nothing to edit *with* — a config file that would not parse
+/// has no settings to show, and the dialog is built from a parsed one.
+pub struct Degraded {
+    pub settings: Arc<settings::Settings>,
+    pub state: Arc<state::AgentState>,
+    pub tracker: Arc<cursor::Tracker>,
+    pub log_path: Option<PathBuf>,
+}
+
 impl Starting {
     pub fn new() -> Self {
         let mtm = MainThreadMarker::new().expect("the menu bar must start on the main thread");
@@ -674,9 +690,15 @@ impl Starting {
     }
 
     /// Keep the status item alive after a handled startup failure.
-    pub fn fail(self, title: &str, body: &str) -> ! {
+    pub fn fail(self, title: &str, body: &str, degraded: Option<Degraded>) -> ! {
         let mtm = MainThreadMarker::new().expect("startup failures run on the main thread");
         let app = NSApplication::sharedApplication(mtm);
+        // The icon has to stop saying "starting", because this is where it stopped:
+        // the loading ellipsis over an alert about a port already taken reads as work
+        // still in progress, and nothing else will ever repaint it — `run`, which is
+        // what installs the controller that keeps the icon honest, is never reached
+        // from here.
+        set_icon(&self.item, Health::Blocked, mtm);
         let menu =
             NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("remotex-agent"));
         menu.setAutoenablesItems(false);
@@ -685,11 +707,42 @@ impl Starting {
         detail.setToolTip(Some(&NSString::from_str(body)));
         menu.addItem(&detail);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
+        // Settings first, because on the failure people actually hit — a port already
+        // in use — it is the way out, and Quit is only the way to stop looking at the
+        // problem. Held in `controller` for as long as this menu can be opened: a
+        // menu item does not retain its target, and `app.run()` below never returns,
+        // so the binding outlives every click there can be.
+        let controller = degraded.map(|degraded| {
+            let controller = Controller::new(
+                mtm,
+                Ivars {
+                    state: degraded.state,
+                    tracker: degraded.tracker,
+                    settings: degraded.settings,
+                    log_path: degraded.log_path,
+                    status_item: OnceCell::new(),
+                    icon: Cell::new(Some(Health::Blocked)),
+                    ticks: Cell::new(0),
+                    permissions: Cell::new(Permissions::read(false)),
+                    // Nothing was created: startup stopped before it could have been,
+                    // or the display is exactly what stopped it.
+                    owned: None,
+                },
+            );
+            menu.addItem(&controller.action("Settings…", sel!(openSettings:), mtm));
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            controller
+        });
         menu.addItem(&quit_item(mtm));
+        // Deliberately no delegate: `rebuild` would draw the ordinary menu, whose
+        // permission and session lines describe a process that never got that far.
         self.item.setMenu(Some(&menu));
 
         panels::startup_failure(mtm, title, body);
         app.run();
+        // Reached only if AppKit's loop is ever left. `controller` is alive until
+        // here, which is what the binding is for.
+        drop(controller);
         std::process::exit(0);
     }
 }
