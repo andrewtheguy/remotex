@@ -243,7 +243,11 @@ mod tests {
         // interleave reads and writes, exercising reassembly under back-pressure.
         let (mut a, mut b) = tokio::io::duplex(8 * 1024);
         let server = tokio::spawn(async move {
-            let t = noise::respond(&mut b, &agent, &gateway_public).await.unwrap();
+            let (t, ()) = noise::respond(&mut b, &agent, |k| {
+                (*k == gateway_public).then_some(())
+            })
+            .await
+            .unwrap();
             (b, t)
         });
         let client_t = noise::initiate(&mut a, &gateway, &agent_public).await.unwrap();

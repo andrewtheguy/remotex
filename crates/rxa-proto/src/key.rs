@@ -19,7 +19,7 @@
 //!
 //! | | private | public |
 //! |---|---|---|
-//! | gateway | `rxgs` — `[rxa].private_key` | `rxgp` — the agent's `gateway_public_key` |
+//! | gateway | `rxgs` — `[rxa].private_key` | `rxgp` — a line in the agent's `authorized_gateways` |
 //! | agent | `rxas` — the agent's `private_key` | `rxap` — a target's `agent_public_key` |
 //!
 //! A gateway never dials a gateway and an agent never dials an agent, so a key
@@ -156,6 +156,17 @@ pub fn public_of(private: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
 pub fn public_text_of(role: Role, private_text: &str) -> Result<String, KeyError> {
     let private = parse_private(role, private_text)?;
     Ok(encode(role.public_prefix(), &public_of(&private)))
+}
+
+/// A public key already in hand, in the form a config file or an authorized list
+/// holds it.
+///
+/// Infallible, unlike [`public_text_of`]: there is nothing to parse. It exists for
+/// the key the *peer* presented — the agent learns a dialing gateway's key from
+/// the handshake now, and a key that is not on its list has to be reported in the
+/// form someone can paste straight into that list.
+pub fn public_text(role: Role, key: &[u8; KEY_LEN]) -> String {
+    encode(role.public_prefix(), key)
 }
 
 /// Parse `role`'s private key.

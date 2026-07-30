@@ -17,6 +17,7 @@ compile_error!(
      `cargo build -p rxa-agent`."
 );
 
+mod authorized;
 mod capture;
 mod config;
 mod cursor;
@@ -302,10 +303,48 @@ fn start_up(
         }
     };
 
-    // Built as soon as the file parses, before anything that can fail with it in
+    // Read here rather than at the handshake, and then never again this run: which
+    // gateways are allowed in is settled for the process's lifetime, exactly like
+    // the config, and for the same reason — the alternative is a list that changes
+    // under a live session. A save re-execs (see [`crate::settings`]).
+    let authorized_path = authorized::path_beside(&path);
+    let authorized = match authorized::Authorized::load(&authorized_path) {
+        Ok(authorized) => Arc::new(authorized),
+        Err(e) => {
+            // A hand-edited list nobody can parse is the same shape of failure as a
+            // broken config, and it takes the same answer: stay up so the menu can
+            // fix it, rather than restarting into it forever. Unlike a broken
+            // config, though, this one *has* a settings dialog to be fixed from —
+            // the config parsed, and the list is edited in that dialog — so the
+            // degraded menu is given one, standing in an empty list for the file it
+            // could not read. Which is also why the body says the editor will open
+            // blank: the broken lines are still on disk, and saving replaces them.
+            let body = format!(
+                "{e:#}\n\nFix it in Settings > Authorized gateways > Manage…, which \
+                 opens empty — the file's current contents are not shown because \
+                 they could not be read. Or edit {} by hand and reopen \
+                 remotex-agent.",
+                authorized_path.display()
+            );
+            let settings = settings::Settings::new(
+                config.clone(),
+                path.clone(),
+                authorized::Authorized::default(),
+                authorized_path,
+            );
+            fail!("remotex-agent could not start", body, e, Some(settings));
+        }
+    };
+
+    // Built as soon as both files parse, before anything that can fail with them in
     // hand: a bind that finds the port taken is the failure whose fix is a *setting*,
     // and the degraded menu can only offer Settings if this exists by then.
-    let settings = settings::Settings::new(config.clone(), path.clone());
+    let settings = settings::Settings::new(
+        config.clone(),
+        path.clone(),
+        (*authorized).clone(),
+        authorized_path,
+    );
 
     info!(
         "remotex-agent {} — rxa/{}, config {}",
@@ -315,7 +354,7 @@ fn start_up(
     );
     if created {
         info!(
-            "config: created {} with a fresh identity, unpaired",
+            "config: created {} with a fresh identity, no gateways authorized yet",
             path.display()
         );
     }
@@ -389,14 +428,27 @@ fn start_up(
     let serve_state = Arc::clone(&state);
     let keys = Keys {
         private: config.private_key_bytes(),
-        gateway_public: config.gateway_public_key_bytes(),
+        authorized: Arc::clone(&authorized),
     };
-    if keys.gateway_public.is_none() {
+    if keys.authorized.is_empty() {
         warn!(
-            "no gateway_public_key: this Mac is unpaired and will refuse every \
-             connection. Its public key is {} — paste that into the gateway's \
-             agent_public_key, and the gateway's own into Settings.",
+            "no authorized gateways: this Mac will refuse every connection. Its \
+             public key is {} — paste that into the gateway's agent_public_key, and \
+             the gateway's own key into Settings > Authorized gateways.",
             config.public_key()
+        );
+    } else {
+        // Named at startup, because this is the one place the list is read and the
+        // log is where somebody goes when a gateway they expected to work does not.
+        info!(
+            "agent: {} authorized gateway(s): {}",
+            keys.authorized.len(),
+            keys.authorized
+                .entries()
+                .iter()
+                .map(|entry| entry.name().unwrap_or("(unnamed)").to_owned())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -681,16 +733,28 @@ fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
 /// connect-and-hello 10 seconds, so nothing legitimate is near this.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// This Mac's identity and the one gateway it answers.
+/// This Mac's identity and the gateways it answers.
 ///
-/// `gateway_public` is `None` while the agent is unpaired — a first launch, or a
-/// config whose `gateway_public_key` was cleared. Then it still listens, so the
-/// port is visibly answering and the menu bar is there to be paired from, but no
-/// connection gets as far as a handshake.
-#[derive(Clone, Copy)]
+/// `authorized` is empty on a first launch, and empty is what a Mac nobody has
+/// authorized anything on has: it still listens, so the port is visibly answering
+/// and the menu bar is there to add a key from, but no connection gets past the
+/// handshake. `Arc` rather than `Copy`, because the list is a `Vec` shared with
+/// every concurrent handshake and never changes within a run — a change is a
+/// restart (see [`crate::settings`]).
+#[derive(Clone)]
 struct Keys {
     private: [u8; 32],
-    gateway_public: Option<[u8; 32]>,
+    authorized: Arc<authorized::Authorized>,
+}
+
+/// A connection as a log line names it: the authorized list's name for that
+/// gateway with its address beside it, or the address alone for an entry with no
+/// comment.
+fn who(authenticated: &session::Authenticated, peer: SocketAddr) -> String {
+    match authenticated.gateway() {
+        Some(name) => format!("{name} ({peer})"),
+        None => peer.to_string(),
+    }
 }
 
 /// Accept gateway connections. Handshakes and claims run concurrently, and only
@@ -754,16 +818,19 @@ async fn serve(
                         });
                         continue;
                     }
-                    state::Decision::Take => info!("agent: gateway connected from {peer}"),
+                    // Named off the authorized list where the entry carried one,
+                    // because "which gateway is this" is now a real question.
+                    state::Decision::Take => info!("agent: {} connected", who(&authenticated, peer)),
                     // Not a second client, so not an eviction worth alarming
                     // anyone about: this is a link that dropped, a target
                     // switched, or a browser taken over on the gateway.
                     state::Decision::Reclaim => info!(
-                        "agent: gateway connected from {peer} — the same session reconnecting"
+                        "agent: {} connected — the same session reconnecting",
+                        who(&authenticated, peer)
                     ),
                     state::Decision::TakeOver => info!(
-                        "agent: gateway connected from {peer} — taking the session over, \
-                         as its client asked"
+                        "agent: {} connected — taking the session over, as its client asked",
+                        who(&authenticated, peer)
                     ),
                 }
 
@@ -771,7 +838,12 @@ async fn serve(
                 // through a "not connected" state during a reconnect. The id is
                 // what keeps the evicted session from clearing this one on its
                 // way out.
-                let id = state.connected(claim.session, peer, now);
+                let id = state.connected(
+                    claim.session,
+                    authenticated.gateway().map(str::to_owned),
+                    peer,
+                    now,
+                );
                 if let Some(previous) = current.take() {
                     previous.abort();
                 }
@@ -798,13 +870,18 @@ async fn serve(
                         continue;
                     }
                 };
-                // An unpaired agent has no key to judge anyone by, so this is as
-                // far as any connection gets.
-                let Some(gateway_public) = keys.gateway_public else {
-                    warn!("agent: refusing {peer} — no gateway_public_key is set (open Settings)");
+                // With nothing on the list there is no key to judge anyone by, so
+                // this is as far as any connection gets. Checked here rather than
+                // left to the lookup so the log says *why* — an empty list is a
+                // Mac nobody has authorized yet, not a gateway that got it wrong.
+                if keys.authorized.is_empty() {
+                    warn!(
+                        "agent: refusing {peer} — no gateways are authorized \
+                         (Settings > Authorized gateways)"
+                    );
                     drop(stream);
                     continue;
-                };
+                }
 
                 // Off the accept path, and on a clock. Handshaking inline would
                 // let one peer that connects and then says nothing block every
@@ -814,10 +891,11 @@ async fn serve(
                 // authenticates and then goes quiet must not hold anything up
                 // either.
                 let ready_tx = ready_tx.clone();
+                let keys = keys.clone();
                 tokio::spawn(async move {
                     let opening = async {
                         let mut authenticated =
-                            session::handshake(stream, keys.private, gateway_public).await?;
+                            session::handshake(stream, keys.private, &keys.authorized).await?;
                         let claim = authenticated.claim().await?;
                         Ok::<_, anyhow::Error>((authenticated, claim))
                     };
@@ -831,8 +909,8 @@ async fn serve(
                             }
                         }
                         // Never fatal to the agent, and never visible to the
-                        // session already running: an unpaired peer, a port
-                        // scanner, or a gateway on another protocol version.
+                        // session already running: an unauthorized peer, a
+                        // port scanner, or a gateway on another protocol version.
                         Ok(Err(e)) => warn!("agent: refusing {peer}: {e:#}"),
                         Err(_) => warn!(
                             "agent: refusing {peer}: no handshake and claim within {}s",

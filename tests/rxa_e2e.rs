@@ -6,7 +6,7 @@
 //! browser's WebSocket — and that is the entire gateway half.
 //!
 //! The fake agent speaks the real protocol: it completes a genuine
-//! `Noise_KK_25519_ChaChaPoly_BLAKE2s` handshake against a gateway it has been
+//! `Noise_IK_25519_ChaChaPoly_BLAKE2s` handshake against a gateway it has been
 //! paired with, reads the gateway's claim on its session slot, answers `Hello`,
 //! then sends a pre-encoded WebP tile and a cursor shape, and it records both the
 //! claims and the input it is sent. Five things are under test:
@@ -203,9 +203,11 @@ async fn spawn_busy_agent(
             let claims_tx = claims_tx.clone();
             tokio::spawn(async move {
                 let served = async {
-                    let transport =
-                        rxa_proto::noise::respond(&mut stream, &keys.private, &keys.gateway_public)
-                            .await?;
+                    let (transport, ()) =
+                        rxa_proto::noise::respond(&mut stream, &keys.private, |k| {
+                            (*k == keys.gateway_public).then_some(())
+                        })
+                        .await?;
                     let (read_half, write_half) = stream.into_split();
                     let (mut reader, mut writer) =
                         rxa_proto::frame::split(read_half, write_half, transport);
@@ -239,8 +241,10 @@ async fn serve_fake_agent(
     input_tx: mpsc::UnboundedSender<GatewayMsg>,
     claims_tx: mpsc::UnboundedSender<GatewayMsg>,
 ) -> anyhow::Result<()> {
-    let transport =
-        rxa_proto::noise::respond(&mut stream, &keys.private, &keys.gateway_public).await?;
+    let (transport, ()) = rxa_proto::noise::respond(&mut stream, &keys.private, |k| {
+        (*k == keys.gateway_public).then_some(())
+    })
+    .await?;
     let (read_half, write_half) = stream.into_split();
     let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
 
@@ -1406,13 +1410,13 @@ async fn a_wrong_agent_public_key_is_reported_instead_of_retried_forever() {
                 Message::Text(text) if text.contains(r#""type":"error""#) => {
                     return text.to_string();
                 }
-                Message::Binary(_) => panic!("an unpaired agent must not paint anything"),
+                Message::Binary(_) => panic!("a mismatched agent must not paint anything"),
                 _ => {}
             }
         }
     })
     .await
-    .expect("an unpaired agent should be reported, not retried silently");
+    .expect("a key mismatch should be reported, not retried silently");
     assert!(text.contains("rxa connect failed"), "{text}");
 
     // Reported is only half of it: "instead of retried" needs the counter. Wait

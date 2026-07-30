@@ -30,29 +30,6 @@ Screen Recording and Accessibility grants reach the signed app in the
 FileVault is the one boundary none of it crosses: no remote-access process runs
 before pre-boot disk unlock.
 
-### Authorized gateway list
-
-The agent holds one `gateway_public_key` and answers that gateway alone, so
-"one active session" and "one permitted gateway" are currently the same fact and
-nothing in its config distinguishes them. They are different questions, and the
-second one has a better answer: a list, the way `~/.ssh/authorized_keys` is a
-list, with a comment against each entry naming the machine it belongs to.
-
-What it buys is a Mac reachable from more than one gateway — a home server and a
-laptop, say — without re-pairing it each time, and an agent that can say *which*
-gateway is watching rather than only that somebody is.
-
-It does not touch the session rule below: one gateway holds the agent at a time,
-and a second has to take it over. That part is already built, and deliberately
-built first, keyed on the session id in `GatewayMsg::Claim` rather than on any
-key — so adding a second permitted key cannot turn into a second concurrent
-session by accident.
-
-The shape is settled enough to name and not settled enough to build here: the
-handshake becomes `Noise_IK` so the agent learns which key dialed and can look it
-up, which is a protocol version change, and the Settings dialog's single key
-field becomes a button onto the list.
-
 ## Not planned
 
 ### Multiple sessions
@@ -76,11 +53,12 @@ question at different hops:
 What the agent's slot is keyed on is worth stating plainly, because getting it
 wrong is what would collapse the distinction: **the session id in the claim, and
 never a key or an address.** Authentication decides whether a peer may ask at all
-— that is the keys, in the handshake, and it is the layer the item above extends
-to a list. Session ownership decides whose turn it is. Keeping them apart is what
-lets several gateways be *permitted* while exactly one is *connected*, and it is
-also why a reconnect, a target switch and a browser takeover all reclaim the slot
-in silence: they are the same session coming back, whatever else has changed.
+— that is the keys, in the handshake, and it is a *list* there
+(`crates/rxa-agent/src/authorized.rs`), so several gateways can be entitled to
+reach one Mac. Session ownership decides whose turn it is. Keeping them apart is
+what lets several gateways be *permitted* while exactly one is *connected*, and it
+is also why a reconnect, a target switch and a browser takeover all reclaim the
+slot in silence: they are the same session coming back, whatever else has changed.
 
 So "more than one client may be permitted, one at a time, taking turns
 explicitly" is a different sentence from "multiple sessions", and only the second

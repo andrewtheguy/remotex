@@ -33,17 +33,30 @@ crates/rxa-proto: identity keys, handshake, framing, messages, key mapping
 ## Transport and identity
 
 The agent listens on TCP port 52381 by default. Connections use
-`Noise_KK_25519_ChaChaPoly_BLAKE2s`, with the RXA protocol version in the Noise
-prologue. Each endpoint has one long-lived X25519 keypair and pins the other's
-public key:
+`Noise_IK_25519_ChaChaPoly_BLAKE2s`, with the RXA protocol version in the Noise
+prologue. Each endpoint has one long-lived X25519 keypair:
 
 - the gateway stores `[rxa].private_key`, and each target stores that Mac's
   `agent_public_key`;
-- the agent stores `private_key` and one `gateway_public_key`.
+- the agent stores `private_key`, and keeps the gateways it will answer in
+  `authorized_gateways` beside its config — one `<rxgp key> <name>` per line, `#`
+  comments and blank lines allowed, mode 0600
+  (`crates/rxa-agent/src/authorized.rs`).
 
-Both static keys are known before the handshake, so authentication completes
-inside Noise. An agent without `gateway_public_key` listens but refuses all
-connections.
+The asymmetry is why the pattern is `IK` rather than `KK`. The gateway knows
+exactly which Mac it is dialing, so the responder's static key is pinned; the Mac
+does not know which of its authorized gateways is calling, so the initiator's
+static key travels encrypted inside message 1. The agent decrypts it, looks it up,
+and refuses the dial before sending message 2. What an unlisted gateway can tell
+from that is exactly two things: something answered port 52381, and its key was
+refused. What it never gets is any RXA traffic — no `Hello`, no display list, and
+no answer to whether anybody is watching the screen. An agent with an empty list
+listens and refuses everything, which is what a first launch looks like.
+
+Being on the list is also what lets the agent say *which* gateway is connected: the
+entry's name is what the menu bar leads with ("Sharing this screen with home
+server (192.168.1.5, 12m)") and what a refused second gateway is told holds the
+session. It is a label and nothing more — nothing is decided by it.
 
 Keys use a role-specific prefix followed by the base64url key and a CRC16:
 
@@ -273,10 +286,10 @@ Four outcomes, and which one applies depends on the claim's session id alone:
 
 **Authentication and session ownership are separate layers**, as they are in SSH.
 The keys decide whether a peer may ask at all; the session id decides whose turn
-it is. Nothing about the slot is keyed on a public key or an address, which is
-what allows a Mac to be reachable by several gateways while exactly one holds it
-(see `docs/roadmap.md`) — and the session id is not a credential: an
-authenticated peer can present any value, and the agent only ever compares it.
+it is. Nothing about the slot is keyed on a public key or an address, which is what
+allows a Mac with several gateways on its authorized list to have exactly one of
+them holding it — and the session id is not a credential: an authenticated peer can
+present any value, and the agent only ever compares it.
 
 A gateway mints one session id per process, because a gateway instance has
 exactly one session slot of its own. Every dial it makes therefore reclaims: a

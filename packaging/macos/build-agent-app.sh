@@ -372,19 +372,31 @@ ${wrote}
 ${install_note}
 ${adhoc_note}
 
-That first open writes the config with a fresh keypair and registers the agent
-in System Settings > General > Login Items. It starts unpaired: it listens and
-refuses every connection until it is given a gateway's public key.
+That first open writes the config with a fresh keypair. It registers nothing: see
+Start at Login below. And it starts with no gateways authorized — it listens and
+refuses every connection until a gateway's public key is on its list.
 
 Everything after that is in the menu bar item, which is the agent's whole
-interface — the only flags that do anything but launch it are --public-key, which
-prints this Mac's public key, and --import-private-key, which reads a private key
-from stdin to give this Mac an identity it already had. Open it for:
+interface. Four flags do something other than launch it:
 
-    Settings...          listen address, displays, and the two public keys —
-                         Copy puts this Mac's on the clipboard for the gateway's
-                         agent_public_key, and the gateway's own (printed by
-                         "remotex rxa-pubkey") is pasted in beside it
+    --public-key            prints this Mac's public key
+    --import-private-key    reads a private key from stdin, to give this Mac an
+                            identity it already had
+    --install-launchagent   writes ~/Library/LaunchAgents/dev.remotex.agent.plist
+                            naming THIS copy by absolute path, so launchd starts
+                            it at login. The same thing the menu's Start at Login
+                            does, for a Mac reached over SSH. Nothing else
+                            registers it, and a launch never does — which is what
+                            stops another copy becoming the one macOS starts.
+    --uninstall-launchagent removes that plist again
+
+Open it for:
+
+    Settings...          listen address, displays, this Mac's public key, and the
+                         gateways allowed to reach it. Copy puts this Mac's key on
+                         the clipboard for the gateway's agent_public_key; Manage...
+                         opens the list each gateway's own key (printed by
+                         "remotex rxa-pubkey") goes on, one per line with a name
 
 It also needs Screen Recording and Accessibility, and asks for whichever is
 missing: the icon warns and the menu offers the right Privacy pane. Read the
