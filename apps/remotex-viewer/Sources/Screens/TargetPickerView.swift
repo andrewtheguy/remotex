@@ -25,6 +25,12 @@ struct TargetPickerView: View {
                     .frame(maxWidth: 420)
             }
 
+            if let busy = model.session.remoteBusy {
+                remoteBusy(busy)
+                    .padding(.top, 16)
+                    .frame(maxWidth: 420)
+            }
+
             if model.targets.isEmpty {
                 Text("No targets are configured on this gateway.")
                     .foregroundStyle(.secondary)
@@ -58,6 +64,47 @@ struct TargetPickerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+    }
+
+    /// The remote is somebody else's, and this is the one refusal with something to
+    /// press. Beside `connectError` rather than through it: that one is a message to
+    /// read, this one is a decision, and the whole reason the gateway sends a
+    /// distinct message is so a client can offer the button.
+    ///
+    /// Locked while a connect is in flight for the same reason the rows are — there
+    /// is one session slot, so a takeover mid-pick has nowhere to go.
+    private func remoteBusy(_ busy: ViewerSessionState.RemoteBusy) -> some View {
+        VStack(spacing: 8) {
+            Label(
+                """
+                \(busy.target.isEmpty ? "That target" : busy.target) is in use \
+                from \(busy.holder), for \(Self.heldFor(busy.heldSecs)).
+                """,
+                systemImage: "person.crop.circle.badge.exclamationmark"
+            )
+            .font(.callout)
+            .foregroundStyle(.orange)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Button("Take Over") {
+                model.connect(to: busy.target, force: true)
+            }
+            .disabled(model.session.pendingTarget != nil || busy.target.isEmpty)
+        }
+    }
+
+    /// "12m" rather than "754s", at the precision a glance wants — the same three
+    /// steps the agent's own menu bar and the SPA's picker use for this number.
+    static func heldFor(_ seconds: UInt32) -> String {
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(minutes)m"
+        }
+        return "\(minutes / 60)h \(minutes % 60)m"
     }
 
     /// The same state the desktop's toolbar toggle holds, offered before the pick so

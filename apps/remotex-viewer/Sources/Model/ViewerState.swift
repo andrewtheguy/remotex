@@ -120,6 +120,21 @@ struct ViewerSessionState: Equatable {
     /// The last engine error, shown against the picker. Not a dead end: the
     /// socket stays up and the session returns to the picker.
     var connectError: String?
+    /// The remote's own session is held by a different client, and this one may
+    /// take it over — the target it applies to, who has it, and for how long.
+    ///
+    /// Beside `connectError` rather than folded into it, because this is the one
+    /// refusal with something to press: the picker shows a Take over button on it.
+    /// Cleared when a session starts or another pick is made, so an offer can never
+    /// outlive the situation that produced it.
+    var remoteBusy: RemoteBusy?
+
+    /// See `ViewerSessionState.remoteBusy`.
+    struct RemoteBusy: Equatable {
+        var target: String
+        var holder: String
+        var heldSecs: UInt32
+    }
 
     /// Keyboard capture belongs to a live desktop and nothing else. Computed
     /// rather than stored: it was only ever a function of these two.

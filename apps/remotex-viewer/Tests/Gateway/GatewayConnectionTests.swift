@@ -419,7 +419,7 @@ struct GatewayConnectionTests {
 
         connection.send(.key(code: "KeyA", pressed: true, caps: false))
         connection.send(.key(code: "KeyA", pressed: false, caps: false))
-        connection.send(.connect(target: "mac"))
+        connection.send(.connect(target: "mac", force: false))
         await sink.wait { _ in transport.sentFrames.count == 3 }
 
         // Parsed, not compared as text: JSONEncoder does not promise a key order,

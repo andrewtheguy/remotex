@@ -33,7 +33,15 @@ struct ClientMessageTests {
         try expectEncoding(.refresh, ["type": "refresh"])
         try expectEncoding(.disconnect, ["type": "disconnect"])
         try expectEncoding(.clipboardRequest, ["type": "clipboardRequest"])
-        try expectEncoding(.connect(target: "mac"), ["type": "connect", "target": "mac"])
+        try expectEncoding(
+            .connect(target: "mac", force: false),
+            ["type": "connect", "target": "mac", "force": false]
+        )
+        // The takeover the picker sends after a `remoteBusy`.
+        try expectEncoding(
+            .connect(target: "mac", force: true),
+            ["type": "connect", "target": "mac", "force": true]
+        )
         try expectEncoding(
             .clipboard(text: "héllo"),
             ["type": "clipboard", "text": "héllo"]
@@ -121,7 +129,7 @@ struct ClientMessageTests {
             .viewport(w: 1, h: 1),
             .defaultSize,
             .refresh,
-            .connect(target: "t"),
+            .connect(target: "t", force: false),
             .disconnect,
             .clipboard(text: ""),
             .clipboardRequest,

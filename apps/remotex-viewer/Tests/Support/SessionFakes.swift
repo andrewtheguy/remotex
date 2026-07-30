@@ -262,6 +262,7 @@ final class RecordingSink: GatewaySessionSink {
         case .resize(let w, let h, let scale): "resize(\(w)x\(h)@\(scale)x)"
         case .cursor: "cursor"
         case .error(let message): "error(\(message))"
+        case .remoteBusy(let holder, let heldSecs): "remoteBusy(\(holder), \(heldSecs)s)"
         case .picker: "picker"
         case .connected(let payload): "connected(\(payload.name))"
         case .remoteOs(let macos): "remoteOs(\(macos))"
