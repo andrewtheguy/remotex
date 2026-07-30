@@ -670,9 +670,10 @@ final class AppModel: GatewaySessionSink {
     /// The density of the screen this window is on, reported to the remote.
     ///
     /// Called on connect and whenever the window changes screen. Deduped because
-    /// acting on it is a WindowServer reconfigure on the Mac at the other end:
-    /// re-sending a value it already matches would relay that desktop's windows
-    /// for nothing. Unlike the viewport there is no debounce — a window changes
+    /// acting on it is expensive at the other end — a WindowServer reconfigure on
+    /// an `rxa` Mac, a full reactivation on an RDP host that allows resize — so
+    /// re-sending a value it already matches costs a relayed desktop or a repaint
+    /// for nothing. Unlike the viewport there is no debounce: a window changes
     /// screen once, discretely, where a drag-resize reports every frame.
     func reportHostScale() {
         sendHostScale()

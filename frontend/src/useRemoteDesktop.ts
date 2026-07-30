@@ -158,7 +158,8 @@ const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
 // Lay out the framebuffer at remote pixels / remote scale CSS pixels. Host
 // devicePixelRatio is intentionally absent: browser rasterization handles the
-// host display, while sendHostScale separately configures owned RXA displays.
+// host display, while sendHostScale separately asks the remote to render at this
+// screen's density (an owned RXA display, or an RDP host that allows resize).
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
@@ -813,9 +814,10 @@ export function useRemoteDesktop(
     // window size won't fire a redundant resize.
     resizeToWindowRef.current = () => sendViewport({ manual: true });
 
-    // This screen's density, deduped the same way: only an rxa target with a
-    // display the agent made acts on it, and only by matching it, so re-sending
-    // an unchanged value would be a WindowServer round trip for nothing.
+    // This screen's density, deduped the same way. Two kinds of target act on it,
+    // and both by matching it: an rxa target with a display the agent made, and an
+    // RDP target that allows resize. Re-sending an unchanged value would be a
+    // WindowServer round trip or a full RDP reactivation for nothing.
     let lastHostScale: number | null = null;
     // Which display the remote is sharing, as its last `displays` reported it.
     // Only so a switch can be told from the first list of a session.
@@ -1379,8 +1381,11 @@ export function useRemoteDesktop(
     // physical size unchanged and nothing here recomputed.
     //
     // What the new density is worth telling is the *remote*, so a display the
-    // agent made can match it and the picture becomes one pixel per pixel instead
-    // of resampled. There is no devicePixelRatio event, so this is the standard
+    // agent made — or an RDP host that allows resize — can match it and the
+    // picture becomes one pixel per pixel instead of resampled. On RDP that also
+    // moves the host's own UI scaling, which is the whole point: twice the pixels
+    // with the same UI in them would only be a sharper version of too small.
+    // There is no devicePixelRatio event, so this is the standard
     // trick: a media query pinned to the current ratio, which stops matching the
     // moment the ratio changes, re-armed each time from the new value.
     let dprQuery: MediaQueryList | null = null;
