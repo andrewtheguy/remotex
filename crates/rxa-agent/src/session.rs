@@ -243,6 +243,14 @@ impl Reconfigure {
 pub struct Authenticated {
     reader: FrameReader<OwnedReadHalf>,
     writer: FrameWriter<OwnedWriteHalf>,
+    /// What the authorized list calls the gateway on the other end, from the
+    /// comment on the entry its key matched. `None` when that entry carried none.
+    ///
+    /// Read off the handshake rather than the socket: `Noise_IK` tells the agent
+    /// *which* key dialed (see [`rxa_proto::noise::respond`]), which is the whole
+    /// reason a list is possible. It is a label for the log and the menu bar and
+    /// nothing else — nothing is decided by it.
+    gateway: Option<String>,
 }
 
 /// What a connection is asking of the session slot.
@@ -257,6 +265,11 @@ pub struct Claim {
 }
 
 impl Authenticated {
+    /// The list's name for this gateway, for whoever records the connection.
+    pub fn gateway(&self) -> Option<&str> {
+        self.gateway.as_deref()
+    }
+
     /// Read this connection's claim on the session slot.
     ///
     /// The first frame, before the agent has said anything: nothing about the
@@ -296,22 +309,36 @@ impl Authenticated {
     }
 }
 
-/// Answer a dial, proving to it and about it that both ends hold the right keys.
+/// Answer a dial, proving to it and about it that both ends hold the right keys,
+/// and that this one is a gateway the Mac was told to accept.
 ///
-/// A peer whose public key is not the configured one fails here, before the
-/// agent has revealed anything at all — including whether anyone is connected.
+/// A peer holding the wrong `agent_public_key` fails in Noise; one holding a key
+/// that is not on `authorized` fails immediately after, between the handshake's two
+/// messages. Either way it is before the agent has revealed anything at all —
+/// including whether anyone is connected — and either way the connection is over.
+///
+/// Returns the matched entry's comment along with the connection, because that is
+/// the only moment it is known: the key is on the wire and the list is here.
 pub async fn handshake(
     mut stream: TcpStream,
     private_key: [u8; 32],
-    gateway_public_key: [u8; 32],
+    authorized: &crate::authorized::Authorized,
 ) -> anyhow::Result<Authenticated> {
     stream.set_nodelay(true).ok();
-    let transport = rxa_proto::noise::respond(&mut stream, &private_key, &gateway_public_key)
-        .await
-        .map_err(|e| anyhow::anyhow!("handshake: {e}"))?;
+    let (transport, gateway) = rxa_proto::noise::respond(&mut stream, &private_key, |dialer| {
+        authorized
+            .lookup(dialer)
+            .map(|entry| entry.name().map(str::to_owned))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("handshake: {e}"))?;
     let (read_half, write_half) = stream.into_split();
     let (reader, writer) = rxa_proto::frame::split(read_half, write_half, transport);
-    Ok(Authenticated { reader, writer })
+    Ok(Authenticated {
+        reader,
+        writer,
+        gateway,
+    })
 }
 
 /// Serve one authenticated gateway connection until it hangs up or fails.
@@ -320,7 +347,11 @@ pub async fn serve(
     owned: Owned,
     cursor_tracker: Arc<cursor::Tracker>,
 ) -> anyhow::Result<()> {
-    let Authenticated { reader, mut writer } = authenticated;
+    let Authenticated {
+        reader,
+        mut writer,
+        gateway: _,
+    } = authenticated;
     let display = owned.handle.clone();
     let owned = owned.target;
 

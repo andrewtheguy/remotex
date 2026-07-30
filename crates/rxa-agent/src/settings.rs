@@ -1,5 +1,10 @@
-//! The config as the GUI sees it: what the agent is running, and what the file
-//! now says.
+//! The settings as the GUI sees them: what the agent is running, and what the
+//! files now say.
+//!
+//! Two files, because they are two different kinds of thing — the config the menu
+//! bar rewrites whole, and the authorized list a person annotates (see
+//! [`crate::authorized`]) — and one pair of `running`/`saved`, because they are
+//! read at the same moment and applied by the same restart.
 //!
 //! Every setting the agent has is editable from the menu bar (see
 //! [`crate::menubar`]), and an edit does exactly two things here: validate, and
@@ -23,23 +28,35 @@ use std::sync::{Arc, Mutex};
 
 use log::info;
 
+use crate::authorized::Authorized;
 use crate::config::Config;
 
 pub struct Settings {
     path: PathBuf,
+    authorized_path: PathBuf,
     /// What this process is serving. Fixed for its lifetime — the network thread
     /// was handed these values at startup and never looks again.
     running: Config,
-    /// What the file says, which is what the next launch will serve.
+    running_authorized: Authorized,
+    /// What the files say, which is what the next launch will serve.
     saved: Mutex<Config>,
+    saved_authorized: Mutex<Authorized>,
 }
 
 impl Settings {
-    pub fn new(config: Config, path: PathBuf) -> Arc<Self> {
+    pub fn new(
+        config: Config,
+        path: PathBuf,
+        authorized: Authorized,
+        authorized_path: PathBuf,
+    ) -> Arc<Self> {
         Arc::new(Self {
             path,
+            authorized_path,
             running: config.clone(),
+            running_authorized: authorized.clone(),
             saved: Mutex::new(config),
+            saved_authorized: Mutex::new(authorized),
         })
     }
 
@@ -47,9 +64,18 @@ impl Settings {
         &self.path
     }
 
+    pub fn authorized_path(&self) -> &Path {
+        &self.authorized_path
+    }
+
     /// The config the running agent is actually serving.
     pub fn running(&self) -> &Config {
         &self.running
+    }
+
+    /// The list the running agent is actually judging dials against.
+    pub fn running_authorized(&self) -> &Authorized {
+        &self.running_authorized
     }
 
     /// The config in the file, which the next launch will serve.
@@ -57,38 +83,62 @@ impl Settings {
         self.saved.lock().unwrap().clone()
     }
 
+    /// The list in the file, which the next launch will judge dials against.
+    pub fn saved_authorized(&self) -> Authorized {
+        self.saved_authorized.lock().unwrap().clone()
+    }
+
     /// Whether anything has been changed that the running agent is not obeying.
     pub fn restart_pending(&self) -> bool {
         *self.saved.lock().unwrap() != self.running
+            || *self.saved_authorized.lock().unwrap() != self.running_authorized
     }
 
-    /// Replace the config with what the settings dialog collected.
+    /// Replace the config and the authorized list with what the settings dialog
+    /// collected.
     ///
-    /// The whole config at once, because the dialog edits it that way: one panel,
-    /// one Save, one write. An error means nothing was written — the file and
-    /// everything this struct reports are exactly as they were, and the caller can
-    /// put the dialog back up on the same values.
+    /// Both at once, because the dialog edits them that way: one panel, one Save.
+    /// An error means **nothing** was written — including the half that was fine,
+    /// since two files half-applied is a state no restart resolves — and everything
+    /// this struct reports is exactly as it was, so the caller can put the dialog
+    /// back up on the same values.
     ///
-    /// Note what this does *not* do: apply anything. Returns whether the file
-    /// changed, which is the caller's cue to restart into it.
-    pub fn apply(&self, next: Config) -> anyhow::Result<bool> {
+    /// Note what this does *not* do: apply anything. Returns whether either file
+    /// changed, which is the caller's cue to restart into them.
+    pub fn apply(&self, next: Config, next_authorized: Authorized) -> anyhow::Result<bool> {
         // Whitespace round a pasted value is the user's typing, not their intent.
+        // The list needs no equivalent: `Authorized::parse` normalized it, and the
+        // whitespace *inside* it is a person's layout.
         let next = Config {
             listen: next.listen.trim().to_owned(),
             private_key: next.private_key.trim().to_owned(),
-            gateway_public_key: next.gateway_public_key.trim().to_owned(),
             virtual_display: next.virtual_display,
             virtual_display_initial_size: next.virtual_display_initial_size.trim().to_owned(),
         };
         let mut saved = self.saved.lock().unwrap();
-        if next == *saved {
+        let mut saved_authorized = self.saved_authorized.lock().unwrap();
+        let (config_changed, list_changed) =
+            (next != *saved, next_authorized != *saved_authorized);
+        if !config_changed && !list_changed {
             return Ok(false);
         }
-        // Validates before it writes, so an invalid edit changes neither the file
-        // nor what this struct reports.
-        next.save(&self.path)?;
-        info!("settings: saved {}", self.path.display());
+        // Validated before either write, so one file being rejected cannot leave
+        // the other one already replaced.
+        next.validate()?;
+        if config_changed {
+            next.save(&self.path)?;
+            info!("settings: saved {}", self.path.display());
+        }
+        if list_changed {
+            next_authorized.save(&self.authorized_path)?;
+            info!(
+                "settings: saved {} ({} authorized gateways)",
+                self.authorized_path.display(),
+                next_authorized.len()
+            );
+        }
         *saved = next;
+        *saved_authorized = next_authorized;
         Ok(true)
     }
 }
@@ -96,12 +146,17 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorized;
     use crate::config::scratch::TempDir;
     use rxa_proto::key::{self, Role};
 
     /// A fresh gateway's public key, as `remotex rxa-pubkey` prints it.
     fn gateway_public_key() -> String {
         key::public_text_of(Role::Gateway, &key::generate_private(Role::Gateway)).unwrap()
+    }
+
+    fn list(text: &str) -> Authorized {
+        Authorized::parse(text).unwrap()
     }
 
     /// The `TempDir` comes back with the settings: dropping it removes the
@@ -113,24 +168,38 @@ mod tests {
         let config = Config {
             listen: format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT),
             private_key: key::generate_private(Role::Agent),
-            gateway_public_key: gateway_public_key(),
             virtual_display: false,
             virtual_display_initial_size: "1600x1000".to_owned(),
         };
         config.save(&path).unwrap();
-        (Settings::new(config, path.clone()), path, dir)
+        let authorized_path = authorized::path_beside(&path);
+        let authorized = list(&format!("{} home server\n", gateway_public_key()));
+        authorized.save(&authorized_path).unwrap();
+        (
+            Settings::new(config, path.clone(), authorized, authorized_path),
+            path,
+            dir,
+        )
     }
 
     fn on_disk(path: &Path) -> Config {
         crate::config::load(Some(path)).unwrap().0
     }
 
+    fn list_on_disk(settings: &Settings) -> Authorized {
+        Authorized::load(settings.authorized_path()).unwrap()
+    }
+
     #[test]
-    fn a_fresh_agent_is_running_what_the_file_says() {
+    fn a_fresh_agent_is_running_what_the_files_say() {
         let (settings, path, _dir) = settings("fresh");
         assert!(!settings.restart_pending());
         assert_eq!(settings.saved(), on_disk(&path));
         assert_eq!(&settings.saved(), settings.running());
+        assert_eq!(settings.saved_authorized(), list_on_disk(&settings));
+        assert_eq!(&settings.saved_authorized(), settings.running_authorized());
+        // Beside the config, so one --config moves the whole of an agent's state.
+        assert_eq!(settings.authorized_path().parent(), path.parent());
     }
 
     #[test]
@@ -140,7 +209,10 @@ mod tests {
         next.listen = "127.0.0.1:9001".to_owned();
         next.virtual_display = true;
 
-        assert!(settings.apply(next.clone()).unwrap(), "a change was saved");
+        assert!(
+            settings.apply(next.clone(), settings.saved_authorized()).unwrap(),
+            "a change was saved"
+        );
         assert_eq!(settings.saved(), next);
         assert_eq!(on_disk(&path), next, "not persisted");
         assert!(settings.restart_pending());
@@ -159,25 +231,47 @@ mod tests {
     #[test]
     fn saving_an_unchanged_config_is_not_a_change() {
         let (settings, _, _dir) = settings("unchanged");
-        assert!(!settings.apply(settings.saved()).unwrap());
+        assert!(
+            !settings
+                .apply(settings.saved(), settings.saved_authorized())
+                .unwrap()
+        );
         assert!(!settings.restart_pending());
     }
 
-    // A key pasted into the dialog is stored verbatim, and the old one keeps
-    // authenticating until the restart.
+    // A gateway added to the list is saved verbatim, and the old list keeps
+    // deciding who gets in until the restart.
     #[test]
-    fn a_new_gateway_is_saved_without_becoming_the_running_one() {
-        let (settings, path, _dir) = settings("gateway");
-        let before = settings.saved().gateway_public_key;
-        let after = gateway_public_key();
-        let mut next = settings.saved();
-        next.gateway_public_key = after.clone();
+    fn a_new_authorized_gateway_is_saved_without_becoming_the_running_list() {
+        let (settings, _, _dir) = settings("gateway");
+        let before = settings.saved_authorized();
+        let after = list(&format!(
+            "{}{} the laptop\n",
+            before.text(),
+            gateway_public_key()
+        ));
+        assert_eq!(after.len(), 2);
 
-        assert!(settings.apply(next).unwrap());
-        assert_eq!(settings.saved().gateway_public_key, after);
-        assert_eq!(on_disk(&path).gateway_public_key, after);
-        assert_eq!(settings.running().gateway_public_key, before);
+        assert!(settings.apply(settings.saved(), after.clone()).unwrap());
+        assert_eq!(settings.saved_authorized(), after);
+        assert_eq!(list_on_disk(&settings), after);
+        assert_eq!(settings.running_authorized(), &before);
         assert!(settings.restart_pending());
+    }
+
+    // Commenting a line out is how an entry is parked, so it has to be a change
+    // even though no key was added or removed: the running agent still answers
+    // that gateway until it restarts.
+    #[test]
+    fn commenting_an_entry_out_is_a_change_worth_restarting_for() {
+        let (settings, _, _dir) = settings("parked");
+        let parked = list(&format!("# away for now:\n#{}", settings.saved_authorized().text().trim()));
+        assert!(parked.is_empty());
+
+        assert!(settings.apply(settings.saved(), parked.clone()).unwrap());
+        assert_eq!(list_on_disk(&settings), parked);
+        assert!(settings.restart_pending());
+        assert_eq!(settings.running_authorized().len(), 1, "still answering it");
     }
 
     // Regenerating this Mac's identity is the same deal, and the more important
@@ -191,7 +285,7 @@ mod tests {
         let mut next = settings.saved();
         next.private_key = after.clone();
 
-        assert!(settings.apply(next).unwrap());
+        assert!(settings.apply(next, settings.saved_authorized()).unwrap());
         assert_eq!(on_disk(&path).private_key, after);
         assert_eq!(settings.running().private_key, before);
         assert!(settings.restart_pending());
@@ -205,21 +299,26 @@ mod tests {
         let (settings, path, _dir) = settings("reject");
         let before = settings.saved();
 
-        let mut bad = before.clone();
-        bad.listen = "port 52381".to_owned();
-        let err = settings.apply(bad).unwrap_err();
-        assert!(format!("{err:#}").contains("address:port"), "{err:#}");
+        let before_list = settings.saved_authorized();
 
         let mut bad = before.clone();
-        bad.gateway_public_key = "rxgpnonsense".to_owned();
-        let err = settings.apply(bad).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("gateway_public_key"),
-            "{err:#}"
-        );
+        bad.listen = "port 52381".to_owned();
+        let err = settings
+            .apply(bad, settings.saved_authorized())
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("address:port"), "{err:#}");
+
+        // And the rejected half must not leave the *other* file already replaced:
+        // a good list beside a bad address writes neither.
+        let mut bad = before.clone();
+        bad.listen = "port 52381".to_owned();
+        let good_list = list(&format!("{} somewhere else\n", gateway_public_key()));
+        assert!(settings.apply(bad, good_list).is_err());
 
         assert_eq!(settings.saved(), before);
         assert_eq!(on_disk(&path), before);
+        assert_eq!(settings.saved_authorized(), before_list);
+        assert_eq!(list_on_disk(&settings), before_list);
         assert!(!settings.restart_pending());
     }
 
@@ -231,9 +330,9 @@ mod tests {
         let original = settings.saved();
         let mut next = original.clone();
         next.listen = "127.0.0.1:9003".to_owned();
-        settings.apply(next).unwrap();
+        settings.apply(next, settings.saved_authorized()).unwrap();
         assert!(settings.restart_pending());
-        settings.apply(original).unwrap();
+        settings.apply(original, settings.saved_authorized()).unwrap();
         assert!(!settings.restart_pending());
     }
 
@@ -243,20 +342,15 @@ mod tests {
     fn pasted_values_are_trimmed() {
         let (settings, _, _dir) = settings("trim");
         let private_key = key::generate_private(Role::Agent);
-        let gateway = gateway_public_key();
         let next = Config {
             listen: "  127.0.0.1:9002\n".to_owned(),
             private_key: format!(" {private_key}\n"),
-            // The one most likely to arrive with whitespace: it is pasted in
-            // from wherever `remotex rxa-pubkey` was read.
-            gateway_public_key: format!("  {gateway}  "),
             virtual_display: true,
             virtual_display_initial_size: " 1440x900 ".to_owned(),
         };
-        assert!(settings.apply(next).unwrap());
+        assert!(settings.apply(next, settings.saved_authorized()).unwrap());
         assert_eq!(settings.saved().listen, "127.0.0.1:9002");
         assert_eq!(settings.saved().private_key, private_key);
-        assert_eq!(settings.saved().gateway_public_key, gateway);
         assert_eq!(settings.saved().virtual_display_initial_size, "1440x900");
     }
 }

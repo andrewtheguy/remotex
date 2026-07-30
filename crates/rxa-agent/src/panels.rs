@@ -13,15 +13,17 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSBorderType, NSButton, NSColor,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSModalResponseCancel,
-    NSModalResponseOK, NSPanel, NSTextAlignment, NSTextField, NSView,
-    NSWindowButton, NSWindowStyleMask,
+    NSModalResponseOK, NSPanel, NSScrollView, NSTextAlignment, NSTextField, NSTextView,
+    NSView, NSWindowButton, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
     NSTimer,
 };
+
+use crate::authorized::Authorized;
 
 /// Fits a complete key and its Copy button on the minimum supported display.
 const WIDTH: f64 = 630.0;
@@ -66,7 +68,15 @@ const ROWS: usize = 13;
 const COPY_WIDTH: f64 = 78.0;
 const IMPORT_WIDTH: f64 = 84.0;
 const REGENERATE_WIDTH: f64 = 144.0;
+const MANAGE_WIDTH: f64 = 90.0;
 const BUTTON_GAP: f64 = 8.0;
+
+/// How tall the authorized-gateways editor is, and therefore how tall its panel
+/// is: about a dozen lines of the monospaced font, which is more entries than
+/// anybody has and short enough that the whole panel fits the 1x 800x600 test Mac
+/// with room for the Dock. A longer list scrolls rather than growing the panel —
+/// which is the point of it being a scroll view at all.
+const LIST_HEIGHT: f64 = 200.0;
 
 /// How much of the read-only fill is let through, over the panel behind it.
 ///
@@ -134,8 +144,13 @@ pub struct Draft {
     /// **Regenerate identity** change it. What the dialog *displays* is the
     /// public half derived from it, which is not a secret.
     pub private_key: String,
-    /// The gateway's public key, as pasted in. Empty means unpaired.
-    pub gateway_public_key: String,
+    /// The gateways this Mac will answer, as the editor last left them.
+    ///
+    /// Already parsed, unlike the fields around it — a draft is allowed to be
+    /// nonsense, but this one is edited in its own panel, which refuses to close
+    /// over a list it cannot read. So what arrives here is always a valid list, and
+    /// the text inside it is whatever the user typed.
+    pub authorized: Authorized,
     /// Whether to give this Mac an extra display of the agent's own making.
     pub virtual_display: bool,
     /// That display's size, `WIDTHxHEIGHT` in points. Kept whether or not it is
@@ -164,12 +179,17 @@ impl Draft {
 ///
 /// `in_force` is the pairing the running process is actually using, which is not
 /// always the one in `current` — see the warning it raises below. It is read,
-/// never written: this dialog edits the file.
+/// never written: this dialog edits the files.
+///
+/// `authorized_path` is named on screen rather than described, because that file is
+/// the one thing here somebody may reasonably want to edit from a terminal — over
+/// SSH, or to keep a copy of.
 pub fn config(
     mtm: MainThreadMarker,
     current: &Draft,
     displays: &[String],
     in_force: &InForce,
+    authorized_path: &std::path::Path,
 ) -> Option<Draft> {
     let (network_copy, network_copy_height) = section_copy(
         mtm,
@@ -184,12 +204,16 @@ pub fn config(
     );
     let mut pairing_copy = String::from(
         "Pairing uses two public keys, one in each direction; neither is secret. \
-         Copy this Mac's key to `agent_public_key` on the gateway, then paste the \
-         gateway key printed by `remotex rxa-pubkey` below.",
+         Copy this Mac's key to `agent_public_key` on the gateway, then add that \
+         gateway's own key — `remotex rxa-pubkey` prints it — to the list below. \
+         More than one gateway may be authorized; one holds this Mac at a time, and \
+         a second has to take the session over.",
     );
-    if current.gateway_public_key.trim().is_empty() {
-        pairing_copy
-            .push_str("\n\n⚠︎ Unpaired: no gateway key is set, so every connection is refused.");
+    if current.authorized.is_empty() {
+        pairing_copy.push_str(
+            "\n\n⚠︎ No authorized gateways, so every connection is refused. Add one \
+             with Manage.",
+        );
     }
     // Said out loud rather than left in a tooltip, because the difference
     // between the saved pairing and the running one is the difference between a
@@ -231,7 +255,7 @@ pub fn config(
         (pairing_copy_height, ROW_GAP),
         (ROW_HEIGHT, ROW_GAP), // this Mac's public key and Copy
         (ROW_HEIGHT, ROW_GAP), // its private key actions
-        (ROW_HEIGHT, 0.0),     // the gateway's public key
+        (ROW_HEIGHT, 0.0),     // the authorized gateways, and Manage
     ];
     let height: f64 = rows.iter().map(|(row, gap)| row + gap).sum();
     let view = NSView::initWithFrame(
@@ -391,22 +415,52 @@ pub fn config(
     )));
     view.addSubview(&public_key);
 
-    // An ordinary editable field: this one is pasted in, and it is not a secret
-    // either, so nothing about it wants hiding or locking. It follows both of
-    // this Mac's rows, so neither row's buttons can read as actions on it.
-    view.addSubview(&label(mtm, "Gateway public key", row(12)));
-    let gateway = field(
+    // A summary and a button rather than a field, because what is behind it is a
+    // list — several entries, each with a name, some of them commented out. A row
+    // this size could hold one key and would have to lie about the rest; the
+    // editor it opens is the only honest shape for the whole file. It follows both
+    // of this Mac's rows, so neither row's buttons can read as actions on it.
+    view.addSubview(&label(mtm, "Authorized gateways", row(12)));
+    let manage_x = WIDTH - MANAGE_WIDTH;
+    let authorized_summary = NSTextField::labelWithString(
+        &NSString::from_str(&summarize(&current.authorized)),
         mtm,
-        &current.gateway_public_key,
-        row(12),
-        WIDTH - CONTROL_X,
-        true,
     );
-    gateway.setToolTip(Some(&NSString::from_str(
-        "The one gateway this Mac answers, from `remotex rxa-pubkey` on that server. \
-         Leave it empty to unpair, which makes this agent refuse every connection.",
+    authorized_summary.setFrame(NSRect::new(
+        NSPoint::new(CONTROL_X, row(12) + (ROW_HEIGHT - LABEL_HEIGHT) / 2.0),
+        NSSize::new(manage_x - BUTTON_GAP - CONTROL_X, LABEL_HEIGHT),
+    ));
+    authorized_summary.setToolTip(Some(&NSString::from_str(&format!(
+        "The gateways allowed to reach this Mac, one per line in {}. Being on that \
+         list decides who may ask for a session, not who has one — a second gateway \
+         is refused until it takes the session over.",
+        authorized_path.display()
+    ))));
+    view.addSubview(&authorized_summary);
+
+    let authorized = AuthorizedControls::new(
+        mtm,
+        authorized_summary.clone(),
+        current.authorized.clone(),
+    );
+    let manage = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Manage…"),
+            Some(&authorized.as_object()),
+            Some(sel!(manageAuthorized:)),
+            mtm,
+        )
+    };
+    manage.setFrame(NSRect::new(
+        NSPoint::new(manage_x, row(12)),
+        NSSize::new(MANAGE_WIDTH, ROW_HEIGHT),
+    ));
+    manage.setToolTip(Some(&NSString::from_str(
+        "Edit the list: one gateway public key per line, then a name for the machine \
+         it belongs to. Lines starting with # are ignored, so an entry can be \
+         commented out and put back.",
     )));
-    view.addSubview(&gateway);
+    view.addSubview(&manage);
 
     // Owns all three buttons' actions and the private key behind the fields.
     // `buttonWithTitle:target:action:` holds its target weakly, so this has to
@@ -532,14 +586,10 @@ pub fn config(
         }
     }
     // Without this nothing is focused and the first keystroke goes nowhere, which
-    // reads as a dialog that has ignored you. The gateway field when there is no
-    // pairing yet: on a fresh Mac that is the one thing left to do.
-    let first = if current.gateway_public_key.trim().is_empty() {
-        &gateway
-    } else {
-        &listen
-    };
-    panel.setInitialFirstResponder(Some(first));
+    // reads as a dialog that has ignored you. There is nothing to type on the
+    // pairing rows any more — the list is edited in its own panel — so the address
+    // is the field that gets it.
+    panel.setInitialFirstResponder(Some(&listen));
     panel.center();
     panel.makeKeyAndOrderFront(None);
 
@@ -553,7 +603,8 @@ pub fn config(
         // From the actions, not the field: the field shows the *public* half,
         // and Regenerate may have replaced what it was derived from.
         private_key: actions.private_key(),
-        gateway_public_key: gateway.stringValue().to_string().trim().to_owned(),
+        // From the controls, not the summary label: Manage may have replaced it.
+        authorized: authorized.list(),
         virtual_display: virtual_display.state() == NSControlStateValueOn,
         virtual_size: virtual_size.stringValue().to_string().trim().to_owned(),
     })
@@ -563,26 +614,59 @@ pub fn config(
 /// raises when the file has moved on without a restart.
 pub struct InForce {
     pub private_key: String,
-    pub gateway_public_key: String,
+    pub authorized: Authorized,
 }
 
 impl InForce {
     /// Whether a draft describes what the agent is already doing.
     ///
     /// Both halves, because either one changing is a pairing that has not taken
-    /// effect: a regenerated identity the gateway has not been told about, and a
-    /// newly pasted gateway key, fail in exactly the same way.
+    /// effect: a regenerated identity the gateways have not been told about, and a
+    /// gateway added to the list, fail in exactly the same way.
     ///
-    /// Trimmed on both sides. The draft's is whatever was typed, and the running
-    /// side is the config file as parsed — which `Config::validate` accepts with
-    /// spaces inside the quotes, because `key::parse_private` trims before it
+    /// The key is trimmed on both sides. The draft's is whatever was typed, and the
+    /// running side is the config file as parsed — which `Config::validate` accepts
+    /// with spaces inside the quotes, because `key::parse_private` trims before it
     /// looks. Comparing a padded key in force against a trimmed draft of the same
     /// key reported a pairing that "never took effect" while the agent was using
-    /// exactly it.
+    /// exactly it. The list needs no such care: `Authorized::parse` normalized it.
     fn matches(&self, draft: &Draft) -> bool {
         self.private_key.trim() == draft.private_key.trim()
-            && self.gateway_public_key.trim() == draft.gateway_public_key.trim()
+            && self.authorized == draft.authorized
     }
+}
+
+/// The authorized list on one row: how many, and which.
+///
+/// Named rather than counted where they fit, because a count answers the wrong
+/// question — somebody opening this dialog wants to know whether the gateway they
+/// are thinking of is on the list, and two names are shorter than "2 keys" is
+/// unhelpful. Beyond that it truncates rather than growing the row, and Manage is
+/// right there.
+fn summarize(list: &Authorized) -> String {
+    const NAMED: usize = 3;
+    if list.is_empty() {
+        return "None — every connection is refused".to_owned();
+    }
+    let mut names: Vec<&str> = list
+        .entries()
+        .iter()
+        .take(NAMED)
+        .map(|entry| entry.name().unwrap_or("(unnamed)"))
+        .collect();
+    let rest = list.len().saturating_sub(names.len());
+    let more = format!("and {rest} more");
+    if rest > 0 {
+        names.push(&more);
+    }
+    format!(
+        "{} — {}",
+        match list.len() {
+            1 => "1 gateway".to_owned(),
+            n => format!("{n} gateways"),
+        },
+        names.join(", ")
+    )
 }
 
 /// Report a failure while the menu bar remains in its degraded state.
@@ -923,6 +1007,222 @@ impl KeyActions {
     }
 }
 
+/// The authorized list, edited as the text file it is.
+///
+/// Text and not a table, deliberately: the file's value is that an entry can carry
+/// a name, be reordered, and be commented out and put back, and a table would offer
+/// the first of those and quietly drop the other two on save. This is the same
+/// bargain `~/.ssh/authorized_keys` makes.
+///
+/// Loops on a list that will not parse, re-opening on exactly what was typed with
+/// the offending line named — the same shape as the settings dialog, and for the
+/// same reason: a typo in one key must not cost the user the other three.
+///
+/// Returns `None` if they cancelled, which leaves the caller's list alone.
+fn authorized_gateways(mtm: MainThreadMarker, current: &Authorized) -> Option<Authorized> {
+    let mut text = current.text().to_owned();
+    loop {
+        let edited = edit_authorized(mtm, &text)?;
+        match Authorized::parse(&edited) {
+            Ok(list) => return Some(list),
+            Err(e) => {
+                error(
+                    mtm,
+                    "That list was not saved",
+                    &format!(
+                        "{e:#}\n\nEvery line has to be a gateway public key (rxgp…) \
+                         followed by a name, or start with # to be ignored."
+                    ),
+                );
+                text = edited;
+            }
+        }
+    }
+}
+
+/// One pass of the editor: put the text up, hand back what came out.
+fn edit_authorized(mtm: MainThreadMarker, text: &str) -> Option<String> {
+    let (copy, copy_height) = section_copy(
+        mtm,
+        "One gateway per line: its public key (rxgp…, from `remotex rxa-pubkey` on \
+         that server), then a name for the machine it belongs to. The name is only \
+         for this Mac — it is what the menu bar calls that gateway while it is \
+         connected. Blank lines and lines starting with # are ignored, so an entry \
+         can be commented out and put back. Saving restarts the agent.",
+    );
+
+    let button_y = PANEL_BOTTOM_MARGIN;
+    let list_y = button_y + PANEL_BUTTON_HEIGHT + PANEL_CONTENT_GAP;
+    let copy_y = list_y + LIST_HEIGHT + ROW_GAP;
+    let panel_height = copy_y + copy_height + PANEL_TOP_MARGIN;
+
+    let content = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::ZERO, NSSize::new(PANEL_WIDTH, panel_height)),
+    );
+    copy.setFrame(NSRect::new(
+        NSPoint::new(PANEL_MARGIN, copy_y),
+        NSSize::new(WIDTH, copy_height),
+    ));
+    content.addSubview(&copy);
+
+    // A scroll view and not a bare text view, so the panel's height is decided by
+    // this constant rather than by how many gateways somebody has: a list that
+    // outgrows the box scrolls, and the panel still fits a small display with its
+    // buttons reachable. The scroller is left visible rather than autohiding —
+    // there is no other cue that a line has gone off the bottom.
+    let scroll = NSScrollView::initWithFrame(
+        NSScrollView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(PANEL_MARGIN, list_y),
+            NSSize::new(WIDTH, LIST_HEIGHT),
+        ),
+    );
+    scroll.setHasVerticalScroller(true);
+    scroll.setAutohidesScrollers(false);
+    scroll.setBorderType(NSBorderType::BezelBorder);
+
+    // Sized to the scroll view's *content*, which is narrower than its frame by the
+    // border and the scroller. `initWithFrame:` gives a text view a container that
+    // tracks this width and grows downwards, which is the wrapping-and-scrolling
+    // behaviour wanted here; nothing else has to be configured for it.
+    let editor = NSTextView::initWithFrame(
+        NSTextView::alloc(mtm),
+        NSRect::new(NSPoint::ZERO, scroll.contentSize()),
+    );
+    editor.setEditable(true);
+    editor.setRichText(false);
+    editor.setAllowsUndo(true);
+    // Monospaced for the same reason the key rows are: these are compared character
+    // by character against a config file on another machine.
+    editor.setFont(NSFont::userFixedPitchFontOfSize(11.0).as_deref());
+    // macOS would otherwise "helpfully" rewrite what is typed here. Dash
+    // substitution is the one that matters: a base64url key can contain `--`, and an
+    // em dash in a key is a checksum error nobody can see.
+    editor.setAutomaticDashSubstitutionEnabled(false);
+    editor.setAutomaticQuoteSubstitutionEnabled(false);
+    editor.setAutomaticTextReplacementEnabled(false);
+    editor.setAutomaticSpellingCorrectionEnabled(false);
+    editor.setString(&NSString::from_str(text));
+    scroll.setDocumentView(Some(&editor));
+    content.addSubview(&scroll);
+
+    let modal = SettingsModal::new(mtm);
+    let save_x = PANEL_WIDTH - PANEL_MARGIN - PANEL_BUTTON_WIDTH;
+    let cancel_x = save_x - BUTTON_GAP - PANEL_BUTTON_WIDTH;
+    // No Return key equivalent on Save: Return inside the editor is a new line, and
+    // a list is written a line at a time. Escape still cancels.
+    content.addSubview(&modal_button(mtm, "Save", &modal, sel!(saveSettings:), save_x, button_y, ""));
+    content.addSubview(&modal_button(
+        mtm,
+        "Cancel",
+        &modal,
+        sel!(cancelSettings:),
+        cancel_x,
+        button_y,
+        "\u{1b}",
+    ));
+
+    activate(mtm);
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        NSRect::new(NSPoint::ZERO, NSSize::new(PANEL_WIDTH, panel_height)),
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    panel.setTitle(&NSString::from_str("Authorized gateways"));
+    panel.setContentView(Some(&content));
+    if let Some(close) = panel.standardWindowButton(NSWindowButton::CloseButton) {
+        unsafe {
+            close.setTarget(Some(&modal.as_object()));
+            close.setAction(Some(sel!(cancelSettings:)));
+        }
+    }
+    // The list itself, so a paste lands where it is meant to.
+    panel.setInitialFirstResponder(Some(&editor));
+    panel.center();
+    panel.makeKeyAndOrderFront(None);
+
+    let response = NSApplication::sharedApplication(mtm).runModalForWindow(&panel);
+    panel.orderOut(None);
+    (response == NSModalResponseOK).then(|| editor.string().to_string())
+}
+
+/// The Manage button's target, and the keeper of the list behind the summary.
+///
+/// A whole class for one button, for the same reason [`KeyActions`] is one: an
+/// `NSButton` action has to be a selector on an Objective-C object.
+struct AuthorizedControlsIvars {
+    /// The one-line summary on the settings row, rewritten after an edit.
+    summary: Retained<NSTextField>,
+    /// The list as it stands. Authoritative: the summary is a rendering of it, and
+    /// [`config`] reads this rather than parsing that back.
+    list: RefCell<Authorized>,
+}
+
+define_class!(
+    // SAFETY:
+    // - NSObject has no subclassing requirements.
+    // - `AuthorizedControls` does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    // AppKit sends the action on the main thread, and the ivar is a main-thread-only
+    // object.
+    #[thread_kind = MainThreadOnly]
+    #[name = "RxaAuthorizedControls"]
+    #[ivars = AuthorizedControlsIvars]
+    struct AuthorizedControls;
+
+    unsafe impl NSObjectProtocol for AuthorizedControls {}
+
+    impl AuthorizedControls {
+        /// Open the editor, and keep the row in step with it.
+        ///
+        /// Nothing is saved here either: this lands in the draft, and the settings
+        /// panel's own Save is what writes the file. Cancelling the settings panel
+        /// after editing the list therefore discards the edit, which is the same
+        /// promise every other control on it makes.
+        #[unsafe(method(manageAuthorized:))]
+        fn manage_authorized(&self, _sender: Option<&AnyObject>) {
+            let ivars = self.ivars();
+            let current = ivars.list.borrow().clone();
+            let Some(edited) = authorized_gateways(MainThreadMarker::from(self), &current) else {
+                return;
+            };
+            ivars
+                .summary
+                .setStringValue(&NSString::from_str(&summarize(&edited)));
+            *ivars.list.borrow_mut() = edited;
+        }
+    }
+);
+
+impl AuthorizedControls {
+    fn new(
+        mtm: MainThreadMarker,
+        summary: Retained<NSTextField>,
+        list: Authorized,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AuthorizedControlsIvars {
+            summary,
+            list: RefCell::new(list),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+
+    /// The list as it stands — the original, or whatever the editor replaced it
+    /// with.
+    fn list(&self) -> Authorized {
+        self.ivars().list.borrow().clone()
+    }
+
+    fn as_object(&self) -> Retained<AnyObject> {
+        let this: Retained<Self> = self.retain();
+        // Safety: upcasting a subclass of NSObject to AnyObject.
+        unsafe { Retained::cast_unchecked(this) }
+    }
+}
+
 /// Keeps both consequences of the virtual-display checkbox visible.
 ///
 /// A whole class for one checkbox, for the same reason [`KeyActions`] is one: an
@@ -1217,11 +1517,11 @@ mod tests {
     use super::*;
     use rxa_proto::key::{self, Role};
 
-    fn draft(private_key: String, gateway_public_key: String) -> Draft {
+    fn draft(private_key: String, authorized: Authorized) -> Draft {
         Draft {
             listen: "0.0.0.0:52381".to_owned(),
             private_key,
-            gateway_public_key,
+            authorized,
             virtual_display: false,
             virtual_size: "1280x800".to_owned(),
         }
@@ -1229,6 +1529,15 @@ mod tests {
 
     fn gateway_public_key() -> String {
         key::public_text_of(Role::Gateway, &key::generate_private(Role::Gateway)).unwrap()
+    }
+
+    /// A list of `names.len()` gateways, each with a fresh key.
+    fn list(names: &[&str]) -> Authorized {
+        let text: String = names
+            .iter()
+            .map(|name| format!("{} {name}\n", gateway_public_key()))
+            .collect();
+        Authorized::parse(&text).unwrap()
     }
 
     /// The list shows the saved setting, not a stale report of what exists behind
@@ -1268,7 +1577,7 @@ mod tests {
     #[test]
     fn the_dialog_shows_the_public_half_and_never_the_private_one() {
         let private_key = key::generate_private(Role::Agent);
-        let draft = draft(private_key.clone(), gateway_public_key());
+        let draft = draft(private_key.clone(), list(&["home server"]));
         let shown = draft.public_key();
 
         assert!(shown.starts_with("rxap"), "{shown}");
@@ -1286,7 +1595,7 @@ mod tests {
     #[test]
     fn a_private_key_that_is_nonsense_shows_as_nothing() {
         for bad in ["", "rxasnope", "hunter2"] {
-            let draft = draft(bad.to_owned(), gateway_public_key());
+            let draft = draft(bad.to_owned(), list(&["home server"]));
             assert_eq!(draft.public_key(), "", "{bad}");
         }
     }
@@ -1295,31 +1604,69 @@ mod tests {
     /// the pairing moving is the same failure, so both have to count.
     #[test]
     fn a_pairing_that_has_not_taken_effect_is_noticed_either_way() {
-        let (private_key, gateway) = (key::generate_private(Role::Agent), gateway_public_key());
+        let private_key = key::generate_private(Role::Agent);
+        let authorized = list(&["home server"]);
         let running = InForce {
             private_key: private_key.clone(),
-            gateway_public_key: gateway.clone(),
+            authorized: authorized.clone(),
         };
-        assert!(running.matches(&draft(private_key.clone(), gateway.clone())));
-        // Whitespace round a pasted value is the user's typing, not a change —
-        // `Settings::apply` trims it before it ever reaches the file.
-        assert!(running.matches(&draft(private_key.clone(), format!("  {gateway}\n"))));
+        assert!(running.matches(&draft(private_key.clone(), authorized.clone())));
 
-        // And the same on the *running* side, which is not written by the GUI:
-        // it is the config file as parsed, and `Config::validate` accepts a
-        // padded key because `key::parse_private` trims before it looks. A
-        // hand-edited file with spaces inside the quotes is therefore in force,
-        // and warning that it "never took effect" would be a lie about the one
-        // thing this warning exists to report.
+        // The *running* side is not written by the GUI: it is the config file as
+        // parsed, and `Config::validate` accepts a padded key because
+        // `key::parse_private` trims before it looks. A hand-edited file with spaces
+        // inside the quotes is therefore in force, and warning that it "never took
+        // effect" would be a lie about the one thing this warning exists to report.
         let padded = InForce {
             private_key: format!("  {private_key}\n"),
-            gateway_public_key: format!(" {gateway} "),
+            authorized: authorized.clone(),
         };
-        assert!(padded.matches(&draft(private_key.clone(), gateway.clone())));
+        assert!(padded.matches(&draft(private_key.clone(), authorized.clone())));
 
-        // A regenerated identity the gateway has not been told about.
-        assert!(!running.matches(&draft(key::generate_private(Role::Agent), gateway)));
-        // A newly pasted gateway key.
-        assert!(!running.matches(&draft(private_key, gateway_public_key())));
+        // A regenerated identity the gateways have not been told about.
+        assert!(!running.matches(&draft(
+            key::generate_private(Role::Agent),
+            authorized.clone()
+        )));
+        // A gateway added to the list.
+        assert!(!running.matches(&draft(
+            private_key.clone(),
+            list(&["home server", "the laptop"])
+        )));
+        // And a line commented out, which changes no key and is still not what the
+        // agent is doing until it restarts.
+        let parked = Authorized::parse(&format!("#{}", authorized.text())).unwrap();
+        assert!(parked.is_empty());
+        assert!(!running.matches(&draft(private_key, parked)));
+    }
+
+    /// The one row that has to describe a whole file. A count alone would not
+    /// answer the question somebody opens this dialog with — "is the gateway I am
+    /// thinking of on here?" — so the names lead and the row truncates rather than
+    /// growing.
+    #[test]
+    fn the_row_names_the_gateways_it_has_room_for() {
+        assert_eq!(
+            summarize(&Authorized::default()),
+            "None — every connection is refused"
+        );
+        assert_eq!(
+            summarize(&list(&["home server"])),
+            "1 gateway — home server"
+        );
+        assert_eq!(
+            summarize(&list(&["home server", "the laptop"])),
+            "2 gateways — home server, the laptop"
+        );
+        // Past what fits, the count carries the rest rather than the row spilling.
+        assert_eq!(
+            summarize(&list(&["a", "b", "c", "d", "e"])),
+            "5 gateways — a, b, c, and 2 more"
+        );
+
+        // An entry with no name still has to appear as something: it is a real
+        // entry, and a blank there would read as a bug in this line.
+        let unnamed = Authorized::parse(&format!("{}\n", gateway_public_key())).unwrap();
+        assert_eq!(summarize(&unnamed), "1 gateway — (unnamed)");
     }
 }

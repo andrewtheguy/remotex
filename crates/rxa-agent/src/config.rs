@@ -1,14 +1,14 @@
 //! GUI-owned agent configuration.
 //!
 //! The menu bar rewrites the whole file, so rendered comments are canonical and
-//! manual additions are not retained. The agent listens for one paired gateway
-//! and optionally creates one virtual display.
+//! manual additions are not retained. This file holds what the agent *is* — its
+//! address, its identity, and whether it makes a virtual display.
 //!
-//! One *paired* gateway is what this file says, and it is not the same statement
-//! as one session at a time — that is `crate::state`, keyed on the session id a
-//! connection claims with rather than on the key below. A list of permitted
-//! gateways would change this file and the handshake, and leave the session slot
-//! alone (`docs/roadmap.md`).
+//! Who it will answer is not in here. That is a list, and it lives in
+//! [`crate::authorized`] beside this file precisely because a whole-file rewrite
+//! would not keep the comments a list like that is annotated with. Nor is *whose
+//! turn it is*: that is [`crate::state::decide`], keyed on the session id a
+//! connection claims with rather than on any key.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -27,16 +27,6 @@ pub struct Config {
     /// shown, copied or printed. Its public half — derived on demand by
     /// [`Config::public_key`] — is what goes on the gateway.
     pub private_key: String,
-    /// The gateway's public key (`rxgp…`), from `remotex rxa-pubkey`. The agent
-    /// answers that gateway and no other — a statement about who may *ask* for a
-    /// session, not about how many there can be (see [`crate::state::decide`]).
-    ///
-    /// **May be empty**, which means unpaired: a first launch has nobody to
-    /// pair with yet, and the agent has to be running before its own public key
-    /// can be read out of the menu bar. An unpaired agent listens and refuses
-    /// every connection — see [`Config::gateway_public_key_bytes`].
-    #[serde(default)]
-    pub gateway_public_key: String,
     /// Give the Mac an extra display, of the agent's own making.
     ///
     /// An addition, not a substitution: `CGVirtualDisplay` *adds* a monitor next
@@ -70,7 +60,7 @@ fn default_virtual_display_initial_size() -> String {
 
 impl Config {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
-        let config: Config = toml::from_str(text).context("invalid TOML config")?;
+        let config: Config = toml::from_str(text).map_err(moved_gateway_key)?;
         config.validate()?;
         Ok(config)
     }
@@ -84,24 +74,9 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         rxa_proto::key::parse_private(rxa_proto::key::Role::Agent, &self.private_key)
             .map_err(|e| anyhow::anyhow!("invalid private_key: {e}"))?;
-        // Empty is unpaired, which is what a first launch looks like. Anything
-        // else has to be a gateway's public key — including, pointedly, not
-        // this Mac's own, which the role in the prefix is there to catch.
-        if !self.gateway_public_key.trim().is_empty() {
-            rxa_proto::key::parse_public(
-                rxa_proto::key::Role::Gateway,
-                &self.gateway_public_key,
-            )
-            .map_err(|e| anyhow::anyhow!("invalid gateway_public_key: {e}"))?;
-        }
         self.socket_addr()?;
         self.virtual_display_initial_points()?;
         Ok(())
-    }
-
-    /// Whether this agent has been told which gateway to answer.
-    pub fn is_paired(&self) -> bool {
-        !self.gateway_public_key.trim().is_empty()
     }
 
     /// The virtual display's size in points.
@@ -165,18 +140,6 @@ impl Config {
     pub fn public_key(&self) -> String {
         rxa_proto::key::public_text_of(rxa_proto::key::Role::Agent, &self.private_key)
             .expect("private_key validated in Config::validate")
-    }
-
-    /// The gateway this agent answers, or `None` while it is unpaired.
-    /// Infallible after [`Config::validate`].
-    pub fn gateway_public_key_bytes(&self) -> Option<[u8; 32]> {
-        if !self.is_paired() {
-            return None;
-        }
-        Some(
-            rxa_proto::key::parse_public(rxa_proto::key::Role::Gateway, &self.gateway_public_key)
-                .expect("gateway_public_key validated in Config::validate"),
-        )
     }
 
     /// Write this config to `path`, replacing whatever is there.
@@ -270,6 +233,11 @@ pub fn import_private_key(explicit: Option<&Path>, private_key: &str) -> anyhow:
 /// there is no gateway to name yet.
 ///
 /// Returns the config, its path, and whether this call created it.
+///
+/// The authorized list is *not* created alongside it: a missing list is an empty
+/// one (see [`crate::authorized::Authorized::load`]), and writing a file with
+/// nothing in it would only make "has anybody been authorized here" a question
+/// about the file's contents rather than its existence.
 pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBuf, bool)> {
     let path = match explicit {
         Some(path) => path.to_path_buf(),
@@ -288,7 +256,6 @@ pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBu
     let config = Config {
         listen: default_listen(),
         private_key: rxa_proto::key::generate_private(rxa_proto::key::Role::Agent),
-        gateway_public_key: String::new(),
         virtual_display: false,
         virtual_display_initial_size: default_virtual_display_initial_size(),
     };
@@ -301,8 +268,10 @@ pub fn load_or_create(explicit: Option<&Path>) -> anyhow::Result<(Config, PathBu
 /// `private_key` in here is this Mac's whole identity — anything holding it can
 /// be this Mac to the gateway — so the file is created 0600 from the start
 /// rather than chmod'ed afterwards, which leaves no window where it is
-/// world-readable.
-fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
+/// world-readable. Shared with [`crate::authorized`], whose file holds no secret
+/// but must be no more writable than this one: appending a key to it is as good as
+/// holding this one.
+pub(crate) fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -337,22 +306,19 @@ fn render(config: &Config) -> String {
 #     PUBLIC half is what the gateway needs, and Settings shows that one in full
 #     with a Copy button; paste it as `agent_public_key` on the matching
 #     [[targets]] entry in the gateway's remotex.toml.
-#   * gateway_public_key is that gateway's public key, which `remotex rxa-pubkey`
-#     prints. Until it is set this agent is unpaired: it listens, and refuses
-#     every connection.
+#   * the other direction is a LIST, and it is not in this file: the gateways
+#     allowed to reach this Mac live one per line in `authorized_gateways` beside
+#     it, the way ~/.ssh/authorized_keys does, so an entry can carry a name and
+#     be commented out without this file's rewrites losing it. Until something is
+#     on that list this agent listens and refuses every connection.
 
 # Address to listen on, as address:port — 0.0.0.0 so the gateway host can reach
 # it; narrow this to a specific interface if you prefer.
 listen = "{listen}"
 
-# Secret. Regenerating it means re-pairing: the gateway will refuse this Mac
-# until its new public key is pasted there.
+# Secret. Regenerating it means re-pairing: every gateway on the authorized list
+# will refuse this Mac until its new public key is pasted there.
 private_key = "{private_key}"
-
-# The one gateway this Mac answers. Empty means unpaired. This is who may ask for
-# a session; the agent serves one session at a time either way, and refuses a
-# second until whoever is watching is taken over.
-gateway_public_key = "{gateway_public_key}"
 
 # There is no setting for which display to share: that is picked per session
 # from the viewer or the browser, out of every display attached to this Mac.
@@ -387,9 +353,30 @@ virtual_display_initial_size = "{virtual_display_initial_size}"
 "#,
         listen = config.listen,
         private_key = config.private_key,
-        gateway_public_key = config.gateway_public_key,
         virtual_display = config.virtual_display,
         virtual_display_initial_size = config.virtual_display_initial_size,
+    )
+}
+
+/// Turn `deny_unknown_fields`' report of a leftover `gateway_public_key` into the
+/// one sentence that fixes it.
+///
+/// The field moved out of this file into [`crate::authorized`], and it moved
+/// without a migration — the project takes no backward compatibility. A bare
+/// "unknown field `gateway_public_key`" would be true and useless: it names what is
+/// wrong and not where the value went, on the one setting whose absence means the
+/// Mac refuses everybody.
+fn moved_gateway_key(e: toml::de::Error) -> anyhow::Error {
+    let message = e.to_string();
+    if !message.contains("gateway_public_key") {
+        return anyhow::Error::new(e).context("invalid TOML config");
+    }
+    anyhow::anyhow!(
+        "{message}\n\ngateway_public_key is no longer a config field: the gateways \
+         allowed to reach this Mac are now a list in `{}` beside this file, one \
+         `<key> <name>` per line. Delete the line here and add the key there — \
+         Settings > Authorized gateways > Manage… does both.",
+        crate::authorized::FILE_NAME
     )
 }
 
@@ -435,8 +422,7 @@ mod tests {
 
     use rxa_proto::key::{self, Role};
 
-    /// A config body with a valid identity, plus whatever `extra` adds. Left
-    /// unpaired, since most of these tests are not about the gateway.
+    /// A config body with a valid identity, plus whatever `extra` adds.
     fn with_identity(extra: &str) -> String {
         format!(
             "private_key = \"{}\"\n{extra}",
@@ -444,16 +430,10 @@ mod tests {
         )
     }
 
-    /// A fresh gateway's public key, as `remotex rxa-pubkey` prints it.
-    fn gateway_public_key() -> String {
-        key::public_text_of(Role::Gateway, &key::generate_private(Role::Gateway)).unwrap()
-    }
-
     fn sample() -> Config {
         Config {
             listen: default_listen(),
             private_key: key::generate_private(Role::Agent),
-            gateway_public_key: gateway_public_key(),
             virtual_display: false,
             virtual_display_initial_size: default_virtual_display_initial_size(),
         }
@@ -466,37 +446,45 @@ mod tests {
         assert!(!config.virtual_display, "no extra display unless asked for");
     }
 
-    // A config with no gateway named is the state every Mac starts in, and it
-    // has to be a *valid* one: the agent must run before its public key can be
-    // read out of the menu bar and taken to a gateway.
+    // A config that names no gateway at all is the state every Mac starts in,
+    // and it has to be a *valid* one: the agent must run before its public key can
+    // be read out of the menu bar and taken to a gateway. Who may connect is not
+    // in this file any more (see `crate::authorized`), so there is nothing here to
+    // be missing — which is the point.
     #[test]
-    fn an_agent_with_no_gateway_yet_is_unpaired_rather_than_invalid() {
+    fn an_agent_that_has_authorized_nobody_still_has_a_valid_config() {
         let config = Config::parse(&with_identity("")).unwrap();
-        assert!(!config.is_paired());
-        assert!(config.gateway_public_key_bytes().is_none());
-        // And it still knows its own half, which is the thing to go and copy.
+        // It knows its own half, which is the thing to go and copy.
         assert!(config.public_key().starts_with("rxap"), "{}", config.public_key());
+    }
+
+    // The field moved, and it moved without a migration — so the one thing this
+    // must not be is an opaque parse error on the setting whose absence makes the
+    // Mac refuse everybody.
+    #[test]
+    fn a_config_still_carrying_the_old_gateway_key_says_where_it_went() {
+        let key = key::public_text_of(Role::Gateway, &key::generate_private(Role::Gateway))
+            .unwrap();
+        let err =
+            Config::parse(&with_identity(&format!("gateway_public_key = \"{key}\""))).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(crate::authorized::FILE_NAME), "{msg}");
+        assert!(msg.contains("one `<key> <name>` per line"), "{msg}");
     }
 
     #[test]
     fn full_config_parses() {
         let private_key = key::generate_private(Role::Agent);
-        let gateway = gateway_public_key();
         let config = Config::parse(&format!(
             "listen = \"192.168.1.5:9000\"\nprivate_key = \"{private_key}\"\n\
-             gateway_public_key = \"{gateway}\"\nvirtual_display = true"
+             virtual_display = true"
         ))
         .unwrap();
         assert_eq!(config.listen, "192.168.1.5:9000");
         assert!(config.virtual_display);
-        assert!(config.is_paired());
         assert_eq!(
             config.private_key_bytes(),
             key::parse_private(Role::Agent, &private_key).unwrap()
-        );
-        assert_eq!(
-            config.gateway_public_key_bytes(),
-            Some(key::parse_public(Role::Gateway, &gateway).unwrap())
         );
         // Derived, not stored: the file holds one key and this is the other
         // face of it.
@@ -520,30 +508,6 @@ mod tests {
         let typo: String = chars.into_iter().collect();
         let err = Config::parse(&format!("private_key = \"{typo}\"")).unwrap_err();
         assert!(format!("{err:#}").contains("checksum"), "{err:#}");
-    }
-
-    #[test]
-    fn a_malformed_gateway_public_key_is_rejected() {
-        let err = Config::parse(&with_identity("gateway_public_key = \"rxgpnope\"")).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("invalid gateway_public_key"),
-            "{err:#}"
-        );
-    }
-
-    // The mistake the role in the prefix exists to catch, from this side: both
-    // public keys are on screen while pairing, and pasting the wrong one here
-    // would otherwise be a gateway that mysteriously never connects.
-    #[test]
-    fn this_macs_own_public_key_is_rejected_as_the_gateways() {
-        let private_key = key::generate_private(Role::Agent);
-        let own_public = key::public_text_of(Role::Agent, &private_key).unwrap();
-        let err = Config::parse(&format!(
-            "private_key = \"{private_key}\"\ngateway_public_key = \"{own_public}\""
-        ))
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("this is an agent public key"), "{msg}");
     }
 
     // The GUI validates a typed address with `validate`, so what it rejects is
@@ -590,8 +554,6 @@ mod tests {
         assert_eq!(config.private_key.len(), rxa_proto::key::TEXT_LEN);
         key::parse_private(Role::Agent, &config.private_key).unwrap();
         assert_eq!(config.listen, format!("0.0.0.0:{}", rxa_proto::DEFAULT_PORT));
-        // Unpaired: there is no gateway to name until someone brings one.
-        assert!(!config.is_paired(), "a first launch has no gateway yet");
 
         // Owner-only: the private key in this file is this Mac's identity.
         assert_eq!(mode(&path), 0o600, "config must not be group/world readable");
@@ -630,7 +592,6 @@ mod tests {
         assert_eq!(imported.listen, "127.0.0.1:9100");
         assert!(imported.virtual_display);
         assert_eq!(imported.virtual_display_initial_size, "1920x1200");
-        assert_eq!(imported.gateway_public_key, original.gateway_public_key);
         assert_eq!(load(Some(&path)).unwrap().0, imported, "not persisted");
         assert_eq!(mode(&path), 0o600, "the import must not widen the mode");
     }
@@ -668,7 +629,6 @@ mod tests {
         let incoming = key::generate_private(Role::Agent);
         let imported = import_private_key(Some(&path), &incoming).unwrap();
         assert_eq!(imported.private_key, incoming);
-        assert!(!imported.is_paired(), "still nothing to pair with");
         assert_eq!(load(Some(&path)).unwrap().0.private_key, incoming);
         assert_eq!(mode(&path), 0o600);
     }
@@ -718,7 +678,6 @@ mod tests {
         config.listen = "127.0.0.1:9999".to_owned();
         config.virtual_display = true;
         config.private_key = key::generate_private(Role::Agent);
-        config.gateway_public_key = gateway_public_key();
         config.save(&path).unwrap();
         assert_eq!(mode(&path), 0o600, "the rename must not widen the mode");
         assert_eq!(load(Some(&path)).unwrap().0, config);
@@ -757,20 +716,17 @@ mod tests {
         let config = Config {
             listen: "10.0.0.1:1234".to_owned(),
             private_key: key::generate_private(Role::Agent),
-            gateway_public_key: gateway_public_key(),
             virtual_display: true,
             virtual_display_initial_size: "1440x900".to_owned(),
         };
         assert_eq!(Config::parse(&render(&config)).unwrap(), config);
 
-        // And the unpaired shape, which is what a first launch writes: an empty
-        // `gateway_public_key` has to survive the round trip as empty rather
-        // than becoming a line the parser then rejects.
-        let unpaired = Config {
-            gateway_public_key: String::new(),
+        // And the shape a first launch writes, which differs only in the display.
+        let minimal = Config {
+            virtual_display: false,
             ..config
         };
-        assert_eq!(Config::parse(&render(&unpaired)).unwrap(), unpaired);
+        assert_eq!(Config::parse(&render(&minimal)).unwrap(), minimal);
     }
 
     // The floor the config accepts is the floor the display is created at. Were

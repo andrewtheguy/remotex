@@ -213,7 +213,7 @@ define_class!(
             let mut draft = panels::Draft {
                 listen: saved.listen.clone(),
                 private_key: saved.private_key.clone(),
-                gateway_public_key: saved.gateway_public_key.clone(),
+                authorized: settings.saved_authorized(),
                 virtual_display: saved.virtual_display,
                 virtual_size: saved.virtual_display_initial_size.clone(),
             };
@@ -223,21 +223,22 @@ define_class!(
             // gone deaf.
             let in_force = panels::InForce {
                 private_key: settings.running().private_key.clone(),
-                gateway_public_key: settings.running().gateway_public_key.clone(),
+                authorized: settings.running_authorized().clone(),
             };
 
             loop {
-                let Some(edited) = panels::config(mtm, &draft, &attached, &in_force) else {
+                let Some(edited) =
+                    panels::config(mtm, &draft, &attached, &in_force, settings.authorized_path())
+                else {
                     return;
                 };
                 let next = config::Config {
                     listen: edited.listen.clone(),
                     private_key: edited.private_key.clone(),
-                    gateway_public_key: edited.gateway_public_key.clone(),
                     virtual_display: edited.virtual_display,
                     virtual_display_initial_size: edited.virtual_size.clone(),
                 };
-                match settings.apply(next) {
+                match settings.apply(next, edited.authorized.clone()) {
                     // Nothing changed, so there is nothing to restart into and no
                     // reason to interrupt a session that is running.
                     Ok(false) => return,
@@ -457,25 +458,30 @@ impl Controller {
         }
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        // An agent nobody has paired says so, because there is nothing else on
-        // screen to explain a Mac that is plainly running and refusing every
+        // An agent that will answer nobody says so, because there is nothing else
+        // on screen to explain a Mac that is plainly running and refusing every
         // connection. Above Settings, which is where it is fixed.
-        if !saved.is_paired() {
-            let item = self.action("Not paired — open Settings", sel!(openSettings:), mtm);
+        if settings.saved_authorized().is_empty() {
+            let item = self.action(
+                "No authorized gateways — open Settings",
+                sel!(openSettings:),
+                mtm,
+            );
             item.setToolTip(Some(&NSString::from_str(
-                "No gateway key is set, so this Mac refuses every connection. Paste the \
-                 gateway's public key — `remotex rxa-pubkey` prints it — into Settings.",
+                "This Mac refuses every connection until a gateway's public key is on its \
+                 authorized list. `remotex rxa-pubkey` prints that key; add it under \
+                 Authorized gateways in Settings.",
             )));
             menu.addItem(&item);
         }
-        // Neither key is out here. Copying this Mac's is one button inside the
-        // dialog, beside the key it copies — one click further than a menu item
-        // was, and it puts the copy next to the gateway key it has to be
-        // exchanged with, which is the thing being done.
+        // No key is out here. Copying this Mac's is one button inside the dialog,
+        // beside the key it copies — one click further than a menu item was, and it
+        // puts the copy next to the list it has to be exchanged with, which is the
+        // thing being done.
         let item = self.action("Settings…", sel!(openSettings:), mtm);
         item.setToolTip(Some(&NSString::from_str(&format!(
             "Listen address ({}), display, this Mac's public key with a Copy button, and \
-             the gateway's. Saving a change restarts the agent.",
+             the gateways allowed to reach it. Saving a change restarts the agent.",
             saved.listen
         ))));
         menu.addItem(&item);

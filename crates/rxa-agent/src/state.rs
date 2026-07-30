@@ -33,6 +33,14 @@ pub struct Connection {
     /// to itself from a different one arriving, which is the whole of
     /// [`decide`].
     pub session: [u8; 16],
+    /// What this Mac's authorized list calls the gateway that dialed, from the
+    /// comment on its entry — `None` when the entry carried none.
+    ///
+    /// Known because the handshake is `Noise_IK`: the agent learns which key is
+    /// calling and looks it up (see [`crate::authorized`]). It answers a question
+    /// the address alone could not, now that more than one gateway may be listed —
+    /// *which* of them is watching.
+    pub gateway: Option<String>,
     pub peer: SocketAddr,
     pub since: Instant,
 }
@@ -41,17 +49,27 @@ impl Connection {
     /// This connection as a refused claim is told about it: who holds the slot,
     /// and for how many seconds.
     ///
-    /// The address without its ephemeral port, for the same reason [`describe`]
-    /// leaves it out — it is a different number on every reconnect and answers
-    /// nothing, where the address answers "is that me on the laptop, or something
-    /// I don't recognise?". Saturating, because a clock that has gone backwards
-    /// must not panic the accept loop.
+    /// The name off the list when there is one, and the bare address otherwise. The
+    /// name is the better answer to "who is on my Mac?" — it is what its owner chose
+    /// to call that gateway — and the peer being told is itself on the same list, so
+    /// there is nothing here it is not already entitled to know.
+    ///
+    /// Either way without the ephemeral port, for the same reason [`describe`]
+    /// leaves it out: it is a different number on every reconnect and answers
+    /// nothing. Saturating, because a clock that has gone backwards must not panic
+    /// the accept loop.
     pub fn holder(&self, now: Instant) -> (String, u32) {
         let held = now.saturating_duration_since(self.since).as_secs();
         (
-            self.peer.ip().to_string(),
+            self.name().unwrap_or_else(|| self.peer.ip().to_string()),
             u32::try_from(held).unwrap_or(u32::MAX),
         )
+    }
+
+    /// The list's name for this gateway, ignoring one that is only whitespace.
+    fn name(&self) -> Option<String> {
+        let name = self.gateway.as_deref()?.trim();
+        (!name.is_empty()).then(|| name.to_owned())
     }
 }
 
@@ -114,11 +132,18 @@ impl AgentState {
 
     /// Record a newly accepted gateway, returning the id to hand back to
     /// [`AgentState::disconnected`] when its session ends.
-    pub fn connected(&self, session: [u8; 16], peer: SocketAddr, now: Instant) -> u64 {
+    pub fn connected(
+        &self,
+        session: [u8; 16],
+        gateway: Option<String>,
+        peer: SocketAddr,
+        now: Instant,
+    ) -> u64 {
         let id = self.last_id.fetch_add(1, Ordering::Relaxed) + 1;
         *self.connection.lock().unwrap() = Some(Connection {
             id,
             session,
+            gateway,
             peer,
             since: now,
         });
@@ -160,17 +185,22 @@ impl AgentState {
 /// "client" to stay with the one word the logs, the docs and the config comments
 /// all already use for the thing that dials in.
 ///
+/// It leads with the list's name for that gateway when there is one, and keeps the
+/// address beside it: the name is what the user recognises, and the address is what
+/// they check it against. An entry with no comment falls back to the address alone,
+/// which is what this line said before there was a list to name anything.
+///
 /// The port is left out deliberately — it is a different ephemeral number on
 /// every reconnect and tells the user nothing, whereas the address answers "is
 /// that me on the laptop, or something I don't recognise?".
 pub fn describe(connection: Option<&Connection>, now: Instant) -> String {
-    match connection {
-        Some(c) => format!(
-            "Sharing this screen with {} ({})",
-            c.peer.ip(),
-            human_duration(now.saturating_duration_since(c.since))
-        ),
-        None => "No gateway connected".to_owned(),
+    let Some(c) = connection else {
+        return "No gateway connected".to_owned();
+    };
+    let held = human_duration(now.saturating_duration_since(c.since));
+    match c.name() {
+        Some(name) => format!("Sharing this screen with {name} ({}, {held})", c.peer.ip()),
+        None => format!("Sharing this screen with {} ({held})", c.peer.ip()),
     }
 }
 
@@ -220,10 +250,16 @@ mod tests {
     #[test]
     fn connecting_and_disconnecting_round_trips() {
         let state = AgentState::new();
-        let id = state.connected(SESSION_A, peer("10.0.0.2:41234"), Instant::now());
+        let id = state.connected(
+            SESSION_A,
+            Some("home server".to_owned()),
+            peer("10.0.0.2:41234"),
+            Instant::now(),
+        );
         assert!(state.is_connected());
         assert_eq!(state.current().unwrap().peer, peer("10.0.0.2:41234"));
         assert_eq!(state.current().unwrap().session, SESSION_A);
+        assert_eq!(state.current().unwrap().gateway.as_deref(), Some("home server"));
 
         state.disconnected(id);
         assert!(!state.is_connected());
@@ -235,8 +271,8 @@ mod tests {
     #[test]
     fn a_stale_session_does_not_clear_the_connection_that_replaced_it() {
         let state = AgentState::new();
-        let old = state.connected(SESSION_A, peer("10.0.0.2:1"), Instant::now());
-        let new = state.connected(SESSION_B, peer("10.0.0.3:2"), Instant::now());
+        let old = state.connected(SESSION_A, None, peer("10.0.0.2:1"), Instant::now());
+        let new = state.connected(SESSION_B, None, peer("10.0.0.3:2"), Instant::now());
         assert_ne!(old, new);
 
         // The evicted session finishes and reports its own disconnect.
@@ -257,7 +293,7 @@ mod tests {
         state.disconnected(42);
         assert!(!state.is_connected());
 
-        let id = state.connected(SESSION_A, peer("10.0.0.2:1"), Instant::now());
+        let id = state.connected(SESSION_A, None, peer("10.0.0.2:1"), Instant::now());
         state.disconnected(id + 1000);
         assert!(state.is_connected());
     }
@@ -291,6 +327,7 @@ mod tests {
         let connection = Connection {
             id: 1,
             session: SESSION_A,
+            gateway: None,
             peer: peer("192.168.1.10:52344"),
             since,
         };
@@ -304,6 +341,28 @@ mod tests {
         assert_eq!(held, 0);
     }
 
+    // Once the incumbent has a name off the authorized list, that is what a
+    // refusal reports: "in use from home server" answers whose turn it is, where
+    // an address makes the person on the other client work it out. The peer being
+    // told is on the same list, so this is nothing it may not know.
+    #[test]
+    fn a_named_gateway_is_reported_by_name_rather_than_address() {
+        let since = Instant::now();
+        let mut connection = Connection {
+            id: 1,
+            session: SESSION_A,
+            gateway: Some("home server".to_owned()),
+            peer: peer("192.168.1.10:52344"),
+            since,
+        };
+        assert_eq!(connection.holder(since).0, "home server");
+
+        // A comment that is only whitespace is no name at all, and must not become
+        // a blank where the holder should be.
+        connection.gateway = Some("   ".to_owned());
+        assert_eq!(connection.holder(since).0, "192.168.1.10");
+    }
+
     #[test]
     fn the_summary_names_the_peer_without_its_ephemeral_port() {
         // Built forwards from `since`: subtracting from a fresh `Instant` panics
@@ -313,13 +372,24 @@ mod tests {
         let connection = Connection {
             id: 1,
             session: SESSION_A,
+            gateway: None,
             peer: peer("192.168.1.10:52344"),
             since,
         };
         let text = describe(Some(&connection), now);
-        assert!(text.contains("192.168.1.10"), "{text}");
+        assert_eq!(text, "Sharing this screen with 192.168.1.10 (2m)");
         assert!(!text.contains("52344"), "the port is noise: {text}");
-        assert!(text.contains("2m"), "{text}");
+
+        // With a name on the list, that leads and the address stays beside it: the
+        // name is what is recognised, the address is what it is checked against.
+        let named = Connection {
+            gateway: Some("home server".to_owned()),
+            ..connection
+        };
+        assert_eq!(
+            describe(Some(&named), now),
+            "Sharing this screen with home server (192.168.1.10, 2m)"
+        );
     }
 
     // The idle line has to read as "running, and nobody is looking" rather than as
@@ -345,6 +415,7 @@ mod tests {
         let connection = Connection {
             id: 1,
             session: SESSION_A,
+            gateway: None,
             peer: peer("10.0.0.2:1"),
             since: now + Duration::from_secs(60),
         };

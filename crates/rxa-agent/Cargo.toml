@@ -88,6 +88,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSFont",
     "NSWindow",
     "NSPopUpButton",
+    # The authorized-gateways editor is a text view inside a scroll view, so the
+    # list stays reachable on a small display however many entries it has.
+    # NSTextView's setString/setFont/setEditable are NSText's, above.
+    "NSTextView",
+    "NSScrollView",
     # NSColor is what makes the read-only public key look read-only: an
     # NSTextField built with `initWithFrame:` fills itself with
     # `textBackgroundColor` and reads as somewhere to type. It also gates
