@@ -83,7 +83,16 @@ password = "change-me"
 # Optional domain (leave unset for a local account). RDP only.
 #domain = ""
 
-# Initial desktop size to request. RDP only — a VNC server dictates its size.
+# Initial desktop size to request.
+#
+# RDP connects at this size. A VNC server keeps its own instead and consults these
+# only to answer a client that has no desktop-shaped window of its own — a phone
+# asking for whatever this end considers right — which needs `resize = true` below
+# before anything can be applied. rxa ignores them entirely: the size of a display
+# the agent made is stated in the agent's own config, not here.
+#
+# On an RDP target with `resize` these are *points*, not pixels: the connect
+# happens at 1x and a Retina client then asks for twice the pixels.
 #width = 1280
 #height = 800
 
@@ -131,9 +140,10 @@ password = "change-me"
 # only to a client that asks for it, and the viewer never does.
 #audio = false
 
-# A VNC target needs host and, usually, one of the two passwords; domain,
-# width/height, and security are ignored. `vnc_password` is the server's own
-# password and is all a server without user accounts takes.
+# A VNC target needs host and, usually, one of the two passwords; domain and
+# security are ignored, and width/height only ever answer a default-size request
+# (see above). `vnc_password` is the server's own password and is all a server
+# without user accounts takes.
 # [[targets]]
 # name = "workstation-vnc"
 # protocol = "vnc"
