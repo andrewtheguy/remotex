@@ -560,6 +560,7 @@ async fn spawn_app_with(
         }],
         site_passwd: common::test_site_passwd(),
         branding: "remotex".to_owned(),
+        dev_hostname: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
