@@ -7,8 +7,9 @@
 //!
 //! The fake agent speaks the real protocol: it completes a genuine
 //! `Noise_KK_25519_ChaChaPoly_BLAKE2s` handshake against a gateway it has been
-//! paired with, sends `Hello`, then a pre-encoded WebP tile and a cursor shape,
-//! and it records the input it is sent. Four things are under test:
+//! paired with, reads the gateway's claim on its session slot, answers `Hello`,
+//! then sends a pre-encoded WebP tile and a cursor shape, and it records both the
+//! claims and the input it is sent. Five things are under test:
 //!
 //! 1. **Pass-through.** A WebP the agent encoded reaches the browser as a
 //!    `format = 2` tile frame, byte for byte, and the cursor shape arrives on
@@ -22,6 +23,11 @@
 //!    that leaves no evidence on screen when it goes wrong.
 //! 4. **Session expiry.** Closing the browser releases the agent connection
 //!    after the shared reattach grace period.
+//! 5. **The session slot.** Every dial claims the slot, a reconnect claims the
+//!    same session it already held (so the agent lets it back in rather than
+//!    treating it as a second client), and an agent that refuses is reported to
+//!    the browser as busy — once, with no retries, because only a person can
+//!    resolve it.
 
 mod common;
 
@@ -109,7 +115,9 @@ async fn spawn_fake_agent(
     Arc<AtomicUsize>,
     mpsc::UnboundedReceiver<GatewayMsg>,
 ) {
-    spawn_fake_agent_with_mode_change(keys, hang_up_first, None).await
+    let (port, connections, active, input_rx, _claims) =
+        spawn_fake_agent_with(keys, hang_up_first, None).await;
+    (port, connections, active, input_rx)
 }
 
 /// As [`spawn_fake_agent`], with the Mac changing its own display mode right
@@ -124,6 +132,28 @@ async fn spawn_fake_agent_with_mode_change(
     Arc<AtomicUsize>,
     mpsc::UnboundedReceiver<GatewayMsg>,
 ) {
+    let (port, connections, active, input_rx, _claims) =
+        spawn_fake_agent_with(keys, hang_up_first, mode_change).await;
+    (port, connections, active, input_rx)
+}
+
+/// The full form, which also hands back every **claim** the agent was sent, in
+/// arrival order.
+///
+/// Claims travel on their own channel rather than with the browser input: a claim
+/// is the gateway asking for the session slot, not something a person did, and the
+/// input assertions read an exact ordered sequence.
+async fn spawn_fake_agent_with(
+    keys: AgentKeys,
+    hang_up_first: bool,
+    mode_change: Option<(u16, u16)>,
+) -> (
+    u16,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    mpsc::UnboundedReceiver<GatewayMsg>,
+    mpsc::UnboundedReceiver<GatewayMsg>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let connections = Arc::new(AtomicUsize::new(0));
@@ -131,15 +161,18 @@ async fn spawn_fake_agent_with_mode_change(
     let active = Arc::new(AtomicUsize::new(0));
     let active_connections = Arc::clone(&active);
     let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (claims_tx, claims_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let nth = counter.fetch_add(1, Ordering::SeqCst) + 1;
             let hang_up = hang_up_first && nth == 1;
             let input_tx = input_tx.clone();
+            let claims_tx = claims_tx.clone();
             let active = Arc::clone(&active_connections);
             tokio::spawn(async move {
                 active.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = serve_fake_agent(stream, keys, hang_up, mode_change, input_tx).await
+                if let Err(e) =
+                    serve_fake_agent(stream, keys, hang_up, mode_change, input_tx, claims_tx).await
                 {
                     // Expected on the hang-up path and at test teardown.
                     eprintln!("fake agent connection ended: {e}");
@@ -148,7 +181,54 @@ async fn spawn_fake_agent_with_mode_change(
             });
         }
     });
-    (port, connections, active, input_rx)
+    (port, connections, active, input_rx, claims_rx)
+}
+
+/// An agent whose session slot is already held by somebody else: it authenticates
+/// every dial, reads the claim, refuses it, and hangs up. Returns the port and the
+/// claims it was sent.
+async fn spawn_busy_agent(
+    keys: AgentKeys,
+    holder: &'static str,
+    held_secs: u32,
+) -> (u16, Arc<AtomicUsize>, mpsc::UnboundedReceiver<GatewayMsg>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&connections);
+    let (claims_tx, claims_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let claims_tx = claims_tx.clone();
+            tokio::spawn(async move {
+                let served = async {
+                    let transport =
+                        rxa_proto::noise::respond(&mut stream, &keys.private, &keys.gateway_public)
+                            .await?;
+                    let (read_half, write_half) = stream.into_split();
+                    let (mut reader, mut writer) =
+                        rxa_proto::frame::split(read_half, write_half, transport);
+                    let claim = GatewayMsg::decode(&reader.recv().await?)?;
+                    let _ = claims_tx.send(claim);
+                    writer
+                        .send(
+                            &AgentMsg::Busy {
+                                holder: holder.to_owned(),
+                                held_secs,
+                            }
+                            .encode(),
+                        )
+                        .await?;
+                    Ok::<(), anyhow::Error>(())
+                };
+                if let Err(e) = served.await {
+                    eprintln!("busy agent connection ended: {e}");
+                }
+            });
+        }
+    });
+    (port, connections, claims_rx)
 }
 
 async fn serve_fake_agent(
@@ -157,13 +237,27 @@ async fn serve_fake_agent(
     hang_up: bool,
     mode_change: Option<(u16, u16)>,
     input_tx: mpsc::UnboundedSender<GatewayMsg>,
+    claims_tx: mpsc::UnboundedSender<GatewayMsg>,
 ) -> anyhow::Result<()> {
     let transport =
         rxa_proto::noise::respond(&mut stream, &keys.private, &keys.gateway_public).await?;
     let (read_half, write_half) = stream.into_split();
     let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
 
-    // Hello is the agent's first frame, before it has heard anything back.
+    // The gateway asks for the session slot before the agent says anything, so
+    // this is the first frame on every connection.
+    let claim = GatewayMsg::decode(&reader.recv().await?)?;
+    match claim {
+        GatewayMsg::Claim { version, .. } => anyhow::ensure!(
+            version == rxa_proto::VERSION,
+            "gateway claimed with rxa version {version}, this build speaks {}",
+            rxa_proto::VERSION
+        ),
+        other => anyhow::bail!("expected a Claim as the gateway's first message, got {other:?}"),
+    }
+    let _ = claims_tx.send(claim);
+
+    // Hello is the agent's answer to that claim.
     writer
         .send(
             &AgentMsg::Hello {
@@ -666,6 +760,35 @@ fn drain_input(rx: &mut mpsc::UnboundedReceiver<GatewayMsg>) -> Vec<GatewayMsg> 
         seen.push(msg);
     }
     seen
+}
+
+/// Drain the socket until the remote reports its session slot is taken, and
+/// return who it says holds it.
+///
+/// Its own helper rather than a branch in [`expect_paint`], which treats a
+/// `picker` as a failure — here the picker is exactly where the session is
+/// supposed to end up, with this message waiting on it.
+async fn expect_remote_busy(ws: &mut Ws) -> (String, u64) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(msg) = ws.next().await {
+            if let Message::Text(text) = msg.expect("websocket receive") {
+                assert!(
+                    !text.contains(r#""type":"error""#),
+                    "a busy remote must not be reported as an error: {text}"
+                );
+                if text.contains(r#""type":"remoteBusy""#) {
+                    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    return (
+                        parsed["holder"].as_str().unwrap().to_owned(),
+                        parsed["heldSecs"].as_u64().unwrap(),
+                    );
+                }
+            }
+        }
+        panic!("the socket closed before the remote reported itself busy");
+    })
+    .await
+    .expect("timed out waiting for a remoteBusy")
 }
 
 /// Wait for the next input message the fake agent received.
@@ -1174,6 +1297,77 @@ async fn a_dropped_agent_link_reconnects_and_repaints_instead_of_erroring() {
         connections.load(Ordering::SeqCst) >= 2,
         "the engine should have reconnected, saw {} connection(s)",
         connections.load(Ordering::SeqCst)
+    );
+}
+
+// The other half of that reconnect: it must claim the *same* session both times.
+// A reconnect that asked under a new identity would look to the agent like a
+// second client arriving, and be refused rather than let back in.
+#[tokio::test]
+async fn a_reconnect_claims_the_same_session_it_held_before() {
+    let keys = pair();
+    let (port, connections, _active, _input, mut claims) =
+        spawn_fake_agent_with(keys.agent, true, None).await;
+    let addr = spawn_app(port, &keys).await;
+
+    let mut ws = open_session(addr).await;
+    assert_first_paint(&expect_paint(&mut ws).await);
+    assert_paint_pixels(&expect_paint(&mut ws).await);
+    assert!(connections.load(Ordering::SeqCst) >= 2);
+
+    let first = expect_input(&mut claims).await;
+    let second = expect_input(&mut claims).await;
+    let (GatewayMsg::Claim { session: first, force: first_force, .. }, GatewayMsg::Claim { session: second, force: second_force, .. }) =
+        (&first, &second)
+    else {
+        panic!("both frames must be claims, got {first:?} and {second:?}");
+    };
+    assert_eq!(
+        first, second,
+        "a reconnect must present the session it already held"
+    );
+    // And it must not shout: forcing on a reconnect would overrule whoever took
+    // the Mac while this link was down.
+    assert!(
+        !first_force && !second_force,
+        "neither the first dial nor its reconnect asked to take the slot over"
+    );
+}
+
+// A Mac somebody else is already using. The refusal has to reach the browser as
+// itself — a distinct message naming the holder — because it is the one session
+// failure a person can actually resolve, and waiting is not how.
+#[tokio::test]
+async fn a_busy_agent_is_reported_as_busy_and_not_retried() {
+    let keys = pair();
+    let (port, connections, mut claims) = spawn_busy_agent(keys.agent, "192.168.1.5", 754).await;
+    let addr = spawn_app(port, &keys).await;
+
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "mac").await;
+
+    // The engine reports it and the session ends, which lands the browser back on
+    // the picker — the same door a fatal engine error leaves by.
+    let (holder, held_secs) = expect_remote_busy(&mut ws).await;
+    assert_eq!(holder, "192.168.1.5");
+    assert_eq!(held_secs, 754);
+
+    // Unforced: nobody had asked for a takeover yet.
+    match expect_input(&mut claims).await {
+        GatewayMsg::Claim { force, .. } => assert!(!force),
+        other => panic!("expected a claim, got {other:?}"),
+    }
+
+    // The point of the whole exercise: it dialed once and stopped. A retry loop
+    // would sit here failing for the full 30-second window while the picker
+    // showed nothing actionable.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "a busy remote is a settled answer, so it must not be retried"
     );
 }
 

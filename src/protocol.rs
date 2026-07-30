@@ -135,7 +135,23 @@ pub enum ClientMsg {
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
-    Connect { target: String },
+    ///
+    /// `force` answers a [`ServerMsg::RemoteBusy`]: take the *remote's* session
+    /// slot from whoever holds it. It is not about this gateway's own slot, which
+    /// was claimed over HTTP before the socket existed (`force` on
+    /// `/api/session/claim`) — a browser can hold this gateway and still find the
+    /// Mac at the other end occupied by a different one. Only an `rxa` target has
+    /// anything to force; the other engines ignore it, having no session of their
+    /// own to contend for.
+    ///
+    /// Defaulted rather than required so a client that has never seen a busy
+    /// remote — or a bundle cached from before this existed — connects as it
+    /// always did.
+    Connect {
+        target: String,
+        #[serde(default)]
+        force: bool,
+    },
     /// Tear the current session's engine down and return to the picker
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
@@ -523,6 +539,20 @@ pub enum ServerMsg {
     /// A fatal session error the client should surface. The session then
     /// returns to the picker, so the browser shows this against the picker.
     Error { message: String },
+    /// The remote refused the session because a different client holds it, and a
+    /// person can choose to take it over. Sent instead of [`ServerMsg::Error`],
+    /// and followed by the same return to the picker — so the client shows it
+    /// there, against the target it just asked for, with the takeover offered as
+    /// [`ClientMsg::Connect`] carrying `force`.
+    ///
+    /// Its own variant rather than an `Error` with a recognisable string, because
+    /// the client has to *decide* to offer that button: everything else on this
+    /// path is text a person reads and cannot act on.
+    ///
+    /// Only `rxa` produces it — the macOS agent has a session slot of its own (see
+    /// `rxa_proto::msg::GatewayMsg::Claim`). RDP and VNC servers arbitrate their
+    /// own sessions and tell us nothing we could offer a choice about.
+    RemoteBusy { holder: String, held_secs: u32 },
     /// No target is selected: show the post-login target picker. Sent on attach
     /// to an idle slot, on disconnect ("switch target"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
@@ -611,6 +641,11 @@ enum ControlMsg<'a> {
         hy: u16,
     },
     Error { message: &'a str },
+    RemoteBusy {
+        holder: &'a str,
+        #[serde(rename = "heldSecs")]
+        held_secs: u32,
+    },
     Picker,
     Connected {
         name: &'a str,
@@ -687,6 +722,10 @@ impl ServerMsg {
                 },
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
+            ServerMsg::RemoteBusy { holder, held_secs } => control(&ControlMsg::RemoteBusy {
+                holder,
+                held_secs: *held_secs,
+            }),
             ServerMsg::Picker => control(&ControlMsg::Picker),
             ServerMsg::Connected {
                 name,

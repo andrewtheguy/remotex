@@ -382,7 +382,7 @@ mod tests {
         // ends so the session layer sees a live engine.
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target.clone()],
-            |_target, input_rx, frame_tx, audio| {
+            |_target, _takeover, input_rx, frame_tx, audio| {
                 let audio: Arc<AudioBridge> = audio.expect("the target opted into audio");
                 std::thread::spawn(move || {
                     let mut input_rx = input_rx;

@@ -150,22 +150,53 @@ impl RelayMemo {
     }
 }
 
+/// This gateway's session, as the agent's session slot knows it
+/// ([`rxa_proto::msg::GatewayMsg::Claim`]).
+///
+/// One value per **process**, and that is the whole design: a gateway instance
+/// has exactly one session slot (see `docs/roadmap.md`), so every dial this
+/// process ever makes is the same session by definition. The agent therefore
+/// grants all of them without a prompt — a dropped link, a target switched away
+/// and back, a browser taking the gateway over, and a half-open connection the
+/// agent has not reaped yet are all this same id coming back.
+///
+/// Deliberately not derived from the keys, the target, or the browser's claim
+/// token. The keys are authentication and answer a different question; a
+/// per-target id would make switching targets look like a stranger; and the
+/// browser's token is minted afresh by a takeover, which would make one person
+/// pressing "take over" here demand a second takeover at the Mac.
+///
+/// Random rather than counted, because it is compared across two machines and
+/// only equality means anything. It authenticates nothing — the handshake did
+/// that — so it needs no secrecy, only distinctness.
+fn session_id() -> [u8; 16] {
+    static ID: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| *uuid::Uuid::new_v4().as_bytes())
+}
+
 /// Connect to the Mac agent and drive the session until the browser goes away.
 ///
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
 /// Unlike the other engines this returns only when the *session* ends (the
 /// session layer dropped the input channel, or the browser link closed) — a
 /// broken agent link is retried, not reported.
+///
+/// `takeover` answers a [`ServerMsg::RemoteBusy`] the client showed a person: it
+/// takes the agent's session slot from whoever holds it. One-shot by
+/// construction, because it lives on this call — every reconnect inside the run
+/// reclaims on [`session_id`] instead, which needs no force.
 pub async fn run(
     config: TargetConfig,
+    takeover: bool,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    run_with(config, RETRY, input_rx, frame_tx).await
+    run_with(config, takeover, RETRY, input_rx, frame_tx).await
 }
 
 async fn run_with(
     config: TargetConfig,
+    takeover: bool,
     retry: Retry,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
@@ -181,9 +212,17 @@ async fn run_with(
         }
     };
 
-    let mut session = match connect(&config, &keys).await {
+    let mut session = match connect(&config, &keys, takeover).await {
         Ok(session) => session,
-        Err(e) => {
+        // The Mac is somebody else's. Reported as itself rather than as an error,
+        // so the client can offer the one thing that resolves it.
+        Err(DialError::Busy { holder, held_secs }) => {
+            let _ = frame_tx
+                .send(ServerMsg::RemoteBusy { holder, held_secs })
+                .await;
+            return;
+        }
+        Err(DialError::Other(e)) => {
             warn!("rxa: connect failed: {e:#}");
             let _ = frame_tx
                 .send(ServerMsg::Error {
@@ -232,9 +271,23 @@ async fn run_with(
                 info!("rxa: session ended while reconnecting");
                 return;
             }
-            match connect(&config, &keys).await {
+            // Never forced, however this run began: the slot is ours by
+            // [`session_id`] as long as we hold it, and if somebody has taken it
+            // from us in the meantime that was a person's decision. Retrying over
+            // the top of it would be this gateway overruling them.
+            match connect(&config, &keys, false).await {
                 Ok(session) => break session,
-                Err(e) => {
+                // Somebody took the Mac while our link was down. No amount of
+                // waiting undoes that, so stop here and let the client offer the
+                // takeover rather than spending the rest of the window failing.
+                Err(DialError::Busy { holder, held_secs }) => {
+                    info!("rxa: giving up the agent link — {holder} took the session over");
+                    let _ = frame_tx
+                        .send(ServerMsg::RemoteBusy { holder, held_secs })
+                        .await;
+                    return;
+                }
+                Err(DialError::Other(e)) => {
                     debug!("rxa: reconnect failed, retrying: {e:#}");
                     // Checked after the attempt, so a link that is down for less
                     // than the window always gets at least one try at coming back.
@@ -324,20 +377,67 @@ fn keys(config: &TargetConfig) -> Result<Keys, String> {
     })
 }
 
-/// TCP connect → Noise handshake → read the agent's `Hello`.
-async fn connect(config: &TargetConfig, keys: &Keys) -> anyhow::Result<Session> {
+/// Why a dial did not produce a session.
+///
+/// Two cases and not one, because they deserve opposite treatment: a busy remote
+/// is a settled answer that no amount of retrying will change, and everything
+/// else is weather.
+#[derive(Debug, thiserror::Error)]
+enum DialError {
+    /// A different session holds the agent's slot and this dial did not ask to
+    /// take it over. Only a person can resolve it, so it is reported at once and
+    /// never retried.
+    #[error("the Mac is in use from {holder}")]
+    Busy { holder: String, held_secs: u32 },
+    /// The host is down, the keys are wrong, the agent speaks another version —
+    /// anything a later attempt might find differently.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// TCP connect → Noise handshake → claim the agent's session slot → read the
+/// agent's `Hello`.
+///
+/// `force` takes the slot from whoever holds it. It belongs to the *dial* rather
+/// than to the engine on purpose: only the first attempt of a run carries what a
+/// person asked for, and a reconnect must never re-force. Otherwise a client that
+/// took the Mac from us fairly would be evicted again by our own retry loop, and
+/// two gateways would trade the slot back and forth with nobody choosing.
+async fn connect(config: &TargetConfig, keys: &Keys, force: bool) -> Result<Session, DialError> {
+    /// What one dial produced. Split from [`DialError`] so the dial itself can go
+    /// on using `anyhow` throughout — a refusal is an ordinary answer down here,
+    /// and only becomes an error worth distinguishing to the caller.
+    enum Dialed {
+        Ready(Session),
+        Busy { holder: String, held_secs: u32 },
+    }
+
     let dest = host_port(&config.host, config.port);
-    timeout(CONNECT_TIMEOUT, async {
+    let dialed = timeout(CONNECT_TIMEOUT, async {
         let mut stream = engine::tcp_connect(&dest).await?;
 
         let transport = rxa_proto::noise::initiate(&mut stream, &keys.private, &keys.agent_public)
             .await
             .map_err(|e| anyhow::anyhow!("handshake with {dest}: {e}"))?;
         let (read_half, write_half) = stream.into_split();
-        let (mut reader, writer) = rxa_proto::frame::split(read_half, write_half, transport);
+        let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
 
-        // `Hello` is the agent's first frame; anything else means we are not
-        // talking to an agent that agrees with us about the protocol.
+        // Ours to ask for, not to assume: the agent serves one session at a time
+        // and this says which one is asking. It goes out before the agent has said
+        // anything, because the agent cannot decide who to evict until it knows.
+        writer
+            .send(
+                &GatewayMsg::Claim {
+                    version: rxa_proto::VERSION,
+                    session: session_id(),
+                    force,
+                }
+                .encode(),
+            )
+            .await?;
+
+        // `Hello` is the agent's answer to that claim; anything else means we are
+        // not talking to an agent that agrees with us about the protocol.
         let (width, height, scale) = match AgentMsg::decode(&reader.recv().await?)? {
             AgentMsg::Hello {
                 version,
@@ -355,21 +455,33 @@ async fn connect(config: &TargetConfig, keys: &Keys) -> anyhow::Result<Session> 
                 info!("rxa: agent {agent_version} at {dest}, screen {w}x{h} at {scale}x");
                 (w, h, scale)
             }
+            // The other answer to the claim: somebody else has the Mac. Not an
+            // error here — the agent behaved correctly and told us who — so it
+            // leaves by the same door a session does and is sorted out below.
+            AgentMsg::Busy { holder, held_secs } => {
+                info!("rxa: {dest} is in use from {holder} ({held_secs}s)");
+                return Ok(Dialed::Busy { holder, held_secs });
+            }
             // Most likely a missing Screen Recording grant — say what the agent
             // said rather than "unexpected message".
             AgentMsg::Error { message } => anyhow::bail!("agent reported: {message}"),
             other => anyhow::bail!("expected Hello from the agent, got {other:?}"),
         };
-        Ok(Session {
+        Ok(Dialed::Ready(Session {
             reader,
             writer,
             width,
             height,
             scale,
-        })
+        }))
     })
     .await
-    .map_err(|_| anyhow::anyhow!("timed out connecting to {dest}"))?
+    .map_err(|_| anyhow::anyhow!("timed out connecting to {dest}"))??;
+
+    match dialed {
+        Dialed::Ready(session) => Ok(session),
+        Dialed::Busy { holder, held_secs } => Err(DialError::Busy { holder, held_secs }),
+    }
 }
 
 /// Drive one established link.
@@ -605,6 +717,16 @@ async fn pump(
                             })
                             .await;
                         return Ok(());
+                    }
+                    // Only ever an answer to a claim, which was granted before this
+                    // pump existed — the link we are reading it on is the proof.
+                    // Ignored rather than acted on: telling the browser the Mac is
+                    // busy while its desktop is arriving would be a lie.
+                    AgentMsg::Busy { holder, held_secs } => {
+                        warn!(
+                            "rxa: ignoring a Busy({holder}, {held_secs}s) on a session \
+                             the agent already granted"
+                        );
                     }
                 }
             }
@@ -873,22 +995,29 @@ mod tests {
         }
     }
 
-    /// Serve one link — handshake, `Hello`, one paint — then hang up.
+    /// Serve one link — handshake, claim, `Hello`, one paint — then hang up,
+    /// returning the claim so a caller can check what was asked for.
     ///
-    /// The listener is returned so the caller decides whether the agent ever
-    /// comes back: dropping it is a Mac that was switched off, keeping it is one
-    /// whose link merely blipped.
+    /// The listener is *not* consumed, so the caller decides whether the agent
+    /// ever comes back: dropping it is a Mac that was switched off, keeping it is
+    /// one whose link merely blipped.
     async fn serve_one_link(
         listener: &tokio::net::TcpListener,
         agent_private: [u8; 32],
         gateway_public: [u8; 32],
-    ) {
+    ) -> GatewayMsg {
         let (mut stream, _) = listener.accept().await.unwrap();
         let transport = rxa_proto::noise::respond(&mut stream, &agent_private, &gateway_public)
             .await
             .unwrap();
         let (read_half, write_half) = stream.into_split();
         let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
+        // The gateway speaks first now, asking for this agent's session slot.
+        let claim = GatewayMsg::decode(&reader.recv().await.unwrap()).unwrap();
+        assert!(
+            matches!(claim, GatewayMsg::Claim { .. }),
+            "the first frame must be the claim, got {claim:?}"
+        );
         writer
             .send(
                 &AgentMsg::Hello {
@@ -907,6 +1036,7 @@ mod tests {
             GatewayMsg::Attach => {}
             other => panic!("expected Attach, got {other:?}"),
         }
+        claim
     }
 
     // The bug this bound exists for: a Mac that is switched off was retried
@@ -925,7 +1055,7 @@ mod tests {
 
         let (_input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, mut frame_rx) = mpsc::channel(16);
-        run_with(paired.target, FAST_RETRY, input_rx, frame_tx).await;
+        run_with(paired.target, false, FAST_RETRY, input_rx, frame_tx).await;
         agent.await.unwrap();
 
         // `run_with` returning at all is half the point — that is what drops
@@ -960,7 +1090,7 @@ mod tests {
 
         let (_input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, mut frame_rx) = mpsc::channel(16);
-        run_with(paired.target, FAST_RETRY, input_rx, frame_tx).await;
+        run_with(paired.target, false, FAST_RETRY, input_rx, frame_tx).await;
         agent.await.unwrap();
 
         // It still ends up reporting — the agent stops answering eventually —
@@ -996,6 +1126,10 @@ mod tests {
                 .unwrap();
             let (read_half, write_half) = stream.into_split();
             let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
+            match GatewayMsg::decode(&reader.recv().await.unwrap()).unwrap() {
+                GatewayMsg::Claim { .. } => {}
+                other => panic!("expected the claim first, got {other:?}"),
+            }
             writer
                 .send(
                     &AgentMsg::Hello {
@@ -1032,7 +1166,7 @@ mod tests {
 
         let (_input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, mut frame_rx) = mpsc::channel(16);
-        run_with(paired.target, FAST_RETRY, input_rx, frame_tx).await;
+        run_with(paired.target, false, FAST_RETRY, input_rx, frame_tx).await;
         agent.await.unwrap();
 
         let tiles: Vec<_> = std::iter::from_fn(|| frame_rx.try_recv().ok())
@@ -1182,6 +1316,7 @@ mod tests {
         assert_eq!(
             to_agent(
                 &ClientMsg::Connect {
+                    force: false,
                     target: "mac".to_owned()
                 },
                 NO_CAPS,
