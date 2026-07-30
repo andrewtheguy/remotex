@@ -1040,6 +1040,22 @@ fn authorized_gateways(mtm: MainThreadMarker, current: &Authorized) -> Option<Au
     }
 }
 
+/// How tall the editor's panel is, for a given height of explanatory copy.
+///
+/// Everything but the copy is a constant, and that is the point: the panel does not
+/// grow with the number of gateways, because the list scrolls inside
+/// [`LIST_HEIGHT`]. Named so the test below can check the same arithmetic the panel
+/// uses rather than a second copy of it.
+fn list_editor_height(copy_height: f64) -> f64 {
+    PANEL_BOTTOM_MARGIN
+        + PANEL_BUTTON_HEIGHT
+        + PANEL_CONTENT_GAP
+        + LIST_HEIGHT
+        + ROW_GAP
+        + copy_height
+        + PANEL_TOP_MARGIN
+}
+
 /// One pass of the editor: put the text up, hand back what came out.
 fn edit_authorized(mtm: MainThreadMarker, text: &str) -> Option<String> {
     let (copy, copy_height) = section_copy(
@@ -1054,7 +1070,7 @@ fn edit_authorized(mtm: MainThreadMarker, text: &str) -> Option<String> {
     let button_y = PANEL_BOTTOM_MARGIN;
     let list_y = button_y + PANEL_BUTTON_HEIGHT + PANEL_CONTENT_GAP;
     let copy_y = list_y + LIST_HEIGHT + ROW_GAP;
-    let panel_height = copy_y + copy_height + PANEL_TOP_MARGIN;
+    let panel_height = list_editor_height(copy_height);
 
     let content = NSView::initWithFrame(
         NSView::alloc(mtm),
@@ -1638,6 +1654,36 @@ mod tests {
         let parked = Authorized::parse(&format!("#{}", authorized.text())).unwrap();
         assert!(parked.is_empty());
         assert!(!running.matches(&draft(private_key, parked)));
+    }
+
+    /// The reason the list is in a scroll view: its panel's height is fixed by
+    /// [`LIST_HEIGHT`] and cannot grow with the number of entries, so it has to fit
+    /// the smallest display this agent is expected on — the 1x 800x600 test Mac,
+    /// where a panel taller than the screen puts Save and Cancel behind the Dock
+    /// with no way to reach them.
+    ///
+    /// Everything but the explanatory copy is a constant, and the copy is measured
+    /// by AppKit at run time, so this asserts the fixed part against a generous
+    /// allowance for the copy. What it catches is somebody raising `LIST_HEIGHT` to
+    /// "make room for more keys" — which is exactly the change the scroll view
+    /// exists to make unnecessary.
+    #[test]
+    fn the_list_editor_fits_the_smallest_supported_screen() {
+        const SMALLEST_SCREEN: f64 = 600.0;
+        /// Menu bar plus a Dock that is not hidden: what a panel may not overlap.
+        const CHROME: f64 = 100.0;
+        /// Six wrapped lines at 11pt, which is more than the copy has ever needed.
+        const COPY_ALLOWANCE: f64 = 6.0 * LABEL_HEIGHT;
+
+        let height = list_editor_height(COPY_ALLOWANCE);
+        assert!(
+            height <= SMALLEST_SCREEN - CHROME,
+            "the editor panel is {height}pt tall, which will not fit a \
+             {SMALLEST_SCREEN}pt screen — let the list scroll rather than growing it"
+        );
+        // And the same call is what the panel is built from, so this cannot pass
+        // while the panel is laid out to some other height.
+        assert!(height > LIST_HEIGHT, "the list is all of it?");
     }
 
     /// The one row that has to describe a whole file. A count alone would not
