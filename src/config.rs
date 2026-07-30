@@ -158,6 +158,11 @@ pub struct TargetConfig {
     /// a VNC target nothing and gives an operator somewhere to say what a phone
     /// should get. `rxa` ignores it: the size of a display the agent made is the
     /// agent's to state, in its own `virtual_display_initial_size`.
+    ///
+    /// On an RDP target with [`Self::resize`] this is a size in *points*: the
+    /// connect happens at 1x, but a Retina client then asks for twice the pixels,
+    /// and `DefaultSize` has to keep meaning the same desktop rather than half of
+    /// one. See `Density` in src/rdp.rs.
     #[serde(default = "default_width")]
     pub width: u16,
     /// Initial desktop height requested from the server. See [`Self::width`].
@@ -169,6 +174,12 @@ pub struct TargetConfig {
     pub security: Security,
     /// Allow client-driven resize. VNC follows viewport changes; RDP applies an
     /// explicit request; RXA applies one only to an active agent-created display.
+    ///
+    /// On RDP this also turns on density matching, because there a density *is* a
+    /// resize: the Display Control channel this negotiates is the only way to tell
+    /// a live session to render at 200%, so a Retina client gets twice the pixels
+    /// and a UI drawn twice as large. Off, an RDP target ignores the client's
+    /// density entirely.
     #[serde(default)]
     pub resize: bool,
     /// Clipboard bridge: let the browser read and write this target's

@@ -163,8 +163,13 @@ Resize behavior is engine-specific:
 | Engine | Behavior |
 |---|---|
 | VNC with resize | follows desktop-client viewport changes |
-| RDP with resize | changes only on an explicit resize request |
+| RDP with resize | changes on an explicit resize request, and on the client's reported display density |
 | RXA with resize | changes only on explicit request while the agent's private display is active |
+
+`hostScale` reports the density of the screen the client's window is on. RDP with
+resize and RXA both act on it, quantizing to 1x or 2x at the same midpoint; the
+resulting density travels back as the `scale` on `resize`, and clients present the
+framebuffer at `pixels / scale`. Other engines ignore the message.
 
 RDP and VNC expose one framebuffer. RXA can report individual displays and acts
 on `selectDisplay`; choosing a display does not itself change that display's
@@ -215,7 +220,13 @@ splits remaining damage into bands, and encodes WebP off the protocol read loop.
 Input uses fast-path PDUs after DOM-code-to-scancode mapping.
 
 With `resize = true`, the Display Control Virtual Channel applies explicit
-desktop-size requests. With `clipboard = true`, MS-RDPECLIP carries
+desktop-size requests, and also matches the client's display density: a monitor
+layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
+twice the pixels with the host's UI drawn at 200% rather than the same UI
+stretched. The connect itself is always 1x — the density belongs to whichever
+client attaches, which has not spoken yet — so a Retina client costs one
+reactivation. RDP reports no scale factor back, so unlike RXA the density here is
+declared rather than measured. With `clipboard = true`, MS-RDPECLIP carries
 `CF_UNICODETEXT` with CRLF/LF conversion. With `audio = true`, the engine
 negotiates the static and dynamic MS-RDPEA transports described above.
 
