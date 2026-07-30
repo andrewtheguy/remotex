@@ -11,7 +11,7 @@ is the only place they can be read in context.
 ### macOS login-window service
 
 The `SMAppService` LaunchAgent runs only in the signed-in user's Aqua session, so
-the agent stops at logout and cannot be reached from the macOS login screen.
+the agent stops at logout and cannot be reached from the macOS login screen. Currently if the screen is locked, the user must unlock it before remotex can connect. 
 
 The shape of an answer is established: RealVNC's
 [Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes)
