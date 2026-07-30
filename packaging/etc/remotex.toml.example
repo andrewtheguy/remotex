@@ -22,6 +22,32 @@ site_passwd = ""
 # tab title. Defaults to "remotex".
 #branding = "remotex"
 
+# DEVELOPMENT ONLY, and inert in any deployment. Gives this gateway its own
+# hostname on loopback: a browser opening the home page under *any* loopback name
+# that is not this one — 127.0.0.1, ::1, anything in 127/8, localhost, or another
+# gateway's <other>.localhost — is redirected to http://<label>.localhost:<port>/,
+# keeping the port. The port decides which gateway answers, and that gateway names
+# itself, so http://127.0.0.1:52676/ lands on the label configured *here*.
+#
+# Redirecting a mismatched .localhost name matters as much as redirecting a bare
+# address: reaching this gateway at another one's hostname would put this session's
+# cookie under that name, which is the collision below, arrived at by editing the
+# port in the URL bar and not the label.
+#
+# Only the home page is redirected, and only when the request itself arrived on a
+# loopback name — a gateway reached under a real hostname or address ignores this
+# however it is set.
+#
+# It solves one problem: a cookie is scoped by host and ignores the port, so two
+# gateways on one machine share one session cookie and each login silently evicts
+# the other. Every label under .localhost resolves to loopback without DNS
+# (RFC 6761) and is a distinct cookie origin, so two gateways become two
+# independent logins in one browser. Running two is the only way to test rxa
+# session takeover, which is why this exists at all.
+#
+# One DNS label: letters, digits and inner hyphens, no dots.
+#dev_subdomain = "gw-a"
+
 # This gateway's identity on the "rxa" protocol — the macOS agent (see the rxa
 # target near the end of this file). Required as soon as any target is
 # protocol = "rxa", and unused otherwise.

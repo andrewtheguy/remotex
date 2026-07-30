@@ -299,6 +299,48 @@ body {
   text-align: center;
 }
 
+/* The remote's session is somebody else's. Amber rather than the error red:
+   nothing has gone wrong, and the button beside it is the whole point. */
+.picker-busy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  color: #d29922;
+  background: #2d2410;
+  border: 1px solid #4a3a12;
+  border-radius: 6px;
+}
+
+.picker-busy p {
+  margin: 0;
+  font-size: 0.85rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.picker-takeover {
+  padding: 0.4rem 1.1rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #e6edf3;
+  background: #30363d;
+  border: 1px solid #4a3a12;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.picker-takeover:hover:not(:disabled) {
+  background: #3d444d;
+}
+
+.picker-takeover:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .picker-list {
   list-style: none;
   margin: 0 0 0.75rem;

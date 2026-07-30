@@ -45,7 +45,13 @@ enum ClientMessage: Sendable, Equatable {
     /// Re-announce the desktop size and repaint everything. The gateway injects
     /// one itself on reattach, so this is the manual escape hatch.
     case refresh
-    case connect(target: String)
+    /// Pick a target and start its session.
+    ///
+    /// `force` takes the *remote's* session slot from whoever holds it, answering a
+    /// `remoteBusy`. It says nothing about this gateway's slot, which was claimed
+    /// over HTTP before this socket existed — and only an rxa target has a session
+    /// of its own to contend for.
+    case connect(target: String, force: Bool)
     case disconnect
     case clipboard(text: String)
     case clipboardRequest
@@ -120,7 +126,7 @@ enum ClientMessage: Sendable, Equatable {
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
         case type, x, y, button, pressed, dx, dy, code, caps, w, h, target, text
-        case id, scale, enabled
+        case id, scale, enabled, force
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -143,8 +149,9 @@ extension ClientMessage: Encodable {
         case .viewport(let w, let h):
             try container.encode(w, forKey: .w)
             try container.encode(h, forKey: .h)
-        case .connect(let target):
+        case .connect(let target, let force):
             try container.encode(target, forKey: .target)
+            try container.encode(force, forKey: .force)
         case .clipboard(let text):
             try container.encode(text, forKey: .text)
         case .selectDisplay(let id):

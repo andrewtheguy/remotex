@@ -36,18 +36,22 @@ pub mod noise;
 /// mismatch fails at the handshake instead of desynchronising later.
 pub const PROLOGUE: &[u8] = b"rxa/2";
 
-/// Protocol version carried in [`msg::AgentMsg::Hello`]. Redundant with
-/// [`PROLOGUE`] (a mismatch already fails the handshake) but cheap, and it
-/// gives the gateway something to log.
+/// Protocol version, carried in [`msg::GatewayMsg::Claim`] and
+/// [`msg::AgentMsg::Hello`] — once in each direction, so whichever side is older
+/// is the one that says so. Redundant with [`PROLOGUE`] (a mismatch already fails
+/// the handshake) but cheap, and it gives both ends something to log.
 ///
-/// 7 is WebP: [`msg::format`] lost `PNG` and `JPEG`. Nothing structural moved, but
-/// an old agent's format byte would be read as the new codec, so the version is
-/// what stops a mismatched pair rather than the byte. `src/rxa.rs` compares this
-/// for exact equality and names both numbers, so the failure is a log line instead
-/// of a blank desktop. [`PROLOGUE`] deliberately does *not* change with it —
-/// framing and the handshake are unaffected, and a prologue mismatch reads as a
-/// key problem, which would send someone chasing the wrong thing.
-pub const VERSION: u16 = 7;
+/// 8 is the claim: the gateway now speaks first, asking for the agent's session
+/// slot, and `Hello` is the answer to that rather than an unprompted greeting.
+/// A 7 agent would read the claim as an unknown message type and a 7 gateway
+/// would send nothing and wait, so the version is what turns either pairing into
+/// one legible line. 7 was WebP, where [`msg::format`] lost `PNG` and `JPEG` and
+/// an old agent's format byte would have been read as the new codec.
+///
+/// [`PROLOGUE`] deliberately does *not* change with it — framing and the
+/// handshake are unaffected, and a prologue mismatch reads as a key problem,
+/// which would send someone chasing the wrong thing.
+pub const VERSION: u16 = 8;
 
 /// The protocol's default TCP port, adjacent to the web server's 52380.
 pub const DEFAULT_PORT: u16 = 52381;

@@ -4,11 +4,15 @@
 - no cargo fmt
 - run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
 - run biome checks on frontend/ after JS/TS code changes
+- **always `bun run build` in frontend/ before asking anyone to QA a frontend change in a browser, and say that you did.** `remotex serve` serves the SPA from `frontend/dist` on disk (`ServeDir`, `src/server.rs`) — nothing is embedded in the binary — and `dist` is gitignored, so a stale bundle is invisible and is what the browser gets. No check catches it: biome, `tsc -b` and `bun test` read `src/`, `cargo test` never loads the page, and neither does a script driving the WebSocket directly. The symptom is a feature that looks broken while the server side is provably right. To iterate without rebuilding, use `REMOTEX_DEV_BACKEND=<port> bun run dev`, which serves from source
 - use tmp/ for temporary files and test config
 - for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
 - keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
-- multi session is always out of scope (never planned, not merely deferred): this is a single-user program with one active session only, with session takeover logic (a new browser force-claims the single session slot and evicts the previous holder) — no concurrent sessions, session sharing, or session broker
+- multi session is always out of scope (never planned, not merely deferred): no concurrent sessions, session sharing, or session broker. It means **one active session at a time**, and it is two separate slots saying so at two hops — never one client:
+  - **the gateway's**: one active session per gateway instance, forever. A new browser force-claims it and evicts the previous holder (`src/session.rs`)
+  - **the agent's**: one active session on a Mac running `remotex-agent`, *claimed* rather than seized. A connection asks with `GatewayMsg::Claim` and is granted, handed the slot, or refused with who holds it; a client shows the refusal with a Take over button, the same shape as the browser prompt and as Windows Remote Desktop
+- the agent's slot is keyed on **the claim's session id, never on a key or an address**. Authentication (the keys, in the handshake) decides whether a peer may ask; session ownership decides whose turn it is — SSH's split. Keeping them apart is what lets several gateways be *permitted* while one is *connected* (see the authorized-key list in `docs/roadmap.md`), and what makes a reconnect, a target switch and a browser takeover reclaim the slot in silence. So "more than one client may be permitted, taking turns explicitly" is not multi session and is not out of scope; concurrency is
 
 ## Browser tests
 
@@ -45,3 +49,5 @@ Headless Playwright, in `tests/playwright/`.
 - after changes affecting the macOS `remotex-agent` or its packaging, build and validate it with `packaging/macos/build-agent-app.sh`; a standalone Cargo build is not agent packaging validation
 - follow machine-local signing instructions in `CLAUDE.local.md` when present
 - use `--no-dmg` only when the disk-image layer is explicitly out of scope; otherwise build the DMG, mount it, copy the app out as a user would, verify it with `codesign --verify --deep --strict`, and run the bundled executable with `--version`
+- **starting at login is explicit and names an absolute path.** The agent writes `~/Library/LaunchAgents/dev.remotex.agent.plist` only when asked — the menu's Start at Login, or `--install-launchagent` — and a launch registers nothing. So `launchctl kickstart -k gui/<uid>/dev.remotex.agent` can only ever start the binary that plist names, and a copy opened from anywhere else changes nothing. Run `--install-launchagent` once per machine from the copy that should be the one launchd starts; installing from a mounted DMG is refused, since that path is gone by the next login
+- **after redeploying the agent, verify what is actually running rather than what is installed.** `--version` on a bundle describes the file, not the process. `lsof -p $(pgrep -x remotex-agent) | awk '$4=="txt"'` names the executing binary, and the startup log line says it too. If the login item names some other copy, the agent says so on every launch and in its menu; re-tick Start at Login (or re-run `--install-launchagent`) from the copy you want

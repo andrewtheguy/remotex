@@ -229,8 +229,8 @@ async fn session(
                 // Session-control messages act on the slot, not an engine: pick a
                 // target from the picker, or tear the session down and go back to
                 // it ("switch target").
-                Ok(ClientMsg::Connect { target }) => {
-                    if let Err(e) = sessions.connect(attach_id, &target) {
+                Ok(ClientMsg::Connect { target, force }) => {
+                    if let Err(e) = sessions.connect(attach_id, &target, force) {
                         warn!("ws: connect to {target:?} refused: {e}");
                     }
                 }
@@ -319,7 +319,7 @@ mod tests {
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target],
-            move |_target, input_rx, frame_tx, _audio| {
+            move |_target, _takeover, input_rx, frame_tx, _audio| {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));

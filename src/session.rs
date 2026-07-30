@@ -1,6 +1,12 @@
 //! The single session slot and common engine boundary. A claim owns the slot,
 //! an attachment supplies its WebSocket, and the selected engine may outlive a
 //! brief detach. Takeover replaces the attachment without adding a session.
+//!
+//! *This* gateway instance's slot. An `rxa` target has a second one at the far
+//! end — the macOS agent serves one session at a time too, and this gateway has to
+//! claim it (`crate::rxa`, `rxa_proto::msg::GatewayMsg::Claim`). They are
+//! independent: holding this slot says nothing about holding the Mac's, which
+//! another gateway may have, and each has its own takeover.
 
 use std::sync::{Arc, Mutex};
 
@@ -76,10 +82,13 @@ pub struct Attachment {
 ///
 /// The [`AudioBridge`] is `Some` only for a target that opted into audio, which
 /// today means one RDP engine reads it and the other two never see it (see
-/// [`spawn_engine`]).
+/// [`spawn_engine`]). The `bool` is `takeover`, and reaches only the RXA engine
+/// for the same kind of reason: it asks the *remote's* session slot to change
+/// hands, and only the macOS agent has one.
 type EngineSpawner = Box<
     dyn Fn(
             TargetConfig,
+            bool,
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
             Option<Arc<AudioBridge>>,
@@ -210,6 +219,7 @@ impl SessionManager {
         targets: Vec<TargetConfig>,
         spawn_engine: impl Fn(
             TargetConfig,
+            bool,
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
             Option<Arc<AudioBridge>>,
@@ -422,10 +432,16 @@ impl SessionManager {
     /// session is already connected — each refusal (except a stale attachment,
     /// which isn't the current browser) tells the browser with a
     /// [`ServerMsg::Error`] so a rejected pick never hangs the picker.
+    ///
+    /// `takeover` is about the *remote's* session and not this slot's: it answers
+    /// a [`ServerMsg::RemoteBusy`] that the picker showed a person, and reaches
+    /// only the RXA engine (see [`spawn_engine`]). This slot's own takeover
+    /// happened earlier and elsewhere, in [`SessionManager::claim`].
     pub fn connect(
         self: &Arc<Self>,
         attach_id: u64,
         target_name: &str,
+        takeover: bool,
     ) -> Result<(), ConnectError> {
         let mut st = self.state.lock().unwrap();
         if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
@@ -466,7 +482,7 @@ impl SessionManager {
             generation,
             audio: audio.clone(),
         });
-        (self.spawn_engine)(target.clone(), input_rx, frame_tx, audio);
+        (self.spawn_engine)(target.clone(), takeover, input_rx, frame_tx, audio);
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
 
         let name = target.name.clone();
@@ -690,8 +706,15 @@ impl SessionManager {
 /// `audio` reaches only the RDP engine, and only when the target opted in: MS-RDPEA
 /// is the one audio channel any of these speak, which the config file has already
 /// refused the other two protocols over.
+///
+/// `takeover` reaches only the RXA engine, and for a similar reason: it asks the
+/// remote to hand its own session slot over, and the macOS agent is the only
+/// remote here that has one to hand over. An RDP or VNC server arbitrates its
+/// sessions without telling us, so there is nothing for a person to decide and
+/// nothing to pass on.
 fn spawn_engine(
     target: TargetConfig,
+    takeover: bool,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
@@ -707,7 +730,7 @@ fn spawn_engine(
         match target.protocol {
             Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx, audio)),
             Protocol::Vnc => rt.block_on(vnc::run(target, input_rx, frame_tx)),
-            Protocol::Rxa => rt.block_on(rxa::run(target, input_rx, frame_tx)),
+            Protocol::Rxa => rt.block_on(rxa::run(target, takeover, input_rx, frame_tx)),
         }
     });
 }
@@ -803,7 +826,7 @@ mod tests {
     /// ends to the test (which plays the engine role directly).
     fn manager_with_fake_engine() -> (Arc<SessionManager>, std_mpsc::Receiver<EngineEnds>) {
         let (hook_tx, hook_rx) = std_mpsc::channel();
-        let spawner: EngineSpawner = Box::new(move |_target, input_rx, frame_tx, audio| {
+        let spawner: EngineSpawner = Box::new(move |_target, _takeover, input_rx, frame_tx, audio| {
             hook_tx.send((input_rx, frame_tx, audio)).unwrap();
         });
         let targets = vec![
@@ -914,13 +937,13 @@ mod tests {
         assert!(hooks.try_recv().is_err(), "attach must not spawn an engine");
 
         // Picking a target starts the engine and confirms with connected.
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_ok(), "connect spawns the engine");
 
         // A second connect while one is live is refused.
         assert!(matches!(
-            mgr.connect(att.id, "other"),
+            mgr.connect(att.id, "other", false),
             Err(ConnectError::AlreadyConnected)
         ));
     }
@@ -937,7 +960,7 @@ mod tests {
         // UI off them). The VNC/no-resize case is covered by every other test's
         // expect_connected.
         let rdp_resize = Meta::of(Protocol::Rdp).resize();
-        mgr.connect(att.id, "rdp-resize").unwrap();
+        mgr.connect(att.id, "rdp-resize", false).unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
@@ -955,7 +978,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rxa").unwrap();
+        mgr.connect(att.id, "rxa", false).unwrap();
         expect_connected_meta(&mut att.events, "rxa", Meta::of(Protocol::Rxa).clipboard()).await;
 
         // And so does audio, which is what tells the browser to offer the panel
@@ -964,7 +987,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-audio").unwrap();
+        mgr.connect(att.id, "rdp-audio", false).unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
     }
 
@@ -976,11 +999,11 @@ mod tests {
         expect_picker(&mut att.events).await;
 
         assert!(matches!(
-            mgr.connect(att.id, "nope"),
+            mgr.connect(att.id, "nope", false),
             Err(ConnectError::UnknownTarget(name)) if name == "nope"
         ));
         // An attachment that is no longer the current client can't connect.
-        assert!(matches!(mgr.connect(att.id + 999, "fake"), Err(ConnectError::NotCurrent)));
+        assert!(matches!(mgr.connect(att.id + 999, "fake", false), Err(ConnectError::NotCurrent)));
     }
 
     #[tokio::test]
@@ -989,7 +1012,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx, _audio) = hooks.try_recv().expect("engine spawned on connect");
 
@@ -1047,7 +1070,7 @@ mod tests {
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();
             expect_picker(&mut att.events).await;
-            mgr.connect(att.id, target).unwrap();
+            mgr.connect(att.id, target, false).unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
             let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
@@ -1070,7 +1093,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
@@ -1092,7 +1115,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
@@ -1106,7 +1129,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
         assert!(
@@ -1130,7 +1153,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
@@ -1141,7 +1164,7 @@ mod tests {
         assert!(input_rx.is_closed(), "disconnect closes the engine input channel");
 
         // Picking again spawns a fresh engine — a different target this time.
-        mgr.connect(att.id, "other").unwrap();
+        mgr.connect(att.id, "other", false).unwrap();
         expect_connected(&mut att.events, "other").await;
         assert!(hooks.try_recv().is_ok(), "reconnect spawns a fresh engine");
     }
@@ -1156,7 +1179,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _audio) = hooks.try_recv().unwrap();
 
@@ -1198,7 +1221,7 @@ mod tests {
         let token_a = mgr.claim(false, None).unwrap();
         let mut att_a = mgr.attach(&token_a).unwrap();
         expect_picker(&mut att_a.events).await;
-        mgr.connect(att_a.id, "fake").unwrap();
+        mgr.connect(att_a.id, "fake", false).unwrap();
         expect_connected(&mut att_a.events, "fake").await;
         let (mut input_rx, frame_tx, _audio) = hooks.try_recv().unwrap();
 
@@ -1243,7 +1266,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx, _audio) = hooks.try_recv().unwrap();
 
@@ -1262,7 +1285,7 @@ mod tests {
         expect_picker(&mut att.events).await;
 
         // Picking again (same socket) spawns a fresh engine.
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         tokio::task::spawn_blocking(move || {
             hooks
@@ -1285,7 +1308,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-audio").unwrap();
+        mgr.connect(att.id, "rdp-audio", false).unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
         let ends = hooks.try_recv().unwrap();
         let audio = ends
@@ -1439,7 +1462,7 @@ mod tests {
             "the picker has no audio to subscribe to"
         );
 
-        mgr.connect(att.id, "fake").unwrap();
+        mgr.connect(att.id, "fake", false).unwrap();
         expect_connected(&mut att.events, "fake").await;
         mgr.set_audio(att.id, true);
         assert!(

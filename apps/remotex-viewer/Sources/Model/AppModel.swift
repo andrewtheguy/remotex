@@ -475,6 +475,9 @@ final class AppModel: GatewaySessionSink {
             session.protocolName = payload.protocolName
             session.pendingTarget = nil
             setConnectError(nil)
+            // The remote is ours after all, so an offer to take it over has nothing
+            // left to refer to.
+            session.remoteBusy = nil
             // RXA remains non-resizable until a display list identifies an owned
             // display; VNC and RDP are settled here.
             viewportPolicy = ViewportPolicy(
@@ -555,6 +558,22 @@ final class AppModel: GatewaySessionSink {
             // Not fatal — the session returns to the picker, which is where this
             // is shown, and it must survive that `picker` arriving.
             setConnectError(message)
+            session.pendingTarget = nil
+
+        case .remoteBusy(let holder, let heldSecs, let takenOver):
+            // Not an error: the remote answered correctly and said who has it. Like
+            // `error` it must survive the `picker` that follows, and unlike `error`
+            // it carries an action — the picker offers to take the remote over. The
+            // target is the one this session was for, which is the pick still
+            // pending on the ordinary refusal and the connected one when somebody
+            // took the remote from us mid-session.
+            setConnectError(nil)
+            session.remoteBusy = .init(
+                target: session.pendingTarget ?? session.connectedTarget ?? "",
+                holder: holder,
+                heldSecs: heldSecs,
+                takenOver: takenOver
+            )
             session.pendingTarget = nil
 
         case .clipboard(let payload):
@@ -705,13 +724,19 @@ final class AppModel: GatewaySessionSink {
 
     // MARK: - Actions
 
-    func connect(to target: String) {
+    /// Pick a target from the picker.
+    ///
+    /// `force` takes the *remote's* session from whoever holds it, and is how the
+    /// picker's Take over answers a `remoteBusy`. Nothing to do with `takeOver()`
+    /// below, which claims this gateway's slot from another client of it.
+    func connect(to target: String, force: Bool = false) {
         guard session.screen == .picker, session.pendingTarget == nil else {
             return
         }
         session.pendingTarget = target
         setConnectError(nil)
-        connection?.send(.connect(target: target))
+        session.remoteBusy = nil
+        connection?.send(.connect(target: target, force: force))
     }
 
     func switchTarget() {

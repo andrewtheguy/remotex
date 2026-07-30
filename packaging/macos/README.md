@@ -20,10 +20,16 @@ Download `remotex-agent-<version>-macos-arm64-unsigned.dmg` from the
 3. Open `/Applications/remotex-agent.app`.
 
 First launch creates
-`~/Library/Application Support/remotex-agent/config.toml`, generates the Mac's
-identity, and registers the app as a login item. The app has no Dock icon; use
-its menu bar item. It starts unpaired and refuses connections until a gateway
-public key is configured.
+`~/Library/Application Support/remotex-agent/config.toml` and generates the Mac's
+identity. The app has no Dock icon; use its menu bar item. It starts unpaired and
+refuses connections until a gateway public key is configured.
+
+A launch does **not** arrange to start at login. Tick **Start at Login** in the
+menu (or run `remotex-agent --install-launchagent` once), which writes
+`~/Library/LaunchAgents/dev.remotex.agent.plist` naming that copy of the app by
+absolute path. Doing it explicitly, from the copy you mean, is what stops a second
+copy — one opened from a mounted disk image, say — becoming the one macOS starts.
+Installing from a disk image is refused for the same reason.
 
 ## Pair with the gateway
 
@@ -142,7 +148,9 @@ do the thing, kickstart.
 2. Move `/Applications/remotex-agent.app` to the Trash.
 3. Optionally remove its config directory and Privacy & Security entries.
 
-Turn off the login item before deleting the app to avoid leaving a stale entry.
+Turning **Start at Login** off first is what removes the LaunchAgent plist;
+`remotex-agent --uninstall-launchagent` does the same from a terminal. Deleting the
+app without it leaves a plist naming a binary that is no longer there.
 
 ## Display behavior and limitations
 

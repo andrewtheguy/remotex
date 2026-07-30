@@ -13,6 +13,23 @@ enum ServerMessage: Sendable, Equatable {
     /// A fatal engine error. Not a dead end: the session returns to the picker,
     /// so this is shown there.
     case error(message: String)
+    /// The remote's own session is held by a different client, and this one may
+    /// take it over. Arrives instead of `error` and leaves by the same door — back
+    /// to the picker — but with something to press there rather than only something
+    /// to read. Only `rxa` sends it: the macOS agent serves one session at a time
+    /// and names who has it, where RDP and VNC servers arbitrate silently.
+    ///
+    /// `heldSecs` is how long the incumbent has had it, for the same reason
+    /// `holder` is an address without a port — both are only ever shown to a
+    /// person.
+    ///
+    /// `takenOver` separates the two ways this arrives, which are opposite
+    /// experiences and must not read the same: false is "you asked for a target
+    /// somebody else has, and were refused", true is "you *had* it and somebody
+    /// took it". Only the remote's session went in that second case — the login,
+    /// the gateway's slot and this socket are all still ours — which is why both
+    /// land back on the target list.
+    case remoteBusy(holder: String, heldSecs: UInt32, takenOver: Bool)
     case picker
     case connected(Connected)
     case remoteOs(macos: Bool)
@@ -175,8 +192,8 @@ enum ServerMessage: Sendable, Equatable {
 
     /// Every tag this build understands, for the wire-contract test.
     static let allTags: Set<String> = [
-        "resize", "cursor", "error", "picker", "connected", "remoteOs",
-        "clipboard", "displays", "audioFormat",
+        "resize", "cursor", "error", "remoteBusy", "picker", "connected",
+        "remoteOs", "clipboard", "displays", "audioFormat",
     ]
 
     /// Tags this build knows exist and deliberately does not implement.
@@ -223,6 +240,12 @@ extension ServerMessage: Decodable {
         let macos: Bool
     }
 
+    private struct RemoteBusy: Decodable {
+        let holder: String
+        let heldSecs: UInt32
+        let takenOver: Bool
+    }
+
     private struct Displays: Decodable {
         let active: UInt32
         let displays: [DisplayInfo]
@@ -244,6 +267,13 @@ extension ServerMessage: Decodable {
                 self = .cursor(try Cursor(from: decoder))
             case "error":
                 self = .error(message: try Message(from: decoder).message)
+            case "remoteBusy":
+                let payload = try RemoteBusy(from: decoder)
+                self = .remoteBusy(
+                    holder: payload.holder,
+                    heldSecs: payload.heldSecs,
+                    takenOver: payload.takenOver
+                )
             case "picker":
                 self = .picker
             case "connected":

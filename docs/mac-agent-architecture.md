@@ -18,7 +18,7 @@ src/rxa.rs                              crates/rxa-agent
                                            ├─ ScreenCaptureKit capture
                                            ├─ WebP tile encoder
                                            ├─ Core Graphics input injection
-                                           └─ menu bar UI and SMAppService
+                                           └─ menu bar UI and login item
 
 crates/rxa-proto: identity keys, handshake, framing, messages, key mapping
 ```
@@ -57,12 +57,16 @@ need to move between machines; private keys are never displayed. The agent can
 import an existing private identity from its settings dialog or from standard
 input with `--import-private-key`.
 
-Noise transport frames contain length-prefixed `rxa-proto` messages:
+Noise transport frames contain length-prefixed `rxa-proto` messages. The gateway
+speaks first, with its claim on the session slot; the agent's `Hello` is the
+answer to it (see Lifecycle and recovery below):
 
-- agent to gateway: display list and active display, display size, WebP tiles,
-  cursor shape, clipboard data, errors, and heartbeat pongs;
-- gateway to agent: attach/detach control, input, display selection, private
-  display size and density, clipboard requests and writes, and heartbeat pings.
+- gateway to agent: the session claim, attach/detach control, input, display
+  selection, private display size and density, clipboard requests and writes, and
+  heartbeat pings;
+- agent to gateway: `Hello` or a `Busy` refusal, display list and active display,
+  display size, WebP tiles, cursor shape, clipboard data, errors, and heartbeat
+  pongs.
 
 The gateway translates these messages into the same browser protocol used by
 RDP and VNC.
@@ -231,8 +235,13 @@ Apps** permission.
 
 ## Lifecycle and recovery
 
-The application registers its embedded LaunchAgent through `SMAppService` and
-runs in the logged-in user's GUI session. The menu bar shell is created before
+The agent runs in the logged-in user's GUI session. Starting at login is a plain
+LaunchAgent at `~/Library/LaunchAgents/dev.remotex.agent.plist` naming the
+executable by **absolute path**, written only when somebody asks — the menu's
+Start at Login, or `--install-launchagent`. A launch registers nothing, so no copy
+of the app can change what launchd starts by merely running; see
+`crates/rxa-agent/src/loginitem.rs` for the bundle-relative registration this
+replaced and what it cost. The menu bar shell is created before
 configuration, permission checks, display setup, or the network runtime. A
 handled startup or worker failure leaves that shell available with diagnostics
 and Quit.
@@ -247,10 +256,34 @@ holding the port.
 Saving settings restarts the agent through `kickstart` so address, display, and
 identity changes take effect together.
 
-Only one authenticated gateway connection may be active. A new connection
-replaces the current one only after completing its handshake, so an
-unauthenticated socket cannot evict a session. Handshakes run outside the accept
-path with a 20-second timeout.
+Only one session may be active. The slot is claimed, not seized: a connection
+completes its handshake, sends `GatewayMsg::Claim` naming the session it is for,
+and only then is judged (`state::decide`). Handshakes and claims run outside the
+accept path with a 20-second timeout, so an unauthenticated socket — or an
+authenticated one that goes quiet — cannot disturb the session in the slot.
+
+Four outcomes, and which one applies depends on the claim's session id alone:
+
+| claim | outcome |
+|---|---|
+| nobody holds the slot | granted |
+| the holder is the session asking | reclaimed, silently |
+| a different session, `force` set | handed over, because a person asked |
+| a different session, no `force` | refused with `AgentMsg::Busy`, naming the holder and how long they have had it |
+
+**Authentication and session ownership are separate layers**, as they are in SSH.
+The keys decide whether a peer may ask at all; the session id decides whose turn
+it is. Nothing about the slot is keyed on a public key or an address, which is
+what allows a Mac to be reachable by several gateways while exactly one holds it
+(see `docs/roadmap.md`) — and the session id is not a credential: an
+authenticated peer can present any value, and the agent only ever compares it.
+
+A gateway mints one session id per process, because a gateway instance has
+exactly one session slot of its own. Every dial it makes therefore reclaims: a
+dropped link, a target switched away and back, a browser takeover on the gateway,
+and a half-open connection not yet reaped are all the same session returning, so
+none of them costs the user a prompt. Only a genuinely different gateway is
+refused, and its client offers the takeover.
 
 Browser lifetime remains controlled by the gateway's shared session layer. A
 missing browser pong ends the session after about 60 seconds; an orderly browser
@@ -266,7 +299,9 @@ retry window, the browser returns to the target picker with the reason.
 
 ## Constraints
 
-- The program has one active session and one authenticated gateway connection.
+- The program has one active session. That is a limit on concurrency, not on who
+  may connect: a second gateway is refused until a person takes the session over,
+  and the slot is keyed on the claim's session id rather than on any key.
 - The agent shares one whole display at a time.
 - Mac-owned displays are never resized by a client.
 - The private display changes size only through an explicit request and changes

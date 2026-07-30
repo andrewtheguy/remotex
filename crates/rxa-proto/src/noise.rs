@@ -15,12 +15,18 @@
 //! even if a private key later leaks.
 //!
 //! `KK` rather than `IK` (WireGuard's own) because each side pins exactly one
-//! peer: both static keys are known before the first byte, so authentication
-//! happens entirely inside Noise with nothing for this crate to compare. `IK`
+//! peer *today*: both static keys are known before the first byte, so
+//! authentication happens entirely inside Noise with nothing for this crate to
+//! compare.
+//!
+//! That is a fact about the agent's config holding one `gateway_public_key`, and
+//! not about how many sessions it serves — those are separate questions now (see
+//! [`crate::msg::GatewayMsg::Claim`], which keys the session slot on a session id
+//! rather than on any key). So the list of accepted gateways in
+//! `docs/roadmap.md` is a change to *this* module and this module alone: `IK`
 //! would have the agent learn the dialing gateway's key from the first message
-//! and check it here — the shape that admits a *list* of accepted gateways,
-//! which is the opposite of the one-gateway-at-a-time invariant the agent is
-//! built on.
+//! and look it up here, which is the shape a list needs. Nothing about the
+//! session slot would move with it.
 //!
 //! **The responder is the side that reports a mismatch.** Both `es` and `ss` are
 //! consumed in the first message, so a wrong key on *either* end breaks the

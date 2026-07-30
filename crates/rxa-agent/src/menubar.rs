@@ -68,7 +68,6 @@ const URL_SCREEN_RECORDING: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const URL_ACCESSIBILITY: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
-const URL_LOGIN_ITEMS: &str = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
 
 /// Whether Screen Recording is effective for this process launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,15 +313,13 @@ define_class!(
 
         #[unsafe(method(toggleLoginItem:))]
         fn toggle_login_item(&self, _sender: Option<&AnyObject>) {
+            // Only a login item naming *this* copy is something to switch off.
+            // One naming another copy is the state worth repairing, so ticking it
+            // there installs over it rather than removing it — which is the whole
+            // point of the item being able to say which copy it names.
             let outcome = match loginitem::status() {
-                loginitem::Status::Enabled => loginitem::unregister(),
-                // Only the user can undo this one, in System Settings — no
-                // amount of re-registering moves it, so send them there.
-                loginitem::Status::RequiresApproval => {
-                    open_pane(URL_LOGIN_ITEMS);
-                    return;
-                }
-                _ => loginitem::register(),
+                loginitem::Status::Installed => loginitem::uninstall(),
+                _ => loginitem::install(),
             };
             match outcome {
                 Ok(()) => info!("menu: login item is now {}", loginitem::status()),
@@ -332,8 +329,9 @@ define_class!(
                         MainThreadMarker::from(self),
                         "Could not change Start at Login",
                         &format!(
-                            "{e:#}\n\nSMAppService refuses an improperly signed bundle. Running \
-                             the binary outside remotex-agent.app cannot register at all."
+                            "{e:#}\n\nThe login item names this copy of the app by its full \
+                             path, so it cannot be set from a mounted disk image — copy \
+                             remotex-agent.app to Applications and open it from there."
                         ),
                     );
                 }
@@ -536,9 +534,24 @@ impl Controller {
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let login = loginitem::status();
         let item = self.action("Start at Login", sel!(toggleLoginItem:), mtm);
-        item.setState(checkmark(login == loginitem::Status::Enabled));
+        // Unchecked when the login item names a *different* copy, which is the
+        // honest answer: this copy does not start at login, something else does.
+        // The tooltip names it, and ticking the box takes it over.
+        item.setState(checkmark(login == loginitem::Status::Installed));
         item.setToolTip(Some(&NSString::from_str(&login.to_string())));
         menu.addItem(&item);
+        // Not a tooltip: a login item pointing at another copy is why a
+        // `kickstart` starts the wrong binary, and it stayed invisible for three
+        // releases. Given a row of its own, it is the first thing anyone opening
+        // this menu to ask "why am I running an old build" sees.
+        if let loginitem::Status::Elsewhere(other) = &login {
+            let warning = self.info(&format!("⚠︎ Login starts {}", other.display()), mtm);
+            warning.setToolTip(Some(&NSString::from_str(
+                "launchd starts that copy, not this one — so `launchctl kickstart` \
+                 runs it too. Tick Start at Login here to point it at this copy.",
+            )));
+            menu.addItem(&warning);
+        }
 
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let item = self.action("Quit remotex-agent", sel!(quit:), mtm);
@@ -988,7 +1001,7 @@ mod tests {
     // menu item that silently does nothing.
     #[test]
     fn the_settings_deep_links_are_parseable_urls() {
-        for url in [URL_SCREEN_RECORDING, URL_ACCESSIBILITY, URL_LOGIN_ITEMS] {
+        for url in [URL_SCREEN_RECORDING, URL_ACCESSIBILITY] {
             assert!(
                 NSURL::URLWithString(&NSString::from_str(url)).is_some(),
                 "{url} is not a URL"

@@ -25,6 +25,12 @@ struct TargetPickerView: View {
                     .frame(maxWidth: 420)
             }
 
+            if let busy = model.session.remoteBusy {
+                remoteBusy(busy)
+                    .padding(.top, 16)
+                    .frame(maxWidth: 420)
+            }
+
             if model.targets.isEmpty {
                 Text("No targets are configured on this gateway.")
                     .foregroundStyle(.secondary)
@@ -58,6 +64,53 @@ struct TargetPickerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+    }
+
+    /// The remote is somebody else's, and this is the one refusal with something to
+    /// press. Beside `connectError` rather than through it: that one is a message to
+    /// read, this one is a decision, and the whole reason the gateway sends a
+    /// distinct message is so a client can offer the button.
+    ///
+    /// Locked while a connect is in flight for the same reason the rows are — there
+    /// is one session slot, so a takeover mid-pick has nowhere to go.
+    private func remoteBusy(_ busy: ViewerSessionState.RemoteBusy) -> some View {
+        let target = busy.target.isEmpty ? "that target" : busy.target
+        // Two situations, and they must not read the same. Being refused is about a
+        // request this user made; being taken over is about one they did not, and
+        // saying "in use" to somebody whose desktop just vanished describes the
+        // wrong event entirely. Only the remote's session went either way — the
+        // login and this gateway's slot are still theirs, which is why the target
+        // list is right here.
+        let message =
+            busy.takenOver
+            ? "Your session on \(target) was taken over from \(busy.holder)."
+            : "\(target.prefix(1).uppercased() + target.dropFirst()) is in use "
+                + "from \(busy.holder), for \(Self.heldFor(busy.heldSecs))."
+        return VStack(spacing: 8) {
+            Label(message, systemImage: "person.crop.circle.badge.exclamationmark")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(busy.takenOver ? "Take It Back" : "Take Over") {
+                model.connect(to: busy.target, force: true)
+            }
+            .disabled(model.session.pendingTarget != nil || busy.target.isEmpty)
+        }
+    }
+
+    /// "12m" rather than "754s", at the precision a glance wants — the same three
+    /// steps the agent's own menu bar and the SPA's picker use for this number.
+    static func heldFor(_ seconds: UInt32) -> String {
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(minutes)m"
+        }
+        return "\(minutes / 60)h \(minutes % 60)m"
     }
 
     /// The same state the desktop's toolbar toggle holds, offered before the pick so

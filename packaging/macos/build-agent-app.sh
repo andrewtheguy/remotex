@@ -6,9 +6,13 @@
 #
 #   * The TCC grants (Screen Recording, Accessibility) attach to a *stable signed
 #     identity*, so they survive rebuilds — see packaging/macos/Info.plist.
-#   * It carries its own LaunchAgent plist, which SMAppService hands to launchd
-#     when the agent registers itself. There is no install script: drag the
-#     bundle to /Applications and open it once.
+#   * A bundle is what LaunchServices, the menu bar and the Privacy panes all
+#     name the agent by.
+#
+# No LaunchAgent plist is embedded any more. Starting at login is arranged by the
+# agent writing ~/Library/LaunchAgents/dev.remotex.agent.plist with its own
+# *absolute* path, from the menu's Start at Login or --install-launchagent — see
+# crates/rxa-agent/src/loginitem.rs for why a bundle-relative one was a trap.
 #
 # It then produces dist/remotex-agent-<version>-macos-arm64[-unsigned].dmg, which
 # is what a user is meant to get: a disk image dragged to /Applications is the
@@ -182,8 +186,7 @@ cargo build -p rxa-agent "${cargo_flags[@]}"
 app="dist/remotex-agent.app"
 echo ">> assembling $app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Library/LaunchAgents" \
-  "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "target/$profile/remotex-agent" "$app/Contents/MacOS/remotex-agent"
 chmod +x "$app/Contents/MacOS/remotex-agent"
 
@@ -201,11 +204,6 @@ cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 # deliberately left alone — changing it resets both TCC grants.
 sed -e "s|<string>0\.0\.0</string>|<string>${version}</string>|g" \
   packaging/macos/Info.plist > "$app/Contents/Info.plist"
-
-# The plist SMAppService registers. Its filename must match the Label inside it
-# and `loginitem::LABEL`, or registration finds nothing.
-cp packaging/macos/embedded-launchagent.plist \
-  "$app/Contents/Library/LaunchAgents/dev.remotex.agent.plist"
 
 # ── Resolve a signing identity ──────────────────────────────────────────────
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then

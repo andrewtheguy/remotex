@@ -231,15 +231,69 @@ impl Reconfigure {
     }
 }
 
-/// A gateway that has completed the Noise handshake, and is therefore *the*
-/// gateway this Mac is paired with.
+/// A gateway that has completed the Noise handshake, and is therefore a gateway
+/// this Mac is willing to talk to.
 ///
-/// Split out from [`serve`] so the caller can hold the two apart: authenticating
-/// is what earns a connection the single session slot, and anything short of it
-/// must not disturb the session already in it (see [`crate::serve`]).
+/// Split out from [`serve`] so the caller can hold the three stages apart:
+/// authenticating earns a connection the right to *ask* for the session slot,
+/// [`Authenticated::claim`] is the asking, and only a granted claim disturbs the
+/// session already in the slot (see [`crate::serve`]). Authentication alone used
+/// to be enough, which conflated "may this peer be here" with "whose session is
+/// this" — see [`rxa_proto::msg::GatewayMsg::Claim`].
 pub struct Authenticated {
     reader: FrameReader<OwnedReadHalf>,
     writer: FrameWriter<OwnedWriteHalf>,
+}
+
+/// What a connection is asking of the session slot.
+///
+/// `session` identifies the asking session and authenticates nothing: the
+/// handshake already settled who may ask. The agent compares it — same session
+/// reconnecting, or a different one arriving — and never judges it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Claim {
+    pub session: [u8; 16],
+    pub force: bool,
+}
+
+impl Authenticated {
+    /// Read this connection's claim on the session slot.
+    ///
+    /// The first frame, before the agent has said anything: nothing about the
+    /// screen is revealed, and nobody is evicted, until the caller has decided
+    /// what to do with this. A peer that sends something else is one that does
+    /// not agree with us about the protocol, which the version in the claim is
+    /// there to name.
+    pub async fn claim(&mut self) -> anyhow::Result<Claim> {
+        match GatewayMsg::decode(&self.reader.recv().await?)? {
+            GatewayMsg::Claim {
+                version,
+                session,
+                force,
+            } => {
+                anyhow::ensure!(
+                    version == rxa_proto::VERSION,
+                    "gateway speaks rxa version {version}, this agent speaks {}",
+                    rxa_proto::VERSION
+                );
+                Ok(Claim { session, force })
+            }
+            other => anyhow::bail!("expected a Claim first, got {other:?}"),
+        }
+    }
+
+    /// Tell this connection the slot is taken, and hang up.
+    ///
+    /// Consumes the connection, because there is nothing else it may do: the
+    /// session in the slot has not been touched, and this peer is not getting a
+    /// [`AgentMsg::Hello`]. Both fields are for a person to read — retrying
+    /// cannot change this answer.
+    pub async fn refuse(mut self, holder: String, held_secs: u32) -> anyhow::Result<()> {
+        self.writer
+            .send(&AgentMsg::Busy { holder, held_secs }.encode())
+            .await?;
+        Ok(())
+    }
 }
 
 /// Answer a dial, proving to it and about it that both ends hold the right keys.
@@ -1060,6 +1114,15 @@ async fn pump(
                         if enabled && let Some(warning) = pasteboard::access_warning() {
                             warn!("session: {warning}");
                         }
+                    }
+                    // The claim opens a connection and is answered once, by
+                    // [`crate::serve`], before this pump exists. A second one is a
+                    // gateway repeating itself: the slot is already this session's,
+                    // so there is nothing to grant and nothing to refuse. Noted
+                    // rather than fatal — a live desktop is not worth dropping over
+                    // a message that asks for what the sender already has.
+                    GatewayMsg::Claim { .. } => {
+                        debug!("session: ignoring a second Claim on a session already granted");
                     }
                 }
             }

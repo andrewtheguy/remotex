@@ -109,10 +109,29 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         format!("{}:{}", config.host, config.port)
     };
 
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("failed to bind to {addr}"))?;
-    info!("listening on http://{addr}");
+    // **Every** address the host resolves to, not the first one.
+    //
+    // `host = "localhost"` is the case that made this necessary: it resolves to
+    // both `::1` and `127.0.0.1`, `TcpListener::bind` takes whichever the resolver
+    // returned first (on macOS, `::1`), and the other loopback is then simply
+    // refused. The startup line said `listening on http://localhost:52675`, which
+    // is exactly the wrong thing to print when only half of localhost answers — a
+    // native client on `127.0.0.1` failed with `NSURLErrorCannotConnectToHost` and
+    // nothing in the log hinted why.
+    //
+    // Binding each of them is also what makes "both loopbacks" expressible at all.
+    // `::` would do it by accident — a dual-stack wildcard reaches `127.0.0.1` — but
+    // it is `0.0.0.0` and `::/0` together, i.e. every interface on the machine,
+    // which is not what somebody asking for localhost is asking for.
+    //
+    // A literal is unaffected: `127.0.0.1`, `::1` and `0.0.0.0` each resolve to
+    // themselves and bind exactly one socket, as before.
+    let listeners = bind_all(&resolved_addrs(&addr).await?, &addr)?;
+    for listener in &listeners {
+        if let Ok(socket) = listener.local_addr() {
+            info!("listening on http://{socket}");
+        }
+    }
     info!("{} target(s) available in the post-login picker:", config.targets.len());
     for target in &config.targets {
         info!(
@@ -122,15 +141,111 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     }
     info!("web login: user {:?}", config.site_passwd.username());
 
-    // Race the server against an explicit shutdown signal. Relying on the OS
+    // One server per listener over the same router — `Router` is `Clone`, and the
+    // session slot behind it is a single `Arc`, so which socket a browser arrived on
+    // is invisible from here. That matters: two listeners are two doors to one
+    // gateway, not two gateways.
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in listeners {
+        // `bind_all` takes the sockets synchronously so the all-or-nothing check
+        // needs no runtime and is testable on its own; tokio wants them
+        // non-blocking before it will drive them.
+        listener
+            .set_nonblocking(true)
+            .context("cannot make a listening socket non-blocking")?;
+        let listener = tokio::net::TcpListener::from_std(listener)
+            .context("cannot hand a listening socket to the runtime")?;
+        servers.spawn(axum::serve(listener, app.clone()).into_future());
+    }
+
+    // Race the servers against an explicit shutdown signal. Relying on the OS
     // default SIGINT disposition to terminate proved flaky on macOS — Ctrl+C
     // was intermittently ignored while a detached engine thread was still
     // running, forcing a SIGKILL. An installed handler makes it deterministic.
     tokio::select! {
-        result = axum::serve(listener, app) => result.context("server error")?,
+        // The first server to *finish* has failed — `axum::serve` only returns on
+        // error — so it is reported rather than waited on for the others.
+        Some(result) = servers.join_next() => {
+            result.context("the server task panicked")?.context("server error")?;
+        }
         _ = shutdown_signal() => info!("shutdown signal received; stopping"),
     }
     Ok(())
+}
+
+/// Take a listening socket on every address, or none at all.
+///
+/// **A port already in use is fatal, on any one of them.** It means something else
+/// is serving that port — most often a gateway from an earlier run — and starting
+/// beside it is worse than not starting: a browser resolving `localhost` picks
+/// either family, so it would reach the old process or the new one depending on
+/// which address it happened to try, and the two would fight over the agent's
+/// session slot. This is the "stale gateway answered while the fresh one thought
+/// it was serving" failure, and refusing to start is the only honest answer.
+///
+/// The one tolerated failure is an address family this machine does not have:
+/// `localhost` resolves to `::1` on a host with IPv6 switched off, and refusing to
+/// start over a loopback that cannot exist would be useless. It is warned about,
+/// and it is still fatal if it leaves nothing bound.
+///
+/// All-or-nothing rather than a preflight probe, because a probe is a lie by the
+/// time it returns: whatever it found free can be taken in the microseconds before
+/// the real bind. Holding the sockets *is* the check, and dropping the ones already
+/// taken on the way out leaves every port exactly as it was found.
+fn bind_all(
+    addrs: &[std::net::SocketAddr],
+    addr: &str,
+) -> anyhow::Result<Vec<std::net::TcpListener>> {
+    let mut listeners = Vec::new();
+    for &socket in addrs {
+        match std::net::TcpListener::bind(socket) {
+            Ok(listener) => listeners.push(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                warn!(
+                    "not listening on {socket}: {e} — this machine has no such \
+                     address, which is what an IPv6 name resolves to on a host \
+                     with IPv6 disabled"
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // `listeners` drops here, releasing anything already taken.
+                anyhow::bail!(
+                    "{socket} is already in use — something else is serving that \
+                     port (an earlier `remotex serve`?). Stop it first; starting \
+                     beside it would leave two gateways answering {addr} \
+                     unpredictably"
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot listen on {socket}"));
+            }
+        }
+    }
+    anyhow::ensure!(
+        !listeners.is_empty(),
+        "none of the addresses {addr} resolves to can be listened on"
+    );
+    Ok(listeners)
+}
+
+/// Every socket address `addr` names, in the resolver's order and without
+/// duplicates.
+///
+/// Deduplicated because a name can resolve to the same address twice — `localhost`
+/// does on a machine with both an `/etc/hosts` entry and a DNS answer — and two
+/// binds of one address is a spurious "address already in use" against ourselves.
+async fn resolved_addrs(addr: &str) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+    let mut seen = Vec::new();
+    for socket in tokio::net::lookup_host(addr)
+        .await
+        .with_context(|| format!("cannot resolve {addr}"))?
+    {
+        if !seen.contains(&socket) {
+            seen.push(socket);
+        }
+    }
+    anyhow::ensure!(!seen.is_empty(), "{addr} resolves to no address at all");
+    Ok(seen)
 }
 
 /// Resolve when the process is asked to stop: Ctrl+C (SIGINT) on any platform,
@@ -159,5 +274,95 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    /// Both loopbacks at one port, which is what `host = "localhost"` resolves to
+    /// and the reason `bind_all` exists.
+    fn both_loopbacks(port: u16) -> Vec<SocketAddr> {
+        vec![
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        ]
+    }
+
+    /// A port nothing is listening on, found by taking one and letting it go.
+    ///
+    /// Racy in principle and fine in practice: the window is microseconds and the
+    /// alternative is a hardcoded port, which is racy against every other test run
+    /// on the machine rather than against nothing in particular.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn both_loopbacks_are_bound_for_one_name() {
+        let port = free_port();
+        let listeners = bind_all(&both_loopbacks(port), "localhost:0").unwrap();
+        let bound: Vec<_> = listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap())
+            .collect();
+        assert_eq!(bound, both_loopbacks(port), "both, in the order resolved");
+    }
+
+    /// The check the whole function is for: a port held on *any* resolved address
+    /// stops the start, even when the other address is free.
+    #[test]
+    fn a_port_already_in_use_on_one_address_refuses_the_start() {
+        let port = free_port();
+        // Hold IPv4 only, leaving the IPv6 loopback free — the half-bound shape
+        // that used to start happily and answer on one family.
+        let squatter = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+
+        let err = bind_all(&both_loopbacks(port), "localhost:0")
+            .expect_err("a port in use must refuse the start");
+        let text = format!("{err:#}");
+        assert!(text.contains("already in use"), "{text}");
+        assert!(text.contains(&port.to_string()), "it must name the port: {text}");
+
+        // And nothing was left holding the address that *was* free: the IPv6
+        // listener taken on the way through has to be released, or a retry after
+        // stopping the other process would fail against ourselves.
+        drop(squatter);
+        bind_all(&both_loopbacks(port), "localhost:0")
+            .expect("the refused attempt must not have kept a socket");
+    }
+
+    /// An address this machine does not have is warned about, not fatal — that is
+    /// what `::1` is on a host with IPv6 disabled. Simulated with an address no
+    /// machine has assigned.
+    #[test]
+    fn an_unavailable_address_is_skipped_while_the_rest_still_bind() {
+        let port = free_port();
+        let mut addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), port)];
+        addrs.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+
+        let listeners = bind_all(&addrs, "example:0").expect("the loopback still binds");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(
+            listeners[0].local_addr().unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        );
+    }
+
+    /// ...unless it leaves nothing at all, which is a gateway nobody can reach.
+    #[test]
+    fn an_address_nothing_could_bind_is_still_fatal() {
+        let addrs = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            free_port(),
+        )];
+        let err = bind_all(&addrs, "example:0").expect_err("nothing bound is fatal");
+        assert!(format!("{err:#}").contains("can be listened on"), "{err:#}");
     }
 }

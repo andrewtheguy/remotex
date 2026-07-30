@@ -445,6 +445,17 @@ export function useRemoteDesktop(
   // against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
   const [connectError, setConnectError] = useState<string | null>(null);
+  // The remote's own session slot is held by a different client, and this one can
+  // take it over. Beside `connectError` rather than folded into it because the
+  // picker offers a button for this and only reports the other. Cleared the moment
+  // a session starts or another connect is attempted, so a stale offer can never
+  // outlive the situation that produced it (see the `remoteBusy` control message).
+  const [remoteBusy, setRemoteBusy] = useState<{
+    target: string;
+    holder: string;
+    heldSecs: number;
+    takenOver: boolean;
+  } | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
@@ -573,6 +584,13 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
+  // Which target this session is for, so a `remoteBusy` can name the target its
+  // takeover would apply to. A ref because the control handler reads it without
+  // wanting to be re-created when it changes, and because the message can arrive
+  // in two states: while a pick is pending (the ordinary refusal) and mid-session,
+  // when another client took the remote during a reconnect and `pendingTarget` is
+  // long since null.
+  const sessionTargetRef = useRef<string | null>(null);
   // Manual-resize mode (RDP with resize enabled, rxa, and every mobile session):
   // while set, automatic viewport reports are suppressed and only the menu's
   // "Resize to window" sends one — which on mobile is nothing, since the button is
@@ -1172,7 +1190,9 @@ export function useRemoteDesktop(
       // A target session started (picker connect, reattach, or takeover of a
       // live desktop): switch to the desktop.
       setConnectError(null);
+      setRemoteBusy(null);
       setPendingTarget(null);
+      sessionTargetRef.current = msg.name;
       setMode("desktop");
       setCanClipboard(msg.clipboard);
       setCanAudio(msg.audio);
@@ -1275,6 +1295,19 @@ export function useRemoteDesktop(
           // followed by `picker`; a refusal leaves the slot already there.
           console.error("remote session error:", msg.message);
           setConnectError(msg.message);
+          setPendingTarget(null);
+          break;
+        case "remoteBusy":
+          // Not an error: the remote answered correctly and named who has it. The
+          // session ends the same way, back on the picker, but with a takeover to
+          // offer against the target instead of a message to read.
+          setConnectError(null);
+          setRemoteBusy({
+            target: sessionTargetRef.current ?? "",
+            holder: msg.holder,
+            heldSecs: msg.heldSecs,
+            takenOver: msg.takenOver,
+          });
           setPendingTarget(null);
           break;
         case "connected":
@@ -1451,11 +1484,19 @@ export function useRemoteDesktop(
   const retry = useCallback(() => startRef.current?.(false), []);
 
   // Pick a target from the picker: start its session over the live socket. The
-  // server answers `connected` (→ desktop) or `error` (shown on the picker).
-  const connect = useCallback((target: string) => {
+  // server answers `connected` (→ desktop), `error`, or `remoteBusy` (both shown
+  // on the picker).
+  //
+  // `force` takes the *remote's* session slot from whoever holds it, and answers
+  // the `remoteBusy` this picker just showed. It says nothing about this gateway's
+  // own slot, which was claimed over HTTP before this socket existed — that
+  // takeover is `takeOver()`.
+  const connect = useCallback((target: string, force = false) => {
     setConnectError(null);
+    setRemoteBusy(null);
     setPendingTarget(target);
-    sendRef.current({ type: "connect", target });
+    sessionTargetRef.current = target;
+    sendRef.current({ type: "connect", target, force });
   }, []);
 
   // Switch target: tear the current session down and return to the picker. The
@@ -1810,6 +1851,7 @@ export function useRemoteDesktop(
     status,
     mode,
     connectError,
+    remoteBusy,
     pendingTarget,
     size,
     hostScale,

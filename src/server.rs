@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
+use log::warn;
 use serde::{Deserialize, Serialize};
 use tower::service_fn;
 use tower_http::services::ServeDir;
@@ -111,7 +112,121 @@ pub(crate) fn router_with_sessions(
                 .route_layer(require_auth),
         )
         .fallback_service(spa)
+        // Outermost, so it sees the request before routing does: what it acts on is
+        // the `Host` a browser arrived under, not which handler would answer.
+        // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            dev_hostname_redirect,
+        ))
         .with_state(state)
+}
+
+/// Whether `name` — a `Host` header with its port and brackets already stripped —
+/// can only mean this machine.
+///
+/// Three families, and the third is the one that matters for the redirect below:
+///
+/// - a loopback literal, which is all of `127.0.0.0/8` and `::1` rather than just
+///   `127.0.0.1`;
+/// - `localhost`;
+/// - **anything under `.localhost`**, which RFC 6761 §6.3 reserves for loopback in
+///   its entirety. So `gw-a.localhost`, `gateway-1.localhost` and any other label
+///   somebody types are all this machine, and all of them are names this gateway
+///   may find itself serving under.
+///
+/// Case-insensitive, because DNS names are and a `Host` header may arrive in any
+/// case.
+fn is_loopback_name(name: &str) -> bool {
+    if let Ok(ip) = name.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    let name = name.to_ascii_lowercase();
+    name == "localhost" || name.ends_with(".localhost")
+}
+
+/// Send a loopback browser to `<label>.localhost`, so this gateway has a cookie
+/// origin of its own (see `[server].dev_subdomain`).
+///
+/// Three deliberate limits, because a redirect is a thing to be careful with:
+///
+/// - **Loopback only.** A request whose `Host` is anything else — a real hostname,
+///   a LAN address, a reverse proxy's name — is passed through untouched, so no
+///   deployment can be redirected however the key is set. Note that widening what
+///   counts as loopback cannot widen where this sends anybody: the target is built
+///   from this gateway's own validated label and never from the request, so there
+///   is no input that makes it point somewhere else.
+/// - **The home page only**, and not merely "not the API". Opening the gateway is
+///   the one request that decides which origin everything else belongs to: the
+///   document that lands on `<label>.localhost` asks for its assets, its `/api`
+///   and its `/ws` from there by itself. Redirecting anything else would be
+///   redundant at best and harmful at worst — a `fetch` that followed a
+///   cross-origin redirect would drop its credentials, and a WebSocket upgrade
+///   does not follow one at all.
+/// - **307, not 301.** A permanent redirect is cached by the browser hard enough
+///   to outlive the config key that caused it, on a hostname somebody may want
+///   back. This one is a development convenience and must be as easy to remove as
+///   it was to add.
+async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let Some(dev_hostname) = state.config.dev_hostname.as_deref() else {
+        return next.run(req).await;
+    };
+    if req.uri().path() != "/" {
+        return next.run(req).await;
+    }
+    let Some(host) = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return next.run(req).await;
+    };
+    // `host:port`, `[::1]:port`, or a bare name. The port is kept as it arrived
+    // rather than read from the config: it is the one the browser can reach, which
+    // behind anything at all is not necessarily the one this process bound.
+    let (name, port) = match host.rsplit_once(':') {
+        // A colon with no digits after it is part of an unbracketed IPv6 literal,
+        // not a port — so `::1` does not become the host `:` on port `1`.
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() => {
+            (name, Some(port))
+        }
+        _ => (host, None),
+    };
+    let name = name.trim_start_matches('[').trim_end_matches(']');
+    // Any loopback name that is not *this* gateway's own, which is stricter than it
+    // first looks and deliberately so. `gw-b.localhost` on gateway A's port is a
+    // browser about to give gateway A a cookie under gateway B's name — the exact
+    // collision this whole mechanism exists to prevent, arrived at by editing the
+    // port in the URL bar and not the label. So the test is not "did you come in on
+    // a bare loopback address" but "are you already where you belong".
+    //
+    // Also the loop guard: without the second half this would redirect its own
+    // target forever.
+    if !is_loopback_name(name) || name.eq_ignore_ascii_case(dev_hostname) {
+        return next.run(req).await;
+    }
+
+    let authority = match port {
+        Some(port) => format!("{dev_hostname}:{port}"),
+        None => dev_hostname.to_owned(),
+    };
+    let target = format!(
+        "http://{authority}{}",
+        req.uri()
+            .path_and_query()
+            .map_or("/", |path_and_query| path_and_query.as_str())
+    );
+    match header::HeaderValue::from_str(&target) {
+        Ok(location) => {
+            (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, location)]).into_response()
+        }
+        // Unreachable with a validated label and a `Host` that parsed, and a
+        // redirect nobody can follow is worse than none.
+        Err(e) => {
+            warn!("server: cannot redirect to {target:?}: {e}");
+            next.run(req).await
+        }
+    }
 }
 
 /// Middleware guarding everything session-related: no valid login cookie, no
@@ -292,6 +407,180 @@ async fn claim_handler(
 mod tests {
     use super::*;
 
+    /// A router whose only interesting property is the dev hostname, over a
+    /// static dir that does not exist — every assertion below is about the
+    /// redirect, and a request that is *not* redirected only has to be shown not
+    /// to be one.
+    fn dev_router(dev_hostname: Option<&str>) -> Router {
+        let config = AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 52675,
+            static_dir: "frontend/dist".into(),
+            // Never dialed: no test here starts a session.
+            targets: vec![crate::config::TargetConfig {
+                name: "unreachable".to_owned(),
+                protocol: crate::config::Protocol::Vnc,
+                subtype: None,
+                host: "127.0.0.1".to_owned(),
+                port: 9,
+                username: String::new(),
+                password: String::new(),
+                vnc_password: String::new(),
+                domain: None,
+                width: 1280,
+                height: 800,
+                security: crate::config::Security::Auto,
+                resize: false,
+                clipboard: false,
+                audio: false,
+                agent_public_key: String::new(),
+                gateway_private_key: String::new(),
+            }],
+            site_passwd: crate::auth::SitePasswd::parse(
+                &crate::auth::generate("admin", "hunter2", 4).unwrap(),
+            )
+            .unwrap(),
+            branding: "remotex".to_owned(),
+            dev_hostname: dev_hostname.map(str::to_owned),
+        };
+        router(config)
+    }
+
+    /// The `Location` a `GET /` under `host` is sent to, or `None` when it was
+    /// not redirected at all.
+    async fn redirect_for(router: Router, host: &str, path: &str) -> Option<String> {
+        use tower::ServiceExt as _;
+
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .header(header::HOST, host)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() != StatusCode::TEMPORARY_REDIRECT {
+            return None;
+        }
+        Some(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .expect("a redirect carries a Location")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        )
+    }
+
+    /// The hole this closes, and the reason the rule is "not already where you
+    /// belong" rather than "arrived on a bare address".
+    ///
+    /// `gw-b.localhost:52675` is somebody who edited the port in the URL bar and
+    /// not the label. Serving it would put *this* gateway's cookie under the other
+    /// one's hostname, which is precisely the collision the whole mechanism exists
+    /// to prevent — so it is redirected like any other name that is not ours.
+    #[tokio::test]
+    async fn another_gateways_hostname_on_this_port_is_redirected_here() {
+        for host in [
+            "gw-b.localhost:52675",
+            "gateway-1.localhost:52675",
+            // A sub-subdomain of our own name is still not our own name.
+            "x.gw-a.localhost:52675",
+            // The rest of 127/8 is loopback too, not just .0.1.
+            "127.0.0.2:52675",
+        ] {
+            assert_eq!(
+                redirect_for(dev_router(Some("gw-a.localhost")), host, "/").await,
+                Some("http://gw-a.localhost:52675/".to_owned()),
+                "{host} should have been sent to this gateway's own hostname"
+            );
+        }
+    }
+
+    /// The loop guard, which is now explicit: our own name is a loopback name, and
+    /// redirecting it would point at itself forever. Case-insensitively, because a
+    /// `Host` header may arrive in any case and DNS does not care.
+    #[tokio::test]
+    async fn this_gateways_own_hostname_is_never_redirected_again() {
+        for host in [
+            "gw-a.localhost:52675",
+            "GW-A.LOCALHOST:52675",
+            "gw-a.localhost",
+        ] {
+            assert_eq!(
+                redirect_for(dev_router(Some("gw-a.localhost")), host, "/").await,
+                None,
+                "{host} is already where it belongs"
+            );
+        }
+    }
+
+    /// The point of the whole thing: each gateway gets a cookie origin of its own,
+    /// with the port and the loopback spelling it arrived under both preserved.
+    #[tokio::test]
+    async fn a_loopback_browser_is_sent_to_the_dev_hostname() {
+        for host in ["127.0.0.1:52675", "localhost:52675", "[::1]:52675"] {
+            assert_eq!(
+                redirect_for(dev_router(Some("gw-a.localhost")), host, "/").await,
+                Some("http://gw-a.localhost:52675/".to_owned()),
+                "{host} should have been redirected"
+            );
+        }
+        // No port in the Host is legal (port 80) and must not invent one.
+        assert_eq!(
+            redirect_for(dev_router(Some("gw-a.localhost")), "localhost", "/").await,
+            Some("http://gw-a.localhost/".to_owned())
+        );
+    }
+
+    /// The safety property. A deployment reaches this gateway under its own name,
+    /// and must never be bounced to a loopback hostname however this is configured.
+    #[tokio::test]
+    async fn a_request_that_did_not_arrive_on_loopback_is_left_alone() {
+        for host in [
+            "remotex.example.com",
+            "remotex.example.com:52675",
+            "10.22.34.32:52675",
+            "[fdb8:d92a::1]:52675",
+            // Not loopback however much it reads like it: the suffix is what
+            // RFC 6761 reserves, and this one only *contains* the word.
+            "localhost.example.com:52675",
+            "notlocalhost:52675",
+        ] {
+            assert_eq!(
+                redirect_for(dev_router(Some("gw-a.localhost")), host, "/").await,
+                None,
+                "{host} must not be redirected"
+            );
+        }
+    }
+
+    /// Only the home page. Everything else belongs to whichever origin the
+    /// document was loaded from, and a `fetch` that followed a cross-origin
+    /// redirect would drop its cookie.
+    #[tokio::test]
+    async fn nothing_but_the_home_page_is_redirected() {
+        for path in ["/api/health", "/api/auth/status", "/ws", "/assets/app.js"] {
+            assert_eq!(
+                redirect_for(dev_router(Some("gw-a.localhost")), "127.0.0.1:52675", path).await,
+                None,
+                "{path} must not be redirected"
+            );
+        }
+    }
+
+    /// And with the key unset it is inert, which is every deployment.
+    #[tokio::test]
+    async fn without_the_key_nothing_is_redirected() {
+        assert_eq!(
+            redirect_for(dev_router(None), "127.0.0.1:52675", "/").await,
+            None
+        );
+    }
+
     /// Serve the real gateway with a **generated tone** in place of a remote's
     /// audio, so the browser half of the audio path can be listened to without a
     /// server that redirects.
@@ -382,7 +671,7 @@ mod tests {
         // ends so the session layer sees a live engine.
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target.clone()],
-            |_target, input_rx, frame_tx, audio| {
+            |_target, _takeover, input_rx, frame_tx, audio| {
                 let audio: Arc<AudioBridge> = audio.expect("the target opted into audio");
                 std::thread::spawn(move || {
                     let mut input_rx = input_rx;
@@ -450,6 +739,7 @@ mod tests {
             )
             .unwrap(),
             branding: "audio tone harness".to_owned(),
+            dev_hostname: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
