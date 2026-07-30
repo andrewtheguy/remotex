@@ -215,10 +215,15 @@ async fn run_with(
     let mut session = match connect(&config, &keys, takeover).await {
         Ok(session) => session,
         // The Mac is somebody else's. Reported as itself rather than as an error,
-        // so the client can offer the one thing that resolves it.
+        // so the client can offer the one thing that resolves it. `taken_over` is
+        // false because this client asked and was refused — it had nothing to lose.
         Err(DialError::Busy { holder, held_secs }) => {
             let _ = frame_tx
-                .send(ServerMsg::RemoteBusy { holder, held_secs })
+                .send(ServerMsg::RemoteBusy {
+                    holder,
+                    held_secs,
+                    taken_over: false,
+                })
                 .await;
             return;
         }
@@ -280,10 +285,18 @@ async fn run_with(
                 // Somebody took the Mac while our link was down. No amount of
                 // waiting undoes that, so stop here and let the client offer the
                 // takeover rather than spending the rest of the window failing.
+                // The other way round from the initial dial: this session was
+                // running and somebody else claimed it. `taken_over` is what stops
+                // the client telling the person who just lost their desktop that a
+                // target they never picked is busy.
                 Err(DialError::Busy { holder, held_secs }) => {
                     info!("rxa: giving up the agent link — {holder} took the session over");
                     let _ = frame_tx
-                        .send(ServerMsg::RemoteBusy { holder, held_secs })
+                        .send(ServerMsg::RemoteBusy {
+                            holder,
+                            held_secs,
+                            taken_over: true,
+                        })
                         .await;
                     return;
                 }

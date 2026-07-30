@@ -134,6 +134,10 @@ struct ViewerSessionState: Equatable {
         var target: String
         var holder: String
         var heldSecs: UInt32
+        /// True when this session was taken *from* us, false when we asked for a
+        /// target somebody else had. Opposite experiences, so the picker says
+        /// different things about them.
+        var takenOver: Bool
     }
 
     /// Keyboard capture belongs to a live desktop and nothing else. Computed

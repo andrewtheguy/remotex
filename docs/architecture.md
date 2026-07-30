@@ -295,6 +295,13 @@ it against the target picker with a Take over button, which reconnects with
 above: one claims this gateway, the other claims the Mac at the far end of it, and
 both can be needed in the same sitting.
 
+Its `takenOver` flag separates the two ways a client arrives there. False means
+this client asked for a target somebody else holds and was refused. True means it
+*held* the session and another client took it — in which case only the remote's
+session changed hands: the login, this gateway's session slot and the browser's
+socket all remain the loser's, and it returns to the target picker with a message
+saying so rather than to the login screen.
+
 ### Native macOS viewer
 
 The optional viewer is a separate native client of the same HTTP and WebSocket

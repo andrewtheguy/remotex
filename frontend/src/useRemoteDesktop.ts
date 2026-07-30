@@ -454,6 +454,7 @@ export function useRemoteDesktop(
     target: string;
     holder: string;
     heldSecs: number;
+    takenOver: boolean;
   } | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
@@ -1305,6 +1306,7 @@ export function useRemoteDesktop(
             target: sessionTargetRef.current ?? "",
             holder: msg.holder,
             heldSecs: msg.heldSecs,
+            takenOver: msg.takenOver,
           });
           setPendingTarget(null);
           break;

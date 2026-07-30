@@ -107,15 +107,16 @@ struct ServerMessageTests {
     func remoteBusyNamesTheHolderAndHowLongTheyHaveHadIt() throws {
         #expect(
             try ServerMessage.decode(
-                #"{"type":"remoteBusy","holder":"192.168.1.5","heldSecs":754}"#
-            ) == .remoteBusy(holder: "192.168.1.5", heldSecs: 754)
+                #"{"type":"remoteBusy","holder":"192.168.1.5","heldSecs":754,"takenOver":false}"#
+            ) == .remoteBusy(holder: "192.168.1.5", heldSecs: 754, takenOver: false)
         )
-        // A session claimed a moment ago, and an IPv6 holder: both are only ever
-        // shown to a person, so neither shape is the decoder's business to police.
+        // The other way round — this session was taken from us — with an IPv6
+        // holder and no elapsed time. Both are only ever shown to a person, so
+        // neither shape is the decoder's business to police.
         #expect(
             try ServerMessage.decode(
-                #"{"type":"remoteBusy","holder":"fdb8:d92a:f690:3d7f::1","heldSecs":0}"#
-            ) == .remoteBusy(holder: "fdb8:d92a:f690:3d7f::1", heldSecs: 0)
+                #"{"type":"remoteBusy","holder":"fdb8:d92a:f690:3d7f::1","heldSecs":0,"takenOver":true}"#
+            ) == .remoteBusy(holder: "fdb8:d92a:f690:3d7f::1", heldSecs: 0, takenOver: true)
         )
     }
 

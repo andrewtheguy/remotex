@@ -552,7 +552,25 @@ pub enum ServerMsg {
     /// Only `rxa` produces it — the macOS agent has a session slot of its own (see
     /// `rxa_proto::msg::GatewayMsg::Claim`). RDP and VNC servers arbitrate their
     /// own sessions and tell us nothing we could offer a choice about.
-    RemoteBusy { holder: String, held_secs: u32 },
+    ///
+    /// `taken_over` distinguishes the two ways to arrive here, which are opposite
+    /// experiences and must not read the same:
+    ///
+    /// - `false` — this client asked for a target somebody else is using. It was
+    ///   refused, and nothing it had was disturbed.
+    /// - `true` — this client *had* the session and another one took it. Nothing
+    ///   was asked for; something was lost. Only the remote's session went: the
+    ///   login, this gateway's slot and the socket are all still this client's,
+    ///   which is why it lands back on the target list rather than anywhere else.
+    ///
+    /// Both leave a client on the picker with the same button, but "in use, take
+    /// over?" told to somebody who just lost their desktop reads as a refusal of a
+    /// connection they never made.
+    RemoteBusy {
+        holder: String,
+        held_secs: u32,
+        taken_over: bool,
+    },
     /// No target is selected: show the post-login target picker. Sent on attach
     /// to an idle slot, on disconnect ("switch target"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
@@ -645,6 +663,8 @@ enum ControlMsg<'a> {
         holder: &'a str,
         #[serde(rename = "heldSecs")]
         held_secs: u32,
+        #[serde(rename = "takenOver")]
+        taken_over: bool,
     },
     Picker,
     Connected {
@@ -722,9 +742,14 @@ impl ServerMsg {
                 },
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
-            ServerMsg::RemoteBusy { holder, held_secs } => control(&ControlMsg::RemoteBusy {
+            ServerMsg::RemoteBusy {
+                holder,
+                held_secs,
+                taken_over,
+            } => control(&ControlMsg::RemoteBusy {
                 holder,
                 held_secs: *held_secs,
+                taken_over: *taken_over,
             }),
             ServerMsg::Picker => control(&ControlMsg::Picker),
             ServerMsg::Connected {

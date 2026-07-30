@@ -74,20 +74,26 @@ struct TargetPickerView: View {
     /// Locked while a connect is in flight for the same reason the rows are — there
     /// is one session slot, so a takeover mid-pick has nowhere to go.
     private func remoteBusy(_ busy: ViewerSessionState.RemoteBusy) -> some View {
-        VStack(spacing: 8) {
-            Label(
-                """
-                \(busy.target.isEmpty ? "That target" : busy.target) is in use \
-                from \(busy.holder), for \(Self.heldFor(busy.heldSecs)).
-                """,
-                systemImage: "person.crop.circle.badge.exclamationmark"
-            )
-            .font(.callout)
-            .foregroundStyle(.orange)
-            .multilineTextAlignment(.center)
-            .fixedSize(horizontal: false, vertical: true)
+        let target = busy.target.isEmpty ? "that target" : busy.target
+        // Two situations, and they must not read the same. Being refused is about a
+        // request this user made; being taken over is about one they did not, and
+        // saying "in use" to somebody whose desktop just vanished describes the
+        // wrong event entirely. Only the remote's session went either way — the
+        // login and this gateway's slot are still theirs, which is why the target
+        // list is right here.
+        let message =
+            busy.takenOver
+            ? "Your session on \(target) was taken over from \(busy.holder)."
+            : "\(target.prefix(1).uppercased() + target.dropFirst()) is in use "
+                + "from \(busy.holder), for \(Self.heldFor(busy.heldSecs))."
+        return VStack(spacing: 8) {
+            Label(message, systemImage: "person.crop.circle.badge.exclamationmark")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
 
-            Button("Take Over") {
+            Button(busy.takenOver ? "Take It Back" : "Take Over") {
                 model.connect(to: busy.target, force: true)
             }
             .disabled(model.session.pendingTarget != nil || busy.target.isEmpty)

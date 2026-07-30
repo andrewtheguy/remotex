@@ -46,7 +46,12 @@ export default function TargetPicker({
   connect: (name: string, force?: boolean) => void;
   pendingTarget: string | null;
   connectError: string | null;
-  remoteBusy: { target: string; holder: string; heldSecs: number } | null;
+  remoteBusy: {
+    target: string;
+    holder: string;
+    heldSecs: number;
+    takenOver: boolean;
+  } | null;
   onLogout: () => void;
   onUnauthorized: () => void;
 }) {
@@ -90,17 +95,30 @@ export default function TargetPicker({
         {loadError && <p className="picker-error">{loadError}</p>}
         {remoteBusy && (
           <div className="picker-busy">
-            <p>
-              <strong>{remoteBusy.target || "That target"}</strong> is in use
-              from {remoteBusy.holder}, for {heldFor(remoteBusy.heldSecs)}.
-            </p>
+            {remoteBusy.takenOver ? (
+              // This session was running and somebody else claimed it. Say what
+              // happened rather than describing the target as busy: nothing was
+              // asked for here, and only the remote's session went — this login
+              // and this gateway are still ours, which is why the list is right
+              // here to pick from again.
+              <p>
+                Your session on{" "}
+                <strong>{remoteBusy.target || "that target"}</strong> was taken
+                over from {remoteBusy.holder}.
+              </p>
+            ) : (
+              <p>
+                <strong>{remoteBusy.target || "That target"}</strong> is in use
+                from {remoteBusy.holder}, for {heldFor(remoteBusy.heldSecs)}.
+              </p>
+            )}
             <button
               type="button"
               className="picker-takeover"
               onClick={() => connect(remoteBusy.target, true)}
               disabled={pendingTarget !== null || !remoteBusy.target}
             >
-              Take over
+              {remoteBusy.takenOver ? "Take it back" : "Take over"}
             </button>
           </div>
         )}

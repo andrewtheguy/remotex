@@ -130,7 +130,17 @@ export type ControlMsg =
   // which is about *this gateway's* slot being held by another browser. Both can
   // happen at once, and they need different buttons: one takes the gateway, the
   // other takes the Mac at the far end of it.
-  | { type: "remoteBusy"; holder: string; heldSecs: number }
+  // `takenOver` separates the two ways this arrives, which are opposite
+  // experiences: false is "you asked for a target somebody else has, and were
+  // refused"; true is "you *had* it and somebody took it". Only the remote's
+  // session went in that second case — the login, the gateway slot and this socket
+  // are all still ours — which is why both land on the target list.
+  | {
+      type: "remoteBusy";
+      holder: string;
+      heldSecs: number;
+      takenOver: boolean;
+    }
   | { type: "picker" }
   // `protocol` ("rdp"/"vnc"/"rxa") and `resize` tell the browser how to handle
   // resize: VNC follows the viewport automatically, RDP only on request. For

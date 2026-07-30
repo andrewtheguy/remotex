@@ -560,7 +560,7 @@ final class AppModel: GatewaySessionSink {
             setConnectError(message)
             session.pendingTarget = nil
 
-        case .remoteBusy(let holder, let heldSecs):
+        case .remoteBusy(let holder, let heldSecs, let takenOver):
             // Not an error: the remote answered correctly and said who has it. Like
             // `error` it must survive the `picker` that follows, and unlike `error`
             // it carries an action — the picker offers to take the remote over. The
@@ -571,7 +571,8 @@ final class AppModel: GatewaySessionSink {
             session.remoteBusy = .init(
                 target: session.pendingTarget ?? session.connectedTarget ?? "",
                 holder: holder,
-                heldSecs: heldSecs
+                heldSecs: heldSecs,
+                takenOver: takenOver
             )
             session.pendingTarget = nil
 

@@ -62,7 +62,7 @@ struct ConnectErrorTests {
         model.connect(to: "mac")
         #expect(model.session.pendingTarget == "mac")
 
-        model.apply(.control(.remoteBusy(holder: "192.168.1.5", heldSecs: 754)))
+        model.apply(.control(.remoteBusy(holder: "192.168.1.5", heldSecs: 754, takenOver: false)))
         model.apply(.control(.picker))
 
         #expect(model.session.remoteBusy?.target == "mac")
@@ -86,8 +86,12 @@ struct ConnectErrorTests {
         model.apply(.control(.connected(connected(to: "mac"))))
         #expect(model.session.pendingTarget == nil, "a live session has no pick pending")
 
-        model.apply(.control(.remoteBusy(holder: "10.0.0.9", heldSecs: 3)))
+        model.apply(.control(.remoteBusy(holder: "10.0.0.9", heldSecs: 3, takenOver: true)))
         #expect(model.session.remoteBusy?.target == "mac")
+        // And it must arrive marked as a loss rather than a refusal: the picker says
+        // "your session was taken over", not "that target is in use", to somebody
+        // who asked for nothing.
+        #expect(model.session.remoteBusy?.takenOver == true)
     }
 
     private func connected(to name: String) -> ServerMessage.Connected {
@@ -105,7 +109,7 @@ struct ConnectErrorTests {
     @Test
     func aSessionThatOpensClearsTheOfferToTakeItOver() {
         let model = freshModel()
-        model.apply(.control(.remoteBusy(holder: "192.168.1.5", heldSecs: 754)))
+        model.apply(.control(.remoteBusy(holder: "192.168.1.5", heldSecs: 754, takenOver: false)))
         model.apply(.control(.connected(connected(to: "mac"))))
         #expect(model.session.remoteBusy == nil)
     }

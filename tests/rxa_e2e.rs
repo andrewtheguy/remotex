@@ -768,7 +768,7 @@ fn drain_input(rx: &mut mpsc::UnboundedReceiver<GatewayMsg>) -> Vec<GatewayMsg> 
 /// Its own helper rather than a branch in [`expect_paint`], which treats a
 /// `picker` as a failure — here the picker is exactly where the session is
 /// supposed to end up, with this message waiting on it.
-async fn expect_remote_busy(ws: &mut Ws) -> (String, u64) {
+async fn expect_remote_busy(ws: &mut Ws) -> (String, u64, bool) {
     tokio::time::timeout(Duration::from_secs(20), async {
         while let Some(msg) = ws.next().await {
             if let Message::Text(text) = msg.expect("websocket receive") {
@@ -781,6 +781,7 @@ async fn expect_remote_busy(ws: &mut Ws) -> (String, u64) {
                     return (
                         parsed["holder"].as_str().unwrap().to_owned(),
                         parsed["heldSecs"].as_u64().unwrap(),
+                        parsed["takenOver"].as_bool().unwrap(),
                     );
                 }
             }
@@ -1350,9 +1351,16 @@ async fn a_busy_agent_is_reported_as_busy_and_not_retried() {
 
     // The engine reports it and the session ends, which lands the browser back on
     // the picker — the same door a fatal engine error leaves by.
-    let (holder, held_secs) = expect_remote_busy(&mut ws).await;
+    let (holder, held_secs, taken_over) = expect_remote_busy(&mut ws).await;
     assert_eq!(holder, "192.168.1.5");
     assert_eq!(held_secs, 754);
+    // This browser asked and was refused; it never held the session. The other
+    // way round — losing one mid-session — is what `takenOver` is true for, and
+    // the two must not read the same to whoever is looking at the picker.
+    assert!(
+        !taken_over,
+        "a refused connect is not a session being taken away"
+    );
 
     // Unforced: nobody had asked for a takeover yet.
     match expect_input(&mut claims).await {
