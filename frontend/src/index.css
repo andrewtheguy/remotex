@@ -1180,3 +1180,12 @@ body {
   font-size: 0.75rem;
   color: #8b949e;
 }
+
+/* The read-only Screen readout. Tabular figures so the numbers don't shift
+   sideways as a resize changes their widths. */
+.screen-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+}

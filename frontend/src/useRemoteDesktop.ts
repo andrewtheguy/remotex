@@ -398,6 +398,22 @@ async function postClaim(
   }
 }
 
+// This screen's density in hundredths, the unit the wire carries.
+//
+// Rounded because that wire is an integer, and defaulted rather than clamped: a
+// fractional-DPI screen is ordinary, a `devicePixelRatio` of 0 or Infinity is not
+// a screen at all, and 1x is the answer that asks the remote for the least.
+function hostScaleHundredths(): number {
+  const dpr = window.devicePixelRatio;
+  return Number.isFinite(dpr) && dpr > 0 ? Math.round(dpr * 100) : 100;
+}
+
+// A density as a menu reads it: `2x`, `1x`, `1.5x` for the fractional screens
+// that exist. Hundredths in, because that is what both ends of this speak.
+export function densityLabel(hundredths: number): string {
+  return `${Number((hundredths / 100).toFixed(2))}x`;
+}
+
 // Requested CSS viewport converted to remote pixels and clamped to wire `u16`.
 function viewportMsg(
   size: { w: number; h: number },
@@ -420,6 +436,11 @@ export function useRemoteDesktop(
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
+  // This screen's density, kept in state only so the menu can show it beside the
+  // remote's. Nothing about how the desktop is presented reads it — see
+  // applyCanvasCss. Seeded from the screen rather than left null, so the readout
+  // is right from the first paint instead of after the first send.
+  const [hostScale, setHostScale] = useState(hostScaleHundredths);
   // Picker vs desktop. `connectError` holds the last engine error to show
   // against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
@@ -825,15 +846,14 @@ export function useRemoteDesktop(
     // RXA resize requires both target permission and an active owned display.
     let rxaResize = false;
     const sendHostScale = () => {
+      const scale = hostScaleHundredths();
+      // Recorded before either guard below, and whether or not it is sent: the
+      // menu shows this number, and a density this screen has that the remote
+      // does not is exactly what someone reading it is trying to see.
+      setHostScale(scale);
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      // Rounded to hundredths because the wire carries an integer, and clamped
-      // to something a screen could plausibly be: a fractional-DPI screen is
-      // ordinary, `devicePixelRatio` of 0 or Infinity is not.
-      const dpr = window.devicePixelRatio;
-      const scale =
-        Number.isFinite(dpr) && dpr > 0 ? Math.round(dpr * 100) : 100;
       if (lastHostScale === scale) {
         return;
       }
@@ -1792,6 +1812,7 @@ export function useRemoteDesktop(
     connectError,
     pendingTarget,
     size,
+    hostScale,
     canResize,
     canClipboard,
     canAudio,

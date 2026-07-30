@@ -32,6 +32,41 @@ struct DisplayMode: Equatable, Hashable, Sendable, Decodable {
     var h: UInt16
 }
 
+/// A density as a menu reads it: `2x`, `1x`, `1.5x` for the fractional screens
+/// that exist.
+func densityLabel(_ scale: CGFloat) -> String {
+    let rounded = (scale * 100).rounded() / 100
+    // A whole number without the `.0`, which is what almost every screen is.
+    if rounded == rounded.rounded() {
+        return "\(Int(rounded))x"
+    }
+    return "\(rounded)x"
+}
+
+/// The line the Display menu shows: what the remote is drawing, and what this
+/// Mac's screen is.
+///
+/// Both densities, always, because one that failed to apply is otherwise
+/// invisible. Both engines that match a client's density report the outcome only
+/// as a `resize`, and a request the remote quietly dropped produces no message at
+/// all: the desktop simply looks soft, or half the size it was asked for, with
+/// nothing saying which end disagreed. Two numbers that ought to match and don't
+/// is the whole diagnostic — which is why this is not just the resolution.
+///
+/// `nil` before the first `resize`, which is the "waiting for the remote desktop"
+/// state: a placeholder reading 0x0 would be a worse answer than saying so.
+func displaySummary(
+    remote: DisplayMode?,
+    remoteScale: CGFloat,
+    hostScale: UInt16
+) -> String {
+    guard let remote else {
+        return "Waiting for the Remote Desktop"
+    }
+    let host = densityLabel(CGFloat(hostScale) / 100)
+    return "\(remote.w)×\(remote.h) — remote \(densityLabel(remoteScale)), this screen \(host)"
+}
+
 /// What the viewer knows about the session it is attached to.
 ///
 /// Every field here is derived from the gateway's own control messages, which is

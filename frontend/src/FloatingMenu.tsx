@@ -14,6 +14,7 @@ import type {
   RemoteClipboard,
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
+import { densityLabel, type RemoteSize } from "./useRemoteDesktop.ts";
 
 // The floating chrome — a draggable ☰ button that toggles a toolbar drawer. The
 // drawer carries this project's controls (browser-swallowed keys, modifier taps,
@@ -211,6 +212,43 @@ function DisplaySection({
   );
 }
 
+// What the remote is drawing, and what this screen is — read-only, and present
+// for every target rather than only the ones with something to switch between.
+//
+// It exists because a density that did not take is otherwise invisible. Both
+// engines that match a client's density report the result only as a `resize`, and
+// a request the remote quietly dropped produces no message at all: the desktop
+// simply looks soft, or half the size it was asked for, with nothing saying which
+// end disagreed. Two numbers that ought to match and don't is the whole diagnostic,
+// which is why the section shows both and not just the resolution.
+//
+// Unconditional on purpose. The Display section above appears only for a remote
+// with more than one screen, so on RDP, on VNC, and on an rxa target sharing one
+// of the Mac's own screens, this is the only place the numbers appear at all.
+function ScreenSection({
+  size,
+  hostScale,
+}: {
+  size: RemoteSize | null;
+  hostScale: number;
+}) {
+  // Before the first `resize`, which is the "waiting for the remote desktop"
+  // state — there is no resolution to report yet, and a placeholder reading 0x0
+  // would be a worse answer than none.
+  if (!size) {
+    return null;
+  }
+  return (
+    <div className="toolbar-section">
+      <span className="toolbar-label">Screen</span>
+      <p className="screen-note">
+        {size.w}×{size.h} · remote {densityLabel(size.scale * 100)} · this
+        screen {densityLabel(hostScale)}
+      </p>
+    </div>
+  );
+}
+
 // The direct audio toggle is also the user gesture required to create a
 // playable AudioContext. Targets without audio omit the row.
 function AudioSection({
@@ -302,6 +340,8 @@ export default function FloatingMenu({
   displays,
   activeDisplayId,
   onSelectDisplay,
+  size,
+  hostScale,
   canAudio,
   audioEnabled,
   audioError,
@@ -348,6 +388,11 @@ export default function FloatingMenu({
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
+  // The remote's framebuffer and its density, and this screen's density — the
+  // read-only Screen section, shown for every target. See ScreenSection for why
+  // both densities and not just the size.
+  size: RemoteSize | null;
+  hostScale: number;
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
@@ -678,6 +723,8 @@ export default function FloatingMenu({
               togglePanel("display");
             }}
           />
+
+          <ScreenSection size={size} hostScale={hostScale} />
 
           <div className="toolbar-section">
             <span className="toolbar-label">Clipboard</span>
