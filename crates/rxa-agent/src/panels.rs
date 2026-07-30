@@ -15,8 +15,8 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
     NSApplicationActivationPolicy, NSBackingStoreType, NSBorderType, NSButton, NSColor,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSModalResponseCancel,
-    NSModalResponseOK, NSPanel, NSScrollView, NSTextAlignment, NSTextField, NSTextView,
-    NSView, NSWindowButton, NSWindowStyleMask,
+    NSEventModifierFlags, NSModalResponseOK, NSPanel, NSScrollView, NSTextAlignment,
+    NSTextField, NSTextView, NSView, NSWindowButton, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
@@ -1014,9 +1014,11 @@ impl KeyActions {
 /// the first of those and quietly drop the other two on save. This is the same
 /// bargain `~/.ssh/authorized_keys` makes.
 ///
-/// Loops on a list that will not parse, re-opening on exactly what was typed with
-/// the offending line named — the same shape as the settings dialog, and for the
-/// same reason: a typo in one key must not cost the user the other three.
+/// **Validated on the way out**, and the loop is what that buys: a list that will
+/// not parse re-opens on exactly what was typed with the offending line named,
+/// rather than being accepted and failing at the agent's next launch. Nothing
+/// invalid can leave this function — the same shape as the settings dialog, and for
+/// the same reason: a typo in one key must not cost the user the other three.
 ///
 /// Returns `None` if they cancelled, which leaves the caller's list alone.
 fn authorized_gateways(mtm: MainThreadMarker, current: &Authorized) -> Option<Authorized> {
@@ -1026,9 +1028,12 @@ fn authorized_gateways(mtm: MainThreadMarker, current: &Authorized) -> Option<Au
         match Authorized::parse(&edited) {
             Ok(list) => return Some(list),
             Err(e) => {
+                // "not accepted" rather than "not saved": nothing was going to be
+                // saved here either way — Done hands the list back to the settings
+                // dialog, and that dialog's Save is what writes it.
                 error(
                     mtm,
-                    "That list was not saved",
+                    "That list was not accepted",
                     &format!(
                         "{e:#}\n\nEvery line has to be a gateway public key (rxgp…) \
                          followed by a name, or start with # to be ignored."
@@ -1064,7 +1069,9 @@ fn edit_authorized(mtm: MainThreadMarker, text: &str) -> Option<String> {
          that server), then a name for the machine it belongs to. The name is only \
          for this Mac — it is what the menu bar calls that gateway while it is \
          connected. Blank lines and lines starting with # are ignored, so an entry \
-         can be commented out and put back. Saving restarts the agent.",
+         can be commented out and put back.\n\nDone checks the list and hands it \
+         back to Settings; nothing is written until you save there, which restarts \
+         the agent.",
     );
 
     let button_y = PANEL_BOTTOM_MARGIN;
@@ -1124,11 +1131,18 @@ fn edit_authorized(mtm: MainThreadMarker, text: &str) -> Option<String> {
     content.addSubview(&scroll);
 
     let modal = SettingsModal::new(mtm);
-    let save_x = PANEL_WIDTH - PANEL_MARGIN - PANEL_BUTTON_WIDTH;
-    let cancel_x = save_x - BUTTON_GAP - PANEL_BUTTON_WIDTH;
-    // No Return key equivalent on Save: Return inside the editor is a new line, and
-    // a list is written a line at a time. Escape still cancels.
-    content.addSubview(&modal_button(mtm, "Save", &modal, sel!(saveSettings:), save_x, button_y, ""));
+    let done_x = PANEL_WIDTH - PANEL_MARGIN - PANEL_BUTTON_WIDTH;
+    let cancel_x = done_x - BUTTON_GAP - PANEL_BUTTON_WIDTH;
+    // "Done" and not "Save", because this button saves nothing: it validates the
+    // list and hands it to the settings dialog, whose own Save writes both files
+    // and restarts the agent. Two buttons both saying Save, one of which does not,
+    // is the kind of thing somebody only discovers by losing an edit.
+    let done = modal_button(mtm, "Done", &modal, sel!(saveSettings:), done_x, button_y, "\r");
+    // Command-Return, because a plain Return belongs to the editor — a list is
+    // written a line at a time. This is the same key macOS uses to commit any
+    // multi-line field, and without it there is no keyboard way out but Escape.
+    done.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    content.addSubview(&done);
     content.addSubview(&modal_button(
         mtm,
         "Cancel",
