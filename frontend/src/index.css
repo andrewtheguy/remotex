@@ -137,6 +137,12 @@ body {
   color: #d29922;
 }
 
+/* Red rather than amber: the others are waiting for something, and this one has
+   stopped waiting. */
+.status-failed {
+  color: #f85149;
+}
+
 /* The overlay itself must not eat input aimed at the desktop, but its action
    buttons (take over / take back) obviously must be clickable. */
 .status-action {

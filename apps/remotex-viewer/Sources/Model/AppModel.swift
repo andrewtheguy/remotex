@@ -77,6 +77,16 @@ final class AppModel: GatewaySessionSink {
     private var connection: GatewayConnection?
     @ObservationIgnored
     private var pressed = PressedInput()
+    /// Whether `session.connectError` is a *rejected connection's* reason rather than
+    /// an error the gateway sent about an attached one.
+    ///
+    /// The two are cleared at different moments, which is the whole reason this is
+    /// tracked. A gateway error has to survive the `picker` that follows it — the
+    /// picker is where it is read — while a reason the session could not be opened is
+    /// stale the moment one is: any control message means the link works, so leaving
+    /// it up blames a working session for a failure it recovered from.
+    @ObservationIgnored
+    private var connectErrorIsFromRejection = false
     /// The room available for the remote desktop, in the remote's own pixels, as
     /// the surface last measured it. Nil until a surface exists.
     ///
@@ -394,12 +404,27 @@ final class AppModel: GatewaySessionSink {
             // connection status is. Neither replaces the status — a session still
             // reconnecting is still reconnecting — it stops being the *only* thing
             // said about a failure.
-            session.connectError = reason
+            setConnectError(reason, fromRejection: true)
             session.pendingTarget = nil
         }
     }
 
+    /// Set or clear what the picker and the interstitial say about a session that did
+    /// not open. `fromRejection` decides whether it goes away by itself — see
+    /// `connectErrorIsFromRejection`.
+    private func setConnectError(_ message: String?, fromRejection: Bool = false) {
+        session.connectError = message
+        connectErrorIsFromRejection = message != nil && fromRejection
+    }
+
     private func handle(_ message: ServerMessage) {
+        // Any control message is proof the session attached, so a reason it could not
+        // is now history. Cleared before the switch so `error` below can set its own
+        // in the same pass — that one is about the attached session and stays until
+        // something replaces it.
+        if connectErrorIsFromRejection {
+            setConnectError(nil)
+        }
         switch message {
         case .picker:
             session.screen = .picker
@@ -444,7 +469,7 @@ final class AppModel: GatewaySessionSink {
             session.connectedTarget = payload.name
             session.protocolName = payload.protocolName
             session.pendingTarget = nil
-            session.connectError = nil
+            setConnectError(nil)
             // RXA remains non-resizable until a display list identifies an owned
             // display; VNC and RDP are settled here.
             viewportPolicy = ViewportPolicy(
@@ -523,8 +548,8 @@ final class AppModel: GatewaySessionSink {
 
         case .error(let message):
             // Not fatal — the session returns to the picker, which is where this
-            // is shown.
-            session.connectError = message
+            // is shown, and it must survive that `picker` arriving.
+            setConnectError(message)
             session.pendingTarget = nil
 
         case .clipboard(let payload):
@@ -589,7 +614,7 @@ final class AppModel: GatewaySessionSink {
         } catch GatewayClientError.unauthorized {
             await handleUnauthorized()
         } catch {
-            session.connectError = error.localizedDescription
+            setConnectError(error.localizedDescription)
         }
     }
 
@@ -674,7 +699,7 @@ final class AppModel: GatewaySessionSink {
             return
         }
         session.pendingTarget = target
-        session.connectError = nil
+        setConnectError(nil)
         connection?.send(.connect(target: target))
     }
 

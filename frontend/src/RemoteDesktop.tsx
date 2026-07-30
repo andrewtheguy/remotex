@@ -13,6 +13,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   reconnecting: "Reconnecting…",
   busy: "Session in use",
   takenOver: "Session taken over",
+  failed: "Cannot open the session",
 };
 
 export default function RemoteDesktop({
@@ -48,6 +49,7 @@ export default function RemoteDesktop({
     remoteIsMac,
     setMacKeyOverridesEnabled,
     takeOver,
+    retry,
     connect,
     switchTarget,
     resizeToWindow,
@@ -159,6 +161,11 @@ export default function RemoteDesktop({
                 Take over
               </button>
             </>
+          )}
+          {status === "failed" && (
+            <button type="button" className="status-action" onClick={retry}>
+              Retry
+            </button>
           )}
           {status === "takenOver" && (
             <>

@@ -50,7 +50,12 @@ export type ConnectionStatus =
   | "connected"
   | "reconnecting"
   | "busy" // another browser holds the session slot (claim answered 409)
-  | "takenOver"; // this socket was evicted by a takeover (close code 4001)
+  | "takenOver" // this socket was evicted by a takeover (close code 4001)
+  // The session could not be opened for a reason waiting cannot change, so nothing
+  // is in flight and nothing is scheduled. Its own state because the alternative was
+  // leaving "Connecting…" up over a connection that had stopped being attempted,
+  // with no way out but a reload; the overlay offers Retry on this one.
+  | "failed";
 
 // Which post-login state the attached session is in, driven by the server's
 // `picker`/`connected` status messages: the target picker, or a live desktop.
@@ -726,6 +731,10 @@ export function useRemoteDesktop(
       }
       clearDesktop();
       setConnectError(failure.reason);
+      // Not left as "connecting"/"reconnecting": nothing is, and saying so is the
+      // whole point — the reason is shown beside a Retry button instead of under a
+      // status that promises an attempt nobody is making.
+      setStatus("failed");
     };
 
     // Claim the session slot, then open the WebSocket with the token.
@@ -739,6 +748,9 @@ export function useRemoteDesktop(
       }
       if (claimed === "busy") {
         clearDesktop();
+        // Whatever the last attempt failed with is not why this one stopped: the slot
+        // is simply somebody else's, which the status says on its own.
+        setConnectError(null);
         setStatus("busy");
         return;
       }
@@ -1409,6 +1421,9 @@ export function useRemoteDesktop(
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
   // action after being evicted (takenOver).
   const takeOver = useCallback(() => startRef.current?.(true), []);
+  /// Try again after a failure that stopped the retries. Unforced, unlike
+  /// `takeOver`: nothing here is holding the slot, so there is nobody to evict.
+  const retry = useCallback(() => startRef.current?.(false), []);
 
   // Pick a target from the picker: start its session over the live socket. The
   // server answers `connected` (→ desktop) or `error` (shown on the picker).
@@ -1789,6 +1804,7 @@ export function useRemoteDesktop(
     remoteIsMac,
     setMacKeyOverridesEnabled,
     takeOver,
+    retry,
     connect,
     switchTarget,
     resizeToWindow,
