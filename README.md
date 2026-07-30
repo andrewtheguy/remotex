@@ -5,6 +5,11 @@ including Macs using the built-in Screen Sharing service. The Rust backend owns
 each protocol session and streams image tiles to a React/TypeScript frontend
 over a common WebSocket protocol.
 
+One reason the RDP path exists: Microsoft Remote Desktop on macOS handles
+resize-to-window badly, and fonts can come out blurry after a resize. Here a
+resize renegotiates the desktop with the server, so the framebuffer is the size
+that was asked for rather than a resampling of the size it used to be.
+
 - RDP uses [IronRDP](https://crates.io/crates/ironrdp).
 - VNC uses a built-in RFB 3.8 client and can connect directly to macOS Screen
   Sharing.
