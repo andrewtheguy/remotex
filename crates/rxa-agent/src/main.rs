@@ -1,9 +1,11 @@
 //! macOS RXA agent entry point.
 //!
-//! AppKit and cursor reads stay on the main thread while the socket runtime and
-//! ScreenCaptureKit callbacks run elsewhere. The menu-bar app requires Screen
-//! Recording and Accessibility, persists one keypair, and serves one
-//! authenticated gateway connection at a time.
+//! AppKit and cursor reads stay on the main thread while the socket runtime,
+//! ScreenCaptureKit callbacks and *startup itself* run elsewhere — the main thread
+//! is given to AppKit as soon as the status item exists, so the menu answers while
+//! the agent is still coming up (see `start_up` and `menubar::Starting::pump_until`).
+//! The menu-bar app requires Screen Recording and Accessibility, persists one
+//! keypair, and serves one authenticated gateway connection at a time.
 
 // A bare `#![cfg(target_os = "macos")]` would compile the crate away to
 // nothing on Linux and fail at link time with "main function not found",
@@ -83,6 +85,148 @@ fn main() -> anyhow::Result<()> {
     let starting = (!args.no_menu).then(menubar::Starting::new);
     let log_path = init_logging();
 
+    // The status item goes up first and AppKit gets the main thread immediately after,
+    // so startup runs on a worker. An item whose run loop has not started is on
+    // screen and unclickable — the worst of both — and the whole reason it goes up
+    // before the work is so a launch that wedges can still be quit. See
+    // `menubar::Starting::pump_until`.
+    //
+    // `state` and `tracker` are made here rather than in the worker: both are needed
+    // by the network thread and by the menu, and the tracker reads AppKit's cursor,
+    // which belongs to this thread.
+    let tracker = Arc::new(cursor::Tracker::new());
+    let state = Arc::new(state::AgentState::new());
+    let no_menu = args.no_menu;
+    let (finished, startup) = std::sync::mpsc::channel();
+    let worker = {
+        let tracker = Arc::clone(&tracker);
+        let state = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("rxa-startup".to_owned())
+            .spawn(move || {
+                let _ = finished.send(start_up(args, tracker, state));
+            })
+    };
+    if let Err(e) = worker {
+        let body = format!("Could not start the startup worker: {e}");
+        return Err(startup_error(
+            starting,
+            "remotex-agent could not start",
+            &body,
+            e.into(),
+            None,
+        ));
+    }
+
+    let outcome = match starting.as_ref() {
+        Some(starting) => starting.pump_until(&startup),
+        // `--no-menu` has no interface to keep responsive, so there is nothing to
+        // pump: wait for the answer the way any other program would.
+        None => match startup.recv() {
+            Ok(outcome) => outcome,
+            Err(e) => return Err(anyhow::anyhow!("startup did not report back: {e}")),
+        },
+    };
+
+    let ready = match outcome {
+        // The registered job is running this bundle now; this copy is done.
+        Startup::StoodDown => return Ok(()),
+        Startup::Failed {
+            title,
+            body,
+            error,
+            settings,
+        } => {
+            // The menu that is left behind can offer Settings when there is a config
+            // to edit — which is the difference between "that port is in use" being a
+            // dead end and being a thing you fix from the menu bar.
+            let degraded = settings.map(|settings| menubar::Degraded {
+                settings,
+                state,
+                tracker,
+                log_path,
+            });
+            return Err(startup_error(starting, &title, &body, error, degraded));
+        }
+        Startup::Ready(ready) => ready,
+    };
+
+    if no_menu {
+        // No run loop, so nothing drives an NSTimer: poll the pointer shape the
+        // plain way instead. Sessions read the same cache either way.
+        loop {
+            tracker.poll();
+            std::thread::sleep(CURSOR_POLL);
+        }
+    }
+
+    // Hands the main thread to AppKit and never returns.
+    menubar::run(
+        starting.expect("a GUI launch creates its status item before startup"),
+        state,
+        tracker,
+        ready.settings,
+        log_path,
+        ready.screen_recording_at_launch,
+        ready.owned,
+    )
+}
+
+/// What startup produced for the menu bar.
+struct Ready {
+    settings: Arc<settings::Settings>,
+    /// Whether Screen Recording was effective *at launch* — see `report_permissions`.
+    screen_recording_at_launch: bool,
+    /// The display the agent made, for the settings dialog to name.
+    owned: Option<capture::Target>,
+}
+
+/// How a launch ended, as the worker reports it to the main thread.
+///
+/// A failure travels rather than being presented where it happened: the panel and
+/// the degraded menu are AppKit, and AppKit belongs to the thread that is busy
+/// keeping the menu bar answering.
+enum Startup {
+    Ready(Ready),
+    Failed {
+        title: String,
+        body: String,
+        error: anyhow::Error,
+        /// The config, once there is one to edit. What makes the degraded menu's
+        /// **Settings…** work — see [`menubar::Degraded`].
+        settings: Option<Arc<settings::Settings>>,
+    },
+    /// This copy handed over to the registered job and has nothing left to do.
+    StoodDown,
+}
+
+/// Everything between the status item appearing and the agent serving, off the main
+/// thread.
+///
+/// Ordering inside is unchanged and still deliberate — register, hand over, read the
+/// config, bind, ask for permissions, make the display, start the runtime — because
+/// each step's failure has to leave the ones before it done. What changed is only
+/// where it runs and how a failure gets out: [`Startup::Failed`] instead of a call
+/// into AppKit.
+fn start_up(
+    args: Args,
+    tracker: Arc<cursor::Tracker>,
+    state: Arc<state::AgentState>,
+) -> Startup {
+    macro_rules! fail {
+        ($title:expr, $body:expr, $error:expr) => {
+            fail!($title, $body, $error, None)
+        };
+        ($title:expr, $body:expr, $error:expr, $settings:expr) => {
+            return Startup::Failed {
+                title: ($title).to_owned(),
+                body: $body,
+                error: $error,
+                settings: $settings,
+            }
+        };
+    }
+
     // Registering is idempotent, so doing it on every launch keeps a bundle that
     // was copied to a new machine (or a new user account) working without a
     // separate setup step. It belongs after the visible shell but before config
@@ -128,7 +272,7 @@ fn main() -> anyhow::Result<()> {
     // progress; the job that takes over creates its own tray before it does any
     // work too.
     if !args.no_menu && !args.no_register && !is_the_job && hand_over_to_launchd(job) {
-        return Ok(());
+        return Startup::StoodDown;
     }
 
     let loaded = config::load_or_create(args.config.as_deref());
@@ -140,14 +284,14 @@ fn main() -> anyhow::Result<()> {
             // reachable.
             let body =
                 format!("{e:#}\n\nFix the config file, then quit and reopen remotex-agent.");
-            return Err(startup_error(
-                starting,
-                "remotex-agent could not start",
-                &body,
-                e,
-            ));
+            fail!("remotex-agent could not start", body, e);
         }
     };
+
+    // Built as soon as the file parses, before anything that can fail with it in
+    // hand: a bind that finds the port taken is the failure whose fix is a *setting*,
+    // and the degraded menu can only offer Settings if this exists by then.
+    let settings = settings::Settings::new(config.clone(), path.clone());
 
     info!(
         "remotex-agent {} — rxa/{}, config {}",
@@ -180,27 +324,29 @@ fn main() -> anyhow::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             let body = format!(
                 "{} is already in use by another process.\n\nIf that process is another copy \
-                 of remotex-agent, its icon is in the menu bar at the top of the screen.",
+                 of remotex-agent, its icon is in the menu bar at the top of the screen. \
+                 Otherwise, pick another port in Settings — it is in this agent's menu.",
                 config.listen
             );
-            return Err(startup_error(
-                starting,
+            fail!(
                 "remotex-agent cannot listen",
-                &body,
+                body,
                 e.into(),
-            ));
+                Some(Arc::clone(&settings))
+            );
         }
         Err(e) => {
             let body = format!(
-                "{} could not be bound: {e}\n\nChange the listen address in the config file.",
+                "{} could not be bound: {e}\n\nChange the listen address in Settings, in \
+                 this agent's menu.",
                 config.listen
             );
-            return Err(startup_error(
-                starting,
+            fail!(
                 "remotex-agent cannot listen",
-                &body,
+                body,
                 e.into(),
-            ));
+                Some(Arc::clone(&settings))
+            );
         }
     };
     info!("agent: listening on {}", config.listen);
@@ -208,12 +354,12 @@ fn main() -> anyhow::Result<()> {
     // reactor.
     if let Err(e) = listener.set_nonblocking(true) {
         let body = format!("{} could not be made non-blocking: {e}", config.listen);
-        return Err(startup_error(
-            starting,
-            "remotex-agent cannot listen",
-            &body,
-            e.into(),
-        ));
+        fail!(
+                "remotex-agent cannot listen",
+                body,
+                e.into(),
+                Some(Arc::clone(&settings))
+            );
     }
 
     // Keep the pre-request Screen Recording state: granting it in the system
@@ -222,11 +368,6 @@ fn main() -> anyhow::Result<()> {
     // for a permission effective in this launch.
     let screen_recording_at_launch = report_permissions();
 
-    let tracker = Arc::new(cursor::Tracker::new());
-    let state = Arc::new(state::AgentState::new());
-    // The GUI's view of the config: what this process is serving, and what the
-    // file says after any edits made from the menu (see `crate::settings`).
-    let settings = settings::Settings::new(config.clone(), path);
 
     // The socket runs on its own thread so the main thread stays free for
     // AppKit, which owns the menu bar and the pointer shape both.
@@ -328,33 +469,19 @@ fn main() -> anyhow::Result<()> {
         });
     if let Err(e) = network {
         let body = format!("Could not start the network worker: {e}");
-        return Err(startup_error(
-            starting,
+        fail!(
             "remotex-agent could not start",
-            &body,
+            body,
             e.into(),
-        ));
+            Some(Arc::clone(&settings))
+        );
     }
 
-    if args.no_menu {
-        // No run loop, so nothing drives an NSTimer: poll the pointer shape the
-        // plain way instead. Sessions read the same cache either way.
-        loop {
-            tracker.poll();
-            std::thread::sleep(CURSOR_POLL);
-        }
-    }
-
-    // Hands the main thread to AppKit and never returns.
-    menubar::run(
-        starting.expect("a GUI launch creates its status item before startup"),
-        state,
-        tracker,
+    Startup::Ready(Ready {
         settings,
-        log_path,
         screen_recording_at_launch,
-        owned.target,
-    )
+        owned: owned.target,
+    })
 }
 
 /// Settle the new display's density on a thread of its own.
@@ -401,10 +528,11 @@ fn startup_error(
     title: &str,
     body: &str,
     error: anyhow::Error,
+    degraded: Option<menubar::Degraded>,
 ) -> anyhow::Error {
     warn!("{title}: {body}");
     if let Some(starting) = starting {
-        starting.fail(title, body);
+        starting.fail(title, body, degraded);
     }
     error
 }

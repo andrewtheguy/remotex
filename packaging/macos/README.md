@@ -130,6 +130,12 @@ Do not run `bootout` first; it unloads the job that `kickstart` needs. Keep the
 same signing identity across the upgrade or re-grant Screen Recording and
 Accessibility.
 
+Stopping it for a test needs nothing cleverer than a kill. The job has no
+`KeepAlive`, so the process stays stopped instead of being relaunched from whatever
+bundle is on disk at that instant, and
+`launchctl kickstart gui/$(id -u)/dev.remotex.agent` (no `-k`) starts it again. Kill,
+do the thing, kickstart.
+
 ## Uninstall
 
 1. Turn off **Start at Login** and choose **Quit**.

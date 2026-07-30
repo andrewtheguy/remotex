@@ -71,6 +71,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSResponder",
     "NSMenu",
     "NSMenuItem",
+    # `Starting::pump_until` dequeues events by hand so the status item's menu works
+    # while startup runs — see the argument there.
+    "NSEvent",
     "NSPasteboard",
     "NSWorkspace",
     # The modal panels (src/panels.rs): Settings is a normal NSPanel, while
