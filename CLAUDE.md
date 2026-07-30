@@ -8,7 +8,10 @@
 - for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
 - error handling: `anyhow` for application errors, `thiserror` for typed API errors
 - keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
-- multi session is always out of scope (never planned, not merely deferred): this is a single-user program with one active session only, with session takeover logic (a new browser force-claims the single session slot and evicts the previous holder) — no concurrent sessions, session sharing, or session broker
+- multi session is always out of scope (never planned, not merely deferred): no concurrent sessions, session sharing, or session broker. It means **one active session at a time**, and it is two separate slots saying so at two hops — never one client:
+  - **the gateway's**: one active session per gateway instance, forever. A new browser force-claims it and evicts the previous holder (`src/session.rs`)
+  - **the agent's**: one active session on a Mac running `remotex-agent`, *claimed* rather than seized. A connection asks with `GatewayMsg::Claim` and is granted, handed the slot, or refused with who holds it; a client shows the refusal with a Take over button, the same shape as the browser prompt and as Windows Remote Desktop
+- the agent's slot is keyed on **the claim's session id, never on a key or an address**. Authentication (the keys, in the handshake) decides whether a peer may ask; session ownership decides whose turn it is — SSH's split. Keeping them apart is what lets several gateways be *permitted* while one is *connected* (see the authorized-key list in `docs/roadmap.md`), and what makes a reconnect, a target switch and a browser takeover reclaim the slot in silence. So "more than one client may be permitted, taking turns explicitly" is not multi session and is not out of scope; concurrency is
 
 ## Browser tests
 

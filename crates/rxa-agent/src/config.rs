@@ -3,6 +3,12 @@
 //! The menu bar rewrites the whole file, so rendered comments are canonical and
 //! manual additions are not retained. The agent listens for one paired gateway
 //! and optionally creates one virtual display.
+//!
+//! One *paired* gateway is what this file says, and it is not the same statement
+//! as one session at a time — that is `crate::state`, keyed on the session id a
+//! connection claims with rather than on the key below. A list of permitted
+//! gateways would change this file and the handshake, and leave the session slot
+//! alone (`docs/roadmap.md`).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,7 +28,8 @@ pub struct Config {
     /// [`Config::public_key`] — is what goes on the gateway.
     pub private_key: String,
     /// The gateway's public key (`rxgp…`), from `remotex rxa-pubkey`. The agent
-    /// answers that gateway and no other.
+    /// answers that gateway and no other — a statement about who may *ask* for a
+    /// session, not about how many there can be (see [`crate::state::decide`]).
     ///
     /// **May be empty**, which means unpaired: a first launch has nobody to
     /// pair with yet, and the agent has to be running before its own public key
@@ -342,7 +349,9 @@ listen = "{listen}"
 # until its new public key is pasted there.
 private_key = "{private_key}"
 
-# The one gateway this Mac answers. Empty means unpaired.
+# The one gateway this Mac answers. Empty means unpaired. This is who may ask for
+# a session; the agent serves one session at a time either way, and refuses a
+# second until whoever is watching is taken over.
 gateway_public_key = "{gateway_public_key}"
 
 # There is no setting for which display to share: that is picked per session

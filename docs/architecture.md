@@ -24,8 +24,14 @@ of the tile encoder and batching queue.
 
 ## Constraints
 
-- There is one active session slot. A new client may force a takeover and evict
-  the previous holder; concurrent and shared sessions are not supported.
+- There is one active session slot per gateway instance. A new client may force a
+  takeover and evict the previous holder; concurrent and shared sessions are not
+  supported.
+- An `rxa` target has a *second*, independent slot at the far end: the macOS agent
+  serves one session at a time and a gateway claims it (see
+  [`docs/mac-agent-architecture.md`](mac-agent-architecture.md)). That slot is
+  keyed on the claim's session id and not on the gateway's key, so being
+  authorized to reach a Mac and holding its session are separate questions.
 - Remote credentials remain in the server-side TOML configuration.
 - Clients speak only the remotex protocol and never implement RDP, RFB, or RXA.
 - Protocol engines prefer broadly supported baseline features over
@@ -281,6 +287,13 @@ gateway's `remoteOs` message suppresses it for Mac remotes.
 Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.
+
+A `remoteBusy` message reports the separate case of the *remote's* own session
+being held by a different client, which only `rxa` can produce. Both clients show
+it against the target picker with a Take over button, which reconnects with
+`force` on `ClientMsg::Connect`. It is a distinct action from the slot takeover
+above: one claims this gateway, the other claims the Mac at the far end of it, and
+both can be needed in the same sitting.
 
 ### Native macOS viewer
 

@@ -1,6 +1,12 @@
 //! The single session slot and common engine boundary. A claim owns the slot,
 //! an attachment supplies its WebSocket, and the selected engine may outlive a
 //! brief detach. Takeover replaces the attachment without adding a session.
+//!
+//! *This* gateway instance's slot. An `rxa` target has a second one at the far
+//! end — the macOS agent serves one session at a time too, and this gateway has to
+//! claim it (`crate::rxa`, `rxa_proto::msg::GatewayMsg::Claim`). They are
+//! independent: holding this slot says nothing about holding the Mac's, which
+//! another gateway may have, and each has its own takeover.
 
 use std::sync::{Arc, Mutex};
 
