@@ -100,11 +100,34 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Is this process the registered job, or a copy of the app somebody opened?
+    // Both of the next two steps turn on the answer, and asking launchd twice
+    // could get two of them.
+    let job = Job::read();
+    let is_the_job = job.is_this_process();
+
+    // Once per plist generation, make launchd take this bundle's copy of it, which
+    // registering alone does not do — see `loginitem::refresh`, including why only a
+    // copy that is not the job may do it. The job definition being replaced is the
+    // one that used to relaunch the agent behind an upgrade.
+    if !args.no_register && !is_the_job {
+        match loginitem::stamp_path().and_then(|stamp| loginitem::refresh(&stamp)) {
+            Ok(true) => info!(
+                "login item: handed launchd the plist from this bundle (generation {})",
+                loginitem::GENERATION
+            ),
+            Ok(false) => {}
+            Err(e) => {
+                warn!("login item: launchd may still be holding an older job definition: {e:#}");
+            }
+        }
+    }
+
     // A normal `open` hands execution to the registered LaunchAgent. Do this
     // only after creating the tray so even a slow handoff is visibly in
     // progress; the job that takes over creates its own tray before it does any
     // work too.
-    if !args.no_menu && !args.no_register && hand_over_to_launchd() {
+    if !args.no_menu && !args.no_register && !is_the_job && hand_over_to_launchd(job) {
         return Ok(());
     }
 
@@ -257,6 +280,7 @@ fn main() -> anyhow::Result<()> {
         target: owned,
         handle: virtual_display.map(|display| Arc::new(std::sync::Mutex::new(display))),
     };
+    engage_hidpi(owned.handle.clone());
     let serve_owned = owned.clone();
     let keep_ui_on_failure = !args.no_menu;
 
@@ -333,6 +357,40 @@ fn main() -> anyhow::Result<()> {
     )
 }
 
+/// Settle the new display's density on a thread of its own.
+///
+/// Spawned rather than called, because the work is *waiting for the main thread to
+/// get out of the way*: a `CGVirtualDisplay` publishes no mode and accepts no
+/// reconfigure until the main queue is being served, which here means after this
+/// function returns and the run loop starts. The argument for all of that, and for
+/// why it cannot live in `VirtualDisplay::create`, is in
+/// [`virtualdisplay::VirtualDisplay::engage_hidpi`].
+///
+/// Takes the shared handle rather than the display, so a client's `HostScale`
+/// landing in the same second waits its turn instead of racing this.
+fn engage_hidpi(handle: Option<Arc<std::sync::Mutex<virtualdisplay::VirtualDisplay>>>) {
+    let Some(handle) = handle else {
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("rxa-hidpi".to_owned())
+        .spawn(move || {
+            let engaged = handle
+                .lock()
+                .map_err(|_| anyhow::anyhow!("the display lock is poisoned"))
+                .and_then(|display| display.engage_hidpi());
+            if let Err(e) = engaged {
+                warn!(
+                    "virtualdisplay: {e:#} — the desktop is soft until a client on a Retina \
+                     screen asks for 2x"
+                );
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("virtualdisplay: cannot check the new display's density: {e}");
+    }
+}
+
 /// Keep GUI startup failures in the degraded menu, or return them to a headless
 /// caller.
 ///
@@ -374,25 +432,56 @@ fn restart() -> anyhow::Error {
     }
 }
 
-/// Hand execution to the registered LaunchAgent unless this process is already
-/// that job. This keeps one TCC-authorized instance and avoids bind races.
-fn hand_over_to_launchd() -> bool {
+/// What launchd says about the registered job, from one `launchctl print`.
+///
+/// Two startup steps turn on this answer and must not be taken by the job itself:
+/// handing over ([`hand_over_to_launchd`]) and refreshing the plist launchd holds
+/// ([`loginitem::refresh`]). Asking twice could get two different answers, so it is
+/// asked once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Job {
+    /// launchd has no record of the label: never registered on this Mac, or booted
+    /// out of this domain. There is nothing to hand over to.
+    Unknown,
+    /// launchd has the job. The pid is `None` when it is loaded but not running.
+    Known(Option<u32>),
+}
+
+impl Job {
+    fn read() -> Self {
+        let service = format!("gui/{}/{}", uid(), loginitem::LABEL);
+        let Ok(printed) = std::process::Command::new("/bin/launchctl")
+            .args(["print", &service])
+            .output()
+        else {
+            return Job::Unknown;
+        };
+        if !printed.status.success() {
+            return Job::Unknown;
+        }
+        Job::Known(
+            String::from_utf8_lossy(&printed.stdout)
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("pid = ")?.trim().parse::<u32>().ok()),
+        )
+    }
+
+    /// Whether the running job *is* this process.
+    fn is_this_process(self) -> bool {
+        self == Job::Known(Some(std::process::id()))
+    }
+}
+
+/// Hand execution to the registered LaunchAgent. This keeps one TCC-authorized
+/// instance and avoids bind races.
+///
+/// `job` is [`Job::read`]'s answer, taken once by the caller — which has also
+/// already established that the job is not this process.
+fn hand_over_to_launchd(job: Job) -> bool {
+    if job == Job::Unknown {
+        return false;
+    }
     let service = format!("gui/{}/{}", uid(), loginitem::LABEL);
-    let Ok(printed) = std::process::Command::new("/bin/launchctl")
-        .args(["print", &service])
-        .output()
-    else {
-        return false;
-    };
-    if !printed.status.success() {
-        return false;
-    }
-    let job_pid = String::from_utf8_lossy(&printed.stdout)
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("pid = ")?.trim().parse::<u32>().ok());
-    if job_pid == Some(std::process::id()) {
-        return false;
-    }
     info!("agent: {service} is this Mac's copy; starting it from this bundle and standing down");
     // `-k` so a job that is already running is restarted into this bundle, which
     // is the upgrade. Harmless on one that is merely loaded.

@@ -3,8 +3,8 @@
 //!
 //! Accessibility is polled because it becomes effective immediately; Screen
 //! Recording requires relaunch. The cursor timer runs in common run-loop modes
-//! so menu tracking does not pause updates. A clean Quit remains stopped because
-//! the LaunchAgent restarts only unsuccessful exits.
+//! so menu tracking does not pause updates. Quit stays quit: the LaunchAgent has
+//! no `KeepAlive`, so nothing restarts the process until the next login.
 
 use std::cell::{Cell, OnceCell};
 use std::path::PathBuf;
@@ -328,10 +328,11 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
-            // Exit 0 on purpose: the plist's `SuccessfulExit: false` KeepAlive
-            // is what makes that stick. `NSApplication::terminate` would run a
+            // Exit rather than `NSApplication::terminate`, which would run a
             // shutdown sequence that the capture stream and tokio runtime have
-            // no part in, for no benefit — there is nothing to save.
+            // no part in, for no benefit — there is nothing to save. Nothing
+            // brings the process back either: the job has no `KeepAlive`, so Quit
+            // means quit until the next login.
             info!("menu: quitting at the user's request");
             std::process::exit(0);
         }
@@ -681,9 +682,9 @@ pub fn run(
     //
     // Which is the worst state this app has, because the icon is its only
     // interface. An invisible agent cannot be quit — Quit is in the menu that is
-    // not there — and cannot be killed either, since `KeepAlive` restarts it, and
-    // it goes on holding the port, so the next copy the user opens meets "already
-    // in use" from a copy they cannot see.
+    // not there — and while it runs it goes on holding the port, so the next copy
+    // the user opens meets "already in use" from a copy they cannot see. It can at
+    // least be killed: the job has no `KeepAlive`, so a signal is the end of it.
     item.setVisible(true);
     // And say so if it still is not, rather than reporting "ready" for an item
     // nobody can see. Being wrong about this cost an afternoon.

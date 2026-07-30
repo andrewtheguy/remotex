@@ -1,10 +1,22 @@
 //! Optional 2x display built with the private `CGVirtualDisplay` API.
 //!
-//! Creation verifies the asynchronous result because `applySettings:` may
-//! succeed while macOS silently selects a 1x mode. The live CoreGraphics mode
-//! is authoritative; ScreenCaptureKit's point scale is not. The creation size
-//! fixes an immutable density and pixel envelope for later client-driven size
-//! and scale changes. Private-API failure degrades to a real display.
+//! Creation verifies the asynchronous result because `applySettings:` may succeed
+//! while macOS silently selects a 1x mode — the arrangement it remembers against
+//! the identity [`SERIAL`] fixes carries the mode's *density*, and it is applied
+//! over the settings the display was just created with. Bounds cannot see that, so
+//! it is checked separately and off the main thread (see
+//! [`VirtualDisplay::engage_hidpi`]).
+//!
+//! Every density in this module is **measured from pixels**, never read from the
+//! display's mode. The mode is authoritative for the Mac's own screens and is not
+//! authoritative for this one: the process that creates a `CGVirtualDisplay` is
+//! shown the mode it asked for rather than the one macOS is scanning out, and reads
+//! 1x for a display provably running at 2x. The measurement, the evidence and what
+//! it broke are in [`crate::capture::owned_display_scale`].
+//!
+//! The creation size fixes an immutable density and pixel envelope for later
+//! client-driven size and scale changes. Private-API failure degrades to a real
+//! display.
 
 use log::{debug, info, warn};
 use objc2::rc::{Allocated, Retained};
@@ -34,6 +46,21 @@ pub const MIN_HEIGHT_POINTS: u32 = 600;
 /// Deadline for the asynchronous WindowServer configuration update.
 const SETTLE_TIMEOUT_MS: u64 = 1500;
 const SETTLE_POLL_MS: u64 = 25;
+
+/// How many times a density change is applied before giving up on it.
+///
+/// Three, so the whole attempt is bounded by three [`SETTLE_TIMEOUT_MS`] windows —
+/// a few seconds — and by three reconfigures of the same display. See
+/// [`VirtualDisplay::set_scale`] for why one apply is not always enough.
+const SCALE_ATTEMPTS: u32 = 3;
+
+/// Deadline for a freshly created display to publish a mode at all.
+///
+/// Longer than a settle, because it waits on something that has not started yet
+/// rather than something in flight: nothing is published until the main thread
+/// reaches its run loop, which is the caller's next move after
+/// [`VirtualDisplay::engage_hidpi`] is spawned.
+const MODE_TIMEOUT_MS: u64 = 5000;
 
 /// A live virtual display. Dropping this removes it from the desktop.
 ///
@@ -143,16 +170,17 @@ impl VirtualDisplay {
                 shown.0, shown.1, points.0, points.1
             );
         }
-
+        // No density here, deliberately: a display this Mac has seen before comes
+        // up in the density its remembered arrangement names, which can be 1x, and
+        // nothing on this thread can either read that or change it — see
+        // [`VirtualDisplay::engage_hidpi`], which the caller runs off the main
+        // thread for exactly that reason. Saying "at 2x" here is what this line
+        // used to do, and it was wrong for every launch after a 1x client.
         info!(
-            "virtualdisplay: created display {id} at {}x{} points ({}x{} pixels at {SCALE}x), \
-             {:.0}x{:.0} mm; its resolution is now the Mac's to change",
-            points.0,
-            points.1,
-            pixels.0,
-            pixels.1,
-            mm.0,
-            mm.1,
+            "virtualdisplay: created display {id} in a {}x{} point envelope ({}x{} pixels at \
+             {SCALE}x, {:.0}x{:.0} mm); it came up {}x{} points, and its resolution is now the \
+             Mac's to change",
+            points.0, points.1, pixels.0, pixels.1, mm.0, mm.1, shown.0, shown.1,
         );
         Ok(Self {
             handle,
@@ -174,33 +202,192 @@ impl VirtualDisplay {
         self.base_points
     }
 
-    /// Set 1x or 2x while preserving current point size. Size is read under the
-    /// caller's lock so a concurrent resize cannot be overwritten. Returns
-    /// `false` when no WindowServer change is needed.
+    /// Check that the new display really is at [`SCALE`], and bring it there if not.
+    ///
+    /// **Never on the main thread**, and that is why it is not part of
+    /// [`VirtualDisplay::create`]. Two facts meet here:
+    ///
+    /// * macOS files an arrangement against a display's identity ([`SERIAL`]) and
+    ///   restores it when the display appears — including the *density* of the mode
+    ///   it was last left in. A display shrunk through a `(low resolution)` entry in
+    ///   System Settings could come back 1x however emphatically the settings it was
+    ///   created with said `hiDPI = 1`, and [`await_hidpi_bounds`] cannot see it: a
+    ///   1x mode at the created size is comfortably inside the envelope it tests.
+    /// * Nothing about the density can be established from `create` at all. While
+    ///   that runs — on the main thread, before AppKit has it — the display cannot
+    ///   be measured and no `applySettings:` takes effect, however many times it is
+    ///   retried and however long each one is given. Measured: five applies over ten
+    ///   seconds, `applySettings:` answering YES to every one, and no mode published
+    ///   throughout. A `CGVirtualDisplay` reconfigure completes through the main
+    ///   queue, which is the queue [`set_queue`] hands the descriptor and the one
+    ///   this thread is not holding.
+    ///
+    /// So this waits until the display can be measured, then decides. A display that
+    /// came up 2x must not be reconfigured for nothing: enough mode changes can wedge
+    /// a guest's display stack. The measurement decides because both answers happen —
+    /// measured every 250 ms for six seconds after creation, a display whose
+    /// arrangement was remembered at 1x reads 1x the whole time and never settles
+    /// upward on its own, while one remembered at 2x reads 2x from the first sample.
+    ///
+    /// Not fatal, and not silent. A soft desktop of the right size is worth having,
+    /// and a client on a Retina screen still asks for 2x on connect; the failure
+    /// creation *does* refuse is a display at twice the size asked for (see
+    /// [`await_hidpi_bounds`]).
+    pub fn engage_hidpi(&self) -> anyhow::Result<bool> {
+        let scale = await_measurable(self.id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "display {} still cannot be measured {MODE_TIMEOUT_MS} ms after it was created, so \
+                 its density is unknown — leaving it in whichever one macOS restored",
+                self.id
+            )
+        })?;
+        if scale >= 1.5 {
+            debug!(
+                "virtualdisplay: display {} came up at {scale}x, as created",
+                self.id
+            );
+            return Ok(false);
+        }
+        info!(
+            "virtualdisplay: display {} came up at {scale}x — macOS restored the density this \
+             identity was last left in; bringing it back to {SCALE}x",
+            self.id
+        );
+        self.set_scale(true)
+    }
+
+    /// Whether asking for `want_hidpi` would ask anything of the WindowServer.
+    ///
+    /// Asked before a caller pays for a density change, because the price is not
+    /// only the reconfigure: the capture stream has to come down for one to take at
+    /// all (see the `HostScale` branch in [`crate::session`]), and a client that
+    /// reports the density the display is already in — the common case, on every
+    /// connect — must cost nothing.
+    ///
+    /// Measured from pixels, not read from the mode: this process is shown the mode
+    /// it asked for rather than the one macOS is scanning out, which for a display of
+    /// our own reads 1x whatever the density really is (see
+    /// [`crate::capture::owned_display_scale`]). Reading it that way made every
+    /// `HostScale` look like a change, so each one tore the stream down and
+    /// reconfigured a display that was already correct — and then logged that a
+    /// density had changed when nothing had.
+    ///
+    /// No reading is an error rather than "1x": that is a display mid-reconfigure,
+    /// and asking it to change density again is how a request gets applied to a
+    /// display on its way somewhere else.
+    pub fn needs_scale(&self, want_hidpi: bool) -> anyhow::Result<bool> {
+        let now = crate::capture::framebuffer_scale(self.id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "display {} cannot be measured — it is mid-reconfigure, or Screen Recording is \
+                 not granted, so this density change is dropped rather than guessed at",
+                self.id
+            )
+        })?;
+        // Compared against the midpoint rather than for equality: the question is
+        // only which of the two densities it is.
+        Ok((now >= 1.5) != want_hidpi)
+    }
+
+    /// Whether resizing to `points` would ask anything of the WindowServer.
+    ///
+    /// `false` for a display already that size, which is what a button pressed twice
+    /// on a window that did not move asks for, and skipping it is not an
+    /// optimisation: a guest's display stack can wedge after enough mode changes and
+    /// need a reboot to clear.
+    pub fn needs_size(&self, points: (u32, u32)) -> bool {
+        size_in_envelope(points, self.base_points) != crate::capture::display_points(self.id)
+    }
+
+    /// Set 1x or 2x, keeping the point size the display is in.
+    ///
+    /// "Keeping" is work, not a property: see the repair inside. Size is read under
+    /// the caller's lock so a concurrent resize cannot be overwritten. Returns `false`
+    /// when no WindowServer change is needed ([`VirtualDisplay::needs_scale`]).
     pub fn set_scale(&self, want_hidpi: bool) -> anyhow::Result<bool> {
-        let now = crate::capture::display_scale(self.id);
-        // Compared against the midpoint rather than for equality: `now` is a
-        // ratio of two integers read back from a mode, and the question is only
-        // which of the two densities it is.
-        if (now >= 1.5) == want_hidpi {
+        if !self.needs_scale(want_hidpi)? {
             return Ok(false);
         }
         let points = crate::capture::display_points(self.id);
-        let settings = settings_at(points, want_hidpi)?;
-        let applied: bool = unsafe { msg_send![&*self.handle.0, applySettings: &*settings] };
-        anyhow::ensure!(
-            applied,
-            "applySettings: refused {}x{} at {}",
-            points.0,
-            points.1,
-            if want_hidpi { "2x" } else { "1x" }
-        );
-        info!(
-            "virtualdisplay: display {} is now {} at {}x{} points",
+        let density = if want_hidpi { "2x" } else { "1x" };
+        // A rise is asked for at the size the display was *created* at, never at the
+        // size it happens to be in, and then the size is put back. macOS engages HiDPI
+        // only for a mode the descriptor's `maxPixels` was sized for: asked at anything
+        // smaller it keeps the framebuffer it has and halves the point size instead of
+        // doubling the pixels, so a 1180x760 desktop asked for 2x came back 590x380 at
+        // 2x — and asking for 1180x760 back at that point does nothing, because that
+        // would have to grow the framebuffer, which is the move it just refused.
+        //
+        // Going the other way needs none of this: 2x to 1x takes at whatever size the
+        // display is in, and shrinking at an unchanged density is exactly what
+        // [`VirtualDisplay::set_size`] does all day.
+        let apply_at = if want_hidpi { self.base_points } else { points };
+        // Applied more than once if it has to be, because whether it takes at all
+        // depends on something outside this call. `applySettings:` answers YES either
+        // way; what decides is whether anything still holds the framebuffer — a
+        // ScreenCaptureKit stream on this display blocks a *rise* in density, and
+        // stopping that stream releases it a moment later rather than at once (the
+        // session tears it down before asking; see the `HostScale` branch there).
+        // Measured rather than assumed: the whole point of the loop is that the log
+        // must not say a density changed when it did not.
+        //
+        // Bounded, and the bound is small. A retry is one more WindowServer
+        // reconfigure of a display that just had one, and enough of those wedge a
+        // guest's display stack until it is rebooted.
+        let started = std::time::Instant::now();
+        for attempt in 1..=SCALE_ATTEMPTS {
+            let settings = settings_at(apply_at, want_hidpi)?;
+            let applied: bool = unsafe { msg_send![&*self.handle.0, applySettings: &*settings] };
+            anyhow::ensure!(
+                applied,
+                "applySettings: refused {}x{} at {density}",
+                apply_at.0,
+                apply_at.1
+            );
+            if await_scale(self.id, want_hidpi).is_some() {
+                info!(
+                    "virtualdisplay: display {} is now {density}{}",
+                    self.id,
+                    if attempt > 1 {
+                        format!(
+                            " (took {attempt} applies over {} ms)",
+                            started.elapsed().as_millis()
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+                // The size the display was in is restored last, and it is a shrink from
+                // the envelope at the density just established — the one move that has
+                // never failed. Measured against the alternative, which is why the
+                // rise is applied at the created size at all: left where a rise puts
+                // it, a client's `HostScale` would hand back a quartered desktop
+                // nobody asked to resize.
+                let now = crate::capture::display_points(self.id);
+                if now != points {
+                    info!(
+                        "virtualdisplay: display {} is {}x{} points after the change; putting the \
+                         {}x{} it was in back",
+                        self.id, now.0, now.1, points.0, points.1
+                    );
+                    self.set_size(points)?;
+                }
+                return Ok(true);
+            }
+            debug!(
+                "virtualdisplay: display {} did not take {density} on apply {attempt} of \
+                 {SCALE_ATTEMPTS} ({} ms in)",
+                self.id,
+                started.elapsed().as_millis()
+            );
+        }
+        // Not an error: the display is in whichever density it is in either way, and
+        // the display poll reports whatever that turns out to be.
+        warn!(
+            "virtualdisplay: display {} was asked for {density} {SCALE_ATTEMPTS} times over {} ms \
+             and is still at {:?}x",
             self.id,
-            if want_hidpi { "2x" } else { "1x" },
-            points.0,
-            points.1
+            started.elapsed().as_millis(),
+            crate::capture::framebuffer_scale(self.id)
         );
         Ok(true)
     }
@@ -228,14 +415,11 @@ impl VirtualDisplay {
     /// Clamping to keep 2x would answer a request for a window-sized desktop with
     /// a size nobody asked for, and 2x below that floor is not obtainable at any
     /// size that could be substituted — so the honest answer is the asked-for size
-    /// at the density it can hold. [`crate::capture::mode_scale`] then reports the
-    /// truth and both clients present it correctly, softer.
+    /// at the density it can hold. [`crate::capture::owned_display_scale`] then
+    /// reports the truth and both clients present it correctly, softer.
     ///
-    /// Returns whether anything was asked of the WindowServer. `Ok(false)` is the
-    /// display already being that size — the common case for a button pressed
-    /// twice on a window that did not move — and skipping it is not an
-    /// optimisation: a guest's display stack can wedge after enough mode changes
-    /// and need a reboot to clear.
+    /// Returns whether anything was asked of the WindowServer; see
+    /// [`VirtualDisplay::needs_size`] for the case that asks nothing.
     pub fn set_size(&self, points: (u32, u32)) -> anyhow::Result<bool> {
         let want = size_in_envelope(points, self.base_points);
         // Whether the request was clamped and whether it changes anything are two
@@ -253,7 +437,7 @@ impl VirtualDisplay {
                 points.0, points.1, self.base_points.0, self.base_points.1
             )
         };
-        if want == crate::capture::display_points(self.id) {
+        if !self.needs_size(points) {
             debug!(
                 "virtualdisplay: display {} is already {}x{} points; not reconfiguring{clamped}",
                 self.id, want.0, want.1
@@ -261,15 +445,19 @@ impl VirtualDisplay {
             return Ok(false);
         }
 
-        // Required, not defaulted. `display_scale` answers 1x for a display with
-        // no mode to read, and a display has none for a few tens of milliseconds
-        // around any reconfigure — so defaulting here would turn "resized just
-        // after a density change" into "silently dropped to 1x", which nothing
-        // would put back: a client sends `HostScale` once per screen change and
-        // both clients dedupe it.
-        let hidpi = crate::capture::mode_scale(self.id).ok_or_else(|| {
+        // Measured from pixels, for the reason `set_scale` measures from pixels: the
+        // mode this process is shown for its own display says 1x whatever the
+        // density is, and reading it here meant every resize *applied* 1x — a
+        // "Resize to window" click silently halved the desktop's density.
+        //
+        // Required, not defaulted, for a second reason. An unmeasurable display is
+        // one mid-reconfigure, and defaulting to 1x would turn "resized just after a
+        // density change" into "silently dropped to 1x", which nothing would put
+        // back: a client sends `HostScale` once per screen change and both clients
+        // dedupe it.
+        let hidpi = crate::capture::framebuffer_scale(self.id).ok_or_else(|| {
             anyhow::anyhow!(
-                "display {} publishes no mode to read a density from — it is mid-reconfigure, so \
+                "display {} cannot be measured to read a density from — it is mid-reconfigure, so \
                  this resize is dropped rather than guessed at",
                 self.id
             )
@@ -345,6 +533,47 @@ fn size_in_envelope(want: (u32, u32), created: (u32, u32)) -> (u32, u32) {
     )
 }
 
+/// Poll until the display can be measured at all, and return the density it is in —
+/// or `None` once [`MODE_TIMEOUT_MS`] passes.
+///
+/// "At all" is the point: this is asked before there is a density to want (see
+/// [`VirtualDisplay::engage_hidpi`]), where the two states
+/// [`crate::capture::framebuffer_scale`] keeps apart are "cannot be read yet" and
+/// the answer.
+fn await_measurable(id: u32) -> Option<f64> {
+    await_measured(id, MODE_TIMEOUT_MS, |_| true)
+}
+
+/// Poll until the display measures the density asked for, and return it — or `None`
+/// once [`SETTLE_TIMEOUT_MS`] passes.
+///
+/// The density counterpart of [`await_bounds`], and separate from it because the two
+/// settle independently: a reconfigure changes size and density in one apply, but
+/// each lands when the WindowServer gets to it.
+fn await_scale(id: u32, want_hidpi: bool) -> Option<f64> {
+    await_measured(id, SETTLE_TIMEOUT_MS, |scale| {
+        (scale >= 1.5) == want_hidpi
+    })
+}
+
+/// One poll loop for both of the above, because a second copy of the deadline would
+/// drift from this one. A display that cannot be measured is not settled either way
+/// — that is the state around every reconfigure.
+fn await_measured(id: u32, timeout_ms: u64, accept: impl Fn(f64) -> bool) -> Option<f64> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if let Some(scale) = crate::capture::framebuffer_scale(id)
+            && accept(scale)
+        {
+            return Some(scale);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(SETTLE_POLL_MS));
+    }
+}
+
 /// Poll until `CGDisplayBounds` reports a size the created display can back at
 /// [`SCALE`], and return it — or `None` if the deadline passes first.
 ///
@@ -391,11 +620,13 @@ fn await_bounds(id: u32, accept: impl Fn((u32, u32)) -> bool) -> Option<(u32, u3
 /// [`SCALE`] times the pixels behind.
 ///
 /// The same rule `capture::owned_scale` reads a live mode with, and it shares that
-/// rule's one blind spot: a `(low resolution)` 1x mode at or under
-/// the created size reads as 2x here too. Nothing can tell them apart — the three
-/// geometry reads in the module docs all refuse to — and the failure this check
-/// exists for is not that one. A display whose *creation* did not engage HiDPI
-/// comes up at twice the request, well past the ceiling.
+/// rule's one blind spot: a `(low resolution)` 1x mode at or under the created size
+/// reads as 2x here too. No geometry read can tell them apart, which is why the
+/// density is not settled here at all — [`engage_hidpi`] measures the mode after
+/// this poll returns, and that is the check a remembered 1x mode has to get past.
+/// The failure *this* one exists for is the other shape: a display whose creation
+/// did not engage HiDPI at all comes up at twice the request, well past the
+/// ceiling.
 ///
 /// Zero on either axis is a display that has not published a configuration yet
 /// (or is not there at all), which must not pass for "comfortably under".

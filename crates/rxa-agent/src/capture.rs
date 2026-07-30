@@ -85,14 +85,60 @@ pub fn main_display() -> u32 {
     unsafe { CGMainDisplayID() }
 }
 
-/// Backing scale of an owned display. Prefer the live CoreGraphics mode and use
-/// the creation envelope only when the private display publishes no mode.
+/// Backing scale of a display *this process created*. Measured from pixels, with
+/// the creation envelope as the fallback.
+///
+/// Not from the mode, which is what this used to do and is the bug it exists to
+/// document. A `CGVirtualDisplay`'s owner is told a different mode than every other
+/// process: measured on the test VM, with the display's framebuffer provably
+/// 3200x2000, this process read `CGDisplayCopyDisplayMode` as 1600x1000 pixels
+/// (ioDisplayModeID 11) while a freshly started process read 3200x2000
+/// (ioDisplayModeID 10), `screencapture` wrote a 3200x2000 PNG, and
+/// `NSScreen.backingScaleFactor` — which AppKit derives from the same mode — read
+/// 1 here and 2 there. It is not a stale cache: display reconfiguration callbacks
+/// arrive in this process and the reading does not change after them.
+///
+/// So the density of our own display had to be read some other way, and pixels are
+/// the way ([`framebuffer_scale`]). Everything downstream of a wrong answer here is
+/// wrong in the same direction: the capture surface is sized `points * scale`, so a
+/// 2x desktop read as 1x is captured at half its resolution and looks soft in every
+/// client, the wire reports "1600×1000 at 1x", and
+/// [`crate::virtualdisplay::VirtualDisplay::set_scale`] cannot tell whether it has
+/// anything to do.
 fn owned_display_scale(id: u32, points: (f64, f64), base: (u32, u32)) -> f64 {
-    mode_scale(id).unwrap_or_else(|| owned_scale(points, base))
+    framebuffer_scale(id).unwrap_or_else(|| owned_scale(points, base))
+}
+
+/// Pixels per point, measured by capturing one point of the display.
+///
+/// The one reading of an owned display's density that is true in the process that
+/// created it — see [`owned_display_scale`] for what is wrong with the others. A
+/// one-point rect comes back as a 2x2 image on a 2x display and 1x1 on a 1x one,
+/// which is the whole measurement; the pixels themselves are thrown away.
+///
+/// `CGDisplayCreateImageForRect` is deprecated in favour of ScreenCaptureKit, and
+/// there is no ScreenCaptureKit equivalent: SCK reports points, and the surface size
+/// of a stream is whatever it was configured with — which is the number being
+/// derived here, so asking it would be circular. It costs about 13 ms on the test
+/// VM, which is why it is called where the density can have changed (a capture
+/// starting, the 2-second display poll, a reconfigure) and not per frame.
+///
+/// `None` when the capture fails: mid-reconfigure, or without the Screen Recording
+/// grant — and without that grant there is no capture to size anyway.
+#[allow(deprecated)]
+pub(crate) fn framebuffer_scale(id: u32) -> Option<f64> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{CGDisplayCreateImageForRect, CGImage};
+
+    let point = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1.0, 1.0));
+    let image = CGDisplayCreateImageForRect(id, point)?;
+    let pixels = CGImage::width(Some(&image));
+    (pixels > 0).then_some(pixels as f64)
 }
 
 /// Degraded scale estimate from the immutable creation envelope. It cannot
-/// distinguish same-size 1x and 2x modes, so callers must prefer a live mode.
+/// distinguish same-size 1x and 2x modes, so callers must prefer
+/// [`framebuffer_scale`].
 fn owned_scale(points: (f64, f64), base: (u32, u32)) -> f64 {
     if points.0 <= f64::from(base.0) && points.1 <= f64::from(base.1) {
         crate::virtualdisplay::SCALE
@@ -196,7 +242,7 @@ impl DisplayInfo {
 ///
 /// `owned` is the display the agent created, if it created one; it is in this
 /// list like any other display, but only the caller knows which id is ours and
-/// [`owned_scale`] is the only way to measure it correctly.
+/// [`owned_display_scale`] is the only way to measure it correctly.
 ///
 /// Needs the Screen Recording grant like everything else in this module, so a
 /// caller that gets an error here should say so rather than showing an empty
@@ -482,12 +528,16 @@ fn stream_config(width: u16, height: u16) -> SCStreamConfiguration {
 
 /// Re-measure a target the way its kind allows.
 ///
-/// The owned case still does not go through [`geometry_for_id`], but not for the
-/// reason once written here. That path returns `None` when a display has no mode,
-/// meaning "mid-reconfigure, try again"; for a display of our own the absence of a
-/// mode is a state to degrade in, not to stall in, since bounds *are* always
-/// published for these displays and [`owned_display_scale`] has a fallback for the
-/// scale. So bounds drive the size and the mode is consulted only for the scale.
+/// The owned case does not go through [`geometry_for_id`], and cannot: that path
+/// takes both the size and the density from the display's mode, which is the one
+/// thing about a display we created that this process is told wrongly (see
+/// [`owned_display_scale`]). Bounds are right for either kind, so they drive the
+/// size, and the density is measured from pixels.
+///
+/// The absence of a reading is also handled differently here. `geometry_for_id`
+/// returns `None` for "mid-reconfigure, try again"; for a display of our own that is
+/// a state to degrade in rather than stall in, since bounds *are* always published
+/// and [`owned_display_scale`] falls back to the creation envelope.
 pub fn geometry_for_target(target: Target, id: u32) -> Option<Geometry> {
     use objc2_core_graphics::CGDisplayBounds;
 
@@ -583,10 +633,10 @@ fn pick(displays: &[SCDisplay], target: Target) -> anyhow::Result<&SCDisplay> {
 /// panel's real detail, and carry the scale so input can be converted back.
 fn geometry(display: &SCDisplay, target: Target) -> Geometry {
     let scale = match target {
-        // Read like a real display's, with the created size only as a fallback:
-        // an owned display does publish a mode, and it is the one reading that
-        // tells a HiDPI mode from the `(low resolution)` 1x entry at the same
-        // point size.
+        // Measured from pixels rather than read like a real display's, with the
+        // created size only as a fallback: the mode this process is shown for a
+        // display it created describes the mode it *asked for*, not the one macOS
+        // is scanning out (see `owned_display_scale`).
         Target::Owned { base_points, .. } => owned_display_scale(
             display.display_id(),
             (display.width() as f64, display.height() as f64),
@@ -945,8 +995,9 @@ mod tests {
     // 1600x1000 the list holds both `1600x1000 pt / 3200x2000 px` and
     // `1600x1000 pt / 1600x1000 px` — and from points alone the two are one
     // number. Whichever macOS restored decided whether the answer below was
-    // right. Only `owned_display_scale`'s mode read can tell them apart, which is
-    // why it is what both call sites use and this is only the no-mode fallback.
+    // right. Only a pixel measurement can tell them apart, which is why
+    // `owned_display_scale` starts with `framebuffer_scale` and this is the
+    // fallback for when even that cannot be read.
     #[test]
     fn the_fallback_cannot_see_a_low_resolution_mode_at_the_created_size() {
         let base = (1600, 1000);
