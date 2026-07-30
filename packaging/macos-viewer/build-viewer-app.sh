@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Build and sign the macOS 26 remotex viewer, optionally wrapping it in a DMG.
+# Build and sign remotex.app — the macOS 26 client and the gateway it runs —
+# optionally wrapping it in a DMG.
 #
 # Usage:
 #   packaging/macos-viewer/build-viewer-app.sh [--debug] [--no-dmg]
+#
+# The bundle carries two executables: the Swift app, and a copy of the `remotex`
+# gateway binary as `remotex-gateway`. The app starts that gateway on an ephemeral
+# loopback port at launch (see docs/macos-viewer.md), so a build with only one of
+# the two is not a working app. No frontend is copied: the embedded gateway serves
+# no web UI.
 #
 # Builds are ad-hoc signed by default. Set CODESIGN_IDENTITY explicitly to use
 # another identity; Developer ID distribution also requires notarization.
@@ -65,12 +72,33 @@ binary="$bin_dir/remotex-viewer"
   exit 1
 }
 
-app="dist/remotex-viewer.app"
+# The gateway the app runs. Built at the same configuration as the app, so a debug
+# build is debuggable all the way down rather than half-release.
+cargo_profile=release
+cargo_flags=(--release)
+if [ "$configuration" = debug ]; then
+  cargo_profile=debug
+  cargo_flags=()
+fi
+echo ">> building the remotex gateway ($cargo_profile)"
+cargo build --bin remotex "${cargo_flags[@]}"
+gateway="target/$cargo_profile/remotex"
+[ -x "$gateway" ] || {
+  echo "gateway binary missing at $gateway" >&2
+  exit 1
+}
+
+app="dist/remotex.app"
 echo ">> assembling $app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/remotex-viewer"
 chmod +x "$app/Contents/MacOS/remotex-viewer"
+# `remotex-gateway`, not `remotex`: two files in one directory cannot share a name,
+# and the app's own executable is already there. The suffix also makes it obvious
+# which process is which in Activity Monitor and to `pgrep`.
+cp "$gateway" "$app/Contents/MacOS/remotex-gateway"
+chmod +x "$app/Contents/MacOS/remotex-gateway"
 cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 sed -e "s|<string>0\\.0\\.0</string>|<string>${version}</string>|g" \
   packaging/macos-viewer/Info.plist > "$app/Contents/Info.plist"
@@ -82,6 +110,10 @@ timestamp_flag=(--timestamp)
 if [ "$identity" = "-" ]; then
   timestamp_flag=(--timestamp=none)
 fi
+# Inner code first, then the bundle. A nested executable signed *after* its bundle
+# invalidates the outer signature, and `--verify --deep` is what catches it.
+codesign --force --sign "$identity" --options runtime "${timestamp_flag[@]}" \
+  "$app/Contents/MacOS/remotex-gateway"
 codesign --force --sign "$identity" --options runtime "${timestamp_flag[@]}" \
   "$app/Contents/MacOS/remotex-viewer"
 codesign --force --sign "$identity" --options runtime "${timestamp_flag[@]}" "$app"
@@ -99,12 +131,16 @@ fi
 if [ "$configuration" = debug ]; then
   suffix="${suffix}-debug"
 fi
+# The image keeps the `remotex-viewer` name while the app inside it is `remotex.app`:
+# `remotex-<version>-macos-arm64.tar.gz` is already the CLI gateway's release asset,
+# and two downloads called the same thing is worse than one whose name is a little
+# behind the product's.
 dmg="dist/remotex-viewer-${version}-macos-arm64${suffix}.dmg"
 staging="dist/viewer-dmg-root"
 echo ">> building $dmg"
 rm -rf "$staging" "$dmg"
 mkdir -p "$staging"
-/usr/bin/ditto "$app" "$staging/remotex-viewer.app"
+/usr/bin/ditto "$app" "$staging/remotex.app"
 ln -s /Applications "$staging/Applications"
 hdiutil create -volname "remotex viewer $version" -srcfolder "$staging" \
   -fs HFS+ -format UDZO -ov -quiet "$dmg"
