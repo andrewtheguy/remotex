@@ -514,12 +514,29 @@ body {
   border: 1px solid #30363d;
   border-radius: 12px;
   box-shadow: 0 6px 24px rgba(1, 4, 9, 0.7);
+  /* Three sections and a Close button no longer fit a phone held sideways, and
+     a card that overflows the viewport puts its dismiss button off-screen —
+     with the backdrop tap as the only way out. */
+  max-height: 85vh;
+  overflow-y: auto;
 }
 
 .help-card h2 {
   margin: 0 0 14px;
   font-size: 1.05rem;
   font-weight: 600;
+}
+
+/* Section headings inside the card: the session readout, the shortcuts and the
+   gestures. Uppercased like .toolbar-label so they read as dividers rather than
+   competing with the card's own title. */
+.help-card h3 {
+  margin: 0 0 6px;
+  color: #8b949e;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .help-list {
@@ -1179,13 +1196,4 @@ body {
   margin: 0;
   font-size: 0.75rem;
   color: #8b949e;
-}
-
-/* The read-only Screen readout. Tabular figures so the numbers don't shift
-   sideways as a resize changes their widths. */
-.screen-note {
-  margin: 0;
-  font-size: 0.75rem;
-  color: #8b949e;
-  font-variant-numeric: tabular-nums;
 }

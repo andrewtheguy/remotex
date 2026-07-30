@@ -51,6 +51,22 @@ const MODIFIER_TAPS: readonly { label: string; code: string }[] = [
   { label: "Super", code: "MetaLeft" },
 ];
 
+// The chrome shortcut, spelled the way the Help card shows it. Written out here so
+// the card and the handler cannot drift — the handler matches this exact
+// combination, and deliberately not with Command held, so a Mac user's own
+// Cmd+Ctrl+Alt+Shift+; stays theirs.
+const HIDE_CHROME_SHORTCUT = "Ctrl + Alt + Shift + ;";
+
+// The reference density both ends of this agree on: one CSS pixel per dot, and
+// also what RDP calls 100%. So a 2x screen is 192 dpi whichever end names it.
+const CSS_DPI = 96;
+
+// A density in the unit a host's own display settings talk in, since that is where
+// someone checks whether a remote actually applied one.
+function dpiLabel(hundredths: number): string {
+  return `${Math.round((hundredths / 100) * CSS_DPI)} dpi`;
+}
+
 // The touch gesture cheat-sheet, mirroring touchGestures.ts.
 const GESTURE_HELP: readonly { gesture: string; action: string }[] = [
   { gesture: "Tap", action: "Left-click" },
@@ -212,40 +228,49 @@ function DisplaySection({
   );
 }
 
-// What the remote is drawing, and what this screen is — read-only, and present
-// for every target rather than only the ones with something to switch between.
+// What the remote is drawing against what this browser is, at the top of the Help
+// card so the two can be read off one another.
 //
 // It exists because a density that did not take is otherwise invisible. Both
 // engines that match a client's density report the result only as a `resize`, and
 // a request the remote quietly dropped produces no message at all: the desktop
 // simply looks soft, or half the size it was asked for, with nothing saying which
-// end disagreed. Two numbers that ought to match and don't is the whole diagnostic,
-// which is why the section shows both and not just the resolution.
+// end disagreed. Two densities that ought to agree and don't is the whole
+// diagnostic, which is why this reports both and not just the resolution.
 //
-// Unconditional on purpose. The Display section above appears only for a remote
-// with more than one screen, so on RDP, on VNC, and on an rxa target sharing one
-// of the Mac's own screens, this is the only place the numbers appear at all.
-function ScreenSection({
+// Shown for every target, not only the ones with a display to switch between: on
+// RDP, on VNC, and on an rxa target sharing one of the Mac's own screens, the
+// Display section is absent and these numbers appear nowhere else.
+function ScreenHelp({
   size,
   hostScale,
 }: {
   size: RemoteSize | null;
   hostScale: number;
 }) {
-  // Before the first `resize`, which is the "waiting for the remote desktop"
-  // state — there is no resolution to report yet, and a placeholder reading 0x0
-  // would be a worse answer than none.
-  if (!size) {
-    return null;
-  }
   return (
-    <div className="toolbar-section">
-      <span className="toolbar-label">Screen</span>
-      <p className="screen-note">
-        {size.w}×{size.h} · remote {densityLabel(size.scale * 100)} · this
-        screen {densityLabel(hostScale)}
-      </p>
-    </div>
+    <>
+      <h3>This session</h3>
+      <dl className="help-list">
+        <div className="help-item">
+          <dt>Remote desktop</dt>
+          {/* Null before the first `resize`, which is the "waiting for the remote
+              desktop" state: a placeholder reading 0×0 would be a worse answer
+              than saying so. */}
+          <dd>
+            {size
+              ? `${size.w}×${size.h} at ${densityLabel(size.scale * 100)} (${dpiLabel(size.scale * 100)})`
+              : "Waiting for the remote desktop"}
+          </dd>
+        </div>
+        <div className="help-item">
+          <dt>This browser</dt>
+          <dd>
+            {densityLabel(hostScale)} ({dpiLabel(hostScale)})
+          </dd>
+        </div>
+      </dl>
+    </>
   );
 }
 
@@ -724,8 +749,6 @@ export default function FloatingMenu({
             }}
           />
 
-          <ScreenSection size={size} hostScale={hostScale} />
-
           <div className="toolbar-section">
             <span className="toolbar-label">Clipboard</span>
             {/* Enabled per target (`clipboard = true`), which every protocol
@@ -815,8 +838,9 @@ export default function FloatingMenu({
               type="button"
               className="toolbar-btn"
               onClick={() => setHelpOpen(true)}
+              title="This session's size and density, and the touch gestures"
             >
-              Gestures
+              Help
             </button>
             <button
               type="button"
@@ -852,7 +876,20 @@ export default function FloatingMenu({
           {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner card only stops the backdrop's dismiss */}
           {/* biome-ignore lint/a11y/noStaticElementInteractions: inner card */}
           <div className="help-card" onClick={(e) => e.stopPropagation()}>
-            <h2>Touch gestures</h2>
+            <h2>Help</h2>
+            <ScreenHelp size={size} hostScale={hostScale} />
+            <h3>Shortcuts</h3>
+            <dl className="help-list">
+              <div className="help-item">
+                <dt>Hide or show this menu</dt>
+                {/* Worth documenting precisely because of what it does: once the
+                    ☰ button is hidden there is nothing left on screen to read the
+                    way back off, so a shortcut nobody wrote down is a menu that
+                    looks gone for good. */}
+                <dd>{HIDE_CHROME_SHORTCUT}</dd>
+              </div>
+            </dl>
+            <h3>Touch gestures</h3>
             <dl className="help-list">
               {GESTURE_HELP.map((row) => (
                 <div key={row.gesture} className="help-item">
