@@ -39,20 +39,17 @@
 	<string>Contents/MacOS/remotex-agent</string>
 	<key>RunAtLoad</key>
 	<true/>
-	<!-- Restart the agent if it dies, but not if it exited on purpose. A plain
-	     `KeepAlive: true` would make the menu bar's Quit item a lie — launchd
-	     would bring the agent straight back a second later. `SuccessfulExit:
-	     false` keeps crash recovery and lets a deliberate exit 0 stick until the
-	     next login (or until the user opens the app again). The agent also exits
-	     0 when the port is already bound, which is another case where coming
-	     back would achieve nothing — and when the copy holding it is *this* job,
-	     that exit follows a `kickstart -k` of this label, which is how opening an
-	     upgraded bundle restarts the job into it. See `hand_over_to_launchd`. -->
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
+	<!-- No KeepAlive, deliberately: launchd starts this at login and on an
+	     explicit `kickstart`, and never on its own. It used to carry
+	     `KeepAlive { SuccessfulExit: false }` for crash recovery, and the cost of
+	     that was stale instances: any death by signal counts as an unsuccessful
+	     exit, so launchd relaunched within ~2 s from whatever was on disk at that
+	     moment — mid-upgrade, that is the *old* bundle, running against the new
+	     one's config and holding the port the new one wants. An agent that has
+	     died stays dead now, which is visible (no menu bar icon, connections
+	     refused) rather than quietly wrong, and the next login or `open` brings it
+	     back. `restart` and `hand_over_to_launchd` are unaffected: both drive the
+	     job explicitly. -->
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>EnvironmentVariables</key>

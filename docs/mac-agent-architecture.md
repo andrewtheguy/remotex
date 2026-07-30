@@ -209,10 +209,17 @@ The application registers its embedded LaunchAgent through `SMAppService` and
 runs in the logged-in user's GUI session. The menu bar shell is created before
 configuration, permission checks, display setup, or the network runtime. A
 handled startup or worker failure leaves that shell available with diagnostics
-and Quit instead of exiting into a launchd restart loop.
+and Quit.
 
-Saving settings restarts the agent so address, display, and identity changes take
-effect together. A deliberate quit remains stopped; launchd restarts crashes.
+The job has no `KeepAlive`: launchd starts it at login and on an explicit
+`kickstart`, and never on its own. A process that quits or dies stays gone until
+the next login or until the user opens the app. That is deliberate — automatic
+respawn recovered crashes at the cost of stale instances, because a death by
+signal relaunched whatever bundle was on disk at that instant and it went on
+holding the port.
+
+Saving settings restarts the agent through `kickstart` so address, display, and
+identity changes take effect together.
 
 Only one authenticated gateway connection may be active. A new connection
 replaces the current one only after completing its handshake, so an

@@ -19,6 +19,7 @@
 //! [`Status::RequiresApproval`] — where nothing will start it until they switch
 //! it back, and no amount of re-registering helps.
 
+use anyhow::Context;
 use objc2_foundation::NSString;
 use objc2_service_management::{SMAppService, SMAppServiceStatus, kSMErrorAlreadyRegistered};
 
@@ -97,6 +98,77 @@ pub fn register() -> anyhow::Result<()> {
     }
 }
 
+/// The generation of the embedded plist that launchd is expected to be holding.
+///
+/// Bumped whenever `packaging/macos/embedded-launchagent.plist` changes in a way
+/// launchd has to see. Generation 2 is the one with no `KeepAlive`.
+pub const GENERATION: u32 = 2;
+
+/// Where [`refresh`] records the generation launchd has been given, beside the
+/// config rather than in it: it is bookkeeping about this machine's launchd, not a
+/// setting anybody would edit, and Settings rewrites `config.toml` wholesale.
+pub fn stamp_path() -> anyhow::Result<std::path::PathBuf> {
+    let config = crate::config::default_path()?;
+    let dir = config
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", config.display()))?;
+    Ok(dir.join("launchagent-generation"))
+}
+
+/// Whether launchd has already been given this [`GENERATION`] of the plist.
+pub fn generation_is_current(stamp: &std::path::Path) -> bool {
+    std::fs::read_to_string(stamp)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        == Some(GENERATION)
+}
+
+/// Hand launchd the plist from *this* bundle, and record that it has it.
+///
+/// Needed because [`register`] cannot do it. `SMAppService` copies the plist to
+/// launchd at registration and never looks at the bundle's again — registering an
+/// already-registered service answers "already registered" and changes nothing —
+/// so an upgraded bundle keeps running under the *old* job definition. Measured on
+/// the test VM: a build whose plist had no `KeepAlive` went on being relaunched
+/// within two seconds of every kill, because the job launchd held still had it.
+///
+/// Two things this deliberately does not do. It does not run on every launch —
+/// macOS announces a background item being added — and it does not touch a service
+/// the user has switched off in System Settings ([`Status::RequiresApproval`]):
+/// taking that away and adding it back would overrule them, and somebody who
+/// turned the item off is not waiting for a new plist.
+///
+/// **Only from a copy that is not the launchd job.** Unregistering stops the job it
+/// names, so a job doing this to itself could be killed between the unregister and
+/// the register — leaving the login item gone rather than refreshed. The caller
+/// checks (see `hand_over_to_launchd` in `main.rs`), and a manually opened copy is
+/// the natural place anyway: opening the new app is how a person installs it.
+///
+/// The stamp is written *first*, before anything is unregistered, so that a refresh
+/// interrupted halfway cannot become a refresh that happens at every launch.
+///
+/// Returns whether launchd was given a new copy. Failure is the caller's to report
+/// and nothing worse: the agent runs, under the previous generation's job.
+pub fn refresh(stamp: &std::path::Path) -> anyhow::Result<bool> {
+    if generation_is_current(stamp) {
+        return Ok(false);
+    }
+    if let Some(dir) = stamp.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(stamp, format!("{GENERATION}\n"))
+        .with_context(|| format!("writing {}", stamp.display()))?;
+    // Anything else is a service launchd has no job for, which needs no refresh:
+    // the `register` that runs before this one, on this launch or the next, hands
+    // it this bundle's plist as a matter of course.
+    if status() != Status::Enabled {
+        return Ok(false);
+    }
+    unregister().context("unregistering to hand launchd the current plist")?;
+    register().context("registering again with the current plist")?;
+    Ok(true)
+}
+
 /// Unregister, so the agent no longer starts at login.
 pub fn unregister() -> anyhow::Result<()> {
     // Safety: FFI call on our own service object; errors come back as NSError.
@@ -141,6 +213,47 @@ mod tests {
         );
         // Display is used in user-facing output, so it must never be empty.
         assert!(!status.to_string().is_empty());
+    }
+
+    // The stamp is the whole of how a refresh happens once rather than at every
+    // launch, so what it does with a missing, stale or malformed file matters more
+    // than it looks: "current" wrongly returned for a stale generation means
+    // launchd keeps an old job forever, and wrongly returned false means a
+    // background-item notification every login.
+    #[test]
+    fn only_this_generation_counts_as_current() {
+        let dir = crate::config::scratch::TempDir::new("loginitem-stamp");
+        let stamp = dir.join("launchagent-generation");
+        assert!(!generation_is_current(&stamp), "nothing written yet");
+
+        std::fs::write(&stamp, format!("{GENERATION}\n")).unwrap();
+        assert!(generation_is_current(&stamp));
+        // Trailing whitespace is what `write` puts there; no whitespace has to
+        // read the same, since nothing guarantees who wrote it last.
+        std::fs::write(&stamp, GENERATION.to_string()).unwrap();
+        assert!(generation_is_current(&stamp));
+
+        std::fs::write(&stamp, (GENERATION - 1).to_string()).unwrap();
+        assert!(!generation_is_current(&stamp), "an older generation");
+        std::fs::write(&stamp, (GENERATION + 1).to_string()).unwrap();
+        assert!(!generation_is_current(&stamp), "a newer one is not this one");
+        std::fs::write(&stamp, "").unwrap();
+        assert!(!generation_is_current(&stamp), "empty");
+        std::fs::write(&stamp, "keepalive").unwrap();
+        assert!(!generation_is_current(&stamp), "not a number");
+    }
+
+    // Same directory as the config, since that is the one place per user the agent
+    // already owns.
+    #[test]
+    fn the_stamp_sits_beside_the_config() {
+        let stamp = stamp_path().unwrap();
+        let config = crate::config::default_path().unwrap();
+        assert_eq!(stamp.parent(), config.parent());
+        assert_eq!(
+            stamp.file_name().unwrap().to_str().unwrap(),
+            "launchagent-generation"
+        );
     }
 
     #[test]
