@@ -414,7 +414,7 @@ export default function FloatingMenu({
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
   // The remote's framebuffer and its density, and this screen's density — the
-  // read-only Screen section, shown for every target. See ScreenSection for why
+  // read-only Screen section, shown for every target. See ScreenHelp for why
   // both densities and not just the size.
   size: RemoteSize | null;
   hostScale: number;
