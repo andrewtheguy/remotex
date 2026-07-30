@@ -1,6 +1,6 @@
 ## General
 
-- strict no backward compatibility since it is a personal project
+- strict no backward compatibility or legacy code path since it is a personal project
 - no cargo fmt
 - run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
 - run biome checks on frontend/ after JS/TS code changes
