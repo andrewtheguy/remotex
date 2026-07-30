@@ -144,8 +144,13 @@ pub fn generation_is_current(stamp: &std::path::Path) -> bool {
 /// checks (see `hand_over_to_launchd` in `main.rs`), and a manually opened copy is
 /// the natural place anyway: opening the new app is how a person installs it.
 ///
-/// The stamp is written *first*, before anything is unregistered, so that a refresh
-/// interrupted halfway cannot become a refresh that happens at every launch.
+/// The stamp is written *last*, so it only ever claims what actually happened.
+/// Written first, a failed [`unregister`] left it saying launchd had this generation
+/// while launchd still held the old job — with nothing that would ever try again,
+/// which is the permanent stale job this function exists to clear. Writing it last
+/// costs at most one redundant refresh: an attempt interrupted between the two calls
+/// is retried on the next launch, where [`register`] has already handed launchd this
+/// bundle's plist as part of ordinary startup.
 ///
 /// Returns whether launchd was given a new copy. Failure is the caller's to report
 /// and nothing worse: the agent runs, under the previous generation's job.
@@ -153,20 +158,29 @@ pub fn refresh(stamp: &std::path::Path) -> anyhow::Result<bool> {
     if generation_is_current(stamp) {
         return Ok(false);
     }
-    if let Some(dir) = stamp.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::write(stamp, format!("{GENERATION}\n"))
-        .with_context(|| format!("writing {}", stamp.display()))?;
-    // Anything else is a service launchd has no job for, which needs no refresh:
-    // the `register` that runs before this one, on this launch or the next, hands
-    // it this bundle's plist as a matter of course.
+    // A service launchd has no job for needs no refresh, and neither does one the
+    // user has switched off: [`register`] — which runs before this, on this launch or
+    // the next — hands launchd this bundle's plist as a matter of course. Stamped all
+    // the same, because nothing here failed and re-asking at every launch is the cost
+    // this stamp exists to avoid. The consequence is that an item switched off and
+    // later switched back on keeps whichever plist launchd stored for it; bumping
+    // [`GENERATION`] is the way out of that.
     if status() != Status::Enabled {
+        write_stamp(stamp)?;
         return Ok(false);
     }
     unregister().context("unregistering to hand launchd the current plist")?;
     register().context("registering again with the current plist")?;
+    write_stamp(stamp)?;
     Ok(true)
+}
+
+fn write_stamp(stamp: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(dir) = stamp.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(stamp, format!("{GENERATION}\n"))
+        .with_context(|| format!("writing {}", stamp.display()))
 }
 
 /// Unregister, so the agent no longer starts at login.
