@@ -287,6 +287,26 @@ mod tests {
         }
     }
 
+    /// One key, one place, both audiences — including the app, whose config has no
+    /// `[server]` block a name could have lived in.
+    #[test]
+    fn branding_is_one_top_level_key_for_both_audiences() {
+        check("branding = \"work laptop\"\n", Audience::Embedded)
+            .expect("the app names itself with the top-level key");
+
+        let file = ConfigFile::parse_with("branding = \"work laptop\"\n", Audience::Embedded)
+            .unwrap();
+        let resolved = file.resolve_embedded(EmbeddedToken::generate()).unwrap();
+        assert_eq!(resolved.branding, "work laptop");
+
+        // There is exactly one place to write it, so the block it used to live in
+        // refuses it — `deny_unknown_fields` and nothing else, which is the whole of
+        // the migration this project offers.
+        let error = check("[server]\nbranding = \"x\"\n", Audience::Served)
+            .expect_err("[server].branding is gone");
+        assert!(format!("{error:#}").contains("branding"), "{error:#}");
+    }
+
     /// A target is a target: the same rules, the same messages, either audience.
     #[test]
     fn target_rules_do_not_depend_on_the_audience() {

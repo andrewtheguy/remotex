@@ -111,6 +111,11 @@ target is in the picker by the time the sheet closes.
 `[server]` is refused in this file, and having no targets at all is not an error — it
 is what a first launch has, and the picker says so in words.
 
+A top-level `branding` names the instance: the heading above the target list, the
+window title and the launch screen. It is the one key this file shares with a served
+gateway's, and the only place either sets it — `[server].branding` no longer exists,
+because a key in that block could not name an app whose config has no such block.
+
 ## Protocol compatibility
 
 The check survives even though both halves now ship in one bundle, and it means

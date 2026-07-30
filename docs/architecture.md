@@ -343,6 +343,10 @@ targets at all, which is what a first launch has. `remotex check-config [--embed
 applies either set of rules without starting anything; the app's configuration editor
 calls it before writing, so what the editor accepts is what the gateway starts on.
 
+`branding` is top-level for exactly that reason: it is the one setting both audiences
+share, and a key inside `[server]` could not name a gateway whose config has no
+`[server]` block. There is one place to write it and no second spelling.
+
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
 flow and protocol engines. Containerized dummy servers cover RDP and VNC, while

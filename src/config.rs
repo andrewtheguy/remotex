@@ -235,10 +235,10 @@ pub struct ServerSection {
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
-    /// Display name shown on the login screen, the interstitials, and as the
-    /// browser tab title. Defaults to [`DEFAULT_BRANDING`]; whitespace-only is
-    /// treated as absent.
-    pub branding: Option<String>,
+    // No `branding` here: it is a top-level key now (see `ConfigFile::branding`),
+    // because `remotex.app`'s config has no `[server]` block to hold it and one
+    // value with two spellings is one of them going stale. `deny_unknown_fields`
+    // refuses a file that still has it here.
     /// **Development only.** A label to give this gateway its own hostname on
     /// loopback: a browser arriving at `127.0.0.1`, `::1` or `localhost` is
     /// redirected to `<label>.localhost`, keeping the port and path.
@@ -312,6 +312,20 @@ pub struct ConfigFile {
     /// "present and empty" is the whole reason this is an `Option`.
     #[serde(default)]
     pub server: Option<ServerSection>,
+    /// Display name of this gateway: the browser's login screen, interstitials and
+    /// tab title, and in `remotex.app` the heading above its target list, its window
+    /// title and its launch screen.
+    ///
+    /// Top-level rather than in `[server]`, and it is the **only** place to set it.
+    /// `remotex.app`'s config has no `[server]` block at all
+    /// ([`Audience::Embedded`]), so a key that lived there could not name the app —
+    /// and accepting both spellings would be two places to write one value, with the
+    /// loser losing silently. `deny_unknown_fields` refuses a file that still has it
+    /// under `[server]`, which is the whole of the migration.
+    ///
+    /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
+    #[serde(default)]
+    pub branding: Option<String>,
     #[serde(default)]
     pub rxa: RxaSection,
     #[serde(default)]
@@ -386,7 +400,7 @@ impl ConfigFile {
                 config.server.is_none(),
                 "this config is remotex.app's own and may not have a [server] block: \
                  the app decides where its gateway listens, serves no web UI, and \
-                 authenticates itself. Only [rxa] and [[targets]] belong here"
+                 authenticates itself. Only branding, [rxa] and [[targets]] belong here"
             );
         } else {
             anyhow::ensure!(
@@ -553,8 +567,10 @@ impl ConfigFile {
     ///
     /// Every one of those is a constant here rather than a default that
     /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
-    /// the way in. `branding` is likewise not configurable: the app is the product
-    /// name, and there is no login screen for a deployment to label.
+    /// the way in. `branding` is the one thing such a config *may* say about the
+    /// gateway itself, because it is about the app rather than about the server: it
+    /// names a window, not a deployment, and two instances on one Mac are easier to
+    /// tell apart if they can be called different things.
     pub fn resolve_embedded(mut self, token: EmbeddedToken) -> anyhow::Result<AppConfig> {
         self.spread_rxa_identity();
         Ok(AppConfig {
@@ -565,9 +581,22 @@ impl ConfigFile {
             static_dir: None,
             targets: self.targets,
             auth: GatewayAuth::Token(token),
-            branding: DEFAULT_BRANDING.to_owned(),
+            branding: Self::resolve_branding(self.branding.as_deref()),
             dev_hostname: None,
         })
+    }
+
+    /// The display name, or [`DEFAULT_BRANDING`].
+    ///
+    /// Whitespace-only counts as absent: a heading of one space is not a name
+    /// somebody meant to give. Shared by both audiences because it is one key now,
+    /// and a second copy of this three-line rule is how the two would come to differ.
+    fn resolve_branding(configured: Option<&str>) -> String {
+        configured
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_BRANDING)
+            .to_owned()
     }
 
     /// Resolve the runtime configuration: validate the web-login credential and
@@ -593,13 +622,7 @@ impl ConfigFile {
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
             auth: GatewayAuth::Login(site_passwd),
-            branding: server
-                .branding
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(DEFAULT_BRANDING)
-                .to_owned(),
+            branding: Self::resolve_branding(self.branding.as_deref()),
             dev_hostname: server
                 .dev_subdomain
                 .as_deref()
@@ -872,11 +895,13 @@ mod tests {
         let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
         assert_eq!(config.branding, DEFAULT_BRANDING);
 
-        // Set → carried through, trimmed.
+        // Set → carried through, trimmed. Top-level, which is the only place it
+        // lives: an app instance's config has no [server] block to hold it.
         let toml = format!(
             r#"
-            [server]
             branding = "  Acme Remote  "
+
+            [server]
             {}
 
             [[targets]]

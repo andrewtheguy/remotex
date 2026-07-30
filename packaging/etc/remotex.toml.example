@@ -8,6 +8,12 @@
 #
 #   chmod 600 remotex.toml
 
+# Display name of this gateway: the login screen, the interstitials, and the
+# browser tab title. Defaults to "remotex". Top-level rather than under [server],
+# because it is the one setting remotex.app's own config shares with this one and
+# that file has no [server] block at all.
+#branding = "remotex"
+
 [server]
 # Listen address/port for the web UI (both optional; defaults shown).
 #host = "127.0.0.1"
@@ -18,9 +24,6 @@
 # Web login (required): username:bcrypt_hash guarding the whole surface.
 # Generate with:  remotex gen-passwd <username>
 site_passwd = ""
-# Display name shown on the login screen, the interstitials, and as the browser
-# tab title. Defaults to "remotex".
-#branding = "remotex"
 
 # DEVELOPMENT ONLY, and inert in any deployment. Gives this gateway its own
 # hostname on loopback: a browser opening the home page under *any* loopback name

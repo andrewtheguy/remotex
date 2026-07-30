@@ -156,6 +156,10 @@ final class GatewayConfigStore {
         # Add one [[targets]] block per machine. Edit this from the app —
         # Remote > Configuration… — which checks it before saving.
 
+        # What this instance calls itself: the heading above the target list, the
+        # window title, and the launch screen. Useful when two instances run at once.
+        # branding = "remotex"
+
         # A Windows machine over RDP:
         #
         # [[targets]]
