@@ -21,8 +21,8 @@ Download `remotex-agent-<version>-macos-arm64-unsigned.dmg` from the
 
 First launch creates
 `~/Library/Application Support/remotex-agent/config.toml` and generates the Mac's
-identity. The app has no Dock icon; use its menu bar item. It starts unpaired and
-refuses connections until a gateway public key is configured.
+identity. The app has no Dock icon; use its menu bar item. It starts with no
+gateways authorized and refuses every connection until one is.
 
 A launch does **not** arrange to start at login. Tick **Start at Login** in the
 menu (or run `remotex-agent --install-launchagent` once), which writes
@@ -49,11 +49,23 @@ Pairing exchanges public keys only.
    agent_public_key = "rxap..."
    ```
 
-2. Run `remotex rxa-pubkey` on the gateway and paste its `rxgp...` value into
-   **Gateway public key** in the agent settings.
+2. Run `remotex rxa-pubkey` on the gateway, then add its `rxgp...` value to the
+   agent's authorized list: **Settings… › Authorized gateways › Manage…**, one
+   entry per line, the key followed by a name for that machine.
 
-The agent listens on port 52381 by default. One gateway
-`[rxa].private_key` identifies that gateway to every RXA target.
+   ```text
+   rxgp...  home server
+   ```
+
+   That name is only for this Mac — it is what the menu bar calls the gateway while
+   it is connected. Lines starting with `#` are ignored, so an entry can be
+   commented out and put back. The file itself is `authorized_gateways` beside the
+   config, and can be edited there instead.
+
+The agent listens on port 52381 by default. One gateway `[rxa].private_key`
+identifies that gateway to every RXA target, so a second gateway means a second
+line on this list — not a re-pairing. Several may be authorized; one holds the Mac
+at a time, and a second has to take the session over from the client asking.
 
 ## Move an identity to another Mac
 

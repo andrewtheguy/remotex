@@ -267,7 +267,7 @@ pub const DEFAULT_BRANDING: &str = "remotex";
 pub struct RxaSection {
     /// This gateway's private key (`rxgs…`), generated with `remotex gen-key`.
     /// Its public half — printed by `remotex rxa-pubkey` — is what goes into
-    /// each Mac agent's `gateway_public_key`.
+    /// each Mac agent's `authorized_gateways` file.
     ///
     /// Required as soon as any target is protocol `rxa`. Kept when there are
     /// none: this is the machine's identity rather than a per-target

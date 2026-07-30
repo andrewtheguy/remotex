@@ -31,7 +31,9 @@ of the tile encoder and batching queue.
   serves one session at a time and a gateway claims it (see
   [`docs/mac-agent-architecture.md`](mac-agent-architecture.md)). That slot is
   keyed on the claim's session id and not on the gateway's key, so being
-  authorized to reach a Mac and holding its session are separate questions.
+  authorized to reach a Mac and holding its session are separate questions. The
+  first of those is a list on the Mac (`authorized_gateways`), so several gateways
+  can be entitled to one Mac while exactly one holds it.
 - Remote credentials remain in the server-side TOML configuration.
 - Clients speak only the remotex protocol and never implement RDP, RFB, or RXA.
 - Protocol engines prefer broadly supported baseline features over

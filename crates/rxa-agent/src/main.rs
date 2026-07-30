@@ -895,8 +895,8 @@ async fn serve(
                             }
                         }
                         // Never fatal to the agent, and never visible to the
-                        // session already running: an unpaired peer, a port
-                        // scanner, or a gateway on another protocol version.
+                        // session already running: an unauthorized peer, a
+                        // port scanner, or a gateway on another protocol version.
                         Ok(Err(e)) => warn!("agent: refusing {peer}: {e:#}"),
                         Err(_) => warn!(
                             "agent: refusing {peer}: no handshake and claim within {}s",

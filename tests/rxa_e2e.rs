@@ -6,7 +6,7 @@
 //! browser's WebSocket — and that is the entire gateway half.
 //!
 //! The fake agent speaks the real protocol: it completes a genuine
-//! `Noise_KK_25519_ChaChaPoly_BLAKE2s` handshake against a gateway it has been
+//! `Noise_IK_25519_ChaChaPoly_BLAKE2s` handshake against a gateway it has been
 //! paired with, reads the gateway's claim on its session slot, answers `Hello`,
 //! then sends a pre-encoded WebP tile and a cursor shape, and it records both the
 //! claims and the input it is sent. Five things are under test:
@@ -1410,13 +1410,13 @@ async fn a_wrong_agent_public_key_is_reported_instead_of_retried_forever() {
                 Message::Text(text) if text.contains(r#""type":"error""#) => {
                     return text.to_string();
                 }
-                Message::Binary(_) => panic!("an unpaired agent must not paint anything"),
+                Message::Binary(_) => panic!("a mismatched agent must not paint anything"),
                 _ => {}
             }
         }
     })
     .await
-    .expect("an unpaired agent should be reported, not retried silently");
+    .expect("a key mismatch should be reported, not retried silently");
     assert!(text.contains("rxa connect failed"), "{text}");
 
     // Reported is only half of it: "instead of retried" needs the counter. Wait

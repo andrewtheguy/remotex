@@ -19,7 +19,7 @@
 //!
 //! | | private | public |
 //! |---|---|---|
-//! | gateway | `rxgs` — `[rxa].private_key` | `rxgp` — the agent's `gateway_public_key` |
+//! | gateway | `rxgs` — `[rxa].private_key` | `rxgp` — a line in the agent's `authorized_gateways` |
 //! | agent | `rxas` — the agent's `private_key` | `rxap` — a target's `agent_public_key` |
 //!
 //! A gateway never dials a gateway and an agent never dials an agent, so a key

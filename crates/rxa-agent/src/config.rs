@@ -229,8 +229,9 @@ pub fn import_private_key(explicit: Option<&Path>, private_key: &str) -> anyhow:
 /// [`crate::loginitem`]), so first launch has to be self-sufficient: the user
 /// drags the bundle in, opens it, and is left with two things to do — copy this
 /// Mac's public key onto the gateway, and paste the gateway's back in. The
-/// config it lands in is deliberately *unpaired* rather than half-written:
-/// there is no gateway to name yet.
+/// config it lands in names no gateway at all rather than being half-written:
+/// there is none to name yet, and the list that would name one is a separate
+/// file that stays absent until something is added to it.
 ///
 /// Returns the config, its path, and whether this call created it.
 ///

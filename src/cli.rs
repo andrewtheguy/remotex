@@ -41,7 +41,7 @@ pub enum Commands {
     GenKey,
 
     /// Print this gateway's "rxa" public key, derived from [rxa].private_key:
-    /// the value to paste into each Mac agent's gateway_public_key
+    /// the value to add to each Mac agent's authorized_gateways list
     RxaPubkey {
         /// TOML config file (default: the installed <prefix>/etc/remotex.toml;
         /// required when running from a checkout)

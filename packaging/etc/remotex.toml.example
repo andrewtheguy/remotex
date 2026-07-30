@@ -53,7 +53,8 @@ site_passwd = ""
 # protocol = "rxa", and unused otherwise.
 #
 # One key for the whole server, not one per Mac: this is the [Interface] half of
-# a WireGuard-style pairing, and every agent is configured with its public half.
+# a WireGuard-style pairing, and every agent carries its public half on the list
+# of gateways it will answer.
 # Generate with:      remotex gen-key
 # Read the public half with:   remotex rxa-pubkey
 #[rxa]
@@ -165,16 +166,19 @@ password = "change-me"
 # machine that made it:
 #
 #   1. This gateway's identity is [rxa].private_key, above. Its public half —
-#      printed by `remotex rxa-pubkey` — goes in `gateway_public_key` in the
-#      Mac's ~/Library/Application Support/remotex-agent/config.toml, or in the
-#      agent's Settings dialog.
+#      printed by `remotex rxa-pubkey` — goes on the Mac's list of gateways it
+#      will answer: one `<rxgp key> <name>` per line in
+#      ~/Library/Application Support/remotex-agent/authorized_gateways, or via
+#      Authorized gateways > Manage... in the agent's Settings dialog.
 #   2. The Mac's public key goes in `agent_public_key` below. Its Settings dialog
 #      shows it with a Copy button, and `remotex-agent --public-key` prints it.
 #
 # One [rxa].private_key serves every rxa target: it is this server's identity,
-# not a per-Mac credential. Each Mac keeps its own key across re-pairings, so
-# pointing one at a different gateway is a one-field edit on the Mac rather than
-# new key material on both ends.
+# not a per-Mac credential. And the Mac's side is a list, the way
+# ~/.ssh/authorized_keys is, so a Mac can be reachable from a second gateway by
+# adding a line there — no new key material, and the first gateway's config stays
+# valid. Several gateways may be authorized; one holds the Mac at a time, and a
+# second is refused until its client takes the session over.
 #
 # The agent runs in the Mac user's login session and needs two one-time grants
 # in System Settings -> Privacy & Security: Screen Recording and Accessibility.
