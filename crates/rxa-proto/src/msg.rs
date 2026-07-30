@@ -1,6 +1,6 @@
 //! The message set, hand-rolled little-endian in the style of `src/vnc.rs`.
 //!
-//! There are eighteen messages between the two enums, so a serialization
+//! There are twenty-four messages between the two enums, so a serialization
 //! dependency would buy nothing that these ~200 lines and their roundtrip tests
 //! don't. The payload of a [`AgentMsg::Tile`] is **already** a WebP stream
 //! stream — the exact bytes the browser decodes — so the gateway relays it
@@ -156,7 +156,9 @@ impl DisplayEntry {
 /// Agent → gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentMsg {
-    /// First message after the handshake.
+    /// The claim was accepted: this connection now holds the agent's session
+    /// slot. First message after [`GatewayMsg::Claim`], and the alternative to
+    /// [`AgentMsg::Busy`].
     Hello {
         version: u16,
         agent_version: String,
@@ -169,6 +171,17 @@ pub enum AgentMsg {
         /// own size rather than at twice it.
         scale: u16,
     },
+    /// The claim was refused: another session holds the agent's slot, and this
+    /// one did not ask to take it over. The other alternative to
+    /// [`AgentMsg::Hello`], and the last message on the connection — the agent
+    /// hangs up immediately afterwards, having disturbed nothing.
+    ///
+    /// Both fields exist to be shown to a person, because a person is the only
+    /// thing that can resolve this: no amount of retrying changes the answer.
+    /// `holder` is the incumbent's address without its ephemeral port, for the
+    /// same reason [`crate::msg`]'s neighbour `state::describe` leaves it out on
+    /// the Mac — it is a different number every reconnect and answers nothing.
+    Busy { holder: String, held_secs: u32 },
     /// A dirty rectangle, already encoded as WebP (see [`mod@format`]).
     Tile {
         format: u8,
@@ -245,6 +258,7 @@ impl AgentMsg {
     const T_ERROR: u8 = 0x06;
     const T_CLIPBOARD: u8 = 0x07;
     const T_DISPLAYS: u8 = 0x08;
+    const T_BUSY: u8 = 0x09;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -262,6 +276,11 @@ impl AgentMsg {
                 put_u16(&mut out, *w);
                 put_u16(&mut out, *h);
                 put_u16(&mut out, *scale);
+            }
+            AgentMsg::Busy { holder, held_secs } => {
+                out.push(Self::T_BUSY);
+                put_str(&mut out, holder);
+                put_u32(&mut out, *held_secs);
             }
             AgentMsg::Tile {
                 format,
@@ -364,6 +383,10 @@ impl AgentMsg {
                 h: r.u16()?,
                 scale: r.u16()?,
             },
+            Self::T_BUSY => AgentMsg::Busy {
+                holder: r.string()?,
+                held_secs: r.u32()?,
+            },
             Self::T_TILE => AgentMsg::Tile {
                 format: r.u8()?,
                 x: r.u16()?,
@@ -431,6 +454,37 @@ impl AgentMsg {
 /// Gateway → agent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GatewayMsg {
+    /// Ask for the agent's single session slot. The **first** message on every
+    /// connection, sent before the agent has said anything: the agent has to
+    /// decide this before it evicts an incumbent or starts a capture, so the
+    /// gateway speaks first and [`AgentMsg::Hello`] is the answer to this rather
+    /// than an unprompted greeting. [`AgentMsg::Busy`] is the other answer.
+    ///
+    /// **The claim is session management, and deliberately not authentication.**
+    /// Authentication already happened, in the handshake, and it decided whether
+    /// this peer may be here at all — the SSH split. So `session` is not a
+    /// credential and proves nothing: any authenticated peer can present any
+    /// value it likes. What it identifies is *which* session is asking, so the
+    /// agent can tell a session reconnecting to itself from a different one
+    /// arriving, and refuse only the second. Keying the slot on the peer's public
+    /// key instead would collapse the two layers back together and make "one
+    /// session" mean "one permitted gateway" — see `docs/roadmap.md`.
+    ///
+    /// A gateway mints one `session` per **process**, because rule one of the
+    /// product model is that a gateway instance has exactly one session slot:
+    /// every dial from one process is therefore the same session by definition,
+    /// which is what makes a link drop, a target switch and a browser takeover
+    /// all reclaim in silence.
+    ///
+    /// `force` is a person's decision, taken in the client after it was told who
+    /// holds the slot. `version` is checked here as well as in `Hello` so a
+    /// mismatched pair is a legible line in the agent's log instead of an
+    /// unknown-message decode error on a connection nobody can explain.
+    Claim {
+        version: u16,
+        session: [u8; 16],
+        force: bool,
+    },
     /// Start the capture stream; the agent replies with a full keyframe.
     Attach,
     /// Repaint everything (from `ClientMsg::Refresh`).
@@ -553,10 +607,21 @@ impl GatewayMsg {
     const T_HOST_SCALE: u8 = 0x0c;
     const T_RESIZE_DISPLAY: u8 = 0x0d;
     const T_DEFAULT_DISPLAY_SIZE: u8 = 0x0e;
+    const T_CLAIM: u8 = 0x0f;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
+            GatewayMsg::Claim {
+                version,
+                session,
+                force,
+            } => {
+                out.push(Self::T_CLAIM);
+                put_u16(&mut out, *version);
+                out.extend_from_slice(session);
+                out.push(u8::from(*force));
+            }
             GatewayMsg::Attach => out.push(Self::T_ATTACH),
             GatewayMsg::Refresh => out.push(Self::T_REFRESH),
             GatewayMsg::PointerMove { x, y } => {
@@ -619,6 +684,11 @@ impl GatewayMsg {
         let (&kind, body) = bytes.split_first().ok_or(MsgError::Empty)?;
         let mut r = Reader::new(body);
         let msg = match kind {
+            Self::T_CLAIM => GatewayMsg::Claim {
+                version: r.u16()?,
+                session: r.array::<16>()?,
+                force: r.bool()?,
+            },
             Self::T_ATTACH => GatewayMsg::Attach,
             Self::T_REFRESH => GatewayMsg::Refresh,
             Self::T_POINTER_MOVE => GatewayMsg::PointerMove {
@@ -891,11 +961,47 @@ mod tests {
                 active: 0,
                 displays: Vec::new(),
             },
+            AgentMsg::Busy {
+                holder: "192.168.1.5".to_owned(),
+                held_secs: 754,
+            },
+            // A session claimed a moment ago, and one held since before the epoch
+            // of anybody's patience. Both are shown to a person, so neither bound
+            // is the agent's to police.
+            AgentMsg::Busy {
+                holder: "fdb8:d92a:f690:3d7f::1".to_owned(),
+                held_secs: 0,
+            },
+            AgentMsg::Busy {
+                holder: String::new(),
+                held_secs: u32::MAX,
+            },
         ]
     }
 
     fn gateway_variants() -> Vec<GatewayMsg> {
         vec![
+            GatewayMsg::Claim {
+                version: crate::VERSION,
+                session: [
+                    0x9f, 0x1c, 0x00, 0xff, 0x42, 0x42, 0x42, 0x42, 0x01, 0x02, 0x03, 0x04, 0x05,
+                    0x06, 0x07, 0x08,
+                ],
+                force: false,
+            },
+            // A takeover, and an all-zero id. The id is not a credential and the
+            // agent compares it rather than judging it, so every value travels —
+            // including the one a gateway that forgot to mint one would send.
+            GatewayMsg::Claim {
+                version: crate::VERSION,
+                session: [0xab; 16],
+                force: true,
+            },
+            GatewayMsg::Claim {
+                version: 0,
+                session: [0; 16],
+                force: false,
+            },
             GatewayMsg::Attach,
             GatewayMsg::Refresh,
             GatewayMsg::PointerMove { x: 0, y: 0 },
@@ -987,12 +1093,12 @@ mod tests {
         let mut agent: Vec<u8> = agent_variants().iter().map(|m| m.encode()[0]).collect();
         agent.sort_unstable();
         agent.dedup();
-        assert_eq!(agent.len(), 8, "eight agent message types");
+        assert_eq!(agent.len(), 9, "nine agent message types");
 
         let mut gateway: Vec<u8> = gateway_variants().iter().map(|m| m.encode()[0]).collect();
         gateway.sort_unstable();
         gateway.dedup();
-        assert_eq!(gateway.len(), 14, "fourteen gateway message types");
+        assert_eq!(gateway.len(), 15, "fifteen gateway message types");
     }
 
     // The count on the wire is the peer's claim about what follows. A body that
@@ -1016,6 +1122,35 @@ mod tests {
         // Claim four more entries than the body carries.
         bytes[5..7].copy_from_slice(&5u16.to_le_bytes());
         assert_eq!(AgentMsg::decode(&bytes), Err(MsgError::Truncated));
+    }
+
+    // The claim carries the only fixed-width byte array on this wire, and it is
+    // what the agent compares to decide whether to evict somebody. A short body
+    // must be refused rather than compared against a zero-padded id, which would
+    // read as "the same session" to every other truncated claim.
+    #[test]
+    fn a_claim_missing_part_of_its_session_id_is_refused() {
+        let whole = (GatewayMsg::Claim {
+            version: crate::VERSION,
+            session: [0x5a; 16],
+            force: false,
+        })
+        .encode();
+        // Type byte, two version bytes, sixteen id bytes, one force byte.
+        assert_eq!(whole.len(), 20, "the claim's layout is a contract");
+
+        for short in 1..whole.len() {
+            assert_eq!(
+                GatewayMsg::decode(&whole[..short]),
+                Err(MsgError::Truncated),
+                "a {short}-byte claim must not decode"
+            );
+        }
+        // And a trailing byte is a peer that does not agree with us about the
+        // layout, not a claim to act on.
+        let mut long = whole.clone();
+        long.push(0);
+        assert_eq!(GatewayMsg::decode(&long), Err(MsgError::Trailing(1)));
     }
 
     #[test]
