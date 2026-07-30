@@ -158,6 +158,17 @@ pub fn public_text_of(role: Role, private_text: &str) -> Result<String, KeyError
     Ok(encode(role.public_prefix(), &public_of(&private)))
 }
 
+/// A public key already in hand, in the form a config file or an authorized list
+/// holds it.
+///
+/// Infallible, unlike [`public_text_of`]: there is nothing to parse. It exists for
+/// the key the *peer* presented — the agent learns a dialing gateway's key from
+/// the handshake now, and a key that is not on its list has to be reported in the
+/// form someone can paste straight into that list.
+pub fn public_text(role: Role, key: &[u8; KEY_LEN]) -> String {
+    encode(role.public_prefix(), key)
+}
+
 /// Parse `role`'s private key.
 pub fn parse_private(role: Role, text: &str) -> Result<[u8; KEY_LEN], KeyError> {
     parse_with(role.private_prefix(), private_what(role), text)

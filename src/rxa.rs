@@ -1020,9 +1020,11 @@ mod tests {
         gateway_public: [u8; 32],
     ) -> GatewayMsg {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let transport = rxa_proto::noise::respond(&mut stream, &agent_private, &gateway_public)
-            .await
-            .unwrap();
+        let (transport, ()) = rxa_proto::noise::respond(&mut stream, &agent_private, |k| {
+            (*k == gateway_public).then_some(())
+        })
+        .await
+        .unwrap();
         let (read_half, write_half) = stream.into_split();
         let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
         // The gateway speaks first now, asking for this agent's session slot.
@@ -1134,9 +1136,11 @@ mod tests {
 
         let agent = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let transport = rxa_proto::noise::respond(&mut stream, &agent_private, &gateway_public)
-                .await
-                .unwrap();
+            let (transport, ()) = rxa_proto::noise::respond(&mut stream, &agent_private, |k| {
+                (*k == gateway_public).then_some(())
+            })
+            .await
+            .unwrap();
             let (read_half, write_half) = stream.into_split();
             let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
             match GatewayMsg::decode(&reader.recv().await.unwrap()).unwrap() {

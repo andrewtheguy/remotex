@@ -203,9 +203,11 @@ async fn spawn_busy_agent(
             let claims_tx = claims_tx.clone();
             tokio::spawn(async move {
                 let served = async {
-                    let transport =
-                        rxa_proto::noise::respond(&mut stream, &keys.private, &keys.gateway_public)
-                            .await?;
+                    let (transport, ()) =
+                        rxa_proto::noise::respond(&mut stream, &keys.private, |k| {
+                            (*k == keys.gateway_public).then_some(())
+                        })
+                        .await?;
                     let (read_half, write_half) = stream.into_split();
                     let (mut reader, mut writer) =
                         rxa_proto::frame::split(read_half, write_half, transport);
@@ -239,8 +241,10 @@ async fn serve_fake_agent(
     input_tx: mpsc::UnboundedSender<GatewayMsg>,
     claims_tx: mpsc::UnboundedSender<GatewayMsg>,
 ) -> anyhow::Result<()> {
-    let transport =
-        rxa_proto::noise::respond(&mut stream, &keys.private, &keys.gateway_public).await?;
+    let (transport, ()) = rxa_proto::noise::respond(&mut stream, &keys.private, |k| {
+        (*k == keys.gateway_public).then_some(())
+    })
+    .await?;
     let (read_half, write_half) = stream.into_split();
     let (mut reader, mut writer) = rxa_proto::frame::split(read_half, write_half, transport);
 
