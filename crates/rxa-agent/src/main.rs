@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use file_rotate::{
     ContentLimit, FileRotate, compression::Compression, suffix::AppendCount,
 };
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use tokio::time::timeout;
 
 /// How often the main thread re-reads the system cursor when `--no-menu` has
@@ -667,8 +667,6 @@ fn log_file() -> Option<(FileRotate<AppendCount>, PathBuf)> {
 /// connect-and-hello 10 seconds, so nothing legitimate is near this.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Accept gateway connections. Handshakes run concurrently, and only an
-/// authenticated peer evicts the current single session.
 /// This Mac's identity and the one gateway it answers.
 ///
 /// `gateway_public` is `None` while the agent is unpaired — a first launch, or a
@@ -681,6 +679,17 @@ struct Keys {
     gateway_public: Option<[u8; 32]>,
 }
 
+/// Accept gateway connections. Handshakes and claims run concurrently, and only
+/// a *granted claim* moves the single session slot — authentication alone earns a
+/// connection the right to ask for it (see [`session::Authenticated`] and
+/// [`state::decide`]).
+///
+/// The two layers are deliberately separate. Whether a peer may be here at all is
+/// settled by the keys, in the handshake; whose turn it is to be here is settled
+/// by the session id it claims with. Collapsing them — the shape this loop had
+/// when it evicted on a completed handshake — makes "one active session" and "one
+/// permitted gateway" the same sentence, which they are not (see
+/// `docs/roadmap.md`).
 async fn serve(
     listener: std::net::TcpListener,
     keys: Keys,
@@ -691,26 +700,65 @@ async fn serve(
     let listener = tokio::net::TcpListener::from_std(listener)
         .map_err(|e| anyhow::anyhow!("cannot drive the listening socket: {e}"))?;
 
-    // The single active session, so a new gateway evicts the previous one.
+    // The task serving whoever holds the slot. Who that *is* lives in `state`,
+    // which the menu bar reads too — one source of truth for the session id, the
+    // address and the elapsed time, all three of which the decision below needs.
     let mut current: Option<tokio::task::JoinHandle<()>> = None;
-    // Connections that have finished a handshake, waiting to take the slot.
-    // Bounded, and generously: it holds only authenticated peers, and the loop
-    // below drains it immediately.
-    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<(SocketAddr, session::Authenticated)>(4);
+    // Connections that have finished a handshake and stated their claim, waiting
+    // for that claim to be judged. Bounded, and generously: it holds only
+    // authenticated peers, and the loop below drains it immediately.
+    let (ready_tx, mut ready_rx) =
+        tokio::sync::mpsc::channel::<(SocketAddr, session::Authenticated, session::Claim)>(4);
 
     loop {
         tokio::select! {
-            // A connection that proved itself. *Now* the slot moves — see the
-            // module docs on why this is not done at accept.
-            Some((peer, authenticated)) = ready_rx.recv() => {
-                info!("agent: gateway connected from {peer}");
+            // A connection that proved itself and asked for the slot. *Now* the
+            // slot may move — see the module docs on why this is not done at
+            // accept, and not at the handshake either.
+            Some((peer, authenticated, claim)) = ready_rx.recv() => {
+                let now = Instant::now();
+                let held = state.current();
+                match state::decide(held.as_ref().map(|c| c.session), claim.session, claim.force) {
+                    state::Decision::Refuse => {
+                        // Unwrapped safely: `Refuse` is only reachable with a
+                        // holder, and it is the same read `decide` just judged.
+                        let (holder, held_secs) = held
+                            .as_ref()
+                            .expect("a refusal has an incumbent to name")
+                            .holder(now);
+                        info!(
+                            "agent: refusing {peer} — {holder} has held the session for \
+                             {held_secs}s (the client can take over)"
+                        );
+                        // Off the accept loop, like the handshake: this writes to
+                        // a peer that may be slow, and the session in the slot is
+                        // not waiting on it.
+                        tokio::spawn(async move {
+                            if let Err(e) = authenticated.refuse(holder, held_secs).await {
+                                debug!("agent: could not tell {peer} the slot is taken: {e:#}");
+                            }
+                        });
+                        continue;
+                    }
+                    state::Decision::Take => info!("agent: gateway connected from {peer}"),
+                    // Not a second client, so not an eviction worth alarming
+                    // anyone about: this is a link that dropped, a target
+                    // switched, or a browser taken over on the gateway.
+                    state::Decision::Reclaim => info!(
+                        "agent: gateway connected from {peer} — the same session reconnecting"
+                    ),
+                    state::Decision::TakeOver => info!(
+                        "agent: gateway connected from {peer} — taking the session over, \
+                         as its client asked"
+                    ),
+                }
+
                 // Recorded before the eviction, so the menu bar never blinks
                 // through a "not connected" state during a reconnect. The id is
                 // what keeps the evicted session from clearing this one on its
                 // way out.
-                let id = state.connected(peer, Instant::now());
+                let id = state.connected(claim.session, peer, now);
                 if let Some(previous) = current.take() {
-                    info!("agent: evicting the previous gateway connection");
                     previous.abort();
                 }
 
@@ -747,17 +795,24 @@ async fn serve(
                 // Off the accept path, and on a clock. Handshaking inline would
                 // let one peer that connects and then says nothing block every
                 // later connection — including the real gateway's — for as long
-                // as it cared to hold the socket open.
+                // as it cared to hold the socket open. The claim is read under
+                // the same deadline, and for the same reason: a peer that
+                // authenticates and then goes quiet must not hold anything up
+                // either.
                 let ready_tx = ready_tx.clone();
                 tokio::spawn(async move {
-                    let handshake =
-                        session::handshake(stream, keys.private, gateway_public);
-                    match timeout(HANDSHAKE_TIMEOUT, handshake).await {
-                        Ok(Ok(authenticated)) => {
+                    let opening = async {
+                        let mut authenticated =
+                            session::handshake(stream, keys.private, gateway_public).await?;
+                        let claim = authenticated.claim().await?;
+                        Ok::<_, anyhow::Error>((authenticated, claim))
+                    };
+                    match timeout(HANDSHAKE_TIMEOUT, opening).await {
+                        Ok(Ok((authenticated, claim))) => {
                             // A full queue means four authenticated peers are
                             // already waiting, which one gateway at a time
                             // cannot produce. Dropping this one is right.
-                            if ready_tx.try_send((peer, authenticated)).is_err() {
+                            if ready_tx.try_send((peer, authenticated, claim)).is_err() {
                                 warn!("agent: dropping {peer}, too many pending sessions");
                             }
                         }
@@ -766,7 +821,7 @@ async fn serve(
                         // scanner, or a gateway on another protocol version.
                         Ok(Err(e)) => warn!("agent: refusing {peer}: {e:#}"),
                         Err(_) => warn!(
-                            "agent: refusing {peer}: no handshake within {}s",
+                            "agent: refusing {peer}: no handshake and claim within {}s",
                             HANDSHAKE_TIMEOUT.as_secs()
                         ),
                     }
