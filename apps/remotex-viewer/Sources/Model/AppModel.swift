@@ -114,6 +114,11 @@ final class AppModel: GatewaySessionSink {
     /// even if it repeats the number.
     @ObservationIgnored
     private var lastHostScale: UInt16?
+    /// This screen's density in hundredths, for the Display menu to show beside
+    /// the remote's. Nothing about how the desktop is presented reads it — that
+    /// comes from `session.remoteScale` alone, see `RemoteGeometry`. Observed
+    /// where `lastHostScale` is not, because a menu has to redraw when it moves.
+    private(set) var hostScale: UInt16 = 100
     /// Deliberately outside Observation. Tiles arrive dozens of times a second;
     /// routing them through `@Observable` would invalidate the view hierarchy on
     /// every strip.
@@ -670,9 +675,10 @@ final class AppModel: GatewaySessionSink {
     /// The density of the screen this window is on, reported to the remote.
     ///
     /// Called on connect and whenever the window changes screen. Deduped because
-    /// acting on it is a WindowServer reconfigure on the Mac at the other end:
-    /// re-sending a value it already matches would relay that desktop's windows
-    /// for nothing. Unlike the viewport there is no debounce — a window changes
+    /// acting on it is expensive at the other end — a WindowServer reconfigure on
+    /// an `rxa` Mac, a full reactivation on an RDP host that allows resize — so
+    /// re-sending a value it already matches costs a relayed desktop or a repaint
+    /// for nothing. Unlike the viewport there is no debounce: a window changes
     /// screen once, discretely, where a drag-resize reports every frame.
     func reportHostScale() {
         sendHostScale()
@@ -685,6 +691,11 @@ final class AppModel: GatewaySessionSink {
         let read = hostScaleReader?() ?? 1
         let usable = read.isFinite && read > 0 ? read : 1
         let scale = UInt16(clamping: Int((usable * 100).rounded()))
+        // Recorded before either guard below, and whether or not it is sent: the
+        // Display menu shows this number, and a density this Mac's screen has that
+        // the remote does not is exactly what someone reading it is looking for.
+        // Observed, unlike `lastHostScale`, so the menu redraws when it moves.
+        hostScale = scale
         guard session.screen == .desktop, scale != lastHostScale else {
             return
         }

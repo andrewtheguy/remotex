@@ -87,6 +87,64 @@ impl PendingClipboardRead {
     }
 }
 
+// A density the remote has been asked for and has not answered.
+//
+// Windows applies a monitor layout only once the session it is starting has
+// settled. One sent seconds after connect is discarded in silence — *even after*
+// the Display Control channel has its capabilities, which is as close to a
+// readiness signal as this protocol offers. Nothing in the protocol names what is
+// still missing, and nothing acknowledges a layout either, so the only way to tell
+// a refusal from a delay is that the reactivation never comes.
+//
+// Hence a schedule rather than a single attempt. Spread over seconds because what
+// is being waited out is a desktop finishing its logon, not a channel opening; the
+// total is bounded because a server that will never honour this — anything not
+// Windows, most likely — must not be asked forever.
+const DENSITY_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(750),
+    Duration::from_millis(1500),
+    Duration::from_secs(3),
+    Duration::from_secs(6),
+];
+
+struct PendingDensity {
+    density: Density,
+    attempts: usize,
+}
+
+impl PendingDensity {
+    fn new(density: Density) -> Self {
+        Self { density, attempts: 0 }
+    }
+
+    fn wait_again(&mut self) -> Option<Duration> {
+        let delay = DENSITY_RETRY_DELAYS.get(self.attempts).copied();
+        if delay.is_some() {
+            self.attempts += 1;
+        }
+        delay
+    }
+}
+
+/// What came of asking for a layout.
+///
+/// Four outcomes and not a bool, because two of them are worth another attempt and
+/// two are not, and a caller that cannot tell them apart either gives up on a
+/// channel that was merely still opening or retries a layout that will be refused
+/// identically every time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    /// Written to the channel. Not a confirmation: only a reactivation is that, so
+    /// this is still worth repeating if none arrives.
+    Sent,
+    /// The desktop already has this layout, so there was nothing to ask.
+    Redundant,
+    /// The channel cannot carry it yet. Worth asking again unchanged.
+    NotReady,
+    /// The layout itself was refused, so asking again would fail the same way.
+    Refused,
+}
+
 /// Connect to the RDP host, then drive the session until it ends.
 ///
 /// `input_rx` carries browser input; `frame_tx` carries screen updates back.
@@ -142,11 +200,16 @@ async fn session(
 
     let desktop = connection_result.desktop_size;
     info!("rdp: connected, desktop {}x{}", desktop.width, desktop.height);
+    // 1x, always: the density this session ends up at is the attached client's to
+    // state, and it has not spoken yet — the handshake above happens before
+    // `ServerMsg::Connected` reaches it. A Retina client is therefore one
+    // reactivation away from where it wants to be, which is the price of learning
+    // the density from whoever attaches rather than from the config file.
     if sink
         .msg(ServerMsg::Resize {
             w: desktop.width,
             h: desktop.height,
-            scale: UNSCALED,
+            scale: Density::One.scale(),
         })
         .await
         .is_err()
@@ -337,9 +400,128 @@ fn register_channels(
 struct Flags {
     resize: bool,
     clipboard: bool,
-    /// The target's configured `width`/`height` — the size this session asked the
-    /// server for at connect, and so what [`ClientMsg::DefaultSize`] means here.
+    /// The target's configured `width`/`height`, in *points*: the size this
+    /// session asked the server for at connect, and so what
+    /// [`ClientMsg::DefaultSize`] means here. Points rather than pixels because
+    /// the density can move underneath it — see [`Density::pixels`].
     default_size: (u16, u16),
+}
+
+/// How dense a desktop this session has asked the RDP server to render.
+///
+/// Two steps, because that is what the far end can usefully be told and what the
+/// Mac agent already does with the very same message (`Reconfigure::Density` in
+/// crates/rxa-agent/src/session.rs): a display is 1x or 2x, and the midpoint
+/// decides. Two steps also keep the `scale` on [`ServerMsg::Resize`] integral, so
+/// the pixels a client asks for and the points it presents them at are exact
+/// inverses rather than a rounding of each other.
+///
+/// This is a density we *declare*, never one we read back: RDP has no PDU that
+/// reports the scale factor a server settled on. Contrast the agent, which
+/// refuses to believe its own display and measures the framebuffer instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Density {
+    One,
+    Two,
+}
+
+impl Density {
+    /// What a [`ClientMsg::HostScale`] means here.
+    ///
+    /// Through `scale_ratio` rather than dividing by hand: that is the guard which
+    /// turns a value no screen could have into 1x, and the 1.5 midpoint is the one
+    /// the agent applies to this same message.
+    fn from_host(scale: u16) -> Self {
+        if rxa_proto::msg::scale_ratio(scale) >= 1.5 {
+            Self::Two
+        } else {
+            Self::One
+        }
+    }
+
+    /// Percent, for the monitor layout's `DesktopScaleFactor`.
+    ///
+    /// Both values sit inside MS-RDPBCGR's legal 100 to 500, which is load-bearing
+    /// rather than incidental: a server MUST ignore *both* scale factors when
+    /// either is out of range, so an out-of-spec density would quietly cost the
+    /// whole feature rather than part of it. Nothing in FreeRDP's core enforces
+    /// that either — only its command line does — so the clamp has to live at
+    /// whichever end invents the number.
+    fn percent(self) -> u32 {
+        match self {
+            Self::One => 100,
+            Self::Two => 200,
+        }
+    }
+
+    /// The `scale` on [`ServerMsg::Resize`]: how many framebuffer pixels the
+    /// remote draws per point of its own desktop.
+    fn scale(self) -> f32 {
+        match self {
+            Self::One => UNSCALED,
+            Self::Two => 2.0,
+        }
+    }
+
+    /// The pixels `points` covers at this density — the answer to
+    /// [`ClientMsg::DefaultSize`], which is the one size here that is configured
+    /// rather than measured, and so the one that has to be converted.
+    fn pixels(self, points: (u16, u16)) -> (u32, u32) {
+        let px = |points: u16| u32::from(points) * self.percent() / 100;
+        (px(points.0), px(points.1))
+    }
+
+    /// The same desktop re-rendered at `self` instead of `from`.
+    ///
+    /// A density change is a resize, on this protocol: the point of it is that the
+    /// desktop keeps its size in *points* and changes its size in pixels, which is
+    /// what leaves the remote the same size on screen and merely sharper.
+    fn rescale(self, from: Self, desktop: DesktopSize) -> (u32, u32) {
+        let px = |px: u16| u32::from(px) * self.percent() / from.percent();
+        (px(desktop.width), px(desktop.height))
+    }
+}
+
+/// A desktop the server is being asked for: the size in pixels, and the density
+/// to declare with it.
+///
+/// The two travel together because sending one without the other is a bug in each
+/// direction. A size with no density tells the server to ignore the scale factor,
+/// which on a live 2x session means dropping back to 1x UI in a 2x framebuffer;
+/// a density with no size leaves the desktop the same number of pixels and merely
+/// shrinks everything drawn in them.
+///
+/// `u32` because that is what [`MonitorLayoutEntry::adjust_display_size`] and
+/// `encode_resize` work in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    w: u32,
+    h: u32,
+    density: Density,
+}
+
+impl Layout {
+    /// The desktop as it currently stands, at the density it was last asked for.
+    fn current(desktop: DesktopSize, density: Density) -> Self {
+        Self {
+            w: u32::from(desktop.width),
+            h: u32::from(desktop.height),
+            density,
+        }
+    }
+
+    /// The same request at the size the protocol would actually accept: an even
+    /// width, and 200 to 8192 per axis.
+    fn adjusted(self) -> Self {
+        let (w, h) = MonitorLayoutEntry::adjust_display_size(self.w, self.h);
+        Self { w, h, ..self }
+    }
+}
+
+impl std::fmt::Display for Layout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{} at {}x", self.w, self.h, self.density.percent() / 100)
+    }
 }
 
 async fn active_loop(
@@ -393,6 +575,25 @@ async fn active_loop(
     let mut pending_clipboard_read: Option<PendingClipboardRead> = None;
     let mut clipboard_retry_at: Option<Instant> = None;
 
+    // The density the desktop is *known* to be at — known, because this only moves
+    // when a reactivation proves it.
+    //
+    // Believing a write instead was a bug with two faces. The desktop stayed 1x
+    // while this end declared 2x, so every later resize went out with a density the
+    // server had thrown away, and — the one a person actually notices — a reattach
+    // announced `scale` 2.0 for a 1x framebuffer, which a client presents at half
+    // size. Nothing acknowledges a layout on this protocol, so the absence of a
+    // reactivation is the only evidence there is, and it has to be the evidence
+    // used.
+    let mut applied = Density::One;
+    // The request in flight, and when to repeat it. A client states its density
+    // *once per attach* and then dedupes it (`sendHostScale` in
+    // frontend/src/useRemoteDesktop.ts, and the viewer's own in AppModel.swift), so
+    // nothing will ask again from the other end: every attempt after the first has
+    // to come from here. See [`PendingDensity`] for why more than one is needed.
+    let mut pending_density: Option<PendingDensity> = None;
+    let mut density_retry_at: Option<Instant> = None;
+
     loop {
         // The clipboard sender lives inside `active_stage`, so it is only
         // closed when the target did not opt in and the backend was never
@@ -408,6 +609,12 @@ async fn active_loop(
         };
         let clipboard_retry = async {
             match clipboard_retry_at {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        let density_retry = async {
+            match density_retry_at {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -439,7 +646,7 @@ async fn active_loop(
                         .msg(ServerMsg::Resize {
                             w: desktop.width,
                             h: desktop.height,
-                            scale: UNSCALED,
+                            scale: applied.scale(),
                         })
                         .await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
@@ -457,24 +664,60 @@ async fn active_loop(
                     .await?;
                     continue;
                 }
+                // The density of the screen this client's window is on. Ignored
+                // outright without `resize`, whose Display Control channel is the
+                // only way to restate a density on a live session.
+                //
+                // Recorded and scheduled rather than asked for here, so the retry
+                // branch is the single place a layout is requested from — one
+                // attempt and five look the same to this arm.
+                if let ClientMsg::HostScale { scale } = input {
+                    if resize {
+                        let want = Density::from_host(scale);
+                        if want == applied {
+                            // Already there, or moved back before the remote ever
+                            // caught up: either way nothing is left to ask for.
+                            pending_density = None;
+                            density_retry_at = None;
+                        } else if pending_density.as_ref().map(|p| p.density) != Some(want) {
+                            // A fresh schedule, because this is a different request
+                            // and not another go at the last one. The deadline is
+                            // now: the first attempt belongs in the retry branch
+                            // with the rest.
+                            pending_density = Some(PendingDensity::new(want));
+                            density_retry_at = Some(Instant::now());
+                        }
+                    }
+                    continue;
+                }
                 // A viewport report is a client-initiated resize. Unlike VNC's
                 // automatic resize, the browser only sends this when the user
                 // asks for it (the menu's "Resize to window") — reactivation is
                 // heavier than VNC's SetDesktopSize. Ignored unless negotiated.
                 //
+                // The size arrives in remote *pixels*, already multiplied by the
+                // `scale` this end announced, so it needs no conversion — but it
+                // does need the current density attached to it, or the request
+                // would tell the server to forget one it is already applying.
+                //
                 // `DefaultSize` is the same request with the size supplied from
-                // here: the target's configured `width`/`height`, which is already
-                // what this session connected at — so it is a no-op unless
-                // something moved the desktop off it. See
-                // [`ClientMsg::DefaultSize`].
+                // here: the target's configured `width`/`height`, read as points,
+                // which is what this session connected at while it was still 1x.
+                // See [`ClientMsg::DefaultSize`].
                 let wanted_size = match input {
-                    ClientMsg::Viewport { w, h } => Some((w, h)),
-                    ClientMsg::DefaultSize => Some(default_size),
+                    ClientMsg::Viewport { w, h } => Some((u32::from(w), u32::from(h))),
+                    ClientMsg::DefaultSize => Some(applied.pixels(default_size)),
                     _ => None,
                 };
                 if let Some((w, h)) = wanted_size {
                     if resize {
-                        resize_desktop(&mut active_stage, &mut framed, desktop, w, h).await?;
+                        request_layout(
+                            &mut active_stage,
+                            &mut framed,
+                            Layout::current(desktop, applied),
+                            Layout { w, h, density: applied },
+                        )
+                        .await?;
                     }
                     continue;
                 }
@@ -664,6 +907,44 @@ async fn active_loop(
                 }
                 continue;
             }
+            _ = density_retry => {
+                density_retry_at = None;
+                let Some(pending) = pending_density.as_mut() else {
+                    continue; // a reactivation confirmed it first
+                };
+                let density = pending.density;
+                let (w, h) = density.rescale(applied, desktop);
+                let asked = request_layout(
+                    &mut active_stage,
+                    &mut framed,
+                    Layout::current(desktop, applied),
+                    Layout { w, h, density },
+                )
+                .await?;
+                match asked {
+                    // Written, or not yet writable — either way the desktop has not
+                    // moved, so ask again until it does or the schedule runs out.
+                    // Dropping the request is all that giving up takes: `applied`
+                    // was never advanced, so the announced scale still describes
+                    // the desktop that is actually there.
+                    Asked::Sent | Asked::NotReady => match pending.wait_again() {
+                        Some(delay) => density_retry_at = Some(Instant::now() + delay),
+                        None => {
+                            warn!(
+                                "rdp: the remote never applied {}; leaving the desktop at {}",
+                                Layout { w, h, density },
+                                Layout::current(desktop, applied),
+                            );
+                            pending_density = None;
+                        }
+                    },
+                    // Nothing more to try: a refused layout fails identically on
+                    // every attempt, and a redundant one means the desktop already
+                    // agrees.
+                    Asked::Redundant | Asked::Refused => pending_density = None,
+                }
+                continue;
+            }
         };
 
         for out in outputs {
@@ -696,6 +977,17 @@ async fn active_loop(
                     // The server accepted a resolution change: run the
                     // Deactivation-Reactivation Sequence to learn the new size,
                     // rebuild the framebuffer, and tell the browser to resize.
+                    //
+                    // This is also the only confirmation a density ever gets. The
+                    // server acts on the most recent layout it was sent, so a
+                    // reactivation while one is in flight is that layout taking
+                    // effect — whether or not a viewport request arrived in the
+                    // meantime, since a later request would have carried this
+                    // density too.
+                    if let Some(pending) = pending_density.take() {
+                        applied = pending.density;
+                        density_retry_at = None;
+                    }
                     desktop = reactivate(&mut active_stage, &mut framed, &activation_factory)
                         .await?;
                     image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
@@ -708,7 +1000,7 @@ async fn active_loop(
                         .msg(ServerMsg::Resize {
                             w: desktop.width,
                             h: desktop.height,
-                            scale: UNSCALED,
+                            scale: applied.scale(),
                         })
                         .await?;
                 }
@@ -721,47 +1013,92 @@ async fn active_loop(
     Ok(())
 }
 
-/// Request a client-initiated resolution change over the Display Control
-/// channel. Sizes are adjusted to the protocol's constraints (even width, 200
-/// to 8192 per axis). A no-op if the channel isn't connected yet (the server
-/// hasn't sent its capabilities); the browser can simply ask again. The server
-/// answers by deactivating the session — see the `DeactivateAll` arm.
+/// Ask the server for a different desktop — a size, a density, or both — over the
+/// Display Control channel. Sizes are adjusted to the protocol's constraints (even
+/// width, 200 to 8192 per axis). The server answers by deactivating the session —
+/// see the `DeactivateAll` arm.
 ///
-/// Also a no-op when the desktop is already that size, and that guard earns its
+/// Returns which of the four [`Asked`] outcomes happened, rather than whether
+/// anything went out, because the density path has to retry and only two of them
+/// are worth retrying. Note that even [`Asked::Sent`] is not a confirmation: this
+/// protocol acknowledges nothing, so a layout the server silently discards looks
+/// from here exactly like one it is about to act on.
+///
+/// The first thing checked is whether the channel has had the server's
+/// capabilities, because `encode_resize` does *not* check: it asks only whether
+/// the channel has an id, and a layout written between the channel opening and its
+/// caps arriving is discarded by the server with no reply — IronRDP's own
+/// [`DisplayControlClient::new`] says so ("attempting to send messages before the
+/// capabilities are received will result in an error or a silent failure"). That
+/// window is under a second, which is why a human clicking "Resize to window"
+/// never found it and a density sent automatically on connect finds it every time.
+///
+/// Also a no-op when the desktop is already that layout, and that guard earns its
 /// place here rather than at the callers: this is the one engine where asking for
-/// the size you already have is *expensive*, since the server answers any request
-/// with a full Deactivation-Reactivation. VNC and `rxa` both drop an unchanged
-/// request themselves, so this is what makes the two client requests idempotent
-/// across all three — which matters most for the automatic
-/// [`ClientMsg::DefaultSize`] a mobile client sends on every reattach.
+/// what you already have is *expensive*, since the server answers any request with
+/// a full Deactivation-Reactivation. VNC and `rxa` both drop an unchanged request
+/// themselves, so this is what makes the client requests idempotent across all
+/// three — which matters most for the automatic [`ClientMsg::DefaultSize`] a
+/// mobile client sends on every reattach.
 ///
-/// Compared after `adjust_display_size`, because that is the size that would
+/// Compared after `adjust_display_size`, because that is the layout that would
 /// actually be asked for: an odd width lands on the even one beside it, and
-/// comparing before the adjustment would call that a change when it is not.
-async fn resize_desktop(
+/// comparing before the adjustment would call that a change when it is not. The
+/// density is part of that comparison, so a request that only changes the density
+/// — which is what a client dragged between two screens of the same size sends —
+/// is not mistaken for a repeat.
+///
+/// The density goes out as `DesktopScaleFactor`. IronRDP pins the companion
+/// `DeviceScaleFactor` to 100% whenever a desktop scale factor is given, which is
+/// also what FreeRDP's SDL clients send for a 2x display.
+async fn request_layout(
     active_stage: &mut ActiveStage,
     framed: &mut UpgradedFramed,
-    current: DesktopSize,
-    w: u16,
-    h: u16,
-) -> anyhow::Result<()> {
-    let (w, h) = MonitorLayoutEntry::adjust_display_size(u32::from(w), u32::from(h));
-    if (w, h) == (u32::from(current.width), u32::from(current.height)) {
-        debug!("rdp: the desktop is already {w}x{h}; not asking for a reactivation");
-        return Ok(());
+    current: Layout,
+    wanted: Layout,
+) -> anyhow::Result<Asked> {
+    let wanted = wanted.adjusted();
+    if !display_control_ready(active_stage) {
+        debug!("rdp: {wanted} requested before the Display Control channel has its capabilities");
+        return Ok(Asked::NotReady);
     }
-    match active_stage.encode_resize(w, h, None, None) {
+    if wanted == current {
+        debug!("rdp: the desktop is already {wanted}; not asking for a reactivation");
+        return Ok(Asked::Redundant);
+    }
+    match active_stage.encode_resize(wanted.w, wanted.h, Some(wanted.density.percent()), None) {
         Some(Ok(frame)) => {
-            info!("rdp: requesting resize to {w}x{h}");
+            info!("rdp: requesting {wanted}");
             framed
                 .write_all(&frame)
                 .await
                 .map_err(|e| anyhow::anyhow!("write resize: {e}"))?;
+            Ok(Asked::Sent)
         }
-        Some(Err(e)) => warn!("rdp: could not encode resize: {e}"),
-        None => debug!("rdp: resize requested before the Display Control channel is ready"),
+        // The layout, not the channel: encoding the same one again would fail the
+        // same way, so this is where a retry has to stop.
+        Some(Err(e)) => {
+            warn!("rdp: could not encode {wanted}: {e}");
+            Ok(Asked::Refused)
+        }
+        None => {
+            debug!("rdp: {wanted} requested before the Display Control channel is open");
+            Ok(Asked::NotReady)
+        }
     }
-    Ok(())
+}
+
+/// Whether the Display Control channel has had the server's capabilities, and so
+/// whether a monitor layout written to it now would be read.
+///
+/// The channel tracks this itself and says so through `ready`, but nothing on the
+/// path from `encode_resize` down consults it — see [`request_layout`], which is
+/// the only caller and the reason this exists.
+fn display_control_ready(active_stage: &mut ActiveStage) -> bool {
+    active_stage
+        .get_dvc::<DisplayControlClient>()
+        .and_then(|dvc| dvc.channel_processor_downcast_ref::<DisplayControlClient>())
+        .is_some_and(DisplayControlClient::ready)
 }
 
 /// Tell the remote what our clipboard now holds (MS-RDPECLIP Format List).
@@ -966,9 +1303,12 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
                 Vec::new()
             }
         },
-        // Handled by the active loop (client-initiated resize) before
-        // translation, so these arms are unreachable in practice.
-        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize => Vec::new(),
+        // Handled by the active loop (client-initiated resize, and the density
+        // that is a resize here) before translation, so these arms are
+        // unreachable in practice.
+        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize | ClientMsg::HostScale { .. } => {
+            Vec::new()
+        }
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Handled by the active loop (MS-RDPECLIP, a static virtual channel)
@@ -988,11 +1328,6 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
         // So this engine never sends a display list, no client offers the
         // picker, and anything arriving here is a client that invented one.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
-        // Nothing to act on: an RDP server draws at one density and has no
-        // notion of a backing scale to change. Clients send this unconditionally
-        // rather than asking what the engine is, so it is ignored here rather
-        // than treated as a client error.
-        ClientMsg::HostScale { .. } => Vec::new(),
     }
 }
 
@@ -1390,5 +1725,189 @@ mod tests {
         }
         assert_eq!(read.retry_after_failure(), None);
         assert_eq!(read.retry_after_failure(), None);
+    }
+
+    /// The midpoint, and the two ends `scale_ratio` refuses.
+    ///
+    /// 150 is the boundary the Mac agent uses on this same message, so the two
+    /// engines answer a 1.5x screen the same way; the out-of-range pair matter
+    /// because a client computes the number from `devicePixelRatio` (or
+    /// `backingScaleFactor`) and a screen that reports nonsense should read as the
+    /// density that asks the remote for least, not as an absurd one.
+    #[test]
+    fn a_hosts_density_quantizes_at_the_agents_midpoint() {
+        for scale in [0, 1, 99, 100, 125, 149] {
+            assert_eq!(Density::from_host(scale), Density::One, "{scale}");
+        }
+        for scale in [150, 175, 200, 300, 400] {
+            assert_eq!(Density::from_host(scale), Density::Two, "{scale}");
+        }
+        // Past `SCALE_MAX`, so `scale_ratio` reports 1.0 rather than clamping.
+        for scale in [401, 500, u16::MAX] {
+            assert_eq!(Density::from_host(scale), Density::One, "{scale}");
+        }
+    }
+
+    /// Both percentages must sit inside MS-RDPBCGR's legal 100..=500, or the
+    /// server ignores the scale factor entirely and the desktop comes back
+    /// supersampled instead of scaled — a failure that looks like everything
+    /// working at half size.
+    #[test]
+    fn a_density_is_a_legal_scale_factor_and_an_integral_scale() {
+        assert_eq!(Density::One.percent(), 100);
+        assert_eq!(Density::Two.percent(), 200);
+        for density in [Density::One, Density::Two] {
+            assert!((100..=500).contains(&density.percent()), "{density:?}");
+        }
+        assert_eq!(Density::One.scale(), UNSCALED);
+        assert_eq!(Density::Two.scale(), 2.0);
+    }
+
+    /// A density change keeps the desktop's size in *points* and changes its size
+    /// in pixels — that is the whole feature, so it is pinned in both directions
+    /// and pinned as a round trip.
+    #[test]
+    fn changing_density_scales_the_desktop_and_comes_back() {
+        let desktop = DesktopSize {
+            width: 1280,
+            height: 800,
+        };
+        assert_eq!(Density::Two.rescale(Density::One, desktop), (2560, 1600));
+        assert_eq!(Density::One.rescale(Density::One, desktop), (1280, 800));
+
+        let retina = DesktopSize {
+            width: 2560,
+            height: 1600,
+        };
+        assert_eq!(Density::One.rescale(Density::Two, retina), (1280, 800));
+        assert_eq!(Density::Two.rescale(Density::Two, retina), (2560, 1600));
+    }
+
+    /// `DefaultSize` is the one size here that is configured rather than measured,
+    /// so it is the one that has to be read as points.
+    #[test]
+    fn the_configured_size_is_points_once_a_density_is_in_play() {
+        assert_eq!(Density::One.pixels((1280, 800)), (1280, 800));
+        assert_eq!(Density::Two.pixels((1280, 800)), (2560, 1600));
+    }
+
+    /// Two layouts of the same size but different densities are not the same
+    /// request. Without this, a client dragged between a 1x and a 2x screen of the
+    /// same size — or one whose window has not moved at all when the resolution
+    /// clamps both requests to the same pixels — would have its density dropped as
+    /// a repeat, and the browser never restates it.
+    #[test]
+    fn a_layouts_density_is_part_of_what_makes_it_a_new_request() {
+        let one = Layout {
+            w: 1280,
+            h: 800,
+            density: Density::One,
+        };
+        assert_eq!(one.adjusted(), one);
+        assert_ne!(one, Layout { density: Density::Two, ..one });
+
+        // The protocol's own limits, applied where the comparison happens: an odd
+        // width lands on the even one beside it and both axes clamp to 200..=8192,
+        // so a request already at the adjusted size is recognised as a repeat.
+        let odd = Layout { w: 1281, ..one }.adjusted();
+        assert_eq!((odd.w, odd.h), (1280, 800));
+        let huge = Layout {
+            w: 10000,
+            h: 100,
+            ..one
+        }
+        .adjusted();
+        assert_eq!((huge.w, huge.h), (8192, 200));
+    }
+
+    /// A density is asked for more than once, and a bounded number of times.
+    ///
+    /// Both halves matter and they pull against each other. More than once, because
+    /// Windows discards a layout sent while the session it is starting has not
+    /// settled — even after the Display Control channel has its capabilities — and
+    /// nothing asks again from the other end: a client states its density once per
+    /// attach and dedupes it. Bounded, because a server that will never honour one
+    /// must not be asked forever.
+    #[test]
+    fn a_density_is_asked_for_more_than_once_and_not_forever() {
+        let mut pending = PendingDensity::new(Density::Two);
+        assert_eq!(pending.density, Density::Two);
+        for expected in DENSITY_RETRY_DELAYS {
+            assert_eq!(pending.wait_again(), Some(expected));
+        }
+        assert_eq!(pending.wait_again(), None);
+        assert_eq!(pending.wait_again(), None);
+        // Long enough to outlast a logon, which is what is being waited out.
+        let total: Duration = DENSITY_RETRY_DELAYS.iter().sum();
+        assert!(total >= Duration::from_secs(10), "{total:?}");
+    }
+
+    /// The distinction the retry depends on: a channel that is not ready yet is
+    /// worth asking again, a layout the encoder refused is not. Collapsing them
+    /// would either abandon a density over a channel that was merely still opening,
+    /// or re-encode a broken layout on every tick and warn each time.
+    #[test]
+    fn only_a_transient_outcome_is_worth_repeating() {
+        let again = [Asked::Sent, Asked::NotReady];
+        let done = [Asked::Redundant, Asked::Refused];
+        for outcome in again {
+            assert!(!done.contains(&outcome), "{outcome:?}");
+        }
+        // `Sent` is in the retry set deliberately: this protocol acknowledges
+        // nothing, so a written layout the server silently dropped is
+        // indistinguishable from one it is about to act on.
+        assert!(again.contains(&Asked::Sent));
+    }
+
+    /// Why [`display_control_ready`] has to exist: IronRDP will happily encode a
+    /// monitor layout for a channel that has not had the server's capabilities,
+    /// and the server discards such a layout without answering.
+    ///
+    /// Pinned in both halves, so this fails if IronRDP ever grows the check
+    /// itself — at which point the gate is redundant rather than load-bearing, and
+    /// someone should know before deleting it. A Retina client sends its density
+    /// on connect and so lands in that window every single time; the bug it caused
+    /// was a desktop stuck at 1x while this end declared 2x on every later resize,
+    /// which reads as "resize to window gives half the size I asked for".
+    #[test]
+    fn ironrdp_encodes_a_layout_for_a_channel_that_is_not_ready_yet() {
+        let client = DisplayControlClient::new(|_caps| Ok(Vec::new()));
+        assert!(
+            !client.ready(),
+            "a fresh Display Control channel must not claim to be usable"
+        );
+        assert!(
+            client
+                .encode_single_primary_monitor(1, 2560, 1600, Some(Density::Two.percent()), None)
+                .is_ok(),
+            "IronRDP encodes regardless, so nothing below this gate will refuse the write"
+        );
+    }
+
+    /// The one thing here that is IronRDP's rather than ours, pinned because a
+    /// version bump could remap it silently and the symptom would be a desktop
+    /// that resizes but never sharpens.
+    ///
+    /// `DeviceScaleFactor` is forced to 100% beside the desktop factor, which is
+    /// also what FreeRDP's SDL clients send for a Retina display — the field only
+    /// admits 100/140/180, so it cannot carry 200 anyway.
+    #[test]
+    fn a_layout_reaches_the_monitor_layout_as_both_scale_factors() {
+        use ironrdp::displaycontrol::pdu::{DeviceScaleFactor, DisplayControlMonitorLayout};
+
+        let layout = DisplayControlMonitorLayout::new_single_primary_monitor(
+            2560,
+            1600,
+            Some(Density::Two.percent()),
+            None,
+        )
+        .expect("2560x1600 at 200% is a legal single-monitor layout");
+        let monitor = &layout.monitors()[0];
+        assert_eq!(monitor.dimensions(), (2560, 1600));
+        assert_eq!(monitor.desktop_scale_factor(), Some(200));
+        assert_eq!(
+            monitor.device_scale_factor(),
+            Some(DeviceScaleFactor::Scale100Percent)
+        );
     }
 }

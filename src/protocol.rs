@@ -115,8 +115,13 @@ pub enum ClientMsg {
     /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
     /// whenever the window moves to a screen of a different density.
     ///
-    /// Only RXA uses this, and only to set the density of an agent-created
-    /// display. Mac-owned displays and other engines ignore it.
+    /// A request that the remote render at this density, which two engines can
+    /// answer: RXA sets the density of a display the agent made, and RDP with
+    /// `resize` asks the host for twice the pixels at 200% UI scaling. Both
+    /// quantize to 1x or 2x at the same midpoint, and both report what they got
+    /// back through [`ServerMsg::Resize`]. Mac-owned displays, RDP without
+    /// `resize`, and VNC ignore it — clients send it unconditionally rather than
+    /// asking what the engine is, so being ignored is not a client error.
     HostScale { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
@@ -456,13 +461,15 @@ fn encode_webp(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 /// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
-/// points of the desktop it shows: every engine but `rxa`, which reports the
-/// density of the Mac display it captures.
+/// points of the desktop it shows: VNC always, and RDP or `rxa` until a client
+/// asks the remote for a density and the remote agrees.
 ///
-/// A remote with no density of its own is presented one point per pixel, which is
-/// what a VNC or RDP desktop expects — its own DPI settings decide how large its
-/// UI is, and a client must not second-guess them by drawing the whole desktop at
-/// half size because the host screen happens to be Retina.
+/// A remote with no density of its own is presented one point per pixel, and a
+/// client must not second-guess that by drawing the whole desktop at half size
+/// because the host screen happens to be Retina. What makes a scale of 2.0 honest
+/// instead is that the remote was *told*: `rxa` sets the density of a display the
+/// agent made, and RDP declares one to the host, so in both cases the extra pixels
+/// carry a UI drawn twice as large rather than the same UI stretched.
 pub const UNSCALED: f32 = 1.0;
 
 /// One of the remote's displays, as a client lists it for the user to pick from.
@@ -497,8 +504,9 @@ pub enum ServerMsg {
     Tile(Tile),
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
-    /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, RDP,
-    /// and a 1x Mac), 2.0 for a Retina Mac.
+    /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
+    /// Mac, an RDP host rendering at 100%), 2.0 for a Retina Mac or an RDP host
+    /// that accepted a 200% request.
     ///
     /// The two travel together because a client cannot present either without
     /// the other: it shows the desktop at `w / scale` points and lets the host

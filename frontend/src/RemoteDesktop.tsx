@@ -35,6 +35,7 @@ export default function RemoteDesktop({
     connectError,
     pendingTarget,
     size,
+    hostScale,
     canResize,
     canClipboard,
     canAudio,
@@ -110,6 +111,8 @@ export default function RemoteDesktop({
           displays={displays}
           activeDisplayId={activeDisplayId}
           onSelectDisplay={selectDisplay}
+          size={size}
+          hostScale={hostScale}
           canAudio={canAudio}
           audioEnabled={audioEnabled}
           audioError={audioError}
