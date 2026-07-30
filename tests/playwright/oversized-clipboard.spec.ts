@@ -8,12 +8,12 @@
 import { expect, test } from "@playwright/test";
 import {
   logInAndConnect,
-  MISSING_ENV,
   openClipboardPanel,
   readRemoteClipboard,
   returnToPicker,
   setRemoteClipboard,
   setRemoteClipboardBytes,
+  skipUnlessLiveMac,
 } from "./support";
 
 const LIMIT = 65_536;
@@ -23,10 +23,7 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
   page,
 }) => {
   test.setTimeout(90_000);
-  test.skip(
-    MISSING_ENV.length > 0,
-    `live Mac clipboard test requires ${MISSING_ENV.join(", ")}`,
-  );
+  skipUnlessLiveMac();
 
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));

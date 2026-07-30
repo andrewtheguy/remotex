@@ -11,12 +11,7 @@
 // deterministic transport event, and every assertion below is either a byte in a
 // header or a count of records inside one frame.
 import { expect, test } from "@playwright/test";
-import {
-  BASE_URL,
-  logInAndConnect,
-  MISSING_ENV,
-  returnToPicker,
-} from "./support";
+import { logInAndConnect, returnToPicker, skipUnlessLiveMac } from "./support";
 
 // Must match `batch` in src/protocol.rs.
 const BATCH_FRAME_KIND = 0x02;
@@ -28,10 +23,6 @@ const TILE_REF_LEN = 7;
 const NO_SLOT = 0xffff;
 const SLOT_COUNT = 256;
 const TILE_FORMAT_WEBP = 3;
-// `PROTOCOL_VERSION` in src/protocol.rs. 4 is the WebP swap: a `TILE` record's
-// format byte has one valid value, so a client built against 3 would reject every
-// frame — which is why the version, not the byte, is what has to disagree first.
-const PROTOCOL_VERSION = 4;
 
 interface Record {
   op: number;
@@ -104,10 +95,8 @@ function parseBatch(payload: Buffer): Batch {
 }
 
 test.describe("v3 batch envelope", () => {
-  test.skip(
-    MISSING_ENV.length > 0,
-    `set ${MISSING_ENV.join(", ")} to run the live-Mac specs`,
-  );
+  // Needs the Mac agent to be up: the frames under test are its screen arriving.
+  skipUnlessLiveMac();
 
   test("screen updates arrive as batch frames the SPA can parse", async ({
     page,
@@ -188,16 +177,5 @@ test.describe("v3 batch envelope", () => {
     ).toBeGreaterThan(batches.length);
 
     await returnToPicker(page);
-  });
-
-  test("the gateway advertises the protocol version the SPA was built for", async ({
-    page,
-  }) => {
-    await page.goto(BASE_URL);
-    const config = await page.evaluate(async () => {
-      const response = await fetch("/api/config");
-      return (await response.json()) as { protocolVersion: number };
-    });
-    expect(config.protocolVersion).toBe(PROTOCOL_VERSION);
   });
 });

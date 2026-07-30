@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 import {
   logInAndConnect,
-  MISSING_ENV,
   openClipboardPanel,
   readRemoteClipboard,
   setRemoteClipboard,
+  skipUnlessLiveMac,
 } from "./support";
 
 const CRC32_POLYNOMIAL = 0xedb88320;
@@ -32,10 +32,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   page,
 }) => {
   test.setTimeout(90_000);
-  test.skip(
-    MISSING_ENV.length > 0,
-    `live Mac clipboard test requires ${MISSING_ENV.join(", ")}`,
-  );
+  skipUnlessLiveMac();
 
   const pageErrors: string[] = [];
   let remotePushes = 0;

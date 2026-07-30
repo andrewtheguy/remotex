@@ -25,6 +25,7 @@ Headless Playwright, in `tests/playwright/`.
 ### Writing and running them
 
 - run headless and single-worker. Shared login/target and SSH pasteboard helpers live in `tests/playwright/support.ts`
+- the specs that need the Mac agent *running* are opt-in: `REMOTEX_PLAYWRIGHT_AGENT=host:port` asks for them, and they skip when it is unset or nothing answers there. A plain run never assumes a VM is up, the same bargain `#[ignore]` makes for the Rust e2e tests
 - every spec must hand the session back to the picker before it ends (`returnToPicker`): the server keeps a target session alive when its browser goes away, so a spec that stops on the desktop leaves the next run reattached to it. `logInAndConnect` tolerates either landing, so one abandoned run cannot break every run after it
 - the setup is TypeScript and Playwright only transpiles it, so type errors never surface at runtime — run `npm run typecheck` in `tests/playwright/` after changing anything there
 - keep approved specs in `tests/playwright/` rather than leaving one-off copies in `tmp/`, and run a new one several times before relying on it

@@ -139,6 +139,10 @@ export default function RemoteDesktop({
           <span className={`status status-${status}`}>
             {STATUS_LABEL[status]}
           </span>
+          {/* Why the session is not up, when the reason is known. "Reconnecting…"
+              is true and unhelpful next to "the server answered 502", and the
+              picker is not on screen to carry it while the overlay is. */}
+          {connectError && <span className="status-hint">{connectError}</span>}
           {status === "connected" && mode === "desktop" && !size && (
             <span className="status-hint">Waiting for the remote desktop…</span>
           )}

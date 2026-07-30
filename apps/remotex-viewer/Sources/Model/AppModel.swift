@@ -294,7 +294,11 @@ final class AppModel: GatewaySessionSink {
                 loginError = "Login failed (\(status))"
             }
         } catch {
-            loginError = "Network error"
+            // The reason, not the word "network": half of what reaches here is not
+            // the network at all, and the half that is says which half far better
+            // than this could (see `GatewayClientError`).
+            loginError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
         }
     }
 
@@ -384,6 +388,14 @@ final class AppModel: GatewaySessionSink {
             clipboard.failPendingFetch()
         case .unauthorized:
             Task { await handleUnauthorized() }
+        case .rejected(let reason):
+            // Wherever the user is: the picker shows `connectError` under the
+            // branding, and `StatusOverlayView` shows it under whatever the
+            // connection status is. Neither replaces the status — a session still
+            // reconnecting is still reconnecting — it stops being the *only* thing
+            // said about a failure.
+            session.connectError = reason
+            session.pendingTarget = nil
         }
     }
 

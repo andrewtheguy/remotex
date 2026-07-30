@@ -50,12 +50,12 @@ struct SessionStateMachineTests {
     func aFailedClaimRetriesWithGrowingBackoff() {
         var machine = SessionStateMachine()
         _ = machine.handle(.start(force: false))
-        #expect(machine.handle(.claimFailed) == [.scheduleRetry(after: .milliseconds(1_000))])
+        #expect(machine.handle(.claimFailed(reason: "down")) == [.scheduleRetry(after: .milliseconds(1_000))])
         #expect(machine.status == .reconnecting)
         #expect(machine.handle(.retryElapsed) == [.claim(force: false)])
-        #expect(machine.handle(.claimFailed) == [.scheduleRetry(after: .milliseconds(2_000))])
+        #expect(machine.handle(.claimFailed(reason: "down")) == [.scheduleRetry(after: .milliseconds(2_000))])
         #expect(machine.handle(.retryElapsed) == [.claim(force: false)])
-        #expect(machine.handle(.claimFailed) == [.scheduleRetry(after: .milliseconds(4_000))])
+        #expect(machine.handle(.claimFailed(reason: "down")) == [.scheduleRetry(after: .milliseconds(4_000))])
     }
 
     /// Close 4001 is an eviction: another client force-claimed the slot. Taking
@@ -109,9 +109,9 @@ struct SessionStateMachineTests {
     func backoffResetsOnAControlMessageAndNotOnTheSocketOpening() {
         var machine = SessionStateMachine()
         _ = machine.handle(.start(force: false))
-        _ = machine.handle(.claimFailed)
+        _ = machine.handle(.claimFailed(reason: "down"))
         _ = machine.handle(.retryElapsed)
-        _ = machine.handle(.claimFailed)
+        _ = machine.handle(.claimFailed(reason: "down"))
         #expect(machine.attempts == 2)
 
         _ = machine.handle(.retryElapsed)
@@ -174,7 +174,8 @@ struct SessionStateMachineTests {
             .claimed(token: "tok-1"),
             .claimBusy,
             .claimUnauthorized,
-            .claimFailed,
+            .claimFailed(reason: "down"),
+            .claimRejected(reason: "no"),
             .socketOpened,
             .controlReceived,
             .socketClosed(code: 4001),
@@ -190,5 +191,62 @@ struct SessionStateMachineTests {
                 "\(event) returned \(actions), which GatewayConnection.handle would reorder"
             )
         }
+    }
+
+    /// The complaint this answers: every failure to open a session was reported as
+    /// "Reconnecting…" and nothing else, for as long as anybody cared to watch, with
+    /// the actual reason only in the log. So the reason reaches the user — while the
+    /// retries carry on, because a laptop that was asleep for ten minutes still has
+    /// to recover by itself.
+    @Test
+    func aTransportFailureReportsItsReasonOnceReconnectingStopsExplainingIt() {
+        var machine = SessionStateMachine()
+        _ = machine.handle(.start(force: false))
+
+        // Early on, "reconnecting" is the honest answer on its own: a gateway that is
+        // still coming up looks exactly like one that never will.
+        for _ in 0..<SessionStateMachine.attemptsBeforeReporting {
+            let actions = machine.handle(.claimFailed(reason: "no route to host"))
+            #expect(!actions.contains { $0.sinkEvent != nil }, "\(actions) told the user too early")
+            #expect(machine.status == .reconnecting)
+            _ = machine.handle(.retryElapsed)
+        }
+
+        let actions = machine.handle(.claimFailed(reason: "no route to host"))
+        #expect(actions.first == .report(reason: "no route to host"))
+        // And it is still retrying: the reason is added to the status, not swapped in
+        // for it, so an outage that ends still ends by itself.
+        #expect(actions.contains { if case .scheduleRetry = $0 { true } else { false } })
+        #expect(machine.status == .reconnecting)
+    }
+
+    /// A working attachment refills the budget, so a single bad half-minute does not
+    /// leave the next stumble reporting immediately.
+    @Test
+    func aControlMessageRefillsTheReportingBudget() {
+        var machine = SessionStateMachine()
+        _ = machine.handle(.start(force: false))
+        for _ in 0...SessionStateMachine.attemptsBeforeReporting {
+            _ = machine.handle(.claimFailed(reason: "down"))
+            _ = machine.handle(.retryElapsed)
+        }
+        _ = machine.handle(.claimed(token: "tok-1"))
+        _ = machine.handle(.socketOpened)
+        _ = machine.handle(.controlReceived)
+
+        let actions = machine.handle(.claimFailed(reason: "down"))
+        #expect(!actions.contains { $0.sinkEvent != nil }, "the budget did not refill")
+    }
+
+    /// A failure that waiting cannot fix — a refused certificate, a gateway of
+    /// another protocol version, an answer that could not be read — is said at once
+    /// and never retried. Retrying it is what made a definite answer look like
+    /// weather.
+    @Test
+    func aRejectionIsReportedImmediatelyAndNotRetried() {
+        var machine = SessionStateMachine()
+        _ = machine.handle(.start(force: false))
+        let actions = machine.handle(.claimRejected(reason: "certificate untrusted"))
+        #expect(actions == [.report(reason: "certificate untrusted")])
     }
 }
