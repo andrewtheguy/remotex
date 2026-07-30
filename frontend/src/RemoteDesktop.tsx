@@ -50,6 +50,7 @@ export default function RemoteDesktop({
     isMacHost,
     remoteIsMac,
     setMacKeyOverridesEnabled,
+    onLocalShortcut,
     takeOver,
     retry,
     connect,
@@ -123,6 +124,7 @@ export default function RemoteDesktop({
           isMacHost={isMacHost}
           remoteIsMac={remoteIsMac}
           onMacKeyOverridesChange={setMacKeyOverridesEnabled}
+          onLocalShortcut={onLocalShortcut}
         />
       )}
 

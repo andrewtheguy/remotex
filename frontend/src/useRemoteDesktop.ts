@@ -569,6 +569,11 @@ export function useRemoteDesktop(
   // not the toolbar's business to cancel. Focus loss is the case that releases
   // everything.
   const releaseKeysRef = useRef<(() => void) | null>(null);
+  // The same arrangement for the other direction the chrome reaches into a chord:
+  // a shortcut the SPA took for itself, with Command in it. Set by the input
+  // effect, called by the toolbar. Null while nothing is subscribed, which is also
+  // when there is no chord to unwind.
+  const localShortcutRef = useRef<(() => void) | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   // Kept in a ref (not just state) so input handlers read the latest size
   // without re-subscribing.
@@ -1673,6 +1678,12 @@ export function useRemoteDesktop(
     [canvasRef, syncCursor],
   );
 
+  // The toolbar took a chord that had Command in it. Stable, so the handler that
+  // reports it does not resubscribe, and a no-op unless a Command is pending.
+  const onLocalShortcut = useCallback(() => {
+    localShortcutRef.current?.();
+  }, []);
+
   // Capture input over the overlay element and forward it to the server,
   // scaling pointer coordinates from the displayed size to the remote size.
   useEffect(() => {
@@ -1821,6 +1832,7 @@ export function useRemoteDesktop(
     const onKeyUp = (e: KeyboardEvent) => sendTranslated(e, false);
     const onBlur = () => releaseAll();
     releaseKeysRef.current = releaseKeys;
+    localShortcutRef.current = () => macKeys.noteCommandUsedLocally();
 
     el.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
@@ -1836,6 +1848,7 @@ export function useRemoteDesktop(
     return () => {
       gestures?.detach();
       releaseKeysRef.current = null;
+      localShortcutRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mouseup", onMouseUp);
@@ -1871,6 +1884,7 @@ export function useRemoteDesktop(
     isMacHost: IS_MAC_HOST,
     remoteIsMac,
     setMacKeyOverridesEnabled,
+    onLocalShortcut,
     takeOver,
     retry,
     connect,

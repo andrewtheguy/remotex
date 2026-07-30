@@ -51,11 +51,17 @@ const MODIFIER_TAPS: readonly { label: string; code: string }[] = [
   { label: "Super", code: "MetaLeft" },
 ];
 
-// The chrome shortcut, spelled the way the Help card shows it. Written out here so
-// the card and the handler cannot drift — the handler matches this exact
-// combination, and deliberately not with Command held, so a Mac user's own
-// Cmd+Ctrl+Alt+Shift+; stays theirs.
-const HIDE_CHROME_SHORTCUT = "Ctrl + Alt + Shift + ;";
+// The chrome shortcut, spelled the way the Help card and the button's tooltip show
+// it. One source for all three so the card, the tooltip and the handler cannot
+// drift — the handler matches exactly what this returns.
+//
+// The middle modifier is the host's: Command on a Mac, where Option is a
+// character-composing key and Ctrl+Alt chords are Windows vocabulary, and Alt
+// everywhere else. Whichever it is, the *other* one has to be absent, so all four
+// held — a Mac user's own Cmd+Ctrl+Alt+Shift+; hyper chord — stays theirs.
+function hideChromeShortcut(isMacHost: boolean): string {
+  return isMacHost ? "Ctrl + Cmd + Shift + ;" : "Ctrl + Alt + Shift + ;";
+}
 
 // The reference density both ends of this agree on: one CSS pixel per dot, and
 // also what RDP calls 100%. So a 2x screen is 192 dpi whichever end names it.
@@ -66,6 +72,21 @@ const CSS_DPI = 96;
 function dpiLabel(hundredths: number): string {
   return `${Math.round((hundredths / 100) * CSS_DPI)} dpi`;
 }
+
+// What the Mac key override does, which is more than fits on the button that
+// toggles it — hence "Mac key override: on" there and the detail here. Shown only
+// on a Mac host, the only place that button exists. Mirrors macKeys.ts, including
+// the six chords a browser keeps whatever this is set to.
+const MAC_KEY_HELP: readonly { situation: string; effect: string }[] = [
+  {
+    situation: "While on",
+    effect: "⌘A ⌘C ⌘F ⌘P ⌘S ⌘V ⌘X ⌘Z arrive as Ctrl chords",
+  },
+  { situation: "While off", effect: "Every key arrives as pressed" },
+  { situation: "⌘ on its own", effect: "Arrives as the Windows key" },
+  { situation: "Kept by this browser", effect: "⌘W ⌘T ⌘N ⌘L ⌘O ⌘R" },
+  { situation: "A Mac remote", effect: "n/a — ⌘ is sent as ⌘" },
+];
 
 // The touch gesture cheat-sheet, mirroring touchGestures.ts.
 const GESTURE_HELP: readonly { gesture: string; action: string }[] = [
@@ -326,11 +347,15 @@ function MacKeyboardSection({
   if (!isMacHost) {
     return null;
   }
+  // All three states named the same way, with the Help card carrying what the
+  // chord table used to try to say in a button's width. "n/a" rather than "off"
+  // for a Mac guest: the preference may well be on, and it is the guest that
+  // makes it inapplicable.
   const label = remoteIsMac
-    ? "⌘ stays ⌘"
+    ? "Mac key override: n/a"
     : active
-      ? "⌘ → Ctrl: on"
-      : "⌘ → Ctrl: off";
+      ? "Mac key override: on"
+      : "Mac key override: off";
   return (
     <div className="toolbar-section">
       <span className="toolbar-label">Mac keyboard</span>
@@ -376,6 +401,7 @@ export default function FloatingMenu({
   isMacHost,
   remoteIsMac,
   onMacKeyOverridesChange,
+  onLocalShortcut,
 }: {
   onLogout: () => void;
   // Return to the post-login target picker ("switch target"): disconnects the
@@ -441,6 +467,10 @@ export default function FloatingMenu({
   isMacHost: boolean;
   remoteIsMac: boolean;
   onMacKeyOverridesChange: (enabled: boolean) => void;
+  // A chord this component took for itself, announced to the input path so it can
+  // unwind what it was holding for one. Only the Mac spelling of the chrome
+  // shortcut needs it, and only because Command is in it. See useRemoteDesktop.
+  onLocalShortcut: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -539,24 +569,30 @@ export default function FloatingMenu({
   const [hidden, setHidden] = useState(false);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // All three and no Command: a Mac user's Cmd+Ctrl+Alt+Shift+; stays theirs.
-      if (
-        e.code !== "Semicolon" ||
-        !e.ctrlKey ||
-        !e.altKey ||
-        !e.shiftKey ||
-        e.metaKey
-      ) {
+      // The host's own middle modifier and pointedly not the other one, which is
+      // what leaves the four-modifier hyper chord to its owner. See
+      // hideChromeShortcut.
+      const middle = isMacHost
+        ? e.metaKey && !e.altKey
+        : e.altKey && !e.metaKey;
+      if (e.code !== "Semicolon" || !e.ctrlKey || !e.shiftKey || !middle) {
         return;
       }
       e.preventDefault();
       e.stopPropagation();
+      // Command is held and the key it was held with has just been taken by this
+      // client, so the input path never saw the chord and would read Command's
+      // release as a bare tap — which is how the guest's Start menu opens. Hiding
+      // a button must not do that. See macKeys.ts.
+      if (isMacHost) {
+        onLocalShortcut();
+      }
       setHidden((was) => !was);
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, []);
+  }, [isMacHost, onLocalShortcut]);
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLButtonElement>) => {
@@ -731,7 +767,7 @@ export default function FloatingMenu({
           aria-expanded={open}
           // The only place the chord is written down in the UI, and it has to be
           // here: once the button is hidden there is nothing left to read it off.
-          title="Ctrl+Alt+Shift+; hides this button"
+          title={`${hideChromeShortcut(isMacHost)} hides this button`}
         >
           {open ? "✕" : "☰"}
         </button>
@@ -886,9 +922,22 @@ export default function FloatingMenu({
                     ☰ button is hidden there is nothing left on screen to read the
                     way back off, so a shortcut nobody wrote down is a menu that
                     looks gone for good. */}
-                <dd>{HIDE_CHROME_SHORTCUT}</dd>
+                <dd>{hideChromeShortcut(isMacHost)}</dd>
               </div>
             </dl>
+            {isMacHost && (
+              <>
+                <h3>Mac key override</h3>
+                <dl className="help-list">
+                  {MAC_KEY_HELP.map((row) => (
+                    <div key={row.situation} className="help-item">
+                      <dt>{row.situation}</dt>
+                      <dd>{row.effect}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </>
+            )}
             <h3>Touch gestures</h3>
             <dl className="help-list">
               {GESTURE_HELP.map((row) => (
