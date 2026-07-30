@@ -47,9 +47,11 @@ The asymmetry is why the pattern is `IK` rather than `KK`. The gateway knows
 exactly which Mac it is dialing, so the responder's static key is pinned; the Mac
 does not know which of its authorized gateways is calling, so the initiator's
 static key travels encrypted inside message 1. The agent decrypts it, looks it up,
-and refuses the dial before sending message 2 — an unlisted gateway learns
-nothing, not even whether anybody is watching the screen. An agent with an empty
-list listens and refuses everything, which is what a first launch looks like.
+and refuses the dial before sending message 2. What an unlisted gateway can tell
+from that is exactly two things: something answered port 52381, and its key was
+refused. What it never gets is any RXA traffic — no `Hello`, no display list, and
+no answer to whether anybody is watching the screen. An agent with an empty list
+listens and refuses everything, which is what a first launch looks like.
 
 Being on the list is also what lets the agent say *which* gateway is connected: the
 entry's name is what the menu bar leads with ("Sharing this screen with home

@@ -98,10 +98,18 @@ impl Settings {
     /// collected.
     ///
     /// Both at once, because the dialog edits them that way: one panel, one Save.
-    /// An error means **nothing** was written — including the half that was fine,
-    /// since two files half-applied is a state no restart resolves — and everything
-    /// this struct reports is exactly as it was, so the caller can put the dialog
-    /// back up on the same values.
+    ///
+    /// **Nothing invalid is ever written.** Validation happens before the first
+    /// write, so an edit the config layer rejects touches neither file and the
+    /// caller can put the dialog back up on the same values.
+    ///
+    /// A write that fails *after* the other one succeeded is a different thing — a
+    /// full disk, a permission changed underneath — and it is not undone. What
+    /// reached the disk stays there, and what this struct reports moves with it, so
+    /// `saved()` and the file cannot disagree; the error still propagates, and
+    /// `restart_pending` then describes exactly the half that landed. Rolling back
+    /// would mean a second write that can fail for the same reason, and reporting
+    /// the old value would be a lie about what the next launch will read.
     ///
     /// Note what this does *not* do: apply anything. Returns whether either file
     /// changed, which is the caller's cue to restart into them.
@@ -122,12 +130,16 @@ impl Settings {
         if !config_changed && !list_changed {
             return Ok(false);
         }
-        // Validated before either write, so one file being rejected cannot leave
-        // the other one already replaced.
+        // Validated before either write, so a rejected edit cannot leave one file
+        // already replaced. An I/O failure still can, which is why each half is
+        // recorded as its own write succeeds rather than both at the end: returning
+        // early with the config written and `saved` still holding the old one would
+        // make this struct describe a file that no longer exists.
         next.validate()?;
         if config_changed {
             next.save(&self.path)?;
             info!("settings: saved {}", self.path.display());
+            *saved = next;
         }
         if list_changed {
             next_authorized.save(&self.authorized_path)?;
@@ -136,9 +148,8 @@ impl Settings {
                 self.authorized_path.display(),
                 next_authorized.len()
             );
+            *saved_authorized = next_authorized;
         }
-        *saved = next;
-        *saved_authorized = next_authorized;
         Ok(true)
     }
 }
@@ -320,6 +331,37 @@ mod tests {
         assert_eq!(settings.saved_authorized(), before_list);
         assert_eq!(list_on_disk(&settings), before_list);
         assert!(!settings.restart_pending());
+    }
+
+    // Validation cannot leave one file replaced, but I/O can: the config lands and
+    // then the disk refuses the list. What must not happen then is this struct
+    // reporting the config it *used* to have — the file on disk is what the next
+    // launch reads, so `saved()` has to agree with it or `restart_pending` and the
+    // menu both describe a config that no longer exists.
+    //
+    // The second write is made to fail by putting a directory where its temporary
+    // file goes, which `write_private` cannot open.
+    #[test]
+    fn a_write_that_fails_after_another_succeeded_keeps_what_landed() {
+        let (settings, path, dir) = settings("partial");
+        let before_list = settings.saved_authorized();
+        std::fs::create_dir(dir.join(".authorized_gateways.new")).unwrap();
+
+        let mut next = settings.saved();
+        next.listen = "127.0.0.1:9500".to_owned();
+        let good_list = list(&format!("{} somewhere new\n", gateway_public_key()));
+
+        // Both halves were valid, so this is the disk failing and not the edit.
+        assert!(settings.apply(next.clone(), good_list).is_err());
+
+        // The config reached the disk, so it is what this struct reports and what a
+        // restart would pick up.
+        assert_eq!(on_disk(&path), next);
+        assert_eq!(settings.saved(), next);
+        assert!(settings.restart_pending(), "the config is ahead of the process");
+        // The list did not, so both it and the file are as they were.
+        assert_eq!(settings.saved_authorized(), before_list);
+        assert_eq!(list_on_disk(&settings), before_list);
     }
 
     // Reverting an edit closes the gap again — a restart is only pending while

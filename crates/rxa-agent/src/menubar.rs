@@ -461,7 +461,14 @@ impl Controller {
         // An agent that will answer nobody says so, because there is nothing else
         // on screen to explain a Mac that is plainly running and refusing every
         // connection. Above Settings, which is where it is fixed.
-        if settings.saved_authorized().is_empty() {
+        //
+        // The *running* list, not the file's — same rule as the "Listening on" line
+        // above, and for the same reason: this claim is in the present tense, so it
+        // has to be true about right now. Reading the file would both warn about an
+        // agent that is serving happily and stay silent about one that is refusing
+        // everything because a key was added and not yet restarted into. The
+        // pending-restart line above says the file has moved on.
+        if settings.running_authorized().is_empty() {
             let item = self.action(
                 "No authorized gateways — open Settings",
                 sel!(openSettings:),

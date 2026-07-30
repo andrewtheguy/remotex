@@ -313,12 +313,26 @@ fn start_up(
         Err(e) => {
             // A hand-edited list nobody can parse is the same shape of failure as a
             // broken config, and it takes the same answer: stay up so the menu can
-            // fix it, rather than restarting into it forever.
+            // fix it, rather than restarting into it forever. Unlike a broken
+            // config, though, this one *has* a settings dialog to be fixed from —
+            // the config parsed, and the list is edited in that dialog — so the
+            // degraded menu is given one, standing in an empty list for the file it
+            // could not read. Which is also why the body says the editor will open
+            // blank: the broken lines are still on disk, and saving replaces them.
             let body = format!(
-                "{e:#}\n\nFix the authorized gateways file, then quit and reopen \
-                 remotex-agent."
+                "{e:#}\n\nFix it in Settings > Authorized gateways > Manage…, which \
+                 opens empty — the file's current contents are not shown because \
+                 they could not be read. Or edit {} by hand and reopen \
+                 remotex-agent.",
+                authorized_path.display()
             );
-            fail!("remotex-agent could not start", body, e);
+            let settings = settings::Settings::new(
+                config.clone(),
+                path.clone(),
+                authorized::Authorized::default(),
+                authorized_path,
+            );
+            fail!("remotex-agent could not start", body, e, Some(settings));
         }
     };
 
