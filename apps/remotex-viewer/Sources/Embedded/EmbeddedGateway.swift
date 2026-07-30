@@ -85,6 +85,14 @@ final class EmbeddedGateway {
     /// whichever happens first. Nil once resumed, which is what keeps "exactly once"
     /// a fact rather than an intention.
     private var waitingForHandshake: CheckedContinuation<Handshake?, Never>?
+    /// Whether the gateway's stderr has reached end-of-file.
+    ///
+    /// Tracked because a dying gateway writes its explanation to stderr and then
+    /// exits, and the two pipes close independently: stdout's EOF can be delivered
+    /// first, and a failure reported at that instant carries an empty log for a
+    /// gateway that *did* say why. Nothing about this is a timing assumption — it is
+    /// the one wait that makes the message deterministic; see `waitForOutputToDrain`.
+    private var standardErrorClosed = false
 
     /// Called when the gateway exits while the app is still using it, which is a
     /// failure the app has to show rather than discover on the next request.
@@ -130,7 +138,13 @@ final class EmbeddedGateway {
 
         // Both readers are attached before the process starts, so a gateway that
         // fails instantly cannot do it in the gap.
-        let errorReader = PipeReader(logURL: instance.logURL)
+        standardErrorClosed = false
+        let errorReader = PipeReader(
+            logURL: instance.logURL,
+            endOfFile: { [weak self] in
+                Task { @MainActor in self?.standardErrorClosed = true }
+            }
+        )
         errorReader.attach(to: standardError.fileHandleForReading)
         let outputReader = PipeReader(
             firstLine: { [weak self] line in
@@ -173,7 +187,9 @@ final class EmbeddedGateway {
         guard let handshake else {
             // Whatever went wrong, the gateway's own output is the best account of
             // it: a refused config is on stderr, and an empty tail means it never
-            // got far enough to complain.
+            // got far enough to complain. Read after the output has drained, or a
+            // config error that arrived a moment behind the exit would be lost.
+            await waitForOutputToDrain()
             let output = log().trimmingCharacters(in: .whitespacesAndNewlines)
             let running = process.isRunning
             let malformed = malformedHandshakeLine
@@ -249,14 +265,28 @@ final class EmbeddedGateway {
         standardInput = nil
     }
 
+    /// Wait for the gateway's stderr to reach end-of-file, but not for long.
+    ///
+    /// The two output pipes close independently, so a message written just before the
+    /// exit can still be in flight when stdout's EOF arrives. Bounded rather than
+    /// open-ended in both directions: without a wait the failure sometimes has no
+    /// explanation in it, and without the timeout a pipe held open by something
+    /// unexpected would suppress the report altogether — and a failure nobody is told
+    /// about is worse than one with a thin message.
+    private func waitForOutputToDrain(timeout: Duration = .milliseconds(300)) async {
+        let deadline = ContinuousClock.now + timeout
+        while !standardErrorClosed, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     /// The handshake line, the pipe closing, or the deadline — first one wins.
     private func deliver(line: String?, timedOut: Bool = false) {
         guard let continuation = waitingForHandshake else {
             // Nothing is waiting, so this is the pipe closing on a gateway that was
             // already serving: an exit the app did not ask for.
             if line == nil, !timedOut, !onUnexpectedExitSuppressed, process != nil {
-                let output = log().trimmingCharacters(in: .whitespacesAndNewlines)
-                onUnexpectedExit?(.refused(output))
+                Task { await reportUnexpectedExit() }
             }
             return
         }
@@ -273,6 +303,20 @@ final class EmbeddedGateway {
             return
         }
         continuation.resume(returning: handshake)
+    }
+
+    /// Tell whoever is listening that the gateway went away on its own.
+    ///
+    /// The suppression flag is checked again after the wait, not only before it: a
+    /// `stop` that begins while this is draining is the app asking for the very exit
+    /// that is about to be reported, and reporting it then would put a failure screen
+    /// over a relaunch already under way.
+    private func reportUnexpectedExit() async {
+        await waitForOutputToDrain()
+        guard !onUnexpectedExitSuppressed else {
+            return
+        }
+        onUnexpectedExit?(.refused(log().trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 
     /// Set when a line arrived that was not a handshake, so `start` can name it.
