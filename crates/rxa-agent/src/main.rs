@@ -676,15 +676,133 @@ fn hand_over_to_launchd(job: Job) -> bool {
         return false;
     }
     let service = format!("gui/{}/{}", uid(), loginitem::LABEL);
-    info!("agent: {service} is this Mac's copy; starting it from this bundle and standing down");
-    // `-k` so a job that is already running is restarted into this bundle, which
-    // is the upgrade. Harmless on one that is merely loaded.
-    matches!(
-        std::process::Command::new("/bin/launchctl")
-            .args(["kickstart", "-k", &service])
-            .status(),
-        Ok(status) if status.success()
-    )
+    info!("agent: {service} is this Mac's copy; starting it from this bundle");
+    // Two things have to be true before this process may exit, and **neither of
+    // them is what `launchctl` says**. A handover taken on trust costs the whole
+    // application: an agent that stood down for a copy that never ran is a
+    // double-click that did nothing.
+    if !kickstart(&service) {
+        warn!(
+            "agent: serving from this process instead. {}",
+            login_item_hint()
+        );
+        return false;
+    }
+    // Exit 0 from `kickstart` means launchd *accepted* the request, not that
+    // anything is running: the spawn happens afterwards and can fail on its own — a
+    // plist naming a bundle that has since been moved or deleted is the ordinary way
+    // there. Standing down on the *request* left no menu bar item and the reason only
+    // in a log file, and it made [`loginitem::Status::Elsewhere`] — added to report
+    // exactly that stale path — impossible to see, because the process that would
+    // have shown it had already exited.
+    if started() {
+        info!("agent: {service} is running; standing down");
+        return true;
+    }
+    warn!(
+        "agent: {service} accepted the start and nothing came up within {}s — \
+         serving from this process instead. {}",
+        HANDOVER_WAIT.as_secs_f32(),
+        login_item_hint()
+    );
+    false
+}
+
+/// Ask launchd to restart the job, and give up if it will not answer.
+///
+/// `-k` so a job that is already running is restarted into this bundle, which is the
+/// upgrade, and harmless on one that is merely loaded — but **not harmless when
+/// launchd cannot spawn the program at all**, which is what this bound exists for.
+/// Measured against a plist naming a bundle that had been moved: launchd puts the
+/// job in `spawn scheduled`, retries, and `kickstart` waits for a start that never
+/// happens. It does not return, ever. Calling it through
+/// [`std::process::Command::status`] therefore wedged the whole launch — the status
+/// item sat on "Starting…" with a working Quit, and the agent never served.
+///
+/// Killing the client does not withdraw the request; launchd goes on retrying by
+/// itself. That is deliberate: the answer to a job that cannot start is to serve
+/// here and say so, not to fight launchd over it.
+fn kickstart(service: &str) -> bool {
+    let mut child = match std::process::Command::new("/bin/launchctl")
+        .args(["kickstart", "-k", service])
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            warn!("agent: cannot run launchctl: {e}");
+            return false;
+        }
+    };
+    let deadline = Instant::now() + HANDOVER_WAIT;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(HANDOVER_POLL),
+            Err(e) => {
+                warn!("agent: cannot wait for launchctl: {e}");
+                return false;
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    warn!(
+        "agent: `launchctl kickstart` did not return within {}s, so launchd cannot \
+         start {service}",
+        HANDOVER_WAIT.as_secs_f32()
+    );
+    false
+}
+
+/// How long any one step of a handover gets, and how often to look.
+///
+/// Short, because a double-click is waiting on it: launchd answers within
+/// milliseconds when it can answer at all, so this bounds the failure case rather
+/// than budgeting for the normal one. The worst case is two of these in a row — four
+/// seconds before the agent serves here — and only on a Mac whose login item is
+/// broken.
+const HANDOVER_WAIT: Duration = Duration::from_secs(2);
+const HANDOVER_POLL: Duration = Duration::from_millis(100);
+
+/// Whether the job is running now. Blocks for up to [`HANDOVER_WAIT`].
+///
+/// Any pid counts: the caller has already established that the job is not this
+/// process, so a pid here is launchd's copy and not us. The first look comes *after*
+/// a sleep on purpose — `-k` kills and respawns, so reading immediately could find
+/// the outgoing process and stand down for a restart that then fails.
+///
+/// The honest cost of giving up and serving anyway: if launchd's copy does come up
+/// *later*, both want port 52381 and the loser reports "address already in use"
+/// with a degraded menu. That is noisy, and it is strictly better than the silence
+/// it replaces — a visible conflict can be acted on.
+fn started() -> bool {
+    let deadline = Instant::now() + HANDOVER_WAIT;
+    while Instant::now() < deadline {
+        std::thread::sleep(HANDOVER_POLL);
+        if matches!(Job::read(), Job::Known(Some(_))) {
+            return true;
+        }
+    }
+    false
+}
+
+/// What to tell somebody whose login item did not start.
+///
+/// The stale path when there is one, because that is the whole diagnosis and it is
+/// what [`loginitem::Status::Elsewhere`] was added to report.
+fn login_item_hint() -> String {
+    match loginitem::status() {
+        loginitem::Status::Elsewhere(other) => format!(
+            "The login item names {}, which is not this copy — re-tick Start at Login \
+             to point it here.",
+            other.display()
+        ),
+        _ => format!(
+            "`launchctl print gui/{}/{}` has its last exit code.",
+            uid(),
+            loginitem::LABEL
+        ),
+    }
 }
 
 /// This user's uid, for the launchd domain the login item lives in.

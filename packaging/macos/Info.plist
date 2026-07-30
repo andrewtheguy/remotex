@@ -13,10 +13,12 @@
   CFBundleVersion is rewritten by build-agent-app.sh; everything else here is
   intentionally static, because changing CFBundleIdentifier resets the grants.
 
-  The bundle also carries its own LaunchAgent plist at
-  Contents/Library/LaunchAgents/dev.remotex.agent.plist, which SMAppService hands
-  to launchd when the agent registers itself — so there is no install script and
-  nothing in ~/Library/LaunchAgents.
+  Nothing here arranges to start at login, and the bundle carries no LaunchAgent
+  plist. The agent writes ~/Library/LaunchAgents/dev.remotex.agent.plist naming its
+  own *absolute* path, and only when asked — the menu's Start at Login, or
+  --install-launchagent. It used to embed one at Contents/Library/LaunchAgents and
+  hand it to SMAppService; see crates/rxa-agent/src/loginitem.rs for why a
+  bundle-relative program was a trap.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -45,8 +47,7 @@
 	<!-- 15.4 is the floor the project targets, set by the clipboard watcher's
 	     use of NSPasteboard.accessBehavior; keep it in step with
 	     .cargo/config.toml, where the same version is also load-bearing for how
-	     the Swift bridge links. Everything else is older — SMAppService login
-	     item registration is 13+. -->
+	     the Swift bridge links. Nothing else here needs a floor this high. -->
 	<key>LSMinimumSystemVersion</key>
 	<string>15.4</string>
 	<!-- No dock icon, no menu bar, no windows: this is a background agent that
