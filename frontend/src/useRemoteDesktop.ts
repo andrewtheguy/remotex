@@ -459,12 +459,23 @@ export function useRemoteDesktop(
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
-  // True when the connected target supports resize but only on request (RDP):
-  // the floating menu shows a "Resize to window" button and automatic viewport
-  // reports are suppressed. VNC resizes automatically, so it stays false — and so
-  // does every case on a pinch-zoom device, where the window this would resize to
-  // is not one to hand a remote desktop (see CAN_PINCH_ZOOM).
+  // True when this session may ask the remote to change size at all: the
+  // operator's `resize` on the target, and for rxa the further condition that the
+  // display being shared is one the agent made (settled by `displays`, not by
+  // `connected`). False on a pinch-zoom device whatever the target allows, where
+  // the window this would resize to is not one to hand a remote desktop (see
+  // CAN_PINCH_ZOOM).
+  //
+  // Permission only. *How* the size is driven — on request or continuously — is
+  // `autoResize` below, and this gates both the controls that decide it.
   const [canResize, setCanResize] = useState(false);
+  // Whether the remote follows this window continuously, or only when asked.
+  //
+  // The client's choice, and the same choice on every protocol: an engine that
+  // acts on one viewport report acts on all of them. Not remembered either — every
+  // `connected` starts manual, so connecting to a target never reshapes its
+  // desktop on the strength of something chosen for another one.
+  const [autoResize, setAutoResizeState] = useState(false);
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
@@ -596,14 +607,33 @@ export function useRemoteDesktop(
   // when another client took the remote during a reconnect and `pendingTarget` is
   // long since null.
   const sessionTargetRef = useRef<string | null>(null);
-  // Manual-resize mode (RDP with resize enabled, rxa, and every mobile session):
-  // while set, automatic viewport reports are suppressed and only the menu's
-  // "Resize to window" sends one — which on mobile is nothing, since the button is
-  // not offered there.
-  const manualResizeRef = useRef(false);
-  // Set by the connection effect so the menu's "Resize to window" can push the
-  // current viewport even in manual-resize mode.
+  // The two halves of the resize decision as the viewport sender reads them:
+  // whether this session may resize the remote at all (`canResize` above), and
+  // whether the window drives it unasked (`autoResize` above). Refs because the
+  // sender lives inside the connection effect and must not re-subscribe when
+  // either changes.
+  const resizeAllowedRef = useRef(false);
+  const autoResizeRef = useRef(false);
+  // Set by the connection effect so a report the user asked for — the menu's
+  // "Resize to window", and switching auto on — can push the current viewport.
   const resizeToWindowRef = useRef<(() => void) | null>(null);
+
+  // Switch between the two modes. Both the toolbar's toggle and every `connected`
+  // come through here, so the ref the sender reads can never disagree with the
+  // label the user is looking at.
+  //
+  // Switching *on* reports at once rather than waiting for the next window
+  // resize: "the remote follows this window" that starts by not matching it would
+  // read as a control that did nothing. The dedupe makes it free when it already
+  // matches, and this deliberately reuses the manual path — turning auto on is a
+  // resize the user asked for.
+  const setAutoResize = useCallback((enabled: boolean) => {
+    autoResizeRef.current = enabled;
+    setAutoResizeState(enabled);
+    if (enabled) {
+      resizeToWindowRef.current?.();
+    }
+  }, []);
 
   // The engine's latest pointer state, and where the touch gesture layer's
   // virtual pointer sits (null while a hardware mouse is driving). Both are
@@ -811,17 +841,22 @@ export function useRemoteDesktop(
       open(claimed);
     };
 
-    // Viewport reports (dynamic resize), deduped per connection: a
-    // resize that settles on the same size sends nothing. In manual-resize mode
-    // (RDP) the automatic callers are suppressed — an RDP resize triggers a
-    // heavy Deactivation-Reactivation, so it happens only when the user asks
-    // (`manual: true`, from the menu's "Resize to window").
+    // Viewport reports (dynamic resize), deduped per connection: a resize that
+    // settles on the same size sends nothing.
+    //
+    // Two gates, and they are different questions. Nothing goes out at all unless
+    // this session may resize the remote — an engine drops the request otherwise,
+    // and the controls that would ask for one are not offered either. Past that,
+    // `manual: true` is a report the user asked for and always goes; an automatic
+    // one goes only while auto resize is on.
     let lastViewport: { w: number; h: number } | null = null;
+    const mayReport = (manual: boolean) =>
+      resizeAllowedRef.current && (manual || autoResizeRef.current);
     const sendViewport = (opts?: { manual?: boolean }) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      if (!opts?.manual && manualResizeRef.current) {
+      if (!mayReport(opts?.manual === true)) {
         return;
       }
       const el = document.documentElement;
@@ -853,9 +888,8 @@ export function useRemoteDesktop(
           : { type: "defaultSize" },
       );
     };
-    // The manual "Resize to window" action: report the viewport even in
-    // manual-resize mode. Dedup still applies, so re-clicking at the same
-    // window size won't fire a redundant resize.
+    // A report the user asked for, whatever the mode. Dedup still applies, so
+    // re-clicking at the same window size won't fire a redundant resize.
     resizeToWindowRef.current = () => sendViewport({ manual: true });
 
     // This screen's density, deduped the same way. Two kinds of target act on it,
@@ -1167,19 +1201,25 @@ export function useRemoteDesktop(
     const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);
-      // Whether "Resize to window" is offered is a question about *this*
+      // Whether this session may resize at all is a question about *this*
       // display, not only about the target: only a display the agent made can be
       // resized from here, and the user can switch onto and off one mid-session
       // from the Display panel. Read off the message rather than the `displays`
       // state set a line above, which this render has not seen yet. An `active`
       // the list does not name — a screen unplugged between the two, which this
-      // message allows — reads as not virtual, so the button disappears rather
+      // message allows — reads as not virtual, so the controls disappear rather
       // than offering to resize a display nobody here can identify.
+      //
+      // The mode is left alone across such a switch: it was chosen for this
+      // session, the sender is blocked by permission alone while a real screen is
+      // shared, and switching back resumes what the user asked for.
       if (rxaResize) {
         const active = msg.displays.find(
           (display) => display.id === msg.active,
         );
-        setCanResize(active?.virtual === true);
+        const allowed = active?.virtual === true;
+        resizeAllowedRef.current = allowed;
+        setCanResize(allowed);
       }
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
@@ -1209,42 +1249,37 @@ export function useRemoteDesktop(
       releaseAudio();
       setAudioEnabled(false);
       setAudioError(null);
+      // Manual on every connect, before either branch: the mode is this client's
+      // and it is per session, so a reattach, a target switch and a takeover all
+      // arrive with the remote's own size left alone.
+      setAutoResize(false);
+      lastViewport = null;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
-        // and never let this window's shape reach the remote again. So every
-        // automatic sender is suppressed and "Resize to window" is never offered —
-        // the window it would resize to is the one this client deliberately does
-        // not ask the remote to be.
+        // and never let this window's shape reach the remote again. So neither
+        // control is offered and nothing else sends — the window they would resize
+        // to is the one this client deliberately does not ask the remote to be.
         //
-        // Gated on the target's `resize` because there is nothing to say
-        // otherwise: an engine drops both requests without it, and this keeps the
-        // browser from asking for something the operator declined.
-        manualResizeRef.current = true;
+        // The one-shot is still gated on the target's `resize`, because there is
+        // nothing to say otherwise: an engine drops the request without it.
+        resizeAllowedRef.current = false;
         rxaResize = false;
         setCanResize(false);
         mobileSizePending = msg.resize;
       } else {
-        // Three behaviours, and only two of them are settled here. VNC follows the
-        // viewport automatically. RDP resizes only when asked, because its
-        // reactivation is heavy — so viewport reports are suppressed and the menu's
-        // "Resize to window" is the one caller. rxa is only-when-asked too, but
-        // *whether it may be asked* is a fact about the display being shared rather
-        // than about the target, so it is settled in `handleDisplays`: a Mac's own
-        // panel is never resized because somebody connected, and only a display the
-        // agent made for the purpose can be.
-        const manual = msg.protocol === "rdp" && msg.resize;
+        // Permission, and permission only — what the operator allowed. Whether the
+        // window then drives the remote is the user's, above, and identical for
+        // every protocol: an engine that takes one viewport report takes them all.
+        //
+        // rxa is the one target whose permission is not settled here, because its
+        // second condition is a fact about the display being shared rather than
+        // about the target: a Mac's own panel is never resized because somebody
+        // connected, and only a display the agent made for the purpose can be. So
+        // it starts denied and `handleDisplays` decides.
         rxaResize = msg.protocol === "rxa" && msg.resize;
-        // Suppressing the automatic senders is unconditional for rxa, whatever the
-        // target allows: even a display made to be looked at from here is not
-        // dragged around by this window, and the report three lines down is one of
-        // the sends this has to stop.
-        manualResizeRef.current = manual || msg.protocol === "rxa";
-        // For rxa this starts false and stays false until the first `displays`.
-        setCanResize(manual);
-        // A freshly-started engine needs the current viewport; the report is sent
-        // here (once the protocol is known), undeduped.
-        lastViewport = null;
-        sendViewport();
+        const allowed = msg.resize && msg.protocol !== "rxa";
+        resizeAllowedRef.current = allowed;
+        setCanResize(allowed);
       }
       // And this screen's density, which is what lets a display the agent made
       // come up matching the window it is about to be shown in rather than at
@@ -1364,7 +1399,10 @@ export function useRemoteDesktop(
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setMode("picker");
-          manualResizeRef.current = false;
+          // No engine to resize, and the mode goes with the session: the next
+          // target is asked about separately.
+          resizeAllowedRef.current = false;
+          setAutoResize(false);
           rxaResize = false;
           setCanResize(false);
           setCanClipboard(false);
@@ -1479,6 +1517,7 @@ export function useRemoteDesktop(
     syncCursor,
     settleClipboardWaiters,
     releaseAudio,
+    setAutoResize,
   ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
@@ -1511,7 +1550,7 @@ export function useRemoteDesktop(
   }, []);
 
   // Resize the remote desktop to the current browser window (the floating
-  // menu's "Resize to window", shown only when `canResize`). A no-op while the
+  // menu's "Resize to window", offered only when `canResize`). A no-op while the
   // socket is down. The engine answers with a `resize` control message.
   const resizeToWindow = useCallback(() => {
     resizeToWindowRef.current?.();
@@ -1868,7 +1907,9 @@ export function useRemoteDesktop(
     pendingTarget,
     size,
     hostScale,
+    // Permission, and the client's per-session choice of how to use it.
     canResize,
+    autoResize,
     canClipboard,
     canAudio,
     audioEnabled,
@@ -1890,6 +1931,7 @@ export function useRemoteDesktop(
     connect,
     switchTarget,
     resizeToWindow,
+    setAutoResize,
     selectDisplay,
     setAudio,
     sendKeyCombo,

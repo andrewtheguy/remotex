@@ -40,20 +40,21 @@ struct AppModelTests {
         )
     }
 
-    /// The three resize behaviours, as a `connected` alone settles them. Only RDP
-    /// gets a button here; VNC is followed automatically. The `rxa` row is the
-    /// interesting one: `resize` is the target's permission and grants nothing by
-    /// itself, so the button stays off until a display list says the display being
-    /// shared is one the agent made — see
-    /// `resizingAnRxaTargetFollowsTheSharedDisplay`.
+    /// What a `connected` alone settles, which is permission and not behaviour: the
+    /// operator's `resize`, the same answer for RDP and VNC now that how a size is
+    /// driven is the client's own choice. The `rxa` row is the interesting one:
+    /// `resize` is only the target's half and grants nothing by itself, so it stays
+    /// off until a display list says the display being shared is one the agent made
+    /// — see `resizingAnRxaTargetFollowsTheSharedDisplay`.
     @Test
-    func resizeCapabilitiesFollowTheProtocol() {
+    func resizePermissionFollowsTheTarget() {
         let expectations: [(protocolName: String, resize: Bool, canResize: Bool)] = [
             ("rdp", true, true),
+            ("vnc", true, true),
             ("rxa", true, false),
-            ("vnc", true, false),
             ("rdp", false, false),
             ("vnc", false, false),
+            ("rxa", false, false),
         ]
         for expectation in expectations {
             let model = makeModel()
@@ -87,19 +88,21 @@ struct AppModelTests {
         #expect(!model.canResizeNow, "no surface has reported a size yet")
     }
 
-    /// The two directions are independent, and the menu shows both either way.
+    /// The two one-shots are independent, and the menu shows both either way.
     /// Pushing the window's size to the remote needs a target that takes one;
-    /// pulling the remote's size into the window needs only a remote that will
-    /// hold still — so a target that allows the first allows both, and VNC, which
-    /// follows the window unasked, is the single row where the second is greyed.
+    /// pulling the remote's size into the window needs only a remote that will hold
+    /// still — so a target that allows the first allows both, and a target that
+    /// allows neither can still be fitted to.
     @Test
-    func onlyAFollowingRemoteCannotBeFittedTo() {
+    func aTargetThatWillNotResizeCanStillBeFittedTo() {
         let expectations: [(protocolName: String, resize: Bool, toWindow: Bool, toDisplay: Bool)] = [
             ("rdp", true, true, true),
+            ("vnc", true, true, true),
+            // Both halves of the rxa permission are needed, and only one is here.
+            ("rxa", true, false, true),
             ("rxa", false, false, true),
-            ("vnc", true, false, false),
-            // The gateway drops this one's reports, so its desktop holds still
-            // and can be fitted to like any other.
+            // The gateway drops this one's reports, so its desktop holds still and
+            // can be fitted to like any other.
             ("vnc", false, false, true),
             ("rdp", false, false, true),
         ]
@@ -123,6 +126,62 @@ struct AppModelTests {
             #expect(model.canResizeNow == expectation.toWindow, label)
             #expect(model.canResizeToDisplay == expectation.toDisplay, label)
         }
+    }
+
+    /// And auto resize is what greys them now: one of them is what auto does
+    /// continuously, and the other cannot fit a window to a desktop that is already
+    /// fitting itself to the window. Switching back restores both, so the mode is
+    /// never a trap.
+    @Test
+    func autoResizeGreysBothOneShots() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
+        model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
+        model.reportViewport(DisplayMode(w: 1600, h: 900))
+        #expect(model.canAutoResize)
+        #expect(model.canResizeNow)
+        #expect(model.canResizeToDisplay)
+
+        model.setAutoResize(true)
+        #expect(model.autoResizes)
+        #expect(!model.canResizeNow)
+        #expect(!model.canResizeToDisplay)
+
+        model.setAutoResize(false)
+        #expect(model.canResizeNow)
+        #expect(model.canResizeToDisplay)
+    }
+
+    /// The mode is offered only where a resize is allowed at all, and asking for it
+    /// anyway changes nothing — a menu item cannot be clicked while greyed, and this
+    /// is the model saying so on its own.
+    @Test
+    func autoResizeIsRefusedWhereResizingIsNotAllowed() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
+        #expect(!model.canAutoResize)
+
+        model.setAutoResize(true)
+        #expect(!model.autoResizes)
+    }
+
+    /// It goes with the session, like view only: the next target is asked about
+    /// separately rather than inheriting an answer given for another machine.
+    @Test
+    func autoResizeIsForgottenOnTheWayToThePicker() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
+        model.setAutoResize(true)
+        #expect(model.autoResizes)
+
+        model.apply(.control(.picker))
+        #expect(!model.autoResizes)
+
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
+        #expect(!model.autoResizes)
     }
 
     /// Both are disabled off the desktop and before the first `resize`: there is no
@@ -485,6 +544,40 @@ struct AppModelTests {
         model.apply(.control(.displays(active: 7, displays: twoDisplays)))
         #expect(!model.session.canResize)
         #expect(model.canResizeToDisplay)
+    }
+
+    /// A display the agent made has nobody sitting at it, so it may follow this
+    /// window like any other allowed remote — the mode is offered there, not
+    /// withheld. What the display switch moves is the permission underneath it.
+    @Test
+    func anAgentMadeDisplayMayFollowTheWindowToo() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "rxa", resize: true))))
+        model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
+        model.reportViewport(DisplayMode(w: 2880, h: 1800))
+        #expect(!model.canAutoResize, "nothing yet says which display")
+
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+        #expect(model.canAutoResize)
+        model.setAutoResize(true)
+        #expect(model.autoResizes)
+        #expect(!model.canResizeNow, "auto is doing it")
+        #expect(!model.canResizeToDisplay, "and the display is following this window")
+
+        // Onto one of the Mac's own screens: the permission goes, and with it the
+        // following. The tick stays — it is the answer for this session — and both
+        // one-shots come back, because that screen is holding as still as any other.
+        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
+        #expect(!model.canAutoResize)
+        #expect(model.autoResizes)
+        #expect(!model.canResizeNow, "a Mac's own screen is set on the Mac")
+        #expect(model.canResizeToDisplay)
+
+        // And back: what the user asked for is still what happens.
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+        #expect(model.canAutoResize)
+        #expect(!model.canResizeToDisplay)
     }
 
     /// Without the target's permission no display list enables anything: the two

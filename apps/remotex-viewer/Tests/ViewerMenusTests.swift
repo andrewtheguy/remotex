@@ -118,9 +118,9 @@ struct ViewerMenusTests {
         #expect(mainMenu.items.map(\.title) == ["remotex-viewer", "Edit", "View"])
     }
 
-    /// The two resize items go into AppKit's View menu above its full-screen
+    /// The three resize items go into AppKit's View menu above its full-screen
     /// item, because a `CommandMenu("View")` is dropped by SwiftUI — see
-    /// `RemoteCommands`.
+    /// `RemoteCommands`. The mode comes first, then the two one-shots it governs.
     @Test
     func theResizeItemsGoAboveFullScreen() {
         let mainMenu = NSMenu()
@@ -137,19 +137,21 @@ struct ViewerMenusTests {
 
         #expect(
             view.items.map(\.title) == [
-                "Resize to Window", "Resize to Display", "", "Enter Full Screen",
+                "Auto Resize", "Resize to Window", "Resize to Display", "",
+                "Enter Full Screen",
             ]
         )
-        #expect(view.items[2].isSeparatorItem)
-        #expect(view.items[0].action == ViewerMenus.resizeToWindowAction)
-        #expect(view.items[1].action == ViewerMenus.resizeToDisplayAction)
+        #expect(view.items[3].isSeparatorItem)
+        #expect(view.items[0].action == ViewerMenus.autoResizeAction)
+        #expect(view.items[1].action == ViewerMenus.resizeToWindowAction)
+        #expect(view.items[2].action == ViewerMenus.resizeToDisplayAction)
         // A menu item's target is weak, so this is the object the delegate holds.
         #expect(view.items[0].target === target)
     }
 
-    /// Run from a change notification, and inserting three items posts three.
+    /// Run from a change notification, and inserting items posts more.
     @Test
-    func ensuringTheResizeItemsTwiceLeavesOnePair() {
+    func ensuringTheResizeItemsTwiceLeavesOneSet() {
         let mainMenu = NSMenu()
         let view = NSMenu(title: "View")
         view.addItem(
@@ -195,7 +197,10 @@ struct ViewerMenusTests {
 
         ViewerMenus.ensureResizeItems(in: mainMenu, target: target)
 
-        #expect(rebuilt.items.map(\.title).prefix(2) == ["Resize to Window", "Resize to Display"])
+        #expect(
+            rebuilt.items.map(\.title).prefix(3)
+                == ["Auto Resize", "Resize to Window", "Resize to Display"]
+        )
     }
 
     /// The menu is found by the full-screen item, not by its title: this app has
@@ -218,7 +223,10 @@ struct ViewerMenusTests {
         ViewerMenus.ensureResizeItems(in: mainMenu, target: NSObject())
 
         #expect(decoy.items.map(\.title) == ["Something Else"], "the decoy is left alone")
-        #expect(real.items.map(\.title).prefix(2) == ["Resize to Window", "Resize to Display"])
+        #expect(
+            real.items.map(\.title).prefix(3)
+                == ["Auto Resize", "Resize to Window", "Resize to Display"]
+        )
     }
 
     /// Until AppKit's item exists — which for a window that cannot go full screen

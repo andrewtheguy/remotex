@@ -172,8 +172,11 @@ pub struct TargetConfig {
     /// ignored for VNC targets (RFB security is negotiated per the handshake).
     #[serde(default)]
     pub security: Security,
-    /// Allow client-driven resize. VNC follows viewport changes; RDP applies an
-    /// explicit request; RXA applies one only to an active agent-created display.
+    /// Allow client-driven resize: permission for a client to set this target's
+    /// desktop size, and only permission — whether a client then follows its window
+    /// continuously or resizes when asked is that client's own choice. RXA narrows
+    /// where the permission reaches: an active agent-created display, never one of
+    /// the Mac's own screens.
     ///
     /// On RDP this also turns on density matching, because there a density *is* a
     /// resize: the Display Control channel this negotiates is the only way to tell

@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import RemotexViewer
 
-/// The target behind the View menu's two resize items.
+/// The target behind the View menu's three resize items.
 ///
 /// It is three lines of forwarding and a `switch`, and every one of them is a
 /// silent failure if it is wrong: a renamed selector makes an item that does
@@ -18,8 +18,56 @@ struct ResizeMenuTargetTests {
     func theTargetAnswersTheSelectorsTheMenuItemsSend() {
         let target = ResizeMenuTarget(model: makeModel())
 
+        #expect(target.responds(to: ViewerMenus.autoResizeAction))
         #expect(target.responds(to: ViewerMenus.resizeToWindowAction))
         #expect(target.responds(to: ViewerMenus.resizeToDisplayAction))
+    }
+
+    /// The mode item toggles, and its tick is set by `validateMenuItem` — AppKit
+    /// asks as the menu opens, so that is where the answer has to be right. A tick
+    /// pushed on at click time instead would be correct only until something else
+    /// changed the mode.
+    @Test
+    func theAutoResizeItemTogglesAndCarriesItsOwnTick() throws {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
+        model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
+        model.reportViewport(DisplayMode(w: 1600, h: 900))
+        let target = ResizeMenuTarget(model: model)
+        let auto = item(ViewerMenus.autoResizeAction)
+
+        #expect(target.validateMenuItem(auto))
+        #expect(auto.state == .off)
+
+        try #require(target.responds(to: ViewerMenus.autoResizeAction))
+        target.perform(ViewerMenus.autoResizeAction, with: nil)
+
+        #expect(model.autoResizes)
+        #expect(target.validateMenuItem(auto))
+        #expect(auto.state == .on)
+        #expect(
+            !target.validateMenuItem(item(ViewerMenus.resizeToWindowAction)),
+            "and the one-shots it governs are greyed while it is on"
+        )
+        #expect(!target.validateMenuItem(item(ViewerMenus.resizeToDisplayAction)))
+
+        // Sent again: the same item switches back, so the menu is never one-way.
+        target.perform(ViewerMenus.autoResizeAction, with: nil)
+        #expect(!model.autoResizes)
+        #expect(target.validateMenuItem(auto))
+        #expect(auto.state == .off)
+    }
+
+    /// And it is dead where a resize is not allowed at all, with the other two.
+    @Test
+    func theAutoResizeItemIsDeadWithoutThePermission() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
+        let target = ResizeMenuTarget(model: model)
+
+        #expect(!target.validateMenuItem(item(ViewerMenus.autoResizeAction)))
     }
 
     /// "Resize to Display" is entirely local — the window takes the remote's size
@@ -74,8 +122,8 @@ struct ResizeMenuTargetTests {
     @Test
     func eachItemIsValidatedAgainstItsOwnProperty() {
         // The row where the two answers differ: `rxa` without `resize` cannot be
-        // asked to match the window, but its desktop holds still and can be
-        // fitted to. See `AppModelTests.onlyAFollowingRemoteCannotBeFittedTo`.
+        // asked to match the window, but its desktop holds still and can be fitted
+        // to. See `AppModelTests.aTargetThatWillNotResizeCanStillBeFittedTo`.
         let model = makeModel()
         model.apply(.status(.connected))
         model.apply(.control(.connected(connected(protocolName: "rxa", resize: false))))

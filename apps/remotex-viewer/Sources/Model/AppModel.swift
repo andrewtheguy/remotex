@@ -102,7 +102,8 @@ final class AppModel: GatewaySessionSink {
     @ObservationIgnored
     private var viewportPolicy = ViewportPolicy()
     /// Debounces automatic reports. A window drag changes the visible area on
-    /// every frame, and a VNC target acts on each one it is told about.
+    /// every frame, and a remote following the window acts on each one it is told
+    /// about.
     @ObservationIgnored
     private var viewportDebounce: Task<Void, Never>?
     /// Reads current host backing scale on demand; cached screen-change
@@ -196,16 +197,39 @@ final class AppModel: GatewaySessionSink {
             : "Enable macOS Keyboard Overrides"
     }
 
-    /// "Resize to Window" needs both a target that takes one and a measured
-    /// window to report.
-    var canResizeNow: Bool {
-        session.canResize && viewportSize != nil
+    /// The three resize items are one decision in three parts: the mode, and the
+    /// two one-shots that only mean something in manual mode.
+    ///
+    /// "Auto Resize" needs nothing but the permission — it is the item that says
+    /// which way this session works.
+    var canAutoResize: Bool {
+        session.canResize
     }
 
-    /// Whether the local window may fit the remote. Disabled for a VNC desktop
-    /// that continuously follows the window.
+    /// Whether it is ticked.
+    var autoResizes: Bool {
+        session.autoResize
+    }
+
+    /// "Resize to Window" needs the permission and a measured window to report,
+    /// and means nothing while the remote is already following this one.
+    var canResizeNow: Bool {
+        session.canResize && viewportSize != nil && !session.autoResize
+    }
+
+    /// Whether the local window may fit the remote. Disabled while the remote is
+    /// following the window: a desktop that fits itself to this window cannot also
+    /// be fitted to.
     var canResizeToDisplay: Bool {
-        session.screen == .desktop && session.remoteSize != nil && !session.followsWindow
+        session.screen == .desktop && session.remoteSize != nil && !followsWindow
+    }
+
+    /// Whether the remote is *actually* following this window, which takes both
+    /// halves. An rxa session that switched onto one of the Mac's own screens with
+    /// the mode left on has the tick and no permission, and that display is holding
+    /// as still as any other — so it can be fitted to.
+    private var followsWindow: Bool {
+        session.canResize && session.autoResize
     }
 
     /// The interstitial covers the connection lifecycle and the claim conflicts,
@@ -445,7 +469,9 @@ final class AppModel: GatewaySessionSink {
             // any resize has arrived.
             session.remoteScale = 1
             session.canResize = false
-            session.followsWindow = false
+            // The mode goes with the session that was left, like view only below:
+            // the next target is asked about separately.
+            session.autoResize = false
             session.canClipboard = false
             session.canAudio = false
             // The previous target's screens are not the next one's. Left in
@@ -478,8 +504,11 @@ final class AppModel: GatewaySessionSink {
             // The remote is ours after all, so an offer to take it over has nothing
             // left to refer to.
             session.remoteBusy = nil
-            // RXA remains non-resizable until a display list identifies an owned
-            // display; VNC and RDP are settled here.
+            // The operator's permission. RXA remains denied until a display list
+            // identifies an owned display; VNC and RDP are settled here. A fresh
+            // policy also puts the mode back to manual, which is what makes a
+            // reattach, a target switch and a takeover all leave the remote's own
+            // size alone.
             viewportPolicy = ViewportPolicy(
                 protocolName: payload.protocolName,
                 resize: payload.resize
@@ -494,14 +523,18 @@ final class AppModel: GatewaySessionSink {
             // here for the same reason the viewport and the host scale are below: a
             // freshly attached session knows nothing about this client.
             audio.reassert()
-            // A freshly started engine knows nothing about this window, and both
-            // dedupes would swallow the first report for repeating a size already
-            // sent — for the previous target, or for the picker. Both have to be
-            // cleared, not just the policy's: the queue's memo survives a target
-            // switch because the socket does.
+            // Both dedupes would otherwise swallow the first report of this session
+            // for repeating a size already sent — for the previous target, or for
+            // the picker. Both have to be cleared, not just the policy's: the
+            // queue's memo survives a target switch because the socket does.
+            //
+            // Nothing is reported here. A freshly started engine knows nothing
+            // about this window, and in manual mode that is the correct state to
+            // leave it in: the remote keeps the size it has until somebody asks for
+            // another. What used to be sent from here is now the first thing
+            // `setAutoResize(true)` does.
             viewportPolicy.resetForNewConnection()
             connection?.resetViewportMemo()
-            sendViewport(manual: false)
             // And this window's screen density, so a display the agent made comes
             // up matching the screen it is about to be shown on rather than at
             // whatever it was left at. Undeduped for the same reason as the
@@ -657,7 +690,7 @@ final class AppModel: GatewaySessionSink {
     /// The surface measured how much room it has, in the remote's pixels.
     ///
     /// Debounced rather than sent straight through: a window drag reports on every
-    /// frame, and VNC acts on every report it receives.
+    /// frame, and a remote following the window acts on every report it receives.
     func reportViewport(_ size: DisplayMode) {
         viewportSize = size
         viewportDebounce?.cancel()
@@ -672,8 +705,8 @@ final class AppModel: GatewaySessionSink {
 
     /// Publish ignored policy state so Observation invalidates menu enablement.
     private func publishViewportPolicy() {
-        session.canResize = viewportPolicy.manualOnly
-        session.followsWindow = viewportPolicy.followsWindow
+        session.canResize = viewportPolicy.allowed
+        session.autoResize = viewportPolicy.autoFollows
     }
 
     /// The surface exists for the picker as well as the desktop — it has to, so the
@@ -775,7 +808,25 @@ final class AppModel: GatewaySessionSink {
         connection?.send(.selectDisplay(id: id))
     }
 
-    /// "Resize to Window": the one report that gets past `manualOnly`.
+    /// "Auto Resize": hand the remote's size to this window, or take it back.
+    ///
+    /// Switching on reports at once rather than waiting for the next window
+    /// resize — "the remote follows this window" that starts by not matching it
+    /// would read as an item that did nothing. It goes through the requested path
+    /// deliberately: turning this on *is* a resize the user asked for, and the
+    /// dedupe makes it free when the size already matches.
+    func setAutoResize(_ enabled: Bool) {
+        guard session.canResize else {
+            return
+        }
+        viewportPolicy.autoFollows = enabled
+        publishViewportPolicy()
+        if enabled {
+            sendViewport(manual: true)
+        }
+    }
+
+    /// "Resize to Window": one report, now, whatever the mode.
     func resizeToWindow() {
         guard session.canResize else {
             return

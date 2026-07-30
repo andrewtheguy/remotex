@@ -174,9 +174,10 @@ the agent settings only decide whether its optional private display exists and
 what initial size creates it.
 
 Mac-owned displays are never resized from a client. With `resize = true`, the
-private display accepts **Resize to window** while it is active. Its configured
-size is an initial size with an 800×600 minimum and also defines the largest 2x
-mode available to later requests.
+private display accepts sizes from a client while it is active — once, on request
+(**Resize to window**), or continuously, whichever that client is set to. Its
+configured size is an initial size with an 800×600 minimum and also defines the
+largest 2x mode available to later requests.
 
 macOS remembers the private display's arrangement and mode. A client resize can
 therefore survive an agent restart, and changing the configured initial size

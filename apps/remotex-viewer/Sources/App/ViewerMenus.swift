@@ -77,7 +77,10 @@ enum ViewerMenus {
             // between. Inserted rather than appended so this reads the same
             // whether or not AppKit has put anything else in here.
             var at = fullScreen
+            // The mode first, then the two one-shots it governs: with auto on both
+            // of those grey out, and an item that explains why belongs above them.
             for (title, action) in [
+                ("Auto Resize", autoResizeAction),
                 ("Resize to Window", resizeToWindowAction),
                 ("Resize to Display", resizeToDisplayAction),
             ] {
@@ -98,6 +101,9 @@ enum ViewerMenus {
     /// is now a build error instead of two menu items that still appear, still
     /// validate, and quietly do nothing when clicked. The `@objc(…)` names there
     /// pin the selector, so this stays the same string it always was.
+    static let autoResizeAction = #selector(
+        ResizeMenuTarget.toggleAutoResizeFromMenu(_:)
+    )
     static let resizeToWindowAction = #selector(
         ResizeMenuTarget.resizeToWindowFromMenu(_:)
     )

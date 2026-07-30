@@ -166,13 +166,19 @@ selection, viewport size, refresh, cache reset, and session control. Pointer
 motion is coalesced while the socket has queued bytes; any non-motion input
 flushes the latest held position first.
 
-Resize behavior is engine-specific:
+A target's `resize` is permission, not behavior: an engine that has it applies
+every `viewport` it is sent and an engine without it drops them all. Whether a
+client sends one per window change or only when the user asks is the client's own
+choice, made per session and defaulting to on request — see
+[`macos-viewer.md`](macos-viewer.md) and `useRemoteDesktop.ts`.
 
-| Engine | Behavior |
+What is engine-specific is the shape of the permission:
+
+| Engine | With `resize` |
 |---|---|
-| VNC with resize | follows desktop-client viewport changes |
-| RDP with resize | changes on an explicit resize request, and on the client's reported display density |
-| RXA with resize | changes only on explicit request while the agent's private display is active |
+| VNC | applies a requested size, on servers accepting SetDesktopSize |
+| RDP | applies a requested size, and the client's reported display density |
+| RXA | applies a requested size only while the agent's private display is active |
 
 `hostScale` reports the density of the screen the client's window is on. RDP with
 resize and RXA both act on it, quantizing to 1x or 2x at the same midpoint; the

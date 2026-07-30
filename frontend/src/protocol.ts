@@ -142,11 +142,13 @@ export type ControlMsg =
       takenOver: boolean;
     }
   | { type: "picker" }
-  // `protocol` ("rdp"/"vnc"/"rxa") and `resize` tell the browser how to handle
-  // resize: VNC follows the viewport automatically, RDP only on request. For
-  // rxa they settle only half of it — `resize` is the target's permission, and
-  // whether the control appears also needs the shared display to be one the
-  // agent made, which arrives later in `displays`.
+  // `resize` is the operator's permission to change the remote's size at all, and
+  // it is all this says: whether the size then follows the window or moves only
+  // when asked is the client's own choice, the same choice on every protocol (see
+  // useRemoteDesktop's `autoResize`). `protocol` ("rdp"/"vnc"/"rxa") is here
+  // because rxa's permission is only half-settled by `resize` — the display being
+  // shared also has to be one the agent made, which arrives later in `displays`,
+  // so an rxa session starts denied rather than waiting to be corrected.
   // `clipboard` is whether this target opted into the clipboard bridge.
   // `audio` advertises capability, not current activity.
   | {

@@ -11,23 +11,40 @@ import Testing
 /// "it never resized to the window" bugs lived.
 @MainActor
 struct ViewportReportingTests {
-    /// The report from `connected` is the one that sizes a freshly started engine,
-    /// and it repeats a size that was already measured — in the picker, or for the
-    /// previous target. Two dedupes stood between it and the socket: the policy's,
-    /// which was reset, and the queue's, which was not, because it is reset on a
-    /// new socket and a target switch keeps the socket it has.
+    /// Connecting reports nothing: manual is where every session starts, and a
+    /// remote that was already the size it wanted has not been asked to change.
     @Test
-    func connectingSendsTheMeasuredViewportEvenAfterASwitch() async throws {
+    func connectingReportsNothing() async throws {
         let session = try await Self.attached()
         session.model.reportViewport(DisplayMode(w: 1600, h: 1000))
 
         session.connect(protocolName: "vnc")
+
+        try await session.settle()
+        #expect(session.viewports.isEmpty)
+    }
+
+    /// Switching auto on is what sizes the engine now, and it repeats a size that
+    /// was already measured — in the picker, or for the previous target. Two dedupes
+    /// stand between it and the socket: the policy's, reset on `connected`, and the
+    /// queue's, which needs resetting there too because it is reset on a new socket
+    /// and a target switch keeps the socket it has.
+    @Test
+    func autoResizeSendsTheMeasuredViewportEvenAfterASwitch() async throws {
+        let session = try await Self.attached()
+        session.model.reportViewport(DisplayMode(w: 1600, h: 1000))
+
+        session.connect(protocolName: "vnc")
+        session.model.setAutoResize(true)
         try await session.expectViewport(w: 1600, h: 1000)
 
         // Switch away and back to the same size: the socket, and so the queue's
-        // memo, outlive the trip to the picker.
+        // memo, outlive the trip to the picker — and the mode does not, so it has
+        // to be asked for again.
         session.model.apply(.control(.picker))
         session.connect(protocolName: "vnc")
+        #expect(!session.model.autoResizes, "the mode belongs to the session that ended")
+        session.model.setAutoResize(true)
 
         try await session.expectViewport(w: 1600, h: 1000, count: 2)
     }
@@ -53,6 +70,7 @@ struct ViewportReportingTests {
     func aDragResizeCollapsesIntoOneReport() async throws {
         let session = try await Self.attached()
         session.connect(protocolName: "vnc")
+        session.model.setAutoResize(true)
         try await session.settle()
 
         for width in stride(from: 1200, through: 1600, by: 50) {
@@ -62,11 +80,11 @@ struct ViewportReportingTests {
         try await session.expectViewport(w: 1600, h: 1000)
     }
 
-    /// A Mac's screens are set on that Mac, and a display the agent made is
-    /// resized only when the user asks — so nothing an rxa session measures for
-    /// itself ever reaches the socket, whichever display is being shared.
+    /// A Mac's screens are set on that Mac, so nothing an rxa session measures
+    /// reaches the socket while a real screen is shared — and in manual mode, which
+    /// is where it starts, nothing does even once the agent's own display is up.
     @Test
-    func anRxaTargetReportsNothingAutomatically() async throws {
+    func anRxaTargetReportsNothingUntilBothHalvesAgree() async throws {
         let session = try await Self.attached()
         session.connect(protocolName: "rxa")
 
@@ -74,12 +92,27 @@ struct ViewportReportingTests {
         try await session.settle()
         #expect(session.viewports.isEmpty)
 
-        // Still nothing once the agent's own display is the one being shared:
-        // that raises the menu item, not the automatic reports behind it.
+        // The agent's own display arrives: that raises the three menu items, and by
+        // itself sends nothing — manual is still manual.
         session.model.apply(.control(.displays(active: 9, displays: Self.displays)))
         session.model.reportViewport(DisplayMode(w: 1440, h: 900))
         try await session.settle()
         #expect(session.viewports.isEmpty)
+        #expect(session.model.canAutoResize, "and now it may be asked for")
+
+        // Asked for, it follows the window like any other allowed target: a display
+        // made to be looked at from here has nobody sitting at it.
+        session.model.setAutoResize(true)
+        try await session.expectViewport(w: 1440, h: 900)
+        session.model.reportViewport(DisplayMode(w: 1280, h: 800))
+        try await session.expectViewport(w: 1280, h: 800, count: 2)
+
+        // And a switch back to one of the Mac's own screens stops it, mode or no
+        // mode: the permission is the display's, not the session's.
+        session.model.apply(.control(.displays(active: 7, displays: Self.displays)))
+        session.model.reportViewport(DisplayMode(w: 1600, h: 1000))
+        try await session.settle()
+        #expect(session.viewports.count == 2)
     }
 
     /// And the whole path a press of "Resize to Window" takes: three components

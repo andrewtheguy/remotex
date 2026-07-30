@@ -200,16 +200,19 @@ measured on the test VM and all three load-bearing:
 A density change is skipped entirely when the display already measures what was
 asked for, so a client reporting its screen on every connect costs nothing.
 
-### Explicit resize
+### Client-driven resize
 
-The private display accepts a size only when all of the following are true:
+The private display accepts a size only when both of the following are true:
 
 1. the RXA target has `resize = true`;
-2. the private display is the active shared display;
-3. the user invokes **Resize to window** in the browser or viewer.
+2. the private display is the active shared display.
 
-The agent does not continuously follow window changes. Reconfiguring a live
-display moves its windows and is intentionally an explicit operation.
+Whether a client then resizes it once on request or continuously as its window
+changes is the client's own choice, made per session and defaulting to on
+request. The agent draws no distinction between the two: it applies whatever size
+it is sent. Neither condition above is a client's to relax, and the second moves
+during a session — switching to one of the Mac's own screens withdraws it, and the
+clients' resize controls go dead until the private display is shared again.
 
 A client reports its viewport in remote pixels. The gateway divides by the
 scale it previously announced for that display and sends the resulting point
