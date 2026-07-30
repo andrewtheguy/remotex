@@ -67,6 +67,29 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Also answered before anything else, and for the same reason as the two
+    // below: this changes launchd, not this process. It must not bind the port or
+    // raise a TCC prompt on the way.
+    //
+    // It exists as a flag as well as a menu item because a test VM is reached over
+    // SSH, where there is no menu to click — and because installing a login item
+    // from a terminal is how anyone would expect to do it once.
+    if args.install_launchagent || args.uninstall_launchagent {
+        let _ = init_logging();
+        if args.uninstall_launchagent {
+            loginitem::uninstall()?;
+            println!("removed the login item ({})", loginitem::plist_path()?.display());
+        } else {
+            loginitem::install()?;
+            println!(
+                "{} now starts at login, from {}",
+                loginitem::LABEL,
+                loginitem::program()?.display()
+            );
+        }
+        return Ok(());
+    }
+
     // Same reasoning, and the same place in the launch: a config edit, not a
     // launch.
     if args.import_private_key {
@@ -227,51 +250,42 @@ fn start_up(
         };
     }
 
-    // Registering is idempotent, so doing it on every launch keeps a bundle that
-    // was copied to a new machine (or a new user account) working without a
-    // separate setup step. It belongs after the visible shell but before config
-    // parsing: a broken config must still leave a normal login item and a tray
-    // from which the user can diagnose and quit the application.
+    // Which copy is this? Logged on every launch because the answer used to be
+    // invisible and cost an afternoon: a bundle's `--version` and the version in
+    // this log both describe the *file*, and say nothing about which file launchd
+    // is starting. Now the log says.
+    match loginitem::program() {
+        Ok(exe) => info!("agent: running from {}", exe.display()),
+        Err(e) => warn!("agent: cannot tell where this executable lives: {e:#}"),
+    }
+
+    // Nothing here registers, installs or rewrites a login item — that happens only
+    // when somebody asks, from the menu's Start at Login or `--install-launchagent`
+    // (see `loginitem`). A copy of the app that merely runs must never change what
+    // launchd starts, which is exactly how a copy opened from a mounted disk image
+    // used to capture the job and leave every later `kickstart` starting it.
     //
-    // `--no-register` is for running it by hand in a terminal while developing,
-    // where a login item would be in the way.
-    if !args.no_register {
-        match loginitem::register() {
-            Ok(()) => info!("login item: registered ({})", loginitem::status()),
-            // Not fatal: an agent started by hand should still serve. Most
-            // likely causes are an unsigned bundle or no bundle at all.
-            Err(e) => warn!("login item: could not register: {e:#}"),
-        }
+    // What *is* worth saying on every launch is a mismatch, which is the failure
+    // that hid: the login item naming some other copy.
+    if let loginitem::Status::Elsewhere(other) = loginitem::status() {
+        warn!(
+            "login item: {} starts a different copy at login: {} — `launchctl kickstart` \
+             will start that one, not this. Re-tick Start at Login from the copy you want.",
+            loginitem::LABEL,
+            other.display()
+        );
     }
 
-    // Is this process the registered job, or a copy of the app somebody opened?
-    // Both of the next two steps turn on the answer, and asking launchd twice
-    // could get two of them.
-    let job = Job::read();
-    let is_the_job = job.is_this_process();
-
-    // Once per plist generation, make launchd take this bundle's copy of it, which
-    // registering alone does not do — see `loginitem::refresh`, including why only a
-    // copy that is not the job may do it. The job definition being replaced is the
-    // one that used to relaunch the agent behind an upgrade.
-    if !args.no_register && !is_the_job {
-        match loginitem::stamp_path().and_then(|stamp| loginitem::refresh(&stamp)) {
-            Ok(true) => info!(
-                "login item: handed launchd the plist from this bundle (generation {})",
-                loginitem::GENERATION
-            ),
-            Ok(false) => {}
-            Err(e) => {
-                warn!("login item: launchd may still be holding an older job definition: {e:#}");
-            }
-        }
-    }
-
-    // A normal `open` hands execution to the registered LaunchAgent. Do this
-    // only after creating the tray so even a slow handoff is visibly in
+    // Is this process the launchd job, or a copy of the app somebody opened? A
+    // normal `open` on a Mac where the job is already running hands execution over
+    // rather than racing it for the port.
+    //
+    // Done only after creating the tray so even a slow handoff is visibly in
     // progress; the job that takes over creates its own tray before it does any
-    // work too.
-    if !args.no_menu && !args.no_register && !is_the_job && hand_over_to_launchd(job) {
+    // work too. `--no-handover` is for running it by hand in a terminal while
+    // developing, where standing down is the opposite of what is wanted.
+    let job = Job::read();
+    if !args.no_menu && !args.no_handover && !job.is_this_process() && hand_over_to_launchd(job) {
         return Startup::StoodDown;
     }
 
@@ -907,15 +921,20 @@ fn print_first_run(path: &Path, public_key: &str) {
 /// The agent's argument surface: three launch modes and nothing else.
 ///
 /// Every *operation* is a menu item (see [`menubar`]), so what is left here is
-/// only how to start — which config to read, and whether to register and put up a
-/// menu. `clap` would be a dependency for that.
+/// mostly how to start — which config to read, whether to put up a menu, and
+/// whether to stand down for the launchd job. `clap` would be a dependency for
+/// that. The two `--*-launchagent` flags are the exception, and exist because
+/// installing a login item is a thing to do from a terminal on a VM as well as
+/// from a menu.
 #[derive(Debug, Default)]
 struct Args {
     config: Option<PathBuf>,
-    no_register: bool,
+    no_handover: bool,
     no_menu: bool,
     public_key: bool,
     import_private_key: bool,
+    install_launchagent: bool,
+    uninstall_launchagent: bool,
 }
 
 impl Args {
@@ -930,7 +949,9 @@ impl Args {
                         .ok_or_else(|| anyhow::anyhow!("--config needs a path"))?;
                     parsed.config = Some(PathBuf::from(path));
                 }
-                "--no-register" => parsed.no_register = true,
+                "--no-handover" => parsed.no_handover = true,
+                "--install-launchagent" => parsed.install_launchagent = true,
+                "--uninstall-launchagent" => parsed.uninstall_launchagent = true,
                 "--no-menu" => parsed.no_menu = true,
                 "--public-key" => parsed.public_key = true,
                 // Deliberately takes no value: the key arrives on stdin. As an
@@ -958,13 +979,24 @@ remotex-agent — the macOS screen agent remotex connects to
 
 Usage: remotex-agent [options]
 
-With no options: create the config if absent, register as a login item, and
-serve. Normally launched by macOS at login rather than by hand.
+With no options: create the config if absent and serve. Normally launched by
+macOS at login rather than by hand — see --install-launchagent, which is the only
+thing that arranges that. A launch never registers anything by itself.
 
 Options:
   -c, --config <path>  Config file (default:
                        ~/Library/Application Support/remotex-agent/config.toml)
-      --no-register    Serve without registering as a login item (for development)
+      --no-handover    Serve even when launchd already has a copy running, instead
+                       of standing down for it (for development)
+      --install-launchagent
+                       Write ~/Library/LaunchAgents/dev.remotex.agent.plist naming
+                       *this* executable by absolute path, load it, and exit. This
+                       is what makes the agent start at login, and the same thing
+                       the menu's Start at Login does. Refused from a mounted disk
+                       image, where the path would be gone by the next login
+      --uninstall-launchagent
+                       Unload and remove that plist, and exit. The agent then runs
+                       only when somebody opens it
       --no-menu        Serve without a menu bar item. Needed over SSH, where
                        there is no window server to put one in — and with no menu
                        there is no interface at all, so this is for development
@@ -1004,8 +1036,13 @@ mod tests {
     fn no_arguments_serves_with_the_default_config_path() {
         let args = parse(&[]).unwrap();
         assert!(args.config.is_none());
-        // Registering is the default: installing is meant to be "open it once".
-        assert!(!args.no_register);
+        // Standing down for a running launchd job is the default: opening the app
+        // when it is already running must not race it for the port.
+        assert!(!args.no_handover);
+        // And a launch installs nothing. This is the property that stops a copy
+        // opened from a disk image capturing what launchd starts, so it is pinned
+        // here as well as in `loginitem`.
+        assert!(!args.install_launchagent && !args.uninstall_launchagent);
         // So is the menu bar, which is the agent's whole interface — an agent
         // with no visible sign of itself, no way to read its key and no way to
         // quit is what --no-menu opts *out* of.
@@ -1022,7 +1059,13 @@ mod tests {
 
     #[test]
     fn every_flag_parses() {
-        assert!(parse(&["--no-register"]).unwrap().no_register);
+        assert!(parse(&["--no-handover"]).unwrap().no_handover);
+        assert!(parse(&["--install-launchagent"]).unwrap().install_launchagent);
+        assert!(
+            parse(&["--uninstall-launchagent"])
+                .unwrap()
+                .uninstall_launchagent
+        );
         assert!(parse(&["--no-menu"]).unwrap().no_menu);
         assert!(parse(&["--public-key"]).unwrap().public_key);
         assert!(parse(&["--import-private-key"]).unwrap().import_private_key);
@@ -1055,7 +1098,9 @@ mod tests {
     fn the_usage_text_documents_every_flag() {
         for flag in [
             "--config",
-            "--no-register",
+            "--no-handover",
+            "--install-launchagent",
+            "--uninstall-launchagent",
             "--no-menu",
             "--public-key",
             "--import-private-key",

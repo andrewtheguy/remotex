@@ -18,7 +18,7 @@ src/rxa.rs                              crates/rxa-agent
                                            ├─ ScreenCaptureKit capture
                                            ├─ WebP tile encoder
                                            ├─ Core Graphics input injection
-                                           └─ menu bar UI and SMAppService
+                                           └─ menu bar UI and login item
 
 crates/rxa-proto: identity keys, handshake, framing, messages, key mapping
 ```
@@ -235,8 +235,13 @@ Apps** permission.
 
 ## Lifecycle and recovery
 
-The application registers its embedded LaunchAgent through `SMAppService` and
-runs in the logged-in user's GUI session. The menu bar shell is created before
+The agent runs in the logged-in user's GUI session. Starting at login is a plain
+LaunchAgent at `~/Library/LaunchAgents/dev.remotex.agent.plist` naming the
+executable by **absolute path**, written only when somebody asks — the menu's
+Start at Login, or `--install-launchagent`. A launch registers nothing, so no copy
+of the app can change what launchd starts by merely running; see
+`crates/rxa-agent/src/loginitem.rs` for the bundle-relative registration this
+replaced and what it cost. The menu bar shell is created before
 configuration, permission checks, display setup, or the network runtime. A
 handled startup or worker failure leaves that shell available with diagnostics
 and Quit.

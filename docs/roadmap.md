@@ -10,14 +10,15 @@ is the only place they can be read in context.
 
 ### macOS login-window service
 
-The `SMAppService` LaunchAgent runs only in the signed-in user's Aqua session, so
-the agent stops at logout and cannot be reached from the macOS login screen. Currently if the screen is locked, the user must unlock it before remotex can connect. 
+The agent's LaunchAgent is per-user and runs only in the signed-in user's Aqua
+session, so the agent stops at logout and cannot be reached from the macOS login
+screen. Currently if the screen is locked, the user must unlock it before remotex can connect. 
 
 The shape of an answer is established: RealVNC's
 [Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes)
 and RustDesk's installed-service mode both provide login-window access, by
 installing launch components that declare the `LoginWindow` session type
-alongside `Aqua` instead of relying on per-user `SMAppService`.
+alongside `Aqua`, rather than a per-user agent in `~/Library/LaunchAgents`.
 
 Nothing past that shape is settled, and none of it should be designed here first.
 What has to be measured on a real Mac: how the single listener is held across the
@@ -28,29 +29,6 @@ Screen Recording and Accessibility grants reach the signed app in the
 
 FileVault is the one boundary none of it crosses: no remote-access process runs
 before pre-boot disk unlock.
-
-### An absolute-path LaunchAgent for the macOS agent
-
-The agent registers its own embedded plist through `SMAppService`, and that plist's
-`BundleProgram` is a path *relative to the registering bundle*. Every copy of the
-app registers itself on launch, so the job's identity belongs to whichever copy ran
-most recently — including one opened from a mounted release DMG, which the
-packaging check in `CLAUDE.md` asks somebody to do.
-
-The result is a silent version regression that outlives reboots:
-`launchctl kickstart -k` starts the captured old binary, or nothing once the image
-is ejected, while the installed bundle reports the right version to anyone who
-asks it. Observed with a job still naming bundle version 0.0.58 three releases
-later.
-
-The fix is to stop registering anything: ship a plain
-`~/Library/LaunchAgents/dev.remotex.agent.plist` whose `ProgramArguments` is the
-absolute path to the installed executable. No relative resolution, so no second
-copy can become the job. It costs the built-in "starts at login" registration —
-that becomes an explicit install step — and it removes `loginitem.rs` along with
-the plist-generation stamp that exists only because `SMAppService` caches the
-plist. The login-window service above will need an absolute-path plist regardless,
-so the two point the same way.
 
 ### Authorized gateway list
 

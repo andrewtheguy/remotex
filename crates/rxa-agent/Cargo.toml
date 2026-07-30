@@ -107,15 +107,3 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSTimer",
     "NSRunLoop",
 ] }
-# SMAppService: the agent registers itself as a login item, so there is no
-# install script and no plist in ~/Library/LaunchAgents. macOS 13+; this crate
-# targets 14+ (see packaging/macos/Info.plist).
-objc2-service-management = { version = "0.3", default-features = false, features = [
-    "std",
-    "SMAppService",
-    # `kSMErrorAlreadyRegistered`, so "already registered" is matched on the real
-    # constant rather than a magic number.
-    "SMErrors",
-    "objc2",
-    "objc2-foundation",
-] }

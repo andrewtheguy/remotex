@@ -18,9 +18,8 @@
 #
 # 15.4 for `NSPasteboard.accessBehavior`, which the clipboard watcher reports in
 # the menu bar (see `crates/rxa-agent/src/pasteboard.rs`). Everything else here
-# is far older — ScreenCaptureKit's dirty rects, `CGEvent` injection, and
-# `SMAppService` at 13+ — so this one property is the whole reason for the
-# floor. Keep it in step with `LSMinimumSystemVersion` in
+# is far older — ScreenCaptureKit's dirty rects and `CGEvent` injection — so this
+# one property is the whole reason for the floor. Keep it in step with `LSMinimumSystemVersion` in
 # `packaging/macos/Info.plist`; the plist is what stops the app launching on an
 # older Mac, this is what lets it compile against the newer SDK. Ignored on
 # Linux, where the gateway is built.
