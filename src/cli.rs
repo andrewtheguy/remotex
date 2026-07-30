@@ -29,6 +29,34 @@ pub enum Commands {
         config: Option<PathBuf>,
     },
 
+    /// Start the gateway inside remotex.app: an ephemeral port on 127.0.0.1, no
+    /// web UI, and a token printed on stdout for the app that started it.
+    ///
+    /// Not for interactive use. It serves the one client it was started by, reads
+    /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
+    /// is how it dies with the app.
+    ServeEmbedded {
+        /// The app's instance directory, holding remotex.toml, gateway.log and
+        /// the viewer's own preferences. Nothing outside it is read.
+        #[arg(long)]
+        instance_dir: PathBuf,
+    },
+
+    /// Check a config file and say what is wrong with it, without starting
+    /// anything. Reads stdin unless --config names a file.
+    ///
+    /// This is what remotex.app's configuration editor calls before it saves, so
+    /// that what the editor accepts is what the gateway accepts.
+    CheckConfig {
+        /// The file to check (default: read the config from stdin)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// Apply remotex.app's rules instead of a served gateway's: no [server]
+        /// block, and no targets configured yet is not an error
+        #[arg(long)]
+        embedded: bool,
+    },
+
     /// Generate a [server].site_passwd credential for the web login: prompts
     /// for a password and prints username:bcrypt_hash
     GenPasswd {
@@ -78,6 +106,50 @@ mod tests {
     fn serve_rejects_the_removed_target_selector() {
         // Target selection is browser-side now: --target is gone.
         assert!(Cli::try_parse_from(["remotex", "serve", "--target", "win"]).is_err());
+    }
+
+    /// The app's own subcommand. `--instance-dir` is required and there is
+    /// deliberately nothing else to give it: the port, the secret and the absence
+    /// of a web UI are all decided by the gateway, not passed in.
+    #[test]
+    fn serve_embedded_takes_only_an_instance_dir() {
+        let cli =
+            Cli::try_parse_from(["remotex", "serve-embedded", "--instance-dir", "/i"]).unwrap();
+        let Commands::ServeEmbedded { instance_dir } = cli.command else {
+            panic!("expected the serve-embedded subcommand");
+        };
+        assert_eq!(instance_dir, std::path::Path::new("/i"));
+
+        assert!(
+            Cli::try_parse_from(["remotex", "serve-embedded"]).is_err(),
+            "there is no default instance directory: the app names the one it owns"
+        );
+        for rejected in ["--port", "--gateway", "--token"] {
+            assert!(
+                Cli::try_parse_from(["remotex", "serve-embedded", "--instance-dir", "/i", rejected, "x"])
+                    .is_err(),
+                "{rejected} is not the app's to pass"
+            );
+        }
+    }
+
+    #[test]
+    fn check_config_reads_stdin_by_default_and_takes_an_audience() {
+        let cli = Cli::try_parse_from(["remotex", "check-config"]).unwrap();
+        let Commands::CheckConfig { config, embedded } = cli.command else {
+            panic!("expected the check-config subcommand");
+        };
+        assert!(config.is_none(), "stdin, which is what an unsaved editor has");
+        assert!(!embedded, "a served gateway's rules unless asked otherwise");
+
+        let cli =
+            Cli::try_parse_from(["remotex", "check-config", "--embedded", "-c", "/i/remotex.toml"])
+                .unwrap();
+        let Commands::CheckConfig { config, embedded } = cli.command else {
+            panic!("expected the check-config subcommand");
+        };
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("/i/remotex.toml")));
+        assert!(embedded);
     }
 
     #[test]

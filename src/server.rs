@@ -15,7 +15,7 @@ use tower::service_fn;
 use tower_http::services::ServeDir;
 
 use crate::{
-    auth::{self, AuthSessions},
+    auth::{self, AuthSessions, GatewayAuth},
     config::AppConfig,
     error::{ApiResult, AppError},
     protocol,
@@ -29,23 +29,28 @@ pub struct AppState {
     pub config: AppConfig,
     /// The single session slot: claim here, attach over `/ws`.
     pub sessions: Arc<SessionManager>,
-    /// Live auth sessions behind the login cookie.
+    /// Live auth sessions behind the login cookie. Only a
+    /// [`GatewayAuth::Login`] gateway mints or validates one — an embedded
+    /// gateway's client presents a token on every request and never gets a
+    /// cookie, so this stays empty there.
     pub auth: Arc<AuthSessions>,
 }
 
 /// Build the axum router.
 ///
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the
-///   liveness probe.
-/// - the rest of `/api/*` and `/ws` — refuse requests without a valid login
-///   cookie; unknown `/api/*` paths return 404 rather than the SPA,
-///   so API clients get an honest error.
+///   liveness probe. On an embedded gateway the login routes answer 403 instead:
+///   see [`no_login_handler`].
+/// - the rest of `/api/*` and `/ws` — refuse requests that do not carry whatever
+///   this gateway's [`GatewayAuth`] asks for; unknown `/api/*` paths return 404
+///   rather than the SPA, so API clients get an honest error.
 /// - `/ws` — binary WebSocket carrying the remote-desktop session, including audio.
 /// - fallback — the built SPA, served from `config.static_dir` on disk. Real
 ///   files are served by [`ServeDir`]; any unknown path returns `index.html`
 ///   with a 200 so client-side routes resolve (matching an SPA's expectations).
 ///   The static shell stays public — it renders the login screen and holds no
-///   secrets; everything it talks to is behind the cookie.
+///   secrets; everything it talks to is behind the cookie. With no `static_dir` at
+///   all (an embedded gateway ships no SPA) the fallback is a plain 404.
 pub fn router(config: AppConfig) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     router_with_sessions(config, sessions)
@@ -62,20 +67,40 @@ pub(crate) fn router_with_sessions(
 ) -> Router {
     // Use `.fallback` (returns the fallback response as-is) rather than
     // `.not_found_service` (which forces a 404 status), so SPA routes get 200.
-    let index_path = config.static_dir.join("index.html");
-    let spa_index = service_fn(move |_req| {
-        let index_path = index_path.clone();
-        async move {
-            let response = match tokio::fs::read(&index_path).await {
-                Ok(bytes) => {
-                    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], bytes).into_response()
-                }
-                Err(_) => StatusCode::NOT_FOUND.into_response(),
-            };
-            Ok::<_, Infallible>(response)
-        }
+    let spa = config.static_dir.clone().map(|static_dir| {
+        let index_path = static_dir.join("index.html");
+        let spa_index = service_fn(move |_req| {
+            let index_path = index_path.clone();
+            async move {
+                let response = match tokio::fs::read(&index_path).await {
+                    Ok(bytes) => {
+                        ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], bytes)
+                            .into_response()
+                    }
+                    Err(_) => StatusCode::NOT_FOUND.into_response(),
+                };
+                Ok::<_, Infallible>(response)
+            }
+        });
+        ServeDir::new(&static_dir).fallback(spa_index)
     });
-    let spa = ServeDir::new(&config.static_dir).fallback(spa_index);
+
+    // Two shapes of the same three routes, and which one is registered is decided
+    // here rather than inside the handlers. An embedded gateway *has* no login —
+    // its client was given a token before it made its first request — so the
+    // honest answer to one is a refusal, and a refusal is easier to read at the
+    // router than three handlers that each begin by asking what kind of gateway
+    // they are on.
+    let auth_routes = match config.auth {
+        GatewayAuth::Login(_) => Router::new()
+            .route("/auth/login", post(login_handler))
+            .route("/auth/logout", post(logout_handler))
+            .route("/auth/status", get(status_handler)),
+        GatewayAuth::Token(_) => Router::new()
+            .route("/auth/login", post(no_login_handler))
+            .route("/auth/logout", post(no_login_handler))
+            .route("/auth/status", get(no_login_handler)),
+    };
 
     let state = AppState {
         config,
@@ -90,9 +115,7 @@ pub(crate) fn router_with_sessions(
         .route("/health", get(|| async { "ok" }))
         // Public: the login screen reads its branding before authenticating.
         .route("/config", get(config_handler))
-        .route("/auth/login", post(login_handler))
-        .route("/auth/logout", post(logout_handler))
-        .route("/auth/status", get(status_handler))
+        .merge(auth_routes)
         .merge(
             Router::new()
                 .route("/targets", get(targets_handler))
@@ -101,25 +124,32 @@ pub(crate) fn router_with_sessions(
         )
         .fallback(|| async { AppError::NotFound });
 
-    Router::new()
+    let routed = Router::new()
         .nest("/api", api)
-        // The cookie check runs before the upgrade, so an unauthenticated
+        // The auth check runs before the upgrade, so an unauthenticated
         // WebSocket attempt fails its handshake with a plain 401. (A sub-router
         // because route_layer must come after a route to apply to it.)
         .merge(
             Router::new()
                 .route("/ws", any(ws::handler))
                 .route_layer(require_auth),
-        )
-        .fallback_service(spa)
-        // Outermost, so it sees the request before routing does: what it acts on is
-        // the `Host` a browser arrived under, not which handler would answer.
-        // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            dev_hostname_redirect,
-        ))
-        .with_state(state)
+        );
+
+    match spa {
+        Some(spa) => routed.fallback_service(spa),
+        // No SPA was shipped, so there is nothing to look for and nothing to fall
+        // back to: `remotex.app` bundles this binary without a web root on purpose
+        // (see `AppConfig::static_dir`). A 404 is the whole answer.
+        None => routed.fallback(|| async { AppError::NotFound }),
+    }
+    // Outermost, so it sees the request before routing does: what it acts on is
+    // the `Host` a browser arrived under, not which handler would answer.
+    // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        dev_hostname_redirect,
+    ))
+    .with_state(state)
 }
 
 /// Whether `name` — a `Host` header with its port and brackets already stripped —
@@ -229,11 +259,23 @@ async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next
     }
 }
 
-/// Middleware guarding everything session-related: no valid login cookie, no
-/// service. Validation also refreshes the session's sliding expiry.
+/// Middleware guarding everything session-related: whatever this gateway's
+/// [`GatewayAuth`] asks for, or no service.
+///
+/// The two ways in are exclusive, which is what the match expresses. A login
+/// gateway accepts a cookie and knows nothing about tokens; an embedded one
+/// accepts its token and **not** a cookie, since it never issues one — a request
+/// bearing a `remotex_session` there is either confusion or somebody's guess, and
+/// either way it is not the client this gateway was started for.
 async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let authenticated = auth::token_from_headers(req.headers())
-        .is_some_and(|token| state.auth.validate(&token));
+    let authenticated = match &state.config.auth {
+        // Validation also refreshes the session's sliding expiry.
+        GatewayAuth::Login(_) => auth::token_from_headers(req.headers())
+            .is_some_and(|token| state.auth.validate(&token)),
+        GatewayAuth::Token(expected) => {
+            auth::bearer_from_headers(req.headers()).is_some_and(|token| expected.matches(token))
+        }
+    };
     if !authenticated {
         return AppError::Unauthorized.into_response();
     }
@@ -274,7 +316,14 @@ async fn login_handler(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let site_passwd = state.config.site_passwd.clone();
+    let GatewayAuth::Login(site_passwd) = &state.config.auth else {
+        // Unreachable: `router` registers `no_login_handler` at this path on a
+        // token gateway. Answered rather than asserted, because the shape that
+        // would reach here — a login route on a gateway with no credential — must
+        // not be a panic in a running program.
+        return Err(AppError::Forbidden);
+    };
+    let site_passwd = site_passwd.clone();
     // bcrypt verification burns tens of milliseconds by design — keep it off
     // the async workers.
     let ok = tokio::task::spawn_blocking(move || {
@@ -336,6 +385,17 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
         branding: state.config.branding.clone(),
         protocol_version: protocol::PROTOCOL_VERSION,
     })
+}
+
+/// The login routes on an embedded gateway: 403, always.
+///
+/// A refusal rather than a missing route, because the two say different things. A
+/// 404 reads as "this build is older than you thought" and sends somebody looking
+/// for a routing mistake; a 403 says the request was understood and is not allowed
+/// here — which is the truth, and it is the same answer whatever credentials are
+/// offered, since an embedded gateway holds none to check them against.
+async fn no_login_handler() -> AppError {
+    AppError::Forbidden
 }
 
 #[derive(Serialize)]
@@ -415,7 +475,7 @@ mod tests {
         let config = AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 52675,
-            static_dir: "frontend/dist".into(),
+            static_dir: Some("frontend/dist".into()),
             // Never dialed: no test here starts a session.
             targets: vec![crate::config::TargetConfig {
                 name: "unreachable".to_owned(),
@@ -436,10 +496,12 @@ mod tests {
                 agent_public_key: String::new(),
                 gateway_private_key: String::new(),
             }],
-            site_passwd: crate::auth::SitePasswd::parse(
-                &crate::auth::generate("admin", "hunter2", 4).unwrap(),
-            )
-            .unwrap(),
+            auth: crate::auth::GatewayAuth::Login(
+                crate::auth::SitePasswd::parse(
+                    &crate::auth::generate("admin", "hunter2", 4).unwrap(),
+                )
+                .unwrap(),
+            ),
             branding: "remotex".to_owned(),
             dev_hostname: dev_hostname.map(str::to_owned),
         };
@@ -732,12 +794,14 @@ mod tests {
         let config = AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 0,
-            static_dir: "frontend/dist".into(),
+            static_dir: Some("frontend/dist".into()),
             targets: vec![target],
-            site_passwd: crate::auth::SitePasswd::parse(
-                &crate::auth::generate("admin", "hunter2", 4).unwrap(),
-            )
-            .unwrap(),
+            auth: crate::auth::GatewayAuth::Login(
+                crate::auth::SitePasswd::parse(
+                    &crate::auth::generate("admin", "hunter2", 4).unwrap(),
+                )
+                .unwrap(),
+            ),
             branding: "audio tone harness".to_owned(),
             dev_hostname: None,
         };
