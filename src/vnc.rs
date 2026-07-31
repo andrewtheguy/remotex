@@ -44,7 +44,7 @@ use crate::protocol::{
     ServerMsg, UNSCALED, clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
-use crate::vnc_apple::{self, CursorCache, ZlibStream};
+use crate::vnc_apple::{self, CursorCache, FramebufferZlib};
 use crate::vnc_clipboard;
 use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
 
@@ -325,8 +325,8 @@ type SharedDisplay = Arc<std::sync::Mutex<DisplayState>>;
 #[derive(Default)]
 struct Apple {
     /// One inflate stream for the connection's zlib rectangles. Created on the
-    /// first one, never reset — see [`ZlibStream`].
-    zlib: Option<ZlibStream>,
+    /// first one, never reset — see [`FramebufferZlib`].
+    zlib: Option<FramebufferZlib>,
     cursors: CursorCache,
     /// Whether zlib has been asked for yet.
     ///
@@ -1736,14 +1736,14 @@ async fn read_rect<R: AsyncRead + Unpin>(
     let pixels = if deflated {
         // One `u32` of length, then that much of the connection's single deflate
         // stream. The stream is the connection's, not the rectangle's — see
-        // [`ZlibStream`].
+        // [`FramebufferZlib`].
         let len = reader.read_u32().await?;
         // Deflate can *expand*, and on a small rectangle it always does: the
         // stream header and one sync flush cost more than a 1x1 rectangle's four
         // pixels (measured: nine bytes for four). So bounding this at `expect`
         // would refuse legitimate rectangles. A generous multiple still bounds the
         // read, which is all this check is for — the inflated size is checked
-        // exactly, by `ZlibStream::inflate`.
+        // exactly, by `FramebufferZlib::inflate`.
         let ceiling = expect + expect / 64 + 1024;
         anyhow::ensure!(
             u64::from(len) <= ceiling as u64,
@@ -1755,7 +1755,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         let apple = apple.as_mut().expect("zlib is the Apple dialect's alone");
         apple
             .zlib
-            .get_or_insert_with(|| ZlibStream::new("zlib"))
+            .get_or_insert_with(FramebufferZlib::default)
             .inflate(&chunk, expect)?
     } else {
         let mut pixels = vec![0u8; expect];
@@ -1958,11 +1958,18 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
     reader.read_exact(&mut deflated).await?;
 
     let apple = apple.as_mut().expect("cursor images are the Apple dialect's alone");
-    let shape = match apple.cursors.accept(id, hotspot, size, &deflated)? {
-        vnc_apple::Cursor::Shape(shape) => shape,
+    let shape = match apple.cursors.accept(id, hotspot, size, &deflated) {
+        Err(error) => {
+            // Cursor stores are individually compressed, so this body has been
+            // fully consumed and a bad one has no state the next shape depends on.
+            // Keep the last usable pointer instead of ending the desktop session.
+            warn!("vnc: ignoring cursor image {id}: {error:#}");
+            return Ok(());
+        }
+        Ok(vnc_apple::Cursor::Shape(shape)) => shape,
         // Nothing to draw and nothing to say: the pointer keeps the shape it has,
         // which is closer to the truth than blanking it.
-        vnc_apple::Cursor::Unchanged => return Ok(()),
+        Ok(vnc_apple::Cursor::Unchanged) => return Ok(()),
     };
     *cursor.lock().unwrap() = CursorState::Shape(shape.clone());
     sink.msg(ServerMsg::Cursor(Some(shape))).await
@@ -3058,6 +3065,49 @@ mod tests {
         // so the browser is told to fall back rather than left with nothing.
         assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(None))));
         assert!(matches!(cursor_msg(&cursor), Some(ServerMsg::Cursor(None))));
+    }
+
+    #[tokio::test]
+    async fn a_bad_apple_cursor_does_not_end_or_poison_the_session() {
+        use flate2::{Compress, Compression, FlushCompress};
+
+        fn store(id: u32, raw: &[u8]) -> Vec<u8> {
+            let mut deflate = Compress::new(Compression::default(), true);
+            let mut compressed = Vec::with_capacity(raw.len() + 128);
+            deflate
+                .compress_vec(raw, &mut compressed, FlushCompress::Sync)
+                .unwrap();
+            let mut body = id.to_be_bytes().to_vec();
+            body.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+            body.extend_from_slice(&compressed);
+            body
+        }
+
+        let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
+        let (sink, mut rx) = test_sink();
+        let mut apple = Some(Apple::default());
+
+        // 1x1 BGRX plus its separate alpha byte, each in a complete cursor-local
+        // zlib stream.
+        let first = store(1000, &[0, 0, 255, 0, 255]);
+        read_cursor_image(&mut first.as_slice(), &mut apple, &cursor, (0, 0), (1, 1), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(Some(_)))));
+
+        let mut bad = 1001u32.to_be_bytes().to_vec();
+        bad.extend_from_slice(&3u32.to_be_bytes());
+        bad.extend_from_slice(&[1, 2, 3]);
+        read_cursor_image(&mut bad.as_slice(), &mut apple, &cursor, (0, 0), (1, 1), &sink)
+            .await
+            .expect("one malformed cursor is not a session error");
+        assert!(forwarded(&sink, &mut rx).await.is_none());
+
+        let after = store(1002, &[255, 0, 0, 0, 255]);
+        read_cursor_image(&mut after.as_slice(), &mut apple, &cursor, (0, 0), (1, 1), &sink)
+            .await
+            .expect("the next independent cursor stream still decodes");
+        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Cursor(Some(_)))));
     }
 
     #[test]

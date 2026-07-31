@@ -472,19 +472,40 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
     Ok(Layout { backing, current, displays })
 }
 
-/// The connection's zlib inflate stream.
+/// The connection's framebuffer-zlib inflate stream.
 ///
 /// One deflate stream for the life of the connection, chunked across rectangles:
 /// the sliding window carries over, so this context is created once and never
 /// reset. A fresh one per rectangle decodes the first rectangle and then fails —
 /// or, worse, succeeds with the wrong pixels.
-pub struct ZlibStream {
+pub struct FramebufferZlib {
+    inflater: Inflater,
+}
+
+impl Default for FramebufferZlib {
+    fn default() -> Self {
+        Self { inflater: Inflater::new("zlib") }
+    }
+}
+
+impl FramebufferZlib {
+    pub fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
+        self.inflater.inflate(chunk, expect)
+    }
+}
+
+/// An inflater whose lifetime is chosen by the encoding that owns it.
+///
+/// Keep this private: framebuffer zlib owns one through [`FramebufferZlib`],
+/// while self-contained Apple payloads call [`inflate_independent`] and cannot
+/// accidentally inherit connection-wide state.
+struct Inflater {
     inflate: flate2::Decompress,
     what: &'static str,
 }
 
-impl ZlibStream {
-    pub fn new(what: &'static str) -> Self {
+impl Inflater {
+    fn new(what: &'static str) -> Self {
         Self {
             inflate: flate2::Decompress::new(true),
             what,
@@ -497,7 +518,7 @@ impl ZlibStream {
     /// payload that wants to expand past it is a protocol violation rather than a
     /// buffer to grow — which is also what keeps a compression bomb from being
     /// answered with memory.
-    pub fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
+    fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
         anyhow::ensure!(
             expect <= MAX_INFLATED,
             "a {} rectangle wants {expect} inflated bytes, past the {MAX_INFLATED} ceiling",
@@ -528,6 +549,14 @@ impl ZlibStream {
     }
 }
 
+fn inflate_independent(
+    what: &'static str,
+    chunk: &[u8],
+    expect: usize,
+) -> anyhow::Result<Vec<u8>> {
+    Inflater::new(what).inflate(chunk, expect)
+}
+
 /// Apple's cursor shapes, which arrive as a cache rather than as pixels.
 ///
 /// A shape is sent once with pixels (*store*) and then re-selected by id every
@@ -539,7 +568,6 @@ impl ZlibStream {
 #[derive(Default)]
 pub struct CursorCache {
     shapes: HashMap<u32, CursorShape>,
-    zlib: Option<ZlibStream>,
 }
 
 /// What a cursor rectangle asked for.
@@ -552,9 +580,7 @@ pub enum Cursor {
     ///
     /// There is no "the server hid the pointer" here. On the plain RFB Cursor
     /// pseudo-encoding a zero-sized rectangle means exactly that, but this encoding
-    /// never says how it is spelled, and treating a zero-sized *store* as hidden
-    /// meant discarding a chunk of the shared deflate stream — see
-    /// [`CursorCache::accept`].
+    /// never says how it is spelled.
     Unchanged,
 }
 
@@ -580,14 +606,10 @@ impl CursorCache {
                 }
             });
         }
-        // A store this client cannot decode cannot be *skipped* either. Its payload
-        // is a chunk of the connection's single deflate stream, so not feeding it
-        // leaves that stream one chunk behind for the rest of the session and every
-        // later shape inflates to rubbish — silently, since rubbish of the right
-        // length still parses. Nor can it be fed and discarded: a zero-dimension
-        // store gives no expected size to inflate to, and an oversized one gives a
-        // size up to 21 GB. So both are fatal, which for shapes a real Mac never
-        // sends costs nothing and removes the one path that could corrupt the rest.
+        // Each store is an independent zlib stream. Unlike framebuffer encoding 6,
+        // Apple does not carry the deflate window from one cursor image to the next.
+        // A fresh inflater also means a malformed shape can be skipped without
+        // poisoning every cursor that follows it.
         anyhow::ensure!(
             w != 0 && h != 0,
             "a cursor store carried {} compressed bytes for a {w}x{h} shape",
@@ -599,10 +621,7 @@ impl CursorCache {
         );
 
         let pixels = usize::from(w) * usize::from(h);
-        let stream = self
-            .zlib
-            .get_or_insert_with(|| ZlibStream::new("cursor image"));
-        let raw = stream.inflate(deflated, pixels * 4 + pixels)?;
+        let raw = inflate_independent("cursor image", deflated, pixels * 4 + pixels)?;
         // BGRA pixels, then a *separate* alpha plane. The fourth byte of each
         // pixel is not the alpha — folding it in is how a cursor comes out
         // uniformly opaque or invisible.
@@ -955,7 +974,7 @@ mod tests {
     /// all here. Two chunks of one deflate stream inflate in sequence and fail
     /// separately.
     #[test]
-    fn zlib_inflates_across_rectangles_but_not_out_of_order() {
+    fn framebuffer_zlib_inflates_across_rectangles_but_not_out_of_order() {
         use flate2::{Compress, Compression, FlushCompress};
 
         let first = vec![0xabu8; 4096];
@@ -977,17 +996,17 @@ mod tests {
         let a = chunk(&mut deflate, &first);
         let b = chunk(&mut deflate, &second);
 
-        let mut stream = ZlibStream::new("test");
+        let mut stream = FramebufferZlib::default();
         assert_eq!(stream.inflate(&a, first.len()).unwrap(), first);
         assert_eq!(stream.inflate(&b, second.len()).unwrap(), second);
 
         // The second chunk alone, through a stream that never saw the first: no
         // zlib header, no window, nothing.
-        let mut fresh = ZlibStream::new("test");
+        let mut fresh = FramebufferZlib::default();
         assert!(fresh.inflate(&b, second.len()).is_err());
 
         // A chunk that does not inflate to the size its geometry claims.
-        let mut stream = ZlibStream::new("test");
+        let mut stream = FramebufferZlib::default();
         let err = stream.inflate(&a, first.len() + 1).unwrap_err();
         assert!(format!("{err:#}").contains("its geometry claims"), "{err:#}");
     }
@@ -998,6 +1017,15 @@ mod tests {
     fn a_cursor_is_stored_once_and_selected_by_id() {
         use flate2::{Compress, Compression, FlushCompress};
 
+        fn compress(raw: &[u8]) -> Vec<u8> {
+            let mut deflate = Compress::new(Compression::default(), true);
+            let mut compressed = Vec::with_capacity(raw.len() + 128);
+            deflate
+                .compress_vec(raw, &mut compressed, FlushCompress::Sync)
+                .unwrap();
+            compressed
+        }
+
         let (w, h) = (2u16, 2u16);
         let pixels = usize::from(w) * usize::from(h);
         let mut raw = Vec::new();
@@ -1007,11 +1035,7 @@ mod tests {
         }
         raw.extend_from_slice(&[0x00, 0x40, 0x80, 0xff]); // the real alpha plane
 
-        let mut deflate = Compress::new(Compression::default(), true);
-        let mut deflated = Vec::with_capacity(raw.len());
-        deflate
-            .compress_vec(&raw, &mut deflated, FlushCompress::Sync)
-            .unwrap();
+        let deflated = compress(&raw);
 
         let mut cache = CursorCache::default();
         let stored = cache.accept(1000, (1, 1), (w, h), &deflated).unwrap();
@@ -1036,9 +1060,20 @@ mod tests {
             Cursor::Unchanged
         ));
 
-        // A store this client cannot decode is fatal rather than skipped: its
-        // payload belongs to the shared deflate stream, and dropping it would leave
-        // every later shape inflating to rubbish of plausible length.
+        // A second store begins a new zlib stream. Reusing the first store's
+        // inflater here rejects the second stream's zlib header as an invalid
+        // stored block, which is the live-session failure this guards against.
+        raw[0] = 99;
+        let second = cache.accept(1002, (0, 0), (w, h), &compress(&raw)).unwrap();
+        assert!(matches!(second, Cursor::Shape(_)));
+
+        // A malformed independent store does not alter the cache or poison the
+        // next independently compressed shape.
+        assert!(cache.accept(1003, (0, 0), (w, h), &[1, 2, 3]).is_err());
+        raw[0] = 101;
+        let after_bad = cache.accept(1004, (0, 0), (w, h), &compress(&raw)).unwrap();
+        assert!(matches!(after_bad, Cursor::Shape(_)));
+
         let err = cache.accept(1002, (0, 0), (0, 0), &deflated).unwrap_err();
         assert!(format!("{err:#}").contains("for a 0x0 shape"), "{err:#}");
         let err = cache
