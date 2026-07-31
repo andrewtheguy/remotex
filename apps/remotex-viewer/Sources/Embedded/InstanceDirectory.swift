@@ -79,6 +79,26 @@ struct InstanceDirectory: Equatable, Sendable {
         url.appending(path: "viewer.json")
     }
 
+    /// Icon file names this instance may carry, in the order they are preferred.
+    ///
+    /// `.icns` first because it is what macOS wants — multiple resolutions in one file —
+    /// with `.png` accepted because it is what somebody actually has to hand.
+    static let iconNames = ["icon.icns", "icon.png"]
+
+    /// A Dock icon for *this* instance, if one has been dropped into its directory.
+    ///
+    /// A file rather than a config key, so it needs no schema and no validation: an
+    /// instance either has an `icon.icns` beside its config or it does not. Two
+    /// instances running at once are otherwise identical in the Dock and in ⌘-Tab —
+    /// `branding` distinguishes their windows, and this distinguishes everything else.
+    ///
+    /// Nil is the ordinary case and means the app keeps its own icon.
+    func iconURL() -> URL? {
+        Self.iconNames
+            .map { url.appending(path: $0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
     /// Create the directory if it is not there, owner-only.
     ///
     /// `0700` because `remotex.toml` holds the credentials of every machine this app

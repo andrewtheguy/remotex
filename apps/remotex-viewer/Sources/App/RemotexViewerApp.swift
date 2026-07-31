@@ -57,6 +57,17 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A Dock icon for this instance, if its directory carries one. Done here rather
+        // than at the process entry point because `NSApp` does not exist until SwiftUI
+        // has built it, and resolved from the arguments rather than passed in because
+        // that is all it depends on — the model has nothing to do with how the app
+        // looks. See `InstanceDirectory.iconURL`.
+        if let icon = InstanceDirectory.resolved().iconURL(),
+           let image = NSImage(contentsOf: icon)
+        {
+            NSApp.applicationIconImage = image
+        }
+
         // SwiftUI and AppKit build and rebuild menus after launch. Reapply the
         // Edit-menu and no-shortcut rules on additions, changes, and removals.
         for name in [

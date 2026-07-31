@@ -116,6 +116,79 @@ window title and the launch screen. It is the one key this file shares with a se
 gateway's, and the only place either sets it — `[server].branding` no longer exists,
 because a key in that block could not name an app whose config has no such block.
 
+## Running more than one instance
+
+An instance is a directory, so a second one is a second directory. Two run side by
+side with no coordination: separate configs, separate gateways on separate ephemeral
+ports, separate `rxa` identities, nothing shared.
+
+The obstacle is only ever *launching* them. Double-clicking `remotex.app` passes no
+arguments — LaunchServices does not — and `open` without `-n` reactivates the copy
+already running and silently discards `--args`. Both halves are the same trap the
+Chrome `--user-data-dir` launchers hit, and the answer is the same: a small launcher
+app per instance.
+
+### 1. A launcher of its own
+
+`packaging/macos-viewer/instance-launcher.applescript` is the template. Edit the app
+path and the instance name in it, then compile it into an app:
+
+```sh
+osacompile -o ~/Applications/remotex\ Work.app \
+  packaging/macos-viewer/instance-launcher.applescript
+```
+
+It runs one line — `open -n /Applications/remotex.app --args --instance-dir <dir>` —
+and exits, so what stays in the Dock is remotex itself. The launcher is a real bundle:
+give it any name, drop an icon on its **Get Info** window, pin it, find it in
+Spotlight.
+
+Nothing stops you doing the same from a `.command` file or a Shortcuts.app *Run Shell
+Script* action. What you must **not** do is duplicate `remotex.app` and edit the copy:
+the bundle is signed with a hardened runtime, so any change to it invalidates the
+signature and breaks the TCC grants, which are keyed on the code identity.
+
+### 2. Name it
+
+Both instances are otherwise called "remotex" everywhere. Give each config a heading:
+
+```toml
+branding = "Work"
+```
+
+That reaches the window title, the picker heading and the launch screen — everywhere
+the *window* identifies itself.
+
+### 3. Give it a face
+
+Drop an `icon.icns` (or `icon.png`) into the instance directory:
+
+```text
+~/Library/Application Support/remotex-work/
+  remotex.toml
+  icon.icns        ← this instance's Dock icon
+```
+
+The app loads it at launch and sets it as its own icon, so the Dock, ⌘-Tab and the
+window's proxy icon all show it. A file rather than a config key: an instance either
+has one or it does not, so there is nothing to validate and nothing to spell wrong.
+`.icns` wins over `.png` when both are present, because it is the format macOS wants.
+
+The launcher's icon and the instance's icon are different things and both are worth
+setting — the first is what you click, the second is what you then see running.
+
+### What a new instance costs
+
+- **A new `rxa` identity.** A fresh directory mints its own `[rxa].private_key` on
+  first launch, so every Mac agent it should reach needs *that* instance's public key
+  on its `authorized_gateways` list — copy it from **Configuration…**. The keys are
+  genuinely different; one instance being paired says nothing about another.
+- **A turn at the agent.** An agent serves one session at a time, so whichever
+  instance reaches a shared Mac second is refused with a **Take over** button. That is
+  the design, not a conflict to resolve.
+- **Nothing else.** The gateways pick their own ports, and neither instance can see
+  the other's config, log or preferences.
+
 ## Protocol compatibility
 
 The check survives even though both halves now ship in one bundle, and it means

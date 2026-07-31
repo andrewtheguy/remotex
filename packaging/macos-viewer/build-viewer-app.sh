@@ -81,7 +81,19 @@ if [ "$configuration" = debug ]; then
   cargo_flags=()
 fi
 echo ">> building the remotex gateway ($cargo_profile)"
-cargo build --bin remotex "${cargo_flags[@]}"
+# The same three variables `packaging/build-tarball.sh` sets, and for the same reasons
+# — see the long comment there, which is where that story is told once:
+#
+#   LIBOPUS_STATIC / LIBOPUS_NO_PKG  force the vendored opus rather than whatever
+#     pkg-config finds, so the binary that goes into this bundle cannot come out
+#     needing a libopus dylib that exists only on the machine that built it. A DMG is
+#     the worst possible place to discover that.
+#   CMAKE_POLICY_VERSION_MINIMUM     because the vendored opus declares
+#     `cmake_minimum_required` below 3.5 and CMake 4 refuses to configure it at all.
+#     The macos-latest runners have CMake 4; a Mac with CMake 3 builds happily without
+#     this and cannot reproduce the failure, which is exactly how it reached CI.
+LIBOPUS_STATIC=1 LIBOPUS_NO_PKG=1 CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  cargo build --bin remotex "${cargo_flags[@]}"
 gateway="target/$cargo_profile/remotex"
 [ -x "$gateway" ] || {
   echo "gateway binary missing at $gateway" >&2
