@@ -465,26 +465,13 @@ export function useRemoteDesktop(
   // against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
   const [connectError, setConnectError] = useState<string | null>(null);
-  // The remote's own session slot is held by a different client, and this one can
-  // take it over. Beside `connectError` rather than folded into it because the
-  // picker offers a button for this and only reports the other. Cleared the moment
-  // a session starts or another connect is attempted, so a stale offer can never
-  // outlive the situation that produced it (see the `remoteBusy` control message).
-  const [remoteBusy, setRemoteBusy] = useState<{
-    target: string;
-    holder: string;
-    heldSecs: number;
-    takenOver: boolean;
-  } | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
   // True when this session may ask the remote to change size at all: the
-  // operator's `resize` on the target, and for rxa the further condition that the
-  // display being shared is one the agent made (settled by `displays`, not by
-  // `connected`). False on a pinch-zoom device whatever the target allows, where
-  // the window this would resize to is not one to hand a remote desktop (see
-  // CAN_PINCH_ZOOM).
+  // operator's `resize` on the target. False on a pinch-zoom device whatever the
+  // target allows, where the window this would resize to is not one to hand a
+  // remote desktop (see CAN_PINCH_ZOOM).
   //
   // Permission only. *How* the size is driven — on request or continuously — is
   // `autoResize` below, and this gates both the controls that decide it.
@@ -652,13 +639,6 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
-  // Which target this session is for, so a `remoteBusy` can name the target its
-  // takeover would apply to. A ref because the control handler reads it without
-  // wanting to be re-created when it changes, and because the message can arrive
-  // in two states: while a pick is pending (the ordinary refusal) and mid-session,
-  // when another client took the remote during a reconnect and `pendingTarget` is
-  // long since null.
-  const sessionTargetRef = useRef<string | null>(null);
   // The two halves of the resize decision as the viewport sender reads them:
   // whether this session may resize the remote at all (`canResize` above), and
   // whether the window drives it unasked (`autoResize` above). Refs because the
@@ -958,22 +938,13 @@ export function useRemoteDesktop(
     // re-clicking at the same window size won't fire a redundant resize.
     resizeToWindowRef.current = () => sendViewport({ manual: true });
 
-    // This screen's density, deduped the same way. Two kinds of target act on it,
-    // and both by matching it: an rxa target with a display the agent made, and an
-    // RDP target that allows resize. Re-sending an unchanged value would be a
-    // WindowServer round trip or a full RDP reactivation for nothing.
+    // This screen's density, deduped the same way. An RDP target that allows
+    // resize acts on it by matching it; re-sending an unchanged value would be a
+    // full RDP reactivation for nothing.
     let lastHostScale: number | null = null;
     // Which display the remote is sharing, as its last `displays` reported it.
     // Only so a switch can be told from the first list of a session.
     let sharedDisplay: number | null = null;
-    // RXA resize requires both target permission and an active owned display.
-    let rxaResize = false;
-    // Whether the remembered auto-resize default still owes this connection its
-    // effect. Set on `connected` when the target is rxa (whose permission is not
-    // settled until a display list names an owned display) and cleared the first
-    // time `handleDisplays` grants it, so a later switch onto and off a real screen
-    // does not keep re-imposing a mode the user may since have turned off.
-    let autoResizePending = false;
     const sendHostScale = () => {
       const scale = hostScaleHundredths();
       // Recorded before either guard below, and whether or not it is sent: the
@@ -1263,43 +1234,12 @@ export function useRemoteDesktop(
     };
 
     // The remote's display list, and the one follow-up a change of display
-    // needs: this screen's density again.
-    //
-    // The number has not changed, but what it applies to has. The agent sets the
-    // density of whichever display it is sharing *now*, so a switch onto one it
-    // made would otherwise leave that display at whatever density macOS had
-    // remembered against it. Only a real switch re-reports: the first list of a
-    // session names the display the report from `connected` already applied to.
+    // needs: this screen's density again. No engine sends `displays` yet —
+    // display picking over macOS Screen Sharing (ARD) is phase 2 — but the
+    // handler is kept so the wire is ready for it.
     const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);
-      // Whether this session may resize at all is a question about *this*
-      // display, not only about the target: only a display the agent made can be
-      // resized from here, and the user can switch onto and off one mid-session
-      // from the Display panel. Read off the message rather than the `displays`
-      // state set a line above, which this render has not seen yet. An `active`
-      // the list does not name — a screen unplugged between the two, which this
-      // message allows — reads as not virtual, so the controls disappear rather
-      // than offering to resize a display nobody here can identify.
-      //
-      // The mode is left alone across such a switch: it was chosen for this
-      // session, the sender is blocked by permission alone while a real screen is
-      // shared, and switching back resumes what the user asked for.
-      if (rxaResize) {
-        const active = msg.displays.find(
-          (display) => display.id === msg.active,
-        );
-        const allowed = active?.virtual === true;
-        resizeAllowedRef.current = allowed;
-        setCanResize(allowed);
-        // The remembered default asked to follow the window and this is the first
-        // owned display that can — apply it once, then drop the debt, so a later
-        // switch does not re-impose it over a mid-session choice.
-        if (autoResizePending && allowed) {
-          autoResizePending = false;
-          applyAutoResize(true);
-        }
-      }
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
       if (switched) {
@@ -1333,9 +1273,7 @@ export function useRemoteDesktop(
       // A target session started (picker connect, reattach, or takeover of a
       // live desktop): switch to the desktop.
       setConnectError(null);
-      setRemoteBusy(null);
       setPendingTarget(null);
-      sessionTargetRef.current = msg.name;
       setMode("desktop");
       setCanClipboard(msg.clipboard);
       setCanAudio(msg.audio);
@@ -1357,35 +1295,19 @@ export function useRemoteDesktop(
         // The one-shot is still gated on the target's `resize`, because there is
         // nothing to say otherwise: an engine drops the request without it.
         resizeAllowedRef.current = false;
-        rxaResize = false;
         setCanResize(false);
         mobileSizePending = msg.resize;
-        // No auto-follow on a pinch-zoom device whatever the default says: the
-        // window it would hand the remote is the one this client deliberately never
-        // reshapes it to.
-        autoResizePending = false;
       } else {
         // Permission, and permission only — what the operator allowed. Whether the
         // window then drives the remote is the user's, above, and identical for
         // every protocol: an engine that takes one viewport report takes them all.
-        //
-        // rxa is the one target whose permission is not settled here, because its
-        // second condition is a fact about the display being shared rather than
-        // about the target: a Mac's own panel is never resized because somebody
-        // connected, and only a display the agent made for the purpose can be. So
-        // it starts denied and `handleDisplays` decides.
-        rxaResize = msg.protocol === "rxa" && msg.resize;
-        const allowed = msg.resize && msg.protocol !== "rxa";
+        const allowed = msg.resize;
         resizeAllowedRef.current = allowed;
         setCanResize(allowed);
-        // Apply the remembered default now for VNC and RDP, whose permission is
-        // settled here; for rxa hold it until `handleDisplays` names an owned
-        // display it can honour. Where the target allows no resize at all, neither
-        // fires and the default silently does nothing — "… if compatible".
+        // Apply the remembered default now. Where the target allows no resize at
+        // all, it silently does nothing — "… if compatible".
         if (wantAutoResize && allowed) {
           applyAutoResize(true);
-        } else {
-          autoResizePending = wantAutoResize && rxaResize;
         }
       }
       // And this screen's density, which is what lets a display the agent made
@@ -1444,19 +1366,6 @@ export function useRemoteDesktop(
           setConnectError(msg.message);
           setPendingTarget(null);
           break;
-        case "remoteBusy":
-          // Not an error: the remote answered correctly and named who has it. The
-          // session ends the same way, back on the picker, but with a takeover to
-          // offer against the target instead of a message to read.
-          setConnectError(null);
-          setRemoteBusy({
-            target: sessionTargetRef.current ?? "",
-            holder: msg.holder,
-            heldSecs: msg.heldSecs,
-            takenOver: msg.takenOver,
-          });
-          setPendingTarget(null);
-          break;
         case "connected":
           handleConnected(msg);
           break;
@@ -1512,8 +1421,6 @@ export function useRemoteDesktop(
           // Session-only, not the persisting setter: returning to the picker must
           // not wipe the remembered default the next connect will apply.
           applyAutoResize(false);
-          rxaResize = false;
-          autoResizePending = false;
           setCanResize(false);
           setCanClipboard(false);
           // No engine, so no queue to subscribe to: the row goes away rather than
@@ -1638,19 +1545,11 @@ export function useRemoteDesktop(
   const retry = useCallback(() => startRef.current?.(false), []);
 
   // Pick a target from the picker: start its session over the live socket. The
-  // server answers `connected` (→ desktop), `error`, or `remoteBusy` (both shown
-  // on the picker).
-  //
-  // `force` takes the *remote's* session slot from whoever holds it, and answers
-  // the `remoteBusy` this picker just showed. It says nothing about this gateway's
-  // own slot, which was claimed over HTTP before this socket existed — that
-  // takeover is `takeOver()`.
+  // server answers `connected` (→ desktop) or `error` (shown on the picker).
   const connect = useCallback(
-    (target: string, force = false) => {
+    (target: string) => {
       setConnectError(null);
-      setRemoteBusy(null);
       setPendingTarget(target);
-      sessionTargetRef.current = target;
       // If the user wants sound by default, spend this click's gesture on an
       // AudioContext now — the only moment one is playable (see setAudio). The
       // `connected` that decides whether the target actually carries audio arrives
@@ -1662,7 +1561,7 @@ export function useRemoteDesktop(
         releaseAudio();
         audioContextRef.current = createAudioContext();
       }
-      sendRef.current({ type: "connect", target, force });
+      sendRef.current({ type: "connect", target });
     },
     [releaseAudio],
   );
@@ -2049,7 +1948,6 @@ export function useRemoteDesktop(
     status,
     mode,
     connectError,
-    remoteBusy,
     pendingTarget,
     size,
     hostScale,
