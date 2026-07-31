@@ -173,6 +173,337 @@ async fn serve_fake_vnc(
     }
 }
 
+// ── Apple Screen Sharing (RFB 003.889), scripted ────────────────────────────
+//
+// The `ard-high-performance` subtype's whole wire, played from the server side:
+// Apple's version banner, its DH authentication, the `0xC1` ClientInit, the
+// cleartext prelude, the rekey that switches on the record layer, and then a
+// display layout and a framebuffer update *inside* that record layer.
+//
+// This is the only automated test that can reach any of it. There is no
+// containerisable Apple server — `tests/vnc-dummy` is Xtigervnc and speaks none of
+// this — and a real Mac is manual QA.
+//
+// Written against the specification rather than by calling into `src/vnc.rs`, so
+// that a misreading on one side cannot be agreed with by the other. The one
+// exception is the record *framing*, where `RecordWriter`/`RecordReader` are reused:
+// they are symmetric by construction, so a second copy here would prove nothing
+// that `src/vnc_record.rs`'s own byte-level tests do not already pin, and the
+// interesting failures in this test are in the handshake and the plumbing above it.
+
+/// The 1024-bit MODP group of RFC 2409, which is the size macOS offers.
+const DH_PRIME: &[u8] = &[
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc9, 0x0f, 0xda, 0xa2, 0x21, 0x68, 0xc2, 0x34,
+    0xc4, 0xc6, 0x62, 0x8b, 0x80, 0xdc, 0x1c, 0xd1, 0x29, 0x02, 0x4e, 0x08, 0x8a, 0x67, 0xcc, 0x74,
+    0x02, 0x0b, 0xbe, 0xa6, 0x3b, 0x13, 0x9b, 0x22, 0x51, 0x4a, 0x08, 0x79, 0x8e, 0x34, 0x04, 0xdd,
+    0xef, 0x95, 0x19, 0xb3, 0xcd, 0x3a, 0x43, 0x1b, 0x30, 0x2b, 0x0a, 0x6d, 0xf2, 0x5f, 0x14, 0x37,
+    0x4f, 0xe1, 0x35, 0x6d, 0x6d, 0x51, 0xc2, 0x45, 0xe4, 0x85, 0xb5, 0x76, 0x62, 0x5e, 0x7e, 0xc6,
+    0xf4, 0x4c, 0x42, 0xe9, 0xa6, 0x37, 0xed, 0x6b, 0x0b, 0xff, 0x5c, 0xb6, 0xf4, 0x06, 0xb7, 0xed,
+    0xee, 0x38, 0x6b, 0xfb, 0x5a, 0x89, 0x9f, 0xa5, 0xae, 0x9f, 0x24, 0x11, 0x7c, 0x4b, 0x1f, 0xe6,
+    0x49, 0x28, 0x66, 0x51, 0xec, 0xe6, 0x53, 0x81, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+];
+/// The account the target below carries and the fake Mac expects back.
+const MAC_USER: &str = "andrew";
+const MAC_PASSWORD: &str = "s3cr3t-should-not-leak";
+/// The two screens the fake Mac reports, so a display list has something in it.
+const MAC_MAIN_DISPLAY: u32 = 0x2b00_4501;
+const MAC_SECOND_DISPLAY: u32 = 0x2b00_4502;
+/// The framebuffer the layout declares: a 1x logical size equal to its backing
+/// size, so the test asserts on one number and the density path stays out of it.
+const MAC_DESKTOP: u16 = 32;
+
+/// A scripted macOS Screen Sharing server. Returns the port, and a channel
+/// reporting each `SetDisplayMessage` the gateway sends — which is how the test
+/// sees a display selection reach the wire.
+async fn spawn_fake_mac() -> (u16, mpsc::UnboundedReceiver<u32>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = serve_fake_mac(stream, tx).await;
+            });
+        }
+    });
+    (port, rx)
+}
+
+/// The server half of Apple's DH authentication: offer the group, then recover the
+/// shared secret from the client's public value and check the credentials came back
+/// as the account this Mac expects.
+///
+/// Returns the wrap key — `MD5(shared)` — which is the record layer's first key.
+async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 16]> {
+    use md5::{Digest as _, Md5};
+    use num_bigint::BigUint;
+
+    let modulus = BigUint::from_bytes_be(DH_PRIME);
+    // Fixed, so the test is deterministic. A real server would not reuse it.
+    let private = BigUint::from(0x1234_5678_9abc_def0u64);
+    let public = BigUint::from(2u8).modpow(&private, &modulus);
+
+    let pad = |value: &BigUint| {
+        let bytes = value.to_bytes_be();
+        let mut out = vec![0u8; DH_PRIME.len() - bytes.len()];
+        out.extend_from_slice(&bytes);
+        out
+    };
+
+    let mut challenge = Vec::new();
+    challenge.extend_from_slice(&2u16.to_be_bytes()); // generator
+    challenge.extend_from_slice(&(DH_PRIME.len() as u16).to_be_bytes());
+    challenge.extend_from_slice(DH_PRIME);
+    challenge.extend_from_slice(&pad(&public));
+    stream.write_all(&challenge).await?;
+
+    let mut credentials = [0u8; 128];
+    stream.read_exact(&mut credentials).await?;
+    let mut peer = vec![0u8; DH_PRIME.len()];
+    stream.read_exact(&mut peer).await?;
+
+    let shared = pad(&BigUint::from_bytes_be(&peer).modpow(&private, &modulus));
+    let key: [u8; 16] = Md5::digest(&shared).into();
+
+    // AES-128-ECB, the same each-block-independently form the client used.
+    {
+        use aes::Aes128;
+        use aes::cipher::{BlockCipherDecrypt as _, KeyInit as _};
+        let cipher = Aes128::new(&key.into());
+        let mut plain = credentials;
+        for block in plain.chunks_exact_mut(16) {
+            cipher.decrypt_block(<&mut [u8; 16]>::try_from(block).unwrap().into());
+        }
+        let field = |at: usize| {
+            let bytes = &plain[at..at + 64];
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(64);
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        };
+        assert_eq!(field(0), MAC_USER, "the gateway named the wrong account");
+        assert_eq!(field(64), MAC_PASSWORD, "the gateway sent the wrong password");
+    }
+    stream.write_all(&0u32.to_be_bytes()).await?; // SecurityResult: ok
+    Ok(key)
+}
+
+/// The `AppleDisplayLayout` payload for this Mac's two screens.
+///
+/// Built here from the field model rather than by calling the gateway's builder —
+/// there is none, the gateway only parses this — so the offsets are asserted from
+/// both ends.
+fn fake_mac_layout() -> Vec<u8> {
+    const RECORD: usize = 0x38;
+    const HEAD: usize = 0x14;
+    let screens = [(MAC_MAIN_DISPLAY, 0x01u32), (MAC_SECOND_DISPLAY, 0x00)];
+
+    let mut p = vec![0u8; HEAD];
+    p[..2].copy_from_slice(&((HEAD + screens.len() * RECORD) as u16).to_be_bytes());
+    p[2..4].copy_from_slice(&5u16.to_be_bytes()); // version
+    // The leading geometry, which is the first screen's two rects.
+    for at in [4, 6, 8, 10] {
+        p[at..at + 2].copy_from_slice(&MAC_DESKTOP.to_be_bytes());
+    }
+    for (id, flags) in screens {
+        let mut r = vec![0u8; RECORD];
+        r[0x10..0x14].copy_from_slice(&id.to_be_bytes());
+        r[0x18..0x1a].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // logical w
+        r[0x1a..0x1c].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // logical h
+        r[0x20..0x22].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // backing w
+        r[0x22..0x24].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // backing h
+        r[0x24..0x28].copy_from_slice(&flags.to_be_bytes());
+        p.extend_from_slice(&r);
+    }
+    p
+}
+
+/// One raw framebuffer update covering the whole desktop, in a colour derived from
+/// `shade` so two of them are never mistaken for one repeat.
+fn fake_mac_update(shade: u8) -> Vec<u8> {
+    let mut update = vec![0u8, 0];
+    update.extend_from_slice(&1u16.to_be_bytes()); // one rect
+    update.extend_from_slice(&0u16.to_be_bytes()); // x
+    update.extend_from_slice(&0u16.to_be_bytes()); // y
+    update.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
+    update.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
+    update.extend_from_slice(&0i32.to_be_bytes()); // raw
+    update.extend_from_slice(&vec![
+        shade;
+        usize::from(MAC_DESKTOP) * usize::from(MAC_DESKTOP) * 4
+    ]);
+    update
+}
+
+async fn serve_fake_mac(
+    mut stream: TcpStream,
+    selected: mpsc::UnboundedSender<u32>,
+) -> std::io::Result<()> {
+    use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
+    use tokio::io::AsyncReadExt as _;
+
+    stream.write_all(b"RFB 003.889\n").await?;
+    let mut banner = [0u8; 12];
+    stream.read_exact(&mut banner).await?;
+    assert_eq!(&banner, b"RFB 003.889\n", "the gateway answered the wrong version");
+
+    // The set a macOS 26 host offers, in its wire order.
+    stream.write_all(&[4, 30, 33, 36, 35]).await?;
+    let mut chosen = [0u8; 1];
+    stream.read_exact(&mut chosen).await?;
+    assert_eq!(chosen[0], 30, "the gateway picked the wrong security type");
+
+    let wrap_key = fake_mac_authenticate(&mut stream).await?;
+
+    let mut client_init = [0u8; 1];
+    stream.read_exact(&mut client_init).await?;
+    assert_eq!(client_init[0], 0xc1, "Apple's ClientInit byte is 0xC1");
+
+    let mut server_init = Vec::new();
+    server_init.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
+    server_init.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
+    server_init.extend_from_slice(&[0u8; 16]);
+    server_init.extend_from_slice(&3u32.to_be_bytes());
+    server_init.extend_from_slice(b"mac");
+    stream.write_all(&server_init).await?;
+
+    // The cleartext prelude: SetEncryption twice, and nothing else.
+    //
+    // A `ViewerInfo` here would be a bug, and this is where it is caught: a real Mac
+    // reads more bytes for that message than its own length declares, swallows the
+    // SetEncryption behind it, and then waits forever — with no error from either
+    // end. That failure is invisible without a Mac, so the asserts below are the
+    // stand-in.
+    for expected in [1u16, 2] {
+        let mut msg = [0u8; 4];
+        stream.read_exact(&mut msg).await?;
+        assert_eq!(msg[0], 0x12, "the prelude is SetEncryption and nothing else");
+        assert_eq!(u16::from_be_bytes([msg[2], msg[3]]), expected);
+        // command 1 carries a method list, command 2 two words.
+        let rest = if expected == 1 { 8 } else { 4 };
+        stream.read_exact(&mut vec![0u8; rest]).await?;
+    }
+
+    // The rekey, wrapped under MD5(shared): from here everything is records.
+    let keys = Keys {
+        key: *b"apple-record-key",
+        iv: *b"apple-record-iv!",
+    };
+    {
+        use aes::Aes128;
+        use aes::cipher::{BlockCipherEncrypt as _, KeyInit as _};
+        let cipher = Aes128::new(&wrap_key.into());
+        let wrapped = |mut block: [u8; 16]| {
+            cipher.encrypt_block((&mut block).into());
+            block
+        };
+        let mut rekey = vec![0u8, 0];
+        rekey.extend_from_slice(&1u16.to_be_bytes()); // one rect
+        rekey.extend_from_slice(&[0u8; 8]); // x, y, w, h all zero
+        rekey.extend_from_slice(&0x44fi32.to_be_bytes());
+        rekey.extend_from_slice(&1u32.to_be_bytes()); // generation
+        rekey.extend_from_slice(&wrapped(keys.key));
+        rekey.extend_from_slice(&wrapped(keys.iv));
+        stream.write_all(&rekey).await?;
+    }
+
+    let (read_half, mut write_half) = stream.into_split();
+    let mut records = RecordReader::new(read_half, keys);
+    let mut writer = RecordWriter::new(keys);
+    let mut shade = 0x40u8;
+    let mut sent_layout = false;
+
+    loop {
+        let mut kind = [0u8; 1];
+        records.read_exact(&mut kind).await?;
+        match kind[0] {
+            // SetPixelFormat
+            0 => {
+                records.read_exact(&mut [0u8; 19]).await?;
+            }
+            // SetEncodings
+            2 => {
+                let mut head = [0u8; 3];
+                records.read_exact(&mut head).await?;
+                let count = u16::from_be_bytes([head[1], head[2]]);
+                records.read_exact(&mut vec![0u8; usize::from(count) * 4]).await?;
+            }
+            // FramebufferUpdateRequest. A non-incremental one is answered; the
+            // first is answered with the display layout first, which is the
+            // metadata burst a real Mac opens with.
+            3 => {
+                let mut req = [0u8; 9];
+                records.read_exact(&mut req).await?;
+                if req[0] != 0 {
+                    continue;
+                }
+                if !std::mem::replace(&mut sent_layout, true) {
+                    let mut rect = vec![0u8, 0];
+                    rect.extend_from_slice(&1u16.to_be_bytes());
+                    rect.extend_from_slice(&[0u8; 8]);
+                    rect.extend_from_slice(&0x451i32.to_be_bytes());
+                    rect.extend_from_slice(&fake_mac_layout());
+                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                }
+                shade = shade.wrapping_add(0x10);
+                write_half
+                    .write_all(writer.frame(&fake_mac_update(shade)).unwrap())
+                    .await?;
+            }
+            // KeyEvent
+            4 => {
+                records.read_exact(&mut [0u8; 7]).await?;
+            }
+            // PointerEvent
+            5 => {
+                records.read_exact(&mut [0u8; 5]).await?;
+            }
+            // AutoFrameBufferUpdate: the arming, which a real Mac answers by
+            // streaming. Here the paired non-incremental request drives it.
+            0x09 => {
+                records.read_exact(&mut [0u8; 15]).await?;
+            }
+            // SetDisplayMessage: the whole point of the subtype. Reported to the
+            // test, then answered with a layout, which is how a real Mac confirms
+            // it acted.
+            0x0d => {
+                let mut body = [0u8; 7];
+                records.read_exact(&mut body).await?;
+                assert_eq!(body[0], 0, "the aggregate is not implemented");
+                let id = u32::from_be_bytes([body[3], body[4], body[5], body[6]]);
+                let _ = selected.send(id);
+                let mut rect = vec![0u8, 0];
+                rect.extend_from_slice(&1u16.to_be_bytes());
+                rect.extend_from_slice(&[0u8; 8]);
+                rect.extend_from_slice(&0x451i32.to_be_bytes());
+                rect.extend_from_slice(&fake_mac_layout());
+                write_half.write_all(writer.frame(&rect).unwrap()).await?;
+            }
+            // SetDisplayConfiguration
+            0x1d => {
+                let mut head = [0u8; 3];
+                records.read_exact(&mut head).await?;
+                let size = u16::from_be_bytes([head[1], head[2]]);
+                let mut body = vec![0u8; usize::from(size)];
+                records.read_exact(&mut body).await?;
+                // Named, because the alternative is an index-out-of-bounds panic
+                // naming a byte offset instead of the message that was too short.
+                assert!(
+                    body.len() >= 8 + 0x9c,
+                    "a display configuration carried {} body bytes, too few for a descriptor",
+                    body.len()
+                );
+                // The static descriptor: no dynamic-resolution flag and no virtual
+                // display, which is what says this session is fixed-size.
+                let d = &body[8..]; // past version, display_count, flags
+                assert_eq!(&d[0x7a..0x7e], &[0u8; 4], "no dynamic-resolution flag");
+                assert_eq!(&d[0x7e..0x82], &[0u8; 4], "not a virtual display");
+                assert_ne!(&d[0x9a..0x9c], &[0u8; 2], "mode_count must not be zero");
+            }
+            other => panic!("fake Mac got unexpected message type {other:#x}"),
+        }
+    }
+}
+
 /// Install the ring crypto provider once (the binary does this in `main`; tests
 /// don't run `main`, so a code path that reaches TLS would otherwise panic).
 fn ensure_crypto_provider() {
@@ -236,6 +567,17 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         render_type: remotex::config::RenderType::Full,
         render_subtype: remotex::config::RenderSubtype::Png,
         render_quality: None,
+    }
+}
+
+/// A target for the fake Mac: the high-performance subtype, with the account the
+/// fake Mac checks the credentials against.
+fn mac_target(port: u16) -> TargetConfig {
+    TargetConfig {
+        subtype: Some(remotex::config::Subtype::ArdHighPerformance),
+        username: MAC_USER.to_owned(),
+        password: MAC_PASSWORD.to_owned(),
+        ..target(Protocol::Vnc, port)
     }
 }
 
@@ -770,4 +1112,115 @@ async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
         cut_texts.try_recv().is_err(),
         "a target that did not opt in must not write the remote's clipboard"
     );
+}
+
+/// Read until a `displays` control message arrives, and hand back its payload.
+async fn expect_displays(ws: &mut Ws) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                    if text.contains(r#""type":"displays""#) {
+                        return serde_json::from_str::<serde_json::Value>(&text).unwrap();
+                    }
+                }
+                Message::Close(frame) => panic!("closed while waiting for displays: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for displays");
+    })
+    .await
+    .expect("timed out waiting for a display list")
+}
+
+/// The whole `ard-high-performance` wire, end to end: Apple's version banner and
+/// DH authentication, the `0xC1` ClientInit, the cleartext prelude, the rekey, and
+/// then a display layout, a framebuffer update and a display selection all inside
+/// the AES-128-CBC record layer.
+///
+/// The assertions on the gateway's side of it live in the fake Mac (which panics on
+/// a wrong banner, security type, ClientInit byte, prelude shape or display
+/// descriptor); what is asserted here is what a *browser* gets out the far end,
+/// which is the thing the subtype exists for.
+#[tokio::test]
+async fn apple_screen_sharing_reports_its_displays_and_binds_to_one() {
+    let (mac_port, mut selected) = spawn_fake_mac().await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+
+    expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
+
+    // The display list, which is what standard RFB cannot express at all. Read
+    // before the tile because that is the order the Mac sends them in — the layout
+    // opens its metadata burst — and `expect_tile` skips text messages on its way
+    // past, so asking for the tile first would consume this and then time out.
+    let msg = expect_displays(&mut ws).await;
+    assert_eq!(msg["active"], MAC_MAIN_DISPLAY, "{msg}");
+    let displays = msg["displays"].as_array().expect("a display array");
+    assert_eq!(displays.len(), 2, "{msg}");
+    assert_eq!(displays[0]["id"], MAC_MAIN_DISPLAY);
+    assert_eq!(displays[0]["label"], "Display 1");
+    assert_eq!(displays[0]["main"], true);
+    assert_eq!(displays[1]["id"], MAC_SECOND_DISPLAY);
+    assert_eq!(displays[1]["main"], false);
+    // Never a virtual display: this subtype asks the Mac for its own screens.
+    assert_eq!(displays[0]["virtual"], false);
+
+    // And the desktop paints, which means every step above it went through: the
+    // record layer is up in both directions and RFB is running inside it.
+    expect_tile(&mut ws).await;
+
+    // Picking the second screen reaches the Mac as a SetDisplayMessage…
+    ws.send(Message::text(format!(
+        r#"{{"type":"selectDisplay","id":{MAC_SECOND_DISPLAY}}}"#
+    )))
+    .await
+    .unwrap();
+    let asked = tokio::time::timeout(Duration::from_secs(10), selected.recv())
+        .await
+        .expect("timed out waiting for the Mac to be asked")
+        .expect("the selection channel closed");
+    assert_eq!(asked, MAC_SECOND_DISPLAY);
+
+    // …and the checkmark follows the Mac's answering layout, not the click.
+    let msg = expect_displays(&mut ws).await;
+    assert_eq!(msg["active"], MAC_SECOND_DISPLAY, "{msg}");
+}
+
+/// A selection of a screen the Mac never listed is dropped rather than forwarded.
+///
+/// The one case where the gateway is the only thing standing between a client and a
+/// Mac being told to bind to something that does not exist — a screen unplugged
+/// between the list being sent and the click arriving.
+#[tokio::test]
+async fn a_display_the_mac_never_listed_is_not_forwarded_to_it() {
+    let (mac_port, mut selected) = spawn_fake_mac().await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_displays(&mut ws).await;
+
+    ws.send(Message::text(r#"{"type":"selectDisplay","id":9999}"#))
+        .await
+        .unwrap();
+    // A real selection after it, which the Mac *does* answer: if the bogus one had
+    // been forwarded it would arrive first and this assertion would read it.
+    ws.send(Message::text(format!(
+        r#"{{"type":"selectDisplay","id":{MAC_SECOND_DISPLAY}}}"#
+    )))
+    .await
+    .unwrap();
+
+    let asked = tokio::time::timeout(Duration::from_secs(10), selected.recv())
+        .await
+        .expect("timed out waiting for the Mac to be asked")
+        .expect("the selection channel closed");
+    assert_eq!(asked, MAC_SECOND_DISPLAY, "the unknown display was forwarded");
 }

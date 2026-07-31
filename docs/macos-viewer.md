@@ -358,11 +358,17 @@ one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-Neither engine reports individually selectable displays today: RDP and VNC each
-expose one framebuffer, so the Display menu has nothing to offer. Picking a single
-one of a Mac's displays over macOS Screen Sharing — which the stock Screen Sharing
-app does natively — is planned but not implemented; the `selectDisplay` /
-`Displays` wire is kept as scaffolding it builds on. See [`roadmap.md`](roadmap.md).
+**No engine fills the Display menu today.** RDP, plain VNC and both Mac subtypes each
+expose a single framebuffer and send no display list, so the menu holds one disabled
+item reading *No Displays to Choose From* and never anything else.
+
+Picking one of a Mac's screens was attempted through Apple's own protocol revision
+(`subtype = "ard-high-performance"`) and does not work: macOS replaces the Mac's real
+displays with one synthesized display for the duration of such a session, so there is
+nothing to enumerate. `subtype = "ard"` shares every real screen, in one framebuffer.
+The `selectDisplay` / `Displays` wire and this menu remain in place, and the gateway
+side is implemented and tested, waiting on a mechanism that reports a list — see
+[`apple-vnc-889.md`](apple-vnc-889.md) and [`roadmap.md`](roadmap.md).
 
 ### Viewport measurement
 
