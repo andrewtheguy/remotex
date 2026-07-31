@@ -425,6 +425,26 @@ struct AppModelTests {
         #expect(model.session.screen == .login, "still where it was")
     }
 
+    /// A remote gateway on another wire protocol is refused on the home screen,
+    /// before a login is even offered — the viewer ships separately from a remote
+    /// gateway, so this is the check that keeps a mismatch from becoming an
+    /// unreadable frame later. `configuration()` runs ahead of `authState()`, so the
+    /// incompatibility is what the user sees rather than a login they cannot pass.
+    @Test
+    func anIncompatibleRemoteGatewayIsRefusedBeforeItsLogin() async throws {
+        let (model, _) = makeRemoteModel { request in
+            request.url?.path.hasSuffix("/auth/status") == true
+                ? (200, #"{"authenticated":false}"#)
+                : (200, #"{"branding":"acme","protocolVersion":9999}"#)
+        }
+
+        await model.chooseGateway()
+
+        #expect(model.session.screen == .home, "not the login screen")
+        #expect(model.chosen == nil)
+        #expect(model.homeError?.contains("protocol") == true, "got: \(model.homeError ?? "")")
+    }
+
     /// Pointing the app at another copy of *itself* — an embedded gateway, which
     /// refuses `/api/auth/*` — is answered with the reason rather than with a login
     /// form that could never succeed.
