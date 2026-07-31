@@ -283,6 +283,9 @@ type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
 #[derive(Debug, Default)]
 struct DisplayState {
     displays: Vec<DisplayInfo>,
+    /// Union area the next non-incremental Apple update is expected to paint.
+    /// A combined framebuffer may include gaps which never arrive as rectangles.
+    repaint_pixels: u64,
     /// The entry a client's checkmark sits on: a screen id, or
     /// [`DisplayState::COMBINED`].
     ///
@@ -1174,7 +1177,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
     sink: TileSink,
 ) -> anyhow::Result<()> {
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
-    let Shared { uplink, desktop, clipboard, .. } = &shared;
+    let Shared { uplink, desktop, clipboard, display, .. } = &shared;
+    let mut full_repaint: Option<FullRepaint> = None;
     loop {
         let msg_type = match reader.read_u8().await {
             Ok(t) => t,
@@ -1218,20 +1222,33 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // never sends one is stopped by the same code either way.
                 let rects = reader.read_u16().await?;
                 let mut resized = false;
+                let mut full_repaint_owed = false;
                 for _ in 0..rects {
                     let effect = read_rect(&mut reader, &shared, &mut apple, &sink).await?;
                     resized |= effect.resized;
+                    full_repaint_owed |= effect.full_repaint_owed;
+                    if let (Some(repaint), Some(rect)) = (&mut full_repaint, effect.pixels) {
+                        repaint.accept(rect);
+                    }
                     if effect.last {
                         break;
                     }
                 }
-                // Complete the cycle — but only where there is a cycle to
-                // complete. On the 003.889 wire `AutoFrameBufferUpdate` made the
-                // server the driver, and a request per update would be a second
-                // client racing the first. A resize still invalidates the old
-                // contents, so it is asked for again there and only there.
-                if poll || resized {
-                    let size = desktop.lock().unwrap().size;
+                let size = desktop.lock().unwrap().size;
+                if full_repaint_owed {
+                    // Layout metadata and empty updates can arrive before the
+                    // pixels this request earns. Hold the polling loop until the
+                    // actual display regions have arrived, or a later incremental
+                    // request replaces this full one on macOS.
+                    let expected = display.lock().unwrap().repaint_pixels;
+                    full_repaint = Some(FullRepaint::new(expected));
+                    send(uplink, &update_request(false, size)).await?;
+                } else if full_repaint.as_ref().is_some_and(FullRepaint::complete) {
+                    full_repaint = None;
+                    if poll {
+                        send(uplink, &update_request(true, size)).await?;
+                    }
+                } else if full_repaint.is_none() && (poll || resized) {
                     send(uplink, &update_request(poll && !resized, size)).await?;
                 }
             }
@@ -1477,21 +1494,104 @@ async fn extended_cut_text(
     Ok(false)
 }
 
+/// Coverage of one non-incremental framebuffer request.
+///
+/// Apple sends a combined desktop as one rectangle per display, sometimes with
+/// metadata or damage updates between them. Rectangle union is tracked exactly so
+/// overlapping damage cannot masquerade as the full repaint.
+#[derive(Debug)]
+struct FullRepaint {
+    expected_pixels: u64,
+    regions: Vec<Rect>,
+}
+
+impl FullRepaint {
+    fn new(expected_pixels: u64) -> Self {
+        Self { expected_pixels, regions: Vec::new() }
+    }
+
+    fn accept(&mut self, rect: Rect) {
+        self.regions.push(rect);
+    }
+
+    fn complete(&self) -> bool {
+        self.expected_pixels > 0 && union_pixels(&self.regions) >= self.expected_pixels
+    }
+}
+
+/// Area of the union of inclusive rectangles.
+fn union_pixels(regions: &[Rect]) -> u64 {
+    let mut xs = regions
+        .iter()
+        .flat_map(|rect| [u32::from(rect.left), u32::from(rect.right) + 1])
+        .collect::<Vec<_>>();
+    xs.sort_unstable();
+    xs.dedup();
+
+    xs.windows(2)
+        .map(|x| {
+            let mut ys = regions
+                .iter()
+                .filter(|rect| u32::from(rect.left) < x[1] && u32::from(rect.right) + 1 > x[0])
+                .map(|rect| (u32::from(rect.top), u32::from(rect.bottom) + 1))
+                .collect::<Vec<_>>();
+            ys.sort_unstable();
+            let mut height = 0u64;
+            let mut merged: Option<(u32, u32)> = None;
+            for (top, bottom) in ys {
+                match merged {
+                    Some((start, end)) if top <= end => merged = Some((start, end.max(bottom))),
+                    Some((start, end)) => {
+                        height += u64::from(end - start);
+                        merged = Some((top, bottom));
+                    }
+                    None => merged = Some((top, bottom)),
+                }
+            }
+            if let Some((start, end)) = merged {
+                height += u64::from(end - start);
+            }
+            u64::from(x[1] - x[0]) * height
+        })
+        .sum()
+}
+
 /// What reading one rectangle did, beyond whatever it painted.
 #[derive(Debug, Default, Clone, Copy)]
 struct RectEffect {
     /// The desktop changed size, so what the browser holds is stale.
     resized: bool,
+    /// A layout invalidated the framebuffer, so the next poll must be full even
+    /// when the layout's backing size did not change.
+    full_repaint_owed: bool,
+    /// Pixel rectangle consumed, whether or not the shadow needed to forward it.
+    pixels: Option<Rect>,
     /// A `LastRect`: this update ends here, whatever its header's count claimed.
     last: bool,
 }
 
 impl RectEffect {
-    const NOTHING: Self = Self { resized: false, last: false };
-    const LAST: Self = Self { resized: false, last: true };
+    const NOTHING: Self = Self {
+        resized: false,
+        full_repaint_owed: false,
+        pixels: None,
+        last: false,
+    };
+    const LAST: Self = Self { last: true, ..Self::NOTHING };
+
+    const FULL_REPAINT: Self = Self {
+        resized: false,
+        full_repaint_owed: true,
+        pixels: None,
+        last: false,
+    };
 
     const fn resized(resized: bool) -> Self {
-        Self { resized, last: false }
+        Self { resized, ..Self::NOTHING }
+    }
+
+    const fn pixels(rect: Rect) -> Self {
+        Self { pixels: Some(rect), ..Self::NOTHING }
     }
 }
 
@@ -1556,12 +1656,12 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 a.asked_for_zlib = true;
             }
             read_display_layout(reader, shared, first, sink).await?;
-            // Deliberately *not* reported as a resize, even when it was one.
-            // [`read_display_layout`] issues its own non-incremental request as part
-            // of re-arming the server, so telling the caller the desktop resized
-            // would have it ask for the same full frame a second time — which on a
-            // 4480x1800 desktop is a wasted 400 KB every login and lock.
-            return Ok(RectEffect::NOTHING);
+            // Finish consuming this FramebufferUpdate before asking for the full
+            // repaint. If the layout handler asks here, the poll loop queues its
+            // normal incremental request directly behind it. macOS keeps only the
+            // later request, so a freshly cleared framebuffer receives damage
+            // rectangles instead of its full contents.
+            return Ok(RectEffect::FULL_REPAINT);
         }
         // Where the pointer is, which the rect header carries and nothing else does.
         // Advertised because the layout depends on the exact list, and ignored
@@ -1672,7 +1772,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // boundary or a client asking for a full update — stops costing the browser
     // link anything here.
     let Some(changed) = shadow.lock().unwrap().accept(rect, &rgb) else {
-        return Ok(RectEffect::NOTHING);
+        return Ok(RectEffect::pixels(rect));
     };
 
     for band in changed.bands() {
@@ -1684,7 +1784,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         sink.tile(band.left, band.top, band.w(), band.h(), pixels)
             .await?;
     }
-    Ok(RectEffect::NOTHING)
+    Ok(RectEffect::pixels(rect))
 }
 
 /// Handle a Cursor rect: `w * h` pixels in the negotiated format, followed by
@@ -1928,6 +2028,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             );
         }
         let active = layout.current.unwrap_or(DisplayState::COMBINED);
+        state.repaint_pixels = layout.repaint_pixels();
         let changed = state.displays != infos || state.active != active;
         state.displays = infos;
         state.active = active;
@@ -1953,7 +2054,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     }
     // Re-arm, on every layout and not only on a change of geometry.
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
-    uplink.send(&update_request(false, size)).await?;
     Ok(resized)
 }
 
@@ -3539,6 +3639,32 @@ mod tests {
         msg
     }
 
+    fn raw_rect_update(x: u16, y: u16, w: u16, h: u16, shade: u8) -> Vec<u8> {
+        let mut msg = vec![0u8, 0];
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        for value in [x, y, w, h] {
+            msg.extend_from_slice(&value.to_be_bytes());
+        }
+        msg.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        msg.extend(std::iter::repeat_n(
+            [shade, shade, shade, 0],
+            usize::from(w) * usize::from(h),
+        ).flatten());
+        msg
+    }
+
+    fn apple_layout_update(current: Option<u32>, backing: (u16, u16)) -> Vec<u8> {
+        let mut msg = vec![0u8, 0];
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&[0u8; 8]);
+        msg.extend_from_slice(&vnc_apple::ENCODING_DISPLAY_LAYOUT.to_be_bytes());
+        msg.extend_from_slice(&layout_payload(
+            current,
+            &[(11, backing, backing, 0x01)],
+        ));
+        msg
+    }
+
     /// The whole read-side design in one test: a rectangle whose bytes are split
     /// across two records reaches the tile path as one rectangle, and nothing above
     /// the record layer knows the records were there.
@@ -3608,6 +3734,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn repaint_coverage_counts_overlaps_once() {
+        let a = Rect::from_size(0, 0, 10, 10).unwrap();
+        let b = Rect::from_size(5, 0, 10, 10).unwrap();
+        assert_eq!(union_pixels(&[a, b]), 150);
+    }
+
+    /// The Mac can answer a display selection with its layout, then empty
+    /// metadata updates and small damage before the non-incremental pixels. None
+    /// of those may earn the normal incremental poll: on macOS it replaces the
+    /// pending full request and leaves the resized framebuffer black.
+    #[tokio::test]
+    async fn apple_poll_waits_until_the_full_repaint_arrives() {
+        let wire = framed(&[
+            apple_layout_update(Some(11), (2, 2)),
+            vec![0, 0, 0, 0],
+            raw_rect_update(0, 0, 1, 1, 0x20),
+            raw_rect_update(0, 0, 2, 2, 0x40),
+        ]);
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let apple = Apple { asked_for_zlib: true, ..Apple::default() };
+
+        let _ = read_loop(
+            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            Some(apple),
+            sink,
+        )
+        .await;
+
+        let mut expected = vnc_apple::auto_framebuffer_update((2, 2));
+        expected.extend_from_slice(&update_request(false, (2, 2)));
+        expected.extend_from_slice(&update_request(true, (2, 2)));
+        assert_eq!(written(&sent), expected);
+    }
+
     /// The layout payload builder, shared with `vnc_apple`'s own tests rather than
     /// copied: it encodes the measured record offsets, and a second copy of those
     /// would have to be kept in step with the parser by hand. `vnc_apple` is also
@@ -3662,10 +3831,11 @@ mod tests {
 
         // What went back, in order: the second `SetEncodings` — the one that finally
         // asks for zlib, which cannot be in the first without costing this whole
-        // layout — and then the re-arm pair.
+        // layout — and then the re-arm for the display the Mac confirmed. The
+        // enclosing update loop sends the paired full request after it has consumed
+        // every rectangle in this FramebufferUpdate.
         let mut expected = set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB);
         expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
-        expected.extend_from_slice(&update_request(false, (3840, 2160)));
         assert_eq!(written(&sent), expected);
         assert!(
             vnc_apple::ENCODINGS_WITH_ZLIB.contains(&vnc_apple::ENCODING_ZLIB)
