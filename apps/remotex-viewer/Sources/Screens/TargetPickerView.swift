@@ -11,9 +11,19 @@ struct TargetPickerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(model.branding)
-                .font(.largeTitle.weight(.semibold))
-                .padding(.top, 32)
+            // The instance's name, then what this screen is for — the same pair, in
+            // the same order, as the SPA's `picker-brand` and its `<h1>`. Deliberately
+            // the smaller and quieter of the two, as it is there: the branding is what
+            // this is, and "Pick a target" is only what to do about it.
+            VStack(spacing: 4) {
+                Text(model.branding)
+                    .font(.largeTitle.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text("Pick a target")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 32)
 
             if let error = model.session.connectError {
                 Label(error, systemImage: "exclamationmark.triangle")
