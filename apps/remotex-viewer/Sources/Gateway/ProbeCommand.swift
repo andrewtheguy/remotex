@@ -69,7 +69,7 @@ enum ProbeCommand {
         print("probe: \(location.url.absoluteString), \(seconds)s")
         let client = GatewayClient(
             gateway: location,
-            token: handshake.token,
+            credential: .token(handshake.token),
             session: URLSession(configuration: .ephemeral)
         )
 

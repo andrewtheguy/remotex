@@ -67,28 +67,68 @@ struct TargetPickerView: View {
             }
 
             Spacer()
-            // The two things to do when nothing here is connectable yet, together at
-            // the foot of the screen: add a machine, and hand this gateway's key to
-            // one. The key is here rather than only in About and the configuration
-            // sheet because this is the screen a first launch lands on and the screen
-            // a target switch comes back to — and a value somebody has to copy onto
-            // another Mac is no use two panels deep.
+            // What there is to do when nothing here is connectable yet, at the foot of
+            // the screen — and it is not the same list for the two gateways, which is
+            // why this branches rather than greying items out.
             VStack(spacing: 12) {
                 Divider()
-                GatewayKeyRow(store: model.config)
-                // Where "Log Out" used to be, and for the same reason it was there:
-                // this is the one screen with nothing else to do on it. There is no
-                // logging out of a gateway this app started for itself.
-                Button("Configuration…") {
-                    model.editConfiguration()
+                if model.usesEmbeddedGateway {
+                    localFooter
+                } else {
+                    remoteFooter
                 }
-                .disabled(model.config == nil)
             }
             .frame(width: 420)
             .padding(.bottom, 20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+    }
+
+    /// The two things to do when the local gateway's list is empty: add a machine,
+    /// and hand this gateway's key to one.
+    ///
+    /// The key is here rather than only in About and the configuration sheet because
+    /// this is the screen a first launch lands on and the screen a target switch comes
+    /// back to — and a value somebody has to copy onto another Mac is no use two
+    /// panels deep.
+    @ViewBuilder
+    private var localFooter: some View {
+        GatewayKeyRow(store: model.config)
+        Button("Configuration…") {
+            model.editConfiguration()
+        }
+        .disabled(!model.canEditConfiguration)
+    }
+
+    /// Neither of those is this screen's business against a gateway somewhere else.
+    ///
+    /// The **key** is the one that would actively mislead: it identifies the gateway
+    /// in this bundle to a Mac agent, and against a remote gateway nothing here is
+    /// going to present it — the connection to the target is made by that gateway,
+    /// with its own key, which is the one a target has to authorize. Copying this one
+    /// onto a Mac would authorize a machine that is never going to call. The
+    /// **configuration** goes for the same reason one step further along: the targets
+    /// on this screen came out of the remote gateway's config, and this app's own file
+    /// is not where they are edited.
+    ///
+    /// What is left is the pair that *is* true here: which gateway these targets came
+    /// from, and the way back to choose another.
+    @ViewBuilder
+    private var remoteFooter: some View {
+        if let location = model.chosen?.location {
+            Text(location.url.absoluteString)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .accessibilityLabel("Gateway")
+        }
+        Button("Change Gateway…") {
+            Task { await model.changeGateway() }
+        }
+        .disabled(!model.canChangeGateway)
     }
 
     /// The remote is somebody else's, and this is the one refusal with something to

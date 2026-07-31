@@ -152,13 +152,14 @@ struct RemotexViewerApp: App {
                 // The View menu's resize items are AppKit's and need a target —
                 // see `ViewerMenus.ensureResizeItems`. This is the first point
                 // where both the delegate and the model exist.
+                // Nothing is contacted from here. The app opens on the home screen,
+                // which is the one question it cannot answer for anybody: the gateway
+                // in this bundle is the right one for targets this Mac can reach
+                // directly, and the wrong one when the link to them is slow enough
+                // that the gateway belongs at the other end. Starting the local one
+                // unasked is what left no way to say so.
                 .task {
                     applicationDelegate.bind(model: model)
-                    // Unlike the old launch, which deliberately contacted nothing:
-                    // there is no address to be wrong now, and the gateway is ours to
-                    // start. Waiting for a button here would be waiting for the user
-                    // to confirm the only thing this app can do.
-                    await model.launch()
                 }
         }
         .defaultSize(width: 1440, height: 900)
