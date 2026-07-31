@@ -1,6 +1,6 @@
 # Proposal: a per-target render dial
 
-Status: **fixed-quality JPEG implemented; the rest is the scaffolding it grew.**
+Status: **fixed-quality JPEG and WebP implemented; the rest is the scaffolding they grew.**
 This is the path-of-least-resistance version of lowering bandwidth; the dynamic,
 motion-adaptive scheme is a separate, deferred proposal (see
 [motion-adaptive-jpeg.md](motion-adaptive-jpeg.md)).
@@ -13,10 +13,10 @@ or full-motion content, where a JPEG at moderate quality is a fraction of the
 bytes and indistinguishable in motion. There was no way to trade that.
 
 The wire already carries the choice: a tile record's first byte is its format,
-`Tile::FORMAT_PNG` / `Tile::FORMAT_JPEG`, and both clients decode either (the
-browser's `createImageBitmap` from a MIME type, the Swift viewer's ImageIO from
-the container itself). So this is an encoder-side change with **zero wire change**
-and no protocol-version bump.
+`Tile::FORMAT_PNG` / `Tile::FORMAT_JPEG` / `Tile::FORMAT_WEBP`, and both clients
+decode any of them (the browser's `createImageBitmap` from a MIME type, the Swift
+viewer's ImageIO from the container itself). So this is an encoder-side change
+with **zero wire change** and no protocol-version bump.
 
 ## The two axes
 

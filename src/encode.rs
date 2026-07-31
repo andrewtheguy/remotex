@@ -370,6 +370,21 @@ mod tests {
         assert_eq!(tile.format, Tile::FORMAT_JPEG);
     }
 
+    /// Same for the other lossy codec: a WebP-configured sink emits WebP tiles.
+    #[tokio::test]
+    async fn a_webp_quality_makes_tiles_webp() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let sink = TileSink::new("test", frame_tx, TileCodec::Webp(60));
+
+        sink.tile(0, 0, 320, 64, rgb(320, 64, 1)).await.unwrap();
+        sink.flush().await;
+
+        let ServerMsg::Tile(tile) = &drain(&mut frame_rx, 1).await[0] else {
+            panic!("expected a tile");
+        };
+        assert_eq!(tile.format, Tile::FORMAT_WEBP);
+    }
+
     /// The hazard a side channel for control messages would create: the client
     /// must learn a new size before a tile in the new coordinate space arrives.
     #[tokio::test]

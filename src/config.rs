@@ -109,7 +109,8 @@ pub enum RenderType {
     #[default]
     Full,
     /// One quality for the whole session, set by [`TargetConfig::render_quality`]
-    /// and never varied. Pairs with a lossy codec ([`RenderSubtype::Jpeg`]).
+    /// and never varied. Pairs with a lossy codec ([`RenderSubtype::Jpeg`] or
+    /// [`RenderSubtype::Webp`]).
     FixedQuality,
 }
 
@@ -259,9 +260,11 @@ pub struct TargetConfig {
     /// legal pairing with [`Self::render_type`] is enforced at parse time.
     #[serde(default)]
     pub render_subtype: RenderSubtype,
-    /// Fixed JPEG quality (1–100) for [`RenderType::FixedQuality`]. Required for
-    /// that strategy and refused for [`RenderType::Full`], which is lossless and
-    /// has no dial. `None` (unset) is the default.
+    /// Fixed quality (1–100) for [`RenderType::FixedQuality`], applied by whichever
+    /// lossy codec [`Self::render_subtype`] selects ([`RenderSubtype::Jpeg`] or
+    /// [`RenderSubtype::Webp`]). Required for that strategy and refused for
+    /// [`RenderType::Full`], which is lossless and has no dial. `None` (unset) is
+    /// the default.
     #[serde(default)]
     pub render_quality: Option<u8>,
 }

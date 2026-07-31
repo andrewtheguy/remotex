@@ -347,7 +347,7 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// format travels with the tile instead of being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
-    /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`].
+    /// Payload codec: [`Tile::FORMAT_PNG`], [`Tile::FORMAT_JPEG`] or [`Tile::FORMAT_WEBP`].
     pub format: u8,
     pub x: u16,
     pub y: u16,
