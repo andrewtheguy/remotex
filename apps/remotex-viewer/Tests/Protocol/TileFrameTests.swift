@@ -117,6 +117,17 @@ struct TileFrameTests {
         }
     }
 
+    /// The other side of that gate: 2 (JPEG) is a codec this build knows, so its
+    /// record decodes and keeps its codec — `aWellFormedRecordDecodes` covers PNG.
+    @Test
+    func aJpegRecordDecodesAsJpeg() throws {
+        let tiles = try #require(
+            tileRecords(batch(tile(format: TileFormat.jpeg.rawValue, w: 8, h: 8, payload: [0x01])))
+        )
+        #expect(tiles.count == 1)
+        #expect(tiles[0].format == .jpeg)
+    }
+
     /// A truncated frame is only detectable because the header carries a count:
     /// records are self-delimiting, so a short read would otherwise parse cleanly
     /// as a complete but smaller batch and paint half a repaint.

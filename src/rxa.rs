@@ -1186,11 +1186,13 @@ mod tests {
                 other => panic!("expected Attach, got {other:?}"),
             }
             // 3 was WebP before this protocol version, so it is exactly the byte a
-            // stale agent would send — now unrecognised, where PNG is relayed.
-            for (format, data) in [(3u8, vec![b'R', b'I', b'F', b'F']), (
-                rxa_proto::msg::format::PNG,
-                vec![0x89, b'P', b'N', b'G'],
-            )] {
+            // stale agent would send — now unrecognised and dropped, where both PNG
+            // and JPEG (the two the classifier picks between) relay through.
+            for (format, data) in [
+                (3u8, vec![b'R', b'I', b'F', b'F']),
+                (rxa_proto::msg::format::PNG, vec![0x89, b'P', b'N', b'G']),
+                (rxa_proto::msg::format::JPEG, vec![0xFF, 0xD8, 0xFF, 0xE0]),
+            ] {
                 writer
                     .send(
                         &AgentMsg::Tile { format, x: 7, y: 9, w: 4, h: 4, data }.encode(),
@@ -1213,9 +1215,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(tiles.len(), 1, "the unknown format byte should cost one tile");
+        assert_eq!(tiles.len(), 2, "only the unknown format byte should cost a tile");
         assert_eq!(tiles[0].format, Tile::FORMAT_PNG);
         assert_eq!(tiles[0].data, b"\x89PNG");
+        assert_eq!(tiles[1].format, Tile::FORMAT_JPEG);
+        assert_eq!(tiles[1].data, &[0xFF, 0xD8, 0xFF, 0xE0]);
     }
 
     /// A target that opted into nothing, which is the default and what most of

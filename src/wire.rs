@@ -377,9 +377,11 @@ mod tests {
         }
     }
 
-    /// Records of a batch frame as `(op, slot, x, y, w, h, payload_len)`. A
-    /// reference carries no size or payload, so those come back zero.
-    fn records(frame: &[u8]) -> Vec<(u8, u16, u16, u16, u16, u16, usize)> {
+    /// A parsed batch record: `(op, slot, x, y, w, h, payload_len, format)`. A
+    /// reference carries no size, payload or format, so those come back zero.
+    type Record = (u8, u16, u16, u16, u16, u16, usize, u8);
+
+    fn records(frame: &[u8]) -> Vec<Record> {
         assert_eq!(frame[0], batch::FRAME_KIND);
         assert_eq!(frame[1], 0, "flags must be zero");
         let count = u16::from_le_bytes([frame[2], frame[3]]);
@@ -390,7 +392,7 @@ mod tests {
             let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
             match op {
                 batch::OP_TILE_REF => {
-                    out.push((op, le(1), le(3), le(5), 0, 0, 0));
+                    out.push((op, le(1), le(3), le(5), 0, 0, 0, 0));
                     at += batch::TILE_REF_LEN;
                 }
                 batch::OP_TILE => {
@@ -400,7 +402,7 @@ mod tests {
                         frame[at + 14],
                         frame[at + 15],
                     ]) as usize;
-                    out.push((op, le(2), le(4), le(6), le(8), le(10), len));
+                    out.push((op, le(2), le(4), le(6), le(8), le(10), len, frame[at + 1]));
                     at += batch::TILE_HEADER_LEN + len;
                 }
                 other => panic!("unknown record op {other}"),
@@ -462,6 +464,27 @@ mod tests {
         }
         assert_eq!(wire.totals.binary_frames, 1);
         assert_eq!(wire.totals.tiles, 8);
+    }
+
+    // The format byte is the codec, and the wire relays it untouched: the gateway's
+    // engines send PNG, the agent may send JPEG, and neither the batching nor the
+    // cache may drop or rewrite it.
+    #[test]
+    fn the_tile_format_byte_survives_encoding() {
+        let mut wire = Wire::default();
+        let jpeg = ServerMsg::Tile(Tile {
+            format: Tile::FORMAT_JPEG,
+            x: 0,
+            y: 64, // clear of tile(0, ..) so neither supersedes the other
+            w: 320,
+            h: 64,
+            data: vec![0xFFu8; 900],
+        });
+        let frames = wire.encode(vec![tile(0, 900), jpeg]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].7, Tile::FORMAT_PNG, "the PNG tile keeps its codec");
+        assert_eq!(records[1].7, Tile::FORMAT_JPEG, "the JPEG tile keeps its codec");
     }
 
     // Ordering across the two frame types is load-bearing: a resize reallocates
