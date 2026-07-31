@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "remotex-viewer",
     platforms: [
-        .macOS(.v26),
+        .macOS(.v15),
     ],
     products: [
         .executable(name: "remotex-viewer", targets: ["RemotexViewer"]),

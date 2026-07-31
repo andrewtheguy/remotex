@@ -77,6 +77,41 @@ struct TileDecoderTests {
         #expect(bottom.b > 200 && bottom.r < 55, "the bottom band should be blue, got \(bottom)")
     }
 
+    /// WebP is the other lossy codec a target may send, and the reason the app's
+    /// minimum is macOS 15: ImageIO decodes WebP (since 11) through the same path
+    /// as JPEG. It cannot *encode* WebP, so unlike the PNG/JPEG tests this decodes
+    /// a checked-in fixture (16×16, top red / bottom blue) rather than round-trips.
+    @Test
+    func aWebPDecodesToTopDownBGRA() async throws {
+        let width = 16
+        let height = 16
+        // A 16×16 lossy WebP, top half red, bottom half blue.
+        let webp = try #require(
+            Data(
+                base64Encoded:
+                    "UklGRkQAAABXRUJQVlA4IDgAAAAwAgCdASoQABAAAMASJaACdLoB+AH4gARoAAD+/SoP//36PX/u82Cf9aOf+tHP/60c/XQ0beVAAA=="
+            )
+        )
+
+        let tile = try #require(
+            await TileDecoder().decode(
+                TileFrame(
+                    format: .webp, slot: BatchFrame.noSlot,
+                    x: 0,
+                    y: 0,
+                    w: UInt16(width),
+                    h: UInt16(height),
+                    payload: webp
+                )
+            )
+        )
+        #expect(tile.bgra.count == width * height * 4)
+        let top = bgr(tile, width * 2 + width / 2)
+        let bottom = bgr(tile, width * (height - 3) + width / 2)
+        #expect(top.r > 200 && top.b < 55, "the top band should be red, got \(top)")
+        #expect(bottom.b > 200 && bottom.r < 55, "the bottom band should be blue, got \(bottom)")
+    }
+
     /// A grayscale PNG has one channel and an RGBA one has four; both have to
     /// come out as the same four-byte BGRA the texture upload expects.
     @Test

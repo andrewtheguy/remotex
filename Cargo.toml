@@ -50,6 +50,11 @@ png = "0.18"
 # already distinguishes PNG from JPEG on the wire and both clients decode either,
 # so this is a gateway-only encoder. `simd` because it runs on the session hot path.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
+# WebP for the lossy tile path's `webp` subtype — ~30% fewer bytes than JPEG at a
+# matched quality, decoded natively by both clients (browser createImageBitmap,
+# Swift ImageIO on macOS 11+). Binds a statically-linked libwebp built by `cc`
+# (not cmake) with the target's SIMD, so it costs no cmake and no new runtime dep.
+webp = "0.3"
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a

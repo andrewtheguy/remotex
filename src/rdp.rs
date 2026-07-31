@@ -172,7 +172,7 @@ pub async fn run(
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx, config.jpeg_quality());
+    let sink = TileSink::new("rdp", frame_tx, config.tile_codec());
     session(config, input_rx, &sink, audio).await;
     sink.finish().await;
 }

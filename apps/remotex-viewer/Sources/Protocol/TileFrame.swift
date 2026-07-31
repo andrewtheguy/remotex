@@ -2,9 +2,10 @@ import Foundation
 
 /// A tile payload's codec, from the `TILE` record's format byte.
 ///
-/// PNG for the gateway's screen content and the agent's flat-UI tiles, JPEG for
-/// the agent's photographic tiles; both decode through the same ImageIO path.
-/// `Tile::FORMAT_PNG` and `Tile::FORMAT_JPEG` in `src/protocol.rs`.
+/// PNG is the gateway's lossless default; a target on the fixed-quality render
+/// dial sends JPEG or WebP instead. All three decode through the same ImageIO
+/// path (WebP since macOS 11, and the app's minimum is 15). `Tile::FORMAT_PNG`,
+/// `Tile::FORMAT_JPEG`, `Tile::FORMAT_WEBP` in `src/protocol.rs`.
 ///
 /// A byte outside these cases makes `BatchFrame.decode` fail — a refusal — rather
 /// than handing bytes to a decoder that will mangle them. The version check in
@@ -13,6 +14,7 @@ import Foundation
 enum TileFormat: UInt8, Sendable, Equatable {
     case png = 1
     case jpeg = 2
+    case webp = 3
 }
 
 /// One dirty rectangle of the framebuffer, as one `TILE` record inside a batch

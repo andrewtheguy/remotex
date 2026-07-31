@@ -341,10 +341,10 @@ pub const CELL_H: u16 = STRIP_ROWS;
 ///
 /// The RDP and VNC engines decode a framebuffer and compress it here: lossless
 /// PNG ([`Tile::from_rgb`], the default) or, for a target on the fixed-quality
-/// dial, JPEG ([`Tile::from_rgb_jpeg`]). A pass-through path also exists for a
-/// source that hands over frames already encoded ([`Tile::encoded`]), which no
-/// current engine uses; either way the format travels with the tile instead of
-/// being a constant.
+/// dial, JPEG ([`Tile::from_rgb_jpeg`]) or WebP ([`Tile::from_rgb_webp`]). A
+/// pass-through path also exists for a source that hands over frames already
+/// encoded ([`Tile::encoded`]), which no current engine uses; either way the
+/// format travels with the tile instead of being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
     /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`].
@@ -360,6 +360,7 @@ pub struct Tile {
 impl Tile {
     pub const FORMAT_PNG: u8 = 1;
     pub const FORMAT_JPEG: u8 = 2;
+    pub const FORMAT_WEBP: u8 = 3;
 
     /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
     pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
@@ -399,6 +400,32 @@ impl Tile {
         let data = encode_jpeg(w, h, rgb, quality)?;
         Ok(Self {
             format: Self::FORMAT_JPEG,
+            x,
+            y,
+            w,
+            h,
+            data,
+        })
+    }
+
+    /// Build a tile from packed RGB888 pixels, WebP-compressing the payload at a
+    /// fixed `quality` (1–100). The other lossy counterpart to [`Tile::from_rgb`],
+    /// taken when a target set `render_subtype = "webp"`: typically ~30% fewer
+    /// bytes than [`Tile::from_rgb_jpeg`] at a matched quality. Both clients decode
+    /// WebP natively, so the only difference on the wire is the format byte.
+    ///
+    /// Like the JPEG path there is no classifier — every tile goes to WebP, so flat
+    /// UI and text soften too.
+    pub fn from_rgb_webp(x: u16, y: u16, w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Self> {
+        let expected = usize::from(w) * usize::from(h) * 3;
+        anyhow::ensure!(
+            rgb.len() == expected,
+            "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
+            rgb.len()
+        );
+        let data = encode_webp(w, h, rgb, quality)?;
+        Ok(Self {
+            format: Self::FORMAT_WEBP,
             x,
             y,
             w,
@@ -518,6 +545,26 @@ fn encode_jpeg(w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Vec<u8
         .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| anyhow::anyhow!("JPEG encode failed: {e}"))?;
     Ok(out)
+}
+
+/// WebP-encode packed RGB888 at a fixed `quality` (1–100). The lossy path for the
+/// `webp` subtype ([`Tile::from_rgb_webp`]).
+///
+/// All the CPU the encode can use: `libwebp` is compiled with the target's SIMD
+/// (SSE/AVX on x86, NEON on Apple silicon) by the `cc` build, and `thread_level`
+/// lets one encode fan out across cores on top of the tile-level parallelism
+/// `TileSink` already has. `method` stays at libwebp's default 4 — the
+/// speed/size balance — so a hot-path encode does not stall on a slower search.
+fn encode_webp(w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
+    let mut config = webp::WebPConfig::new().map_err(|()| anyhow::anyhow!("WebP config init failed"))?;
+    config.quality = f32::from(quality);
+    config.method = 4;
+    config.thread_level = 1;
+    let encoder = webp::Encoder::from_rgb(rgb, u32::from(w), u32::from(h));
+    let mem = encoder
+        .encode_advanced(&config)
+        .map_err(|e| anyhow::anyhow!("WebP encode failed: {e:?}"))?;
+    Ok(mem.to_vec())
 }
 
 /// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
@@ -1314,6 +1361,54 @@ mod tests {
     #[test]
     fn from_rgb_jpeg_rejects_a_mismatched_payload() {
         assert!(Tile::from_rgb_jpeg(0, 0, 2, 2, &[0u8; 11], 60).is_err());
+    }
+
+    // The WebP path stamps WebP and produces a real RIFF/WEBP container.
+    #[test]
+    fn from_rgb_webp_marks_its_payload_as_webp() {
+        let (w, h) = (16, 16);
+        let tile = Tile::from_rgb_webp(0, 0, w, h, &vec![0u8; usize::from(w) * usize::from(h) * 3], 60).unwrap();
+        assert_eq!(tile.format, Tile::FORMAT_WEBP);
+        assert_eq!(&tile.data[..4], b"RIFF", "RIFF container");
+        assert_eq!(&tile.data[8..12], b"WEBP", "WebP form type");
+        let mut out = Vec::new();
+        tile.write_record(batch::NO_SLOT, &mut out);
+        assert_eq!(out[1], Tile::FORMAT_WEBP);
+    }
+
+    // The reason to offer WebP at all: on photographic content it beats both PNG
+    // (lossless) and JPEG at a matched quality, and a lower quality is smaller.
+    #[test]
+    fn webp_is_smaller_than_png_and_jpeg_on_photographic_content() {
+        let (w, h) = (320, 64);
+        let rgb = noisy_rgb(w, h);
+        let png = Tile::from_rgb(0, 0, w, h, &rgb).unwrap();
+        let jpeg = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 60).unwrap();
+        let webp = Tile::from_rgb_webp(0, 0, w, h, &rgb, 60).unwrap();
+        assert!(
+            webp.data.len() < png.data.len(),
+            "WebP should beat PNG: {} vs {}",
+            webp.data.len(),
+            png.data.len()
+        );
+        assert!(
+            webp.data.len() < jpeg.data.len(),
+            "WebP should beat JPEG at the same quality: {} vs {}",
+            webp.data.len(),
+            jpeg.data.len()
+        );
+        let lower = Tile::from_rgb_webp(0, 0, w, h, &rgb, 20).unwrap();
+        assert!(
+            lower.data.len() < webp.data.len(),
+            "lower quality should be smaller: {} vs {}",
+            lower.data.len(),
+            webp.data.len()
+        );
+    }
+
+    #[test]
+    fn from_rgb_webp_rejects_a_mismatched_payload() {
+        assert!(Tile::from_rgb_webp(0, 0, 2, 2, &[0u8; 11], 60).is_err());
     }
 
     /// A desktop-like strip: horizontal gradient, repeated rows.
