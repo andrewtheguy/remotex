@@ -793,6 +793,9 @@ mod tests {
             resize: meta.resize,
             clipboard: meta.clipboard,
             audio: meta.audio,
+            render_type: crate::config::RenderType::Full,
+            render_subtype: crate::config::RenderSubtype::Png,
+            render_quality: None,
         }
     }
 

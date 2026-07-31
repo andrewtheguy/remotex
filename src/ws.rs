@@ -313,6 +313,9 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: false,
+            render_type: crate::config::RenderType::Full,
+            render_subtype: crate::config::RenderSubtype::Png,
+            render_quality: None,
         };
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(

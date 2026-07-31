@@ -166,7 +166,7 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    let sink = TileSink::new("vnc", frame_tx);
+    let sink = TileSink::new("vnc", frame_tx, config.jpeg_quality());
     session(config, input_rx, &sink).await;
     sink.finish().await;
 }
@@ -2195,7 +2195,7 @@ mod tests {
     /// A sink and the frame channel behind it.
     fn test_sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(8);
-        (TileSink::new("vnc", frame_tx), frame_rx)
+        (TileSink::new("vnc", frame_tx, None), frame_rx)
     }
 
     /// What the sink has forwarded so far, or `None` for nothing.

@@ -8,19 +8,31 @@ is the only place they can be read in context.
 
 ## Planned
 
-### Per-target quality dial
+### Render dial — the modes still planned
 
-The gateway encodes every tile as lossless PNG, with no way to trade quality for
-bytes on photographic or full-motion content. The next release adds a per-target
-`quality` field: `"full"` (the default, today's PNG path unchanged) or an
-integer 1–100 to encode tiles as JPEG at that fixed quality. Zero wire change —
-the tile format byte already carries PNG vs JPEG and every client decodes both.
-Detailed proposal: [proposals/quality-dial.md](proposals/quality-dial.md).
+The gateway used to encode every tile as lossless PNG. It now has a two-axis
+per-target render dial — a `render_type` (quality strategy) and a
+`render_subtype` (codec), plus `render_quality` — whose first lossy combination,
+`fixed-quality` + `jpeg` (every tile JPEG at a fixed quality), is **implemented**.
+The default, `full` + `png`, is byte-identical to the PNG-only gateway. Zero wire
+change: the tile format byte already carries PNG vs JPEG and both clients decode
+either. Detailed proposal and the full type×subtype matrix:
+[proposals/quality-dial.md](proposals/quality-dial.md).
 
-A dynamic, motion-adaptive variant — quality chosen per cell from how fast it is
-changing, with a cleanup pass when it settles — is the scheme the deleted rxa
-agent ran. It is deferred until the fixed dial proves insufficient; the design
-and its salvage point are recorded in
+What remains planned are further points on those two axes, each a new enum variant
+the config already refuses by name until it is built:
+
+- **`adaptive-jpeg` subtype** — a per-tile PNG/JPEG classifier (flat UI and text
+  stay lossless, photographic tiles go JPEG), so a fixed quality no longer softens
+  text. The content-based cousin of the motion scheme below.
+- **`adaptive` type** — quality chosen automatically rather than fixed: from how
+  fast a region is changing, or from the connection's speed.
+- **`video` subtype** — an inter-frame codec for full-motion regions.
+
+The dynamic, motion-adaptive form of `adaptive` — quality chosen per cell from how
+fast it is changing, with a cleanup pass when it settles — is the scheme the
+deleted rxa agent ran. It is deferred until the fixed dial proves insufficient; the
+design and its salvage point are recorded in
 [proposals/motion-adaptive-jpeg.md](proposals/motion-adaptive-jpeg.md).
 
 ### Apple Screen Sharing display picking and high performance

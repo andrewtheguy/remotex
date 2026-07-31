@@ -38,6 +38,9 @@ async fn spawn_app() -> SocketAddr {
             resize: false,
             clipboard: false,
             audio: false,
+            render_type: remotex::config::RenderType::Full,
+            render_subtype: remotex::config::RenderSubtype::Png,
+            render_quality: None,
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

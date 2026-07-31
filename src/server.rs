@@ -493,6 +493,9 @@ mod tests {
                 resize: false,
                 clipboard: false,
                 audio: false,
+                render_type: crate::config::RenderType::Full,
+                render_subtype: crate::config::RenderSubtype::Png,
+                render_quality: None,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -720,6 +723,9 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: true,
+            render_type: crate::config::RenderType::Full,
+            render_subtype: crate::config::RenderSubtype::Png,
+            render_quality: None,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its

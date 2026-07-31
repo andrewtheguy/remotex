@@ -1,8 +1,10 @@
 # Proposal: motion-adaptive JPEG quality (deferred)
 
-Status: **on paper only, deferred.** Do not build this before the fixed
-[quality dial](quality-dial.md) ships and proves insufficient. It is recorded
-here so the design is not re-derived, and so the salvage point is not lost.
+Status: **on paper only, deferred.** The fixed
+[render dial](quality-dial.md) has shipped (`fixed-quality` + `jpeg`); do not build
+this before that dial proves insufficient. This is the dynamic form of its future
+`adaptive` type — quality chosen per cell from motion rather than fixed. It is
+recorded here so the design is not re-derived, and so the salvage point is not lost.
 
 This is the scheme the deleted rxa agent ran. Its full logic is pinned at commit
 `8990971` — `crates/rxa-agent/src/encode.rs` (classifier, `encode_jpeg`,
@@ -28,8 +30,11 @@ leaves real, wanted bandwidth on the table.
 
 ## Design sketch (for when it is picked up)
 
-Gate all of it behind a per-target boolean (`adaptive_quality`, default `false`);
-when off, the encoder is byte-identical to the PNG-only path. The pieces:
+This is a new point on the existing render dial, not a new flag: the future
+`render_type = "adaptive"` paired with `render_subtype = "adaptive-jpeg"` (a
+per-cell classify-and-vary codec). The default `full` + `png` is untouched, and a
+target on any other dial setting keeps its current path — nothing below runs
+unless a target opts into the adaptive type. The pieces:
 
 - **Cell identity.** The gateway `Shadow` is pixel-exact and has no stable cell
   identity, so add the agent's fixed **320×64 grid** (`CELL_W` / `CELL_H`,
@@ -55,7 +60,8 @@ Constants from the agent tree: `CHURN_WINDOW=8`, `CLEANUP_IDLE=500ms`,
 
 ## Verification (when built)
 
-- Flag **off** produces tiles byte-identical to the fixed-dial / PNG path.
+- A target **not** on the adaptive type (the default `full` + `png`, or a
+  `fixed-quality` target) is byte-identical to its current path.
 - A/B on the real RDP and macOS VNC/ARD targets: full-motion bytes down
   substantially at the same surface size, static content unchanged, cleanups seen
   after pausing (~40 samples, median/p90, initial repaint separated from steady
