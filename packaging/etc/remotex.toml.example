@@ -193,6 +193,11 @@ password = "change-me"
 # How this target's pixels are compressed on their way to the browser. Two keys and
 # a dial, and they apply to every protocol.
 #
+# All three are per-target keys, so they belong *inside* a [[targets]] table and not
+# in a section of their own — uncommented here they would attach to whichever
+# [[targets]] block precedes them, which is the "example" one at the top of this file.
+# There is no global render setting.
+#
 # render_type = "full" (the default) is lossless PNG: exact pixels, and the right
 # answer on a LAN. "fixed-quality" trades exactness for bytes at a constant quality,
 # which is what a slow or metered link wants.

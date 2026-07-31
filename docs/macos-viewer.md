@@ -358,8 +358,9 @@ one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-**No engine fills the Display menu today, so it always says so.** RDP, plain VNC and
-both Mac subtypes each expose a single framebuffer and send no display list.
+**No engine fills the Display menu today.** RDP, plain VNC and both Mac subtypes each
+expose a single framebuffer and send no display list, so the menu holds one disabled
+item reading *No Displays to Choose From* and never anything else.
 
 Picking one of a Mac's screens was attempted through Apple's own protocol revision
 (`subtype = "ard-high-performance"`) and does not work: macOS replaces the Mac's real

@@ -485,6 +485,13 @@ async fn serve_fake_mac(
                 let size = u16::from_be_bytes([head[1], head[2]]);
                 let mut body = vec![0u8; usize::from(size)];
                 records.read_exact(&mut body).await?;
+                // Named, because the alternative is an index-out-of-bounds panic
+                // naming a byte offset instead of the message that was too short.
+                assert!(
+                    body.len() >= 8 + 0x9c,
+                    "a display configuration carried {} body bytes, too few for a descriptor",
+                    body.len()
+                );
                 // The static descriptor: no dynamic-resolution flag and no virtual
                 // display, which is what says this session is fixed-size.
                 let d = &body[8..]; // past version, display_count, flags

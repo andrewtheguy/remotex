@@ -178,13 +178,16 @@ resize acts on it, quantizing to 1x or 2x at the same midpoint; the resulting
 density travels back as the `scale` on `resize`, and clients present the
 framebuffer at `pixels / scale`. Other engines ignore the message.
 
-RDP and VNC each expose one framebuffer, so no engine reports a display list and
-neither client shows a picker. Binding to a single one of a Mac's displays — which
-the stock Screen Sharing app does natively — was attempted over Apple's protocol
-revision and does not work there: macOS replaces the Mac's real displays with one
-synthesized display for such a session. The `selectDisplay` / `Displays` wire and the
-gateway's handling of it are implemented and tested, waiting on a mechanism that
-reports a list. See [`apple-vnc-889.md`](apple-vnc-889.md) and
+No server the gateway has been pointed at reports a display list, so in practice
+neither client shows a picker. The gateway is not the missing piece: the VNC engine's
+Apple dialect parses an `AppleDisplayLayout` into a `displays` message and acts on a
+`selectDisplay` by binding that screen, and both paths are unit- and end-to-end
+tested. What is missing is a server that sends such a layout. Binding one of a Mac's
+displays — which the stock Screen Sharing app does natively — was attempted over
+Apple's protocol revision and does not work there: macOS replaces the Mac's real
+displays with one synthesized display for the duration of such a session, so no layout
+arrives and there is nothing to pick. Until some server provides one, the wire stays
+exercised only by tests. See [`apple-vnc-889.md`](apple-vnc-889.md) and
 [`roadmap.md`](roadmap.md).
 
 `refresh` re-announces the desktop size and requests a full repaint. The session

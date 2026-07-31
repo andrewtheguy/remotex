@@ -169,9 +169,20 @@ impl Cbc {
 
 /// Bytes of filler between a body and its trailer: the least that rounds the
 /// plaintext up to a whole number of blocks.
-fn filler_len(body_len: usize) -> usize {
+///
+/// `const` so [`MIN_CIPHERTEXT`] can be derived from it rather than written out as
+/// a number that could drift away from this arithmetic.
+const fn filler_len(body_len: usize) -> usize {
     (BLOCK - (BODY_LEN + body_len + TRAILER) % BLOCK) % BLOCK
 }
+
+/// Smallest legal record: even an empty body carries its own length, the filler
+/// that rounds it to a block, and the trailer.
+///
+/// A record shorter than this cannot be parsed at all — [`RecordReader::accept`]
+/// takes `len - TRAILER`, which for a shorter one is a subtraction below zero — so
+/// the length is refused before the decrypt rather than defended against inside it.
+const MIN_CIPHERTEXT: usize = BODY_LEN + filler_len(0) + TRAILER;
 
 /// Frames outgoing messages, one record each.
 ///
@@ -255,6 +266,15 @@ pub struct RecordReader<R> {
     phase: Phase,
     /// The verified body inside `staging` that has not been handed upward yet.
     body: std::ops::Range<usize>,
+    /// Whether a record has already failed, which is terminal.
+    ///
+    /// `poll_read` may legitimately be called again after returning an error, and
+    /// without this it would re-enter [`Self::accept`] on the same staged
+    /// ciphertext: decrypting it a second time and advancing the sequence counter
+    /// again, which walks both halves of the cipher state forward over data that
+    /// was never accepted. A record layer that has failed once has nothing left to
+    /// say.
+    failed: bool,
 }
 
 impl<R> RecordReader<R> {
@@ -266,10 +286,15 @@ impl<R> RecordReader<R> {
             filled: 0,
             phase: Phase::Len,
             body: 0..0,
+            failed: false,
         }
     }
 
     /// Decrypt and verify a complete record, leaving its body in `staging`.
+    ///
+    /// `len` must be a whole number of blocks and at least [`MIN_CIPHERTEXT`] —
+    /// guaranteed by the caller, which refuses any other length off the wire. The
+    /// arithmetic below relies on it.
     fn accept(&mut self, len: usize) -> io::Result<std::ops::Range<usize>> {
         self.cbc.decrypt(&mut self.staging[..len]);
         let covered = len - TRAILER;
@@ -320,6 +345,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for RecordReader<R> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = &mut *self;
+        if me.failed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the record layer already failed",
+            )));
+        }
         loop {
             // Verified bytes first, and only ever those: nothing reaches a caller
             // before its record's trailer has been checked.
@@ -351,10 +382,17 @@ impl<R: AsyncRead + Unpin> AsyncRead for RecordReader<R> {
                     me.filled += n;
                     if me.filled == BODY_LEN {
                         let len = usize::from(u16::from_be_bytes([me.staging[0], me.staging[1]]));
-                        if len == 0 || len % BLOCK != 0 {
+                        // Both halves matter. Off-block is the spec's rule; below
+                        // the minimum is this implementation's, and it is what keeps
+                        // a too-short length out of `accept`, where the trailer
+                        // subtraction would run off the bottom of a `usize`.
+                        if len < MIN_CIPHERTEXT || len % BLOCK != 0 {
                             return Poll::Ready(Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("a record claims {len} ciphertext bytes, not a non-zero multiple of {BLOCK}"),
+                                format!(
+                                    "a record claims {len} ciphertext bytes, not a multiple of \
+                                     {BLOCK} of at least {MIN_CIPHERTEXT}"
+                                ),
                             )));
                         }
                         me.staging.resize(len, 0);
@@ -369,7 +407,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for RecordReader<R> {
                     }
                     me.filled += n;
                     if me.filled == len {
-                        me.body = me.accept(len)?;
+                        me.body = match me.accept(len) {
+                            Ok(body) => body,
+                            Err(e) => {
+                                me.failed = true;
+                                return Poll::Ready(Err(e));
+                            }
+                        };
                         me.filled = 0;
                         me.phase = Phase::Len;
                     }
@@ -462,9 +506,13 @@ mod tests {
         assert_eq!(u16::from_be_bytes([framed[0], framed[1]]), 32);
         assert_eq!(framed.len(), 2 + 32);
 
-        // An empty message is still a record.
+        // An empty message is still a record — and the smallest one there is, which
+        // has to be exactly the smallest a reader will accept. Any daylight between
+        // the two and legitimate empty records would be refused as too short.
         let framed = writer.frame(&[]).unwrap();
         assert_eq!(u16::from_be_bytes([framed[0], framed[1]]), 32);
+        assert_eq!(MIN_CIPHERTEXT, 32);
+        assert_eq!(usize::from(u16::from_be_bytes([framed[0], framed[1]])), MIN_CIPHERTEXT);
     }
 
     #[test]
@@ -557,11 +605,25 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         // Not one byte of the record escaped before the check.
         assert_eq!(got, [0u8; 7]);
+
+        // And the failure is terminal. Reading again must not re-enter the decrypt
+        // on the same staged ciphertext, which would advance the cipher and the
+        // sequence counter over a record that was never accepted.
+        let err = reader.read_u8().await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(format!("{err}").contains("already failed"), "{err}");
     }
 
     #[tokio::test]
     async fn a_misframed_record_is_refused() {
-        for (len, what) in [(0u16, "zero"), (17, "not a whole number of blocks")] {
+        for (len, what) in [
+            (0u16, "zero"),
+            (17, "not a whole number of blocks"),
+            // A whole block, and still too short to hold a body length and a
+            // trailer. Rejected at the length rather than reaching the decrypt,
+            // where `len - TRAILER` would go negative.
+            (16, "shorter than the smallest legal record"),
+        ] {
             let mut wire = len.to_be_bytes().to_vec();
             wire.resize(2 + usize::from(len.max(16)), 0);
             let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());

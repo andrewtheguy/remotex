@@ -108,7 +108,15 @@ const NOMINAL_DPI: f32 = 132.0;
 const MAX_CURSOR_DIM: u16 = 256;
 /// Ceiling on one inflated payload, so a hostile or broken stream cannot be
 /// answered with unbounded memory.
-const MAX_INFLATED: usize = 64 << 20;
+///
+/// An 8192x8192 framebuffer at four bytes a pixel, which is past any real Mac and
+/// comfortably past the 4480x1800 (31 MiB) a two-display session synthesizes. It
+/// used to be 64 MiB, which is *tighter than the raw path*: a rectangle the raw
+/// branch in [`crate::vnc`] happily allocates would be refused here for no reason
+/// but the codec it arrived under. The real bound on either path is the rectangle's
+/// bounds check against the announced desktop; this only stops a wildly bogus
+/// geometry from turning into an allocation.
+const MAX_INFLATED: usize = 8192 * 8192 * 4;
 
 /// `ViewerInfo`: who is connecting and what it can do.
 ///
@@ -439,14 +447,19 @@ pub struct CursorCache {
 }
 
 /// What a cursor rectangle asked for.
+#[derive(Debug)]
 pub enum Cursor {
     /// Draw this shape.
     Shape(CursorShape),
-    /// A select for an id that was never stored, or a shape too large to draw:
-    /// leave the pointer as it is.
+    /// A select for an id that was never stored: leave the pointer as it is, which
+    /// is closer to the truth than blanking it.
+    ///
+    /// There is no "the server hid the pointer" here. On the plain RFB Cursor
+    /// pseudo-encoding a zero-sized rectangle means exactly that, but this encoding
+    /// never says how it is spelled, and treating a zero-sized *store* as hidden
+    /// meant discarding a chunk of the shared deflate stream — see
+    /// [`CursorCache::accept`].
     Unchanged,
-    /// The server hid the pointer.
-    Hidden,
 }
 
 impl CursorCache {
@@ -471,15 +484,23 @@ impl CursorCache {
                 }
             });
         }
-        if w == 0 || h == 0 {
-            return Ok(Cursor::Hidden);
-        }
-        if w > MAX_CURSOR_DIM || h > MAX_CURSOR_DIM {
-            // The bytes still have to be consumed, and they have been — the caller
-            // read the whole rectangle before calling. Only the shape is dropped.
-            log::warn!("vnc: ignoring an oversized {w}x{h} cursor");
-            return Ok(Cursor::Unchanged);
-        }
+        // A store this client cannot decode cannot be *skipped* either. Its payload
+        // is a chunk of the connection's single deflate stream, so not feeding it
+        // leaves that stream one chunk behind for the rest of the session and every
+        // later shape inflates to rubbish — silently, since rubbish of the right
+        // length still parses. Nor can it be fed and discarded: a zero-dimension
+        // store gives no expected size to inflate to, and an oversized one gives a
+        // size up to 21 GB. So both are fatal, which for shapes a real Mac never
+        // sends costs nothing and removes the one path that could corrupt the rest.
+        anyhow::ensure!(
+            w != 0 && h != 0,
+            "a cursor store carried {} compressed bytes for a {w}x{h} shape",
+            deflated.len()
+        );
+        anyhow::ensure!(
+            w <= MAX_CURSOR_DIM && h <= MAX_CURSOR_DIM,
+            "a cursor store is {w}x{h}, past the {MAX_CURSOR_DIM}-pixel edge this client draws"
+        );
 
         let pixels = usize::from(w) * usize::from(h);
         let stream = self
@@ -766,10 +787,14 @@ mod tests {
             Cursor::Unchanged
         ));
 
-        // A zero-sized store is the server hiding the pointer.
-        assert!(matches!(
-            cache.accept(1002, (0, 0), (0, 0), &deflated).unwrap(),
-            Cursor::Hidden
-        ));
+        // A store this client cannot decode is fatal rather than skipped: its
+        // payload belongs to the shared deflate stream, and dropping it would leave
+        // every later shape inflating to rubbish of plausible length.
+        let err = cache.accept(1002, (0, 0), (0, 0), &deflated).unwrap_err();
+        assert!(format!("{err:#}").contains("for a 0x0 shape"), "{err:#}");
+        let err = cache
+            .accept(1003, (0, 0), (MAX_CURSOR_DIM + 1, 32), &deflated)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("past the"), "{err:#}");
     }
 }

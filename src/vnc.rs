@@ -1472,9 +1472,17 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // stream. The stream is the connection's, not the rectangle's — see
         // [`ZlibStream`].
         let len = reader.read_u32().await?;
+        // Deflate can *expand*, and on a small rectangle it always does: the
+        // stream header and one sync flush cost more than a 1x1 rectangle's four
+        // pixels (measured: nine bytes for four). So bounding this at `expect`
+        // would refuse legitimate rectangles. A generous multiple still bounds the
+        // read, which is all this check is for — the inflated size is checked
+        // exactly, by `ZlibStream::inflate`.
+        let ceiling = expect + expect / 64 + 1024;
         anyhow::ensure!(
-            u64::from(len) <= expect as u64,
-            "a zlib rect claims {len} compressed bytes for {expect} of pixels"
+            u64::from(len) <= ceiling as u64,
+            "a zlib rect claims {len} compressed bytes for {expect} of pixels, past the \
+             {ceiling} that even an incompressible one would take"
         );
         let mut chunk = vec![0u8; len as usize];
         reader.read_exact(&mut chunk).await?;
@@ -1684,21 +1692,14 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
     reader.read_exact(&mut deflated).await?;
 
     let apple = apple.as_mut().expect("cursor images are the Apple dialect's alone");
-    let (state, msg) = match apple.cursors.accept(id, hotspot, size, &deflated)? {
-        vnc_apple::Cursor::Shape(shape) => (
-            CursorState::Shape(shape.clone()),
-            Some(ServerMsg::Cursor(Some(shape))),
-        ),
-        vnc_apple::Cursor::Hidden => (CursorState::Hidden, Some(ServerMsg::Cursor(None))),
+    let shape = match apple.cursors.accept(id, hotspot, size, &deflated)? {
+        vnc_apple::Cursor::Shape(shape) => shape,
         // Nothing to draw and nothing to say: the pointer keeps the shape it has,
         // which is closer to the truth than blanking it.
         vnc_apple::Cursor::Unchanged => return Ok(()),
     };
-    *cursor.lock().unwrap() = state;
-    match msg {
-        Some(msg) => sink.msg(msg).await,
-        None => Ok(()),
-    }
+    *cursor.lock().unwrap() = CursorState::Shape(shape.clone());
+    sink.msg(ServerMsg::Cursor(Some(shape))).await
 }
 
 /// Handle an `AppleDisplayLayout` rect: the Mac's screens, and the geometry it is
@@ -1735,17 +1736,20 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     let msg = {
         let mut state = display.lock().unwrap();
         let main = layout.displays.iter().find(|d| d.main).map(|d| d.id);
-        state.active = state
-            .requested
-            .take()
-            .or(main)
-            .unwrap_or(layout.displays[0].id);
+        // Captured before the `take`, because after it the field is always `None`
+        // and asking again would answer for every layout rather than for the ones
+        // that confirmed something.
+        let confirmed = state.requested.take();
+        state.active = confirmed.or(main).unwrap_or(layout.displays[0].id);
         let changed = state.displays != layout.displays;
         state.displays = layout.displays;
         // Sent whenever either half changes, since a client holds no display state
         // of its own and the checkmark is the only thing telling it what it is
-        // looking at.
-        (changed || state.requested.is_none()).then(|| state.displays_msg()).flatten()
+        // looking at. A layout that changes neither — which is most of them, since
+        // one arrives at every login and lock — says nothing new.
+        (changed || confirmed.is_some())
+            .then(|| state.displays_msg())
+            .flatten()
     };
     if let Some(msg) = msg {
         sink.msg(msg).await?;
