@@ -1128,7 +1128,9 @@ fn translate_input(
             *last_pos = (clamp_u16(x), clamp_u16(y));
             pointer_event(*button_mask, *last_pos).to_vec()
         }
-        ClientMsg::MouseButton { button, pressed } => {
+        // `clicks` goes nowhere: RFB carries a button mask alone, and the guest
+        // counts the clicks itself from the events it receives.
+        ClientMsg::MouseButton { button, pressed, .. } => {
             let bit = match button {
                 MouseButton::Left => 0x01,
                 MouseButton::Middle => 0x02,
@@ -2111,6 +2113,7 @@ mod tests {
             ClientMsg::MouseButton {
                 button: MouseButton::Left,
                 pressed: true,
+                clicks: 1,
             },
             &mut mask,
             &mut pos,
@@ -2142,6 +2145,7 @@ mod tests {
             ClientMsg::MouseButton {
                 button: MouseButton::Left,
                 pressed: false,
+                clicks: 1,
             },
             &mut mask,
             &mut pos,

@@ -24,7 +24,7 @@ struct InputGateTests {
 
         model.sendPointer(x: 10, y: 20)
         model.sendWheel(dx: 0, dy: 3)
-        model.sendMouseButton(.left, pressed: true)
+        model.sendMouseButton(.left, pressed: true, clicks: 1)
         model.sendKey(code: "KeyA", pressed: true, caps: false)
         model.clipboard.pushLocalClipboard(force: true)
         try await session.settle()
@@ -70,7 +70,7 @@ struct InputGateTests {
         let session = try await Self.interactive()
         let model = session.model
         model.sendKey(code: "ShiftLeft", pressed: true, caps: false)
-        model.sendMouseButton(.left, pressed: true)
+        model.sendMouseButton(.left, pressed: true, clicks: 1)
         try await session.settle()
 
         model.macOSKeyboardOverridesEnabled.toggle()
@@ -93,9 +93,9 @@ struct InputGateTests {
     func anUnrecordedReleaseStaysBehindTheClosedGate() async throws {
         let session = try await Self.interactive()
         let model = session.model
-        model.sendMouseButton(.left, pressed: true)
+        model.sendMouseButton(.left, pressed: true, clicks: 1)
         model.apply(.control(.picker))
-        model.sendMouseButton(.left, pressed: false)
+        model.sendMouseButton(.left, pressed: false, clicks: 1)
         try await session.settle()
         #expect(
             session.sent(ofType: "mouseButton").count == 2,
@@ -103,7 +103,7 @@ struct InputGateTests {
         )
 
         // The same button again, now that nothing is recorded as held.
-        model.sendMouseButton(.left, pressed: false)
+        model.sendMouseButton(.left, pressed: false, clicks: 1)
         try await session.settle()
 
         #expect(session.sent(ofType: "mouseButton").count == 2, "and nothing after it")
@@ -117,11 +117,11 @@ struct InputGateTests {
     func aHeldButtonStillComesUpOffTheDesktop() async throws {
         let session = try await Self.interactive()
         let model = session.model
-        model.sendMouseButton(.left, pressed: true)
+        model.sendMouseButton(.left, pressed: true, clicks: 1)
         model.apply(.control(.picker))
         try await session.settle()
 
-        model.sendMouseButton(.left, pressed: false)
+        model.sendMouseButton(.left, pressed: false, clicks: 1)
         try await session.settle()
 
         let buttons = session.sent(ofType: "mouseButton")

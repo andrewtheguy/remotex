@@ -243,6 +243,14 @@ coordinates are clamped to the selected display and injected with Core Graphics.
 Screen Recording permission is required for capture and Accessibility
 permission is required for input.
 
+A press carries the client's own click count — `MouseEvent.detail` in the browser,
+`NSEvent.clickCount` in the macOS client — and the agent injects it as the event's
+`kCGMouseEventClickState`. That field is the whole of what makes a double-click a
+double-click on macOS, and it is not something the far end can work out for itself:
+left unset, every injected click counted as the first one, and nothing on any of the
+Mac's displays could be double-clicked. The count follows the press through a drag
+and is released with it (`crates/rxa-agent/src/input.rs`).
+
 The agent polls `NSPasteboard.changeCount` because AppKit provides no clipboard
 change notification. It reads contents only after the counter changes and only
 while a gateway has enabled clipboard watching for a target with

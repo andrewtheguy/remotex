@@ -73,8 +73,8 @@ struct PressedInputTests {
         #expect(
             pressed.takeReleaseMessages() == [
                 .key(code: "KeyA", pressed: false, caps: false),
-                .mouseButton(button: .left, pressed: false),
-                .mouseButton(button: .right, pressed: false),
+                .mouseButton(button: .left, pressed: false, clicks: 1),
+                .mouseButton(button: .right, pressed: false, clicks: 1),
             ]
         )
     }

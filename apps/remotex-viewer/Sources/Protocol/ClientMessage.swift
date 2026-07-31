@@ -19,7 +19,11 @@ enum MouseButton: String, Sendable, Codable, CaseIterable {
 /// a viewport is measured.
 enum ClientMessage: Sendable, Equatable {
     case mouseMove(x: Int32, y: Int32)
-    case mouseButton(button: MouseButton, pressed: Bool)
+    /// `clicks` is `NSEvent.clickCount` — 1 for a single click, 2 for the second
+    /// of a double. Carried because the rxa agent injects it as the macOS event's
+    /// click state, and without it nothing on the remote counts a double-click at
+    /// all; a synthetic send passes 1, which is what a lone click is worth.
+    case mouseButton(button: MouseButton, pressed: Bool, clicks: Int)
     case wheel(dx: Float, dy: Float)
     /// `code` is a DOM `KeyboardEvent.code`; see `src/keymap.rs` for the set the
     /// gateway maps. `caps` is the CapsLock *lock* state, which VNC cannot
@@ -125,8 +129,8 @@ enum ClientMessage: Sendable, Equatable {
 
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
-        case type, x, y, button, pressed, dx, dy, code, caps, w, h, target, text
-        case id, scale, enabled, force
+        case type, x, y, button, pressed, clicks, dx, dy, code, caps, w, h
+        case target, text, id, scale, enabled, force
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -136,9 +140,10 @@ extension ClientMessage: Encodable {
         case .mouseMove(let x, let y):
             try container.encode(x, forKey: .x)
             try container.encode(y, forKey: .y)
-        case .mouseButton(let button, let pressed):
+        case .mouseButton(let button, let pressed, let clicks):
             try container.encode(button, forKey: .button)
             try container.encode(pressed, forKey: .pressed)
+            try container.encode(clicks, forKey: .clicks)
         case .wheel(let dx, let dy):
             try container.encode(dx, forKey: .dx)
             try container.encode(dy, forKey: .dy)

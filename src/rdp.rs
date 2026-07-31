@@ -1247,7 +1247,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
                 y_position: y,
             })]
         }
-        ClientMsg::MouseButton { button, pressed } => {
+        // `clicks` goes nowhere: RDP carries button state alone, and Windows
+        // counts the clicks itself from the events it receives.
+        ClientMsg::MouseButton { button, pressed, .. } => {
             let mut flags = match button {
                 MouseButton::Left => PointerFlags::LEFT_BUTTON,
                 MouseButton::Right => PointerFlags::RIGHT_BUTTON,
@@ -1522,6 +1524,7 @@ mod tests {
             ClientMsg::MouseButton {
                 button: MouseButton::Left,
                 pressed: true,
+                clicks: 1,
             },
             &mut pos,
         );
@@ -1539,6 +1542,7 @@ mod tests {
             ClientMsg::MouseButton {
                 button: MouseButton::Right,
                 pressed: false,
+                clicks: 1,
             },
             &mut pos,
         );

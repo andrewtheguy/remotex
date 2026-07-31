@@ -15,8 +15,8 @@ struct ClientMessageTests {
             ["type": "mouseMove", "x": 5, "y": 6]
         )
         try expectEncoding(
-            .mouseButton(button: .right, pressed: true),
-            ["type": "mouseButton", "button": "right", "pressed": true]
+            .mouseButton(button: .right, pressed: true, clicks: 2),
+            ["type": "mouseButton", "button": "right", "pressed": true, "clicks": 2]
         )
         try expectEncoding(
             .wheel(dx: 0, dy: -2.5),
@@ -123,7 +123,7 @@ struct ClientMessageTests {
     func everyCaseReportsADistinctTag() {
         let messages: [ClientMessage] = [
             .mouseMove(x: 0, y: 0),
-            .mouseButton(button: .left, pressed: true),
+            .mouseButton(button: .left, pressed: true, clicks: 1),
             .wheel(dx: 0, dy: 0),
             .key(code: "KeyA", pressed: true, caps: false),
             .viewport(w: 1, h: 1),

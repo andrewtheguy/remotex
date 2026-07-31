@@ -55,7 +55,7 @@ struct PressedInput: Equatable {
         let messages =
             keys.sorted().map { ClientMessage.key(code: $0, pressed: false, caps: false) }
                 + buttons.sorted { $0.rawValue < $1.rawValue }
-                .map { ClientMessage.mouseButton(button: $0, pressed: false) }
+                .map { ClientMessage.mouseButton(button: $0, pressed: false, clicks: 1) }
         keys.removeAll()
         buttons.removeAll()
         return messages

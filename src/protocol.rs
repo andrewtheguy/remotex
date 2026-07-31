@@ -89,8 +89,15 @@ pub enum MouseButton {
 pub enum ClientMsg {
     /// Pointer moved to framebuffer coordinates (x, y).
     MouseMove { x: i32, y: i32 },
-    /// A mouse button was pressed or released.
-    MouseButton { button: MouseButton, pressed: bool },
+    /// A mouse button was pressed or released. `clicks` is the client's own click
+    /// count for the press — `MouseEvent.detail` in the browser, `NSEvent`'s
+    /// `clickCount` in the macOS client — which only the rxa engine has anywhere
+    /// to put: RDP and VNC carry button state alone and leave the guest to count.
+    MouseButton {
+        button: MouseButton,
+        pressed: bool,
+        clicks: u8,
+    },
     /// Scroll wheel delta.
     Wheel { dx: f32, dy: f32 },
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
@@ -831,12 +838,13 @@ mod tests {
         ));
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
-                r#"{"type":"mouseButton","button":"right","pressed":true}"#
+                r#"{"type":"mouseButton","button":"right","pressed":true,"clicks":2}"#
             )
             .unwrap(),
             ClientMsg::MouseButton {
                 button: MouseButton::Right,
-                pressed: true
+                pressed: true,
+                clicks: 2
             }
         ));
         assert!(matches!(

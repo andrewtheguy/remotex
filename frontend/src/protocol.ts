@@ -13,7 +13,17 @@ export type MouseButton = "left" | "middle" | "right";
 // support dynamic resize act on them, the rest ignore them).
 export type ClientMsg =
   | { type: "mouseMove"; x: number; y: number }
-  | { type: "mouseButton"; button: MouseButton; pressed: boolean }
+  // `clicks` is the browser's own click count for the press (MouseEvent.detail):
+  // 1 for a single click, 2 for the second of a double. The rxa engine injects it
+  // as the macOS event's click state, which is the only thing that makes a
+  // double-click a double-click — the remote cannot work it out from arrival
+  // times. RDP and VNC have nowhere to put it and let the guest count instead.
+  | {
+      type: "mouseButton";
+      button: MouseButton;
+      pressed: boolean;
+      clicks: number;
+    }
   | { type: "wheel"; dx: number; dy: number }
   // `caps` carries KeyboardEvent.getModifierState("CapsLock") so the backend
   // knows the lock state authoritatively (it can't otherwise tell CapsLock is
@@ -385,6 +395,14 @@ export function decodeAudioFrame(buf: ArrayBuffer): Uint8Array[] | null {
     at = start + len;
   }
   return packets.length === count ? packets : null;
+}
+
+// The click count to report for a mouse event. `detail` is what the browser
+// decided, applying the platform's own double-click policy, so it is taken as
+// given — only bounded, since the wire carries a single byte and a programmatic
+// event can arrive with a detail of 0.
+export function clickCount(detail: number): number {
+  return Math.min(255, Math.max(1, Math.trunc(detail) || 1));
 }
 
 // Map DOM MouseEvent.button (0/1/2) to the protocol button name.

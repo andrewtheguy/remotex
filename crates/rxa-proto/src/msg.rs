@@ -492,7 +492,17 @@ pub enum GatewayMsg {
     /// Framebuffer pixel coordinates — the agent converts to display points.
     PointerMove { x: u16, y: u16 },
     /// `button` uses the DOM `MouseEvent.button` numbering (0/1/2).
-    PointerButton { button: u8, pressed: bool },
+    ///
+    /// `clicks` is the client's own click count for this press — 1 for a single
+    /// click, 2 for the second of a double — carried for the same reason `Key`
+    /// carries CapsLock: the client's OS has already decided it, and the agent
+    /// would otherwise have to infer it from arrival times a network can stretch.
+    /// It is never zero.
+    PointerButton {
+        button: u8,
+        pressed: bool,
+        clicks: u8,
+    },
     /// Raw DOM wheel deltas, exactly as remotex already carries them.
     Wheel { dx: f32, dy: f32 },
     /// DOM `KeyboardEvent.code`, plus the browser's authoritative CapsLock
@@ -629,10 +639,15 @@ impl GatewayMsg {
                 put_u16(&mut out, *x);
                 put_u16(&mut out, *y);
             }
-            GatewayMsg::PointerButton { button, pressed } => {
+            GatewayMsg::PointerButton {
+                button,
+                pressed,
+                clicks,
+            } => {
                 out.push(Self::T_POINTER_BUTTON);
                 out.push(*button);
                 out.push(u8::from(*pressed));
+                out.push(*clicks);
             }
             GatewayMsg::Wheel { dx, dy } => {
                 out.push(Self::T_WHEEL);
@@ -698,6 +713,10 @@ impl GatewayMsg {
             Self::T_POINTER_BUTTON => GatewayMsg::PointerButton {
                 button: r.u8()?,
                 pressed: r.bool()?,
+                // Floored here rather than trusted: a zero click state on the
+                // injected event would make the click count as no click at all,
+                // and one is what every press is at worst.
+                clicks: r.u8()?.max(1),
             },
             Self::T_WHEEL => GatewayMsg::Wheel {
                 dx: f32::from_le_bytes(r.array::<4>()?),
@@ -1012,10 +1031,12 @@ mod tests {
             GatewayMsg::PointerButton {
                 button: 2,
                 pressed: true,
+                clicks: 1,
             },
             GatewayMsg::PointerButton {
                 button: 0,
                 pressed: false,
+                clicks: 2,
             },
             GatewayMsg::Wheel { dx: 0.0, dy: -2.5 },
             GatewayMsg::Wheel {
@@ -1312,6 +1333,22 @@ mod tests {
         // PointerButton with a `pressed` byte that is neither 0 nor 1.
         let bytes = [0x04, 0x00, 0x02];
         assert_eq!(GatewayMsg::decode(&bytes), Err(MsgError::BadBool(2)));
+    }
+
+    /// A zero click count reaches the agent as a `kCGMouseEventClickState` of
+    /// zero, which is a click that counts as none. One is the floor at the
+    /// boundary rather than a check at the injector.
+    #[test]
+    fn a_zero_click_count_decodes_as_one() {
+        let bytes = [0x04, 0x00, 0x01, 0x00];
+        assert_eq!(
+            GatewayMsg::decode(&bytes),
+            Ok(GatewayMsg::PointerButton {
+                button: 0,
+                pressed: true,
+                clicks: 1,
+            })
+        );
     }
 
     // Clients *divide* the framebuffer by this, so every answer has to be a

@@ -260,7 +260,9 @@ final class RemoteSurfaceView: NSView {
         if pressed, let point = remotePoint(for: convert(event.locationInWindow, from: nil)) {
             model.sendPointer(x: point.x, y: point.y)
         }
-        model.sendMouseButton(button, pressed: pressed)
+        // `clickCount` is AppKit's own answer, applying this Mac's double-click
+        // interval — the remote has no way to arrive at it.
+        model.sendMouseButton(button, pressed: pressed, clicks: max(1, event.clickCount))
     }
 }
 

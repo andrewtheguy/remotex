@@ -41,6 +41,10 @@ pub const PROLOGUE: &[u8] = b"rxa/3";
 /// is the one that says so. Redundant with [`PROLOGUE`] (a mismatch already fails
 /// the handshake) but cheap, and it gives both ends something to log.
 ///
+/// 10 is the click count: [`msg::GatewayMsg::PointerButton`] carries the client's
+/// own count, so the byte after `pressed` is new and an older agent would read the
+/// next message's type byte as it.
+///
 /// 9 is the authorized list: the handshake became `Noise_IK` so the agent learns
 /// which gateway key dialed and can look it up (see [`noise`]). Unlike 8, this one
 /// *does* move [`PROLOGUE`] with it — the handshake pattern itself changed, so
@@ -52,7 +56,7 @@ pub const PROLOGUE: &[u8] = b"rxa/3";
 /// and `Hello` is the answer to that rather than an unprompted greeting. 7 was
 /// WebP, where [`msg::format`] lost `PNG` and `JPEG` and an old agent's format
 /// byte would have been read as the new codec.
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 
 /// The protocol's default TCP port, adjacent to the web server's 52380.
 pub const DEFAULT_PORT: u16 = 52381;

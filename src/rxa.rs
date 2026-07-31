@@ -840,7 +840,11 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
             x: clamp_u16(*x),
             y: clamp_u16(*y),
         },
-        ClientMsg::MouseButton { button, pressed } => GatewayMsg::PointerButton {
+        ClientMsg::MouseButton {
+            button,
+            pressed,
+            clicks,
+        } => GatewayMsg::PointerButton {
             // DOM `MouseEvent.button` numbering, unchanged — the agent maps it
             // to a `CGMouseButton`.
             button: match button {
@@ -849,6 +853,9 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
                 MouseButton::Right => 2,
             },
             pressed: *pressed,
+            // Floored, not trusted: a browser is free to send a zero and the
+            // agent turns this straight into a click state.
+            clicks: (*clicks).max(1),
         },
         // Raw DOM deltas; the agent owns the sign and unit conversion, because
         // only it can verify the direction against a real trackpad.
@@ -1240,24 +1247,50 @@ mod tests {
             assert_eq!(
                 to_agent(&ClientMsg::MouseButton {
                     button,
-                    pressed: true
+                    pressed: true,
+                    clicks: 1
                 }, NO_CAPS, UNSCALED),
                 Some(GatewayMsg::PointerButton {
                     button: expected,
-                    pressed: true
+                    pressed: true,
+                    clicks: 1
                 })
             );
         }
         assert_eq!(
             to_agent(&ClientMsg::MouseButton {
                 button: MouseButton::Left,
-                pressed: false
+                pressed: false,
+                clicks: 1
             }, NO_CAPS, UNSCALED),
             Some(GatewayMsg::PointerButton {
                 button: 0,
-                pressed: false
+                pressed: false,
+                clicks: 1
             })
         );
+    }
+
+    /// The count the client reports is what the agent must inject: it is the only
+    /// end of the link that knows whether the person double-clicked, and macOS
+    /// guessing it from arrival times is the bug this carries it for.
+    #[test]
+    fn the_click_count_is_carried_and_floored_at_one() {
+        for (sent, expected) in [(1, 1), (2, 2), (3, 3), (0, 1)] {
+            assert_eq!(
+                to_agent(&ClientMsg::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                    clicks: sent
+                }, NO_CAPS, UNSCALED),
+                Some(GatewayMsg::PointerButton {
+                    button: 0,
+                    pressed: true,
+                    clicks: expected
+                }),
+                "clicks {sent}"
+            );
+        }
     }
 
     // Wheel deltas pass through untouched: the agent owns sign and units, so

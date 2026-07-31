@@ -19,6 +19,15 @@
 //! covering 1x, 2x, and an offset display, checked at the screen corners where
 //! an error is largest.
 //!
+//! ## Click count
+//!
+//! A double-click is not two clicks: it is one click carrying a click state of 2,
+//! in `kCGMouseEventClickState`. macOS will guess that state from where and when
+//! the events landed if it is left unset, and the guess is what breaks over a
+//! network — most visibly on the display the agent makes for itself. So the count
+//! is carried on the wire from the client, whose own OS already decided it, for
+//! the same reason CapsLock is (below) rather than inferred here.
+//!
 //! ## Modifiers
 //!
 //! `CGEventPost` does not apply a modifier to later keystrokes just because its
@@ -33,7 +42,7 @@ use std::collections::HashSet;
 use log::{debug, info};
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGDisplayBounds, CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID,
+    CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID,
     CGEventTapLocation, CGEventType, CGGetActiveDisplayList, CGMouseButton, CGScrollEventUnit,
     CGWarpMouseCursorPosition,
 };
@@ -106,6 +115,10 @@ pub struct Injector {
     /// plain move — the two are different `CGEventType`s and using the wrong one
     /// breaks text selection and window dragging.
     buttons: HashSet<u8>,
+    /// Click count of the press in progress, zero while no button is down. A
+    /// drag carries the count of the press that started it — that is what makes
+    /// dragging out of a double-click select by word rather than by character.
+    clicks: u8,
 }
 
 impl Injector {
@@ -121,6 +134,7 @@ impl Injector {
                 y: origin.1,
             },
             buttons: HashSet::new(),
+            clicks: 0,
         }
     }
 
@@ -171,11 +185,13 @@ impl Injector {
         } else {
             (CGEventType::MouseMoved, CGMouseButton::Left)
         };
-        self.post_mouse(event_type, button);
+        self.post_click(event_type, button, self.clicks);
     }
 
-    /// Press or release a mouse button. `button` uses the DOM numbering (0/1/2).
-    pub fn pointer_button(&mut self, button: u8, pressed: bool) {
+    /// Press or release a mouse button. `button` uses the DOM numbering (0/1/2),
+    /// `clicks` is the client's click count for this press (1, or 2 for the
+    /// second of a double).
+    pub fn pointer_button(&mut self, button: u8, pressed: bool, clicks: u8) {
         let Some(cg_button) = dom_button(button) else {
             debug!("input: ignoring unknown mouse button {button}");
             return;
@@ -188,15 +204,42 @@ impl Injector {
             (_, true) => CGEventType::OtherMouseDown,
             (_, false) => CGEventType::OtherMouseUp,
         };
+        let clicks = self.note_button(button, pressed, clicks);
+        self.post_click(event_type, cg_button, clicks);
+    }
+
+    /// Record a press or release, and answer with the click count its event
+    /// should carry.
+    ///
+    /// Split from the posting so the bookkeeping can be tested: everything else
+    /// in `pointer_button` ends in `CGEventPost`, which a test has no business
+    /// reaching — on a machine whose terminal happens to hold the Accessibility
+    /// grant it would click on whatever the developer is looking at.
+    fn note_button(&mut self, button: u8, pressed: bool, clicks: u8) -> u8 {
+        // Zero would inject a click state of zero, which is a press that counts
+        // as no click. The wire floors it too; this is the floor for every caller.
+        let clicks = clicks.max(1);
         if pressed {
             self.buttons.insert(button);
         } else {
             self.buttons.remove(&button);
         }
-        self.post_mouse(event_type, cg_button);
+        // Held across the press so a drag out of it reports the same count, and
+        // cleared only once nothing is down: the release itself still carries the
+        // count its press had, which is what a real mouse reports.
+        self.clicks = if self.buttons.is_empty() { 0 } else { clicks };
+        clicks
     }
 
-    fn post_mouse(&self, event_type: CGEventType, button: CGMouseButton) {
+    /// `clicks` becomes the event's click state, which is where `NSEvent`'s
+    /// `clickCount` comes from and so the whole of what makes a double-click a
+    /// double-click. Without it macOS is left to guess the count from where and
+    /// when the events landed, and a click that crossed a network is a poor
+    /// imitation of the gesture the person actually made.
+    ///
+    /// Zero leaves the field alone, which is what a plain move wants — it has no
+    /// click to count.
+    fn post_click(&self, event_type: CGEventType, button: CGMouseButton, clicks: u8) {
         let Some(source) = Self::source() else {
             debug!("input: no event source available");
             return;
@@ -209,6 +252,13 @@ impl Injector {
         };
         // Modifiers apply to clicks too — Command-click, Shift-click.
         CGEvent::set_flags(Some(&event), self.flags());
+        if clicks > 0 {
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::MouseEventClickState,
+                i64::from(clicks),
+            );
+        }
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
     }
 
@@ -285,7 +335,9 @@ impl Injector {
     /// both baffling and hard to clear without a keyboard.
     pub fn release_all(&mut self) {
         for button in std::mem::take(&mut self.buttons) {
-            self.pointer_button(button, false);
+            // One click, whatever the press was: nobody is double-clicking a
+            // button loose, and the count only matters to the app receiving it.
+            self.pointer_button(button, false, 1);
         }
         // Taking the set empties it before the first release is posted, so no
         // release event carries its own flag — a Shift-up flagged with Shift is
@@ -514,6 +566,43 @@ mod tests {
             let p = inj.to_global_point(100, 50);
             assert_eq!((p.x, p.y), (100.0, 50.0), "scale {scale}");
         }
+    }
+
+    // The count on the press is the count on its release, and `clicks` is what a
+    // drag in between reads — that is what makes dragging out of a double-click
+    // select by word rather than by character.
+    #[test]
+    fn a_press_leaves_its_click_count_for_the_drag_and_takes_it_back_on_release() {
+        let mut inj = Injector::new(1.0, (0.0, 0.0));
+        assert_eq!(inj.clicks, 0, "no press, no count");
+
+        assert_eq!(inj.note_button(0, true, 2), 2);
+        assert_eq!(inj.clicks, 2, "what a drag from here reports");
+
+        assert_eq!(inj.note_button(0, false, 2), 2, "the release counts too");
+        assert_eq!(inj.clicks, 0, "nothing held, nothing to inherit");
+    }
+
+    // A second button going down mid-drag must not leave a count behind when it
+    // is the one released.
+    #[test]
+    fn the_count_survives_until_the_last_button_is_up() {
+        let mut inj = Injector::new(1.0, (0.0, 0.0));
+        inj.note_button(0, true, 2);
+        inj.note_button(2, true, 1);
+        assert_eq!(inj.clicks, 1, "the most recent press is the one in progress");
+        inj.note_button(2, false, 1);
+        assert_eq!(inj.clicks, 1, "the left button is still down");
+        inj.note_button(0, false, 2);
+        assert_eq!(inj.clicks, 0);
+    }
+
+    // Zero reaches `kCGMouseEventClickState` as a press that counts as no click.
+    #[test]
+    fn a_zero_click_count_is_floored_at_one() {
+        let mut inj = Injector::new(1.0, (0.0, 0.0));
+        assert_eq!(inj.note_button(0, true, 0), 1);
+        assert_eq!(inj.clicks, 1);
     }
 
     #[test]

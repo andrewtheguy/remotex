@@ -892,10 +892,10 @@ async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
     // sequence assertion below prove it was dropped rather than merely delayed.
     for text in [
         r#"{"type":"mouseMove","x":100,"y":50}"#,
-        r#"{"type":"mouseButton","button":"left","pressed":true}"#,
+        r#"{"type":"mouseButton","button":"left","pressed":true,"clicks":2}"#,
         r#"{"type":"viewport","w":2560,"h":1440}"#,
         r#"{"type":"mouseMove","x":101,"y":52}"#,
-        r#"{"type":"mouseButton","button":"left","pressed":false}"#,
+        r#"{"type":"mouseButton","button":"left","pressed":false,"clicks":2}"#,
         r#"{"type":"wheel","dx":0.0,"dy":-100.0}"#,
         r#"{"type":"key","code":"KeyA","pressed":true,"caps":true}"#,
         r#"{"type":"key","code":"KeyA","pressed":false,"caps":true}"#,
@@ -908,11 +908,13 @@ async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
         GatewayMsg::PointerButton {
             button: 0,
             pressed: true,
+            clicks: 2,
         },
         GatewayMsg::PointerMove { x: 101, y: 52 },
         GatewayMsg::PointerButton {
             button: 0,
             pressed: false,
+            clicks: 2,
         },
         // DOM deltas, sign and units untouched — the agent owns that conversion.
         GatewayMsg::Wheel { dx: 0.0, dy: -100.0 },

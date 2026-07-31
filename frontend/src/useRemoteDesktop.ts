@@ -14,6 +14,7 @@ import {
   type ClientMsg,
   type ClipboardSnapshot,
   type ControlMsg,
+  clickCount,
   type DisplayInfo,
   decodeAudioFrame,
   decodeBatchFrame,
@@ -1809,7 +1810,12 @@ export function useRemoteDesktop(
         return;
       }
       pressedButtons.add(button);
-      send({ type: "mouseButton", button, pressed: true });
+      send({
+        type: "mouseButton",
+        button,
+        pressed: true,
+        clicks: clickCount(e.detail),
+      });
     };
     // Release on window so a press that ends outside the overlay still reports
     // the button up. Only buttons we saw pressed on the surface are released.
@@ -1818,7 +1824,12 @@ export function useRemoteDesktop(
       if (!button || !pressedButtons.delete(button)) {
         return;
       }
-      send({ type: "mouseButton", button, pressed: false });
+      send({
+        type: "mouseButton",
+        button,
+        pressed: false,
+        clicks: clickCount(e.detail),
+      });
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -1842,7 +1853,8 @@ export function useRemoteDesktop(
     const releaseAll = () => {
       releaseKeys();
       for (const button of pressedButtons) {
-        send({ type: "mouseButton", button, pressed: false });
+        // A sweep, not a gesture: one click is what an unclick is worth.
+        send({ type: "mouseButton", button, pressed: false, clicks: 1 });
       }
       pressedButtons.clear();
       gestures?.release();

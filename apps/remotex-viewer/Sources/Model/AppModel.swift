@@ -930,7 +930,7 @@ final class AppModel: GatewaySessionSink {
         connection?.send(.key(code: code, pressed: isPressed, caps: caps))
     }
 
-    func sendMouseButton(_ button: MouseButton, pressed isPressed: Bool) {
+    func sendMouseButton(_ button: MouseButton, pressed isPressed: Bool, clicks: Int) {
         // A release gets past the gate, but only for a button this client recorded
         // as held — which is the whole case the exception is for: a press that did
         // go through, whose mouseUp lands after the screen changed under it.
@@ -943,7 +943,7 @@ final class AppModel: GatewaySessionSink {
             return
         }
         pressed.record(button: button, pressed: isPressed)
-        connection?.send(.mouseButton(button: button, pressed: isPressed))
+        connection?.send(.mouseButton(button: button, pressed: isPressed, clicks: clicks))
     }
 
     /// Let go of everything held on the remote. The single path for it — see
