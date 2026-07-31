@@ -13,8 +13,7 @@ edition = "2024"
 # default features resolve to `ring`, which compiles C and assembly through `cc`,
 # and it does so in *both* halves of the workspace because this crate is shared.
 # Left as-is rather than chased — a C toolchain is present on every target the
-# release matrix builds on, and the tree has since taken a second one (libwebp,
-# see the root Cargo.toml).
+# release matrix builds on anyway, for `ring` if nothing else.
 snow = "0.10"
 # Only the io-util traits — rxa-proto never opens a socket itself, it adapts
 # whatever AsyncRead/AsyncWrite the caller hands it.

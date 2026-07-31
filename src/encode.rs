@@ -1,4 +1,4 @@
-//! Ordered WebP encoding outside the RDP and VNC protocol-read loops.
+//! Ordered PNG encoding outside the RDP and VNC protocol-read loops.
 //!
 //! ```text
 //! read loop:  pack → Shadow::accept → bands()
@@ -333,7 +333,7 @@ mod tests {
                 panic!("expected a tile at {i}");
             };
             assert_eq!(tile.y, i as u16 * 64, "tiles left the sink out of order");
-            assert_eq!(tile.format, Tile::FORMAT_WEBP);
+            assert_eq!(tile.format, Tile::FORMAT_PNG);
         }
     }
 
@@ -392,8 +392,8 @@ mod tests {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let sink = TileSink::new("test", frame_tx);
 
-        // A payload one byte short of the geometry: `Tile::from_rgb` rejects it
-        // rather than letting libwebp panic on a buffer it would read past.
+        // A payload one byte short of the geometry: `Tile::from_rgb` rejects it on
+        // its length check rather than handing a short buffer to the PNG encoder.
         let short = rgb(32, 32, 0)[1..].to_vec();
         // Accepted: the queue takes work without running it, so the engine's own
         // push cannot be what reports this.

@@ -2,7 +2,7 @@
 //!
 //! There are twenty-four messages between the two enums, so a serialization
 //! dependency would buy nothing that these ~200 lines and their roundtrip tests
-//! don't. The payload of a [`AgentMsg::Tile`] is **already** a WebP stream
+//! don't. The payload of a [`AgentMsg::Tile`] is **already** a PNG or JPEG
 //! stream — the exact bytes the browser decodes — so the gateway relays it
 //! without ever looking inside.
 //!
@@ -86,21 +86,22 @@ pub fn scale_ratio(scale: u16) -> f32 {
 /// The tile payload codec, mirroring the gateway's `Tile::FORMAT_*` constants
 /// (`src/protocol.rs`) so the byte passes straight through to the browser.
 ///
-/// One value, because WebP covers both the lossless and the lossy case and the
-/// agent's classifier picks between them *inside* the container. The byte survives
-/// only as the seam a future second codec would arrive through; the gateway
-/// validates it rather than relaying it blind, since an unrecognised value would
-/// otherwise cost a client the whole batch.
+/// Two values, because the agent's classifier picks a codec per tile: flat UI and
+/// text go to PNG (lossless, sharp edges), photographic content to JPEG (lossy, an
+/// order of magnitude smaller). The gateway's own engines only ever send [`PNG`].
+/// The gateway validates the byte rather than relaying it blind, since an
+/// unrecognised value would otherwise cost a client the whole batch it arrived in.
 pub mod format {
-    pub const WEBP: u8 = 3;
+    pub const PNG: u8 = 1;
+    pub const JPEG: u8 = 2;
 }
 
 /// A pointer shape: an RGBA PNG plus its hotspot, ready for the gateway's
 /// `CursorShape` and from there the browser's `paintCursor`.
 ///
-/// Still PNG after tiles moved to WebP: AppKit hands these over already encoded
-/// (`cursor.rs`), it cannot write WebP, and a shape is a few hundred bytes sent a
-/// handful of times a session.
+/// AppKit hands these over already PNG-encoded (`cursor.rs`), and a shape is a few
+/// hundred bytes sent a handful of times a session, so the tile codec never applied
+/// to them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorImage {
     pub w: u16,
@@ -182,7 +183,7 @@ pub enum AgentMsg {
     /// same reason [`crate::msg`]'s neighbour `state::describe` leaves it out on
     /// the Mac — it is a different number every reconnect and answers nothing.
     Busy { holder: String, held_secs: u32 },
-    /// A dirty rectangle, already encoded as WebP (see [`mod@format`]).
+    /// A dirty rectangle, already encoded as PNG or JPEG (see [`mod@format`]).
     Tile {
         format: u8,
         x: u16,
@@ -941,7 +942,7 @@ mod tests {
                 scale: 2 * SCALE_ONE,
             },
             AgentMsg::Tile {
-                format: format::WEBP,
+                format: format::JPEG,
                 x: 64,
                 y: 128,
                 w: 320,
@@ -949,7 +950,7 @@ mod tests {
                 data: vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
             },
             AgentMsg::Tile {
-                format: format::WEBP,
+                format: format::PNG,
                 x: 0,
                 y: 0,
                 w: 1,
@@ -1299,7 +1300,7 @@ mod tests {
     #[test]
     fn tile_encodes_to_the_documented_layout() {
         let bytes = AgentMsg::Tile {
-            format: format::WEBP,
+            format: format::PNG,
             x: 0x0102,
             y: 0x0304,
             w: 2,
@@ -1308,7 +1309,7 @@ mod tests {
         }
         .encode();
         assert_eq!(bytes[0], 0x02, "tile type byte");
-        assert_eq!(bytes[1], format::WEBP);
+        assert_eq!(bytes[1], format::PNG);
         assert_eq!(&bytes[2..4], &[0x02, 0x01]); // x, little-endian
         assert_eq!(&bytes[4..6], &[0x04, 0x03]); // y
         assert_eq!(&bytes[6..8], &[2, 0]); // w
@@ -1368,7 +1369,7 @@ mod tests {
     fn a_length_field_larger_than_the_body_is_rejected() {
         // Claim a 4 GB tile payload in a 14-byte message.
         let mut bytes = AgentMsg::Tile {
-            format: format::WEBP,
+            format: format::PNG,
             x: 0,
             y: 0,
             w: 1,

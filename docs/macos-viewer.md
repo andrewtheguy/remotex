@@ -320,7 +320,7 @@ Tiles overwrite their rectangles with `replaceRegion`, and a paused `MTKView`
 redraws after every complete batch.
 
 The gateway may replace a tile payload with a reference to one of 256 cache
-slots. The viewer stores encoded WebP payloads in those slots and re-decodes a
+slots. The viewer stores encoded PNG/JPEG payloads in those slots and re-decodes a
 payload when it is referenced. The gateway chooses which slot to overwrite. A
 missing slot or a cached payload that cannot decode sends `cacheReset` and drops
 that record.

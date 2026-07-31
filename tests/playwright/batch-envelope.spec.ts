@@ -22,7 +22,8 @@ const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
 const NO_SLOT = 0xffff;
 const SLOT_COUNT = 256;
-const TILE_FORMAT_WEBP = 3;
+const TILE_FORMAT_PNG = 1;
+const TILE_FORMAT_JPEG = 2;
 
 interface Record {
   op: number;
@@ -151,10 +152,10 @@ test.describe("v3 batch envelope", () => {
           expect(record.slot).toBeLessThan(SLOT_COUNT);
           continue;
         }
-        // 3 = WebP, and the only value there is: one codec covers the gateway's
-        // lossless screen content and the agent's lossy tiles alike, so the
-        // classifier's choice never reaches the wire. 1 and 2 meant PNG and JPEG.
-        expect(record.format).toBe(TILE_FORMAT_WEBP);
+        // 1 = PNG, 2 = JPEG. The gateway's engines send PNG; the Mac agent picks
+        // per tile, so any sample is one of the two — the relationship that holds
+        // whatever the desktop happens to be showing.
+        expect([TILE_FORMAT_PNG, TILE_FORMAT_JPEG]).toContain(record.format);
         // Either a slot inside the cache, or "do not remember this".
         if (record.slot !== NO_SLOT) {
           expect(record.slot).toBeLessThan(SLOT_COUNT);

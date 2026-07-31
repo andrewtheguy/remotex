@@ -8,10 +8,10 @@
 //! The fake agent speaks the real protocol: it completes a genuine
 //! `Noise_IK_25519_ChaChaPoly_BLAKE2s` handshake against a gateway it has been
 //! paired with, reads the gateway's claim on its session slot, answers `Hello`,
-//! then sends a pre-encoded WebP tile and a cursor shape, and it records both the
+//! then sends a pre-encoded JPEG tile and a cursor shape, and it records both the
 //! claims and the input it is sent. Five things are under test:
 //!
-//! 1. **Pass-through.** A WebP the agent encoded reaches the browser as a
+//! 1. **Pass-through.** A JPEG the agent encoded reaches the browser as a
 //!    `format = 2` tile frame, byte for byte, and the cursor shape arrives on
 //!    the existing `cursor` control channel.
 //! 2. **Silent reconnect.** When the agent's connection drops mid-session the
@@ -80,14 +80,12 @@ const HOTSPOT: (u16, u16) = (4, 7);
 const FAKE_PASTEBOARD: &str = "on the Mac — 画面 ☕";
 const FAKE_CLIPBOARD_CHANGED_AT_MS: u64 = 1_721_234_567_890;
 
-/// Stand-in for a WebP the agent encoded. The gateway never decodes a tile
+/// Stand-in for a JPEG the agent encoded. The gateway never decodes a tile
 /// payload — that is the point of the pass-through design — so these bytes only
-/// have to survive the trip unchanged. They start with a real RIFF/WEBP/VP8L
-/// header so a human staring at a hexdump isn't misled.
-fn fake_webp() -> Vec<u8> {
-    let mut data = vec![
-        b'R', b'I', b'F', b'F', 0x08, 0x08, 0, 0, b'W', b'E', b'B', b'P', b'V', b'P', b'8', b'L',
-    ];
+/// have to survive the trip unchanged. They start with a real JPEG SOI/APP0 so
+/// a human staring at a hexdump isn't misled.
+fn fake_jpeg() -> Vec<u8> {
+    let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
     data.extend((0u16..2048).map(|i| (i % 251) as u8));
     data
 }
@@ -446,7 +444,7 @@ fn displays_msg(active: u32) -> AgentMsg {
     }
 }
 
-/// One full paint: a WebP tile plus the current pointer shape. The real agent
+/// One full paint: a JPEG tile plus the current pointer shape. The real agent
 /// resends the cached cursor here too, so a browser attaching later has a
 /// pointer without waiting for the shape to change.
 async fn paint<W>(writer: &mut rxa_proto::frame::FrameWriter<W>) -> anyhow::Result<()>
@@ -456,12 +454,12 @@ where
     writer
         .send(
             &AgentMsg::Tile {
-                format: format::WEBP,
+                format: format::JPEG,
                 x: 0,
                 y: 0,
                 w: 64,
                 h: 64,
-                data: fake_webp(),
+                data: fake_jpeg(),
             }
             .encode(),
         )
@@ -670,13 +668,13 @@ fn assert_first_paint(paint: &Paint) {
 /// reference form makes it more strongly: it can only be sent for byte-identical
 /// content.
 fn assert_paint_pixels(paint: &Paint) {
-    let expected = fake_webp();
+    let expected = fake_jpeg();
     match &common::batch_records(&paint.tile)[..] {
         [common::BatchRecord::Tile(tile)] => {
             assert_eq!(
                 tile.format,
-                Tile::FORMAT_WEBP,
-                "the agent's WebP must reach the browser as format 3, not be re-encoded"
+                Tile::FORMAT_JPEG,
+                "the agent's JPEG must reach the browser as format 2, not be re-encoded"
             );
             assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 64, 64));
             assert_eq!(

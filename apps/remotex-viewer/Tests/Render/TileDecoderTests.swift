@@ -2,61 +2,93 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Testing
+import UniformTypeIdentifiers
 @testable import RemotexViewer
 
 /// CoreGraphics only, so this runs headless — a Metal device is not always
 /// available under `swift test`, and none of the pixel work needs one.
 ///
-/// Payloads come from `Tests/Fixtures` (see `webpFixture`). They used to be encoded
-/// here at runtime, deliberately, so that no encoder's choices got frozen into a
-/// test — but ImageIO cannot *write* WebP, only read it, so that is no longer
-/// possible. What the fixtures freeze instead is the output of the encoder that
-/// ships, which is at least the payload a real session carries.
+/// Payloads are encoded at runtime rather than checked in as fixtures: the point
+/// is that whatever ImageIO produces round-trips, and a fixture would freeze one
+/// encoder's choices (bit depth, colour type, palette) as if they were the
+/// contract.
 struct TileDecoderTests {
     /// The tile's own rows, top-down, is what `replaceRegion` means by row 0.
-    ///
-    /// The fixture's top half is red and its bottom half blue, so a vertical flip
-    /// and a channel swap both show up here — a uniform image would catch neither.
+    /// A quadrant image catches both a vertical flip and a channel swap, which
+    /// a uniform one cannot.
     @Test
-    func aTileDecodesToTopDownBGRA() async throws {
-        let payload = try webpFixture("topdown-8x8")
+    func aPNGDecodesToTopDownBGRA() async throws {
+        let red: Pixel = (255, 0, 0)
+        let green: Pixel = (0, 255, 0)
+        let blue: Pixel = (0, 0, 255)
+        let white: Pixel = (255, 255, 255)
+        let png = try encode(
+            image(width: 2, height: 2, pixels: [red, green, blue, white]),
+            as: .png
+        )
 
         let tile = try #require(
             await TileDecoder().decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot, x: 3, y: 5, w: 8, h: 8, payload: payload
-                )
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 3, y: 5, w: 2, h: 2, payload: png)
             )
         )
         #expect(tile.x == 3)
         #expect(tile.y == 5)
-        #expect(tile.bgra.count == 8 * 8 * 4)
-        // Buffer index 0 is the image's top-left pixel: row 0 is the top row, and
-        // `bgr` reads it back out of the B,G,R,X byte order. Lossless, so these are
-        // exact rather than within a tolerance.
-        #expect(bgr(tile, 0) == (255, 0, 0), "top-left")
-        #expect(bgr(tile, 8 * 3 + 7) == (255, 0, 0), "end of the last red row")
-        #expect(bgr(tile, 8 * 4) == (0, 0, 255), "start of the first blue row")
-        #expect(bgr(tile, 8 * 8 - 1) == (0, 0, 255), "bottom-right")
+        #expect(tile.bgra.count == 2 * 2 * 4)
+        // Buffer index 0 is the image's top-left pixel: row 0 is the top row,
+        // and `bgr` reads it back out of the B,G,R,X byte order.
+        #expect(bgr(tile, 0) == red, "top-left")
+        #expect(bgr(tile, 1) == green, "top-right")
+        #expect(bgr(tile, 2) == blue, "bottom-left")
+        #expect(bgr(tile, 3) == white, "bottom-right")
     }
 
-    /// WebP decodes as three channels, or four when its bitstream carries alpha,
-    /// and ImageIO picks. Both have to come out as the same four-byte BGRA the
-    /// texture upload expects.
-    ///
-    /// Nothing in production encodes the alpha case — both ends encode from packed
-    /// RGB888 — which is exactly why it is a fixture: the normalisation would
-    /// otherwise be untested until something upstream started carrying alpha.
+    /// JPEG decodes as three-channel RGB where PNG may be RGBA, so the same
+    /// context path has to normalize both. Lossy, hence bands and a tolerance
+    /// rather than exact pixels — row order is what matters here.
     @Test
-    func opaqueAndAlphaTilesBothNormalizeToFourBytesPerPixel() async throws {
+    func aJPEGDecodesToTopDownBGRA() async throws {
+        let width = 16
+        let height = 16
+        let pixels: [Pixel] = (0 ..< width * height).map { index in
+            index < width * height / 2 ? (255, 0, 0) : (0, 0, 255)
+        }
+        let jpeg = try encode(
+            image(width: width, height: height, pixels: pixels),
+            as: .jpeg
+        )
+
+        let tile = try #require(
+            await TileDecoder().decode(
+                TileFrame(
+                    format: .jpeg, slot: BatchFrame.noSlot,
+                    x: 0,
+                    y: 0,
+                    w: UInt16(width),
+                    h: UInt16(height),
+                    payload: jpeg
+                )
+            )
+        )
+        #expect(tile.bgra.count == width * height * 4)
+        let top = bgr(tile, width * 2 + width / 2)
+        let bottom = bgr(tile, width * (height - 3) + width / 2)
+        #expect(top.r > 200 && top.b < 55, "the top band should be red, got \(top)")
+        #expect(bottom.b > 200 && bottom.r < 55, "the bottom band should be blue, got \(bottom)")
+    }
+
+    /// A grayscale PNG has one channel and an RGBA one has four; both have to
+    /// come out as the same four-byte BGRA the texture upload expects.
+    @Test
+    func grayscaleAndAlphaPNGsBothNormalizeToFourBytesPerPixel() async throws {
         let decoder = TileDecoder()
-        for name in ["opaque-4x4", "alpha-4x4"] {
+        for (name, data) in try [
+            ("grayscale", encode(grayscaleImage(width: 4, height: 4), as: .png)),
+            ("rgba", encode(alphaImage(width: 4, height: 4), as: .png)),
+        ] {
             let tile = try #require(
                 await decoder.decode(
-                    TileFrame(
-                        format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 4,
-                        payload: try webpFixture(name)
-                    )
+                    TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 4, payload: data)
                 ),
                 "\(name) should decode"
             )
@@ -69,20 +101,19 @@ struct TileDecoderTests {
     /// screen, and a dropped tile costs one repaint.
     @Test
     func aPayloadDisagreeingWithTheHeaderIsDropped() async throws {
-        let payload = try webpFixture("opaque-4x4")
+        let png = try encode(
+            image(width: 4, height: 4, pixels: Array(repeating: (1, 2, 3), count: 16)),
+            as: .png
+        )
         let decoder = TileDecoder()
         #expect(
             await decoder.decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 8, h: 8, payload: payload
-                )
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 8, h: 8, payload: png)
             ) == nil
         )
         #expect(
             await decoder.decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 2, payload: payload
-                )
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 2, payload: png)
             ) == nil
         )
     }
@@ -92,34 +123,18 @@ struct TileDecoderTests {
         let decoder = TileDecoder()
         #expect(
             await decoder.decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 4, payload: Data()
-                )
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 4, payload: Data())
             ) == nil
         )
         #expect(
             await decoder.decode(
                 TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot,
+                    format: .png, slot: BatchFrame.noSlot,
                     x: 0,
                     y: 0,
                     w: 4,
                     h: 4,
                     payload: Data([0x00, 0x01, 0x02, 0x03])
-                )
-            ) == nil
-        )
-        // A truncated WebP: the container header is intact, so this is rejected by
-        // the decode rather than by a magic-byte check.
-        #expect(
-            await decoder.decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot,
-                    x: 0,
-                    y: 0,
-                    w: 4,
-                    h: 4,
-                    payload: Data("RIFF\u{0}\u{0}\u{0}\u{0}WEBPVP8L".utf8)
                 )
             ) == nil
         )
@@ -129,78 +144,21 @@ struct TileDecoderTests {
     /// fail the context anyway.
     @Test
     func aZeroSizedTileIsDropped() async throws {
-        let payload = try webpFixture("opaque-4x4")
+        let png = try encode(
+            image(width: 1, height: 1, pixels: [(9, 9, 9)]),
+            as: .png
+        )
         let decoder = TileDecoder()
         #expect(
             await decoder.decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 0, h: 4, payload: payload
-                )
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 0, h: 4, payload: png)
             ) == nil
         )
         #expect(
             await decoder.decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 0, payload: payload
-                )
+                TileFrame(format: .png, slot: BatchFrame.noSlot, x: 0, y: 0, w: 4, h: 0, payload: png)
             ) == nil
         )
-    }
-
-    /// The lossy branch, which is a different bitstream: `VP8 ` where every other
-    /// fixture is `VP8L`, and a different decoder inside ImageIO.
-    ///
-    /// The macOS agent's classifier sends photographic tiles this way, so without
-    /// this a viewer that could not read VP8 would show blank tiles on exactly the
-    /// content the classifier picks — while every other test here passed. Pixels are
-    /// checked loosely, because lossy: what matters is that a plausible image comes
-    /// out at the right size, not which values.
-    @Test
-    func aLossyTileDecodesToTopDownBGRA() async throws {
-        let tile = try #require(
-            await TileDecoder().decode(
-                TileFrame(
-                    format: .webp, slot: BatchFrame.noSlot, x: 0, y: 0, w: 64, h: 64,
-                    payload: try webpFixture("lossy-64x64")
-                )
-            )
-        )
-        #expect(tile.bgra.count == 64 * 64 * 4)
-        // The fixture ramps red with x and green with y from a low base, so the
-        // right-hand column is redder than the left and the bottom is greener than
-        // the top. Both survive a lossy encode; neither survives a flip or a swap.
-        let topLeft = bgr(tile, 0)
-        let topRight = bgr(tile, 63)
-        let bottomLeft = bgr(tile, 63 * 64)
-        #expect(topRight.r > topLeft.r + 100, "red should ramp with x, got \(topLeft) -> \(topRight)")
-        #expect(bottomLeft.g > topLeft.g + 100, "green should ramp with y, got \(topLeft) -> \(bottomLeft)")
-    }
-
-    /// Every fixture is what its name says, checked from the bytes on disk.
-    ///
-    /// This is the guard the runtime encoding used to provide for free. Without it a
-    /// fixture that was regenerated wrongly — or silently replaced by a PNG, which
-    /// `TileDecoder` would happily decode, since it identifies a payload from its
-    /// own container and never reads `format` — would leave every test above
-    /// passing while testing the wrong codec.
-    @Test
-    func everyFixtureIsAWebPOfTheSizeItsNameClaims() throws {
-        for (name, side) in [
-            ("solid-2x2-11", 2), ("solid-2x2-22", 2), ("solid-2x2-ff", 2),
-            ("topdown-8x8", 8), ("opaque-4x4", 4), ("alpha-4x4", 4),
-            ("lossy-64x64", 64),
-        ] {
-            let data = try webpFixture(name)
-            #expect(data.prefix(4) == Data("RIFF".utf8), "\(name) is not a RIFF container")
-            #expect(data.dropFirst(8).prefix(4) == Data("WEBP".utf8), "\(name) is not a WebP")
-            let source = try #require(CGImageSourceCreateWithData(data as CFData, nil))
-            #expect(
-                CGImageSourceGetType(source) as String? == "org.webmproject.webp",
-                "\(name) is not identified as WebP by ImageIO"
-            )
-            let image = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
-            #expect(image.width == side && image.height == side, "\(name) is the wrong size")
-        }
     }
 
     // MARK: - Fixtures
@@ -208,7 +166,86 @@ struct TileDecoderTests {
     private typealias Pixel = (r: UInt8, g: UInt8, b: UInt8)
 
     private func bgr(_ tile: DecodedTile, _ index: Int) -> Pixel {
-        let base = index * 4
-        return (tile.bgra[base + 2], tile.bgra[base + 1], tile.bgra[base])
+        (r: tile.bgra[index * 4 + 2], g: tile.bgra[index * 4 + 1], b: tile.bgra[index * 4])
+    }
+
+    /// `pixels` in reading order: left to right, top row first.
+    private func image(width: Int, height: Int, pixels: [Pixel]) throws -> CGImage {
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(width * height * 4)
+        for pixel in pixels {
+            bytes.append(contentsOf: [pixel.r, pixel.g, pixel.b, 0xFF])
+        }
+        return try image(
+            width: width,
+            height: height,
+            bytes: bytes,
+            bitsPerPixel: 32,
+            space: CGColorSpaceCreateDeviceRGB(),
+            info: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue)
+        )
+    }
+
+    private func grayscaleImage(width: Int, height: Int) throws -> CGImage {
+        let bytes = (0 ..< width * height).map { UInt8($0 * 8) }
+        return try image(
+            width: width,
+            height: height,
+            bytes: bytes,
+            bitsPerPixel: 8,
+            space: CGColorSpaceCreateDeviceGray(),
+            info: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)
+        )
+    }
+
+    private func alphaImage(width: Int, height: Int) throws -> CGImage {
+        var bytes = [UInt8]()
+        for index in 0 ..< width * height {
+            bytes.append(contentsOf: [UInt8(index * 4), 0x40, 0x80, 0x80])
+        }
+        return try image(
+            width: width,
+            height: height,
+            bytes: bytes,
+            bitsPerPixel: 32,
+            space: CGColorSpaceCreateDeviceRGB(),
+            info: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        )
+    }
+
+    private func image(
+        width: Int,
+        height: Int,
+        bytes: [UInt8],
+        bitsPerPixel: Int,
+        space: CGColorSpace,
+        info: CGBitmapInfo
+    ) throws -> CGImage {
+        let provider = try #require(CGDataProvider(data: Data(bytes) as CFData))
+        return try #require(
+            CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: bitsPerPixel,
+                bytesPerRow: width * bitsPerPixel / 8,
+                space: space,
+                bitmapInfo: info,
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: false,
+                intent: .defaultIntent
+            )
+        )
+    }
+
+    private func encode(_ image: CGImage, as type: UTType) throws -> Data {
+        let data = NSMutableData()
+        let destination = try #require(
+            CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil)
+        )
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        return data as Data
     }
 }

@@ -19,10 +19,10 @@ let package = Package(
             name: "RemotexViewerTests",
             dependencies: ["RemotexViewer"],
             path: "Tests",
-            // Real WebP tile payloads, produced by the gateway's own encoder
-            // (`write_swift_webp_fixtures` in src/protocol.rs). Checked in because
-            // ImageIO can read WebP but cannot write it, so these tests cannot
-            // encode their own the way they used to.
+            // Opus audio fixtures (`Fixtures/opus`), produced by the gateway's own
+            // encoder (`write_swift_opus_fixtures` in src/opus_stream.rs) because
+            // macOS can encode Opus but must not for these tests. Tile payloads are
+            // encoded at runtime through ImageIO, so they need no fixture.
             resources: [.copy("Fixtures")]
         ),
     ]

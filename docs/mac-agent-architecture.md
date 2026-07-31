@@ -16,7 +16,7 @@ src/rxa.rs                              crates/rxa-agent
     │                                      │
     └──── Noise-encrypted rxa over TCP ────┤
                                            ├─ ScreenCaptureKit capture
-                                           ├─ WebP tile encoder
+                                           ├─ PNG/JPEG tile encoder
                                            ├─ Core Graphics input injection
                                            └─ menu bar UI and login item
 
@@ -78,7 +78,7 @@ answer to it (see Lifecycle and recovery below):
   selection, private display size and density, clipboard requests and writes, and
   heartbeat pings;
 - agent to gateway: `Hello` or a `Busy` refusal, display list and active display,
-  display size, WebP tiles, cursor shape, clipboard data, errors, and heartbeat
+  display size, PNG/JPEG tiles, cursor shape, clipboard data, errors, and heartbeat
   pongs.
 
 The gateway translates these messages into the same browser protocol used by
@@ -118,9 +118,8 @@ dirty rectangle outward to a fixed 320×64 grid, deduplicates the cells in that
 frame, and hashes their source pixels. A cell whose pixels have not changed is
 not encoded.
 
-All tile payloads are WebP. A per-tile classifier chooses lossless encoding for
-flat or text-like content and lossy encoding for photographic content without
-changing the wire format.
+A per-tile classifier chooses PNG for flat or text-like content and JPEG for
+photographic content, naming the codec in the tile's format byte.
 
 ```text
 SCStream callback ──▶ raw-frame queue ──▶ encoders ──▶ ordered queue ──▶ socket

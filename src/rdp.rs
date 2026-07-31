@@ -1367,7 +1367,7 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
 /// nothing upstream filters. Both come back as `None` here and cost nothing but a
 /// pack and a `memcmp`.
 ///
-/// The pack happens either way; what is skipped is the WebP encode, which is far
+/// The pack happens either way; what is skipped is the PNG encode, which is far
 /// the more expensive half (~8–10× the hash it replaced, measured in
 /// `protocol::tests::encode_cost_against_hash_cost`). That encode no longer happens
 /// here — [`TileSink`] runs it elsewhere — so what this loop costs is the pack, the

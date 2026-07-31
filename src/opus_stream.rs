@@ -438,9 +438,9 @@ mod tests {
 
     /// Write the Opus fixtures the macOS viewer's tests decode.
     ///
-    /// Checked in for a different reason than the WebP ones ([`crate::protocol`]'s
-    /// `write_swift_webp_fixtures`, which exists because ImageIO cannot *write* WebP):
-    /// macOS can encode Opus perfectly well, and the point is that it must not. The
+    /// Checked in because macOS can encode Opus perfectly well, and the point is
+    /// that it must not — unlike the tile codecs, where the viewer's tests encode
+    /// their own PNG/JPEG payloads at runtime through ImageIO. The
     /// viewer's decoder test has to answer to *this* encoder — the resampler, the 20 ms
     /// framing, the bitrate and the pre-skip in this file — or the two ends agree with
     /// their own fixtures and disagree with each other, which is the failure the
@@ -484,11 +484,13 @@ mod tests {
     /// **This compares properties rather than bytes, and it learned that the hard way.**
     /// The first version byte-compared, on the reasoning that libopus is deterministic
     /// for a given input and configuration. It is — for a given *build*. The fixtures are
-    /// checked in, so the comparison spans builds, and CI sets `LIBOPUS_NO_PKG=1` to
-    /// compile `audiopus_sys`'s vendored source while a dev machine may link a system
-    /// libopus (homebrew 1.6.1 here). Those two produced 9960 bytes each and disagreed on
-    /// the contents, which broke `Agent validation` on main. Encoded float output is not a
-    /// reproducible artifact across libopus versions or optimisation paths.
+    /// checked in, so the comparison spans builds, and back when CI compiled
+    /// `audiopus_sys`'s vendored source while a dev machine linked a system libopus
+    /// (homebrew 1.6.1) the two produced 9960 bytes each and disagreed on the contents,
+    /// which broke `Agent validation` on main. `opus-prebuilt` now links the same static
+    /// archive everywhere, so that particular divergence is gone — but encoded float
+    /// output is still not a reproducible artifact across libopus versions or optimisation
+    /// paths, so the property comparison stays rather than betting the check on it.
     ///
     /// So the head is compared exactly — it is byte assembly plus the encoder's
     /// lookahead, and the CI failure confirmed both builds report the same 312 — while

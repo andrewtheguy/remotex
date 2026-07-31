@@ -1,4 +1,4 @@
-//! Gateway side of RXA. Agent-encoded WebP tiles pass through unchanged.
+//! Gateway side of RXA. Agent-encoded PNG/JPEG tiles pass through unchanged.
 //! Established authenticated links reconnect with a bounded retry window;
 //! initial connection and authentication failures are reported immediately.
 
@@ -600,7 +600,9 @@ async fn pump(
                         // Unreachable while both halves ship together, which
                         // rxa_proto::VERSION enforces at the handshake. This is for
                         // the case where they do not.
-                        if format != rxa_proto::msg::format::WEBP {
+                        if format != rxa_proto::msg::format::PNG
+                            && format != rxa_proto::msg::format::JPEG
+                        {
                             warn!("rxa: dropping a {w}x{h} tile with unknown format byte {format}");
                             continue;
                         }
@@ -1183,12 +1185,14 @@ mod tests {
                 GatewayMsg::Attach => {}
                 other => panic!("expected Attach, got {other:?}"),
             }
-            // 1 was PNG before this protocol version, so it is exactly the byte a
-            // stale agent would send.
-            for (format, data) in [(1u8, vec![0x89, b'P', b'N', b'G']), (
-                rxa_proto::msg::format::WEBP,
-                vec![b'R', b'I', b'F', b'F'],
-            )] {
+            // 3 was WebP before this protocol version, so it is exactly the byte a
+            // stale agent would send — now unrecognised and dropped, where both PNG
+            // and JPEG (the two the classifier picks between) relay through.
+            for (format, data) in [
+                (3u8, vec![b'R', b'I', b'F', b'F']),
+                (rxa_proto::msg::format::PNG, vec![0x89, b'P', b'N', b'G']),
+                (rxa_proto::msg::format::JPEG, vec![0xFF, 0xD8, 0xFF, 0xE0]),
+            ] {
                 writer
                     .send(
                         &AgentMsg::Tile { format, x: 7, y: 9, w: 4, h: 4, data }.encode(),
@@ -1211,9 +1215,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(tiles.len(), 1, "the unknown format byte should cost one tile");
-        assert_eq!(tiles[0].format, Tile::FORMAT_WEBP);
-        assert_eq!(tiles[0].data, b"RIFF");
+        assert_eq!(tiles.len(), 2, "only the unknown format byte should cost a tile");
+        assert_eq!(tiles[0].format, Tile::FORMAT_PNG);
+        assert_eq!(tiles[0].data, b"\x89PNG");
+        assert_eq!(tiles[1].format, Tile::FORMAT_JPEG);
+        assert_eq!(tiles[1].data, &[0xFF, 0xD8, 0xFF, 0xE0]);
     }
 
     /// A target that opted into nothing, which is the default and what most of

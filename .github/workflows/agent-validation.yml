@@ -55,17 +55,10 @@ jobs:
       # against a fake agent speaking the real Noise handshake, so it covers the
       # gateway half of this protocol, and it needs no container by design.
       - name: Test the gateway
-        # The same three variables packaging/build-tarball.sh sets, and for the same
-        # reason: this is the only step here that compiles the gateway, so it is the
-        # only one that builds libopus from audiopus_sys's vendored source. That
-        # source declares `cmake_minimum_required` below 3.5, which CMake 4 — on
-        # macos-latest since audio landed — refuses to configure at all. Without this
-        # the step fails before running a single test, which is exactly what it did
-        # from the first audio merge until it was noticed.
-        env:
-          LIBOPUS_STATIC: 1
-          LIBOPUS_NO_PKG: 1
-          CMAKE_POLICY_VERSION_MINIMUM: 3.5
+        # Remote audio links `opus-prebuilt` (a prebuilt static libopus archive, no
+        # vendored cmake build — see the root Cargo.toml), so this step needs none of
+        # the LIBOPUS_STATIC/LIBOPUS_NO_PKG/CMAKE_POLICY_VERSION_MINIMUM coaxing the
+        # audiopus_sys build used to demand on CMake 4.
         run: cargo test -p remotex
 
       - name: Build remotex-agent.app and its disk image

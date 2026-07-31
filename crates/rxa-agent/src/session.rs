@@ -15,7 +15,7 @@ use std::time::Duration;
 use log::{debug, info, warn};
 use rxa_proto::frame::{FrameReader, FrameWriter};
 use rxa_proto::msg::{
-    AgentMsg, DisplayEntry, GatewayMsg, MAX_CLIPBOARD_BYTES, SCALE_ONE, clipboard_fits,
+    AgentMsg, DisplayEntry, GatewayMsg, MAX_CLIPBOARD_BYTES, SCALE_ONE, clipboard_fits, format,
 };
 use rxa_proto::next_clipboard_time;
 use tokio::net::TcpStream;
@@ -1349,8 +1349,8 @@ fn start_pipeline(
 /// - **`stalled` is the one that decides whether any of this helps.** It is time the
 ///   encoder spent blocked handing tiles to the pump, so if it dominates then the
 ///   socket is the constraint and widening the encoder cannot make a repaint faster.
-/// - `lossy` is the classifier's split, which nothing downstream can observe because
-///   both branches are WebP. It was a per-frame `debug!` and is now also a total.
+/// - `lossy` is the classifier's split: how many tiles went to JPEG rather than PNG.
+///   It was a per-frame `debug!` and is now also a total.
 /// - `dropped` counts tiles a failed encode discarded. Each one was already a
 ///   `warn!`, but a count is what says whether it happened once or constantly.
 /// - `bytes` cross-checks against the gateway's own `ws: outbound totals`.
@@ -1494,7 +1494,7 @@ fn encode_batch_at(
             }
         };
         totals.tiles += 1;
-        totals.lossy += u64::from(!encoded.lossless);
+        totals.lossy += u64::from(encoded.format == format::JPEG);
         totals.bytes += encoded.data.len() as u64;
 
         if !send(
@@ -1512,8 +1512,8 @@ fn encode_batch_at(
 
     // Counted per frame as well as in the totals: the classifier's split is the only
     // thing about it that can be judged from outside, and one line a frame says
-    // whether it is finding what it should. Every payload is a WebP either way, so
-    // nothing downstream can tell.
+    // whether it is finding what it should — how many tiles it sent to JPEG rather
+    // than PNG.
     let (tiles, lossy) = (totals.tiles - before.0, totals.lossy - before.1);
     if lossy > 0 {
         debug!("encoder: {tiles} tile(s), {lossy} photographic");
@@ -1741,7 +1741,7 @@ mod tests {
 
         let mut cells = vec![cell(0, 0, 320, 64), cell(0, 64, 320, 64), cell(0, 128, 320, 64)];
         // A payload one byte short of its geometry, which `encode_tile` rejects
-        // rather than letting libwebp read past the buffer.
+        // on its length check rather than handing a short buffer to the encoder.
         cells[1].rgb.pop();
 
         // Width 4, so the good cells really are in flight beside the bad one.

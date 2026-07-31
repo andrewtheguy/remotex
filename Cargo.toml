@@ -22,7 +22,7 @@ default-members = [".", "crates/rxa-proto"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.70"
+version = "0.0.71"
 
 [package]
 name = "remotex"
@@ -45,43 +45,21 @@ log = "0.4"
 env_logger = "0.11"
 futures-util = "0.3"
 toml = "1"
-# Cursor shapes only, since tiles moved to WebP: `encode_cursor_png` in
-# src/protocol.rs. A shape is a few hundred bytes on the JSON control channel, and
-# the macOS agent's arrive already PNG-encoded from AppKit, which cannot write WebP.
+# Tiles and cursor shapes both. The RDP and VNC engines PNG-compress screen tiles
+# (`Tile::from_rgb`), and cursor shapes ride the JSON control channel as base64 PNG
+# — the macOS agent's arrive already PNG-encoded from AppKit. `encode_png` in
+# src/protocol.rs is shared by both. Fast compression on the session's hot path.
 png = "0.18"
-# WebP, the codec that replaced PNG and JPEG on the tile path (see src/protocol.rs). Not pure
-# Rust: libwebp-sys compiles vendored libwebp C with `cc`. That is not a new class
-# of requirement here — `ring` and `libz-sys` already do the same on every runner
-# — and it costs nothing at runtime, because there is no cross-compilation
-# (packaging/build-tarball.sh is a native `cargo build --release` per runner) and
-# packaging/Dockerfile only COPYs the finished binary in.
-#
-# `default-features = false` drops its `img` feature, which would otherwise pull
-# the whole `image` crate in for a convenience constructor we do not use.
-webp = { version = "0.3.1", default-features = false }
-# A direct dependency only to turn on libwebp's x86 SIMD. `webp` does not re-export
-# its sys crate's features, and cargo unifies features across the graph, so naming
-# libwebp-sys here is what reaches them.
-#
-# This makes the x86_64 build **x86-64-v3**, deliberately. libwebp-sys applies
-# `-msse4.1`/`-mavx2` to its whole `cc::Build` rather than per-file
-# (`setup_build` in its build.rs), so the objects are not runtime-dispatched: the
-# binary requires those instructions. Every machine this runs on is Coffee Lake or
-# newer (SSE4.1, AVX2, FMA, BMI2; no AVX-512), and this is a personal project, so
-# the portability the default gives up buys real encode time back on the one
-# codec that sits on the engine's hot path. arm64 needs nothing here — `neon` is
-# already on by default.
-libwebp-sys = { version = "0.9", features = ["sse41", "avx2"] }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
-# `opus` binds libopus through audiopus_sys, which builds it with cmake. C again,
-# and again not a new class of requirement — but unlike libwebp it *prefers a
-# system library*: on Linux/GNU audiopus_sys probes pkg-config first, which would
-# link libopus dynamically and leave the release binary needing libopus0 inside
-# packaging/Dockerfile's debian:trixie-slim, which does not ship it. So
-# packaging/build-tarball.sh sets LIBOPUS_STATIC/LIBOPUS_NO_PKG to force the
-# vendored static build on every runner.
-opus = "0.3"
+# `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
+# prebuilt static archive its sys crate downloads, instead of compiling the
+# vendored C through cmake. That deletes the whole LIBOPUS_STATIC/LIBOPUS_NO_PKG/
+# CMAKE_POLICY_VERSION_MINIMUM dance the packaging scripts used to carry: there is
+# no C build on this path any more, and nothing links a system `libopus.dylib`, so
+# the binary is self-contained on every runner without any env coaxing. The lib is
+# still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731073637-74aab76" }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # desktop WebSocket, which already delimits them, and the browser hands them
 # straight to a WebCodecs decoder — so an Ogg dependency would buy framing that is
@@ -154,10 +132,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
-# The codec the agent used for photographic tiles before WebP. A dev-dependency
-# rather than gone, because `webp_cost_against_png_cost` measures against it: the
-# reason JPEG was dropped is a ratio, and a ratio nobody can re-run is an anecdote.
-jpeg-encoder = { version = "0.7", features = ["simd"] }
 # `tokio::time::pause()` for the rxa engine's reconnect-backoff tests: waiting
 # out a real 1-second backoff in a unit test is a second of nothing.
 tokio = { version = "1", features = ["test-util"] }

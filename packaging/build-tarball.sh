@@ -66,26 +66,12 @@ else
 fi
 
 echo ">> building release binary"
-# libopus is linked *statically*, and this is not a preference. audiopus_sys (via
-# the `opus` crate, for remote audio) probes pkg-config first on Linux/GNU, so on a
-# runner that happens to have libopus-dev the binary would come out needing
-# libopus.so — and packaging/Dockerfile runs this binary on debian:trixie-slim,
-# which does not ship it. That failure would appear only inside the image, only at
-# start-up, after every build and test had passed. Forcing the vendored build here
-# makes every runner produce the same thing.
-#
-# `CMAKE_POLICY_VERSION_MINIMUM` is the second half of the same story. That vendored
-# opus declares `cmake_minimum_required` below 3.5, and CMake 4 — which the
-# macos-latest runners now have — refuses to configure it at all:
-#
-#   CMake Error at CMakeLists.txt:1 (cmake_minimum_required):
-#     Compatibility with CMake < 3.5 has been removed from CMake.
-#
-# 3.5 is the escape hatch CMake's own error message names. It is set here rather than
-# only for macOS because the Linux runners are on CMake 3 today and will meet this the
-# day they are not, and it is inert on any CMake that predates the variable.
-LIBOPUS_STATIC=1 LIBOPUS_NO_PKG=1 CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  cargo build --release
+# No libopus env coaxing here any more: remote audio links `opus-prebuilt`, which
+# pulls a prebuilt static libopus archive instead of compiling vendored C through
+# cmake (see the `opus` line in the root Cargo.toml). So the binary is self-contained
+# on debian:trixie-slim with no system libopus, and there is no cmake_minimum_required
+# for CMake 4 to reject.
+cargo build --release
 
 echo ">> assembling ${pkg}"
 mkdir -p "$root/bin" "$root/share/doc/remotex" "$root/share/remotex"

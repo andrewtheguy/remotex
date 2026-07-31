@@ -144,7 +144,7 @@ struct GatewayConnectionTests {
     @Test
     func anUndecodableRecordIsDroppedWithoutItsBatch() async throws {
         // A structurally valid record whose payload is not an image.
-        var garbage = Data([BatchFrame.opTile, TileFormat.webp.rawValue])
+        var garbage = Data([BatchFrame.opTile, TileFormat.png.rawValue])
         for value: UInt16 in [BatchFrame.noSlot, 8, 8, 2, 2] {
             garbage.append(UInt8(value & 0xFF))
             garbage.append(UInt8(value >> 8))
