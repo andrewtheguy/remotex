@@ -8,9 +8,10 @@
 // panel agreeing with what is actually on the canvas rather than with what was
 // clicked.
 //
-// Only `rxa` populates the list. RDP and VNC each deliver one framebuffer
+// No engine populates the list yet: RDP and VNC each deliver one framebuffer
 // spanning every remote screen, so they send nothing and the FAB shows no
-// Display section at all.
+// Display section. Picking a display over macOS Screen Sharing (ARD) is a
+// planned phase-2 feature.
 
 import { useRef } from "react";
 import type { DisplayInfo } from "./protocol.ts";

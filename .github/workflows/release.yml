@@ -1,4 +1,4 @@
-name: Release remotex, mac agent, and mac viewer
+name: Release remotex and mac viewer
 
 on:
   workflow_dispatch:
@@ -131,78 +131,6 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  # The macOS agent, shipped in the same release as the gateway rather than as a
-  # stream of its own: install.sh resolves GitHub's "Latest" release and strips a
-  # leading `v` to get the version, so a separately-tagged release becoming
-  # Latest would break `curl … | bash` for everyone.
-  #
-  # Shipped as a .dmg: dragging an app out of a disk image is the standard macOS
-  # install, and an image carries the bundle exactly as it was signed rather than
-  # through an archive round-trip. See the header of build-agent-app.sh.
-  #
-  # Ad-hoc signed, and the asset name says so. A Developer ID signature plus
-  # notarization is what a bundle needs to run on someone else's Mac without a
-  # quarantine dance — build-agent-app.sh already takes --notary-profile, so
-  # wiring it up here is adding the secrets, not writing code.
-  mac-agent:
-    needs: prepare
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build remotex-agent.app and its disk image
-        # `-` pins the ad-hoc path rather than searching the runner's keychain, so
-        # a signing identity appearing in a future runner image cannot change what
-        # ships. Xcode is preinstalled, which the capture bindings' Swift bridge
-        # needs.
-        env:
-          CODESIGN_IDENTITY: "-"
-        run: bash packaging/macos/build-agent-app.sh
-
-      - name: Verify the disk image
-        # Installed exactly as a user will — mount, copy the bundle out, run it —
-        # so the signature is checked where it can actually break rather than in
-        # the build directory. `--version` parses argv and exits before any config,
-        # capture or launchd work, so it needs no GUI session and neither TCC
-        # grant; it is also where a Swift-runtime link error surfaces, the failure
-        # MACOSX_DEPLOYMENT_TARGET exists to prevent (see .cargo/config.toml),
-        # which builds clean and only dies on launch.
-        run: |
-          version="${{ needs.prepare.outputs.version }}"
-          dmg="dist/remotex-agent-${version}-macos-arm64-unsigned.dmg"
-          mnt="$RUNNER_TEMP/dmg-mount"
-          mkdir -p "$mnt" "$RUNNER_TEMP/installed"
-          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
-          # The symlink is what gives the drag somewhere to go; without it the
-          # image is a puzzle rather than an install. It has to point at
-          # /Applications specifically — a symlink to anything else would pass a
-          # bare -L check and still drop the bundle somewhere nobody asked for.
-          [ "$(readlink "$mnt/Applications")" = "/Applications" ] || {
-            echo "::error::the image has no /Applications symlink"
-            exit 1
-          }
-          # ditto is what the Finder's copy amounts to.
-          /usr/bin/ditto "$mnt/remotex-agent.app" "$RUNNER_TEMP/installed/remotex-agent.app"
-          hdiutil detach "$mnt"
-          app="$RUNNER_TEMP/installed/remotex-agent.app"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          got=$("$app/Contents/MacOS/remotex-agent" --version)
-          echo "bundle reports: ${got}"
-          [ "$got" = "remotex-agent ${version}" ] || {
-            echo "::error::expected 'remotex-agent ${version}'"
-            exit 1
-          }
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: remotex-agent-macos-arm64
-          path: dist/*.dmg
-          if-no-files-found: error
-
   mac-viewer:
     needs: prepare
     runs-on: macos-latest
@@ -267,7 +195,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [prepare, build, mac-agent, mac-viewer]
+    needs: [prepare, build, mac-viewer]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -285,7 +213,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Both globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .dmg is the macOS agent.
+        # release assets. The .dmg is the macOS viewer app.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.tar.gz artifacts/*.dmg --clobber
@@ -310,10 +238,9 @@ jobs:
   # only unpacks a tarball and drives docker, so all that matters is its arch —
   # the glibc that has to line up is the *base image*'s against the binary's.
   #
-  # The image is the gateway alone. Nothing from `mac-agent` goes into it: the
-  # agent needs ScreenCaptureKit, a window server and a logged-in GUI session, so
-  # it runs on a Mac and never in a container. Its only relation to this job is
-  # that both hang off the same published release.
+  # The image is the gateway alone. Nothing from `mac-viewer` goes into it: the
+  # viewer is a macOS app shipped as a DMG and never in a container. Its only
+  # relation to this job is that both hang off the same published release.
   docker:
     needs: [prepare, release]
     strategy:

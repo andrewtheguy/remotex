@@ -409,16 +409,14 @@ struct Flags {
 
 /// How dense a desktop this session has asked the RDP server to render.
 ///
-/// Two steps, because that is what the far end can usefully be told and what the
-/// Mac agent already does with the very same message (`Reconfigure::Density` in
-/// crates/rxa-agent/src/session.rs): a display is 1x or 2x, and the midpoint
-/// decides. Two steps also keep the `scale` on [`ServerMsg::Resize`] integral, so
+/// Two steps, because that is what the far end can usefully be told: a display
+/// is 1x or 2x, and the midpoint decides. Two steps also keep the `scale` on
+/// [`ServerMsg::Resize`] integral, so
 /// the pixels a client asks for and the points it presents them at are exact
 /// inverses rather than a rounding of each other.
 ///
 /// This is a density we *declare*, never one we read back: RDP has no PDU that
-/// reports the scale factor a server settled on. Contrast the agent, which
-/// refuses to believe its own display and measures the framebuffer instead.
+/// reports the scale factor a server settled on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Density {
     One,
@@ -722,7 +720,7 @@ async fn active_loop(
                         // *by default* reports its window from `connected`, before
                         // the channel is up, so on RDP the desktop stays at its
                         // connect size until the next window change (a manual resize)
-                        // lands after the channel has opened. VNC and rxa have no such
+                        // lands after the channel has opened. VNC has no such
                         // gate. The fix is to retry a `NotReady` size the way density
                         // is retried, but serialized with the density retry — two
                         // independent layout retries racing would each drive a
@@ -826,7 +824,7 @@ async fn active_loop(
                     }
                     // Ask straight away rather than waiting for the panel's
                     // Fetch, so a copy on the remote reaches the browser
-                    // unprompted exactly as it does for VNC and rxa.
+                    // unprompted exactly as it does for VNC.
                     ClipboardEvent::RemoteFormats(formats) => {
                         match rdp_clipboard::pick_text_format(&formats) {
                             Some(format) => {
@@ -1053,9 +1051,9 @@ async fn active_loop(
 /// Also a no-op when the desktop is already that layout, and that guard earns its
 /// place here rather than at the callers: this is the one engine where asking for
 /// what you already have is *expensive*, since the server answers any request with
-/// a full Deactivation-Reactivation. VNC and `rxa` both drop an unchanged request
-/// themselves, so this is what makes the client requests idempotent across all
-/// three — which matters most for the automatic [`ClientMsg::DefaultSize`] a
+/// a full Deactivation-Reactivation. VNC drops an unchanged request itself, so
+/// this is what makes the client requests idempotent across both engines —
+/// which matters most for the automatic [`ClientMsg::DefaultSize`] a
 /// mobile client sends on every reattach.
 ///
 /// Compared after `adjust_display_size`, because that is the layout that would

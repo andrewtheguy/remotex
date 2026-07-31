@@ -144,8 +144,8 @@ impl TileSink {
     /// caller, so it cannot be run before the flush that completes the numbers.
     ///
     /// Explicit rather than emitted by the order task on its way out, for the reason
-    /// [`Shared`] gives. Silent for an engine that never encoded anything: `rxa`
-    /// relays tiles the agent already compressed, and a line of zeroes says nothing.
+    /// [`Shared`] gives. Silent when an engine encoded nothing, since a line of
+    /// zeroes says nothing — though both current engines, RDP and VNC, do encode.
     fn report(&self) {
         let totals = Totals::of(&self.shared);
         if totals.tiles > 0 {

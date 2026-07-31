@@ -260,8 +260,8 @@ function DisplaySection({
 // diagnostic, which is why this reports both and not just the resolution.
 //
 // Shown for every target, not only the ones with a display to switch between: on
-// RDP, on VNC, and on an rxa target sharing one of the Mac's own screens, the
-// Display section is absent and these numbers appear nowhere else.
+// RDP and on VNC the Display section is absent and these numbers appear nowhere
+// else.
 function ScreenHelp({
   size,
   hostScale,
@@ -338,7 +338,7 @@ function AudioSection({
 // Both controls in one section because they are one decision. Auto hands the size
 // to the window continuously; manual — the default, and what every connect starts
 // at — sends nothing until the button is pressed. Neither is the protocol's
-// business, so this section looks the same on RDP, VNC and rxa.
+// business, so this section looks the same on RDP and VNC.
 function ResizeSection({
   available,
   auto,
@@ -464,8 +464,7 @@ export default function FloatingMenu({
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
   // Whether this session may resize the remote at all — the target's
-  // `resize = true`, and for an rxa target a display the agent made rather than
-  // one of the Mac's own screens. It is the operator's permission and says nothing
+  // `resize = true`. It is the operator's permission and says nothing
   // about how it is used; that is `autoResize`, and false here hides both.
   //
   // Never true on a pinch-zoom device, whatever the target allows: a phone's
@@ -507,8 +506,8 @@ export default function FloatingMenu({
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
-  // feature that does not exist for this target: audio is RDP-only, so on VNC and
-  // rxa there is nothing that could be switched on.
+  // feature that does not exist for this target: audio is RDP-only, so on VNC
+  // there is nothing that could be switched on.
   //
   // `audioEnabled` is what this browser has asked for, not proof that sound is
   // arriving: a quiet remote and one that will never redirect are the same thing

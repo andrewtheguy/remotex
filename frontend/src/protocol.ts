@@ -5,9 +5,8 @@
 // apart by their first byte (binaryFrameKind below); rare control messages
 // (resize/error, the audio format) as JSON text frames with a `type` tag.
 
-// "back" and "forward" are the side buttons of a five-button mouse. Only an rxa
-// target acts on them — macOS numbers them 3 and 4 exactly as the DOM does — and
-// RDP and VNC drop them for want of anywhere to put them.
+// "back" and "forward" are the side buttons of a five-button mouse. No engine
+// acts on them today — RDP and VNC drop them for want of anywhere to put them.
 export type MouseButton = "left" | "middle" | "right" | "back" | "forward";
 
 // What a wheel delta is measured in: the DOM's deltaMode, by name. Carried
@@ -23,10 +22,9 @@ export type WheelUnit = "pixel" | "line" | "page";
 export type ClientMsg =
   | { type: "mouseMove"; x: number; y: number }
   // `clicks` is the browser's own click count for the press (MouseEvent.detail):
-  // 1 for a single click, 2 for the second of a double. The rxa engine injects it
-  // as the macOS event's click state, which is the only thing that makes a
-  // double-click a double-click — the remote cannot work it out from arrival
-  // times. RDP and VNC have nowhere to put it and let the guest count instead.
+  // 1 for a single click, 2 for the second of a double. It still rides the wire,
+  // but neither current engine consumes it — RDP and VNC carry button state alone
+  // and let the guest count.
   | {
       type: "mouseButton";
       button: MouseButton;

@@ -48,15 +48,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A host that is switched off swallows SYNs, and the kernel's own retry budget
 /// runs to about two minutes with the client showing "Connecting…" for all of
 /// it — no client has a timeout of its own. Generous enough to cross a slow VPN.
-/// [`crate::rxa`] keeps its own tighter budget, which covers connect *and*
-/// handshake against an agent it expects on a LAN.
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long a protocol handshake may take once the TCP connect has succeeded.
 ///
 /// A host that accepts the connection and then says nothing is a hang no socket
-/// timeout catches (see [`crate::rxa`], which has guarded this from the start).
-/// Long enough for CredSSP or a DES challenge on a loaded server.
+/// timeout catches. Long enough for CredSSP or a DES challenge on a loaded server.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a silent host takes to be noticed: idle, then every probe.
@@ -78,9 +75,7 @@ pub fn keepalive_budget() -> Duration {
 /// to say. What it proves is narrow but real: that the peer's *kernel* is still
 /// answering. For RDP and VNC that is the whole of it — a server process that
 /// wedges behind a kernel which still answers reads as an idle desktop, and
-/// neither RFB nor IronRDP offers a probe to close that gap. [`crate::rxa`] asks
-/// the agent process as well, so for that engine this is the outer of two
-/// guarantees rather than the only one.
+/// neither RFB nor IronRDP offers a probe to close that gap.
 pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
     let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(dest))
         .await

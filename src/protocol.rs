@@ -129,9 +129,8 @@ impl ClipboardSnapshot {
 
 /// A mouse button, matching the DOM `MouseEvent.button` numbering.
 ///
-/// `Back` and `Forward` are the side buttons of a five-button mouse. Only the
-/// rxa engine acts on them — macOS numbers them 3 and 4 exactly as the DOM does
-/// — while RDP and VNC carry no equivalent and drop them.
+/// `Back` and `Forward` are the side buttons of a five-button mouse. No engine
+/// acts on them today — RDP and VNC both carry no equivalent and drop them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
@@ -144,8 +143,8 @@ pub enum MouseButton {
 
 /// What a wheel delta is measured in — the DOM's `deltaMode`, carried rather
 /// than normalised because only the client knows whether its scroll came from a
-/// trackpad (pixels) or a notched wheel (lines). Mirrors
-/// [`rxa_proto::msg::WheelUnit`], which is where it is acted on.
+/// trackpad (pixels) or a notched wheel (lines). Carried to the RDP and VNC
+/// engines but not yet acted on: both spend any nonzero delta as one notch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WheelUnit {
@@ -161,16 +160,17 @@ pub enum ClientMsg {
     /// Pointer moved to framebuffer coordinates (x, y).
     MouseMove { x: i32, y: i32 },
     /// A mouse button was pressed or released. `clicks` is the client's own click
-    /// count for the press — `MouseEvent.detail` in the browser, `NSEvent`'s
-    /// `clickCount` in the macOS client — which only the rxa engine has anywhere
-    /// to put: RDP and VNC carry button state alone and leave the guest to count.
+    /// count for the press — `MouseEvent.detail` in the browser — which still
+    /// rides the wire for any engine that has somewhere to put it, but neither
+    /// current engine does: RDP and VNC carry button state alone and leave the
+    /// guest to count.
     MouseButton {
         button: MouseButton,
         pressed: bool,
         clicks: u8,
     },
-    /// Scroll wheel delta, in `unit`. Only the rxa engine reads the unit: RDP
-    /// and VNC spend any nonzero delta as one notch whatever it was measured in.
+    /// Scroll wheel delta, in `unit`. No engine reads the unit today: RDP and
+    /// VNC spend any nonzero delta as one notch whatever it was measured in.
     Wheel { dx: f32, dy: f32, unit: WheelUnit },
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
     /// `caps` is the browser's authoritative CapsLock lock state at the moment
@@ -196,13 +196,12 @@ pub enum ClientMsg {
     /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
     /// whenever the window moves to a screen of a different density.
     ///
-    /// A request that the remote render at this density, which two engines can
-    /// answer: RXA sets the density of a display the agent made, and RDP with
-    /// `resize` asks the host for twice the pixels at 200% UI scaling. Both
-    /// quantize to 1x or 2x at the same midpoint, and both report what they got
-    /// back through [`ServerMsg::Resize`]. Mac-owned displays, RDP without
-    /// `resize`, and VNC ignore it — clients send it unconditionally rather than
-    /// asking what the engine is, so being ignored is not a client error.
+    /// A request that the remote render at this density, which one engine can
+    /// answer: RDP with `resize` asks the host for twice the pixels at 200% UI
+    /// scaling. It quantizes to 1x or 2x at a midpoint and reports what it got
+    /// back through [`ServerMsg::Resize`]. RDP without `resize` and VNC ignore
+    /// it — clients send it unconditionally rather than asking what the engine
+    /// is, so being ignored is not a client error.
     HostScale { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
@@ -326,9 +325,10 @@ pub mod audio {
     }
 }
 
-/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0). The
-/// fixed geometry gives the RXA agent stable change-detection and cache cells.
-/// Gateway RDP and VNC damage is not snapped to this grid.
+/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0). No
+/// engine snaps to it today — RDP and VNC damage is reported in its own
+/// rectangles — but the constants are retained for a future fixed-grid quality
+/// pass that would want stable change-detection and cache cells.
 pub const CELL_W: u16 = 320;
 /// See [`CELL_W`].
 pub const CELL_H: u16 = STRIP_ROWS;
@@ -339,9 +339,10 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// MIME type.
 ///
 /// The RDP and VNC engines decode a framebuffer and PNG-compress it here
-/// ([`Tile::from_rgb`]); the macOS agent chooses PNG or JPEG per tile on the
-/// Mac and the gateway relays those bytes untouched ([`Tile::encoded`]), which
-/// is why the format travels with the tile instead of being a constant.
+/// ([`Tile::from_rgb`]). A pass-through path also exists for a source that hands
+/// over frames already encoded as PNG or JPEG ([`Tile::encoded`]), which no
+/// current engine uses; it is why the format travels with the tile instead of
+/// being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
     /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`].
@@ -377,9 +378,9 @@ impl Tile {
         })
     }
 
-    /// Wrap an already-encoded image stream — the pass-through path for the
-    /// macOS agent (see [`crate::rxa`]), which encodes on the Mac so the
-    /// gateway never decodes and re-encodes a pixel.
+    /// Wrap an already-encoded image stream — the pass-through path for a source
+    /// that encodes elsewhere, so the gateway never decodes and re-encodes a
+    /// pixel. No current engine takes this path.
     pub fn encoded(format: u8, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> Self {
         Self {
             format,
@@ -478,15 +479,15 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
 }
 
 /// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
-/// points of the desktop it shows: VNC always, and RDP or `rxa` until a client
-/// asks the remote for a density and the remote agrees.
+/// points of the desktop it shows: VNC always, and RDP until a client asks the
+/// remote for a density and the remote agrees.
 ///
 /// A remote with no density of its own is presented one point per pixel, and a
 /// client must not second-guess that by drawing the whole desktop at half size
 /// because the host screen happens to be Retina. What makes a scale of 2.0 honest
-/// instead is that the remote was *told*: `rxa` sets the density of a display the
-/// agent made, and RDP declares one to the host, so in both cases the extra pixels
-/// carry a UI drawn twice as large rather than the same UI stretched.
+/// instead is that the remote was *told*: RDP declares a density to the host, so
+/// the extra pixels carry a UI drawn twice as large rather than the same UI
+/// stretched.
 pub const UNSCALED: f32 = 1.0;
 
 /// One of the remote's displays, as a client lists it for the user to pick from.
@@ -497,7 +498,8 @@ pub const UNSCALED: f32 = 1.0;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
-    /// [`ClientMsg::SelectDisplay`]. For `rxa` it is a `CGDirectDisplayID`.
+    /// [`ClientMsg::SelectDisplay`]. No current engine emits a display list;
+    /// per-display selection is a phase-2 feature (see docs/roadmap.md).
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,
@@ -797,8 +799,8 @@ mod tests {
             .unwrap(),
             ClientMsg::Wheel { dy, unit, .. } if dy == -2.5 && unit == WheelUnit::Pixel
         ));
-        // The side buttons a five-button mouse has, which only the rxa engine
-        // can do anything with.
+        // The side buttons a five-button mouse has, which no engine acts on
+        // today.
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
                 r#"{"type":"mouseButton","button":"forward","pressed":true,"clicks":1}"#
@@ -1323,7 +1325,7 @@ mod tests {
     fn encode_cost_against_hash_cost() {
         use std::time::Instant;
 
-        // A full-width Retina strip, the unit the rxa agent ships today.
+        // A full-width Retina strip.
         let (sw, sh) = (3200u16, 64u16);
         let runs = 20;
 

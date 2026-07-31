@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rasterize packaging/macos/icon.svg into packaging/macos/AppIcon.icns.
+# Rasterize packaging/macos-viewer/icon.svg into packaging/macos-viewer/AppIcon.icns.
 #
 # The .icns is committed, and this script is what regenerates it. Two reasons it
 # is not built during build-agent-app.sh:

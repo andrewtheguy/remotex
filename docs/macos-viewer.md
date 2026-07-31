@@ -14,7 +14,7 @@ launch with the last answer preselected:
 | address | an ephemeral loopback port it picks | typed, and remembered once it answers |
 | credential | a bearer token nobody types | a username and password, once per session |
 | who reaches the target | this Mac | that gateway |
-| **Configuration…**, the rxa key | this instance's | not shown — they are that gateway's |
+| **Configuration…** | edits this instance's config | not shown — it is that gateway's |
 
 Neither is a default the app can pick for somebody. The embedded gateway is the right
 answer for targets this Mac can reach directly — nothing to install, nothing to sign
@@ -26,7 +26,7 @@ Below the choice, the two are the same program: `/api/config`, `/api/targets`,
 `/api/session` and `/ws` are one route table with one set of shapes. The single
 difference is which header carries the credential — see `GatewayCredential`.
 
-The client has no RDP, VNC, or RXA implementation. Engine-specific behavior is
+The client has no RDP or VNC implementation. Engine-specific behavior is
 reported by the gateway, with resize policy as the only client-side branch.
 Whether the remote is a Mac is likewise discovered from the gateway's
 `remoteOs` message and affects only keyboard conventions.
@@ -110,16 +110,14 @@ the unit of isolation: a suite lives in the user's own `Preferences` whatever th
 of the app was told, which is the trap the old `--settings` flag existed to work
 around.
 
-A first launch writes a commented template and mints this instance's `[rxa]`
-`private_key`. That key is not a choice — it is the gateway's name on the wire, and
-without it the one protocol written for this app could not be configured without a
-terminal.
+A first launch writes a commented template with no targets, which is a valid
+configuration for this app — the picker simply says there is nothing to connect to
+yet.
 
 ### Configuration
 
 **Remote › Configuration…** edits `remotex.toml` in a sheet: the TOML in a monospaced
-editor, Reveal in Finder, Cancel, Save, and this instance's `rxa` public key with a
-Copy button — the value a Mac agent needs in its `authorized_gateways`.
+editor, Reveal in Finder, Cancel, and Save.
 
 ### About
 
@@ -129,32 +127,11 @@ app, none of which is visible anywhere else:
 
 - **the version**, from `CFBundleShortVersionString`, plus the wire protocol number
   the gateway is checked against;
-- **the instance directory**, with Reveal in Finder;
-- **the `rxa` public key**, with Copy — the same `GatewayKeyRow` the picker and the
-  configuration panel show, because pairing a Mac is a reason to want it without
-  editing anything.
+- **the instance directory**, with Reveal in Finder.
 
 It exists as an explicit item because `commandsReplaced` takes the standard
 application menu down whole (see `RemoteCommands`): About is not restored unless it is
 put back, and until it was, a running app could not say which build it was.
-
-### The gateway key, in three places
-
-`GatewayKeyRow` is the only value in the app that has to *leave* it — an agent answers
-no gateway missing from its `authorized_gateways` — so it appears wherever somebody
-would look for it:
-
-- **the target picker's footer**, beside Configuration…. The screen a first launch
-  lands on and the one a target switch comes back to, so this is the unburied copy;
-- **About**, as part of what this instance is;
-- **the configuration panel**, beside the target being paired.
-
-The row is always present, in all three: when there is no `[rxa].private_key` it says
-so, rather than disappearing and reading as a feature the app does not have. Deriving
-the key costs a gateway process (`rxa-pubkey`), so `GatewayConfigStore` remembers a
-successful answer and retires it on a save — which is the one thing that can change
-the identity. A failed read is not cached, because bootstrapping is what mints the key
-and a `nil` remembered before it ran would stick for the life of the app.
 
 Save validates first, by running the bundled gateway's `check-config --embedded` on
 the candidate text. So what the editor accepts is by construction what the gateway
@@ -235,14 +212,9 @@ as well — one names the app, the other names what is on screen.
 
 ### What a new instance costs
 
-- **A new `rxa` identity.** A fresh directory mints its own `[rxa].private_key` on
-  first launch, so every Mac agent it should reach needs *that* instance's public key
-  on its `authorized_gateways` list — copy it from **About** or **Configuration…**,
-  both of which show that instance's own key. The keys are
-  genuinely different; one instance being paired says nothing about another.
-- **A turn at the agent.** An agent serves one session at a time, so whichever
-  instance reaches a shared Mac second is refused with a **Take over** button. That is
-  the design, not a conflict to resolve.
+- **Its own configuration.** A fresh directory starts with an empty targets list, so
+  each instance is configured independently — one instance being set up says nothing
+  about another.
 - **Nothing else.** The gateways pick their own ports, and neither instance can see
   the other's config, log or preferences.
 
@@ -350,17 +322,12 @@ framebuffer to the window.
 remote, which the gateway answers, and whether the window drives it, which this
 viewer does.
 
-Permission comes from the `connected` message and, for RXA, the active display:
+Permission comes from the `connected` message:
 
 | Target | May resize |
 |---|---|
 | RDP or VNC with `resize` | yes |
-| RXA with `resize`, private display active | yes |
 | Any other case | no — no viewport request is ever sent |
-
-RXA permits it only for a display created by the agent; a Mac-owned display is
-never resized by the viewer, and switching onto one withdraws the permission
-mid-session.
 
 The three View menu items are one decision:
 
@@ -369,9 +336,9 @@ The three View menu items are one decision:
   is one value with two editors — this menu item and the picker's *Auto-resize the
   remote to the window, if compatible* — so a choice made mid-session is the one
   the next connection starts from. It is applied to a new connection only where the
-  target allows resize (for RXA, once an owned display is shared); where it does
-  not, the remembered default silently does nothing, which is the picker caption's
-  "if compatible". See `ViewerPreferences.autoResizeByDefault`.
+  target allows resize; where it does not, the remembered default silently does
+  nothing, which is the picker caption's "if compatible". See
+  `ViewerPreferences.autoResizeByDefault`.
 
   > **Known limitation on RDP.** When the default is on, the client reports its
   > window from the `connected` handshake — before RDP's Display Control channel
@@ -379,7 +346,7 @@ The three View menu items are one decision:
   > (`Asked::NotReady`) and, unlike a density change, does not retry it, so on an
   > RDP target the desktop stays at its connect size until the next window change
   > lands after the channel is up. Turning **Auto Resize** off and on, or nudging
-  > the window, applies it. VNC and rxa are unaffected. This is a server-side gap
+  > the window, applies it. VNC is unaffected. This is a server-side gap
   > documented at the `Viewport` arm in `src/rdp.rs`; the browser client has the
   > same symptom for the same reason.
 - **Resize to Window** asks the remote to adopt the viewer's available size, once.
@@ -391,10 +358,11 @@ one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-RXA is the only engine that reports individually selectable displays. The
-Display menu sends `selectDisplay` and follows the `active` flag returned by the
-gateway; it does not infer selection locally. RDP and VNC expose one framebuffer
-and therefore no display choice.
+Neither engine reports individually selectable displays today: RDP and VNC each
+expose one framebuffer, so the Display menu has nothing to offer. Picking a single
+one of a Mac's displays over macOS Screen Sharing — which the stock Screen Sharing
+app does natively — is planned as phase 2; the `selectDisplay` / `Displays` wire is
+kept as scaffolding for it. See [`roadmap.md`](roadmap.md).
 
 ### Viewport measurement
 
@@ -447,7 +415,7 @@ to points.
 
 AppKit scroll deltas are inverted on both axes to match DOM wheel direction.
 Trackpad deltas pass through directly; line-based wheel deltas are scaled for the
-Mac agent's line conversion.
+gateway's line conversion.
 
 ## Clipboard
 
@@ -583,11 +551,11 @@ dist/remotex.app/Contents/MacOS/remotex-viewer \
   --probe-target mac --probe-seconds 90
 ```
 
-The bundled gateway is also a full `remotex` binary, which is how an instance is
-inspected from a terminal:
+The bundled gateway is also a full `remotex` binary, which is how an instance's
+configuration is checked from a terminal:
 
 ```sh
-dist/remotex.app/Contents/MacOS/remotex-gateway rxa-pubkey \
+dist/remotex.app/Contents/MacOS/remotex-gateway check-config --embedded \
   --config ~/Library/Application\ Support/remotex/remotex.toml
 ```
 

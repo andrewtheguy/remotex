@@ -170,16 +170,14 @@ const MAX_RETRY_DELAY_MS = 15_000;
 const ATTEMPTS_BEFORE_REPORTING = 4;
 
 // How long `requestClipboard` waits for the server's answer before giving up.
-// Generous because it is not all local: a VNC or RDP target answers from an
-// engine-side buffer immediately, but an `rxa` target is a real round trip to
-// the Mac, and one made during an agent reconnect is discarded outright and
-// never answered at all.
+// Generous rather than tight: the engines answer from an engine-side buffer, but
+// a slow link or a fetch made mid-reconnect can still leave a request unanswered.
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
 // Lay out the framebuffer at remote pixels / remote scale CSS pixels. Host
 // devicePixelRatio is intentionally absent: browser rasterization handles the
 // host display, while sendHostScale separately asks the remote to render at this
-// screen's density (an owned RXA display, or an RDP host that allows resize).
+// screen's density (an RDP host that allows resize).
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
@@ -1652,8 +1650,8 @@ export function useRemoteDesktop(
   // Awaitable so the toolbar can hold the panel closed until there is something
   // current to show, rather than opening on stale text that updates a moment
   // later. Every engine answers exactly one `clipboard` message per request
-  // (from a buffer for VNC and RDP, from a live pasteboard read for `rxa`), so
-  // this behaves the same on all three.
+  // (from an engine-side buffer for VNC and RDP), so this behaves the same on
+  // both.
   const requestClipboard =
     useCallback((): Promise<ClipboardSnapshot | null> => {
       const ws = wsRef.current;

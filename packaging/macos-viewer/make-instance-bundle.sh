@@ -6,7 +6,7 @@
 #
 #   name    the bundle's name, used verbatim. It is also the instance directory under
 #           ~/Library/Application Support, so `remotex-work` keeps that folder tidy
-#           beside `remotex` and `remotex-agent`.
+#           beside `remotex`.
 #   icon    optional. A PNG (square, 512px or larger) is converted; an .icns is used
 #           as it is. Without one the variant wears the same icon as remotex, which
 #           makes two apps nobody can tell apart in the Dock.

@@ -29,7 +29,7 @@ assets relative to its real path and loads the stable config from
 | `install.sh` | stage a version, switch `current`, and retain one rollback |
 | `uninstall.sh` | remove an installation or one version |
 | `Dockerfile` | build an image from an extracted release tarball |
-| `macos/build-agent-app.sh` | build the separate macOS agent app/DMG |
+| `macos-viewer/build-viewer-app.sh` | build the macOS viewer app/DMG |
 
 The repository-root `install.sh` downloads and verifies a release before
 calling `packaging/install.sh`.

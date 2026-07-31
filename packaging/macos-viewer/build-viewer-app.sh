@@ -103,7 +103,7 @@ chmod +x "$app/Contents/MacOS/remotex-viewer"
 # which process is which in Activity Monitor and to `pgrep`.
 cp "$gateway" "$app/Contents/MacOS/remotex-gateway"
 chmod +x "$app/Contents/MacOS/remotex-gateway"
-cp packaging/macos/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp packaging/macos-viewer/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 sed -e "s|<string>0\\.0\\.0</string>|<string>${version}</string>|g" \
   packaging/macos-viewer/Info.plist > "$app/Contents/Info.plist"
 
