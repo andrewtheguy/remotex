@@ -23,7 +23,7 @@ struct InputGateTests {
         session.pasteboard.setString("local text", forType: .string)
 
         model.sendPointer(x: 10, y: 20)
-        model.sendWheel(dx: 0, dy: 3)
+        model.sendWheel(dx: 0, dy: 3, unit: .line)
         model.sendMouseButton(.left, pressed: true, clicks: 1)
         model.sendKey(code: "KeyA", pressed: true, caps: false)
         model.clipboard.pushLocalClipboard(force: true)
@@ -50,7 +50,7 @@ struct InputGateTests {
         let already = session.sent(ofType: "clipboard").count
 
         model.sendPointer(x: 10, y: 20)
-        model.sendWheel(dx: 0, dy: 3)
+        model.sendWheel(dx: 0, dy: 3, unit: .line)
         model.sendKey(code: "KeyA", pressed: true, caps: false)
         model.clipboard.pushLocalClipboard(force: true)
         try await session.settle()

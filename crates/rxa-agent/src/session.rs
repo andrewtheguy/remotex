@@ -1083,7 +1083,7 @@ async fn pump(
                     } => {
                         injector.pointer_button(button, pressed, clicks);
                     }
-                    GatewayMsg::Wheel { dx, dy } => injector.wheel(dx, dy),
+                    GatewayMsg::Wheel { dx, dy, unit } => injector.wheel(dx, dy, unit),
                     GatewayMsg::Key { code, pressed, caps } => {
                         injector.key(&code, pressed, caps);
                     }

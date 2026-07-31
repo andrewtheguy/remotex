@@ -451,6 +451,49 @@ impl AgentMsg {
     }
 }
 
+/// What a wheel delta is measured in, straight from the DOM's `deltaMode`.
+///
+/// Carried rather than normalised because only the client knows: macOS scrolls
+/// in *pixels* for a trackpad and a modern mouse, and in *lines* for a notched
+/// legacy wheel, and the two are an order of magnitude apart. Collapsing every
+/// delta to lines — which is what the agent did before this existed — turns a
+/// trackpad's stream of few-pixel deltas into a stream of whole lines, so a
+/// gesture that should glide jumps instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelUnit {
+    /// `DOM_DELTA_PIXEL`. Pixels of content, and what every browser on macOS
+    /// reports for both a trackpad and a wheel.
+    Pixel,
+    /// `DOM_DELTA_LINE`. Lines of text, which macOS scales by the app's own
+    /// line height.
+    Line,
+    /// `DOM_DELTA_PAGE`. macOS has no page unit, so the agent spends it as
+    /// lines.
+    Page,
+}
+
+impl WheelUnit {
+    /// The wire byte. Explicit rather than a cast, so reordering the variants
+    /// cannot silently renumber them under a running agent.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Pixel => 0,
+            Self::Line => 1,
+            Self::Page => 2,
+        }
+    }
+
+    /// Anything unrecognised reads as pixels: it is the unit every browser on a
+    /// Mac actually sends, so it is the safest thing to be wrong about.
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Line,
+            2 => Self::Page,
+            _ => Self::Pixel,
+        }
+    }
+}
+
 /// Gateway → agent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GatewayMsg {
@@ -503,8 +546,9 @@ pub enum GatewayMsg {
         pressed: bool,
         clicks: u8,
     },
-    /// Raw DOM wheel deltas, exactly as remotex already carries them.
-    Wheel { dx: f32, dy: f32 },
+    /// Raw DOM wheel deltas, exactly as remotex already carries them, with the
+    /// unit they are measured in — see [`WheelUnit`].
+    Wheel { dx: f32, dy: f32, unit: WheelUnit },
     /// DOM `KeyboardEvent.code`, plus the browser's authoritative CapsLock
     /// state so the agent never has to infer lock state.
     Key {
@@ -649,10 +693,11 @@ impl GatewayMsg {
                 out.push(u8::from(*pressed));
                 out.push(*clicks);
             }
-            GatewayMsg::Wheel { dx, dy } => {
+            GatewayMsg::Wheel { dx, dy, unit } => {
                 out.push(Self::T_WHEEL);
                 out.extend_from_slice(&dx.to_le_bytes());
                 out.extend_from_slice(&dy.to_le_bytes());
+                out.push(unit.code());
             }
             GatewayMsg::Key {
                 code,
@@ -721,6 +766,7 @@ impl GatewayMsg {
             Self::T_WHEEL => GatewayMsg::Wheel {
                 dx: f32::from_le_bytes(r.array::<4>()?),
                 dy: f32::from_le_bytes(r.array::<4>()?),
+                unit: WheelUnit::from_code(r.u8()?),
             },
             Self::T_KEY => GatewayMsg::Key {
                 code: r.string()?,
@@ -1038,10 +1084,20 @@ mod tests {
                 pressed: false,
                 clicks: 2,
             },
-            GatewayMsg::Wheel { dx: 0.0, dy: -2.5 },
+            GatewayMsg::Wheel {
+                dx: 0.0,
+                dy: -2.5,
+                unit: WheelUnit::Pixel,
+            },
             GatewayMsg::Wheel {
                 dx: 120.0,
                 dy: f32::MIN,
+                unit: WheelUnit::Line,
+            },
+            GatewayMsg::Wheel {
+                dx: 0.0,
+                dy: 1.0,
+                unit: WheelUnit::Page,
             },
             GatewayMsg::Key {
                 code: "KeyA".to_owned(),
@@ -1377,13 +1433,26 @@ mod tests {
         let msg = GatewayMsg::Wheel {
             dx: -0.5,
             dy: 33.333_332,
+            unit: WheelUnit::Pixel,
         };
         match GatewayMsg::decode(&msg.encode()).unwrap() {
-            GatewayMsg::Wheel { dx, dy } => {
+            GatewayMsg::Wheel { dx, dy, unit } => {
                 assert_eq!(dx, -0.5);
                 assert_eq!(dy, 33.333_332);
+                assert_eq!(unit, WheelUnit::Pixel);
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // The unit decides whether a delta is a few pixels or a whole line, so a
+    // byte that means neither must not read as the larger of the two.
+    #[test]
+    fn every_wheel_unit_survives_and_a_strange_byte_reads_as_pixels() {
+        for unit in [WheelUnit::Pixel, WheelUnit::Line, WheelUnit::Page] {
+            assert_eq!(WheelUnit::from_code(unit.code()), unit);
+        }
+        assert_eq!(WheelUnit::from_code(3), WheelUnit::Pixel);
+        assert_eq!(WheelUnit::from_code(u8::MAX), WheelUnit::Pixel);
     }
 }

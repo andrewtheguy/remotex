@@ -4,6 +4,24 @@ enum MouseButton: String, Sendable, Codable, CaseIterable {
     case left
     case middle
     case right
+    /// The side buttons of a five-button mouse. Only an rxa target acts on them;
+    /// RDP and VNC have nowhere to put them and drop them at the gateway.
+    case back
+    case forward
+}
+
+/// What a wheel delta is measured in: `WheelUnit` in `src/protocol.rs`, and the
+/// DOM's `deltaMode` by name.
+///
+/// Carried because only this end knows. `NSEvent.hasPreciseScrollingDeltas` is
+/// exactly the distinction — a trackpad or Magic Mouse reports point-like deltas,
+/// a notched wheel reports lines — and the two are an order of magnitude apart.
+/// Sending both as lines, which is what this client did before the unit existed,
+/// turns a trackpad glide into a series of jumps.
+enum WheelUnit: String, Sendable, Codable, CaseIterable {
+    case pixel
+    case line
+    case page
 }
 
 /// Viewer -> gateway input and session control: `ClientMsg` in
@@ -24,7 +42,7 @@ enum ClientMessage: Sendable, Equatable {
     /// click state, and without it nothing on the remote counts a double-click at
     /// all; a synthetic send passes 1, which is what a lone click is worth.
     case mouseButton(button: MouseButton, pressed: Bool, clicks: Int)
-    case wheel(dx: Float, dy: Float)
+    case wheel(dx: Float, dy: Float, unit: WheelUnit)
     /// `code` is a DOM `KeyboardEvent.code`; see `src/keymap.rs` for the set the
     /// gateway maps. `caps` is the CapsLock *lock* state, which VNC cannot
     /// observe on its own — false on a synthetic send, which expresses case with
@@ -129,7 +147,7 @@ enum ClientMessage: Sendable, Equatable {
 
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
-        case type, x, y, button, pressed, clicks, dx, dy, code, caps, w, h
+        case type, x, y, button, pressed, clicks, dx, dy, unit, code, caps, w, h
         case target, text, id, scale, enabled, force
     }
 
@@ -144,9 +162,10 @@ extension ClientMessage: Encodable {
             try container.encode(button, forKey: .button)
             try container.encode(pressed, forKey: .pressed)
             try container.encode(clicks, forKey: .clicks)
-        case .wheel(let dx, let dy):
+        case .wheel(let dx, let dy, let unit):
             try container.encode(dx, forKey: .dx)
             try container.encode(dy, forKey: .dy)
+            try container.encode(unit, forKey: .unit)
         case .key(let code, let pressed, let caps):
             try container.encode(code, forKey: .code)
             try container.encode(pressed, forKey: .pressed)

@@ -910,11 +910,11 @@ final class AppModel: GatewaySessionSink {
         connection?.send(.mouseMove(x: x, y: y))
     }
 
-    func sendWheel(dx: Float, dy: Float) {
+    func sendWheel(dx: Float, dy: Float, unit: WheelUnit) {
         guard canSendInput else {
             return
         }
-        connection?.send(.wheel(dx: dx, dy: dy))
+        connection?.send(.wheel(dx: dx, dy: dy, unit: unit))
     }
 
     /// Gated here as well as in `KeyboardCapture`, which is the only caller: this

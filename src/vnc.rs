@@ -1135,6 +1135,11 @@ fn translate_input(
                 MouseButton::Left => 0x01,
                 MouseButton::Middle => 0x02,
                 MouseButton::Right => 0x04,
+                // RFB's mask has bits for buttons 8 and 9, but no server agrees
+                // on what they mean and the ones remotex talks to ignore them.
+                // Dropped rather than sent as a scroll notch, which is what
+                // those bits are on every server that does read them.
+                MouseButton::Back | MouseButton::Forward => return Vec::new(),
             };
             if pressed {
                 *button_mask |= bit;
@@ -1143,7 +1148,8 @@ fn translate_input(
             }
             pointer_event(*button_mask, *last_pos).to_vec()
         }
-        ClientMsg::Wheel { dx, dy } => {
+        // The unit is dropped: RFB has one notch and no way to say how big it is.
+        ClientMsg::Wheel { dx, dy, .. } => {
             // A wheel notch is a press+release of buttons 4-7 (mask bits 3-6):
             // 4 = up, 5 = down, 6 = left, 7 = right. One notch per event,
             // like the RDP engine.
@@ -1641,6 +1647,7 @@ async fn write_to<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::WheelUnit;
 
     // Vectors generated from a reference VNC auth implementation
     // (node:crypto des-ecb) with the challenge 00 01 .. 0f.
@@ -2132,7 +2139,7 @@ mod tests {
 
         // Scroll down = button 5 (0x10) press + release, on top of the held mask.
         let bytes = translate_input(
-            ClientMsg::Wheel { dx: 0.0, dy: 3.0 },
+            ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Pixel },
             &mut mask,
             &mut pos,
             &mut keys,

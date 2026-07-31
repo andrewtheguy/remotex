@@ -75,12 +75,30 @@ impl ClipboardSnapshot {
 }
 
 /// A mouse button, matching the DOM `MouseEvent.button` numbering.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+///
+/// `Back` and `Forward` are the side buttons of a five-button mouse. Only the
+/// rxa engine acts on them — macOS numbers them 3 and 4 exactly as the DOM does
+/// — while RDP and VNC carry no equivalent and drop them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
     Left,
     Middle,
     Right,
+    Back,
+    Forward,
+}
+
+/// What a wheel delta is measured in — the DOM's `deltaMode`, carried rather
+/// than normalised because only the client knows whether its scroll came from a
+/// trackpad (pixels) or a notched wheel (lines). Mirrors
+/// [`rxa_proto::msg::WheelUnit`], which is where it is acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WheelUnit {
+    Pixel,
+    Line,
+    Page,
 }
 
 /// Browser -> server: input events captured over the remote canvas.
@@ -98,8 +116,9 @@ pub enum ClientMsg {
         pressed: bool,
         clicks: u8,
     },
-    /// Scroll wheel delta.
-    Wheel { dx: f32, dy: f32 },
+    /// Scroll wheel delta, in `unit`. Only the rxa engine reads the unit: RDP
+    /// and VNC spend any nonzero delta as one notch whatever it was measured in.
+    Wheel { dx: f32, dy: f32, unit: WheelUnit },
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
     /// `caps` is the browser's authoritative CapsLock lock state at the moment
     /// of the event (`KeyboardEvent.getModifierState("CapsLock")`), so the
@@ -848,8 +867,23 @@ mod tests {
             }
         ));
         assert!(matches!(
-            serde_json::from_str::<ClientMsg>(r#"{"type":"wheel","dx":0.0,"dy":-2.5}"#).unwrap(),
-            ClientMsg::Wheel { dy, .. } if dy == -2.5
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"wheel","dx":0.0,"dy":-2.5,"unit":"pixel"}"#
+            )
+            .unwrap(),
+            ClientMsg::Wheel { dy, unit, .. } if dy == -2.5 && unit == WheelUnit::Pixel
+        ));
+        // The side buttons a five-button mouse has, which only the rxa engine
+        // can do anything with.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"mouseButton","button":"forward","pressed":true,"clicks":1}"#
+            )
+            .unwrap(),
+            ClientMsg::MouseButton {
+                button: MouseButton::Forward,
+                ..
+            }
         ));
         match serde_json::from_str::<ClientMsg>(
             r#"{"type":"key","code":"KeyA","pressed":false,"caps":true}"#,

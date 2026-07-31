@@ -896,7 +896,7 @@ async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
         r#"{"type":"viewport","w":2560,"h":1440}"#,
         r#"{"type":"mouseMove","x":101,"y":52}"#,
         r#"{"type":"mouseButton","button":"left","pressed":false,"clicks":2}"#,
-        r#"{"type":"wheel","dx":0.0,"dy":-100.0}"#,
+        r#"{"type":"wheel","dx":0.0,"dy":-100.0,"unit":"pixel"}"#,
         r#"{"type":"key","code":"KeyA","pressed":true,"caps":true}"#,
         r#"{"type":"key","code":"KeyA","pressed":false,"caps":true}"#,
     ] {
@@ -916,8 +916,13 @@ async fn browser_input_reaches_the_agent_in_order_and_untranslated() {
             pressed: false,
             clicks: 2,
         },
-        // DOM deltas, sign and units untouched — the agent owns that conversion.
-        GatewayMsg::Wheel { dx: 0.0, dy: -100.0 },
+        // DOM deltas, sign and units untouched — the agent owns that conversion,
+        // and the unit it needs to do so rides along.
+        GatewayMsg::Wheel {
+            dx: 0.0,
+            dy: -100.0,
+            unit: rxa_proto::msg::WheelUnit::Pixel,
+        },
         // The DOM code and the browser's authoritative CapsLock flag, verbatim.
         GatewayMsg::Key {
             code: "KeyA".to_owned(),

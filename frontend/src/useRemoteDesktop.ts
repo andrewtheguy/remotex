@@ -25,6 +25,7 @@ import {
   type RemoteClipboard,
   SLOT_COUNT,
   type TileMsg,
+  wheelUnitFromEvent,
 } from "./protocol.ts";
 import {
   attachTouchGestures,
@@ -1833,7 +1834,12 @@ export function useRemoteDesktop(
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      send({ type: "wheel", dx: e.deltaX, dy: e.deltaY });
+      send({
+        type: "wheel",
+        dx: e.deltaX,
+        dy: e.deltaY,
+        unit: wheelUnitFromEvent(e.deltaMode),
+      });
     };
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
     // Release everything still held so nothing sticks on the remote when focus

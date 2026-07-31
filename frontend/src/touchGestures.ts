@@ -318,7 +318,10 @@ export function attachTouchGestures(
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();
     deps.send({ type: "mouseMove", x: c.x, y: c.y });
-    deps.send({ type: "wheel", dx, dy });
+    // Lines, not pixels: these deltas are a notch each rather than a distance
+    // the finger travelled, and calling them pixels would scroll by a few of
+    // them and go nowhere.
+    deps.send({ type: "wheel", dx, dy, unit: "line" });
   }
 
   // Move the cursor by a finger step (screen px -> remote px through the

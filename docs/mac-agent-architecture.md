@@ -243,13 +243,35 @@ coordinates are clamped to the selected display and injected with Core Graphics.
 Screen Recording permission is required for capture and Accessibility
 permission is required for input.
 
-A press carries the client's own click count — `MouseEvent.detail` in the browser,
-`NSEvent.clickCount` in the macOS client — and the agent injects it as the event's
-`kCGMouseEventClickState`. That field is the whole of what makes a double-click a
-double-click on macOS, and it is not something the far end can work out for itself:
-left unset, every injected click counted as the first one, and nothing on any of the
-Mac's displays could be double-clicked. The count follows the press through a drag
-and is released with it (`crates/rxa-agent/src/input.rs`).
+Three things travel with the input that the agent could not work out for itself,
+all of them fields on the `CGEvent` it posts (`crates/rxa-agent/src/input.rs`):
+
+- **the click count**, from `MouseEvent.detail` in the browser and
+  `NSEvent.clickCount` in the macOS client, injected as `kCGMouseEventClickState`.
+  That field is the whole of what makes a double-click a double-click on macOS:
+  left unset, every injected click counted as the first one and nothing on any of
+  the Mac's displays could be double-clicked. The count follows the press through
+  a drag and is released with it, which is what makes dragging out of a
+  double-click select by word;
+- **the wheel unit**, from the DOM's `deltaMode` and from
+  `NSEvent.hasPreciseScrollingDeltas`, which decides between
+  `kCGScrollEventUnitPixel` and `kCGScrollEventUnitLine`. A trackpad's few-pixel
+  deltas and a wheel's few-line notches are the same numbers and an order of
+  magnitude apart in effect, so spending both as lines — which is what the agent
+  did before the unit existed — turned a glide into a series of jumps;
+- **the button number**, for anything past left and right. Middle, back and
+  forward are all `OtherMouse` events distinguished only by
+  `kCGMouseEventButtonNumber`, and the DOM numbers the two side buttons 3 and 4
+  exactly as macOS does. RDP and VNC have nowhere to put the side buttons and drop
+  them at the gateway.
+
+Two conversions have no client to ask and are made on the Mac. A move carries
+`kCGMouseEventDeltaX/Y` — how far the pointer travelled, which is what an app
+reading relative input sees instead of the position. And Shift turns a vertical
+wheel horizontal, but only for a client whose own OS has not done it already: a
+Mac client's delta arrives on the horizontal axis and is left alone, while a
+Windows or Linux client's arrives vertical and is moved across, because macOS
+applies that rule to hardware and not to what is posted.
 
 The agent polls `NSPasteboard.changeCount` because AppKit provides no clipboard
 change notification. It reads contents only after the counter changes and only

@@ -14,7 +14,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use crate::config::TargetConfig;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MouseButton, ServerMsg, Tile,
+    ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MouseButton, ServerMsg, Tile, WheelUnit,
     clipboard_fits,
 };
 
@@ -851,6 +851,8 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
                 MouseButton::Left => 0,
                 MouseButton::Middle => 1,
                 MouseButton::Right => 2,
+                MouseButton::Back => 3,
+                MouseButton::Forward => 4,
             },
             pressed: *pressed,
             // Floored, not trusted: a browser is free to send a zero and the
@@ -858,8 +860,18 @@ fn to_agent(msg: &ClientMsg, caps: Caps, scale: f32) -> Option<GatewayMsg> {
             clicks: (*clicks).max(1),
         },
         // Raw DOM deltas; the agent owns the sign and unit conversion, because
-        // only it can verify the direction against a real trackpad.
-        ClientMsg::Wheel { dx, dy } => GatewayMsg::Wheel { dx: *dx, dy: *dy },
+        // only it can verify the direction against a real trackpad. The unit
+        // rides along because the agent cannot infer it: a three-pixel glide and
+        // a three-line notch are the same number.
+        ClientMsg::Wheel { dx, dy, unit } => GatewayMsg::Wheel {
+            dx: *dx,
+            dy: *dy,
+            unit: match unit {
+                WheelUnit::Pixel => rxa_proto::msg::WheelUnit::Pixel,
+                WheelUnit::Line => rxa_proto::msg::WheelUnit::Line,
+                WheelUnit::Page => rxa_proto::msg::WheelUnit::Page,
+            },
+        },
         ClientMsg::Key {
             code,
             pressed,
@@ -1271,6 +1283,51 @@ mod tests {
         );
     }
 
+    // Back and forward keep the DOM's own numbering, which macOS happens to
+    // share — the agent turns 3 and 4 straight into `CGMouseButton`s.
+    #[test]
+    fn the_side_buttons_reach_the_agent_as_three_and_four() {
+        for (button, expected) in [(MouseButton::Back, 3), (MouseButton::Forward, 4)] {
+            assert_eq!(
+                to_agent(&ClientMsg::MouseButton {
+                    button,
+                    pressed: true,
+                    clicks: 1
+                }, NO_CAPS, UNSCALED),
+                Some(GatewayMsg::PointerButton {
+                    button: expected,
+                    pressed: true,
+                    clicks: 1
+                })
+            );
+        }
+    }
+
+    // The unit is the difference between a three-pixel glide and a three-line
+    // notch, so it has to survive the hop rather than be normalised here.
+    #[test]
+    fn the_wheel_unit_is_carried_rather_than_normalised() {
+        for (sent, expected) in [
+            (WheelUnit::Pixel, rxa_proto::msg::WheelUnit::Pixel),
+            (WheelUnit::Line, rxa_proto::msg::WheelUnit::Line),
+            (WheelUnit::Page, rxa_proto::msg::WheelUnit::Page),
+        ] {
+            assert_eq!(
+                to_agent(
+                    &ClientMsg::Wheel { dx: 1.0, dy: 2.0, unit: sent },
+                    NO_CAPS,
+                    UNSCALED
+                ),
+                Some(GatewayMsg::Wheel {
+                    dx: 1.0,
+                    dy: 2.0,
+                    unit: expected
+                }),
+                "{sent:?}"
+            );
+        }
+    }
+
     /// The count the client reports is what the agent must inject: it is the only
     /// end of the link that knows whether the person double-clicked, and macOS
     /// guessing it from arrival times is the bug this carries it for.
@@ -1298,8 +1355,16 @@ mod tests {
     #[test]
     fn wheel_deltas_pass_through_unmodified() {
         assert_eq!(
-            to_agent(&ClientMsg::Wheel { dx: 0.0, dy: -2.5 }, NO_CAPS, UNSCALED),
-            Some(GatewayMsg::Wheel { dx: 0.0, dy: -2.5 })
+            to_agent(
+                &ClientMsg::Wheel { dx: 0.0, dy: -2.5, unit: WheelUnit::Line },
+                NO_CAPS,
+                UNSCALED
+            ),
+            Some(GatewayMsg::Wheel {
+                dx: 0.0,
+                dy: -2.5,
+                unit: rxa_proto::msg::WheelUnit::Line
+            })
         );
     }
 

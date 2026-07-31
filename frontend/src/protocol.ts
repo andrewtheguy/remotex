@@ -5,7 +5,16 @@
 // apart by their first byte (binaryFrameKind below); rare control messages
 // (resize/error, the audio format) as JSON text frames with a `type` tag.
 
-export type MouseButton = "left" | "middle" | "right";
+// "back" and "forward" are the side buttons of a five-button mouse. Only an rxa
+// target acts on them — macOS numbers them 3 and 4 exactly as the DOM does — and
+// RDP and VNC drop them for want of anywhere to put them.
+export type MouseButton = "left" | "middle" | "right" | "back" | "forward";
+
+// What a wheel delta is measured in: the DOM's deltaMode, by name. Carried
+// because only the browser knows — the remote cannot tell a three-pixel trackpad
+// glide from a three-line wheel notch, and treating every delta as lines is what
+// made trackpad scrolling jump.
+export type WheelUnit = "pixel" | "line" | "page";
 
 // Browser -> server: input events captured over the remote canvas, plus
 // viewport reports (the desired remote desktop size, in the *remote's* pixels:
@@ -24,7 +33,7 @@ export type ClientMsg =
       pressed: boolean;
       clicks: number;
     }
-  | { type: "wheel"; dx: number; dy: number }
+  | { type: "wheel"; dx: number; dy: number; unit: WheelUnit }
   // `caps` carries KeyboardEvent.getModifierState("CapsLock") so the backend
   // knows the lock state authoritatively (it can't otherwise tell CapsLock is
   // already on at connect time). Synthetic sends without a real event pass
@@ -405,7 +414,22 @@ export function clickCount(detail: number): number {
   return Math.min(255, Math.max(1, Math.trunc(detail) || 1));
 }
 
-// Map DOM MouseEvent.button (0/1/2) to the protocol button name.
+// The unit a WheelEvent's deltas are in. WheelEvent.deltaMode is 0/1/2 for
+// pixels/lines/pages; an unknown value reads as pixels, which is what every
+// browser on macOS reports and so the safest thing to be wrong about.
+export function wheelUnitFromEvent(deltaMode: number): WheelUnit {
+  switch (deltaMode) {
+    case 1:
+      return "line";
+    case 2:
+      return "page";
+    default:
+      return "pixel";
+  }
+}
+
+// Map DOM MouseEvent.button to the protocol button name. 3 and 4 are the back
+// and forward buttons; anything past them has no agreed meaning on any platform.
 export function mouseButtonFromEvent(button: number): MouseButton | null {
   switch (button) {
     case 0:
@@ -414,6 +438,10 @@ export function mouseButtonFromEvent(button: number): MouseButton | null {
       return "middle";
     case 2:
       return "right";
+    case 3:
+      return "back";
+    case 4:
+      return "forward";
     default:
       return null;
   }

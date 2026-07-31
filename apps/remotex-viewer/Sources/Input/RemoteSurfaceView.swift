@@ -224,7 +224,7 @@ final class RemoteSurfaceView: NSView {
         ) else {
             return
         }
-        model.sendWheel(dx: delta.dx, dy: delta.dy)
+        model.sendWheel(dx: delta.dx, dy: delta.dy, unit: delta.unit)
     }
 
     // MARK: - Keyboard

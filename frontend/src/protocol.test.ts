@@ -7,7 +7,11 @@
 // click at all. Run with `bun test src/protocol.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clickCount } from "./protocol.ts";
+import {
+  clickCount,
+  mouseButtonFromEvent,
+  wheelUnitFromEvent,
+} from "./protocol.ts";
 
 test("an ordinary click run is passed through as the browser counted it", () => {
   assert.equal(clickCount(1), 1);
@@ -30,4 +34,25 @@ test("a detail of nothing is still one click", () => {
   assert.equal(clickCount(-1), 1);
   assert.equal(clickCount(Number.NaN), 1);
   assert.equal(clickCount(1.7), 1);
+});
+
+test("the side buttons of a five-button mouse are named, not dropped", () => {
+  // DOM 3 and 4 are back and forward, and macOS numbers them the same way.
+  assert.equal(mouseButtonFromEvent(0), "left");
+  assert.equal(mouseButtonFromEvent(1), "middle");
+  assert.equal(mouseButtonFromEvent(2), "right");
+  assert.equal(mouseButtonFromEvent(3), "back");
+  assert.equal(mouseButtonFromEvent(4), "forward");
+  // Past forward nothing has an agreed meaning on any platform.
+  assert.equal(mouseButtonFromEvent(5), null);
+});
+
+test("a wheel delta says which unit it is in", () => {
+  // The remote cannot tell a three-pixel trackpad glide from a three-line
+  // notch, and guessing lines is what made trackpad scrolling jump.
+  assert.equal(wheelUnitFromEvent(0), "pixel");
+  assert.equal(wheelUnitFromEvent(1), "line");
+  assert.equal(wheelUnitFromEvent(2), "page");
+  // Anything else is what every browser on macOS actually sends.
+  assert.equal(wheelUnitFromEvent(7), "pixel");
 });
