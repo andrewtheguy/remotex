@@ -37,7 +37,7 @@
 //! browser reports its lock state authoritatively on every key message, so it is
 //! read from there instead of inferred.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use log::{debug, info};
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -111,14 +111,17 @@ pub struct Injector {
     /// Last pointer position in global points, so a button or wheel event lands
     /// where the pointer actually is.
     pointer: CGPoint,
-    /// Mouse buttons currently down, so a move becomes a *drag* rather than a
+    /// Mouse buttons currently down, each with the click count of the press that
+    /// put it there. Held at all because a move becomes a *drag* rather than a
     /// plain move — the two are different `CGEventType`s and using the wrong one
     /// breaks text selection and window dragging.
-    buttons: HashSet<u8>,
-    /// Click count of the press in progress, zero while no button is down. A
-    /// drag carries the count of the press that started it — that is what makes
+    ///
+    /// Keyed by button rather than kept as one count for the session: a drag
+    /// carries the count of the press *it* started with, which is what makes
     /// dragging out of a double-click select by word rather than by character.
-    clicks: u8,
+    /// One shared count would let any other button pressed mid-drag overwrite it
+    /// and quietly demote the drag to single-click selection.
+    buttons: HashMap<u8, u8>,
 }
 
 impl Injector {
@@ -133,8 +136,7 @@ impl Injector {
                 x: origin.0,
                 y: origin.1,
             },
-            buttons: HashSet::new(),
-            clicks: 0,
+            buttons: HashMap::new(),
         }
     }
 
@@ -174,18 +176,31 @@ impl Injector {
     /// Move the pointer. Becomes a drag while a button is held.
     pub fn pointer_move(&mut self, x: u16, y: u16) {
         self.pointer = self.to_global_point(x, y);
+        let (event_type, button, clicks) = self
+            .drag()
+            // No button down: a plain move, which has no click to count.
+            .unwrap_or((CGEventType::MouseMoved, CGMouseButton::Left, 0));
+        self.post_click(event_type, button, clicks);
+    }
+
+    /// The drag a move becomes while a button is held — its event type, its
+    /// button, and the click count of the press that started *that* button.
+    /// `None` when nothing is down.
+    fn drag(&self) -> Option<(CGEventType, CGMouseButton, u8)> {
         // Left drag wins if several buttons are somehow down; that is what a
-        // real mouse reports too.
-        let (event_type, button) = if self.buttons.contains(&0) {
-            (CGEventType::LeftMouseDragged, CGMouseButton::Left)
-        } else if self.buttons.contains(&2) {
-            (CGEventType::RightMouseDragged, CGMouseButton::Right)
-        } else if self.buttons.contains(&1) {
-            (CGEventType::OtherMouseDragged, CGMouseButton::Center)
-        } else {
-            (CGEventType::MouseMoved, CGMouseButton::Left)
-        };
-        self.post_click(event_type, button, self.clicks);
+        // real mouse reports too. The count comes from the button chosen here,
+        // so a press on any other one leaves this drag as it found it.
+        [
+            (0u8, CGEventType::LeftMouseDragged, CGMouseButton::Left),
+            (2, CGEventType::RightMouseDragged, CGMouseButton::Right),
+            (1, CGEventType::OtherMouseDragged, CGMouseButton::Center),
+        ]
+        .into_iter()
+        .find_map(|(dom, event_type, cg_button)| {
+            self.buttons
+                .get(&dom)
+                .map(|&clicks| (event_type, cg_button, clicks))
+        })
     }
 
     /// Press or release a mouse button. `button` uses the DOM numbering (0/1/2),
@@ -219,15 +234,13 @@ impl Injector {
         // Zero would inject a click state of zero, which is a press that counts
         // as no click. The wire floors it too; this is the floor for every caller.
         let clicks = clicks.max(1);
+        // Recorded against this button and forgotten when this button comes up,
+        // so a drag reads its own press's count for as long as it lasts.
         if pressed {
-            self.buttons.insert(button);
+            self.buttons.insert(button, clicks);
         } else {
             self.buttons.remove(&button);
         }
-        // Held across the press so a drag out of it reports the same count, and
-        // cleared only once nothing is down: the release itself still carries the
-        // count its press had, which is what a real mouse reports.
-        self.clicks = if self.buttons.is_empty() { 0 } else { clicks };
         clicks
     }
 
@@ -334,7 +347,7 @@ impl Injector {
     /// otherwise leave Command or a mouse button stuck down on the Mac, which is
     /// both baffling and hard to clear without a keyboard.
     pub fn release_all(&mut self) {
-        for button in std::mem::take(&mut self.buttons) {
+        for button in std::mem::take(&mut self.buttons).into_keys() {
             // One click, whatever the press was: nobody is double-clicking a
             // button loose, and the count only matters to the app receiving it.
             self.pointer_button(button, false, 1);
@@ -568,33 +581,58 @@ mod tests {
         }
     }
 
-    // The count on the press is the count on its release, and `clicks` is what a
-    // drag in between reads — that is what makes dragging out of a double-click
+    /// The count a drag reports, or `None` when the move is a plain move.
+    fn drag_clicks(inj: &Injector) -> Option<u8> {
+        inj.drag().map(|(_, _, clicks)| clicks)
+    }
+
+    // The count on the press is the count on its release, and the drag in
+    // between reads it — that is what makes dragging out of a double-click
     // select by word rather than by character.
     #[test]
     fn a_press_leaves_its_click_count_for_the_drag_and_takes_it_back_on_release() {
         let mut inj = Injector::new(1.0, (0.0, 0.0));
-        assert_eq!(inj.clicks, 0, "no press, no count");
+        assert_eq!(drag_clicks(&inj), None, "no press, no drag");
 
         assert_eq!(inj.note_button(0, true, 2), 2);
-        assert_eq!(inj.clicks, 2, "what a drag from here reports");
+        assert_eq!(drag_clicks(&inj), Some(2), "what a drag from here reports");
 
         assert_eq!(inj.note_button(0, false, 2), 2, "the release counts too");
-        assert_eq!(inj.clicks, 0, "nothing held, nothing to inherit");
+        assert_eq!(drag_clicks(&inj), None, "nothing held, nothing to drag");
     }
 
-    // A second button going down mid-drag must not leave a count behind when it
-    // is the one released.
+    // A left double-click drag with another button chorded into it: the drag is
+    // still the left button's, so it keeps the left button's count throughout.
+    // One count shared across buttons would have let the right press overwrite
+    // it and silently demote the selection from by-word to by-character.
     #[test]
     fn the_count_survives_until_the_last_button_is_up() {
         let mut inj = Injector::new(1.0, (0.0, 0.0));
         inj.note_button(0, true, 2);
+        assert_eq!(drag_clicks(&inj), Some(2));
+
         inj.note_button(2, true, 1);
-        assert_eq!(inj.clicks, 1, "the most recent press is the one in progress");
+        assert_eq!(
+            drag_clicks(&inj),
+            Some(2),
+            "the left drag is untouched by a right press"
+        );
         inj.note_button(2, false, 1);
-        assert_eq!(inj.clicks, 1, "the left button is still down");
+        assert_eq!(drag_clicks(&inj), Some(2), "and by its release");
+
         inj.note_button(0, false, 2);
-        assert_eq!(inj.clicks, 0);
+        assert_eq!(drag_clicks(&inj), None);
+    }
+
+    // The left button wins a chord, so a right press *before* it does not become
+    // the drag — and does not lend it a count either.
+    #[test]
+    fn a_left_press_takes_over_a_drag_a_right_button_started() {
+        let mut inj = Injector::new(1.0, (0.0, 0.0));
+        inj.note_button(2, true, 1);
+        assert_eq!(drag_clicks(&inj), Some(1));
+        inj.note_button(0, true, 2);
+        assert_eq!(drag_clicks(&inj), Some(2), "now the left button's drag");
     }
 
     // Zero reaches `kCGMouseEventClickState` as a press that counts as no click.
@@ -602,7 +640,7 @@ mod tests {
     fn a_zero_click_count_is_floored_at_one() {
         let mut inj = Injector::new(1.0, (0.0, 0.0));
         assert_eq!(inj.note_button(0, true, 0), 1);
-        assert_eq!(inj.clicks, 1);
+        assert_eq!(drag_clicks(&inj), Some(1));
     }
 
     #[test]
