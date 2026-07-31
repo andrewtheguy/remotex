@@ -130,10 +130,10 @@ password = "change-me"
 # falls back to latin-1 and anything outside it becomes "?".
 #clipboard = false
 
-# Remote audio (opt-in): redirect this target's sound to the browser, where the
-# floating menu's Audio button plays it. RDP only — MS-RDPEA is the one audio
-# channel the gateway speaks, so this is refused on "vnc" and "rxa" rather than
-# accepted and left doing nothing.
+# Remote audio (opt-in): redirect this target's sound to whichever client asks for
+# it — the browser's floating-menu Audio button, or remotex.app's Remote > Enable
+# Audio. RDP only — MS-RDPEA is the one audio channel the gateway speaks, so this is
+# refused on "vnc" and "rxa" rather than accepted and left doing nothing.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
@@ -141,11 +141,11 @@ password = "change-me"
 # accepted; a server that offers no matching format sends nothing, and the log
 # says so.
 #
-# Two things worth knowing before switching this on. The browser decodes the Opus
-# the gateway sends with WebCodecs, which is **secure-context only** — so a gateway
-# reached over plain HTTP on a LAN address has no audio until it is behind TLS
-# (localhost is exempt). And the macOS viewer has no audio at all: audio is sent
-# only to a client that asks for it, and the viewer never does.
+# One thing worth knowing before switching this on, and it is the browser's alone:
+# it decodes the Opus the gateway sends with WebCodecs, which is **secure-context
+# only** — so a gateway reached over plain HTTP on a LAN address has no audio until
+# it is behind TLS (localhost is exempt). remotex.app has no such limit; it decodes
+# with AVAudioConverter over its own loopback gateway.
 #audio = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain and

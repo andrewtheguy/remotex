@@ -51,14 +51,31 @@ impl Embedded {
             .spawn()
             .expect("the gateway binary must be built");
 
+        // Taken rather than borrowed, so the reader below owns what is left of stdout
+        // after the handshake line.
+        let mut stdout = BufReader::new(child.stdout.take().expect("a piped stdout"));
         let mut line = String::new();
-        BufReader::new(child.stdout.as_mut().unwrap())
+        stdout
             .read_line(&mut line)
             .expect("the gateway must print a handshake line");
         let handshake: serde_json::Value =
             serde_json::from_str(line.trim_end()).unwrap_or_else(|e| {
                 panic!("the handshake must be one line of JSON, got {line:?}: {e}")
             });
+
+        // Both pipes are drained for the rest of the child's life. Nothing reads what
+        // arrives — the assertions are all made over HTTP — but a pipe nobody empties
+        // fills at 64 KiB and then blocks the gateway inside a `write`, which is a
+        // test that hangs rather than fails. Today's output is nowhere near that; the
+        // first test to drive real traffic through one of these would find out the
+        // hard way, at which point the failure looks like anything but this.
+        //
+        // Detached deliberately: each thread ends by itself when its pipe closes, and
+        // the child is killed on `Drop`.
+        std::thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+        }
         let port = handshake["port"].as_u64().expect("a port") as u16;
         let token = handshake["token"].as_str().expect("a token").to_owned();
         Self {

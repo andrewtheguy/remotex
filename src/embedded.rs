@@ -24,7 +24,7 @@
 
 use std::io::Read as _;
 use std::io::Write as _;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -40,12 +40,24 @@ use crate::config::{Audience, ConfigFile};
 /// complete handshake from a truncated one by parsing it, which matters because the
 /// alternative — reading fields until they run out — cannot distinguish "still
 /// coming" from "this build does not send it".
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct Handshake {
     /// The loopback port the kernel gave us, and the only one the app may use.
     pub port: u16,
     /// The bearer token for every request and for the `/ws` upgrade.
     pub token: String,
+}
+
+// Manual Debug, for the reason [`EmbeddedToken`]'s is manual: this is the other
+// holder of the same secret, and the one that exists to be *written somewhere*. A
+// derived Debug would put the token in any log line that ever formats a handshake,
+// which is a mistake nobody would notice making.
+impl std::fmt::Debug for Handshake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handshake")
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Handshake {
@@ -109,12 +121,15 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
     let token = EmbeddedToken::generate();
     let config = file.resolve_embedded(token.clone())?;
 
-    // One socket on one address. `serve` binds every address its host name
-    // resolves to, for reasons that do not apply here: the client is told a single
-    // port on a single loopback address by the line below, so there is no name to
-    // resolve and no second family for it to arrive on.
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port))
-        .context("cannot listen on 127.0.0.1")?;
+    // One socket on one address, and that address comes from the config rather than
+    // from a literal here — `resolve_embedded` is where it is decided, and two places
+    // saying `127.0.0.1` is one of them going stale the day the other changes.
+    //
+    // `serve` binds every address its host name resolves to, for reasons that do not
+    // apply here: the client is told a single port on a single address by the line
+    // below, so there is no name to resolve and no second family for it to arrive on.
+    let listener = TcpListener::bind((config.host.as_str(), config.port))
+        .with_context(|| format!("cannot listen on {}", config.host))?;
     let port = listener
         .local_addr()
         .context("cannot read the port the kernel gave us")?
@@ -133,7 +148,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
         .context("cannot write the handshake to stdout")?;
     drop(stdout);
 
-    info!("embedded gateway listening on http://127.0.0.1:{port}");
+    info!("embedded gateway listening on http://{}:{port}", config.host);
     info!("config: {}", instance.config_path().display());
     info!("{} target(s) available in the picker:", config.targets.len());
     for target in &config.targets {
