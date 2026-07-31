@@ -52,14 +52,14 @@ toml = "1"
 png = "0.18"
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
-# `opus` binds libopus through audiopus_sys, which builds it with cmake. C again,
-# and again not a new class of requirement — but unlike `ring` it *prefers a
-# system library*: on Linux/GNU audiopus_sys probes pkg-config first, which would
-# link libopus dynamically and leave the release binary needing libopus0 inside
-# packaging/Dockerfile's debian:trixie-slim, which does not ship it. So
-# packaging/build-tarball.sh sets LIBOPUS_STATIC/LIBOPUS_NO_PKG to force the
-# vendored static build on every runner.
-opus = "0.3"
+# `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
+# prebuilt static archive its sys crate downloads, instead of compiling the
+# vendored C through cmake. That deletes the whole LIBOPUS_STATIC/LIBOPUS_NO_PKG/
+# CMAKE_POLICY_VERSION_MINIMUM dance the packaging scripts used to carry: there is
+# no C build on this path any more, and nothing links a system `libopus.dylib`, so
+# the binary is self-contained on every runner without any env coaxing. The lib is
+# still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
+opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731073637-74aab76" }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # desktop WebSocket, which already delimits them, and the browser hands them
 # straight to a WebCodecs decoder — so an Ogg dependency would buy framing that is
