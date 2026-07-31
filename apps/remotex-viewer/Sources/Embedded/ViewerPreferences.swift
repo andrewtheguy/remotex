@@ -33,8 +33,8 @@ final class ViewerPreferences {
     /// Whether a new connection should follow this window's size where the target
     /// allows it. Default off. Set from the picker's "… if compatible" toggle and
     /// from the View menu's live "Auto Resize" alike — one remembered value, two
-    /// places to set it — and applied to a session only where `connected` (and, for
-    /// rxa, an owned display) says the target can honour it.
+    /// places to set it — and applied to a session only where `connected` says the
+    /// target can honour it.
     var autoResizeByDefault: Bool {
         didSet {
             guard autoResizeByDefault != oldValue else {

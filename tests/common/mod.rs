@@ -33,8 +33,7 @@ pub fn test_auth() -> remotex::auth::GatewayAuth {
 /// A directory that removes itself, for a test that needs somewhere to put a
 /// config file.
 ///
-/// Hand-rolled rather than a `tempfile` dependency, the same way
-/// `rxa-agent`'s `config::scratch::TempDir` is — and keyed on a counter as well as
+/// Hand-rolled rather than a `tempfile` dependency — and keyed on a counter as well as
 /// the pid, because one test binary makes several of these and two instance
 /// directories that turned out to be the same directory would quietly share a
 /// config.

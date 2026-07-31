@@ -8,9 +8,7 @@ import { useEffect, useState } from "react";
 // `connect` sends the pick over the live socket; `pendingTarget` is the profile
 // a pick is waiting on (buttons lock until the server answers). `connectError`
 // carries a failed connect's message so it shows here rather than on a
-// dead-end screen. `remoteBusy` is the one refusal with something to press: the
-// remote's own session is held by a different client, and connecting again with
-// `force` takes it. `onLogout` ends the web login; `onUnauthorized` fires if the
+// dead-end screen. `onLogout` ends the web login; `onUnauthorized` fires if the
 // target list itself comes back 401 (the login expired).
 
 interface TargetInfo {
@@ -20,25 +18,11 @@ interface TargetInfo {
   port: number;
 }
 
-// "12m" rather than "754s", at the precision a glance wants — the same three
-// steps the agent's own menu bar uses for the same number.
-function heldFor(seconds: number): string {
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 export default function TargetPicker({
   branding,
   connect,
   pendingTarget,
   connectError,
-  remoteBusy,
   autoResizeByDefault,
   audioByDefault,
   onAutoResizeByDefaultChange,
@@ -47,15 +31,9 @@ export default function TargetPicker({
   onUnauthorized,
 }: {
   branding: string;
-  connect: (name: string, force?: boolean) => void;
+  connect: (name: string) => void;
   pendingTarget: string | null;
   connectError: string | null;
-  remoteBusy: {
-    target: string;
-    holder: string;
-    heldSecs: number;
-    takenOver: boolean;
-  } | null;
   // The two remembered defaults, shown here as the one place they can be set
   // before a target is picked — and the same values the desktop menu's live
   // controls edit. "… if compatible" is deliberately not a per-target check: the
@@ -107,35 +85,6 @@ export default function TargetPicker({
         <h1>Pick a target</h1>
         {connectError && <p className="picker-error">{connectError}</p>}
         {loadError && <p className="picker-error">{loadError}</p>}
-        {remoteBusy && (
-          <div className="picker-busy">
-            {remoteBusy.takenOver ? (
-              // This session was running and somebody else claimed it. Say what
-              // happened rather than describing the target as busy: nothing was
-              // asked for here, and only the remote's session went — this login
-              // and this gateway are still ours, which is why the list is right
-              // here to pick from again.
-              <p>
-                Your session on{" "}
-                <strong>{remoteBusy.target || "that target"}</strong> was taken
-                over from {remoteBusy.holder}.
-              </p>
-            ) : (
-              <p>
-                <strong>{remoteBusy.target || "That target"}</strong> is in use
-                from {remoteBusy.holder}, for {heldFor(remoteBusy.heldSecs)}.
-              </p>
-            )}
-            <button
-              type="button"
-              className="picker-takeover"
-              onClick={() => connect(remoteBusy.target, true)}
-              disabled={pendingTarget !== null || !remoteBusy.target}
-            >
-              {remoteBusy.takenOver ? "Take it back" : "Take over"}
-            </button>
-          </div>
-        )}
         {targets === null && !loadError && (
           <p className="picker-hint">Loading targets…</p>
         )}

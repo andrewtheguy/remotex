@@ -12,11 +12,10 @@
 #   ├── install.sh
 #   └── uninstall.sh
 #
-# The gateway only. The macOS screen agent is a separate program with a separate
-# install story — a .dmg you drag into /Applications and open once, which then
-# registers itself — so it is built and shipped separately, by
-# packaging/macos/build-agent-app.sh and the mac-agent job in
-# .github/workflows/release.yml. Nothing here needs a Swift toolchain.
+# The gateway only. The macOS viewer app is a separate program with a separate
+# install story — a .dmg you drag into /Applications — built and shipped
+# separately by packaging/macos-viewer/build-viewer-app.sh and the mac-viewer
+# job in .github/workflows/release.yml. Nothing here needs a Swift toolchain.
 #
 # Run on each target platform you want to ship (macOS builds the mac tarball,
 # Linux builds the linux tarball) — this does not cross-compile.

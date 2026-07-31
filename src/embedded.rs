@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(instance.config_path(), PathBuf::from("/tmp/inst/remotex.toml"));
     }
 
-    /// The app's config is `[rxa]` and `[[targets]]`, and an empty one is a first
+    /// The app's config is `branding` and `[[targets]]`, and an empty one is a first
     /// launch rather than an error.
     #[test]
     fn the_embedded_audience_accepts_a_config_with_nothing_in_it() {
@@ -333,12 +333,12 @@ mod tests {
     }
 
     /// The whole point of `check`: it refuses what the gateway would refuse to
-    /// start on, not merely what fails to parse. An rxa target without the
-    /// gateway's own key is well-formed TOML and an unusable config.
+    /// start on, not merely what fails to parse. `audio` on a VNC target is
+    /// well-formed TOML and an unusable config.
     #[test]
     fn checking_goes_as_far_as_starting_would() {
-        let text = "[[targets]]\nname = \"mac\"\nprotocol = \"rxa\"\nhost = \"::1\"\n";
-        let error = check(text, Audience::Embedded).expect_err("no [rxa].private_key");
-        assert!(format!("{error:#}").contains("private_key"), "{error:#}");
+        let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nhost = \"::1\"\naudio = true\n";
+        let error = check(text, Audience::Embedded).expect_err("audio is rejected on vnc");
+        assert!(format!("{error:#}").contains("audio"), "{error:#}");
     }
 }

@@ -26,29 +26,16 @@ struct ConfigProblem: Error, Equatable {
 final class GatewayConfigStore {
     /// Checks candidate text, answering with the gateway's own complaint.
     typealias Validator = @Sendable (String) async -> Result<Void, ConfigProblem>
-    /// Runs a subcommand that prints one value (`gen-key`, `rxa-pubkey`).
-    typealias ValueReader = @Sendable ([String]) async -> String?
 
     let instance: InstanceDirectory
     private let validate: Validator
-    private let readValue: ValueReader
-    /// The last answer [`publicKey`] got, because deriving it costs a process.
-    ///
-    /// Three places show it now — the picker, About and the configuration panel — and
-    /// the picker's is on screen again after every target switch, so an uncached read
-    /// would spawn a gateway to re-derive a value that only a save can change. Only a
-    /// *successful* read is remembered, so a config with no identity yet is asked
-    /// again rather than being written off for the life of the app.
-    private var cachedPublicKey: String?
 
     init(
         instance: InstanceDirectory,
-        validate: @escaping Validator,
-        readValue: @escaping ValueReader
+        validate: @escaping Validator
     ) {
         self.instance = instance
         self.validate = validate
-        self.readValue = readValue
     }
 
     /// The store the app uses, over the gateway in this bundle.
@@ -62,13 +49,6 @@ final class GatewayConfigStore {
                 } catch {
                     return .failure(ConfigProblem(error.localizedDescription))
                 }
-            },
-            readValue: { arguments in
-                guard let output = try? await binary.run(arguments), output.succeeded else {
-                    return nil
-                }
-                let value = output.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                return value.isEmpty ? nil : value
             }
         )
     }
@@ -78,38 +58,16 @@ final class GatewayConfigStore {
         (try? String(contentsOf: instance.configURL, encoding: .utf8)) ?? Self.template
     }
 
-    /// Make sure there is a config to serve, minting this instance's `rxa` identity
-    /// the first time.
+    /// Make sure there is a config to serve.
     ///
-    /// The key is generated here rather than left for the user, because it is not a
-    /// choice: it is this gateway's name on the wire, every Mac agent needs its
-    /// public half, and the alternative is a first launch where the one protocol the
-    /// app was written for cannot be configured without a terminal.
+    /// A first launch has no targets, which is a valid config the picker reports as
+    /// an empty list — so this only has to put the template on disk where none exists.
     func bootstrapIfNeeded() async throws {
         try instance.create()
         guard !FileManager.default.fileExists(atPath: instance.configURL.path) else {
             return
         }
-        var text = Self.template
-        // A key that could not be minted is not a reason to refuse to start: the app
-        // still comes up, the picker still says there are no targets, and an `rxa`
-        // target added later is refused by the gateway for want of an identity —
-        // which is a message about the thing that is actually missing.
-        if let key = await readValue(["gen-key"]) {
-            text += "\n[rxa]\nprivate_key = \"\(key)\"\n"
-        }
-        try write(text)
-    }
-
-    /// This instance's `rxa` public key — the value a Mac's `authorized_gateways`
-    /// needs. `nil` when the config has no identity yet.
-    func publicKey() async -> String? {
-        if let cachedPublicKey {
-            return cachedPublicKey
-        }
-        let key = await readValue(["rxa-pubkey", "--config", instance.configURL.path])
-        cachedPublicKey = key
-        return key
+        try write(Self.template)
     }
 
     /// Check `text` and write it only if the gateway would serve it.
@@ -123,10 +81,6 @@ final class GatewayConfigStore {
         }
         do {
             try write(text)
-            // The saved text may carry a different `[rxa].private_key`, which makes
-            // this instance a different gateway on the wire — so the key on screen
-            // has to be re-derived rather than kept.
-            cachedPublicKey = nil
             return .success(())
         } catch {
             return .failure(
@@ -209,16 +163,6 @@ final class GatewayConfigStore {
         # protocol = "vnc"
         # host = "192.168.1.30"
         # vnc_password = "…"     # the VNC server's own password
-
-        # A Mac running remotex-agent:
-        #
-        # [[targets]]
-        # name = "mac"
-        # protocol = "rxa"
-        # host = "192.168.1.40"
-        # agent_public_key = "rxap…"   # from that Mac's agent: Settings > Copy
-        # resize = true
-        # clipboard = true
 
         """
 }

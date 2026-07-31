@@ -4,6 +4,7 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Transport policy shared by all engines: a dirty rectangle taller than this
 /// is split into strips before being sent, so a full-screen repaint doesn't
@@ -16,11 +17,63 @@ pub const STRIP_ROWS: u16 = 64;
 /// tags they do not know.
 pub const PROTOCOL_VERSION: u32 = 6;
 
-/// The clipboard transfer cap and its test, defined in `rxa-proto` so the
-/// browser link, the gateway and the Mac agent cannot drift apart on it (the
-/// agent crate can't see this file). Re-exported here because every other
-/// boundary in this crate reaches for `protocol::` first.
-pub use rxa_proto::msg::{MAX_CLIPBOARD_BYTES, clipboard_fits};
+/// Ceiling on one clipboard transfer, in bytes, in either direction.
+///
+/// Text over this is refused, not truncated: a truncated paste looks exactly
+/// like a complete one, so neither end can tell the rest is missing until
+/// something downstream is quietly wrong. A refusal is reported as one (the
+/// panels name the size and the limit), so the surprise happens at the
+/// clipboard, where it can be understood. Clipboard text rides the same link as
+/// live frames, so an accidental 200 MB copy must not stall a session.
+pub const MAX_CLIPBOARD_BYTES: usize = 65_536;
+
+/// Whether `text` fits one clipboard transfer. `str::len` is already UTF-8
+/// bytes, which is exactly what [`MAX_CLIPBOARD_BYTES`] bounds.
+pub fn clipboard_fits(text: &str) -> bool {
+    text.len() <= MAX_CLIPBOARD_BYTES
+}
+
+/// A display's backing scale as it travels on the wire: hundredths of a
+/// captured pixel per point of the desktop being captured — 100 for a 1× panel,
+/// 200 for a Retina one.
+pub const SCALE_ONE: u16 = 100;
+
+/// The largest scale worth believing. macOS has only ever shipped 1× and 2×
+/// panels; this leaves room for one more doubling and rejects the rest.
+const SCALE_MAX: u16 = 4 * SCALE_ONE;
+
+/// A wire `scale` as the ratio clients divide the framebuffer by.
+///
+/// Anything outside `SCALE_ONE..=SCALE_MAX` — a zero from a source that could
+/// not read the display's mode, a number no panel has — reads as 1×, which is
+/// the answer that leaves the framebuffer alone. A scale below 1 is as wrong as
+/// one above 4: it would blow the desktop up rather than shrink it.
+pub fn scale_ratio(scale: u16) -> f32 {
+    if (SCALE_ONE..=SCALE_MAX).contains(&scale) {
+        f32::from(scale) / f32::from(SCALE_ONE)
+    } else {
+        1.0
+    }
+}
+
+/// Wall-clock milliseconds for clipboard activity timestamps. Saturation only
+/// matters after the year 584,554,051 or if the system clock predates Unix.
+pub fn unix_time_ms() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis();
+    u64::try_from(elapsed).unwrap_or(u64::MAX)
+}
+
+/// Timestamp a newly observed clipboard change without moving backwards.
+///
+/// Advancing by at least one millisecond distinguishes repeated activity even
+/// when the text is identical or the wall clock has not advanced.
+pub fn next_clipboard_time(previous: Option<u64>) -> u64 {
+    let now = unix_time_ms();
+    previous.map_or(now, |last| now.max(last.saturating_add(1)))
+}
 
 /// A remote clipboard value held by an engine, plus when remotex last observed
 /// that clipboard change. `None` is honest for content that predates the
@@ -70,15 +123,14 @@ impl ClipboardSnapshot {
     }
 
     fn now(previous: Option<&Self>) -> u64 {
-        rxa_proto::next_clipboard_time(previous.and_then(|snapshot| snapshot.changed_at_ms))
+        next_clipboard_time(previous.and_then(|snapshot| snapshot.changed_at_ms))
     }
 }
 
 /// A mouse button, matching the DOM `MouseEvent.button` numbering.
 ///
-/// `Back` and `Forward` are the side buttons of a five-button mouse. Only the
-/// rxa engine acts on them — macOS numbers them 3 and 4 exactly as the DOM does
-/// — while RDP and VNC carry no equivalent and drop them.
+/// `Back` and `Forward` are the side buttons of a five-button mouse. No engine
+/// acts on them today — RDP and VNC both carry no equivalent and drop them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
@@ -91,8 +143,8 @@ pub enum MouseButton {
 
 /// What a wheel delta is measured in — the DOM's `deltaMode`, carried rather
 /// than normalised because only the client knows whether its scroll came from a
-/// trackpad (pixels) or a notched wheel (lines). Mirrors
-/// [`rxa_proto::msg::WheelUnit`], which is where it is acted on.
+/// trackpad (pixels) or a notched wheel (lines). Carried to the RDP and VNC
+/// engines but not yet acted on: both spend any nonzero delta as one notch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WheelUnit {
@@ -108,16 +160,17 @@ pub enum ClientMsg {
     /// Pointer moved to framebuffer coordinates (x, y).
     MouseMove { x: i32, y: i32 },
     /// A mouse button was pressed or released. `clicks` is the client's own click
-    /// count for the press — `MouseEvent.detail` in the browser, `NSEvent`'s
-    /// `clickCount` in the macOS client — which only the rxa engine has anywhere
-    /// to put: RDP and VNC carry button state alone and leave the guest to count.
+    /// count for the press — `MouseEvent.detail` in the browser — which still
+    /// rides the wire for any engine that has somewhere to put it, but neither
+    /// current engine does: RDP and VNC carry button state alone and leave the
+    /// guest to count.
     MouseButton {
         button: MouseButton,
         pressed: bool,
         clicks: u8,
     },
-    /// Scroll wheel delta, in `unit`. Only the rxa engine reads the unit: RDP
-    /// and VNC spend any nonzero delta as one notch whatever it was measured in.
+    /// Scroll wheel delta, in `unit`. No engine reads the unit today: RDP and
+    /// VNC spend any nonzero delta as one notch whatever it was measured in.
     Wheel { dx: f32, dy: f32, unit: WheelUnit },
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
     /// `caps` is the browser's authoritative CapsLock lock state at the moment
@@ -143,13 +196,12 @@ pub enum ClientMsg {
     /// 100 for a 1x screen, 200 for a Retina one. Sent on connect and again
     /// whenever the window moves to a screen of a different density.
     ///
-    /// A request that the remote render at this density, which two engines can
-    /// answer: RXA sets the density of a display the agent made, and RDP with
-    /// `resize` asks the host for twice the pixels at 200% UI scaling. Both
-    /// quantize to 1x or 2x at the same midpoint, and both report what they got
-    /// back through [`ServerMsg::Resize`]. Mac-owned displays, RDP without
-    /// `resize`, and VNC ignore it — clients send it unconditionally rather than
-    /// asking what the engine is, so being ignored is not a client error.
+    /// A request that the remote render at this density, which one engine can
+    /// answer: RDP with `resize` asks the host for twice the pixels at 200% UI
+    /// scaling. It quantizes to 1x or 2x at a midpoint and reports what it got
+    /// back through [`ServerMsg::Resize`]. RDP without `resize` and VNC ignore
+    /// it — clients send it unconditionally rather than asking what the engine
+    /// is, so being ignored is not a client error.
     HostScale { scale: u16 },
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
@@ -163,23 +215,7 @@ pub enum ClientMsg {
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
-    ///
-    /// `force` answers a [`ServerMsg::RemoteBusy`]: take the *remote's* session
-    /// slot from whoever holds it. It is not about this gateway's own slot, which
-    /// was claimed over HTTP before the socket existed (`force` on
-    /// `/api/session/claim`) — a browser can hold this gateway and still find the
-    /// Mac at the other end occupied by a different one. Only an `rxa` target has
-    /// anything to force; the other engines ignore it, having no session of their
-    /// own to contend for.
-    ///
-    /// Defaulted rather than required so a client that has never seen a busy
-    /// remote — or a bundle cached from before this existed — connects as it
-    /// always did.
-    Connect {
-        target: String,
-        #[serde(default)]
-        force: bool,
-    },
+    Connect { target: String },
     /// Tear the current session's engine down and return to the picker
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
@@ -193,8 +229,9 @@ pub enum ClientMsg {
     /// alongside the automatic pushes: a browser attaching mid-session has
     /// missed every one of them. See docs/architecture.md.
     ClipboardRequest,
-    /// Share the display identified by the last [`ServerMsg::Displays`].
-    /// Currently supported only by RXA.
+    /// Share the display identified by the last [`ServerMsg::Displays`]. No
+    /// engine acts on it yet — display picking over macOS Screen Sharing (ARD)
+    /// is a planned phase-2 feature (see docs/roadmap.md).
     SelectDisplay { id: u32 },
     /// Start or stop audio delivery for this attachment.
     Audio { enabled: bool },
@@ -288,9 +325,10 @@ pub mod audio {
     }
 }
 
-/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0). The
-/// fixed geometry gives the RXA agent stable change-detection and cache cells.
-/// Gateway RDP and VNC damage is not snapped to this grid.
+/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0). No
+/// engine snaps to it today — RDP and VNC damage is reported in its own
+/// rectangles — but the constants are retained for a future fixed-grid quality
+/// pass that would want stable change-detection and cache cells.
 pub const CELL_W: u16 = 320;
 /// See [`CELL_W`].
 pub const CELL_H: u16 = STRIP_ROWS;
@@ -301,9 +339,10 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// MIME type.
 ///
 /// The RDP and VNC engines decode a framebuffer and PNG-compress it here
-/// ([`Tile::from_rgb`]); the macOS agent chooses PNG or JPEG per tile on the
-/// Mac and the gateway relays those bytes untouched ([`Tile::encoded`]), which
-/// is why the format travels with the tile instead of being a constant.
+/// ([`Tile::from_rgb`]). A pass-through path also exists for a source that hands
+/// over frames already encoded as PNG or JPEG ([`Tile::encoded`]), which no
+/// current engine uses; it is why the format travels with the tile instead of
+/// being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
     /// Payload codec: [`Tile::FORMAT_PNG`] or [`Tile::FORMAT_JPEG`].
@@ -339,9 +378,9 @@ impl Tile {
         })
     }
 
-    /// Wrap an already-encoded image stream — the pass-through path for the
-    /// macOS agent (see [`crate::rxa`]), which encodes on the Mac so the
-    /// gateway never decodes and re-encodes a pixel.
+    /// Wrap an already-encoded image stream — the pass-through path for a source
+    /// that encodes elsewhere, so the gateway never decodes and re-encodes a
+    /// pixel. No current engine takes this path.
     pub fn encoded(format: u8, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> Self {
         Self {
             format,
@@ -440,15 +479,15 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
 }
 
 /// The `scale` on [`ServerMsg::Resize`] for a framebuffer whose pixels *are* the
-/// points of the desktop it shows: VNC always, and RDP or `rxa` until a client
-/// asks the remote for a density and the remote agrees.
+/// points of the desktop it shows: VNC always, and RDP until a client asks the
+/// remote for a density and the remote agrees.
 ///
 /// A remote with no density of its own is presented one point per pixel, and a
 /// client must not second-guess that by drawing the whole desktop at half size
 /// because the host screen happens to be Retina. What makes a scale of 2.0 honest
-/// instead is that the remote was *told*: `rxa` sets the density of a display the
-/// agent made, and RDP declares one to the host, so in both cases the extra pixels
-/// carry a UI drawn twice as large rather than the same UI stretched.
+/// instead is that the remote was *told*: RDP declares a density to the host, so
+/// the extra pixels carry a UI drawn twice as large rather than the same UI
+/// stretched.
 pub const UNSCALED: f32 = 1.0;
 
 /// One of the remote's displays, as a client lists it for the user to pick from.
@@ -459,7 +498,8 @@ pub const UNSCALED: f32 = 1.0;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
-    /// [`ClientMsg::SelectDisplay`]. For `rxa` it is a `CGDirectDisplayID`.
+    /// [`ClientMsg::SelectDisplay`]. No current engine emits a display list;
+    /// per-display selection is a phase-2 feature (see docs/roadmap.md).
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,
@@ -502,45 +542,12 @@ pub enum ServerMsg {
     /// A fatal session error the client should surface. The session then
     /// returns to the picker, so the browser shows this against the picker.
     Error { message: String },
-    /// The remote refused the session because a different client holds it, and a
-    /// person can choose to take it over. Sent instead of [`ServerMsg::Error`],
-    /// and followed by the same return to the picker — so the client shows it
-    /// there, against the target it just asked for, with the takeover offered as
-    /// [`ClientMsg::Connect`] carrying `force`.
-    ///
-    /// Its own variant rather than an `Error` with a recognisable string, because
-    /// the client has to *decide* to offer that button: everything else on this
-    /// path is text a person reads and cannot act on.
-    ///
-    /// Only `rxa` produces it — the macOS agent has a session slot of its own (see
-    /// `rxa_proto::msg::GatewayMsg::Claim`). RDP and VNC servers arbitrate their
-    /// own sessions and tell us nothing we could offer a choice about.
-    ///
-    /// `taken_over` distinguishes the two ways to arrive here, which are opposite
-    /// experiences and must not read the same:
-    ///
-    /// - `false` — this client asked for a target somebody else is using. It was
-    ///   refused, and nothing it had was disturbed.
-    /// - `true` — this client *had* the session and another one took it. Nothing
-    ///   was asked for; something was lost. Only the remote's session went: the
-    ///   login, this gateway's slot and the socket are all still this client's,
-    ///   which is why it lands back on the target list rather than anywhere else.
-    ///
-    /// Both leave a client on the picker with the same button, but "in use, take
-    /// over?" told to somebody who just lost their desktop reads as a refusal of a
-    /// connection they never made.
-    RemoteBusy {
-        holder: String,
-        held_secs: u32,
-        taken_over: bool,
-    },
     /// No target is selected: show the post-login target picker. Sent on attach
     /// to an idle slot, on disconnect ("switch target"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
     Picker,
-    /// A live target and its client-visible capabilities. RXA resize also
-    /// depends on whether [`ServerMsg::Displays`] marks the active display as
-    /// agent-created. `audio` reports capability, not whether sound is arriving.
+    /// A live target and its client-visible capabilities. `audio` reports
+    /// capability, not whether sound is arriving.
     Connected {
         name: String,
         protocol: &'static str,
@@ -622,13 +629,6 @@ enum ControlMsg<'a> {
         hy: u16,
     },
     Error { message: &'a str },
-    RemoteBusy {
-        holder: &'a str,
-        #[serde(rename = "heldSecs")]
-        held_secs: u32,
-        #[serde(rename = "takenOver")]
-        taken_over: bool,
-    },
     Picker,
     Connected {
         name: &'a str,
@@ -705,15 +705,6 @@ impl ServerMsg {
                 },
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
-            ServerMsg::RemoteBusy {
-                holder,
-                held_secs,
-                taken_over,
-            } => control(&ControlMsg::RemoteBusy {
-                holder,
-                held_secs: *held_secs,
-                taken_over: *taken_over,
-            }),
             ServerMsg::Picker => control(&ControlMsg::Picker),
             ServerMsg::Connected {
                 name,
@@ -808,8 +799,8 @@ mod tests {
             .unwrap(),
             ClientMsg::Wheel { dy, unit, .. } if dy == -2.5 && unit == WheelUnit::Pixel
         ));
-        // The side buttons a five-button mouse has, which only the rxa engine
-        // can do anything with.
+        // The side buttons a five-button mouse has, which no engine acts on
+        // today.
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
                 r#"{"type":"mouseButton","button":"forward","pressed":true,"clicks":1}"#
@@ -936,7 +927,7 @@ mod tests {
         }
         match (ServerMsg::Connected {
             name: "mac".to_owned(),
-            protocol: "rxa",
+            protocol: "vnc",
             resize: false,
             clipboard: true,
             audio: false,
@@ -945,7 +936,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true,"audio":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"clipboard":true,"audio":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1098,7 +1089,7 @@ mod tests {
     fn repeated_clipboard_activity_advances_the_timestamp_even_for_identical_text() {
         let first = ClipboardSnapshot {
             text: "same text".to_owned(),
-            changed_at_ms: Some(rxa_proto::unix_time_ms().saturating_add(1_000)),
+            changed_at_ms: Some(unix_time_ms().saturating_add(1_000)),
             oversized_bytes: None,
         };
         let second = ClipboardSnapshot::changed("same text".to_owned(), Some(&first));
@@ -1334,7 +1325,7 @@ mod tests {
     fn encode_cost_against_hash_cost() {
         use std::time::Instant;
 
-        // A full-width Retina strip, the unit the rxa agent ships today.
+        // A full-width Retina strip.
         let (sw, sh) = (3200u16, 64u16);
         let runs = 20;
 

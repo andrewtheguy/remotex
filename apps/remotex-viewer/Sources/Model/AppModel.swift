@@ -61,8 +61,8 @@ final class AppModel: GatewaySessionSink {
     /// home screen, which is the screen that answers it.
     ///
     /// Everything that differs between the two branches reads this: whether there is
-    /// a process of ours to restart, whether the configuration panel and the rxa key
-    /// describe anything the session can see, and what a 401 means.
+    /// a process of ours to restart, whether the configuration panel describes
+    /// anything the session can see, and what a 401 means.
     private(set) var chosen: GatewayChoice?
     /// A launch, a login or a relaunch is in flight, so the controls that would start
     /// another are locked.
@@ -170,14 +170,6 @@ final class AppModel: GatewaySessionSink {
     /// even if it repeats the number.
     @ObservationIgnored
     private var lastHostScale: UInt16?
-    /// Whether the remembered auto-resize default still owes this connection its
-    /// effect. Set on `connected` for an rxa target, whose permission is not
-    /// settled until a `displays` message names an owned display, and cleared the
-    /// first time one does — so a later switch onto and off a real screen does not
-    /// keep re-imposing a mode the user may since have turned off. VNC and RDP
-    /// settle at `connected`, so they never leave it set.
-    @ObservationIgnored
-    private var pendingAutoResizeSeed = false
     /// This screen's density in hundredths, for the Display menu to show beside
     /// the remote's. Nothing about how the desktop is presented reads it — that
     /// comes from `session.remoteScale` alone, see `RemoteGeometry`. Observed
@@ -267,14 +259,12 @@ final class AppModel: GatewaySessionSink {
         chosen?.isEmbedded ?? false
     }
 
-    /// Whether **Configuration…** and the rxa public key mean anything right now.
+    /// Whether **Configuration…** means anything right now.
     ///
-    /// They describe the gateway in this bundle: the file is the one
-    /// `serve-embedded` reads, and the key is the one a Mac agent has to authorize
-    /// before *this app's* gateway may connect to it. Against a remote gateway
-    /// neither is part of the session — its targets and its key are its own, edited
-    /// wherever it runs — so offering them would be offering to edit a file nothing
-    /// on screen is reading, and showing a key nothing is going to present.
+    /// It describes the gateway in this bundle: the file is the one
+    /// `serve-embedded` reads. Against a remote gateway it is not part of the
+    /// session — its targets are its own, edited wherever it runs — so offering it
+    /// would be offering to edit a file nothing on screen is reading.
     var canEditConfiguration: Bool {
         config != nil && usesEmbeddedGateway
     }
@@ -342,9 +332,9 @@ final class AppModel: GatewaySessionSink {
     }
 
     /// Whether the remote is *actually* following this window, which takes both
-    /// halves. An rxa session that switched onto one of the Mac's own screens with
-    /// the mode left on has the tick and no permission, and that display is holding
-    /// as still as any other — so it can be fitted to.
+    /// halves: the permission and the mode. A session with resize denied is not
+    /// following the window whatever the mode says, so that display is holding as
+    /// still as any other — and can be fitted to.
     private var followsWindow: Bool {
         session.canResize && session.autoResize
     }
@@ -614,8 +604,8 @@ final class AppModel: GatewaySessionSink {
         configurationRequests += 1
     }
 
-    /// Ask the window to open the About panel — which version this is, which instance
-    /// it runs, and the gateway key a Mac has to authorize.
+    /// Ask the window to open the About panel — which version this is and which
+    /// instance it runs.
     func showAbout() {
         aboutRequests += 1
     }
@@ -825,9 +815,6 @@ final class AppModel: GatewaySessionSink {
             // `AudioOutput.update(available:)` handles — a reconnect keeps playing.
             audio.reset()
             viewportPolicy = ViewportPolicy()
-            // No connection left to owe the resize default to; the next pick sets
-            // this again from `connected`.
-            pendingAutoResizeSeed = false
             updateClipboardEnablement()
             updateAudioAvailability()
             clipboard.failPendingFetch()
@@ -846,18 +833,11 @@ final class AppModel: GatewaySessionSink {
             let userInitiated = session.pendingTarget != nil
             session.pendingTarget = nil
             setConnectError(nil)
-            // The remote is ours after all, so an offer to take it over has nothing
-            // left to refer to.
-            session.remoteBusy = nil
-            // The operator's permission. RXA remains denied until a display list
-            // identifies an owned display; VNC and RDP are settled here. A fresh
+            // The operator's permission, settled here for every protocol. A fresh
             // policy also puts the mode back to manual, which is what makes a
             // reattach, a target switch and a takeover all leave the remote's own
             // size alone.
-            viewportPolicy = ViewportPolicy(
-                protocolName: payload.protocolName,
-                resize: payload.resize
-            )
+            viewportPolicy = ViewportPolicy(resize: payload.resize)
             publishViewportPolicy()
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
@@ -893,16 +873,12 @@ final class AppModel: GatewaySessionSink {
             connection?.resetViewportMemo()
             // Seed the remembered auto-resize default now that the dedupes are
             // clear — its first act is a viewport report, and reporting before the
-            // reset above would have it swallowed. VNC and RDP have their permission
-            // settled, so the default takes or does not take effect here; rxa's
-            // permission waits on a `displays` naming an owned display, so defer to
-            // the first one. Where the target allows no resize, neither path fires
-            // and the default silently does nothing.
+            // reset above would have it swallowed. Permission is settled at connect
+            // for every protocol, so the default takes or does not take effect here;
+            // where the target allows no resize, this does not fire and the default
+            // silently does nothing.
             if autoResizeByDefault, session.canResize {
                 applyAutoResize(true)
-                pendingAutoResizeSeed = false
-            } else {
-                pendingAutoResizeSeed = autoResizeByDefault
             }
             // And this window's screen density, so a display the agent made comes
             // up matching the screen it is about to be shown on rather than at
@@ -924,27 +900,6 @@ final class AppModel: GatewaySessionSink {
             let switched = session.activeDisplayID != active
             session.displays = displays
             session.activeDisplayID = active
-            // Whether "Resize to Window" is offered is a question about *this*
-            // display, not only about the target: a Mac's own panel is never
-            // resized from here, and the user can switch onto and off an
-            // agent-made one from the Display menu at any point. An `active` the
-            // list does not contain — a screen unplugged between the two, which
-            // this message allows — reads as not virtual, leaving the item greyed
-            // rather than offering to resize a display nobody here can name.
-            viewportPolicy.sharing(
-                virtualDisplay: displays.first { $0.id == active }?.isVirtual ?? false
-            )
-            // Harmless for RDP and VNC, whose policy the call above cannot touch:
-            // it writes back the values that are already there.
-            publishViewportPolicy()
-            // The remembered auto-resize default asked to follow the window and this
-            // is the first owned display that can honour it — apply it once, then
-            // drop the debt, so a later switch onto and off a real screen does not
-            // re-impose a mode the user may since have turned off.
-            if pendingAutoResizeSeed, session.canResize {
-                pendingAutoResizeSeed = false
-                applyAutoResize(true)
-            }
             // A different display is being shared, and the density was only ever
             // reported *at* the previous one — the agent acts on it for the display
             // it is currently sharing, so a switch onto one the agent made would
@@ -968,22 +923,6 @@ final class AppModel: GatewaySessionSink {
             // Not fatal — the session returns to the picker, which is where this
             // is shown, and it must survive that `picker` arriving.
             setConnectError(message)
-            session.pendingTarget = nil
-
-        case .remoteBusy(let holder, let heldSecs, let takenOver):
-            // Not an error: the remote answered correctly and said who has it. Like
-            // `error` it must survive the `picker` that follows, and unlike `error`
-            // it carries an action — the picker offers to take the remote over. The
-            // target is the one this session was for, which is the pick still
-            // pending on the ordinary refusal and the connected one when somebody
-            // took the remote from us mid-session.
-            setConnectError(nil)
-            session.remoteBusy = .init(
-                target: session.pendingTarget ?? session.connectedTarget ?? "",
-                holder: holder,
-                heldSecs: heldSecs,
-                takenOver: takenOver
-            )
             session.pendingTarget = nil
 
         case .clipboard(let payload):
@@ -1102,11 +1041,11 @@ final class AppModel: GatewaySessionSink {
     /// The density of the screen this window is on, reported to the remote.
     ///
     /// Called on connect and whenever the window changes screen. Deduped because
-    /// acting on it is expensive at the other end — a WindowServer reconfigure on
-    /// an `rxa` Mac, a full reactivation on an RDP host that allows resize — so
-    /// re-sending a value it already matches costs a relayed desktop or a repaint
-    /// for nothing. Unlike the viewport there is no debounce: a window changes
-    /// screen once, discretely, where a drag-resize reports every frame.
+    /// acting on it can be expensive at the other end — a full reactivation on an
+    /// RDP host that allows resize, say — so re-sending a value it already matches
+    /// costs a repaint for nothing. Unlike the viewport there is no debounce: a
+    /// window changes screen once, discretely, where a drag-resize reports every
+    /// frame.
     func reportHostScale() {
         sendHostScale()
     }
@@ -1134,17 +1073,15 @@ final class AppModel: GatewaySessionSink {
 
     /// Pick a target from the picker.
     ///
-    /// `force` takes the *remote's* session from whoever holds it, and is how the
-    /// picker's Take over answers a `remoteBusy`. Nothing to do with `takeOver()`
-    /// below, which claims this gateway's slot from another client of it.
-    func connect(to target: String, force: Bool = false) {
+    /// Nothing to do with `takeOver()` below, which claims this gateway's slot from
+    /// another client of it.
+    func connect(to target: String) {
         guard session.screen == .picker, session.pendingTarget == nil else {
             return
         }
         session.pendingTarget = target
         setConnectError(nil)
-        session.remoteBusy = nil
-        connection?.send(.connect(target: target, force: force))
+        connection?.send(.connect(target: target))
     }
 
     func switchTarget() {

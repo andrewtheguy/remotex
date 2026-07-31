@@ -4,8 +4,8 @@ enum MouseButton: String, Sendable, Codable, CaseIterable {
     case left
     case middle
     case right
-    /// The side buttons of a five-button mouse. Only an rxa target acts on them;
-    /// RDP and VNC have nowhere to put them and drop them at the gateway.
+    /// The side buttons of a five-button mouse. RDP and VNC have nowhere to put
+    /// them and drop them at the gateway, so nothing acts on them today.
     case back
     case forward
 }
@@ -38,9 +38,9 @@ enum WheelUnit: String, Sendable, Codable, CaseIterable {
 enum ClientMessage: Sendable, Equatable {
     case mouseMove(x: Int32, y: Int32)
     /// `clicks` is `NSEvent.clickCount` — 1 for a single click, 2 for the second
-    /// of a double. Carried because the rxa agent injects it as the macOS event's
-    /// click state, and without it nothing on the remote counts a double-click at
-    /// all; a synthetic send passes 1, which is what a lone click is worth.
+    /// of a double. Carried so an engine can inject it as the platform's click
+    /// state, without which nothing on the remote counts a double-click at all; a
+    /// synthetic send passes 1, which is what a lone click is worth.
     case mouseButton(button: MouseButton, pressed: Bool, clicks: Int)
     case wheel(dx: Float, dy: Float, unit: WheelUnit)
     /// `code` is a DOM `KeyboardEvent.code`; see `src/keymap.rs` for the set the
@@ -50,12 +50,11 @@ enum ClientMessage: Sendable, Equatable {
     case key(code: String, pressed: Bool, caps: Bool)
     /// How much room the viewer has, in the *remote's* pixels — its room in points
     /// times the density the remote draws at. Followed continuously by VNC, acted on
-    /// only by request for RDP, ignored entirely by rxa.
+    /// only by request for RDP.
     case viewport(w: UInt16, h: UInt16)
     /// `viewport` with no size on it: put the remote back at whatever size the far
     /// side considers its default — a target's configured `width`/`height` for RDP
-    /// and VNC, the point size the agent created its display at for rxa. Gated on
-    /// the same target opt-in and acted on by the same three engines.
+    /// and VNC. Gated on the same target opt-in and acted on by the same engines.
     ///
     /// It exists for a client whose window is not a shape a desktop can usefully
     /// be, which is the browser on a phone rather than anything here — this viewer
@@ -68,12 +67,7 @@ enum ClientMessage: Sendable, Equatable {
     /// one itself on reattach, so this is the manual escape hatch.
     case refresh
     /// Pick a target and start its session.
-    ///
-    /// `force` takes the *remote's* session slot from whoever holds it, answering a
-    /// `remoteBusy`. It says nothing about this gateway's slot, which was claimed
-    /// over HTTP before this socket existed — and only an rxa target has a session
-    /// of its own to contend for.
-    case connect(target: String, force: Bool)
+    case connect(target: String)
     case disconnect
     case clipboard(text: String)
     case clipboardRequest
@@ -82,8 +76,8 @@ enum ClientMessage: Sendable, Equatable {
     ///
     /// The counterpart to `viewport` above, and the contrast is the point: a
     /// remote's *resolution* belongs to the machine running it, while *which of
-    /// its screens to look at* is only a question for the person looking. Only
-    /// rxa answers it.
+    /// its screens to look at* is only a question for the person looking.
+    /// Scaffolding for a future phase; no engine answers it today.
     case selectDisplay(id: UInt32)
     /// The density of the screen this window is on, in hundredths — 100 for a 1x
     /// screen, 200 for a Retina one. Sent on connect and whenever the window
@@ -92,8 +86,8 @@ enum ClientMessage: Sendable, Equatable {
     /// It changes nothing about how the remote is drawn here: the framebuffer view
     /// is laid out at the remote's own point size and AppKit rasterizes that for
     /// whichever screen it is on (see `RemoteGeometry`). This asks the remote to
-    /// *have* the density that makes the result one pixel per pixel. Only rxa acts
-    /// on it, and only for a display the agent made.
+    /// *have* the density that makes the result one pixel per pixel. No engine acts
+    /// on it today.
     case hostScale(scale: UInt16)
     /// "I lost the tiles you told me to remember." Sent when a cached tile will
     /// not decode, or when a reference names a slot this client does not hold.
@@ -148,7 +142,7 @@ enum ClientMessage: Sendable, Equatable {
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
         case type, x, y, button, pressed, clicks, dx, dy, unit, code, caps, w, h
-        case target, text, id, scale, enabled, force
+        case target, text, id, scale, enabled
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -173,9 +167,8 @@ extension ClientMessage: Encodable {
         case .viewport(let w, let h):
             try container.encode(w, forKey: .w)
             try container.encode(h, forKey: .h)
-        case .connect(let target, let force):
+        case .connect(let target):
             try container.encode(target, forKey: .target)
-            try container.encode(force, forKey: .force)
         case .clipboard(let text):
             try container.encode(text, forKey: .text)
         case .selectDisplay(let id):

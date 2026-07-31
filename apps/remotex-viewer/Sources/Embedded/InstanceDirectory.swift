@@ -31,7 +31,6 @@ struct InstanceDirectory: Equatable, Sendable {
     /// no flag — it is its own app, with its own name, icon and instance.
     ///
     /// The shipped bundle is named `remotex`, so this is exactly where it always was.
-    /// The agent's own directory beside it is `remotex-agent`, and the names stay apart.
     static var defaultURL: URL {
         URL.applicationSupportDirectory.appending(
             path: instanceName(ofBundleNamed: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String),

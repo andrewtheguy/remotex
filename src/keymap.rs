@@ -399,14 +399,10 @@ mod tests {
     }
 
     #[test]
-    fn native_viewer_keys_are_supported_by_every_backend() {
+    fn native_viewer_keys_are_supported_by_both_backends() {
         for code in NATIVE_VIEWER_CODES {
             assert!(scancode(code).is_some(), "RDP does not map {code}");
             assert!(keysym(code, false).is_some(), "VNC does not map {code}");
-            assert!(
-                rxa_proto::keymap::mac_keycode(code).is_some(),
-                "RXA does not map {code}"
-            );
         }
     }
 

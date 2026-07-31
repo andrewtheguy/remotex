@@ -33,7 +33,6 @@ export default function RemoteDesktop({
     status,
     mode,
     connectError,
-    remoteBusy,
     pendingTarget,
     size,
     hostScale,
@@ -154,7 +153,6 @@ export default function RemoteDesktop({
           connect={connect}
           pendingTarget={pendingTarget}
           connectError={connectError}
-          remoteBusy={remoteBusy}
           autoResizeByDefault={autoResizeByDefault}
           audioByDefault={audioByDefault}
           onAutoResizeByDefaultChange={setAutoResizeByDefault}

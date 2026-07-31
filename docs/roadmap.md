@@ -8,72 +8,51 @@ is the only place they can be read in context.
 
 ## Planned
 
-### macOS login-window service
+### macOS login-window and unattended access
 
-The agent's LaunchAgent is per-user and runs only in the signed-in user's Aqua
-session, so the agent stops at logout and cannot be reached from the macOS login
-screen. Currently if the screen is locked, the user must unlock it before remotex can connect. 
+The gateway reaches a Mac through its built-in Screen Sharing over VNC, in the
+signed-in user's Aqua session. So the desktop cannot be reached from the macOS
+login screen, and if the screen is locked the user must unlock it at the Mac
+before remotex can connect.
 
 The shape of an answer is established: RealVNC's
 [Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes)
 and RustDesk's installed-service mode both provide login-window access, by
 installing launch components that declare the `LoginWindow` session type
-alongside `Aqua`, rather than a per-user agent in `~/Library/LaunchAgents`.
+alongside `Aqua`, rather than running only in a per-user Aqua session.
 
 Nothing past that shape is settled, and none of it should be designed here first.
 What has to be measured on a real Mac: how the single listener is held across the
-login transition and fast user switching, where a config and private key readable by both
+login transition and fast user switching, where a configuration readable by both
 the configured user and the UID 0 login-window process should live, and whether
-Screen Recording and Accessibility grants reach the signed app in the
+Screen Recording and Accessibility grants reach the service in the
 `LoginWindow` session at all.
 
 FileVault is the one boundary none of it crosses: no remote-access process runs
 before pre-boot disk unlock.
 
-### Input fidelity on macOS
+### Phase 2 — Apple Screen Sharing display picking and high performance
 
-Injecting input is not the same as having input, and the gap is made of fields
-and timings that no amount of looking at the screen reveals — a click state that
-is never set looks exactly like a click. These are the ones known to be missing,
-found by reading RustDesk's macOS injection path (`libs/enigo/src/macos/macos_impl.rs`
-and `src/server/input_service.rs` in that project), which is the closest thing to
-a reference implementation of the same job.
+macOS Screen Sharing can natively pick a single display: the stock Screen Sharing
+app shows a Both Displays / Display 1 / Display 2 choice. The gateway does not do
+this yet. Today it shares the Mac's real screen(s) as-is over standard screen
+sharing; teaching the VNC/ARD path to enumerate the Mac's displays and bind to one
+is phase 2. The `ClientMsg::SelectDisplay` / `ServerMsg::Displays` wire is kept as
+scaffolding for exactly that, and `src/vnc.rs` currently returns an empty display
+list.
 
-None is known to have bitten anyone here yet. They are recorded because the cost
-of finding each one from a bug report is high and the cost of writing it down is
-not.
+"High-performance" screen sharing goes one step further: it spins up a resizable
+virtual display and allows dynamic resize the way RDP does. That is where `resize`
+on an `ard` target becomes real — it is rejected at configuration time today.
 
-**Relative pointer motion has no path of its own.** A move now carries
-`kCGMouseEventDeltaX/Y` alongside where it landed, which is what an app reading
-relative input sees, so a pointer-locked game or 3D viewer is no longer looking at
-a motionless mouse. What is still missing is the mode: the browser's Pointer Lock
-API on the client, a wire message carrying a delta rather than a position, and a
-per-session flag saying which of the two a client is sending. Without it the
-pointer still walks to the edge of the remote screen and stops. RustDesk models
-this as a separate `MOUSE_TYPE_MOVE_RELATIVE` message with the absolute one, which
-is the shape to copy if it is ever wanted.
+### A virtual-display-only macOS utility (deferred, low priority)
 
-**CapsLock is expressed as a flag, not as the lock.** Every injected event carries
-`MaskAlphaShift` when the client says CapsLock is on
-(`crates/rxa-agent/src/input.rs`), which produces the right characters but leaves
-the Mac's own lock state untouched. RustDesk instead presses and releases the real
-CapsLock key so the two agree. The difference shows if the Mac's physical CapsLock
-is on while the client's is off: the remote's lock applies on top of our flag, and
-nothing we send can turn it off. Worth revisiting if anyone reports case that will
-not go away.
-
-**Key events are posted with no pacing.** RustDesk sleeps 12 ms after every key
-event on macOS, having found that a Shift release can otherwise fail to take
-effect and leave the remote typing uppercase. We sleep nothing. It may not apply:
-they post keys at `CGEventTapLocation::Session` where we use `HID`, and their own
-comment says HID fixes a related Command-key bug they chose not to move for. If
-sticky modifiers ever appear under fast typing, this is the first thing to try.
-
-**The side buttons stop at the rxa engine.** Back and forward reach a Mac
-(`MouseButton::Back`/`Forward`), and RDP and VNC drop them: RDP carries them in an
-extended pointer PDU the fast-path event cannot express, and RFB's mask has bits
-for them that no server remotex talks to agrees on. Both would need protocol work
-rather than a mapping, which is why neither was attempted.
+BetterDisplay already covers the need, so this is revisited only if more control is
+required. A small app that creates a `CGVirtualDisplay` at a chosen size — the mold
+BetterDisplay is cut from — would let macOS Screen Sharing share that display over
+plain ARD with no bespoke code on either side. The mechanism is salvageable from git
+history at commit `8990971` (`crates/rxa-agent/src/virtualdisplay.rs` and the
+`virtual_display*` config fields).
 
 ### RDP resize requested before the Display Control channel is ready
 
@@ -90,8 +69,8 @@ what auto-resize-by-default does: with the preference on, both clients report th
 window from the `connected` handshake, before the channel is up, so on RDP the
 desktop stays at its connect size until the next window change lands after the
 channel has opened. Toggling Auto Resize off and on, or nudging the window, applies
-it. VNC and rxa have no such gate — their engines act on any viewport report
-whenever it arrives.
+it. VNC has no such gate — its engine acts on any viewport report whenever it
+arrives.
 
 The fix is to retry a `NotReady` size the way density is retried, but **serialized
 with the density retry, not alongside it**: two independent layout retries racing
@@ -111,28 +90,9 @@ the reactivation behaviour can be measured rather than guessed.
 product model.** This is one user's program, and that is not a limitation waiting
 to be lifted.
 
-There are two session slots, and they are separate mechanisms answering the same
-question at different hops:
-
-- **The gateway's.** One active session per gateway instance, permanently. A new
-  browser takes over and evicts the previous holder (`src/session.rs`).
-- **The agent's.** One active session at a time on a Mac running `remotex-agent`,
-  claimed rather than seized: a connection asks with `GatewayMsg::Claim`, and the
-  agent grants it, hands it over, or refuses it and names who holds it
-  (`crates/rxa-agent/src/state.rs`). A client shows that refusal with a Take over
-  button, which is the same shape as the browser prompt above and the same shape
-  as Windows Remote Desktop.
-
-What the agent's slot is keyed on is worth stating plainly, because getting it
-wrong is what would collapse the distinction: **the session id in the claim, and
-never a key or an address.** Authentication decides whether a peer may ask at all
-— that is the keys, in the handshake, and it is a *list* there
-(`crates/rxa-agent/src/authorized.rs`), so several gateways can be entitled to
-reach one Mac. Session ownership decides whose turn it is. Keeping them apart is
-what lets several gateways be *permitted* while exactly one is *connected*, and it
-is also why a reconnect, a target switch and a browser takeover all reclaim the
-slot in silence: they are the same session coming back, whatever else has changed.
-
-So "more than one client may be permitted, one at a time, taking turns
-explicitly" is a different sentence from "multiple sessions", and only the second
-one is refused here.
+There is one active session slot: one active session per gateway instance,
+permanently. A new browser takes over and evicts the previous holder
+(`src/session.rs`), which a client offers with a Take over button — the same
+shape as Windows Remote Desktop. A reconnect, a target switch and a browser
+takeover all reclaim the slot in silence: they are the same session coming back,
+whatever else has changed.

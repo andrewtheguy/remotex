@@ -59,11 +59,6 @@ struct ConfigurationPanel: View {
                 .accessibilityLabel("Configuration error")
             }
 
-            // The value a Mac needs before it will answer this gateway at all, beside
-            // the target being paired. Also in About, which is where somebody looks
-            // for it when they are not editing anything — see `GatewayKeyRow`.
-            GatewayKeyRow(store: store)
-
             HStack {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([store.instance.configURL])

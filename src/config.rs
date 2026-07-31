@@ -38,14 +38,13 @@ impl Security {
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via IronRDP
-/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs), `rxa` via the
-/// purpose-built macOS agent (src/rxa.rs).
+/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is
+/// reached as a `vnc` target with `subtype = "ard"` — macOS Screen Sharing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Rdp,
     Vnc,
-    Rxa,
 }
 
 /// A variant of a target's [`Protocol`]: same engine, different dialect at the
@@ -81,9 +80,6 @@ impl Protocol {
         match self {
             Protocol::Rdp => 3389,
             Protocol::Vnc => 5900,
-            // Adjacent to the web server's 52380, in the same private range,
-            // colliding with neither 3389 nor 5900.
-            Protocol::Rxa => rxa_proto::DEFAULT_PORT,
         }
     }
 
@@ -92,7 +88,6 @@ impl Protocol {
         match self {
             Protocol::Rdp => "rdp",
             Protocol::Vnc => "vnc",
-            Protocol::Rxa => "rxa",
         }
     }
 }
@@ -107,8 +102,8 @@ pub struct TargetConfig {
     /// Unique profile name; shown in the post-login target picker and selected
     /// there by the browser.
     pub name: String,
-    /// Remote-desktop protocol: `"rdp"`, `"vnc"` or `"rxa"`. Required — each
-    /// target must say what it speaks.
+    /// Remote-desktop protocol: `"rdp"` or `"vnc"`. Required — each target must
+    /// say what it speaks.
     pub protocol: Protocol,
     /// Which flavour of [`Self::protocol`] the far end is, when the protocol has
     /// more than one: `subtype = "ard"` on a `vnc` target is macOS Screen
@@ -124,8 +119,7 @@ pub struct TargetConfig {
     /// Target host.
     pub host: String,
     /// Target port. Omitted (or 0) means the protocol's standard port
-    /// (3389 for RDP, 5900 for VNC, 52381 for rxa) — normalized in
-    /// [`ConfigFile::parse`].
+    /// (3389 for RDP, 5900 for VNC) — normalized in [`ConfigFile::parse`].
     #[serde(default)]
     pub port: u16,
     /// Username. Required by RDP, and by a `vnc` target of [`Subtype::Ard`],
@@ -160,8 +154,7 @@ pub struct TargetConfig {
     /// size this end considers right. A VNC server keeps its own size at connect
     /// and this is only ever consulted for a client that asks, so setting it costs
     /// a VNC target nothing and gives an operator somewhere to say what a phone
-    /// should get. `rxa` ignores it: the size of a display the agent made is the
-    /// agent's to state, in its own `virtual_display_initial_size`.
+    /// should get.
     ///
     /// On an RDP target with [`Self::resize`] this is a size in *points*: the
     /// connect happens at 1x, but a Retina client then asks for twice the pixels,
@@ -178,9 +171,7 @@ pub struct TargetConfig {
     pub security: Security,
     /// Allow client-driven resize: permission for a client to set this target's
     /// desktop size, and only permission — whether a client then follows its window
-    /// continuously or resizes when asked is that client's own choice. RXA narrows
-    /// where the permission reaches: an active agent-created display, never one of
-    /// the Mac's own screens.
+    /// continuously or resizes when asked is that client's own choice.
     ///
     /// On RDP this also turns on density matching, because there a density *is* a
     /// resize: the Display Control channel this negotiates is the only way to tell
@@ -194,23 +185,16 @@ pub struct TargetConfig {
     /// a remote desktop's clipboard often holds whatever was last copied there,
     /// so exposing it is a per-target decision rather than a default.
     ///
-    /// Supported by every engine, though what reaches the far side differs:
+    /// Supported by both engines, though what reaches the far side differs:
     /// `vnc` uses RFB `ServerCutText`/`ClientCutText` and is latin-1, so
     /// anything outside it becomes `?`; `rdp` uses the MS-RDPECLIP virtual
-    /// channel with `CF_UNICODETEXT`; `rxa` has the Mac agent read and write
-    /// `NSPasteboard`. The latter two are UTF-8 end to end.
+    /// channel with `CF_UNICODETEXT`, UTF-8 end to end.
     #[serde(default)]
     pub clipboard: bool,
     /// Negotiate RDP audio at connect. Packets are sent only while the attached
-    /// client subscribes. Rejected for VNC and RXA.
+    /// client subscribes. Rejected for VNC.
     #[serde(default)]
     pub audio: bool,
-    /// Mac agent public key (`rxap…`). Required for RXA and rejected elsewhere.
-    #[serde(default)]
-    pub agent_public_key: String,
-    /// Gateway private key copied from [`RxaSection`] during resolution.
-    #[serde(skip)]
-    pub gateway_private_key: String,
 }
 
 fn default_width() -> u16 {
@@ -248,7 +232,7 @@ pub struct ServerSection {
     /// share `remotex_session` and each login silently evicts the other. The
     /// gateway you were not touching then answers 401 to everything, and its
     /// browser drops to the login screen the next time anything asks — which
-    /// reads as a session bug in whatever you were actually testing. Testing rxa
+    /// reads as a session bug in whatever you were actually testing. Testing
     /// session takeover needs two gateways, so this is not a rare corner.
     ///
     /// `<label>.localhost` because every label under `.localhost` resolves to
@@ -263,25 +247,6 @@ pub struct ServerSection {
 
 /// The default display name when `[server].branding` is unset.
 pub const DEFAULT_BRANDING: &str = "remotex";
-
-/// The optional `[rxa]` block: this gateway's identity on the `rxa` protocol.
-///
-/// One identity for the whole server, not one per target — the
-/// `[Interface]`/`[Peer]` split WireGuard makes. Every Mac agent is configured
-/// with the same gateway public key, and each target names the agent's.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct RxaSection {
-    /// This gateway's private key (`rxgs…`), generated with `remotex gen-key`.
-    /// Its public half — printed by `remotex rxa-pubkey` — is what goes into
-    /// each Mac agent's `authorized_gateways` file.
-    ///
-    /// Required as soon as any target is protocol `rxa`. Kept when there are
-    /// none: this is the machine's identity rather than a per-target
-    /// credential, and dropping the last `rxa` target should not mean minting a
-    /// new one to add the next.
-    pub private_key: String,
-}
 
 /// Who a config file is for, and therefore which rules it is held to.
 ///
@@ -326,8 +291,6 @@ pub struct ConfigFile {
     /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
     #[serde(default)]
     pub branding: Option<String>,
-    #[serde(default)]
-    pub rxa: RxaSection,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
 }
@@ -400,7 +363,7 @@ impl ConfigFile {
                 config.server.is_none(),
                 "this config is remotex.app's own and may not have a [server] block: \
                  the app decides where its gateway listens, serves no web UI, and \
-                 authenticates itself. Only branding, [rxa] and [[targets]] belong here"
+                 authenticates itself. Only branding and [[targets]] belong here"
             );
         } else {
             anyhow::ensure!(
@@ -426,45 +389,7 @@ impl ConfigFile {
                 target.name
             );
         }
-        // Keys are validated here rather than at connect time: a mistyped one
-        // should fail on startup with the CRC's "transcription typo" hint (or,
-        // for the wrong kind of key, a message naming what was pasted), not as
-        // a handshake rejection the first time someone picks the target.
-        let rxa_private_key = config.rxa.private_key.trim();
-        if config.targets.iter().any(|t| t.protocol == Protocol::Rxa) {
-            anyhow::ensure!(
-                !rxa_private_key.is_empty(),
-                "a target is protocol \"rxa\" but [rxa].private_key is unset — \
-                 generate one with `remotex gen-key`"
-            );
-            rxa_proto::key::parse_private(rxa_proto::key::Role::Gateway, rxa_private_key)
-                .map_err(|e| anyhow::anyhow!("[rxa].private_key is invalid: {e}"))?;
-        }
         for target in &config.targets {
-            if target.protocol == Protocol::Rxa {
-                let agent_public_key = target.agent_public_key.trim();
-                anyhow::ensure!(
-                    !agent_public_key.is_empty(),
-                    "target {:?} is protocol \"rxa\" but has no agent_public_key — \
-                     read it off that Mac with `remotex-agent --public-key`, or from \
-                     the agent's Settings",
-                    target.name
-                );
-                rxa_proto::key::parse_public(rxa_proto::key::Role::Agent, agent_public_key)
-                    .map_err(|e| {
-                        anyhow::anyhow!("target {:?} has an invalid agent_public_key: {e}", target.name)
-                    })?;
-                // RXA resize capability also depends on agent-owned display state,
-                // which cannot be validated from gateway configuration.
-            } else {
-                anyhow::ensure!(
-                    target.agent_public_key.is_empty(),
-                    "target {:?} is protocol {:?} but sets agent_public_key, which only \
-                     \"rxa\" targets use",
-                    target.name,
-                    target.protocol.name()
-                );
-            }
             // Audio is the mirror image of `resize`: refused outright rather than
             // accepted and left inert, because there is nothing on the other side
             // of the protocol to be uncertain about. RFB has no audio channel and
@@ -497,19 +422,18 @@ impl ConfigFile {
                          account credentials above instead",
                         target.name
                     );
-                    // Still rejected, and no longer for the reason `rxa` used to
-                    // reject it — `rxa` accepts it now. The difference is what is
-                    // behind the protocol: an agent can make a display for a
-                    // client to resize, while a Mac reached over Screen Sharing
-                    // has only its own screens, whose resolution is set on the
-                    // Mac. Apple's server accepts the resize negotiation and then
-                    // ignores every request, so the key would promise a control
-                    // that does nothing at all.
+                    // Rejected because only *standard* macOS Screen Sharing is
+                    // supported today: it shares the Mac's real screens, whose
+                    // resolution is set on the Mac. Dynamic resize over ARD is a
+                    // high-performance-mode feature — Screen Sharing can spin up a
+                    // resizable virtual display, like RDP — and is not implemented
+                    // yet (see docs/roadmap.md, phase 2).
                     anyhow::ensure!(
                         !target.resize,
-                        "target {:?} is subtype \"ard\" and sets resize, which macOS Screen \
-                         Sharing accepts and then ignores — a Mac's resolution is changed on \
-                         the Mac",
+                        "target {:?} is subtype \"ard\" and sets resize, which this gateway \
+                         does not support yet: standard macOS Screen Sharing shares the Mac's \
+                         real screens at the size set on the Mac, and dynamic resize is \
+                         high-performance ARD (phase 2)",
                         target.name
                     );
                 }
@@ -527,14 +451,13 @@ impl ConfigFile {
                 // catch-all, so that a second VNC subtype cannot land here and
                 // be told it belongs to another protocol. Adding one stops the
                 // build until this match says what it means.
-                (protocol @ (Protocol::Rdp | Protocol::Rxa), Some(subtype)) => anyhow::bail!(
-                    "target {:?} is protocol {:?} and sets subtype {:?}, which only \"vnc\" \
+                (Protocol::Rdp, Some(subtype)) => anyhow::bail!(
+                    "target {:?} is protocol \"rdp\" and sets subtype {:?}, which only \"vnc\" \
                      targets have",
                     target.name,
-                    protocol.name(),
                     subtype.name()
                 ),
-                (Protocol::Rdp | Protocol::Rxa, None) => {}
+                (Protocol::Rdp, None) => {}
             }
             if target.protocol != Protocol::Vnc {
                 anyhow::ensure!(
@@ -549,19 +472,6 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// Hand this gateway's `rxa` identity to every target that speaks it.
-    ///
-    /// One server identity for all of them — see `TargetConfig::gateway_private_key`
-    /// for why it rides along on the target rather than beside it.
-    fn spread_rxa_identity(&mut self) {
-        let private_key = self.rxa.private_key.trim().to_owned();
-        for target in &mut self.targets {
-            if target.protocol == Protocol::Rxa {
-                target.gateway_private_key = private_key.clone();
-            }
-        }
-    }
-
     /// Resolve the runtime configuration of the gateway inside `remotex.app`:
     /// loopback, an ephemeral port, no web UI, and a freshly minted token.
     ///
@@ -571,8 +481,7 @@ impl ConfigFile {
     /// gateway itself, because it is about the app rather than about the server: it
     /// names a window, not a deployment, and two instances on one Mac are easier to
     /// tell apart if they can be called different things.
-    pub fn resolve_embedded(mut self, token: EmbeddedToken) -> anyhow::Result<AppConfig> {
-        self.spread_rxa_identity();
+    pub fn resolve_embedded(self, token: EmbeddedToken) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
             // Not `localhost`: that name resolves to both loopbacks and the client
             // is told one port on one address. The app connects to 127.0.0.1.
@@ -601,8 +510,7 @@ impl ConfigFile {
 
     /// Resolve the runtime configuration: validate the web-login credential and
     /// carry over every target profile (the browser picks one after login).
-    pub fn resolve(mut self) -> anyhow::Result<AppConfig> {
-        self.spread_rxa_identity();
+    pub fn resolve(self) -> anyhow::Result<AppConfig> {
         let server = self.server.unwrap_or_default();
         let site_passwd = server
             .site_passwd
@@ -677,30 +585,6 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
     Ok((config, path))
 }
 
-/// Read `[rxa].private_key` out of a config file, ignoring everything else in
-/// it.
-///
-/// Deliberately *not* [`load`]: `remotex rxa-pubkey` has to work before the
-/// config is wholly valid, because pairing is a cycle otherwise. A target's
-/// `agent_public_key` is read off a Mac that has not been paired yet, and that
-/// Mac is paired with the value this prints — so demanding every target already
-/// carry a valid key would mean neither end could ever be configured first.
-pub fn load_rxa_private_key(explicit: Option<&Path>) -> anyhow::Result<(String, PathBuf)> {
-    /// Just the one section. No `deny_unknown_fields`: the rest of the file is
-    /// none of this function's business, including whatever is wrong with it.
-    #[derive(Deserialize)]
-    struct RxaOnly {
-        #[serde(default)]
-        rxa: RxaSection,
-    }
-
-    let path = config_path(explicit)?;
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
-    let file: RxaOnly = toml::from_str(&text)
-        .with_context(|| format!("invalid TOML in config file {}", path.display()))?;
-    Ok((file.rxa.private_key.trim().to_owned(), path))
-}
 
 /// Which config file to read: the one named, or the installed one.
 fn config_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
@@ -1077,8 +961,8 @@ mod tests {
     }
 
     // Nothing in a target says what the remote runs. The engines discover it
-    // (src/vnc.rs asks the RFB greeting; rxa is macOS by construction), so a
-    // config that tried to declare it is a typo, not a supported knob.
+    // (src/vnc.rs asks the RFB greeting), so a config that tried to declare it
+    // is a typo, not a supported knob.
     #[test]
     fn a_target_cannot_declare_the_remote_os() {
         let err = ConfigFile::parse(
@@ -1196,11 +1080,11 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
 
-        // Resize is rejected rather than ignored: macOS accepts the negotiation
-        // and then does nothing with the requests.
+        // Resize is rejected: only standard screen sharing is supported today, and
+        // dynamic resize over ARD is a phase-2 (high-performance) feature.
         let err =
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
-        assert!(format!("{err:#}").contains("accepts and then ignores"), "{err:#}");
+        assert!(format!("{err:#}").contains("does not support yet"), "{err:#}");
 
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
@@ -1243,274 +1127,8 @@ mod tests {
         assert!(msg.contains("vnc_password") && msg.contains("vnc"), "{msg}");
     }
 
-    use rxa_proto::key::{self, Role};
-
-    /// A fresh gateway identity, as `remotex gen-key` prints it.
-    fn gateway_private_key() -> String {
-        key::generate_private(Role::Gateway)
-    }
-
-    /// A fresh Mac's public key, as its agent reports it.
-    fn agent_public_key() -> String {
-        key::public_text_of(Role::Agent, &key::generate_private(Role::Agent)).unwrap()
-    }
-
-    /// An `rxa` config with both halves of a valid pairing: a `[rxa]` block and
-    /// one target. `extra` adds further target keys.
-    fn rxa_toml(extra: &str) -> String {
-        rxa_toml_keyed(&gateway_private_key(), &agent_public_key(), extra)
-    }
-
-    /// [`rxa_toml`] with the two key lines spelled out, for the tests that are
-    /// about what happens when one of them is wrong.
-    fn rxa_toml_keyed(private_key: &str, agent_public_key: &str, extra: &str) -> String {
-        format!(
-            r#"
-            [server]
-            {}
-
-            [rxa]
-            private_key = "{private_key}"
-
-            [[targets]]
-            name = "mac"
-            protocol = "rxa"
-            host = "mac.local"
-            agent_public_key = "{agent_public_key}"
-            {extra}
-            "#,
-            site_passwd_line()
-        )
-    }
-
     #[test]
-    fn rxa_target_parses_with_its_own_default_port() {
-        let (private_key, public_key) = (gateway_private_key(), agent_public_key());
-        let config = ConfigFile::parse(&rxa_toml_keyed(&private_key, &public_key, ""))
-            .unwrap()
-            .resolve()
-            .unwrap();
-        let target = &config.targets[0];
-        assert_eq!(target.protocol, Protocol::Rxa);
-        assert_eq!(target.protocol.name(), "rxa");
-        // Adjacent to the web server's 52380, and not 3389 or 5900.
-        assert_eq!(target.port, 52381);
-        assert_eq!(target.agent_public_key, public_key);
-        // `resolve` fans the one server identity out to the targets that speak
-        // the protocol, which is how the engine gets it (see the field's docs).
-        assert_eq!(target.gateway_private_key, private_key);
-        assert!(!target.resize, "resize is opt-in for rxa too");
-
-        // An explicit port still wins.
-        let config = ConfigFile::parse(&rxa_toml("port = 52999"))
-            .unwrap()
-            .resolve()
-            .unwrap();
-        assert_eq!(config.targets[0].port, 52999);
-    }
-
-    // A non-rxa target gets no identity to carry: it would be an unused copy of
-    // a private key on a struct that is cloned per session.
-    #[test]
-    fn resolve_leaves_the_gateway_key_off_targets_that_cannot_use_it() {
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [rxa]
-            private_key = "{}"
-
-            [[targets]]
-            name = "pc"
-            protocol = "rdp"
-            host = "10.0.0.5"
-            username = "u"
-            password = "p"
-            "#,
-            site_passwd_line(),
-            gateway_private_key()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].gateway_private_key.is_empty());
-    }
-
-    // A mistyped key must fail on startup with the CRC's hint, not as an opaque
-    // handshake rejection the first time someone picks the target.
-    #[test]
-    fn rxa_keys_are_validated_at_parse_time() {
-        let missing = rxa_toml_keyed(&gateway_private_key(), "", "");
-        let err = ConfigFile::parse(&missing).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("no agent_public_key") && msg.contains("--public-key"),
-            "{msg}"
-        );
-
-        let err = ConfigFile::parse(&rxa_toml_keyed(&gateway_private_key(), "rxapnope", ""))
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("invalid agent_public_key"),
-            "{err:#}"
-        );
-
-        // A single-character typo in an otherwise well-formed key.
-        let mut chars: Vec<char> = agent_public_key().chars().collect();
-        chars[10] = if chars[10] == 'A' { 'B' } else { 'A' };
-        let typo: String = chars.into_iter().collect();
-        let err = ConfigFile::parse(&rxa_toml_keyed(&gateway_private_key(), &typo, "")).unwrap_err();
-        assert!(format!("{err:#}").contains("checksum"), "{err:#}");
-    }
-
-    #[test]
-    fn an_rxa_target_without_a_gateway_identity_is_rejected() {
-        let err = ConfigFile::parse(&rxa_toml_keyed("", &agent_public_key(), "")).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("[rxa].private_key") && msg.contains("gen-key"),
-            "{msg}"
-        );
-
-        let err = ConfigFile::parse(&rxa_toml_keyed("rxgsnope", &agent_public_key(), "")).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("[rxa].private_key is invalid"),
-            "{err:#}"
-        );
-    }
-
-    // The whole reason the role is in the prefix. Both of these are well-formed
-    // keys that would otherwise fail as a handshake rejection with nothing to
-    // say which end was misconfigured.
-    #[test]
-    fn a_key_of_the_wrong_kind_is_named_rather_than_failing_at_the_handshake() {
-        let private_key = gateway_private_key();
-        let gateway_public = key::public_text_of(Role::Gateway, &private_key).unwrap();
-
-        // The two public keys are on screen together while pairing, so this is
-        // the swap most easily made.
-        let err = ConfigFile::parse(&rxa_toml_keyed(&private_key, &gateway_public, "")).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("this is a gateway public key"), "{msg}");
-
-        // And the other direction: a Mac's own private key where the gateway's
-        // belongs.
-        let agent_private = key::generate_private(Role::Agent);
-        let err = ConfigFile::parse(&rxa_toml_keyed(&agent_private, &agent_public_key(), ""))
-            .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("this is an agent private key"), "{msg}");
-    }
-
-    // A server keeps its identity across a config that has no rxa targets in it
-    // today: it is the machine's, not the target's, and re-minting it to add the
-    // next Mac would mean re-pairing every other one.
-    #[test]
-    fn a_gateway_identity_with_no_rxa_targets_is_kept() {
-        ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [rxa]
-            private_key = "{}"
-
-            [[targets]]
-            name = "box"
-            protocol = "vnc"
-            host = "10.0.0.4"
-            vnc_password = "hunter2"
-            "#,
-            site_passwd_line(),
-            gateway_private_key()
-        ))
-        .unwrap();
-    }
-
-    #[test]
-    fn an_agent_public_key_on_a_non_rxa_target_is_rejected() {
-        // Silently ignoring it would leave someone believing a VNC target was
-        // authenticated by a key it never uses.
-        let err = ConfigFile::parse(&format!(
-            r#"
-            [[targets]]
-            name = "one"
-            protocol = "vnc"
-            host = "h"
-            agent_public_key = "{}"
-            "#,
-            agent_public_key()
-        ))
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("agent_public_key") && msg.contains("rxa"), "{msg}");
-    }
-
-    // Pairing is a cycle if this does not hold: the value `remotex rxa-pubkey`
-    // prints is what a Mac needs before it can report the `agent_public_key`
-    // this config is waiting for, so reading the gateway's own key must not
-    // require a config that is already wholly valid.
-    #[test]
-    fn the_gateway_private_key_is_readable_from_a_config_that_does_not_parse() {
-        let dir = std::env::temp_dir().join(format!("remotex-rxa-pubkey-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("remotex.toml");
-        let private_key = gateway_private_key();
-        // An rxa target with no agent key yet — exactly the state a half-set-up
-        // config is in, and one `ConfigFile::parse` rightly refuses.
-        std::fs::write(
-            &path,
-            rxa_toml_keyed(&private_key, "", ""),
-        )
-        .unwrap();
-
-        assert!(ConfigFile::parse(&std::fs::read_to_string(&path).unwrap()).is_err());
-        let (read, from) = load_rxa_private_key(Some(&path)).unwrap();
-        assert_eq!(read, private_key);
-        assert_eq!(from, path);
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    // `gateway_private_key` is populated by `resolve`, never read from the file:
-    // a hand-set one would be a second, silently-ignored opinion about the
-    // server's identity.
-    #[test]
-    fn a_target_cannot_set_the_gateway_private_key_itself() {
-        let err = ConfigFile::parse(&rxa_toml(&format!(
-            "gateway_private_key = \"{}\"",
-            gateway_private_key()
-        )))
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("gateway_private_key"),
-            "{err:#}"
-        );
-    }
-
-    // Accepted, and only half of what enables the control: the other half is that
-    // the display being shared is one the agent made, which is a per-session fact
-    // this file cannot see. A Mac whose agent has no such display gets an inert
-    // flag rather than an error — refusing here would reject a config that is
-    // correct for every Mac but that one.
-    #[test]
-    fn resize_is_accepted_on_an_rxa_target() {
-        let config = ConfigFile::parse(&rxa_toml("resize = true"))
-            .unwrap()
-            .resolve()
-            .unwrap();
-        assert!(config.targets[0].resize);
-    }
-
-    #[test]
-    fn clipboard_is_accepted_for_every_protocol() {
-        let config = ConfigFile::parse(&rxa_toml("clipboard = true"))
-            .unwrap()
-            .resolve()
-            .unwrap();
-        assert!(config.targets[0].clipboard);
-
+    fn clipboard_is_accepted_for_both_protocols() {
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -1530,7 +1148,7 @@ mod tests {
         assert!(config.targets[0].clipboard);
 
         // RDP was the last engine to gain a clipboard (MS-RDPECLIP) and used to
-        // be refused here; the flag is now accepted for all three.
+        // be refused here; the flag is now accepted for both engines.
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -1550,12 +1168,10 @@ mod tests {
         assert!(config.targets[0].clipboard);
     }
 
-    /// Unlike `clipboard`, which every engine supports, and unlike `resize` on
-    /// `rxa`, which is accepted because this file cannot see the other half of
-    /// the answer: there is no audio channel behind RFB or the Mac agent at all,
-    /// so the key is refused where it could never do anything.
+    /// Unlike `clipboard`, which both engines support: there is no audio channel
+    /// behind RFB at all, so the key is refused where it could never do anything.
     #[test]
-    fn audio_is_accepted_for_rdp_and_refused_for_the_other_protocols() {
+    fn audio_is_accepted_for_rdp_and_refused_for_vnc() {
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -1574,32 +1190,22 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].audio);
 
-        for (protocol, extra) in [
-            ("vnc", String::new()),
-            ("rxa", format!("agent_public_key = \"{}\"", agent_public_key())),
-        ] {
-            let err = ConfigFile::parse(&format!(
-                r#"
-                [server]
-                {}
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
 
-                [rxa]
-                private_key = "{}"
-
-                [[targets]]
-                name = "nope"
-                protocol = "{protocol}"
-                host = "10.0.0.6"
-                audio = true
-                {extra}
-                "#,
-                site_passwd_line(),
-                gateway_private_key()
-            ))
-            .unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains("audio"), "{rendered}");
-            assert!(rendered.contains(protocol), "{rendered}");
-        }
+            [[targets]]
+            name = "nope"
+            protocol = "vnc"
+            host = "10.0.0.6"
+            audio = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("audio"), "{rendered}");
+        assert!(rendered.contains("vnc"), "{rendered}");
     }
 }

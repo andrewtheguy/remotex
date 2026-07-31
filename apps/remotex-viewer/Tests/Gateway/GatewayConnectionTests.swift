@@ -6,7 +6,7 @@ import Testing
 /// the gateway sends them all and this build refuses a message missing any — so it is
 /// noise in a test about ordering.
 private let connectedJSON = #"""
-{"type":"connected","name":"mac","protocol":"rxa","resize":false,\#
+{"type":"connected","name":"mac","protocol":"vnc","resize":false,\#
 "clipboard":true,"audio":true}
 """#
 
@@ -419,7 +419,7 @@ struct GatewayConnectionTests {
 
         connection.send(.key(code: "KeyA", pressed: true, caps: false))
         connection.send(.key(code: "KeyA", pressed: false, caps: false))
-        connection.send(.connect(target: "mac", force: false))
+        connection.send(.connect(target: "mac"))
         await sink.wait { _ in transport.sentFrames.count == 3 }
 
         // Parsed, not compared as text: JSONEncoder does not promise a key order,

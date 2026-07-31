@@ -2,9 +2,9 @@
 // checked here; what a browser actually reports in `MouseEvent.detail` is its
 // own double-click policy and no unit test can stand in for it.
 //
-// It matters more than a bounds check looks: the rxa agent injects this as the
-// macOS event's click state, and a value of zero is a click that counts as no
-// click at all. Run with `bun test src/protocol.test.ts` from frontend/.
+// It matters more than a bounds check looks: a value of zero is a click that
+// counts as no click at all where a guest infers double-clicks from the count.
+// Run with `bun test src/protocol.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {

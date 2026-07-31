@@ -218,8 +218,8 @@ struct KeyboardTranslator {
     }
 
     // macOS virtual keycodes are physical positions, exactly like DOM `code`.
-    // This is the inverse of rxa-proto's mac_keycode table for the canonical
-    // keys the gateway's RDP and VNC adapters both support.
+    // This is the inverse of the canonical mac_keycode table for the keys the
+    // gateway's RDP and VNC adapters both support.
     private static let keyCodes: [UInt16: String] = [
         0x00: "KeyA", 0x01: "KeyS", 0x02: "KeyD", 0x03: "KeyF",
         0x04: "KeyH", 0x05: "KeyG", 0x06: "KeyZ", 0x07: "KeyX",

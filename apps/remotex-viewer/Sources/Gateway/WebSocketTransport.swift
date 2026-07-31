@@ -36,7 +36,7 @@ final class URLSessionWebSocketTransport: WebSocketTransport {
     /// which would read as a random disconnect under load rather than as a size
     /// problem.
     ///
-    /// Measured, not guessed: `--probe` against a 3204×1758 rxa desktop saw a
+    /// Measured, not guessed: `--probe` against a 3204×1758 Mac desktop saw a
     /// largest strip of ~100 KB, so the default would have held there. But a
     /// strip is a full-width band of up to 64 rows, so the ceiling scales with
     /// the remote's width and how badly its content compresses, and there is no

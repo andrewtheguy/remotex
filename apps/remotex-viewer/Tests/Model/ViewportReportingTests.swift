@@ -81,50 +81,13 @@ struct ViewportReportingTests {
         try await session.expectViewport(w: 1600, h: 1000)
     }
 
-    /// A Mac's screens are set on that Mac, so nothing an rxa session measures
-    /// reaches the socket while a real screen is shared — and in manual mode, which
-    /// is where it starts, nothing does even once the agent's own display is up.
+    /// A press of "Resize to Window" reaches the socket, and measuring alone does
+    /// not — three components and a screen, which is where both of the "it never
+    /// resized" bugs lived.
     @Test
-    func anRxaTargetReportsNothingUntilBothHalvesAgree() async throws {
+    func askingResizesTheWindowAndMeasuringDoesNot() async throws {
         let session = try await Self.attached()
-        session.connect(protocolName: "rxa")
-
-        session.model.reportViewport(DisplayMode(w: 1600, h: 1000))
-        try await session.settle()
-        #expect(session.viewports.isEmpty)
-
-        // The agent's own display arrives: that raises the three menu items, and by
-        // itself sends nothing — manual is still manual.
-        session.model.apply(.control(.displays(active: 9, displays: Self.displays)))
-        session.model.reportViewport(DisplayMode(w: 1440, h: 900))
-        try await session.settle()
-        #expect(session.viewports.isEmpty)
-        #expect(session.model.canAutoResize, "and now it may be asked for")
-
-        // Asked for, it follows the window like any other allowed target: a display
-        // made to be looked at from here has nobody sitting at it.
-        session.model.setAutoResize(true)
-        try await session.expectViewport(w: 1440, h: 900)
-        session.model.reportViewport(DisplayMode(w: 1280, h: 800))
-        try await session.expectViewport(w: 1280, h: 800, count: 2)
-
-        // And a switch back to one of the Mac's own screens stops it, mode or no
-        // mode: the permission is the display's, not the session's.
-        session.model.apply(.control(.displays(active: 7, displays: Self.displays)))
-        session.model.reportViewport(DisplayMode(w: 1600, h: 1000))
-        try await session.settle()
-        #expect(session.viewports.count == 2)
-    }
-
-    /// And the whole path a press of "Resize to Window" takes: three components
-    /// and a screen, which is where both of the "it never resized" bugs lived.
-    /// The display list is what unlocks it, and switching to a real screen locks
-    /// it again — with the automatic report in between still swallowed.
-    @Test
-    func askingResizesAnAgentMadeDisplayAndNothingElse() async throws {
-        let session = try await Self.attached()
-        session.connect(protocolName: "rxa", resize: true)
-        session.model.apply(.control(.displays(active: 9, displays: Self.displays)))
+        session.connect(protocolName: "vnc", resize: true)
 
         session.model.reportViewport(DisplayMode(w: 1440, h: 900))
         try await session.settle()
@@ -132,28 +95,7 @@ struct ViewportReportingTests {
 
         session.model.resizeToWindow()
         try await session.expectViewport(w: 1440, h: 900)
-
-        // Onto one of the Mac's own screens: the item greys out, and a press that
-        // somehow got through would still send nothing.
-        session.model.apply(.control(.displays(active: 7, displays: Self.displays)))
-        #expect(!session.model.session.canResize)
-        session.model.resizeToWindow()
-        try await session.settle()
-        #expect(session.viewports.count == 1)
     }
-
-    /// The fake Mac's two screens: one somebody is sitting at, and the one the
-    /// agent made to be looked at from here.
-    private static let displays: [ServerMessage.DisplayInfo] = [
-        .init(id: 7, label: "Display 1", detail: "1920×1080 at 1x", main: true, isVirtual: false),
-        .init(
-            id: 9,
-            label: "Virtual display",
-            detail: "3200×2000 at 2x",
-            main: false,
-            isVirtual: true
-        ),
-    ]
 
     private static func attached() async throws -> AttachedSession {
         try await AttachedSession.attached(suite: "ViewportReportingTests")

@@ -1,28 +1,22 @@
-# The gateway is the workspace root package; the macOS agent and the protocol
-# crate it shares with the gateway live under crates/ (see
-# docs/mac-agent-architecture.md).
+# The gateway is the workspace root package and the only member: the macOS agent
+# and the protocol crate it shared were removed (see docs/roadmap.md for the
+# virtual-display utility idea that could one day revive its one kept feature).
 #
-# `default-members` deliberately omits rxa-agent: it only compiles on macOS, so
-# a bare `cargo build` / `cargo clippy -- -D warnings` / `cargo test` on Linux
-# must never reach for it. Build it explicitly with `-p rxa-agent` on a Mac.
-#
-# One version for the whole workspace: the gateway, the agent and the protocol
-# crate they share all ship together, and a release names them from the same
-# number. `[workspace.package]` below is the only literal `version` in the tree
-# — every member inherits it with `version.workspace = true`.
+# One version for the whole workspace. `[workspace.package]` below is the only
+# literal `version` in the tree — the root package inherits it with
+# `version.workspace = true`.
 #
 # Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
 # so that line must stay the workspace version. `version.workspace = true` does
 # not match the regex (the `.` after `version` breaks it), which is what keeps
-# the members from shadowing it.
+# the root package from shadowing it.
 [workspace]
-members = [".", "crates/rxa-proto", "crates/rxa-agent"]
-default-members = [".", "crates/rxa-proto"]
+members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.71"
+version = "0.0.72"
 
 [package]
 name = "remotex"
@@ -112,10 +106,6 @@ flate2 = "1"
 # and Linux's `TCP_USER_TIMEOUT` all live behind it.
 socket2 = { version = "0.6", features = ["all"] }
 
-# The wire protocol shared with the macOS agent (src/rxa.rs, crates/rxa-agent).
-# In-repo so the two halves cannot drift — see docs/mac-agent-architecture.md.
-rxa-proto = { path = "crates/rxa-proto" }
-
 # Server-side RDP engine (see docs/architecture.md). `dvc`/`displaycontrol`/`svc`
 # expose the Display Control Virtual Channel used for client-driven resize;
 # `cliprdr` is the MS-RDPECLIP static channel behind the clipboard bridge
@@ -132,8 +122,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
-# `tokio::time::pause()` for the rxa engine's reconnect-backoff tests: waiting
-# out a real 1-second backoff in a unit test is a second of nothing.
+# `tokio::time::pause()` for the session heartbeat and reattach-grace tests
+# (src/session.rs, src/ws.rs): waiting out a real timeout in a unit test is a
+# stretch of doing nothing.
 tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]

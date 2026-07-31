@@ -255,8 +255,8 @@ struct Flags {
 }
 
 /// An established, handshaken RFB link, plus what the handshake revealed about
-/// the far side. Mirrors `rxa.rs`'s own `Session` rather than returning a tuple
-/// nobody can read at the call site.
+/// the far side. A named struct rather than a tuple nobody can read at the call
+/// site.
 struct Connected {
     reader: Reader,
     writer: OwnedWriteHalf,
@@ -521,7 +521,7 @@ async fn active_loop(
                     Ok(())
                 } else if let ClientMsg::Clipboard { text } = &input {
                     if clipboard_enabled && !clipboard_fits(text) {
-                        // Refused, as the RDP and rxa engines do: the remote
+                        // Refused, as the RDP engine does: the remote
                         // keeps what it had rather than being handed a partial
                         // copy that looks whole. Also keeps an oversized string
                         // out of `state.local`, which the deferred Provide can
@@ -1224,10 +1224,12 @@ fn translate_input(
         | ClientMsg::Disconnect
         | ClientMsg::CacheReset
         | ClientMsg::Audio { .. } => Vec::new(),
-        // RFB has one framebuffer, and on a multi-screen server it spans all of
-        // them: the ExtendedDesktopSize screen list describes how they are laid
-        // out inside it, not a set of things to choose between. So this engine
-        // never sends a display list and no client offers the picker.
+        // Standard RFB exposes one framebuffer spanning all screens: the
+        // ExtendedDesktopSize screen list describes how they are laid out inside
+        // it, not a set of things to choose between. Picking a single display
+        // over macOS Screen Sharing (ARD) is a planned phase-2 feature (see
+        // docs/roadmap.md), so for now this engine sends no display list and the
+        // no-op stands.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
         // Nothing to act on: RFB has no backing scale, and a VNC server's
         // framebuffer is already the pixels it has. Clients send this

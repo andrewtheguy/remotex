@@ -50,14 +50,10 @@ struct RootView: View {
         .sheet(isPresented: $isShowingAbout) {
             // The instance is a fact about this app whichever gateway it is talking
             // to — it is where these preferences and this log live — so it is always
-            // shown. The key is not: it identifies the gateway *in this bundle* to a
-            // Mac agent, and against a remote gateway nothing is going to present it.
-            // Showing it there is an invitation to authorize the wrong machine and
-            // then wonder why the pairing did nothing.
+            // shown.
             AboutPanel(
                 branding: model.branding,
-                store: model.config,
-                showsGatewayKey: model.usesEmbeddedGateway
+                store: model.config
             )
         }
         .onChange(of: model.aboutRequests) { _, _ in

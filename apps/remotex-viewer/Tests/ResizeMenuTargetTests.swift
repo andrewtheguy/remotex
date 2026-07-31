@@ -81,7 +81,7 @@ struct ResizeMenuTargetTests {
         let target = ResizeMenuTarget(model: model)
 
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        model.apply(.control(.connected(connected(protocolName: "vnc"))))
         model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
         #expect(model.canResizeToDisplay)
 
@@ -121,12 +121,12 @@ struct ResizeMenuTargetTests {
     /// wrong at all.
     @Test
     func eachItemIsValidatedAgainstItsOwnProperty() {
-        // The row where the two answers differ: `rxa` without `resize` cannot be
+        // The row where the two answers differ: a target without `resize` cannot be
         // asked to match the window, but its desktop holds still and can be fitted
         // to. See `AppModelTests.aTargetThatWillNotResizeCanStillBeFittedTo`.
         let model = makeModel()
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa", resize: false))))
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
         model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
         model.reportViewport(DisplayMode(w: 1600, h: 900))
         #expect(!model.canResizeNow)

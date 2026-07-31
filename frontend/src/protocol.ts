@@ -5,9 +5,8 @@
 // apart by their first byte (binaryFrameKind below); rare control messages
 // (resize/error, the audio format) as JSON text frames with a `type` tag.
 
-// "back" and "forward" are the side buttons of a five-button mouse. Only an rxa
-// target acts on them — macOS numbers them 3 and 4 exactly as the DOM does — and
-// RDP and VNC drop them for want of anywhere to put them.
+// "back" and "forward" are the side buttons of a five-button mouse. No engine
+// acts on them today — RDP and VNC drop them for want of anywhere to put them.
 export type MouseButton = "left" | "middle" | "right" | "back" | "forward";
 
 // What a wheel delta is measured in: the DOM's deltaMode, by name. Carried
@@ -23,10 +22,9 @@ export type WheelUnit = "pixel" | "line" | "page";
 export type ClientMsg =
   | { type: "mouseMove"; x: number; y: number }
   // `clicks` is the browser's own click count for the press (MouseEvent.detail):
-  // 1 for a single click, 2 for the second of a double. The rxa engine injects it
-  // as the macOS event's click state, which is the only thing that makes a
-  // double-click a double-click — the remote cannot work it out from arrival
-  // times. RDP and VNC have nowhere to put it and let the guest count instead.
+  // 1 for a single click, 2 for the second of a double. It still rides the wire,
+  // but neither current engine consumes it — RDP and VNC carry button state alone
+  // and let the guest count.
   | {
       type: "mouseButton";
       button: MouseButton;
@@ -48,16 +46,12 @@ export type ClientMsg =
   // Sent on connect and again whenever the window moves to a screen of a
   // different density.
   //
-  // Only an owned RXA display acts on this; it does not affect canvas layout.
+  // RDP density matching acts on this; it does not affect canvas layout.
   | { type: "hostScale"; scale: number }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it.
-  // `force` takes the *remote's* session slot from whoever holds it, answering a
-  // `remoteBusy`. Not about this gateway's slot, which is claimed over HTTP before
-  // the socket exists — only an rxa target has a session of its own to contend
-  // for, and the other engines ignore it.
-  | { type: "connect"; target: string; force: boolean }
+  | { type: "connect"; target: string }
   | { type: "disconnect" }
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
   // text on the remote's clipboard, "clipboardRequest" asks for the remote's
@@ -139,37 +133,13 @@ export type ControlMsg =
       hy: number;
     }
   | { type: "error"; message: string }
-  // The remote refused the session because a different client holds it, and this
-  // one may take it over. Only an rxa target sends it: the macOS agent serves one
-  // session at a time and says who has it, where an RDP or VNC server arbitrates
-  // its own sessions silently.
-  //
-  // Distinct from "error" because it is actionable — the picker offers a takeover
-  // rather than only reporting — and distinct from the ConnectionStatus "busy",
-  // which is about *this gateway's* slot being held by another browser. Both can
-  // happen at once, and they need different buttons: one takes the gateway, the
-  // other takes the Mac at the far end of it.
-  // `takenOver` separates the two ways this arrives, which are opposite
-  // experiences: false is "you asked for a target somebody else has, and were
-  // refused"; true is "you *had* it and somebody took it". Only the remote's
-  // session went in that second case — the login, the gateway slot and this socket
-  // are all still ours — which is why both land on the target list.
-  | {
-      type: "remoteBusy";
-      holder: string;
-      heldSecs: number;
-      takenOver: boolean;
-    }
   | { type: "picker" }
   // `resize` is the operator's permission to change the remote's size at all, and
   // it is all this says: whether the size then follows the window or moves only
   // when asked is the client's own choice, the same choice on every protocol (see
-  // useRemoteDesktop's `autoResize`). `protocol` ("rdp"/"vnc"/"rxa") is here
-  // because rxa's permission is only half-settled by `resize` — the display being
-  // shared also has to be one the agent made, which arrives later in `displays`,
-  // so an rxa session starts denied rather than waiting to be corrected.
-  // `clipboard` is whether this target opted into the clipboard bridge.
-  // `audio` advertises capability, not current activity.
+  // useRemoteDesktop's `autoResize`). `protocol` ("rdp"/"vnc") is carried for the
+  // status line. `clipboard` is whether this target opted into the clipboard
+  // bridge. `audio` advertises capability, not current activity.
   | {
       type: "connected";
       name: string;

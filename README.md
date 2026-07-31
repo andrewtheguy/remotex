@@ -12,17 +12,15 @@ that was asked for rather than a resampling of the size it used to be.
 
 - RDP uses [IronRDP](https://crates.io/crates/ironrdp).
 - VNC uses a built-in RFB 3.8 client and can connect directly to macOS Screen
-  Sharing.
-- The optional macOS companion `remotex-agent` provides a dedicated-agent
-  alternative over the encrypted `rxa` protocol.
+  Sharing. A Mac is a `vnc` target with `subtype = "ard"` for Apple Remote
+  Desktop authentication.
 - The optional macOS 26 `remotex.app` is a self-contained native client: it
   carries its own gateway, starts it on a loopback port at launch, and needs no
   server, address, or login. Metal rendering, AppKit input, menus, clipboard
   access, and audio playback.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
-[`docs/mac-agent-architecture.md`](docs/mac-agent-architecture.md) for the
-macOS agent, and [`docs/macos-viewer.md`](docs/macos-viewer.md) for the app.
+[`docs/macos-viewer.md`](docs/macos-viewer.md) for the app.
 
 ## Install
 
@@ -53,11 +51,10 @@ The installer verifies the release digest, installs versioned files under
 and uninstall.
 
 Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
-no companion software. For RealVNC-like behavior where reconnects authenticate
-from a keypair instead of returning to Screen Sharing's login gate, install the
-optional agent DMG from the same release and use `protocol = "rxa"`. The agent
-mirrors a logged-in user's display and does not provide login-window access. See
-[`packaging/macos/README.md`](packaging/macos/README.md).
+no companion software. Use `protocol = "vnc"` with `subtype = "ard"` and the Mac
+account's username and password; that selects Apple Remote Desktop authentication
+so the connection lands at the user's own screen rather than a login-window
+session.
 
 ## Container
 
@@ -98,11 +95,9 @@ The main directories are:
 
 | Path | Contents |
 |---|---|
-| `src/` | gateway, session management, and RDP/VNC/`rxa` engines |
+| `src/` | gateway, session management, and RDP/VNC engines |
 | `frontend/` | React SPA |
 | `apps/remotex-viewer/` | `remotex.app`, the native macOS 26 SwiftUI/Metal client |
-| `crates/rxa-proto/` | protocol shared by gateway and macOS agent |
-| `crates/rxa-agent/` | macOS agent |
 | `tests/` | protocol and engine end-to-end tests |
 | `packaging/` | release, install, container, and macOS bundle scripts |
 
@@ -117,17 +112,16 @@ site_passwd = "admin:$2b$..."
 
 [[targets]]
 name = "workstation"
-protocol = "rdp" # rdp, vnc, or rxa
+protocol = "rdp" # rdp or vnc
 host = "192.0.2.10"
 username = "Administrator"
 password = "change-me"
 ```
 
-Generate `site_passwd` with `remotex gen-passwd <username>`. For `rxa`, generate
-this gateway's identity with `remotex gen-key` into `[rxa].private_key`, read its
-public half back with `remotex rxa-pubkey`, and put each Mac's public key in that
-target's `agent_public_key`. Keep the config mode `0600`; target credentials
-remain server-side but are stored in this file.
+Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
+target with `subtype = "ard"` and the Mac account's username and password. Keep
+the config mode `0600`; target credentials remain server-side but are stored in
+this file.
 
 All fields and per-protocol examples are in
 [`packaging/etc/remotex.toml.example`](packaging/etc/remotex.toml.example).
@@ -151,8 +145,6 @@ browser. They are ignored by default; run them explicitly with:
 ```sh
 cargo test --test rdp_tiles_e2e --test vnc_tiles_e2e -- --ignored
 ```
-
-`tests/rxa_e2e.rs` uses an in-process fake agent and runs by default.
 
 Stable headless browser checks for DOM/control-plane flows live under
 [`tests/playwright`](tests/playwright/README.md). They intentionally do not
@@ -179,7 +171,6 @@ cargo build --release
 bash packaging/build-tarball.sh
 ```
 
-The tarball contains the gateway binary and built frontend. The macOS agent is
-a separate DMG built by `packaging/macos/build-agent-app.sh`. `remotex.app` is
+The tarball contains the gateway binary and built frontend. `remotex.app` is
 built by `packaging/macos-viewer/build-viewer-app.sh`, which bundles the gateway
 binary into the app rather than shipping the frontend.
