@@ -126,6 +126,10 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 enum ViewerMain {
     static func main() {
+        // Before anything acts on the arguments: refuse an option the app does not
+        // know, rather than ignoring it and doing something else. `--settings qa`
+        // used to be dropped silently and send a QA run at the real instance.
+        ArgumentCheck.enforce()
         if CommandLine.arguments.contains("--version") {
             print("remotex-viewer \(ProductInfo.version)")
             Foundation.exit(EXIT_SUCCESS)
