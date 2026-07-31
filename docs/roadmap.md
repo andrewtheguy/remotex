@@ -30,6 +30,51 @@ Screen Recording and Accessibility grants reach the signed app in the
 FileVault is the one boundary none of it crosses: no remote-access process runs
 before pre-boot disk unlock.
 
+### Input fidelity on macOS
+
+Injecting input is not the same as having input, and the gap is made of fields
+and timings that no amount of looking at the screen reveals — a click state that
+is never set looks exactly like a click. These are the ones known to be missing,
+found by reading RustDesk's macOS injection path (`libs/enigo/src/macos/macos_impl.rs`
+and `src/server/input_service.rs` in that project), which is the closest thing to
+a reference implementation of the same job.
+
+None is known to have bitten anyone here yet. They are recorded because the cost
+of finding each one from a bug report is high and the cost of writing it down is
+not.
+
+**Relative pointer motion has no path of its own.** A move now carries
+`kCGMouseEventDeltaX/Y` alongside where it landed, which is what an app reading
+relative input sees, so a pointer-locked game or 3D viewer is no longer looking at
+a motionless mouse. What is still missing is the mode: the browser's Pointer Lock
+API on the client, a wire message carrying a delta rather than a position, and a
+per-session flag saying which of the two a client is sending. Without it the
+pointer still walks to the edge of the remote screen and stops. RustDesk models
+this as a separate `MOUSE_TYPE_MOVE_RELATIVE` message with the absolute one, which
+is the shape to copy if it is ever wanted.
+
+**CapsLock is expressed as a flag, not as the lock.** Every injected event carries
+`MaskAlphaShift` when the client says CapsLock is on
+(`crates/rxa-agent/src/input.rs`), which produces the right characters but leaves
+the Mac's own lock state untouched. RustDesk instead presses and releases the real
+CapsLock key so the two agree. The difference shows if the Mac's physical CapsLock
+is on while the client's is off: the remote's lock applies on top of our flag, and
+nothing we send can turn it off. Worth revisiting if anyone reports case that will
+not go away.
+
+**Key events are posted with no pacing.** RustDesk sleeps 12 ms after every key
+event on macOS, having found that a Shift release can otherwise fail to take
+effect and leave the remote typing uppercase. We sleep nothing. It may not apply:
+they post keys at `CGEventTapLocation::Session` where we use `HID`, and their own
+comment says HID fixes a related Command-key bug they chose not to move for. If
+sticky modifiers ever appear under fast typing, this is the first thing to try.
+
+**The side buttons stop at the rxa engine.** Back and forward reach a Mac
+(`MouseButton::Back`/`Forward`), and RDP and VNC drop them: RDP carries them in an
+extended pointer PDU the fast-path event cannot express, and RFB's mask has bits
+for them that no server remotex talks to agrees on. Both would need protocol work
+rather than a mapping, which is why neither was attempted.
+
 ## Not planned
 
 ### Multiple sessions

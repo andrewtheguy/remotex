@@ -38,12 +38,12 @@ struct OutboundQueueTests {
     func aMoveAfterAButtonDoesNotReachBackPastIt() {
         let queue = OutboundQueue()
         queue.enqueue(.mouseMove(x: 10, y: 10))
-        queue.enqueue(.mouseButton(button: .left, pressed: true))
+        queue.enqueue(.mouseButton(button: .left, pressed: true, clicks: 1))
         queue.enqueue(.mouseMove(x: 99, y: 99))
         #expect(
             queue.drain() == [
                 .mouseMove(x: 10, y: 10),
-                .mouseButton(button: .left, pressed: true),
+                .mouseButton(button: .left, pressed: true, clicks: 1),
                 .mouseMove(x: 99, y: 99),
             ]
         )

@@ -451,6 +451,49 @@ impl AgentMsg {
     }
 }
 
+/// What a wheel delta is measured in, straight from the DOM's `deltaMode`.
+///
+/// Carried rather than normalised because only the client knows: macOS scrolls
+/// in *pixels* for a trackpad and a modern mouse, and in *lines* for a notched
+/// legacy wheel, and the two are an order of magnitude apart. Collapsing every
+/// delta to lines — which is what the agent did before this existed — turns a
+/// trackpad's stream of few-pixel deltas into a stream of whole lines, so a
+/// gesture that should glide jumps instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelUnit {
+    /// `DOM_DELTA_PIXEL`. Pixels of content, and what every browser on macOS
+    /// reports for both a trackpad and a wheel.
+    Pixel,
+    /// `DOM_DELTA_LINE`. Lines of text, which macOS scales by the app's own
+    /// line height.
+    Line,
+    /// `DOM_DELTA_PAGE`. macOS has no page unit, so the agent spends it as
+    /// lines.
+    Page,
+}
+
+impl WheelUnit {
+    /// The wire byte. Explicit rather than a cast, so reordering the variants
+    /// cannot silently renumber them under a running agent.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Pixel => 0,
+            Self::Line => 1,
+            Self::Page => 2,
+        }
+    }
+
+    /// Anything unrecognised reads as pixels: it is the unit every browser on a
+    /// Mac actually sends, so it is the safest thing to be wrong about.
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Line,
+            2 => Self::Page,
+            _ => Self::Pixel,
+        }
+    }
+}
+
 /// Gateway → agent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GatewayMsg {
@@ -492,9 +535,20 @@ pub enum GatewayMsg {
     /// Framebuffer pixel coordinates — the agent converts to display points.
     PointerMove { x: u16, y: u16 },
     /// `button` uses the DOM `MouseEvent.button` numbering (0/1/2).
-    PointerButton { button: u8, pressed: bool },
-    /// Raw DOM wheel deltas, exactly as remotex already carries them.
-    Wheel { dx: f32, dy: f32 },
+    ///
+    /// `clicks` is the client's own click count for this press — 1 for a single
+    /// click, 2 for the second of a double — carried for the same reason `Key`
+    /// carries CapsLock: the client's OS has already decided it, and the agent
+    /// would otherwise have to infer it from arrival times a network can stretch.
+    /// It is never zero.
+    PointerButton {
+        button: u8,
+        pressed: bool,
+        clicks: u8,
+    },
+    /// Raw DOM wheel deltas, exactly as remotex already carries them, with the
+    /// unit they are measured in — see [`WheelUnit`].
+    Wheel { dx: f32, dy: f32, unit: WheelUnit },
     /// DOM `KeyboardEvent.code`, plus the browser's authoritative CapsLock
     /// state so the agent never has to infer lock state.
     Key {
@@ -629,15 +683,21 @@ impl GatewayMsg {
                 put_u16(&mut out, *x);
                 put_u16(&mut out, *y);
             }
-            GatewayMsg::PointerButton { button, pressed } => {
+            GatewayMsg::PointerButton {
+                button,
+                pressed,
+                clicks,
+            } => {
                 out.push(Self::T_POINTER_BUTTON);
                 out.push(*button);
                 out.push(u8::from(*pressed));
+                out.push(*clicks);
             }
-            GatewayMsg::Wheel { dx, dy } => {
+            GatewayMsg::Wheel { dx, dy, unit } => {
                 out.push(Self::T_WHEEL);
                 out.extend_from_slice(&dx.to_le_bytes());
                 out.extend_from_slice(&dy.to_le_bytes());
+                out.push(unit.code());
             }
             GatewayMsg::Key {
                 code,
@@ -698,10 +758,15 @@ impl GatewayMsg {
             Self::T_POINTER_BUTTON => GatewayMsg::PointerButton {
                 button: r.u8()?,
                 pressed: r.bool()?,
+                // Floored here rather than trusted: a zero click state on the
+                // injected event would make the click count as no click at all,
+                // and one is what every press is at worst.
+                clicks: r.u8()?.max(1),
             },
             Self::T_WHEEL => GatewayMsg::Wheel {
                 dx: f32::from_le_bytes(r.array::<4>()?),
                 dy: f32::from_le_bytes(r.array::<4>()?),
+                unit: WheelUnit::from_code(r.u8()?),
             },
             Self::T_KEY => GatewayMsg::Key {
                 code: r.string()?,
@@ -1012,15 +1077,27 @@ mod tests {
             GatewayMsg::PointerButton {
                 button: 2,
                 pressed: true,
+                clicks: 1,
             },
             GatewayMsg::PointerButton {
                 button: 0,
                 pressed: false,
+                clicks: 2,
             },
-            GatewayMsg::Wheel { dx: 0.0, dy: -2.5 },
+            GatewayMsg::Wheel {
+                dx: 0.0,
+                dy: -2.5,
+                unit: WheelUnit::Pixel,
+            },
             GatewayMsg::Wheel {
                 dx: 120.0,
                 dy: f32::MIN,
+                unit: WheelUnit::Line,
+            },
+            GatewayMsg::Wheel {
+                dx: 0.0,
+                dy: 1.0,
+                unit: WheelUnit::Page,
             },
             GatewayMsg::Key {
                 code: "KeyA".to_owned(),
@@ -1314,6 +1391,22 @@ mod tests {
         assert_eq!(GatewayMsg::decode(&bytes), Err(MsgError::BadBool(2)));
     }
 
+    /// A zero click count reaches the agent as a `kCGMouseEventClickState` of
+    /// zero, which is a click that counts as none. One is the floor at the
+    /// boundary rather than a check at the injector.
+    #[test]
+    fn a_zero_click_count_decodes_as_one() {
+        let bytes = [0x04, 0x00, 0x01, 0x00];
+        assert_eq!(
+            GatewayMsg::decode(&bytes),
+            Ok(GatewayMsg::PointerButton {
+                button: 0,
+                pressed: true,
+                clicks: 1,
+            })
+        );
+    }
+
     // Clients *divide* the framebuffer by this, so every answer has to be a
     // number that leaves a desktop on screen — 1x for anything unbelievable
     // rather than a zero to divide by or a factor that would shrink the desktop
@@ -1340,13 +1433,26 @@ mod tests {
         let msg = GatewayMsg::Wheel {
             dx: -0.5,
             dy: 33.333_332,
+            unit: WheelUnit::Pixel,
         };
         match GatewayMsg::decode(&msg.encode()).unwrap() {
-            GatewayMsg::Wheel { dx, dy } => {
+            GatewayMsg::Wheel { dx, dy, unit } => {
                 assert_eq!(dx, -0.5);
                 assert_eq!(dy, 33.333_332);
+                assert_eq!(unit, WheelUnit::Pixel);
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // The unit decides whether a delta is a few pixels or a whole line, so a
+    // byte that means neither must not read as the larger of the two.
+    #[test]
+    fn every_wheel_unit_survives_and_a_strange_byte_reads_as_pixels() {
+        for unit in [WheelUnit::Pixel, WheelUnit::Line, WheelUnit::Page] {
+            assert_eq!(WheelUnit::from_code(unit.code()), unit);
+        }
+        assert_eq!(WheelUnit::from_code(3), WheelUnit::Pixel);
+        assert_eq!(WheelUnit::from_code(u8::MAX), WheelUnit::Pixel);
     }
 }

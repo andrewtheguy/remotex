@@ -1247,12 +1247,19 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
                 y_position: y,
             })]
         }
-        ClientMsg::MouseButton { button, pressed } => {
-            let mut flags = match button {
+        // `clicks` goes nowhere: RDP carries button state alone, and Windows
+        // counts the clicks itself from the events it receives.
+        ClientMsg::MouseButton { button, pressed, .. } => {
+            let flags = match button {
                 MouseButton::Left => PointerFlags::LEFT_BUTTON,
                 MouseButton::Right => PointerFlags::RIGHT_BUTTON,
                 MouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                // The side buttons travel in RDP's *extended* pointer PDU, which
+                // this fast-path event cannot carry. Dropped rather than sent as
+                // some other button, which would be worse than doing nothing.
+                MouseButton::Back | MouseButton::Forward => return Vec::new(),
             };
+            let mut flags = flags;
             if pressed {
                 flags |= PointerFlags::DOWN;
             }
@@ -1263,7 +1270,9 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
                 y_position: last_pos.1,
             })]
         }
-        ClientMsg::Wheel { dx, dy } => {
+        // The unit is dropped: RDP spends a notch as 120 rotation units whatever
+        // the delta was measured in, and the guest applies its own scrolling.
+        ClientMsg::Wheel { dx, dy, .. } => {
             let mut events = Vec::new();
             // RDP: positive rotation is up/forward. The DOM deltaY is positive
             // when scrolling down, so invert it. One notch ≈ 120 units.
@@ -1482,6 +1491,7 @@ fn build_connector_config(config: &TargetConfig) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::WheelUnit;
 
     fn one(input: ClientMsg, last_pos: &mut (u16, u16)) -> FastPathInputEvent {
         let mut events = translate_input(input, last_pos);
@@ -1522,6 +1532,7 @@ mod tests {
             ClientMsg::MouseButton {
                 button: MouseButton::Left,
                 pressed: true,
+                clicks: 1,
             },
             &mut pos,
         );
@@ -1539,6 +1550,7 @@ mod tests {
             ClientMsg::MouseButton {
                 button: MouseButton::Right,
                 pressed: false,
+                clicks: 1,
             },
             &mut pos,
         );
@@ -1554,7 +1566,10 @@ mod tests {
     #[test]
     fn wheel_down_is_negative_vertical() {
         let mut pos = (0, 0);
-        let event = one(ClientMsg::Wheel { dx: 0.0, dy: 3.0 }, &mut pos);
+        let event = one(
+            ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Pixel },
+            &mut pos,
+        );
         match event {
             FastPathInputEvent::MouseEvent(pdu) => {
                 assert!(pdu.flags.contains(PointerFlags::VERTICAL_WHEEL));

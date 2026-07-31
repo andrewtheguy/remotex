@@ -277,27 +277,40 @@ export function attachTouchGestures(
 
   // Move the remote pointer, transitioning the left button when the held
   // state changes.
-  function movePointer(x: number, y: number, left: boolean): void {
+  function movePointer(x: number, y: number, left: boolean, clicks = 1): void {
     const clamped = clampCursorToRemote(x, y);
     trackCursor(clamped.x, clamped.y);
     deps.send({ type: "mouseMove", x: clamped.x, y: clamped.y });
     if (left !== leftHeld) {
       leftHeld = left;
-      deps.send({ type: "mouseButton", button: "left", pressed: left });
+      deps.send({ type: "mouseButton", button: "left", pressed: left, clicks });
     }
   }
 
-  function sendTapClick(): void {
+  // A tap is a click, and the count says which one of a run it is — a touch
+  // screen has no MouseEvent.detail to inherit, so the gesture layer is the only
+  // thing that knows a second tap was meant as a double-click.
+  function sendTapClick(clicks = 1): void {
     const c = currentCursor();
-    movePointer(c.x, c.y, true);
-    movePointer(c.x, c.y, false);
+    movePointer(c.x, c.y, true, clicks);
+    movePointer(c.x, c.y, false, clicks);
   }
 
   function sendRightClick(): void {
     const c = currentCursor();
     deps.send({ type: "mouseMove", x: c.x, y: c.y });
-    deps.send({ type: "mouseButton", button: "right", pressed: true });
-    deps.send({ type: "mouseButton", button: "right", pressed: false });
+    deps.send({
+      type: "mouseButton",
+      button: "right",
+      pressed: true,
+      clicks: 1,
+    });
+    deps.send({
+      type: "mouseButton",
+      button: "right",
+      pressed: false,
+      clicks: 1,
+    });
   }
 
   // One scroll notch at the cursor; the server maps any nonzero delta to one
@@ -305,7 +318,10 @@ export function attachTouchGestures(
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();
     deps.send({ type: "mouseMove", x: c.x, y: c.y });
-    deps.send({ type: "wheel", dx, dy });
+    // Lines, not pixels: these deltas are a notch each rather than a distance
+    // the finger travelled, and calling them pixels would scroll by a few of
+    // them and go nowhere.
+    deps.send({ type: "wheel", dx, dy, unit: "line" });
   }
 
   // Move the cursor by a finger step (screen px -> remote px through the
@@ -403,9 +419,10 @@ export function attachTouchGestures(
       const c = currentCursor();
       movePointer(c.x, c.y, false);
       // A quick forceful second tap after the drag release doubles up into a
-      // double-click.
+      // double-click — which it only is if it says so, since the remote counts
+      // nothing itself.
       if (isForceTap) {
-        sendTapClick();
+        sendTapClick(2);
       }
       return;
     }
@@ -990,7 +1007,12 @@ export function attachTouchGestures(
     ignoreSingleTouch = false;
     if (leftHeld) {
       leftHeld = false;
-      deps.send({ type: "mouseButton", button: "left", pressed: false });
+      deps.send({
+        type: "mouseButton",
+        button: "left",
+        pressed: false,
+        clicks: 1,
+      });
     }
   }
 

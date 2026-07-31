@@ -15,12 +15,12 @@ struct ClientMessageTests {
             ["type": "mouseMove", "x": 5, "y": 6]
         )
         try expectEncoding(
-            .mouseButton(button: .right, pressed: true),
-            ["type": "mouseButton", "button": "right", "pressed": true]
+            .mouseButton(button: .right, pressed: true, clicks: 2),
+            ["type": "mouseButton", "button": "right", "pressed": true, "clicks": 2]
         )
         try expectEncoding(
-            .wheel(dx: 0, dy: -2.5),
-            ["type": "wheel", "dx": 0, "dy": -2.5]
+            .wheel(dx: 0, dy: -2.5, unit: .pixel),
+            ["type": "wheel", "dx": 0, "dy": -2.5, "unit": "pixel"]
         )
         try expectEncoding(
             .key(code: "KeyA", pressed: false, caps: true),
@@ -105,9 +105,9 @@ struct ClientMessageTests {
     /// nil and the caller drops one wheel event instead.
     @Test
     func aNonFiniteWheelDeltaDoesNotProduceAFrame() {
-        #expect(ClientMessage.wheel(dx: .infinity, dy: 0).jsonText() == nil)
-        #expect(ClientMessage.wheel(dx: 0, dy: .nan).jsonText() == nil)
-        #expect(ClientMessage.wheel(dx: -.infinity, dy: 3).jsonText() == nil)
+        #expect(ClientMessage.wheel(dx: .infinity, dy: 0, unit: .pixel).jsonText() == nil)
+        #expect(ClientMessage.wheel(dx: 0, dy: .nan, unit: .pixel).jsonText() == nil)
+        #expect(ClientMessage.wheel(dx: -.infinity, dy: 3, unit: .pixel).jsonText() == nil)
     }
 
     /// Both answers explicitly, because the gateway refuses `{"type":"audio"}` with no
@@ -123,8 +123,8 @@ struct ClientMessageTests {
     func everyCaseReportsADistinctTag() {
         let messages: [ClientMessage] = [
             .mouseMove(x: 0, y: 0),
-            .mouseButton(button: .left, pressed: true),
-            .wheel(dx: 0, dy: 0),
+            .mouseButton(button: .left, pressed: true, clicks: 1),
+            .wheel(dx: 0, dy: 0, unit: .pixel),
             .key(code: "KeyA", pressed: true, caps: false),
             .viewport(w: 1, h: 1),
             .defaultSize,

@@ -29,11 +29,11 @@ struct WheelMappingTests {
         #expect(other.dy == 7)
     }
 
-    /// Trackpad deltas are point-like, which is what a browser reports for the
-    /// same gesture, so they go through untouched and the agent's rounding keeps
-    /// a flick smooth.
+    /// A trackpad's deltas are point-like, and travel as pixels. Unscaled, so the
+    /// agent can spend them as the pixels they are — scaling them into some
+    /// common unit is what made a glide arrive as a series of jumps.
     @Test
-    func preciseDeltasPassThroughUnscaled() throws {
+    func preciseDeltasTravelAsPixels() throws {
         let delta = try #require(
             WheelMapping.delta(
                 scrollingDeltaX: 0,
@@ -42,13 +42,14 @@ struct WheelMappingTests {
             )
         )
         #expect(delta.dy == -1.5)
+        #expect(delta.unit == .pixel)
     }
 
-    /// A notched wheel reports *lines*, not points. One line has to arrive as one
-    /// hundred, because that is what the agent divides by to get one line back —
-    /// send AppKit's 1 and a wheel click barely moves anything.
+    /// A notched wheel reports *lines*, and says so rather than being converted.
+    /// The remote cannot tell the two apart afterwards: AppKit's one line and a
+    /// trackpad's one point are the same number and nothing like the same scroll.
     @Test
-    func lineDeltasScaleToTheProtocolsUnits() throws {
+    func lineDeltasTravelAsLines() throws {
         let delta = try #require(
             WheelMapping.delta(
                 scrollingDeltaX: 0,
@@ -56,7 +57,8 @@ struct WheelMappingTests {
                 hasPreciseScrollingDeltas: false
             )
         )
-        #expect(delta.dy == -100)
+        #expect(delta.dy == -1)
+        #expect(delta.unit == .line)
 
         let triple = try #require(
             WheelMapping.delta(
@@ -65,7 +67,8 @@ struct WheelMappingTests {
                 hasPreciseScrollingDeltas: false
             )
         )
-        #expect(triple.dy == 300)
+        #expect(triple.dy == 3)
+        #expect(triple.unit == .line)
     }
 
     @Test
@@ -111,15 +114,17 @@ struct WheelMappingTests {
         }
     }
 
-    /// Mirrors `mouseButtonFromEvent` in the web client, which names nothing past
-    /// the third button — a five-button mouse's extra buttons are not forwarded
-    /// rather than being forwarded as something wrong.
+    /// Mirrors `mouseButtonFromEvent` in the web client. AppKit numbers right
+    /// before centre where the DOM does the opposite, and both agree that 3 and 4
+    /// are the side buttons.
     @Test
-    func onlyTheThreeNamedButtonsMap() {
+    func everyNamedButtonMapsAndNothingElseDoes() {
         #expect(WheelMapping.button(forEventNumber: 0) == .left)
         #expect(WheelMapping.button(forEventNumber: 1) == .right)
         #expect(WheelMapping.button(forEventNumber: 2) == .middle)
-        for number in [3, 4, 31, -1] {
+        #expect(WheelMapping.button(forEventNumber: 3) == .back)
+        #expect(WheelMapping.button(forEventNumber: 4) == .forward)
+        for number in [5, 31, -1] {
             #expect(WheelMapping.button(forEventNumber: number) == nil, "button \(number)")
         }
     }

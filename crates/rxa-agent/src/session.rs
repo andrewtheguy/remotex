@@ -1076,10 +1076,14 @@ async fn pump(
                         cursor_seen = cursor::UNSEEN;
                     }
                     GatewayMsg::PointerMove { x, y } => injector.pointer_move(x, y),
-                    GatewayMsg::PointerButton { button, pressed } => {
-                        injector.pointer_button(button, pressed);
+                    GatewayMsg::PointerButton {
+                        button,
+                        pressed,
+                        clicks,
+                    } => {
+                        injector.pointer_button(button, pressed, clicks);
                     }
-                    GatewayMsg::Wheel { dx, dy } => injector.wheel(dx, dy),
+                    GatewayMsg::Wheel { dx, dy, unit } => injector.wheel(dx, dy, unit),
                     GatewayMsg::Key { code, pressed, caps } => {
                         injector.key(&code, pressed, caps);
                     }

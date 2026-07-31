@@ -4,6 +4,24 @@ enum MouseButton: String, Sendable, Codable, CaseIterable {
     case left
     case middle
     case right
+    /// The side buttons of a five-button mouse. Only an rxa target acts on them;
+    /// RDP and VNC have nowhere to put them and drop them at the gateway.
+    case back
+    case forward
+}
+
+/// What a wheel delta is measured in: `WheelUnit` in `src/protocol.rs`, and the
+/// DOM's `deltaMode` by name.
+///
+/// Carried because only this end knows. `NSEvent.hasPreciseScrollingDeltas` is
+/// exactly the distinction — a trackpad or Magic Mouse reports point-like deltas,
+/// a notched wheel reports lines — and the two are an order of magnitude apart.
+/// Sending both as lines, which is what this client did before the unit existed,
+/// turns a trackpad glide into a series of jumps.
+enum WheelUnit: String, Sendable, Codable, CaseIterable {
+    case pixel
+    case line
+    case page
 }
 
 /// Viewer -> gateway input and session control: `ClientMsg` in
@@ -19,8 +37,12 @@ enum MouseButton: String, Sendable, Codable, CaseIterable {
 /// a viewport is measured.
 enum ClientMessage: Sendable, Equatable {
     case mouseMove(x: Int32, y: Int32)
-    case mouseButton(button: MouseButton, pressed: Bool)
-    case wheel(dx: Float, dy: Float)
+    /// `clicks` is `NSEvent.clickCount` — 1 for a single click, 2 for the second
+    /// of a double. Carried because the rxa agent injects it as the macOS event's
+    /// click state, and without it nothing on the remote counts a double-click at
+    /// all; a synthetic send passes 1, which is what a lone click is worth.
+    case mouseButton(button: MouseButton, pressed: Bool, clicks: Int)
+    case wheel(dx: Float, dy: Float, unit: WheelUnit)
     /// `code` is a DOM `KeyboardEvent.code`; see `src/keymap.rs` for the set the
     /// gateway maps. `caps` is the CapsLock *lock* state, which VNC cannot
     /// observe on its own — false on a synthetic send, which expresses case with
@@ -125,8 +147,8 @@ enum ClientMessage: Sendable, Equatable {
 
 extension ClientMessage: Encodable {
     private enum Key: String, CodingKey {
-        case type, x, y, button, pressed, dx, dy, code, caps, w, h, target, text
-        case id, scale, enabled, force
+        case type, x, y, button, pressed, clicks, dx, dy, unit, code, caps, w, h
+        case target, text, id, scale, enabled, force
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -136,12 +158,14 @@ extension ClientMessage: Encodable {
         case .mouseMove(let x, let y):
             try container.encode(x, forKey: .x)
             try container.encode(y, forKey: .y)
-        case .mouseButton(let button, let pressed):
+        case .mouseButton(let button, let pressed, let clicks):
             try container.encode(button, forKey: .button)
             try container.encode(pressed, forKey: .pressed)
-        case .wheel(let dx, let dy):
+            try container.encode(clicks, forKey: .clicks)
+        case .wheel(let dx, let dy, let unit):
             try container.encode(dx, forKey: .dx)
             try container.encode(dy, forKey: .dy)
+            try container.encode(unit, forKey: .unit)
         case .key(let code, let pressed, let caps):
             try container.encode(code, forKey: .code)
             try container.encode(pressed, forKey: .pressed)
