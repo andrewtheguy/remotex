@@ -77,6 +77,15 @@ final class AppModel: GatewaySessionSink {
     /// it up blames a working session for a failure it recovered from.
     @ObservationIgnored
     private var connectErrorIsFromRejection = false
+    /// Whether a 401 has already bought this launch its one automatic relaunch.
+    ///
+    /// Cleared when a control message proves a session attached — the same proof
+    /// `connectErrorIsFromRejection` is cleared by — so it bounds *consecutive*
+    /// refusals rather than counting them for the life of the app. The runaway it
+    /// exists to stop is the one with no progress in it: launch, 401, launch, 401,
+    /// a process each time.
+    @ObservationIgnored
+    private var relaunchedForUnauthorized = false
     /// The room available for the remote desktop, in the remote's own pixels, as
     /// the surface last measured it. Nil until a surface exists.
     ///
@@ -318,7 +327,15 @@ final class AppModel: GatewaySessionSink {
     /// What a saved config change and the launch screen's **Retry** both do. The
     /// session goes with it — the gateway is the session's ground, and a new process
     /// has no memory of the old one's slot.
+    ///
+    /// Asking for it clears the automatic-relaunch budget below: a person pressing
+    /// Retry is entitled to the same one free recovery a fresh launch gets.
     func relaunchGateway() async {
+        relaunchedForUnauthorized = false
+        await restartGateway()
+    }
+
+    private func restartGateway() async {
         await teardown()
         session = ViewerSessionState(screen: .launching)
         targets = []
@@ -343,6 +360,12 @@ final class AppModel: GatewaySessionSink {
         launchLog = gateway?.log() ?? ""
         session = ViewerSessionState(screen: .launching)
         targets = []
+        // The client described a gateway process that is gone, so it is not a client
+        // any more. Dropped rather than left to fail on its next use: `loadTargets`
+        // treats a nil client as "nothing to ask" and a live one as a working gateway,
+        // and a stale one would put a connection error on the launch screen — over the
+        // failure that actually explains this.
+        client = nil
     }
 
     /// The gateway exited on its own while the app was using it.
@@ -407,8 +430,24 @@ final class AppModel: GatewaySessionSink {
     /// gateway behind it is not the one that issued it — it restarted, or died and
     /// something else answered on its port. Either way the answer is a fresh gateway,
     /// not fresh credentials.
+    ///
+    /// **Once.** A relaunch that comes straight back with another 401 is not a
+    /// situation more relaunches improve, and each one spawns a process — so the second
+    /// refusal goes to the launch screen with the gateway's own output instead, where
+    /// Retry is a decision somebody makes rather than a loop nobody can see.
     private func handleUnauthorized() async {
-        await relaunchGateway()
+        guard !relaunchedForUnauthorized else {
+            await teardown()
+            fail(with: EmbeddedGateway.LaunchFailure.refused(gateway?.log() ?? ""))
+            return
+        }
+        // A relaunch already under way will attach or fail on its own; a second one
+        // started on top of it would fight the first for the same process.
+        guard !isBusy else {
+            return
+        }
+        relaunchedForUnauthorized = true
+        await restartGateway()
     }
 
     // MARK: - Session events
@@ -463,6 +502,9 @@ final class AppModel: GatewaySessionSink {
         if connectErrorIsFromRejection {
             setConnectError(nil)
         }
+        // The same proof, spent on the same thing: this gateway accepted the token, so
+        // a 401 arriving later is a new situation and gets its own automatic relaunch.
+        relaunchedForUnauthorized = false
         switch message {
         case .picker:
             session.screen = .picker

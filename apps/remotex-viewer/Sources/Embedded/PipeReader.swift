@@ -96,19 +96,16 @@ final class PipeReader: @unchecked Sendable {
     /// The pipe closed. Anything left unterminated is still a line — a gateway that
     /// died mid-message has said the most useful thing it is going to.
     private func finish() {
-        let (leftover, closed) = lock.withLock { () -> (String?, (@Sendable () -> Void)?) in
-            var leftover: String?
+        let closed = lock.withLock { () -> (@Sendable () -> Void)? in
             if !pending.isEmpty {
-                leftover = String(decoding: pending, as: UTF8.self)
-                lines.append(leftover!)
+                lines.append(String(decoding: pending, as: UTF8.self))
                 pending.removeAll()
             }
             let closed = endOfFile
             endOfFile = nil
             firstLine = nil
-            return (leftover, closed)
+            return closed
         }
-        _ = leftover
         closed?()
     }
 

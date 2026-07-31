@@ -18,8 +18,6 @@ struct GatewayBinary: Sendable {
     /// Activity Monitor and in `pgrep` which process is which.
     static let name = "remotex-gateway"
 
-    let executable: URL
-
     /// The copy inside this bundle, or `nil` in an unbundled build (`swift test`,
     /// `swift run`), where there is none.
     static func inBundle() -> GatewayBinary? {
@@ -41,13 +39,30 @@ struct GatewayBinary: Sendable {
         }
     }
 
+    /// How long a one-shot subcommand gets before it is killed and reported as a
+    /// failure.
+    ///
+    /// These answer in milliseconds — parse a config, derive a key — so this is not a
+    /// budget, it is the difference between a wedged child and a **Save** button stuck
+    /// on "Checking…" with no way out. Generous enough that a cold start whose
+    /// signature Gatekeeper is checking for the first time is not mistaken for a hang.
+    static let defaultTimeout: Duration = .seconds(15)
+
+    let executable: URL
+    /// Overridable so a test can watch this happen without waiting fifteen seconds
+    /// for it; nothing in the app passes anything but the default.
+    var timeout: Duration = GatewayBinary.defaultTimeout
+
     /// Run the binary, optionally writing `input` to its stdin, and collect both
     /// streams.
     ///
-    /// For subcommands that answer and exit. Both pipes are drained concurrently
-    /// rather than one after the other: a child that fills one while this waits on
-    /// the other is a deadlock, and the fact that today's outputs are small is not a
-    /// property worth depending on.
+    /// The order matters twice over. Both pipes are drained **before** anything is
+    /// written to stdin and concurrently with each other: a child that fills one
+    /// while this waits on the other — or while this is still feeding it — is a
+    /// deadlock, and the fact that today's inputs and outputs are small is not a
+    /// property worth depending on. The write itself goes to a queue rather than
+    /// happening here, because a blocking `write` on a cooperative thread is one
+    /// fewer thread for everything else in the process.
     func run(_ arguments: [String], input: String? = nil) async throws -> Output {
         let process = Process()
         process.executableURL = executable
@@ -60,18 +75,49 @@ struct GatewayBinary: Sendable {
         process.standardError = standardError
         try process.run()
 
-        if let input {
-            try? standardInput.fileHandleForWriting.write(contentsOf: Data(input.utf8))
-        }
-        // Closed either way: a subcommand reading its config from stdin waits for
-        // end-of-file, so leaving this open is a hang rather than an empty input.
-        try? standardInput.fileHandleForWriting.close()
-
         async let out = Self.readToEnd(standardOutput.fileHandleForReading)
         async let error = Self.readToEnd(standardError.fileHandleForReading)
+        // Started before the write and never awaited before it either, so a child that
+        // talks back while being fed cannot wedge the pair of us.
+        Self.write(input, to: standardInput.fileHandleForWriting)
+
+        // The watchdog is what turns a wedged child into an ordinary failure: killing
+        // it closes both pipes, so the reads above finish and this returns through the
+        // path a non-zero exit already takes.
+        let watchdog = Task { [timeout] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else {
+                return
+            }
+            let box = ProcessBox(process: process)
+            DispatchQueue.global(qos: .userInitiated).async {
+                if box.process.isRunning {
+                    box.process.terminate()
+                }
+            }
+        }
+        defer { watchdog.cancel() }
+
         let (text, errorText) = await (out, error)
         let status = await Self.exitStatus(of: process)
         return Output(status: status, standardOutput: text, standardError: errorText)
+    }
+
+    /// Feed the child its stdin and close it.
+    ///
+    /// Closed either way, input or none: a subcommand reading its config from stdin
+    /// waits for end-of-file, so leaving this open is a hang rather than an empty
+    /// input. Failures are ignored because they all mean the same thing — the child is
+    /// not listening — which its exit status and stderr describe better than a write
+    /// error could.
+    private static func write(_ input: String?, to handle: FileHandle) {
+        let box = HandleBox(handle: handle)
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let input {
+                try? box.handle.write(contentsOf: Data(input.utf8))
+            }
+            try? box.handle.close()
+        }
     }
 
     private static func readToEnd(_ handle: FileHandle) async -> String {

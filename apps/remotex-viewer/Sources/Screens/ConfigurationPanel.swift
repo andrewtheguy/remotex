@@ -68,8 +68,14 @@ struct ConfigurationPanel: View {
                     NSWorkspace.shared.activateFileViewerSelecting([store.instance.configURL])
                 }
                 Spacer()
+                // Disabled while a save is in flight, Escape included, because it could
+                // not do what it says: the check is already running and a clean verdict
+                // writes the file and restarts the gateway whether or not this sheet is
+                // still on screen. Better to be briefly unavailable than to offer a
+                // cancel that cancels nothing.
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(isSaving)
                 Button(isSaving ? "Checking…" : "Save", action: save)
                     .keyboardShortcut(.defaultAction)
                     .disabled(isSaving)

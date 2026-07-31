@@ -128,11 +128,23 @@ final class GatewayConfigStore {
         try instance.create()
         let url = instance.configURL
         let temporary = url.appendingPathExtension("new")
+        // Registered before the first thing that can throw: a `remotex.toml.new` left
+        // behind by a failed save is litter in a directory documented as holding three
+        // files, and the next save would be writing over somebody's unexplained
+        // leftovers. Harmless once the move below has consumed it.
+        defer { try? FileManager.default.removeItem(at: temporary) }
         try Data(text.utf8).write(to: temporary, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
-        // `replaceItemAt` keeps the destination's identity, so an editor watching the
-        // file follows the change rather than losing track of it.
-        _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+        if FileManager.default.fileExists(atPath: url.path) {
+            // `replaceItemAt` keeps the destination's identity, so an editor watching
+            // the file follows the change rather than losing track of it.
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+        } else {
+            // First launch: there is no item to replace, which is not what
+            // `replaceItemAt` is for. A move is the same atomic rename without the
+            // pretence.
+            try FileManager.default.moveItem(at: temporary, to: url)
+        }
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
