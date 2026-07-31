@@ -119,6 +119,25 @@ struct GatewayConfigStoreTests {
         #expect(await unpaired.publicKey() == nil, "no identity yet")
     }
 
+    /// A per-instance Dock icon is a file, not a setting: present or absent, `.icns`
+    /// preferred over `.png` because that is what macOS wants. Absent is the ordinary
+    /// case and leaves the app its own icon.
+    @Test
+    func aninstanceIconIsWhicheverFileIsThere() throws {
+        let directory = try ScratchDirectory()
+        let instance = directory.instance
+        #expect(instance.iconURL() == nil, "nothing dropped in yet")
+
+        try directory.write("icon.png", "not really a png")
+        #expect(instance.iconURL()?.lastPathComponent == "icon.png")
+
+        try directory.write("icon.icns", "not really an icns")
+        #expect(
+            instance.iconURL()?.lastPathComponent == "icon.icns",
+            "the format macOS wants wins when both are there"
+        )
+    }
+
     // MARK: - Helpers
 
     private func store(

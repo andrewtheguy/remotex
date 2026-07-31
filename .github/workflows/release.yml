@@ -212,6 +212,12 @@ jobs:
       - name: Test the native viewer
         run: swift test --package-path apps/remotex-viewer
 
+      # This job builds the gateway binary too, since it goes inside the bundle — and
+      # without a cache that means compiling the whole graph, libopus through cmake
+      # included, on every release.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Build remotex.app and its disk image
         env:
           CODESIGN_IDENTITY: "-"
