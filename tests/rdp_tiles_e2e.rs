@@ -86,8 +86,6 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             resize: false,
             clipboard: false,
             audio: false,
-            agent_public_key: String::new(),
-            gateway_private_key: String::new(),
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

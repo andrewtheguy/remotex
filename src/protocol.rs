@@ -4,6 +4,7 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Transport policy shared by all engines: a dirty rectangle taller than this
 /// is split into strips before being sent, so a full-screen repaint doesn't
@@ -16,11 +17,63 @@ pub const STRIP_ROWS: u16 = 64;
 /// tags they do not know.
 pub const PROTOCOL_VERSION: u32 = 6;
 
-/// The clipboard transfer cap and its test, defined in `rxa-proto` so the
-/// browser link, the gateway and the Mac agent cannot drift apart on it (the
-/// agent crate can't see this file). Re-exported here because every other
-/// boundary in this crate reaches for `protocol::` first.
-pub use rxa_proto::msg::{MAX_CLIPBOARD_BYTES, clipboard_fits};
+/// Ceiling on one clipboard transfer, in bytes, in either direction.
+///
+/// Text over this is refused, not truncated: a truncated paste looks exactly
+/// like a complete one, so neither end can tell the rest is missing until
+/// something downstream is quietly wrong. A refusal is reported as one (the
+/// panels name the size and the limit), so the surprise happens at the
+/// clipboard, where it can be understood. Clipboard text rides the same link as
+/// live frames, so an accidental 200 MB copy must not stall a session.
+pub const MAX_CLIPBOARD_BYTES: usize = 65_536;
+
+/// Whether `text` fits one clipboard transfer. `str::len` is already UTF-8
+/// bytes, which is exactly what [`MAX_CLIPBOARD_BYTES`] bounds.
+pub fn clipboard_fits(text: &str) -> bool {
+    text.len() <= MAX_CLIPBOARD_BYTES
+}
+
+/// A display's backing scale as it travels on the wire: hundredths of a
+/// captured pixel per point of the desktop being captured — 100 for a 1× panel,
+/// 200 for a Retina one.
+pub const SCALE_ONE: u16 = 100;
+
+/// The largest scale worth believing. macOS has only ever shipped 1× and 2×
+/// panels; this leaves room for one more doubling and rejects the rest.
+const SCALE_MAX: u16 = 4 * SCALE_ONE;
+
+/// A wire `scale` as the ratio clients divide the framebuffer by.
+///
+/// Anything outside `SCALE_ONE..=SCALE_MAX` — a zero from a source that could
+/// not read the display's mode, a number no panel has — reads as 1×, which is
+/// the answer that leaves the framebuffer alone. A scale below 1 is as wrong as
+/// one above 4: it would blow the desktop up rather than shrink it.
+pub fn scale_ratio(scale: u16) -> f32 {
+    if (SCALE_ONE..=SCALE_MAX).contains(&scale) {
+        f32::from(scale) / f32::from(SCALE_ONE)
+    } else {
+        1.0
+    }
+}
+
+/// Wall-clock milliseconds for clipboard activity timestamps. Saturation only
+/// matters after the year 584,554,051 or if the system clock predates Unix.
+pub fn unix_time_ms() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis();
+    u64::try_from(elapsed).unwrap_or(u64::MAX)
+}
+
+/// Timestamp a newly observed clipboard change without moving backwards.
+///
+/// Advancing by at least one millisecond distinguishes repeated activity even
+/// when the text is identical or the wall clock has not advanced.
+pub fn next_clipboard_time(previous: Option<u64>) -> u64 {
+    let now = unix_time_ms();
+    previous.map_or(now, |last| now.max(last.saturating_add(1)))
+}
 
 /// A remote clipboard value held by an engine, plus when remotex last observed
 /// that clipboard change. `None` is honest for content that predates the
@@ -70,7 +123,7 @@ impl ClipboardSnapshot {
     }
 
     fn now(previous: Option<&Self>) -> u64 {
-        rxa_proto::next_clipboard_time(previous.and_then(|snapshot| snapshot.changed_at_ms))
+        next_clipboard_time(previous.and_then(|snapshot| snapshot.changed_at_ms))
     }
 }
 
@@ -163,23 +216,7 @@ pub enum ClientMsg {
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
-    ///
-    /// `force` answers a [`ServerMsg::RemoteBusy`]: take the *remote's* session
-    /// slot from whoever holds it. It is not about this gateway's own slot, which
-    /// was claimed over HTTP before the socket existed (`force` on
-    /// `/api/session/claim`) — a browser can hold this gateway and still find the
-    /// Mac at the other end occupied by a different one. Only an `rxa` target has
-    /// anything to force; the other engines ignore it, having no session of their
-    /// own to contend for.
-    ///
-    /// Defaulted rather than required so a client that has never seen a busy
-    /// remote — or a bundle cached from before this existed — connects as it
-    /// always did.
-    Connect {
-        target: String,
-        #[serde(default)]
-        force: bool,
-    },
+    Connect { target: String },
     /// Tear the current session's engine down and return to the picker
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
@@ -193,8 +230,9 @@ pub enum ClientMsg {
     /// alongside the automatic pushes: a browser attaching mid-session has
     /// missed every one of them. See docs/architecture.md.
     ClipboardRequest,
-    /// Share the display identified by the last [`ServerMsg::Displays`].
-    /// Currently supported only by RXA.
+    /// Share the display identified by the last [`ServerMsg::Displays`]. No
+    /// engine acts on it yet — display picking over macOS Screen Sharing (ARD)
+    /// is a planned phase-2 feature (see docs/roadmap.md).
     SelectDisplay { id: u32 },
     /// Start or stop audio delivery for this attachment.
     Audio { enabled: bool },
@@ -502,45 +540,12 @@ pub enum ServerMsg {
     /// A fatal session error the client should surface. The session then
     /// returns to the picker, so the browser shows this against the picker.
     Error { message: String },
-    /// The remote refused the session because a different client holds it, and a
-    /// person can choose to take it over. Sent instead of [`ServerMsg::Error`],
-    /// and followed by the same return to the picker — so the client shows it
-    /// there, against the target it just asked for, with the takeover offered as
-    /// [`ClientMsg::Connect`] carrying `force`.
-    ///
-    /// Its own variant rather than an `Error` with a recognisable string, because
-    /// the client has to *decide* to offer that button: everything else on this
-    /// path is text a person reads and cannot act on.
-    ///
-    /// Only `rxa` produces it — the macOS agent has a session slot of its own (see
-    /// `rxa_proto::msg::GatewayMsg::Claim`). RDP and VNC servers arbitrate their
-    /// own sessions and tell us nothing we could offer a choice about.
-    ///
-    /// `taken_over` distinguishes the two ways to arrive here, which are opposite
-    /// experiences and must not read the same:
-    ///
-    /// - `false` — this client asked for a target somebody else is using. It was
-    ///   refused, and nothing it had was disturbed.
-    /// - `true` — this client *had* the session and another one took it. Nothing
-    ///   was asked for; something was lost. Only the remote's session went: the
-    ///   login, this gateway's slot and the socket are all still this client's,
-    ///   which is why it lands back on the target list rather than anywhere else.
-    ///
-    /// Both leave a client on the picker with the same button, but "in use, take
-    /// over?" told to somebody who just lost their desktop reads as a refusal of a
-    /// connection they never made.
-    RemoteBusy {
-        holder: String,
-        held_secs: u32,
-        taken_over: bool,
-    },
     /// No target is selected: show the post-login target picker. Sent on attach
     /// to an idle slot, on disconnect ("switch target"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
     Picker,
-    /// A live target and its client-visible capabilities. RXA resize also
-    /// depends on whether [`ServerMsg::Displays`] marks the active display as
-    /// agent-created. `audio` reports capability, not whether sound is arriving.
+    /// A live target and its client-visible capabilities. `audio` reports
+    /// capability, not whether sound is arriving.
     Connected {
         name: String,
         protocol: &'static str,
@@ -622,13 +627,6 @@ enum ControlMsg<'a> {
         hy: u16,
     },
     Error { message: &'a str },
-    RemoteBusy {
-        holder: &'a str,
-        #[serde(rename = "heldSecs")]
-        held_secs: u32,
-        #[serde(rename = "takenOver")]
-        taken_over: bool,
-    },
     Picker,
     Connected {
         name: &'a str,
@@ -705,15 +703,6 @@ impl ServerMsg {
                 },
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
-            ServerMsg::RemoteBusy {
-                holder,
-                held_secs,
-                taken_over,
-            } => control(&ControlMsg::RemoteBusy {
-                holder,
-                held_secs: *held_secs,
-                taken_over: *taken_over,
-            }),
             ServerMsg::Picker => control(&ControlMsg::Picker),
             ServerMsg::Connected {
                 name,
@@ -936,7 +925,7 @@ mod tests {
         }
         match (ServerMsg::Connected {
             name: "mac".to_owned(),
-            protocol: "rxa",
+            protocol: "vnc",
             resize: false,
             clipboard: true,
             audio: false,
@@ -945,7 +934,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"rxa","resize":false,"clipboard":true,"audio":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"clipboard":true,"audio":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1098,7 +1087,7 @@ mod tests {
     fn repeated_clipboard_activity_advances_the_timestamp_even_for_identical_text() {
         let first = ClipboardSnapshot {
             text: "same text".to_owned(),
-            changed_at_ms: Some(rxa_proto::unix_time_ms().saturating_add(1_000)),
+            changed_at_ms: Some(unix_time_ms().saturating_add(1_000)),
             oversized_bytes: None,
         };
         let second = ClipboardSnapshot::changed("same text".to_owned(), Some(&first));

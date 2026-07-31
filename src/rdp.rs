@@ -432,7 +432,7 @@ impl Density {
     /// turns a value no screen could have into 1x, and the 1.5 midpoint is the one
     /// the agent applies to this same message.
     fn from_host(scale: u16) -> Self {
-        if rxa_proto::msg::scale_ratio(scale) >= 1.5 {
+        if crate::protocol::scale_ratio(scale) >= 1.5 {
             Self::Two
         } else {
             Self::One
@@ -1671,8 +1671,6 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: false,
-            agent_public_key: String::new(),
-            gateway_private_key: String::new(),
         };
         assert!(!build_connector_config(&target).enable_audio_playback);
         target.audio = true;
@@ -1712,8 +1710,6 @@ mod tests {
                 resize,
                 clipboard,
                 audio,
-                agent_public_key: String::new(),
-                gateway_private_key: String::new(),
             };
             let (clip_tx, _clip_rx) = mpsc::unbounded_channel();
             let bridge = audio.then(|| Arc::new(AudioBridge::new()));

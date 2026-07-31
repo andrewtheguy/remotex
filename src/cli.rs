@@ -63,19 +63,6 @@ pub enum Commands {
         /// Username for the web login (must not contain ':')
         username: String,
     },
-
-    /// Generate this gateway's "rxa" identity: prints a private key to paste
-    /// into [rxa].private_key. Its public half is `remotex rxa-pubkey`.
-    GenKey,
-
-    /// Print this gateway's "rxa" public key, derived from [rxa].private_key:
-    /// the value to add to each Mac agent's authorized_gateways list
-    RxaPubkey {
-        /// TOML config file (default: the installed <prefix>/etc/remotex.toml;
-        /// required when running from a checkout)
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
 }
 
 #[cfg(test)]
@@ -164,29 +151,4 @@ mod tests {
         assert!(Cli::try_parse_from(["remotex", "gen-passwd"]).is_err());
     }
 
-    #[test]
-    fn gen_key_takes_no_arguments() {
-        let cli = Cli::try_parse_from(["remotex", "gen-key"]).unwrap();
-        assert!(matches!(cli.command, Commands::GenKey));
-        // Simpler than gen-passwd on purpose: no prompt, no username. And no
-        // config either — a fresh identity does not depend on one.
-        assert!(Cli::try_parse_from(["remotex", "gen-key", "mac"]).is_err());
-    }
-
-    // The public key is *derived*, so unlike gen-key this one has to be told
-    // which config holds the private key it comes from.
-    #[test]
-    fn rxa_pubkey_takes_the_same_config_flag_as_serve() {
-        let cli = Cli::try_parse_from(["remotex", "rxa-pubkey", "-c", "/etc/x.toml"]).unwrap();
-        let Commands::RxaPubkey { config } = cli.command else {
-            panic!("expected the rxa-pubkey subcommand");
-        };
-        assert_eq!(config.as_deref(), Some(std::path::Path::new("/etc/x.toml")));
-
-        let cli = Cli::try_parse_from(["remotex", "rxa-pubkey"]).unwrap();
-        let Commands::RxaPubkey { config } = cli.command else {
-            panic!("expected the rxa-pubkey subcommand");
-        };
-        assert!(config.is_none(), "defaults to the installed config");
-    }
 }

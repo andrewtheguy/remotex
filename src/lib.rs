@@ -17,7 +17,6 @@ pub mod protocol;
 pub mod rdp;
 pub mod rdp_audio;
 pub mod rdp_clipboard;
-pub mod rxa;
 pub mod server;
 pub mod session;
 pub mod tiles;

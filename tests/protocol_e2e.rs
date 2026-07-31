@@ -233,8 +233,6 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         resize: false,
         clipboard,
         audio: false,
-        agent_public_key: String::new(),
-        gateway_private_key: String::new(),
     }
 }
 

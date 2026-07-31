@@ -88,8 +88,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all
-            agent_public_key: String::new(),
-            gateway_private_key: String::new(),
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -493,8 +493,6 @@ mod tests {
                 resize: false,
                 clipboard: false,
                 audio: false,
-                agent_public_key: String::new(),
-                gateway_private_key: String::new(),
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -722,8 +720,6 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: true,
-            agent_public_key: String::new(),
-            gateway_private_key: String::new(),
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its
@@ -733,7 +729,7 @@ mod tests {
         // ends so the session layer sees a live engine.
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target.clone()],
-            |_target, _takeover, input_rx, frame_tx, audio| {
+            |_target, input_rx, frame_tx, audio| {
                 let audio: Arc<AudioBridge> = audio.expect("the target opted into audio");
                 std::thread::spawn(move || {
                     let mut input_rx = input_rx;
