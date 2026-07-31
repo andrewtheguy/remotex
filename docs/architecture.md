@@ -178,15 +178,17 @@ resize acts on it, quantizing to 1x or 2x at the same midpoint; the resulting
 density travels back as the `scale` on `resize`, and clients present the
 framebuffer at `pixels / scale`. Other engines ignore the message.
 
-No server the gateway has been pointed at reports a display list, so in practice
-neither client shows a picker. The gateway is not the missing piece: the VNC engine's
-Apple dialect parses an `AppleDisplayLayout` into a `displays` message and acts on a
-`selectDisplay` by binding that screen. It is the only engine that fills the list:
-RDP and plain VNC each expose one framebuffer spanning every remote screen and send
-nothing, which is how a client knows to hide the picker. The engine prepends an *All
-Displays* entry of its own so a client that picks a screen can get back, and it moves
-the checkmark only when a layout comes back naming the screen the Mac is now sending
-— never on the click. See [`apple-vnc-889.md`](apple-vnc-889.md).
+A client shows the display picker exactly when the target sends it a
+`ServerMsg::Displays`, and hides it otherwise. One engine sends one: the VNC engine's
+Apple dialect, which parses an `AppleDisplayLayout` into a `displays` message and
+acts on a `selectDisplay` by binding that screen. RDP and plain VNC each expose a
+single framebuffer spanning every remote screen and have nothing to enumerate, so
+they never send the message and the picker stays hidden on those targets.
+
+Where the list is sent, the engine prepends an *All Displays* entry of its own so a
+client that picks a screen can get back, and it moves the checkmark only when a
+layout comes back naming the screen the Mac is now sending — never on the click. See
+[`apple-vnc-889.md`](apple-vnc-889.md).
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine.

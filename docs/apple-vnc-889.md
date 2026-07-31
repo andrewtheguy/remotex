@@ -79,8 +79,9 @@ that record's two bounds rects (3200/1600), so the two can be cross-checked.
 
 The consequence is that **a combined framebuffer has no single density.** 4480×1800
 is a 1× 1280×800 beside a 2× 3200×1800, spanning 2880×900 points; no one scale
-describes it, and the header's own logical-over-backing ratio (4480/2880 = 1.56) is
-a meaningless number that happens to look plausible. `Layout::scale` therefore
+describes it, and the header's own backing-pixels-to-logical-points ratio
+(4480/2880 = 1.56) is a meaningless number that happens to look plausible — it is
+neither screen's density and not an average of anything. `Layout::scale` therefore
 reports `UNSCALED` for the combined view and the selected screen's own density
 otherwise — which makes picking a screen the thing that makes the geometry exact,
 rather than a convenience.
@@ -118,11 +119,22 @@ Two consequences for an implementer:
   display selection still working afterwards. This is what `ENCODINGS_WITH_ZLIB` and
   the `asked_for_zlib` flag in `src/vnc.rs` are for.
 - **Advertising is a promise.** Every entry in that list has to be decodable or at
-  least steppable, and three of them do not share the common length rule:
-  `CursorPos` (`0x44c`) has no payload at all, `DisplayInfo` (`0x44d`) is four
-  `u16`s then `0x1c` bytes per screen, and `UserInfo` (`0x44e`) is a counted name
-  then a counted image. `LastRect` has to actually end the update, which means
-  handling the `0xffff` rectangle count that goes with it.
+  least steppable, and two of them do not share the common length rule: `CursorPos`
+  (`0x44c`) has no payload at all, and `DisplayInfo` (`0x44d`) is four `u16`s then
+  `0x1c` bytes per screen. `LastRect` has to actually end the update, which means
+  handling the `0xffff` rectangle count that goes with it. (`UserInfo` (`0x44e`) — a
+  counted name then a counted image — is *not* advertised but is decoded anyway, on
+  the same grounds as `DeviceInfo`: tolerating an encoding that turns up unasked
+  costs nothing, and desyncing on it costs the session.)
+
+**One honest qualification to all of the above.** The list the probe measured had
+eleven entries; `vnc_apple::ENCODINGS` ships ten, `UserInfo` having been dropped
+between the two. That single-entry removal was *not* among the sixteen variants tried,
+and the shipped ten-entry list was afterwards verified against the same Mac to produce
+a layout, a display list and a working selection — twice, through the gateway rather
+than the probe. So "any single removal costs the layout" is what the bisection
+measured, and it has one known exception. Which entries actually matter is therefore
+still unresolved, and the safe reading is the one in the code: leave the list alone.
 
 ### A layout payload is two bytes shorter than it declares
 

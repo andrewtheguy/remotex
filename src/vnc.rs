@@ -1539,9 +1539,13 @@ async fn read_rect<R: AsyncRead + Unpin>(
             if let Some(a) = apple.as_mut() {
                 a.asked_for_zlib = true;
             }
-            return read_display_layout(reader, shared, first, sink)
-                .await
-                .map(RectEffect::resized);
+            read_display_layout(reader, shared, first, sink).await?;
+            // Deliberately *not* reported as a resize, even when it was one.
+            // [`read_display_layout`] issues its own non-incremental request as part
+            // of re-arming the server, so telling the caller the desktop resized
+            // would have it ask for the same full frame a second time — which on a
+            // 4480x1800 desktop is a wasted 400 KB every login and lock.
+            return Ok(RectEffect::NOTHING);
         }
         // Where the pointer is, which the rect header carries and nothing else does.
         // Advertised because the layout depends on the exact list, and ignored
@@ -1561,10 +1565,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
             discard(reader, u64::from(len)).await?;
             return Ok(RectEffect::NOTHING);
         }
-        // Two more that must be advertised for a layout to arrive but that frame
-        // themselves differently, so they cannot share the rule above. Neither was
-        // ever seen on macOS 26; both are stepped over by their own arithmetic
-        // because advertising an encoding is a promise to be able to.
+        // Two more that frame themselves differently, so they cannot share the rule
+        // above. `DisplayInfo` is in [`vnc_apple::ENCODINGS`] and so must be
+        // steppable — advertising an encoding is a promise to be able to; `UserInfo`
+        // is not advertised and is handled anyway, on the same grounds as
+        // `DeviceInfo`. Neither was ever seen on macOS 26.
         //
         // `DisplayInfo` is the older display list — a header of four `u16`s, then
         // 0x1c bytes per screen — and carries no density, which is why the layout is
@@ -3587,59 +3592,11 @@ mod tests {
         }
     }
 
-    /// One screen as a test writes it: id, logical size, backing size, flags.
-    type TestScreen = (u32, (u16, u16), (u16, u16), u32);
-
-    /// A layout payload at the offsets a live Mac uses — every record field two
-    /// bytes later than the reference document claims, and both bounds rects as
-    /// `(top, left, bottom, right)`. `current` is the screen the Mac says it is
-    /// sending, or `None` for the combined view.
-    fn layout_payload(current: Option<u32>, displays: &[TestScreen]) -> Vec<u8> {
-        let total = 0x14 + displays.len() * 0x38;
-        let mut p = vec![0u8; 0x14];
-        p[..2].copy_from_slice(&u16::try_from(total).unwrap().to_be_bytes());
-        p[2..4].copy_from_slice(&5u16.to_be_bytes());
-        // The header's logical geometry spans every screen; its backing is the
-        // framebuffer, which the Mac narrows to one screen's when one is selected.
-        let span: u16 = displays.iter().map(|d| d.1.0).sum();
-        let framebuffer = current
-            .and_then(|id| displays.iter().find(|d| d.0 == id))
-            .map_or_else(
-                || {
-                    (
-                        displays.iter().map(|d| d.2.0).sum(),
-                        displays.iter().map(|d| d.2.1).max().unwrap_or(0),
-                    )
-                },
-                |d| d.2,
-            );
-        p[4..6].copy_from_slice(&span.to_be_bytes());
-        p[6..8].copy_from_slice(&displays[0].1.1.to_be_bytes());
-        p[8..10].copy_from_slice(&framebuffer.0.to_be_bytes());
-        p[10..12].copy_from_slice(&framebuffer.1.to_be_bytes());
-        p[12..16].copy_from_slice(&current.unwrap_or(u32::MAX).to_be_bytes());
-        let mut left = 0u16;
-        for (id, logical, backing, flags) in displays {
-            let mut r = vec![0u8; 0x38];
-            let density = f64::from(backing.0) / f64::from(logical.0.max(1));
-            r[0x02..0x0a].copy_from_slice(&density.to_be_bytes());
-            r[0x0a..0x12].copy_from_slice(&1.0f64.to_be_bytes());
-            r[0x12..0x16].copy_from_slice(&id.to_be_bytes());
-            let edges = |at: usize, r: &mut [u8], w: u16, h: u16| {
-                r[at + 2..at + 4].copy_from_slice(&left.to_be_bytes());
-                r[at + 4..at + 6].copy_from_slice(&h.to_be_bytes());
-                r[at + 6..at + 8].copy_from_slice(&(left + w).to_be_bytes());
-            };
-            edges(0x16, &mut r, logical.0, logical.1);
-            edges(0x1e, &mut r, backing.0, backing.1);
-            r[0x26..0x2a].copy_from_slice(&flags.to_be_bytes());
-            p.extend_from_slice(&r);
-            left += logical.0;
-        }
-        // Two short of the last record, as a Mac sends it.
-        p.truncate(p.len() - 2);
-        p
-    }
+    /// The layout payload builder, shared with `vnc_apple`'s own tests rather than
+    /// copied: it encodes the measured record offsets, and a second copy of those
+    /// would have to be kept in step with the parser by hand. `vnc_apple` is also
+    /// where it is cross-checked against a captured payload.
+    use crate::vnc_apple::{TestScreen, test_layout as layout_payload};
 
     /// A layout does three things, and the third is the one that is easy to miss:
     /// it resizes, it reports the screens, and it re-arms the server. Without the

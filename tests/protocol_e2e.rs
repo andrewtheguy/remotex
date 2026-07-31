@@ -1143,15 +1143,21 @@ async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
 }
 
 /// Read until a control message of `kind` arrives, and hand back its payload.
+///
+/// Matched on the parsed top-level `type`, not on a substring of the line. A
+/// `displays` message carries remote-supplied strings — screen labels and details —
+/// so a substring match is a match against content the *remote* chooses, and a
+/// screen named `"type":"resize"` would satisfy a search for a resize.
 async fn expect_control(ws: &mut Ws, kind: &str) -> serde_json::Value {
-    let needle = format!(r#""type":"{kind}""#);
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
-                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
-                    if text.contains(&needle) {
-                        return serde_json::from_str::<serde_json::Value>(&text).unwrap();
+                    let parsed: serde_json::Value = serde_json::from_str(&text)
+                        .unwrap_or_else(|e| panic!("control message is not JSON ({e}): {text}"));
+                    assert_ne!(parsed["type"], "error", "session failed: {text}");
+                    if parsed["type"] == kind {
+                        return parsed;
                     }
                 }
                 Message::Close(frame) => panic!("closed while waiting for {kind}: {frame:?}"),
@@ -1255,6 +1261,16 @@ async fn apple_screen_sharing_reports_its_displays_and_binds_to_one() {
         .expect("timed out waiting for the combining request")
         .expect("the selection channel closed");
     assert_eq!(asked, u32::MAX, "combine_all_displays, not an id");
+
+    // The framebuffer widens back to the union of both screens — and the scale drops
+    // to 1, because a 1x screen beside a 2x one has no single density and the desktop
+    // is shown at its pixel size. The other half of the density story: it is *picking
+    // a screen* that makes the geometry exact.
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_DESKTOP + MAC_RETINA, "{resize}");
+    assert_eq!(resize["h"], MAC_RETINA, "{resize}");
+    assert_eq!(resize["scale"], 1.0, "{resize}");
+
     let msg = expect_displays(&mut ws).await;
     assert_eq!(msg["active"], u32::MAX, "{msg}");
 }
