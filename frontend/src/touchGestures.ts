@@ -10,7 +10,7 @@
 //   double-tap-and-hold   hold the left button (drag mode); a second finger
 //                         then moves the cursor while the first keeps holding
 //   two-finger tap        right-click at the cursor
-//   two-finger pinch      zoom (1x-4x, anchored at the finger midpoint)
+//   two-finger pinch      zoom (1x-8x, anchored at the finger midpoint)
 //   two-finger drag       pan the zoomed view (when not in drag mode)
 //   three-finger swipe    scroll, axis-locked (vertical or horizontal wheel)
 //
@@ -22,7 +22,24 @@
 import type { ClientMsg } from "./protocol.ts";
 
 export const MIN_ZOOM = 1;
-export const MAX_ZOOM = 4;
+// The pinch ceiling, as a multiple of the fit-to-width base scale — so the most a
+// remote pixel can occupy is `MAX_ZOOM × clientWidth / framebufferWidth` CSS px,
+// which on a wide desktop is still well under 1:1.
+//
+// Eight rather than four so a desktop that arrives *larger than it should be* stays
+// legible on a phone. That is not hypothetical: a Mac's combined framebuffer spans
+// every screen at its own density (4480 px wide on the two-screen test Mac), so on a
+// 390 px phone fit-to-width is 0.087 and a ceiling of four capped a point at 0.7 CSS
+// px — readable only just. Eight makes it 1.4. The same headroom covers any future
+// engine that reports a density wrong in the direction that magnifies, which is the
+// failure this is insurance against: a phone is where you find out, and it must not
+// also be where you are stuck.
+//
+// Not conditional on the engine or the subtype, deliberately. A ceiling exists only
+// to stop a pinch running away, so a higher one costs nothing to a session that does
+// not need it — and an escape hatch fitted to the one bug already found would be no
+// use for the next one. The client is not told the target's subtype anyway.
+export const MAX_ZOOM = 8;
 const TAP_MAX_MOVE_PX = 4;
 const TAP_MAX_DURATION_MS = 200;
 const PAN_ACTIVATION_THRESHOLD_PX = 12;
