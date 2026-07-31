@@ -258,7 +258,10 @@ all of them fields on the `CGEvent` it posts (`crates/rxa-agent/src/input.rs`):
   `kCGScrollEventUnitPixel` and `kCGScrollEventUnitLine`. A trackpad's few-pixel
   deltas and a wheel's few-line notches are the same numbers and an order of
   magnitude apart in effect, so spending both as lines — which is what the agent
-  did before the unit existed — turned a glide into a series of jumps;
+  did before the unit existed — turned a glide into a series of jumps. A page is
+  the third unit and the one macOS does not have: `Injector::wheel` spends it as
+  `kCGScrollEventUnitLine` scaled by `LINES_PER_PAGE`, a screenful being the only
+  thing a page can mean here;
 - **the button number**, for anything past left and right. Middle, back and
   forward are all `OtherMouse` events distinguished only by
   `kCGMouseEventButtonNumber`, and the DOM numbers the two side buttons 3 and 4
