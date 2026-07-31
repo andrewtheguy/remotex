@@ -21,6 +21,7 @@ import {
   MODIFIER_CODES,
   PRIMARY_SCREEN_ROWS,
   type PrintableSoftKey,
+  ROW_HOME,
   SECONDARY_SCREEN_ROWS,
   type SoftKeyboardScreen,
   type SoftKeyDefinition,
@@ -32,6 +33,17 @@ import {
 // interval — matching a physical keyboard's typematic feel.
 const REPEAT_DELAY_MS = 400;
 const REPEAT_INTERVAL_MS = 80;
+
+// How far a finger may travel before a tap on a *scrollable* row counts as a
+// scroll instead. 8px, squared so the check needs no square root.
+//
+// The scrollable rows cannot fire on pointer-down the way the fixed rows do —
+// that would send a key every time the row is flicked sideways. They used to use
+// `onClick`, which has the opposite failure: a click needs the press and release
+// on the same element with no scroll intervening, so a tap with a few pixels of
+// drift is swallowed and the key never sends at all. Tracking the pointer gives
+// both — the row still scrolls, and a tap that stayed put still counts.
+const SCROLL_DRAG_THRESHOLD_SQ = 64;
 
 const MODIFIER_LABELS: Record<keyof SoftKeyModifiers, string> = {
   ctrl: "Ctrl",
@@ -102,6 +114,10 @@ function SoftKeyButton({
   const repeatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const repeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pressedRef = useRef(false);
+  // Scrollable rows only: where the finger went down, and whether it has since
+  // travelled far enough to be a scroll rather than a tap.
+  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const draggedRef = useRef(false);
 
   const clearRepeat = useCallback(() => {
     if (repeatTimerRef.current) {
@@ -151,6 +167,38 @@ function SoftKeyButton({
     [def, onRelease, clearRepeat],
   );
 
+  // No `preventDefault` on this path: the row under it has to keep panning, and
+  // the key is decided on pointer-up.
+  const startScrollableTap = useCallback((e: React.PointerEvent) => {
+    pointerStartRef.current = { x: e.clientX, y: e.clientY };
+    draggedRef.current = false;
+  }, []);
+
+  const trackScrollableTap = useCallback((e: React.PointerEvent) => {
+    const start = pointerStartRef.current;
+    if (!start || draggedRef.current) {
+      return;
+    }
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    if (dx * dx + dy * dy > SCROLL_DRAG_THRESHOLD_SQ) {
+      draggedRef.current = true;
+    }
+  }, []);
+
+  const finishScrollableTap = useCallback(() => {
+    if (pointerStartRef.current && !draggedRef.current) {
+      onPress(def);
+    }
+    pointerStartRef.current = null;
+  }, [def, onPress]);
+
+  // A finger that leaves the key, or a gesture the browser takes over for
+  // scrolling, is not a tap on this key.
+  const cancelScrollableTap = useCallback(() => {
+    pointerStartRef.current = null;
+  }, []);
+
   const label = getDisplayLabel(def, modifiers.shift);
   const isSingleChar = label.length === 1;
   const widthClass = def.width
@@ -166,7 +214,13 @@ function SoftKeyButton({
     <div
       className={`sk-button ${widthClass} ${extraClass ?? ""} ${isActive ? "sk-active" : ""} ${isSingleChar ? "sk-single-char" : ""}`}
       {...(scrollable
-        ? { onClick: () => onPress(def) }
+        ? {
+            onPointerDown: startScrollableTap,
+            onPointerMove: trackScrollableTap,
+            onPointerUp: finishScrollableTap,
+            onPointerLeave: cancelScrollableTap,
+            onPointerCancel: cancelScrollableTap,
+          }
         : {
             onPointerDown: handlePointerDown,
             onPointerUp: stopPress,
@@ -559,6 +613,7 @@ export function SoftKeyboardPanel({
             {mainRows.map((row, rowIndex) => (
               // biome-ignore lint/suspicious/noArrayIndexKey: stable row order
               <div key={rowIndex} className="sk-row">
+                {row === ROW_HOME && <div className="sk-half-spacer" />}
                 {row.map((def) => {
                   const mod = isModifierKey(def);
                   return (
@@ -572,6 +627,7 @@ export function SoftKeyboardPanel({
                     />
                   );
                 })}
+                {row === ROW_HOME && <div className="sk-half-spacer" />}
               </div>
             ))}
           </div>

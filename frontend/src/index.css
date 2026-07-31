@@ -746,18 +746,52 @@ body {
   font-size: 0.68rem;
 }
 
-/* Grid and rows. */
+/* Grid and rows.
+
+   No gap anywhere, and neighbouring borders collapse into each other — the same
+   treatment `.sk-desktop-row` below already gets, and for a reason that matters
+   far more on a phone: a gutter is dead space. A tap landing in it hits `.sk-row`
+   and does nothing at all — no key, no feedback, no way to tell it apart from a
+   key that was sent and is waiting on a lagging remote. At 3px between ten keys
+   and between five rows that was ~13% of the panel's surface, against a finger
+   that lands within a couple of px of where it meant to. Every pixel now belongs
+   to some key. */
 .sk-grid {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 0;
   padding: 0 4px;
 }
 
 .sk-row {
   display: flex;
-  gap: 3px;
+  gap: 0;
   justify-content: center;
+}
+
+.sk-row > .sk-button {
+  margin-right: -1px;
+}
+
+.sk-row + .sk-row {
+  margin-top: -1px;
+}
+
+/* Half a key of dead margin at each end of the home row, so `a` starts and `l`
+   ends half a key in from the row above — the stagger of a real keyboard. Half
+   *each*, so the nine keys still measure ten units and stay the same width as
+   every other row.
+
+   Inert on purpose: `pointer-events: none` means the inset is the one place on
+   this keyboard a tap is *meant* to do nothing, which is the opposite of the
+   gutters removed above. A tap there belongs to no key and there is no honest
+   key to give it. */
+.sk-half-spacer {
+  flex: 0.5 1 0;
+  min-width: 0;
+  visibility: hidden;
+  pointer-events: none;
+  margin-right: -1px;
 }
 
 /* Individual key button. */
@@ -777,6 +811,13 @@ body {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  /* Stated on the key rather than left to `.sk-panel`. `touch-action` does not
+     inherit — an ancestor's value constrains a gesture, but it is the hit-test
+     target's own value that decides, so a key that is ever reparented or reused
+     outside the panel keeps its behaviour. `manipulation` is what drops the
+     double-tap-zoom wait. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .sk-button:active,
