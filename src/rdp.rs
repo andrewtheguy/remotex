@@ -87,38 +87,45 @@ impl PendingClipboardRead {
     }
 }
 
-// A density the remote has been asked for and has not answered.
+// A layout — a size, a density, or both — the remote has been asked for and has
+// not answered.
 //
-// Windows applies a monitor layout only once the session it is starting has
-// settled. One sent seconds after connect is discarded in silence — *even after*
-// the Display Control channel has its capabilities, which is as close to a
-// readiness signal as this protocol offers. Nothing in the protocol names what is
-// still missing, and nothing acknowledges a layout either, so the only way to tell
-// a refusal from a delay is that the reactivation never comes.
+// Two things are waited out here, and a single schedule covers both. The first is
+// the Display Control channel not yet having its capabilities: a layout sent then
+// cannot go out at all, which is exactly what a resize reported from `connected`
+// hits, before the channel is up. The second is Windows applying a monitor layout
+// only once the session it is starting has settled — one sent seconds after
+// connect is discarded in silence *even after* the channel is ready. Nothing in
+// the protocol names what is still missing, and nothing acknowledges a layout
+// either, so the only way to tell a refusal from a delay is that the reactivation
+// never comes.
 //
-// Hence a schedule rather than a single attempt. Spread over seconds because what
-// is being waited out is a desktop finishing its logon, not a channel opening; the
-// total is bounded because a server that will never honour this — anything not
-// Windows, most likely — must not be asked forever.
-const DENSITY_RETRY_DELAYS: [Duration; 4] = [
+// Hence a schedule rather than a single attempt, and one retry rather than two:
+// FreeRDP's own Display Control client (client/X11/xf_disp.c) holds a single
+// desired layout and re-sends *that* — size and scale factors ride the same PDU —
+// so a size and a density can never race into two reactivations that desync
+// `applied` from the desktop actually negotiated. The total is bounded because a
+// server that will never honour this — anything not Windows, most likely — must
+// not be asked forever.
+const LAYOUT_RETRY_DELAYS: [Duration; 4] = [
     Duration::from_millis(750),
     Duration::from_millis(1500),
     Duration::from_secs(3),
     Duration::from_secs(6),
 ];
 
-struct PendingDensity {
-    density: Density,
+struct PendingLayout {
+    layout: Layout,
     attempts: usize,
 }
 
-impl PendingDensity {
-    fn new(density: Density) -> Self {
-        Self { density, attempts: 0 }
+impl PendingLayout {
+    fn new(layout: Layout) -> Self {
+        Self { layout, attempts: 0 }
     }
 
     fn wait_again(&mut self) -> Option<Duration> {
-        let delay = DENSITY_RETRY_DELAYS.get(self.attempts).copied();
+        let delay = LAYOUT_RETRY_DELAYS.get(self.attempts).copied();
         if delay.is_some() {
             self.attempts += 1;
         }
@@ -468,16 +475,6 @@ impl Density {
         let px = |points: u16| u32::from(points) * self.percent() / 100;
         (px(points.0), px(points.1))
     }
-
-    /// The same desktop re-rendered at `self` instead of `from`.
-    ///
-    /// A density change is a resize, on this protocol: the point of it is that the
-    /// desktop keeps its size in *points* and changes its size in pixels, which is
-    /// what leaves the remote the same size on screen and merely sharper.
-    fn rescale(self, from: Self, desktop: DesktopSize) -> (u32, u32) {
-        let px = |px: u16| u32::from(px) * self.percent() / from.percent();
-        (px(desktop.width), px(desktop.height))
-    }
 }
 
 /// A desktop the server is being asked for: the size in pixels, and the density
@@ -513,6 +510,24 @@ impl Layout {
     fn adjusted(self) -> Self {
         let (w, h) = MonitorLayoutEntry::adjust_display_size(self.w, self.h);
         Self { w, h, ..self }
+    }
+
+    /// The same desktop — the same number of *points* — re-expressed at another
+    /// density.
+    ///
+    /// The pixels scale with the density and the points stay put, which is the
+    /// whole meaning of a density change on this protocol — the remote stays the
+    /// same size on screen and merely sharper. This is how a size and a density
+    /// that were requested separately merge into one layout: a
+    /// viewport reported in the announced density's pixels is carried up to a
+    /// denser one still waiting for the channel, so both reach the server as a
+    /// single monitor layout rather than two.
+    fn at_density(self, density: Density) -> Self {
+        if density == self.density {
+            return self;
+        }
+        let px = |v: u32| v * density.percent() / self.density.percent();
+        Self { w: px(self.w), h: px(self.h), density }
     }
 }
 
@@ -584,13 +599,15 @@ async fn active_loop(
     // reactivation is the only evidence there is, and it has to be the evidence
     // used.
     let mut applied = Density::One;
-    // The request in flight, and when to repeat it. A client states its density
-    // *once per attach* and then dedupes it (`sendHostScale` in
-    // frontend/src/useRemoteDesktop.ts, and the viewer's own in AppModel.swift), so
-    // nothing will ask again from the other end: every attempt after the first has
-    // to come from here. See [`PendingDensity`] for why more than one is needed.
-    let mut pending_density: Option<PendingDensity> = None;
-    let mut density_retry_at: Option<Instant> = None;
+    // The layout in flight — a size, a density, or both — and when to repeat it.
+    // A client states each *once per attach* and then dedupes it (a viewport, and
+    // `sendHostScale` in frontend/src/useRemoteDesktop.ts and the viewer's own in
+    // AppModel.swift), so nothing will ask again from the other end: every attempt
+    // after the first has to come from here. One slot, not one per kind, so a size
+    // and a density can only ever be pending as a single merged layout — see
+    // [`PendingLayout`] for why one retry rather than two.
+    let mut pending_layout: Option<PendingLayout> = None;
+    let mut layout_retry_at: Option<Instant> = None;
 
     loop {
         // The clipboard sender lives inside `active_stage`, so it is only
@@ -611,8 +628,8 @@ async fn active_loop(
                 None => std::future::pending().await,
             }
         };
-        let density_retry = async {
-            match density_retry_at {
+        let layout_retry = async {
+            match layout_retry_at {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -671,20 +688,21 @@ async fn active_loop(
                 // attempt and five look the same to this arm.
                 if let ClientMsg::HostScale { scale } = input {
                     if resize {
+                        // Only the density changes; the size the desktop should be
+                        // stays what it is. Re-express whatever size is already
+                        // pending at the new density, or the live desktop when
+                        // nothing is — so a size still waiting for the channel is
+                        // carried along by a screen change rather than dropped.
                         let want = Density::from_host(scale);
-                        if want == applied {
-                            // Already there, or moved back before the remote ever
-                            // caught up: either way nothing is left to ask for.
-                            pending_density = None;
-                            density_retry_at = None;
-                        } else if pending_density.as_ref().map(|p| p.density) != Some(want) {
-                            // A fresh schedule, because this is a different request
-                            // and not another go at the last one. The deadline is
-                            // now: the first attempt belongs in the retry branch
-                            // with the rest.
-                            pending_density = Some(PendingDensity::new(want));
-                            density_retry_at = Some(Instant::now());
-                        }
+                        let base = pending_layout
+                            .as_ref()
+                            .map_or_else(|| Layout::current(desktop, applied), |p| p.layout);
+                        install_layout(
+                            base.at_density(want),
+                            Layout::current(desktop, applied),
+                            &mut pending_layout,
+                            &mut layout_retry_at,
+                        );
                     }
                     continue;
                 }
@@ -709,30 +727,25 @@ async fn active_loop(
                 };
                 if let Some((w, h)) = wanted_size {
                     if resize {
-                        // KNOWN LIMITATION (not yet fixed): the outcome is dropped,
-                        // and an `Asked::NotReady` here is lost with it. Unlike a
-                        // density change, which schedules a retry (`pending_density`
-                        // / `density_retry_at`), a size request that arrives before
-                        // the Display Control channel has its capabilities is simply
-                        // gone — and a client states a viewport once and dedupes it,
-                        // so nothing re-sends it. The window this opens is exactly
-                        // the start of a session: a client that turns auto-resize on
-                        // *by default* reports its window from `connected`, before
-                        // the channel is up, so on RDP the desktop stays at its
-                        // connect size until the next window change (a manual resize)
-                        // lands after the channel has opened. VNC has no such
-                        // gate. The fix is to retry a `NotReady` size the way density
-                        // is retried, but serialized with the density retry — two
-                        // independent layout retries racing would each drive a
-                        // reactivation and desync `applied` from the desktop actually
-                        // negotiated (see the `DeactivateAll` arm's invariant).
-                        request_layout(
-                            &mut active_stage,
-                            &mut framed,
+                        // Scheduled, not sent-and-forgotten, for the same reason a
+                        // density is: a size that arrives before the Display Control
+                        // channel has its capabilities cannot go out, and a client
+                        // states its viewport once and dedupes it, so nothing would
+                        // re-send it. This is the start of every session with
+                        // auto-resize on by default — both reports come from
+                        // `connected`, before the channel is up — so without the
+                        // retry the desktop stayed at its connect size until a manual
+                        // resize landed. The size arrives in the announced density's
+                        // pixels; if a denser layout is already pending it is carried
+                        // up to that density, so the two go out as one layout and
+                        // never as two reactivations racing to set `applied`.
+                        let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
+                        install_layout(
+                            Layout { w, h, density: applied }.at_density(density),
                             Layout::current(desktop, applied),
-                            Layout { w, h, density: applied },
-                        )
-                        .await?;
+                            &mut pending_layout,
+                            &mut layout_retry_at,
+                        );
                     }
                     continue;
                 }
@@ -922,18 +935,17 @@ async fn active_loop(
                 }
                 continue;
             }
-            _ = density_retry => {
-                density_retry_at = None;
-                let Some(pending) = pending_density.as_mut() else {
+            _ = layout_retry => {
+                layout_retry_at = None;
+                let Some(pending) = pending_layout.as_mut() else {
                     continue; // a reactivation confirmed it first
                 };
-                let density = pending.density;
-                let (w, h) = density.rescale(applied, desktop);
+                let wanted = pending.layout;
                 let asked = request_layout(
                     &mut active_stage,
                     &mut framed,
                     Layout::current(desktop, applied),
-                    Layout { w, h, density },
+                    wanted,
                 )
                 .await?;
                 match asked {
@@ -943,20 +955,20 @@ async fn active_loop(
                     // was never advanced, so the announced scale still describes
                     // the desktop that is actually there.
                     Asked::Sent | Asked::NotReady => match pending.wait_again() {
-                        Some(delay) => density_retry_at = Some(Instant::now() + delay),
+                        Some(delay) => layout_retry_at = Some(Instant::now() + delay),
                         None => {
                             warn!(
                                 "rdp: the remote never applied {}; leaving the desktop at {}",
-                                Layout { w, h, density },
+                                wanted,
                                 Layout::current(desktop, applied),
                             );
-                            pending_density = None;
+                            pending_layout = None;
                         }
                     },
                     // Nothing more to try: a refused layout fails identically on
                     // every attempt, and a redundant one means the desktop already
                     // agrees.
-                    Asked::Redundant | Asked::Refused => pending_density = None,
+                    Asked::Redundant | Asked::Refused => pending_layout = None,
                 }
                 continue;
             }
@@ -993,15 +1005,15 @@ async fn active_loop(
                     // Deactivation-Reactivation Sequence to learn the new size,
                     // rebuild the framebuffer, and tell the browser to resize.
                     //
-                    // This is also the only confirmation a density ever gets. The
+                    // This is also the only confirmation a layout ever gets. The
                     // server acts on the most recent layout it was sent, so a
-                    // reactivation while one is in flight is that layout taking
-                    // effect — whether or not a viewport request arrived in the
-                    // meantime, since a later request would have carried this
-                    // density too.
-                    if let Some(pending) = pending_density.take() {
-                        applied = pending.density;
-                        density_retry_at = None;
+                    // reactivation while one is in flight is that layout — size and
+                    // density together — taking effect. `applied` follows the
+                    // density that just landed; the new size is read back from the
+                    // reactivation itself, just below.
+                    if let Some(pending) = pending_layout.take() {
+                        applied = pending.layout.density;
+                        layout_retry_at = None;
                     }
                     desktop = reactivate(&mut active_stage, &mut framed, &activation_factory)
                         .await?;
@@ -1028,14 +1040,40 @@ async fn active_loop(
     Ok(())
 }
 
+/// Install `wanted` as the layout to ask the server for, or clear the schedule
+/// when there is nothing to ask.
+///
+/// The first attempt belongs in the retry branch with the rest, so this only
+/// records the want and dates the deadline now; it never writes to the channel.
+/// Two cases need no schedule: the desktop is already `current` (so a screen
+/// change that moved back before the remote caught up, or a viewport equal to the
+/// desktop, asks for nothing), and the identical layout is already pending (so a
+/// deduped-but-repeated report does not reset the attempt count). The comparison
+/// is against the adjusted `wanted`, matching what [`request_layout`] will send.
+fn install_layout(
+    wanted: Layout,
+    current: Layout,
+    pending: &mut Option<PendingLayout>,
+    retry_at: &mut Option<Instant>,
+) {
+    if wanted.adjusted() == current {
+        *pending = None;
+        *retry_at = None;
+    } else if pending.as_ref().map(|p| p.layout) != Some(wanted) {
+        *pending = Some(PendingLayout::new(wanted));
+        *retry_at = Some(Instant::now());
+    }
+}
+
 /// Ask the server for a different desktop — a size, a density, or both — over the
 /// Display Control channel. Sizes are adjusted to the protocol's constraints (even
 /// width, 200 to 8192 per axis). The server answers by deactivating the session —
 /// see the `DeactivateAll` arm.
 ///
 /// Returns which of the four [`Asked`] outcomes happened, rather than whether
-/// anything went out, because the density path has to retry and only two of them
-/// are worth retrying. Note that even [`Asked::Sent`] is not a confirmation: this
+/// anything went out, because the retry branch has to know which layouts are
+/// worth another attempt and only two of the four are. Note that even
+/// [`Asked::Sent`] is not a confirmation: this
 /// protocol acknowledges nothing, so a layout the server silently discards looks
 /// from here exactly like one it is about to act on.
 ///
@@ -1789,26 +1827,6 @@ mod tests {
         assert_eq!(Density::Two.scale(), 2.0);
     }
 
-    /// A density change keeps the desktop's size in *points* and changes its size
-    /// in pixels — that is the whole feature, so it is pinned in both directions
-    /// and pinned as a round trip.
-    #[test]
-    fn changing_density_scales_the_desktop_and_comes_back() {
-        let desktop = DesktopSize {
-            width: 1280,
-            height: 800,
-        };
-        assert_eq!(Density::Two.rescale(Density::One, desktop), (2560, 1600));
-        assert_eq!(Density::One.rescale(Density::One, desktop), (1280, 800));
-
-        let retina = DesktopSize {
-            width: 2560,
-            height: 1600,
-        };
-        assert_eq!(Density::One.rescale(Density::Two, retina), (1280, 800));
-        assert_eq!(Density::Two.rescale(Density::Two, retina), (2560, 1600));
-    }
-
     /// `DefaultSize` is the one size here that is configured rather than measured,
     /// so it is the one that has to be read as points.
     #[test]
@@ -1846,26 +1864,72 @@ mod tests {
         assert_eq!((huge.w, huge.h), (8192, 200));
     }
 
-    /// A density is asked for more than once, and a bounded number of times.
+    /// A layout is asked for more than once, and a bounded number of times.
     ///
     /// Both halves matter and they pull against each other. More than once, because
-    /// Windows discards a layout sent while the session it is starting has not
-    /// settled — even after the Display Control channel has its capabilities — and
-    /// nothing asks again from the other end: a client states its density once per
-    /// attach and dedupes it. Bounded, because a server that will never honour one
-    /// must not be asked forever.
+    /// the Display Control channel may not have its capabilities yet — a resize
+    /// reported from `connected` hits exactly that — and because Windows discards a
+    /// layout sent while the session it is starting has not settled, even after the
+    /// channel is ready; nothing asks again from the other end, since a client
+    /// states a size or a density once per attach and dedupes it. Bounded, because
+    /// a server that will never honour one must not be asked forever.
     #[test]
-    fn a_density_is_asked_for_more_than_once_and_not_forever() {
-        let mut pending = PendingDensity::new(Density::Two);
-        assert_eq!(pending.density, Density::Two);
-        for expected in DENSITY_RETRY_DELAYS {
+    fn a_layout_is_asked_for_more_than_once_and_not_forever() {
+        let wanted = Layout { w: 2560, h: 1600, density: Density::Two };
+        let mut pending = PendingLayout::new(wanted);
+        assert_eq!(pending.layout, wanted);
+        for expected in LAYOUT_RETRY_DELAYS {
             assert_eq!(pending.wait_again(), Some(expected));
         }
         assert_eq!(pending.wait_again(), None);
         assert_eq!(pending.wait_again(), None);
-        // Long enough to outlast a logon, which is what is being waited out.
-        let total: Duration = DENSITY_RETRY_DELAYS.iter().sum();
+        // Long enough to outlast a logon, which is one of the things being waited out.
+        let total: Duration = LAYOUT_RETRY_DELAYS.iter().sum();
         assert!(total >= Duration::from_secs(10), "{total:?}");
+    }
+
+    /// Re-expressing a size at another density keeps the *points* and scales the
+    /// *pixels* — which is what lets a viewport reported at one density and a
+    /// screen change to another merge into a single layout instead of two.
+    #[test]
+    fn a_size_carried_to_another_density_keeps_its_points() {
+        let one = Layout { w: 1280, h: 800, density: Density::One };
+        // 1x → 2x doubles the pixels; the same window, twice as sharp.
+        assert_eq!(one.at_density(Density::Two), Layout { w: 2560, h: 1600, density: Density::Two });
+        // The same density is a no-op, down to the struct.
+        assert_eq!(one.at_density(Density::One), one);
+        // And it round-trips.
+        assert_eq!(one.at_density(Density::Two).at_density(Density::One), one);
+    }
+
+    /// `install_layout` schedules a genuinely new want, leaves the desktop alone
+    /// when it is already there, and does not restart the clock on a repeat — the
+    /// three cases that keep a deduped, retrying client from either stalling or
+    /// spinning.
+    #[test]
+    fn a_layout_is_scheduled_only_when_it_is_new() {
+        let current = Layout { w: 1280, h: 800, density: Density::One };
+        let mut pending = None;
+        let mut retry_at = None;
+
+        // A different size schedules, with its first attempt due immediately.
+        let bigger = Layout { w: 1920, h: 1080, density: Density::One };
+        install_layout(bigger, current, &mut pending, &mut retry_at);
+        assert_eq!(pending.as_ref().map(|p| p.layout), Some(bigger));
+        assert!(retry_at.is_some());
+
+        // A repeat of the same want does not reset the attempt count: burn one
+        // attempt, then re-install the identical layout and confirm the count held.
+        pending.as_mut().unwrap().wait_again();
+        let attempts = pending.as_ref().unwrap().attempts;
+        install_layout(bigger, current, &mut pending, &mut retry_at);
+        assert_eq!(pending.as_ref().unwrap().attempts, attempts);
+
+        // Asking for exactly what is already on screen clears the schedule — down
+        // to an odd width the protocol would round to the desktop's even one.
+        install_layout(Layout { w: 1281, ..current }, current, &mut pending, &mut retry_at);
+        assert!(pending.is_none());
+        assert!(retry_at.is_none());
     }
 
     /// The distinction the retry depends on: a channel that is not ready yet is
