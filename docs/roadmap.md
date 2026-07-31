@@ -75,6 +75,34 @@ extended pointer PDU the fast-path event cannot express, and RFB's mask has bits
 for them that no server remotex talks to agrees on. Both would need protocol work
 rather than a mapping, which is why neither was attempted.
 
+### RDP resize requested before the Display Control channel is ready
+
+A client-initiated resize on RDP travels as a `Viewport` (or `DefaultSize`)
+message, and the gateway answers it over the Display Control dynamic channel —
+which is not open the instant the session connects. A request that arrives in that
+window returns `Asked::NotReady` from `request_layout`, and the `Viewport` arm in
+`src/rdp.rs` **drops that outcome**: unlike a density change, which schedules a
+retry (`pending_density` / `density_retry_at`), a size that could not be sent is
+never re-sent, because a client states its viewport once and dedupes it.
+
+This is invisible until something reports a viewport *at connect*, which is exactly
+what auto-resize-by-default does: with the preference on, both clients report their
+window from the `connected` handshake, before the channel is up, so on RDP the
+desktop stays at its connect size until the next window change lands after the
+channel has opened. Toggling Auto Resize off and on, or nudging the window, applies
+it. VNC and rxa have no such gate — their engines act on any viewport report
+whenever it arrives.
+
+The fix is to retry a `NotReady` size the way density is retried, but **serialized
+with the density retry, not alongside it**: two independent layout retries racing
+would each drive a Deactivation-Reactivation and desync `applied` from the desktop
+actually negotiated — the invariant the `DeactivateAll` arm and the note by
+`applied` exist to protect. The cleaner shape is a single pending "wanted layout"
+(size and density together) with one retry by construction, so the last request
+wins and there is nothing to serialize. Not attempted yet; the choice between the
+two is the part to settle on a real Windows host, where the channel-open timing and
+the reactivation behaviour can be measured rather than guessed.
+
 ## Not planned
 
 ### Multiple sessions

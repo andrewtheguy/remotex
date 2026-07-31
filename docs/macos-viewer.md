@@ -372,6 +372,16 @@ The three View menu items are one decision:
   target allows resize (for RXA, once an owned display is shared); where it does
   not, the remembered default silently does nothing, which is the picker caption's
   "if compatible". See `ViewerPreferences.autoResizeByDefault`.
+
+  > **Known limitation on RDP.** When the default is on, the client reports its
+  > window from the `connected` handshake — before RDP's Display Control channel
+  > has finished opening. The gateway drops a size request that arrives that early
+  > (`Asked::NotReady`) and, unlike a density change, does not retry it, so on an
+  > RDP target the desktop stays at its connect size until the next window change
+  > lands after the channel is up. Turning **Auto Resize** off and on, or nudging
+  > the window, applies it. VNC and rxa are unaffected. This is a server-side gap
+  > documented at the `Viewport` arm in `src/rdp.rs`; the browser client has the
+  > same symptom for the same reason.
 - **Resize to Window** asks the remote to adopt the viewer's available size, once.
 - **Resize to Display** changes the local window so the current remote desktop
   fits at its point size; it sends nothing to the gateway.
