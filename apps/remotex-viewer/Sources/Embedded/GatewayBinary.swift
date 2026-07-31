@@ -3,11 +3,10 @@ import Foundation
 /// The gateway executable this app carries, run for a one-shot answer.
 ///
 /// `remotex-gateway` inside the bundle is the same binary the CLI installs, so the
-/// app can ask it the questions it would otherwise have to answer for itself:
-/// whether a config is valid, and what this instance's `rxa` public key is. Asking
-/// the binary is the point — a TOML parser written in Swift would be a *second*
-/// opinion about what a config means, and the one that mattered would be whichever
-/// ran last.
+/// app can ask it the question it would otherwise have to answer for itself:
+/// whether a config is valid. Asking the binary is the point — a TOML parser
+/// written in Swift would be a *second* opinion about what a config means, and the
+/// one that mattered would be whichever ran last.
 ///
 /// Long-running use — the session gateway itself — is [`EmbeddedGateway`]'s.
 struct GatewayBinary: Sendable {

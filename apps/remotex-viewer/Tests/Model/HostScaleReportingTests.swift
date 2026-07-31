@@ -30,7 +30,7 @@ struct HostScaleReportingTests {
         let session = try await Self.attached()
         session.model.hostScaleReader = { 2 }
 
-        session.connect(protocolName: "rxa")
+        session.connect(protocolName: "vnc")
         try await session.expectHostScale(200)
     }
 
@@ -42,7 +42,7 @@ struct HostScaleReportingTests {
         var scale: CGFloat = 2
         session.model.hostScaleReader = { scale }
 
-        session.connect(protocolName: "rxa")
+        session.connect(protocolName: "vnc")
         try await session.expectHostScale(200)
 
         scale = 1
@@ -57,7 +57,7 @@ struct HostScaleReportingTests {
         let session = try await Self.attached()
         session.model.hostScaleReader = { 2 }
 
-        session.connect(protocolName: "rxa")
+        session.connect(protocolName: "vnc")
         try await session.expectHostScale(200)
 
         session.model.reportHostScale()
@@ -74,7 +74,7 @@ struct HostScaleReportingTests {
         let session = try await Self.attached()
         session.model.hostScaleReader = { 2 }
 
-        session.connect(protocolName: "rxa")
+        session.connect(protocolName: "vnc")
         try await session.expectHostScale(200)
 
         session.model.apply(.control(.displays(active: 7, displays: [])))

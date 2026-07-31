@@ -4,10 +4,8 @@ import Foundation
 ///
 /// Two questions, and keeping them apart is the whole of this type.
 ///
-/// *May* this session resize the remote — the operator's `resize` on the target,
-/// and for rxa the further condition that the display being shared is one the
-/// agent made rather than one of the Mac's own screens. That is the gateway's
-/// answer and this client cannot argue with it.
+/// *May* this session resize the remote — the operator's `resize` on the target.
+/// That is the gateway's answer and this client cannot argue with it.
 ///
 /// *How* — continuously as the window changes, or only when the user asks. That is
 /// this client's answer, and it is the same question on every protocol: an engine
@@ -23,33 +21,15 @@ struct ViewportPolicy: Equatable {
     /// session; every connection starts manual.
     var autoFollows = false
 
-    /// The target's `resize`, for an rxa target only.
-    ///
-    /// Held rather than acted on: it is the operator's half of the permission and
-    /// grants nothing by itself, because what the agent can resize is a display it
-    /// *made*. `sharing(virtualDisplay:)` supplies the other half. Left false for
-    /// RDP and VNC, whose permission a display list must not be able to touch.
-    private var rxaResizeAllowed = false
-
     /// The last size sent on this connection, for the dedupe below.
     private var lastSent: DisplayMode?
 
     init() {}
 
-    /// Derive the permission. RXA stays denied until `displays` identifies an
-    /// owned display.
-    init(protocolName: String, resize: Bool) {
-        rxaResizeAllowed = protocolName == "rxa" && resize
-        allowed = resize && protocolName != "rxa"
-    }
-
-    /// Allow request-only RXA resizing for an owned display, and only for one.
-    /// No-op for other protocols.
-    mutating func sharing(virtualDisplay isVirtual: Bool) {
-        guard rxaResizeAllowed else {
-            return
-        }
-        allowed = isVirtual
+    /// Derive the permission: the target's `resize`, settled at connect for every
+    /// protocol.
+    init(resize: Bool) {
+        allowed = resize
     }
 
     /// The message to send for a measured window, or nil for none.

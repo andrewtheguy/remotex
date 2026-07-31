@@ -60,29 +60,28 @@ struct GatewayConfigStoreTests {
         #expect(try mode(of: directory.instance.configURL) == 0o600, "a replacement must not widen it")
     }
 
-    /// A first launch has to produce a config, and one with this instance's own `rxa`
-    /// identity in it — otherwise the one protocol written for this app could not be
-    /// configured without a terminal.
+    /// A first launch has to produce a config, and zero targets is a valid one — so
+    /// the template goes on disk with no live tables at all, only commented examples
+    /// to copy. Anything else (a `[server]` block, say) would be a config the gateway
+    /// refuses.
     @Test
-    func aFirstLaunchWritesATemplateWithAMintedKey() async throws {
+    func aFirstLaunchWritesTheTemplate() async throws {
         let directory = try ScratchDirectory()
-        let store = store(in: directory, verdict: .success(()), value: "rxgs-minted-key")
+        let store = store(in: directory, verdict: .success(()))
 
         try await store.bootstrapIfNeeded()
 
         let text = try #require(directory.contents(of: "remotex.toml"))
-        #expect(text.contains("private_key = \"rxgs-minted-key\""), "got: \(text)")
         // There is an example target to copy, and it is commented out — so the picker
-        // offers nothing rather than a machine that does not exist. `[server]` and
-        // `[[targets]]` are both *mentioned*, in prose, which is the point of checking
-        // the live lines rather than the text: the only table this file declares is
-        // `[rxa]`, and anything else would be a config the gateway refuses.
+        // offers nothing rather than a machine that does not exist. Checking the live
+        // lines rather than the text is the point: the file declares no tables, and
+        // any it did would be config the gateway refuses.
         #expect(text.contains("# [[targets]]"), "an example to copy")
         let liveTables = text
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.hasPrefix("[") }
-        #expect(liveTables == ["[rxa]"], "got: \(liveTables)")
+        #expect(liveTables.isEmpty, "got: \(liveTables)")
     }
 
     /// Bootstrapping twice must not overwrite the targets somebody added — it is run
@@ -91,7 +90,7 @@ struct GatewayConfigStoreTests {
     func bootstrappingAgainLeavesAnExistingConfigAlone() async throws {
         let directory = try ScratchDirectory()
         try directory.write("remotex.toml", "# mine\n")
-        let store = store(in: directory, verdict: .success(()), value: "rxgs-minted-key")
+        let store = store(in: directory, verdict: .success(()))
 
         try await store.bootstrapIfNeeded()
 
@@ -105,66 +104,6 @@ struct GatewayConfigStoreTests {
         let directory = try ScratchDirectory()
         let store = store(in: directory, verdict: .success(()))
         #expect(store.read() == GatewayConfigStore.template)
-    }
-
-    /// The pairing value a Mac agent needs. Read through the binary, because it is
-    /// derived from the private key and only the gateway can derive it.
-    @Test
-    func thePublicKeyComesFromTheGateway() async throws {
-        let directory = try ScratchDirectory()
-        let paired = store(in: directory, verdict: .success(()), value: "rxap-public")
-        #expect(await paired.publicKey() == "rxap-public")
-
-        let unpaired = store(in: directory, verdict: .success(()), value: nil)
-        #expect(await unpaired.publicKey() == nil, "no identity yet")
-    }
-
-    /// Deriving the key costs a gateway process, and three places on screen ask for
-    /// it — the picker most often, since it is shown again after every target switch.
-    /// So a successful answer is remembered, and only a save can retire it.
-    @Test
-    func thePublicKeyIsDerivedOnceAndAgainAfterASave() async throws {
-        let directory = try ScratchDirectory()
-        let reads = Counter()
-        let store = GatewayConfigStore(
-            instance: directory.instance,
-            validate: { _ in .success(()) },
-            readValue: { _ in
-                await reads.increment()
-                return "rxap-public"
-            }
-        )
-
-        #expect(await store.publicKey() == "rxap-public")
-        #expect(await store.publicKey() == "rxap-public")
-        #expect(await reads.count == 1, "the second read came from the cache")
-
-        // A saved config may carry a different identity, so the app must not go on
-        // showing the key it had.
-        _ = await store.save("# a new config\n")
-        #expect(await store.publicKey() == "rxap-public")
-        #expect(await reads.count == 2, "a save retires it")
-    }
-
-    /// A read that failed is not remembered: the config may simply have no identity
-    /// yet — bootstrapping is what mints one — and caching `nil` would leave the row
-    /// saying so for the life of the app.
-    @Test
-    func aFailedReadIsAskedAgain() async throws {
-        let directory = try ScratchDirectory()
-        let reads = Counter()
-        let store = GatewayConfigStore(
-            instance: directory.instance,
-            validate: { _ in .success(()) },
-            readValue: { _ in
-                await reads.increment()
-                return nil
-            }
-        )
-
-        #expect(await store.publicKey() == nil)
-        #expect(await store.publicKey() == nil)
-        #expect(await reads.count == 2)
     }
 
     /// The bundle names the instance, which is what lets a stamped-out variant be a
@@ -202,28 +141,16 @@ struct GatewayConfigStoreTests {
 
     private func store(
         in directory: ScratchDirectory,
-        verdict: Result<Void, ConfigProblem>,
-        value: String? = nil
+        verdict: Result<Void, ConfigProblem>
     ) -> GatewayConfigStore {
         GatewayConfigStore(
             instance: directory.instance,
-            validate: { _ in verdict },
-            readValue: { _ in value }
+            validate: { _ in verdict }
         )
     }
 
     private func mode(of url: URL) throws -> Int {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         return (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
-    }
-}
-
-/// How many times an injected closure was called. An actor because the closures the
-/// store takes are `@Sendable` and may run anywhere.
-private actor Counter {
-    private(set) var count = 0
-
-    func increment() {
-        count += 1
     }
 }

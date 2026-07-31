@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// What this app is: which version, which instance, and which key it pairs with.
+/// What this app is: which version and which instance it runs.
 ///
 /// A Mac app's version lives in its About panel, and this one had neither — the
 /// version appeared for as long as the launch screen was up and nowhere after it, so
@@ -10,23 +10,15 @@ import SwiftUI
 /// had been put back (see `RemoteCommands`).
 ///
 /// It is not only the version. An app that carries its own gateway *is* an
-/// installation, so the two facts that identify this one belong here beside it: the
-/// instance directory everything is read from and written to, and the gateway key a
-/// Mac has to authorize. Both are otherwise invisible — the directory is under
-/// `~/Library`, and the key exists nowhere but inside the config.
+/// installation, so the fact that identifies this one belongs here beside it: the
+/// instance directory everything is read from and written to, otherwise invisible
+/// under `~/Library`.
 struct AboutPanel: View {
     let branding: String
     /// Nil in an unbundled build, where there is no gateway and so no instance to
     /// describe. The version above still is one, which is the reason this panel does
     /// not require a store to open.
     let store: GatewayConfigStore?
-    /// Whether to show the rxa public key of the gateway in this bundle.
-    ///
-    /// False while the app is talking to a gateway somewhere else, which is the case
-    /// this flag exists for: the instance below is still this app's, but that key is
-    /// not the one the session presents to any Mac agent — the remote gateway has its
-    /// own, and it is that one a target has to authorize. See `AppModel.chosen`.
-    let showsGatewayKey: Bool
 
     @Environment(\.dismiss)
     private var dismiss
@@ -98,10 +90,6 @@ struct AboutPanel: View {
                     NSWorkspace.shared.activateFileViewerSelecting([store.instance.configURL])
                 }
             }
-        }
-
-        if showsGatewayKey {
-            GatewayKeyRow(store: store)
         }
     }
 }

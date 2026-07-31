@@ -43,20 +43,15 @@ struct AppModelTests {
     }
 
     /// What a `connected` alone settles, which is permission and not behaviour: the
-    /// operator's `resize`, the same answer for RDP and VNC now that how a size is
-    /// driven is the client's own choice. The `rxa` row is the interesting one:
-    /// `resize` is only the target's half and grants nothing by itself, so it stays
-    /// off until a display list says the display being shared is one the agent made
-    /// — see `resizingAnRxaTargetFollowsTheSharedDisplay`.
+    /// operator's `resize`, the same answer for every protocol now that how a size is
+    /// driven is the client's own choice and there is no second condition to wait on.
     @Test
     func resizePermissionFollowsTheTarget() {
         let expectations: [(protocolName: String, resize: Bool, canResize: Bool)] = [
             ("rdp", true, true),
             ("vnc", true, true),
-            ("rxa", true, false),
             ("rdp", false, false),
             ("vnc", false, false),
-            ("rxa", false, false),
         ]
         for expectation in expectations {
             let model = makeModel()
@@ -100,9 +95,6 @@ struct AppModelTests {
         let expectations: [(protocolName: String, resize: Bool, toWindow: Bool, toDisplay: Bool)] = [
             ("rdp", true, true, true),
             ("vnc", true, true, true),
-            // Both halves of the rxa permission are needed, and only one is here.
-            ("rxa", true, false, true),
-            ("rxa", false, false, true),
             // The gateway drops this one's reports, so its desktop holds still and
             // can be fitted to like any other.
             ("vnc", false, false, true),
@@ -197,7 +189,7 @@ struct AppModelTests {
         model.fitWindowToRemote = { fitted += 1 }
 
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        model.apply(.control(.connected(connected(protocolName: "vnc"))))
         #expect(!model.canResizeToDisplay, "no size has arrived yet")
         model.resizeToDisplay()
         #expect(fitted == 0)
@@ -217,7 +209,7 @@ struct AppModelTests {
     func connectingMovesToTheDesktopAndNamesTheTarget() {
         let model = makeModel()
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa", clipboard: true))))
+        model.apply(.control(.connected(connected(protocolName: "vnc", clipboard: true))))
 
         #expect(model.session.screen == .desktop)
         #expect(model.session.connectedTarget == "mac")
@@ -248,7 +240,7 @@ struct AppModelTests {
     func thePickerResetsEverythingTheTargetLeftBehind() {
         let model = makeModel()
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa", resize: true, clipboard: true))))
+        model.apply(.control(.connected(connected(protocolName: "vnc", resize: true, clipboard: true))))
         model.apply(.control(.resize(w: 1920, h: 1080, scale: 2)))
         model.apply(.control(.remoteOs(macos: true)))
         model.apply(.control(.displays(active: 7, displays: twoDisplays)))
@@ -278,7 +270,7 @@ struct AppModelTests {
     func displaysArriveWithTheActiveOneMarked() {
         let model = makeModel()
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        model.apply(.control(.connected(connected(protocolName: "vnc"))))
         #expect(model.session.displays.isEmpty, "nothing to pick until the remote says so")
 
         model.apply(.control(.displays(active: 9, displays: twoDisplays)))
@@ -294,7 +286,7 @@ struct AppModelTests {
     func selectingADisplayDoesNotMoveTheCheckmarkOnItsOwn() {
         let model = makeModel()
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        model.apply(.control(.connected(connected(protocolName: "vnc"))))
         model.apply(.control(.displays(active: 7, displays: twoDisplays)))
 
         model.selectDisplay(9)
@@ -419,11 +411,11 @@ struct AppModelTests {
         #expect(preferences.prefersRemoteGateway)
     }
 
-    /// The local gateway's config file and its rxa key describe the gateway in *this*
-    /// bundle. Against a remote one they are not part of the session — its targets and
-    /// its key are its own — so neither is offered.
+    /// The local gateway's config file describes the gateway in *this* bundle.
+    /// Against a remote one it is not part of the session — its targets are its own —
+    /// so editing it is not offered.
     @Test
-    func aRemoteGatewayOffersNoLocalConfigurationAndNoKey() async throws {
+    func aRemoteGatewayOffersNoLocalConfiguration() async throws {
         let (model, _) = makeRemoteModel { request in
             request.url?.path.hasSuffix("/auth/status") == true
                 ? (200, #"{"authenticated":false}"#)
@@ -432,7 +424,7 @@ struct AppModelTests {
         await model.chooseGateway()
 
         #expect(!model.usesEmbeddedGateway)
-        #expect(!model.canEditConfiguration, "and the key row goes with it — see RootView")
+        #expect(!model.canEditConfiguration)
         model.editConfiguration()
         #expect(model.configurationRequests == 0, "refused at the model, not only greyed")
 
@@ -621,7 +613,7 @@ struct AppModelTests {
         #expect(!model.canCaptureKeyboardNow)
 
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa"))))
+        model.apply(.control(.connected(connected(protocolName: "vnc"))))
         #expect(!model.canCaptureKeyboardNow, "no frame yet")
 
         model.apply(.control(.resize(w: 800, h: 600, scale: 1)))
@@ -795,85 +787,6 @@ struct AppModelTests {
         ),
     ]
 
-    /// The other half of the rxa gate, and the half that moves during a session:
-    /// the user switches displays from the Display menu, and only the one the
-    /// agent made is this window's to resize.
-    @Test
-    func resizingAnRxaTargetFollowsTheSharedDisplay() {
-        let model = makeModel()
-        model.apply(.control(.connected(connected(protocolName: "rxa", resize: true))))
-        #expect(!model.session.canResize, "nothing yet says which display")
-
-        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
-        #expect(model.session.canResize, "the display the agent made")
-
-        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
-        #expect(!model.session.canResize, "a Mac's own screen is set on the Mac")
-
-        // An `active` the list does not name — a screen unplugged between the
-        // two. Greyed rather than offering to resize a display nobody can name.
-        model.apply(.control(.displays(active: 99, displays: twoDisplays)))
-        #expect(!model.session.canResize)
-
-        // "Resize to Window" is what flips with the shared display. Its neighbour
-        // does not: no rxa display follows this window, so fitting the window to
-        // whichever one is being shared is always a thing that can be asked for.
-        model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
-        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
-        #expect(model.session.canResize)
-        #expect(model.canResizeToDisplay)
-        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
-        #expect(!model.session.canResize)
-        #expect(model.canResizeToDisplay)
-    }
-
-    /// A display the agent made has nobody sitting at it, so it may follow this
-    /// window like any other allowed remote — the mode is offered there, not
-    /// withheld. What the display switch moves is the permission underneath it.
-    @Test
-    func anAgentMadeDisplayMayFollowTheWindowToo() {
-        let model = makeModel()
-        model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa", resize: true))))
-        model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
-        model.reportViewport(DisplayMode(w: 2880, h: 1800))
-        #expect(!model.canAutoResize, "nothing yet says which display")
-
-        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
-        #expect(model.canAutoResize)
-        model.setAutoResize(true)
-        #expect(model.autoResizes)
-        #expect(!model.canResizeNow, "auto is doing it")
-        #expect(!model.canResizeToDisplay, "and the display is following this window")
-
-        // Onto one of the Mac's own screens: the permission goes, and with it the
-        // following. The tick stays — it is the answer for this session — and both
-        // one-shots come back, because that screen is holding as still as any other.
-        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
-        #expect(!model.canAutoResize)
-        #expect(model.autoResizes)
-        #expect(!model.canResizeNow, "a Mac's own screen is set on the Mac")
-        #expect(model.canResizeToDisplay)
-
-        // And back: what the user asked for is still what happens.
-        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
-        #expect(model.canAutoResize)
-        #expect(!model.canResizeToDisplay)
-    }
-
-    /// Without the target's permission no display list enables anything: the two
-    /// gates are independent, and a Mac's agent-made display does not grant what
-    /// the operator withheld.
-    @Test
-    func anRxaTargetWithoutResizeStaysUnresizable() {
-        let model = makeModel()
-        model.apply(.control(.connected(connected(protocolName: "rxa"))))
-        for active in [UInt32(9), 7, 9] {
-            model.apply(.control(.displays(active: active, displays: twoDisplays)))
-            #expect(!model.session.canResize, "active=\(active)")
-        }
-    }
-
     // MARK: - Remembered resize and audio defaults
 
     /// Both default off and survive a relaunch, like the keyboard preference — they
@@ -912,28 +825,6 @@ struct AppModelTests {
         unwilling.apply(.status(.connected))
         unwilling.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
         #expect(!unwilling.autoResizes, "no permission, so the default does nothing")
-    }
-
-    /// rxa settles resize on a display list, so the default waits for the first
-    /// owned display rather than firing at `connected` — and it is imposed once, not
-    /// re-applied on a later switch over a mid-session change of mind.
-    @Test
-    func theAutoResizeDefaultWaitsForAnOwnedDisplayOnRxa() {
-        let model = makeModel()
-        model.autoResizeByDefault = true
-        model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa", resize: true))))
-        #expect(!model.autoResizes, "no display yet says the default may apply")
-
-        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
-        #expect(model.autoResizes, "the first owned display adopts the default")
-
-        // A change of mind for this session, then away from the owned display and
-        // back: the one-time seed is spent, so the user's choice stands.
-        model.setAutoResize(false)
-        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
-        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
-        #expect(!model.autoResizes, "seeded once, not re-imposed on every switch")
     }
 
     /// The remembered audio default is adopted on a pick when the target carries
@@ -1007,7 +898,7 @@ struct AppModelTests {
 
     private func enableClipboard(on model: AppModel) {
         model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rxa", clipboard: true))))
+        model.apply(.control(.connected(connected(protocolName: "vnc", clipboard: true))))
         #expect(model.clipboard.isEnabled)
     }
 }

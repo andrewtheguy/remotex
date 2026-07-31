@@ -35,12 +35,6 @@ struct TargetPickerView: View {
                     .frame(maxWidth: 420)
             }
 
-            if let busy = model.session.remoteBusy {
-                remoteBusy(busy)
-                    .padding(.top, 16)
-                    .frame(maxWidth: 420)
-            }
-
             if model.targets.isEmpty {
                 // A first launch lands here, so this is not only an empty state but
                 // the app's front door: the sentence says what is missing and the
@@ -119,32 +113,18 @@ struct TargetPickerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The two things to do when the local gateway's list is empty: add a machine,
-    /// and hand this gateway's key to one.
-    ///
-    /// The key is here rather than only in About and the configuration sheet because
-    /// this is the screen a first launch lands on and the screen a target switch comes
-    /// back to — and a value somebody has to copy onto another Mac is no use two
-    /// panels deep.
+    /// What there is to do when the local gateway's list is empty: add a machine.
     @ViewBuilder
     private var localFooter: some View {
-        GatewayKeyRow(store: model.config)
         Button("Configuration…") {
             model.editConfiguration()
         }
         .disabled(!model.canEditConfiguration)
     }
 
-    /// Neither of those is this screen's business against a gateway somewhere else.
-    ///
-    /// The **key** is the one that would actively mislead: it identifies the gateway
-    /// in this bundle to a Mac agent, and against a remote gateway nothing here is
-    /// going to present it — the connection to the target is made by that gateway,
-    /// with its own key, which is the one a target has to authorize. Copying this one
-    /// onto a Mac would authorize a machine that is never going to call. The
-    /// **configuration** goes for the same reason one step further along: the targets
-    /// on this screen came out of the remote gateway's config, and this app's own file
-    /// is not where they are edited.
+    /// Editing the configuration is not this screen's business against a gateway
+    /// somewhere else: the targets on this screen came out of the remote gateway's
+    /// config, and this app's own file is not where they are edited.
     ///
     /// What is left is the pair that *is* true here: which gateway these targets came
     /// from, and the way back to choose another.
@@ -163,53 +143,6 @@ struct TargetPickerView: View {
             Task { await model.changeGateway() }
         }
         .disabled(!model.canChangeGateway)
-    }
-
-    /// The remote is somebody else's, and this is the one refusal with something to
-    /// press. Beside `connectError` rather than through it: that one is a message to
-    /// read, this one is a decision, and the whole reason the gateway sends a
-    /// distinct message is so a client can offer the button.
-    ///
-    /// Locked while a connect is in flight for the same reason the rows are — there
-    /// is one session slot, so a takeover mid-pick has nowhere to go.
-    private func remoteBusy(_ busy: ViewerSessionState.RemoteBusy) -> some View {
-        let target = busy.target.isEmpty ? "that target" : busy.target
-        // Two situations, and they must not read the same. Being refused is about a
-        // request this user made; being taken over is about one they did not, and
-        // saying "in use" to somebody whose desktop just vanished describes the
-        // wrong event entirely. Only the remote's session went either way — the
-        // login and this gateway's slot are still theirs, which is why the target
-        // list is right here.
-        let message =
-            busy.takenOver
-            ? "Your session on \(target) was taken over from \(busy.holder)."
-            : "\(target.prefix(1).uppercased() + target.dropFirst()) is in use "
-                + "from \(busy.holder), for \(Self.heldFor(busy.heldSecs))."
-        return VStack(spacing: 8) {
-            Label(message, systemImage: "person.crop.circle.badge.exclamationmark")
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Button(busy.takenOver ? "Take It Back" : "Take Over") {
-                model.connect(to: busy.target, force: true)
-            }
-            .disabled(model.session.pendingTarget != nil || busy.target.isEmpty)
-        }
-    }
-
-    /// "12m" rather than "754s", at the precision a glance wants — the same three
-    /// steps the agent's own menu bar and the SPA's picker use for this number.
-    static func heldFor(_ seconds: UInt32) -> String {
-        if seconds < 60 {
-            return "\(seconds)s"
-        }
-        let minutes = seconds / 60
-        if minutes < 60 {
-            return "\(minutes)m"
-        }
-        return "\(minutes / 60)h \(minutes % 60)m"
     }
 
     /// `ordinal` is the row's 1-based place in the list, which is also its

@@ -218,7 +218,7 @@ struct RemoteSurfaceViewTests {
     func aRemoteWiderThanTheWindowScrollsOnThatAxisAlone() throws {
         let harness = try Harness()
         harness.resize(to: CGSize(width: 900, height: 700))
-        // 19pt too wide and well short vertically: the `rxa` near-miss.
+        // 19pt too wide and well short vertically: the near-miss.
         // No window resize and no tile of our own: a desktop that arrives larger than
         // the window has to raise its own scrollbar, which is what it did not do.
         harness.apply(remote: harness.remote(width: 919, height: 500))

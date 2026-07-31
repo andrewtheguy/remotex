@@ -71,14 +71,14 @@ struct GatewayClientTests {
     @Test
     func targetsDecodeTheirProtocolNameAroundTheSwiftKeyword() async throws {
         let client = client { _ in
-            (200, #"[{"name":"mac","protocol":"rxa","host":"fd00::1","port":52381}]"#)
+            (200, #"[{"name":"mac","protocol":"vnc","host":"fd00::1","port":52381}]"#)
         }
         let targets = try await client.targets()
         #expect(targets.count == 1)
         #expect(targets[0].name == "mac")
-        #expect(targets[0].protocolName == "rxa")
+        #expect(targets[0].protocolName == "vnc")
         #expect(targets[0].port == 52381)
-        #expect(targets[0].detail == "RXA · fd00::1:52381")
+        #expect(targets[0].detail == "VNC · fd00::1:52381")
     }
 
     @Test

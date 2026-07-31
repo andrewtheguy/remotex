@@ -132,11 +132,11 @@ struct RemoteCommands: Commands {
             .disabled(!model.usesEmbeddedGateway || model.isBusy)
         }
 
-        // RXA display selection; other engines leave the stable menu disabled.
+        // Display selection, scaffolding for a future phase; every engine today
+        // leaves the stable menu disabled.
         CommandMenu("Display") {
             // A readout rather than a command, and present for every target: on
-            // RDP, on VNC, and on an rxa target sharing one of the Mac's own
-            // screens, this menu is otherwise empty and these numbers appear
+            // RDP and on VNC this menu is otherwise empty and these numbers appear
             // nowhere at all. See `displaySummary`.
             Button(
                 displaySummary(
