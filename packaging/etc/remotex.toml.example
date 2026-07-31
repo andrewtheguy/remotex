@@ -168,20 +168,20 @@ password = "change-me"
 # password = "the-account-password"
 
 # `subtype = "ard-high-performance"` is the same Mac and the same credentials over
-# Apple's own protocol revision. What it buys is **compression**: zlib instead of raw
-# pixels, which on a static desktop is around fifty times fewer bytes.
+# Apple's own protocol revision, and adds three things:
 #
-# What it costs is the Mac's real screens. A session on this wire makes macOS
-# synthesize one display and remove the real ones until it ends, so what you see is a
-# single canvas that is none of the Mac's monitors. If you want the actual screens,
-# use plain "ard" above — it shares all of them, in one framebuffer. (This wire was
-# reached for in order to *pick* a screen, the way the stock Screen Sharing app does;
-# it turns out not to offer that. See docs/apple-vnc-889.md.)
+#   * **compression** — zlib instead of raw pixels, around fifty times fewer bytes on
+#     a static desktop;
+#   * **the Mac's screens, listed** — pick one from the client's Display menu, or
+#     "All Displays" for every screen in one framebuffer the way plain "ard" does;
+#   * **each screen's pixel density** — so a Retina Mac is drawn at 100% instead of at
+#     twice the size. Picking a single screen is what makes this exact: a framebuffer
+#     spanning screens of different densities has no one scale factor.
 #
-# It also refuses two keys rather than accepting them and doing nothing: `clipboard`,
+# It refuses two keys rather than accepting them and doing nothing: `clipboard`,
 # because Apple carries the pasteboard over its own messages here; and `resize`, for
 # the same reason plain "ard" refuses it. Everything else is identical, so switching
-# between the two subtypes is one line.
+# between the two subtypes is one line. See docs/apple-vnc-889.md.
 # [[targets]]
 # name = "mac-compressed"
 # protocol = "vnc"

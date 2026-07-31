@@ -358,17 +358,18 @@ one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-**No engine fills the Display menu today.** RDP, plain VNC and both Mac subtypes each
-expose a single framebuffer and send no display list, so the menu holds one disabled
-item reading *No Displays to Choose From* and never anything else.
+**One engine fills the Display menu: `subtype = "ard-high-performance"`.** It lists
+the Mac's screens plus an *All Displays* entry, and picking one narrows the session
+to that screen's own pixels. RDP and plain VNC (`subtype = "ard"` included) each
+expose a single framebuffer spanning every remote screen and send no list, so the
+menu holds one disabled item reading *No Displays to Choose From*.
 
-Picking one of a Mac's screens was attempted through Apple's own protocol revision
-(`subtype = "ard-high-performance"`) and does not work: macOS replaces the Mac's real
-displays with one synthesized display for the duration of such a session, so there is
-nothing to enumerate. `subtype = "ard"` shares every real screen, in one framebuffer.
-The `selectDisplay` / `Displays` wire and this menu remain in place, and the gateway
-side is implemented and tested, waiting on a mechanism that reports a list — see
-[`apple-vnc-889.md`](apple-vnc-889.md) and [`roadmap.md`](roadmap.md).
+The checkmark follows the Mac, not the click: it moves when the Mac answers with a
+display layout naming the screen it is now sending, so a selection it declines leaves
+the menu agreeing with what is on screen. Picking a single screen is also what makes
+a Retina Mac render at 100% — a combined framebuffer of screens at different
+densities has no single scale factor, so it is shown at its pixel size. See
+[`apple-vnc-889.md`](apple-vnc-889.md).
 
 ### Viewport measurement
 

@@ -65,22 +65,24 @@ pub enum Subtype {
     /// target.
     ///
     /// One framebuffer spanning every attached display, at the size the Mac is set
-    /// to — and the only subtype that shares the real screens at all, which is why
-    /// it is the one to reach for on a Mac with more than one.
+    /// to, with no way to narrow it to one screen and no pixel density: a Retina Mac
+    /// arrives at its backing resolution and is drawn at twice the size it should be.
+    /// [`Subtype::ArdHighPerformance`] is the one that fixes both.
     Ard,
     /// The same Mac over Apple's own protocol revision, RFB 003.889: an
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
     /// control messages (see [`crate::vnc_apple`]).
     ///
-    /// **What it buys is compression** — zlib rather than raw pixels, which on a
-    /// static desktop is around fifty times fewer bytes.
+    /// Three things over [`Subtype::Ard`]: **compression** (zlib rather than raw
+    /// pixels, around fifty times fewer bytes on a static desktop), the Mac's
+    /// **screens listed** so a client can look at one of them, and each screen's
+    /// **pixel density**, which is what lets a Retina desktop be drawn at 100%
+    /// instead of twice its size.
     ///
-    /// What it costs is the Mac's real screens. Measured on macOS 26: a 003.889
-    /// session makes macOS synthesize *one* display and remove the real ones until
-    /// the session ends, whatever the client asks for. So this subtype shares a
-    /// single canvas that is not any of the Mac's monitors, and there is nothing to
-    /// pick between. [`Subtype::Ard`] is the one that shares the real screens —
-    /// all of them, in one framebuffer. See docs/apple-vnc-889.md.
+    /// What it costs is `clipboard` and `resize`, both refused below: Apple carries
+    /// the pasteboard over messages of its own rather than RFB's, and dynamic
+    /// resolution needs the very message that makes the Mac hide its real screens.
+    /// See docs/apple-vnc-889.md.
     ArdHighPerformance,
 }
 
