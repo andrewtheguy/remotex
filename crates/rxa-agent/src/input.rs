@@ -203,6 +203,11 @@ impl Injector {
             (0u8, CGEventType::LeftMouseDragged, CGMouseButton::Left),
             (2, CGEventType::RightMouseDragged, CGMouseButton::Right),
             (1, CGEventType::OtherMouseDragged, CGMouseButton::Center),
+            // The side buttons drag like any other: their presses already post
+            // `OtherMouseDown`, so leaving them out here would have the moves in
+            // between report a mouse with nothing held.
+            (3, CGEventType::OtherMouseDragged, CGMouseButton(3)),
+            (4, CGEventType::OtherMouseDragged, CGMouseButton(4)),
         ]
         .into_iter()
         .find_map(|(dom, event_type, cg_button)| {
@@ -707,6 +712,20 @@ mod tests {
 
         inj.note_button(0, false, 2);
         assert_eq!(drag_clicks(&inj), None);
+    }
+
+    // A side button drags like any other. Its press already posts an
+    // `OtherMouseDown`, so a move that reported no button at all would leave an
+    // app watching a mouse that pressed, moved with nothing held, and released.
+    #[test]
+    fn a_side_button_drags_rather_than_merely_moving() {
+        for button in [3u8, 4] {
+            let mut inj = Injector::new(1.0, (0.0, 0.0));
+            inj.note_button(button, true, 1);
+            let (_, cg_button, clicks) = inj.drag().expect("a drag");
+            assert_eq!(cg_button, CGMouseButton(u32::from(button)));
+            assert_eq!(clicks, 1);
+        }
     }
 
     // The left button wins a chord, so a right press *before* it does not become
