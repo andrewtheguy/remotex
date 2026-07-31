@@ -56,6 +56,12 @@ account's username and password; that selects Apple Remote Desktop authenticatio
 so the connection lands at the user's own screen rather than a login-window
 session.
 
+`subtype = "ard-high-performance"` takes the same credentials and speaks Apple's
+own protocol revision instead. On a Mac with more than one display that is what
+lets you **pick a screen** — the choice the stock Screen Sharing app offers in its
+Display menu — and it compresses the picture rather than sending raw pixels. It
+does not support `resize` or `clipboard`; plain `ard` supports `clipboard`.
+
 ## Container
 
 ```sh
@@ -119,9 +125,9 @@ password = "change-me"
 ```
 
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
-target with `subtype = "ard"` and the Mac account's username and password. Keep
-the config mode `0600`; target credentials remain server-side but are stored in
-this file.
+target with `subtype = "ard"` (or `"ard-high-performance"`, to pick a screen) and
+the Mac account's username and password. Keep the config mode `0600`; target
+credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in
 [`packaging/etc/remotex.toml.example`](packaging/etc/remotex.toml.example).

@@ -105,6 +105,14 @@ num-bigint = "0.4"
 md-5 = "0.11"
 aes = "0.9"
 rand = "0.10"
+# Integrity trailer on Apple's record layer (src/vnc_record.rs), which the
+# `ard-high-performance` subtype speaks: plain SHA-1 over the record's sequence
+# number and plaintext, not HMAC. Already in the tree behind ironrdp, so this
+# costs no new dependency. CBC is *not* a dependency: the `cbc` crate in the tree
+# is on `cipher` 0.4 while `aes` above is on 0.5, and chaining eight lines by hand
+# keeps "one context per direction, never reset" a visible field rather than a
+# library invariant.
+sha1 = "0.11"
 # zlib for RFB's Extended Clipboard, whose Provide payload is deflated
 # (src/vnc_clipboard.rs). Already in the tree behind `png`, so this costs no
 # new dependency.
@@ -133,6 +141,14 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+# The scripted Apple Screen Sharing server in tests/protocol_e2e.rs plays the
+# *server* side of Apple's DH authentication and wraps the record layer's key,
+# neither of which the gateway does. Written against the specification rather
+# than by calling src/vnc.rs, so a mistake in one cannot be agreed with by the
+# other. All three are already direct dependencies of the gateway.
+num-bigint = "0.4"
+md-5 = "0.11"
+aes = "0.9"
 # `tokio::time::pause()` for the session heartbeat and reattach-grace tests
 # (src/session.rs, src/ws.rs): waiting out a real timeout in a unit test is a
 # stretch of doing nothing.

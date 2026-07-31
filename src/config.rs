@@ -53,23 +53,47 @@ pub enum Protocol {
 /// Generic by design — a protocol with more than one flavour of server names
 /// which one it is talking to here, rather than each protocol growing a key of
 /// its own. Which subtypes a protocol accepts is [`ConfigFile::parse`]'s
-/// business; today `ard` is the only one and only `vnc` takes it.
+/// business; both of today's are `vnc`'s and describe the same Mac.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Subtype {
-    /// macOS Screen Sharing, authenticated the way Apple Remote Desktop does:
-    /// the credentials are a *macOS account's* and the connection is named to
-    /// the Mac, which is what makes it share the screen rather than a login
-    /// window of its own (see [`crate::vnc`]). A third-party VNC server that
-    /// happens to run on a Mac is not this — it is a plain `vnc` target.
+    /// macOS Screen Sharing on the standard RFB 3.8 wire, authenticated the way
+    /// Apple Remote Desktop does: the credentials are a *macOS account's* and the
+    /// connection is named to the Mac, which is what makes it share the screen
+    /// rather than a login window of its own (see [`crate::vnc`]). A third-party
+    /// VNC server that happens to run on a Mac is not this — it is a plain `vnc`
+    /// target.
+    ///
+    /// One framebuffer spanning every attached display, at the size the Mac is
+    /// set to. For a choice of screen, see [`Subtype::ArdHighPerformance`].
     Ard,
+    /// The same Mac over Apple's own protocol revision, RFB 003.889: an
+    /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
+    /// control messages (see [`crate::vnc_apple`]).
+    ///
+    /// What it buys over [`Subtype::Ard`] is what only this wire can do: the Mac
+    /// reports its displays and one of them can be picked, the way Screen
+    /// Sharing.app's Display menu does, and pixels arrive zlib-compressed rather
+    /// than raw. What it does not buy is dynamic resize — that is a further
+    /// feature of this wire and is not implemented (see docs/roadmap.md).
+    ArdHighPerformance,
 }
 
 impl Subtype {
-    /// The lowercase name, as written in the config file.
+    /// The name as written in the config file.
     pub fn name(self) -> &'static str {
         match self {
             Subtype::Ard => "ard",
+            Subtype::ArdHighPerformance => "ard-high-performance",
+        }
+    }
+
+    /// Whether this subtype authenticates to a Mac the Apple Remote Desktop way
+    /// (RFB security type 30), which both of them do and no plain `vnc` target
+    /// does. What makes the credentials a macOS account's.
+    pub fn apple_authentication(self) -> bool {
+        match self {
+            Subtype::Ard | Subtype::ArdHighPerformance => true,
         }
     }
 }
@@ -492,37 +516,54 @@ impl ConfigFile {
                 target.protocol.name()
             );
             // Which credentials a VNC target may carry is the subtype's to say,
-            // and the two sets do not overlap: `ard` authenticates an account to
-            // a Mac, plain VncAuth proves a secret the machine holds. Mixing
-            // them is how a password ends up authenticating nobody, so each is
-            // refused where it cannot be used rather than quietly ignored.
+            // and the two sets do not overlap: an Apple subtype authenticates an
+            // account to a Mac, plain VncAuth proves a secret the machine holds.
+            // Mixing them is how a password ends up authenticating nobody, so each
+            // is refused where it cannot be used rather than quietly ignored.
             match (target.protocol, target.subtype) {
-                (Protocol::Vnc, Some(Subtype::Ard)) => {
+                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
+                    let name = subtype.name();
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
-                        "target {:?} is subtype \"ard\" but has no username and password — \
+                        "target {:?} is subtype {name:?} but has no username and password — \
                          both are needed, and on a Mac they are an account's there",
                         target.name
                     );
                     anyhow::ensure!(
                         target.vnc_password.is_empty(),
-                        "target {:?} is subtype \"ard\" but sets vnc_password, which only a \
+                        "target {:?} is subtype {name:?} but sets vnc_password, which only a \
                          plain \"vnc\" target uses — Apple's authentication carries the \
                          account credentials above instead",
                         target.name
                     );
-                    // Rejected because only *standard* macOS Screen Sharing is
-                    // supported today: it shares the Mac's real screens, whose
-                    // resolution is set on the Mac. Dynamic resize over ARD is a
-                    // high-performance-mode feature — Screen Sharing can spin up a
-                    // resizable virtual display, like RDP — and is not implemented
-                    // yet (see docs/roadmap.md).
+                    // Refused on *both* Apple subtypes, for the same reason each
+                    // time: what the gateway asks the Mac for is a fixed-size
+                    // session, so the resolution is the one set on the Mac. Screen
+                    // Sharing does have a resizable path — it asks for a virtual
+                    // display with the dynamic-resolution flag set, and then keeps
+                    // renegotiating — and that is not implemented on either subtype
+                    // (see docs/roadmap.md).
                     anyhow::ensure!(
                         !target.resize,
-                        "target {:?} is subtype \"ard\" and sets resize, which this gateway \
-                         does not support yet: standard macOS Screen Sharing shares the Mac's \
-                         real screens at the size set on the Mac, and dynamic resize is \
-                         high-performance ARD, which is not implemented yet",
+                        "target {:?} is subtype {name:?} and sets resize, which this gateway \
+                         does not support yet: it asks the Mac for a fixed-size session, so \
+                         the resolution is the one set on the Mac. Dynamic resize means asking \
+                         for a resizable virtual display instead, which is not implemented",
+                        target.name
+                    );
+                    // Refused on the high-performance subtype alone, because it is
+                    // the one subtype where the key would be a lie: `clipboard`
+                    // advertises RFB's Extended Clipboard (src/vnc_clipboard.rs),
+                    // and on the 003.889 wire the Mac carries the pasteboard over
+                    // Apple's own messages instead, which is not implemented. Plain
+                    // `ard` is standard RFB and honours the key.
+                    anyhow::ensure!(
+                        !(target.clipboard && subtype == Subtype::ArdHighPerformance),
+                        "target {:?} is subtype {name:?} and sets clipboard, which this \
+                         gateway does not support yet: on Apple's own protocol revision the \
+                         Mac carries the pasteboard over its own messages rather than RFB's \
+                         Extended Clipboard, which is not implemented. Plain subtype \"ard\" \
+                         does support clipboard",
                         target.name
                     );
                 }
@@ -1381,11 +1422,15 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
 
-        // Resize is rejected: only standard screen sharing is supported today, and
-        // dynamic resize over ARD is a high-performance feature, not implemented yet.
+        // Resize is rejected: the gateway asks the Mac for a fixed-size session,
+        // and asking for a resizable virtual display instead is not implemented.
         let err =
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
         assert!(format!("{err:#}").contains("does not support yet"), "{err:#}");
+
+        // Clipboard is *not* rejected here: plain `ard` is standard RFB and its
+        // Extended Clipboard works. Only the high-performance subtype refuses it.
+        assert!(ard("username = \"andrew\"\npassword = \"h\"\nclipboard = true").is_ok());
 
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
@@ -1406,6 +1451,36 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("only \"vnc\" targets have"), "{msg}");
+    }
+
+    /// The high-performance subtype carries the same account credentials as plain
+    /// `ard` and refuses one key more: the pasteboard is Apple's own on that wire.
+    #[test]
+    fn the_high_performance_subtype_refuses_clipboard_as_well_as_resize() {
+        let hp = |extra: &str| {
+            ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+            )))
+        };
+
+        let target = &hp("").unwrap().targets[0];
+        assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
+        // The name is what a config file writes, hyphens and all — the enum is
+        // kebab-case, not lowercase, and this is what pins that.
+        assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
+
+        let err = hp("clipboard = true").unwrap_err();
+        assert!(format!("{err:#}").contains("Apple's own protocol revision"), "{err:#}");
+
+        let err = hp("resize = true").unwrap_err();
+        assert!(format!("{err:#}").contains("does not support yet"), "{err:#}");
+
+        // The credential rules are the ones `ard` has, shared rather than restated.
+        let err = ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nvnc_password = \"other\"",
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
     }
 
     #[test]

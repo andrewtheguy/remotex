@@ -1,6 +1,20 @@
-//! RFB 3.8 client using Raw framebuffer updates, cursor and resize
-//! pseudo-encodings, classic or Apple DH authentication, and baseline or
-//! Extended Clipboard. Decoded damage joins the common ordered tile path.
+//! VNC client, in two dialects that share everything below the handshake.
+//!
+//! **RFB 3.8**, which is every VNC server including a Mac's under `subtype =
+//! "ard"`: Raw framebuffer updates, the cursor and resize pseudo-encodings,
+//! classic or Apple DH authentication, baseline or Extended Clipboard.
+//!
+//! **RFB 003.889**, Apple's own revision, under `subtype =
+//! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
+//! record layer ([`crate::vnc_record`]), alongside Apple's control messages
+//! ([`crate::vnc_apple`]). What that buys is a *choice of screen* — which
+//! standard RFB cannot express — and zlib instead of raw pixels.
+//!
+//! The difference is contained in three places and nowhere else: [`Dialect`]
+//! (which banner, which ClientInit byte), the two preface functions after
+//! ServerInit, and the encodings [`read_rect`] then has to handle. One read loop,
+//! one input path, one tile path — decoded damage joins the common ordered tile
+//! path either way.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,11 +36,13 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, MAX_CLIPBOARD_BYTES, MouseButton, ServerMsg,
-    UNSCALED, clipboard_fits,
+    ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES, MouseButton,
+    ServerMsg, UNSCALED, clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
+use crate::vnc_apple::{self, CursorCache, ZlibStream};
 use crate::vnc_clipboard;
+use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
 
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC_AUTH: u8 = 2;
@@ -71,9 +87,142 @@ const MAX_STRING: u32 = 1024;
 /// Largest cursor edge accepted. Real pointers are 32x32 or 64x64; anything
 /// beyond this is drained and ignored rather than drawn.
 const MAX_CURSOR_DIM: u16 = 256;
+/// Cap on an Apple cursor rect's compressed payload. Its size is not implied by
+/// the rect header the way a raw cursor's is — a *select* carries zeroed geometry
+/// — so the length has to be bounded on its own.
+const MAX_CURSOR_BYTES: u64 = 1 << 20;
 
 type Reader = BufReader<OwnedReadHalf>;
-type SharedWriter = Arc<Mutex<OwnedWriteHalf>>;
+
+/// Which RFB dialect a target's subtype puts on the wire.
+///
+/// One value, read once from the config, standing in for what would otherwise be
+/// a subtype test at four points in the handshake. Everything after ServerInit is
+/// decided by which preface function ran, not by re-asking this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Dialect {
+    /// RFB 3.8, as every VNC server speaks it — including a Mac under plain
+    /// `subtype = "ard"`, which changes only the authentication.
+    Rfb38,
+    /// Apple's RFB 003.889 and the record layer that goes up after ServerInit.
+    Apple889,
+}
+
+impl Dialect {
+    fn of(subtype: Option<Subtype>) -> Self {
+        match subtype {
+            Some(Subtype::ArdHighPerformance) => Dialect::Apple889,
+            Some(Subtype::Ard) | None => Dialect::Rfb38,
+        }
+    }
+
+    /// The version this client answers the server's greeting with.
+    fn banner(self) -> &'static [u8; 12] {
+        match self {
+            Dialect::Rfb38 => b"RFB 003.008\n",
+            Dialect::Apple889 => b"RFB 003.889\n",
+        }
+    }
+
+    /// The ClientInit byte. Nominally RFB's shared-session flag; Apple's server
+    /// wants a particular value there and the bits above the low one are what tell
+    /// it a viewer speaking its own revision is on the other end.
+    fn client_init(self) -> u8 {
+        match self {
+            // Share the session: don't kick other clients. The single-session
+            // policy lives in this program, not on the VNC server.
+            Dialect::Rfb38 => 1,
+            Dialect::Apple889 => 0xc1,
+        }
+    }
+}
+
+/// The session's byte source.
+///
+/// `Plain` is the socket as RFB has always been read. `Records` is the same
+/// socket with Apple's record layer peeled off — and because that peeling is an
+/// [`AsyncRead`], every `read_u8`/`read_exact` above here is identical in both
+/// dialects and a rectangle whose pixels span four records is still one
+/// `read_exact`.
+enum Downlink {
+    Plain(Reader),
+    /// Boxed because a record reader is an order of magnitude larger than a bare
+    /// one (two AES key schedules and a staging buffer), and every plain-RFB
+    /// session would otherwise carry that on the stack for nothing.
+    Records(Box<RecordReader<Reader>>),
+}
+
+impl AsyncRead for Downlink {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Downlink::Plain(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+            Downlink::Records(r) => std::pin::Pin::new(r).poll_read(cx, buf),
+        }
+    }
+}
+
+/// Everything the session sends, one complete client message per call.
+///
+/// A message sink rather than an [`AsyncWrite`], because on the 003.889 wire the
+/// framing unit *is* a message: one record carries exactly one of them. Two
+/// messages written back to back would land in a single record and the server
+/// would read the first and discard the second — which is why
+/// [`translate_input`] returns a list rather than a buffer.
+struct Uplink {
+    /// Boxed rather than a type parameter: this is written once per input event,
+    /// so a vtable hop costs nothing measurable, and it keeps [`Shared`] and every
+    /// rect handler free of a `W`.
+    sock: Box<dyn AsyncWrite + Send + Unpin>,
+    /// `None` until the record layer is up, which on the plain dialect is never.
+    records: Option<RecordWriter>,
+}
+
+impl Uplink {
+    fn plain(sock: impl AsyncWrite + Send + Unpin + 'static) -> Self {
+        Self {
+            sock: Box::new(sock),
+            records: None,
+        }
+    }
+
+    fn records(sock: impl AsyncWrite + Send + Unpin + 'static, keys: Keys) -> Self {
+        Self {
+            sock: Box::new(sock),
+            records: Some(RecordWriter::new(keys)),
+        }
+    }
+
+    async fn send(&mut self, msg: &[u8]) -> anyhow::Result<()> {
+        let Self { sock, records } = self;
+        match records {
+            Some(records) => sock.write_all(records.frame(msg)?).await?,
+            None => sock.write_all(msg).await?,
+        }
+        Ok(())
+    }
+}
+
+type SharedUplink = Arc<Mutex<Uplink>>;
+
+/// Send one complete message.
+async fn send(uplink: &SharedUplink, msg: &[u8]) -> anyhow::Result<()> {
+    uplink.lock().await.send(msg).await
+}
+
+/// Send several, in order, stopping at the first failure. The lock is taken once
+/// so nothing can interleave between them — a wheel notch's press and release
+/// must not be split by a pointer move.
+async fn send_all(uplink: &SharedUplink, msgs: &[Vec<u8>]) -> anyhow::Result<()> {
+    let mut uplink = uplink.lock().await;
+    for msg in msgs {
+        uplink.send(msg).await?;
+    }
+    Ok(())
+}
 
 /// One screen in the server's ExtendedDesktopSize layout. Only the id and
 /// flags matter here: SetDesktopSize echoes them back with new dimensions.
@@ -88,8 +237,17 @@ struct Screen {
 /// The lock is never held across an await.
 #[derive(Debug)]
 struct DesktopState {
-    /// Current framebuffer size.
+    /// Current framebuffer size, in pixels.
     size: (u16, u16),
+    /// Pixels per point: how large `size` should be *shown*, as opposed to how
+    /// many pixels it has.
+    ///
+    /// Always [`UNSCALED`] on plain RFB, where a framebuffer is just its pixels
+    /// and no server says otherwise. Apple's display layout does say otherwise —
+    /// a Retina screen renders at twice its logical size — and reporting only the
+    /// pixel count there would give the browser a canvas at half the size the Mac
+    /// thinks it is.
+    scale: f32,
     /// First screen of the server's layout. `Some` only once the server has
     /// sent an ExtendedDesktopSize rect — its declaration that SetDesktopSize
     /// is supported; nothing is requested before that.
@@ -99,7 +257,60 @@ struct DesktopState {
     pending: Option<(u16, u16)>,
 }
 
+impl DesktopState {
+    /// The size and scale, as a client is told them.
+    fn resize_msg(&self) -> ServerMsg {
+        ServerMsg::Resize {
+            w: self.size.0,
+            h: self.size.1,
+            scale: self.scale,
+        }
+    }
+}
+
 type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
+
+/// The Mac's screens and which one is being shared. Empty on plain RFB, where
+/// there is nothing to choose between, and until the first layout arrives.
+#[derive(Debug, Default)]
+struct DisplayState {
+    displays: Vec<DisplayInfo>,
+    /// The screen a client's checkmark sits on.
+    active: u32,
+    /// A selection sent to the Mac but not yet confirmed by a layout.
+    ///
+    /// Kept separate from `active` so a request the Mac ignores leaves the menu
+    /// honest: nothing moves until a layout comes back, which is the Mac saying it
+    /// acted. Client state is never optimistic here — see
+    /// [`ServerMsg::Displays`].
+    requested: Option<u32>,
+}
+
+impl DisplayState {
+    /// The message that tells a client the list and the selection, or `None` while
+    /// there is nothing to choose between.
+    fn displays_msg(&self) -> Option<ServerMsg> {
+        (!self.displays.is_empty()).then(|| ServerMsg::Displays {
+            active: self.active,
+            displays: self.displays.clone(),
+        })
+    }
+}
+
+type SharedDisplay = Arc<std::sync::Mutex<DisplayState>>;
+
+/// The 003.889 dialect's decoding state, owned by the read loop.
+///
+/// Not in [`Shared`]: the zlib stream and the cursor cache are touched by nothing
+/// else, and a lock on the pixel path to say so would be a lock that never
+/// contends.
+#[derive(Default)]
+struct Apple {
+    /// One inflate stream for the connection's zlib rectangles. Created on the
+    /// first one, never reset — see [`ZlibStream`].
+    zlib: Option<ZlibStream>,
+    cursors: CursorCache,
+}
 
 /// The pixels the browser has already been sent, so an update carrying none of
 /// them costs nothing and one carrying a few is sent as those few.
@@ -193,7 +404,7 @@ async fn session(
         return;
     };
 
-    let Connected { reader, writer, width, height, macos } = connected;
+    let Connected { downlink, uplink, width, height, macos, poll } = connected;
     info!("vnc: connected, desktop {width}x{height} (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
@@ -211,14 +422,16 @@ async fn session(
     }
 
     if let Err(e) = active_loop(
-        reader,
-        writer,
+        downlink,
+        uplink,
         (width, height),
         Flags {
             macos,
             resize: config.resize,
             clipboard: config.clipboard,
             default_size: (config.width, config.height),
+            apple: Dialect::of(config.subtype) == Dialect::Apple889,
+            poll,
         },
         input_rx,
         sink.clone(),
@@ -252,33 +465,105 @@ struct Flags {
     /// asks — and it is what lets an operator say what a phone should get
     /// without a second constant existing anywhere.
     default_size: (u16, u16),
+    /// Whether this is the RFB 003.889 dialect, which is what gives the read loop
+    /// its zlib stream, its cursor cache and a display list to report.
+    apple: bool,
+    /// Whether the client drives the update cycle — see [`Connected::poll`].
+    poll: bool,
+}
+
+/// What the read loop needs to know about the dialect it is reading. Two bools
+/// with names on them, because at the call site they are indistinguishable.
+#[derive(Clone, Copy)]
+struct ReadFlags {
+    clipboard: bool,
+    poll: bool,
 }
 
 /// An established, handshaken RFB link, plus what the handshake revealed about
 /// the far side. A named struct rather than a tuple nobody can read at the call
 /// site.
 struct Connected {
-    reader: Reader,
-    writer: OwnedWriteHalf,
+    downlink: Downlink,
+    uplink: Uplink,
     width: u16,
     height: u16,
     /// Whether the server is macOS Screen Sharing — see [`is_macos_server`].
     macos: bool,
+    /// Whether the client drives the update cycle: one request, one update, repeat.
+    ///
+    /// True on both dialects, and on the 003.889 one that is a measurement rather
+    /// than a default. The reference says `AutoFrameBufferUpdate` switches the
+    /// server to sending on its own and that a client should then stop asking;
+    /// macOS 26 does not — armed or not, it answers a non-incremental request and
+    /// is otherwise silent, even while the screen is changing under a moving
+    /// pointer. A client that took the reference at its word would paint one frame
+    /// and then freeze.
+    poll: bool,
 }
 
-/// RFB version/security handshake → ClientInit/ServerInit → force our pixel
-/// format and the encoding set (raw + the resize pseudo-encodings), on a
-/// connected socket.
+/// ServerInit, as much of it as anything here uses.
+struct ServerInit {
+    width: u16,
+    height: u16,
+}
+
+impl ServerInit {
+    fn size(&self) -> (u16, u16) {
+        (self.width, self.height)
+    }
+}
+
+/// RFB version/security handshake → ClientInit/ServerInit → the dialect's
+/// preface, on a connected socket.
+///
+/// Reads as the sequence it is, with the one branch at the end: everything above
+/// that point is common to both dialects, including Apple's authentication, which
+/// plain `subtype = "ard"` uses on the 3.8 wire.
 ///
 /// The TCP connect happens in [`run`] (see [`engine::connect_and_handshake`]) so
-/// its deadline and this handshake's are sequential rather than nested.
+/// its deadline and this handshake's are sequential rather than nested. The
+/// 003.889 preface waits for the server's rekey, which puts *that* wait inside the
+/// same budget — a Mac that authenticates and then says nothing is reported as a
+/// handshake that ran long, not as a live session with a blank canvas.
 async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow::Result<Connected> {
-    let (read_half, mut writer) = stream.into_split();
+    let dialect = Dialect::of(config.subtype);
+    let (read_half, mut sock) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
-    // Version handshake. The server leads with e.g. "RFB 003.008\n"; anything
-    // announcing at least 3.8 (macOS Screen Sharing says 3.889) is answered
-    // with 3.8, the baseline this client speaks.
+    let minor = read_version(&mut reader).await?;
+    sock.write_all(dialect.banner()).await?;
+
+    let types = read_security_types(&mut reader).await?;
+    let macos = is_macos_server(minor, &types);
+    let chosen = choose_security(&types, config.subtype, &config.vnc_password)?;
+    if macos && chosen != SECURITY_ARD {
+        // Said once, at the only moment it can still be acted on, because the
+        // symptom is otherwise unreadable: a login screen that will not accept
+        // the account already signed in on that Mac.
+        warn!(
+            "vnc: this server is a Mac and the target has no Apple subtype — macOS answers \
+             an anonymous viewer with a new login window on a virtual display rather than its \
+             own screen. Set subtype = \"ard\" with a macOS account's username and password \
+             to share the screen."
+        );
+    }
+    sock.write_all(&[chosen]).await?;
+
+    let wrap_key = authenticate(&mut reader, &mut sock, config, chosen).await?;
+    read_security_result(&mut reader).await?;
+    sock.write_all(&[dialect.client_init()]).await?;
+    let server = read_server_init(&mut reader).await?;
+
+    match dialect {
+        Dialect::Rfb38 => rfb38_preface(reader, sock, server, macos, config).await,
+        Dialect::Apple889 => apple_preface(reader, sock, server, macos, wrap_key).await,
+    }
+}
+
+/// The server's version greeting, answered by the caller. Returns the minor
+/// number, which is one of the two things that identifies a Mac.
+async fn read_version<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<u32> {
     let mut greeting = [0u8; 12];
     reader.read_exact(&mut greeting).await?;
     let (major, minor) =
@@ -287,71 +572,85 @@ async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow
         major > 3 || (major == 3 && minor >= 8),
         "unsupported RFB version {major}.{minor} (this client requires 3.8+)"
     );
-    writer.write_all(b"RFB 003.008\n").await?;
+    Ok(minor)
+}
 
-    // Security handshake (3.8 style): the server lists types, we pick one.
-    let type_count = reader.read_u8().await?;
-    if type_count == 0 {
+/// The security types on offer. An empty list is not an empty list — it is RFB's
+/// way of refusing the connection, with the reason following it.
+async fn read_security_types<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<Vec<u8>> {
+    let count = reader.read_u8().await?;
+    if count == 0 {
         anyhow::bail!(
             "VNC server refused the connection: {}",
-            read_string(&mut reader).await?
+            read_string(reader).await?
         );
     }
-    let mut types = vec![0u8; usize::from(type_count)];
+    let mut types = vec![0u8; usize::from(count)];
     reader.read_exact(&mut types).await?;
-    let macos = is_macos_server(minor, &types);
+    Ok(types)
+}
 
-    let chosen = choose_security(&types, config.subtype, &config.vnc_password)?;
-    if macos && chosen != SECURITY_ARD {
-        // Said once, at the only moment it can still be acted on, because the
-        // symptom is otherwise unreadable: a login screen that will not accept
-        // the account already signed in on that Mac.
-        warn!(
-            "vnc: this server is a Mac and the target is not subtype \"ard\" — macOS answers \
-             an anonymous viewer with a new login window on a virtual display rather than its \
-             own screen. Set subtype = \"ard\" with a macOS account's username and password \
-             to share the screen."
-        );
-    }
-    writer.write_all(&[chosen]).await?;
-
+/// Run the chosen security type's exchange.
+///
+/// Returns the record layer's initial wrap key, which only Apple's DH branch
+/// produces and only the 003.889 dialect goes on to use. It is `MD5(shared)` —
+/// the very digest that encrypted the credentials — so the plain path has always
+/// computed it and thrown it away.
+async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    sock: &mut W,
+    config: &TargetConfig,
+    chosen: u8,
+) -> anyhow::Result<Option<[u8; 16]>> {
     match chosen {
-        SECURITY_ARD => {
-            ard_authenticate(&mut reader, &mut writer, &config.username, &config.password).await?;
-        }
+        SECURITY_ARD => Ok(Some(
+            ard_authenticate(reader, sock, &config.username, &config.password).await?,
+        )),
         SECURITY_VNC_AUTH => {
             let mut challenge = [0u8; 16];
             reader.read_exact(&mut challenge).await?;
-            writer
-                .write_all(&auth_response(&config.vnc_password, &challenge))
+            sock.write_all(&auth_response(&config.vnc_password, &challenge))
                 .await?;
+            Ok(None)
         }
-        _ => {}
+        _ => Ok(None),
     }
+}
 
-    // SecurityResult (sent for every type in 3.8, including None).
+/// SecurityResult, which RFB 3.8 sends for every type including None.
+async fn read_security_result<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<()> {
     if reader.read_u32().await? != 0 {
         anyhow::bail!(
             "VNC authentication failed: {}",
-            read_string(&mut reader).await?
+            read_string(reader).await?
         );
     }
+    Ok(())
+}
 
-    // ClientInit: request a shared session (don't kick other clients; the
-    // single-session policy lives in this program, not on the VNC server).
-    writer.write_all(&[1]).await?;
-
-    // ServerInit: desktop size, the server's native pixel format (ignored —
-    // we override it), and the desktop name.
+/// ServerInit: desktop size, the server's native pixel format (ignored — we
+/// override it), and the desktop name.
+async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<ServerInit> {
     let width = reader.read_u16().await?;
     let height = reader.read_u16().await?;
     let mut native_format = [0u8; 16];
     reader.read_exact(&mut native_format).await?;
-    let name = read_string(&mut reader).await?;
+    let name = read_string(reader).await?;
     debug!("vnc: server desktop {name:?}");
     anyhow::ensure!(width > 0 && height > 0, "server reported a {width}x{height} desktop");
+    Ok(ServerInit { width, height })
+}
 
-    writer.write_all(&set_pixel_format()).await?;
+/// The RFB 3.8 tail: force our pixel format and the encoding set.
+async fn rfb38_preface(
+    reader: Reader,
+    sock: OwnedWriteHalf,
+    server: ServerInit,
+    macos: bool,
+    config: &TargetConfig,
+) -> anyhow::Result<Connected> {
+    let mut uplink = Uplink::plain(sock);
+    uplink.send(&set_pixel_format()).await?;
     // Cursor is unconditional (the browser can always draw a pointer). The
     // resize pseudo-encodings are advertised only when the target opts in
     // (`resize = true`); without them the server never announces support and
@@ -367,53 +666,191 @@ async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow
         // simply never sends caps and the latin-1 path stays in use.
         encodings.push(vnc_clipboard::ENCODING);
     }
-    writer.write_all(&set_encodings(&encodings)).await?;
+    uplink.send(&set_encodings(&encodings)).await?;
 
     Ok(Connected {
-        reader,
-        writer,
-        width,
-        height,
+        downlink: Downlink::Plain(reader),
+        uplink,
+        width: server.width,
+        height: server.height,
         macos,
+        poll: true,
     })
 }
 
+/// The RFB 003.889 tail: Apple's cleartext prelude, the wait for the rekey, then
+/// the encrypted preface and the arming that replaces polling.
+///
+/// The one function in this file that knows the record layer is switched on here,
+/// which is deliberate: it runs before [`Connected`] exists, so there is no input
+/// task and no second holder of the writer. The alternative — noticing the rekey
+/// inside [`read_loop`] — has a race with no fix, because the server rotates
+/// *both* its own ciphers the instant it sends the rekey: a mouse move delivered
+/// in the window before this side catches up goes out in cleartext to a server
+/// that is already decrypting, and the session is unrecoverable. Doing it here
+/// makes that structurally impossible rather than unlikely.
+async fn apple_preface(
+    mut reader: Reader,
+    mut sock: OwnedWriteHalf,
+    server: ServerInit,
+    macos: bool,
+    wrap_key: Option<[u8; 16]>,
+) -> anyhow::Result<Connected> {
+    let wrap_key = wrap_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Apple's protocol revision needs its DH authentication, which this server did not offer"
+        )
+    })?;
+
+    // Both written back to back and before anything is read. The server emits the
+    // rekey the moment it sees the first of them, so anything that waited for a
+    // reply in between would be writing cleartext into a server that had already
+    // switched.
+    //
+    // `ViewerInfo` is deliberately absent, and its absence was measured: macOS 26
+    // reads *more* bytes for it than its own length field declares — the
+    // "version strings" the reference names but never frames — so sending one
+    // swallows whatever follows and the server then waits forever for the rest of
+    // a message that has already been sent. With it the rekey never arrives; with
+    // only these two it arrives immediately. Nothing is lost: the one bit the
+    // server is known to read out of it gates observe-only mode, which this
+    // client does not use.
+    sock.write_all(&vnc_apple::set_encryption_start()).await?;
+    sock.write_all(&vnc_apple::set_encryption_stop()).await?;
+
+    let keys = await_rekey(&mut reader, &wrap_key).await?;
+    info!("vnc: Apple record layer active");
+
+    let mut uplink = Uplink::records(sock, keys);
+    uplink
+        .send(&vnc_apple::set_display_configuration(server.size()))
+        .await?;
+    uplink.send(&set_pixel_format()).await?;
+    uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
+    // Arm the server's sender. On this Mac it does *not* take over the update
+    // cycle — see [`Connected::poll`] — so what it is still sent for is the
+    // server-driven cursor shapes, which the reference says stop flowing across a
+    // login or lock without it. Cheap, and re-sent on every layout for the same
+    // reason. The non-incremental request that pairs with it is [`active_loop`]'s
+    // opening kick, which is the next thing on the wire.
+    uplink
+        .send(&vnc_apple::auto_framebuffer_update(server.size()))
+        .await?;
+
+    Ok(Connected {
+        downlink: Downlink::Records(Box::new(RecordReader::new(reader, keys))),
+        uplink,
+        width: server.width,
+        height: server.height,
+        macos,
+        poll: true,
+    })
+}
+
+/// Read cleartext server messages until the rekey arrives, and return the key and
+/// IV it carried.
+///
+/// Nothing legitimate can precede it: no pixel format, no encodings and no update
+/// request have been sent, so the server has nothing else to say. Anything that
+/// does turn up is named in the error rather than skipped — the metadata burst
+/// that follows a rekey is already inside the record layer, so a rectangle here is
+/// not a burst arriving early, it is a stream that has gone somewhere unexpected.
+async fn await_rekey<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    wrap_key: &[u8; 16],
+) -> anyhow::Result<Keys> {
+    loop {
+        match reader.read_u8().await? {
+            // FramebufferUpdate, which is how the rekey travels.
+            0 => {
+                reader.read_u8().await?; // padding
+                let rects = reader.read_u16().await?;
+                // An update with no rectangles at all is empty, not an error.
+                if rects == 0 {
+                    continue;
+                }
+                let mut header = [0u8; 8];
+                reader.read_exact(&mut header).await?;
+                let encoding = reader.read_i32().await?;
+                anyhow::ensure!(
+                    encoding == vnc_apple::ENCODING_REKEY,
+                    "the server sent encoding {encoding} before the record layer was up"
+                );
+                let mut body = [0u8; vnc_record::REKEY_LEN];
+                reader.read_exact(&mut body).await?;
+                // Everything after this rectangle is ciphertext, so a further
+                // rectangle in the same update cannot be read at all. Named rather
+                // than attempted.
+                anyhow::ensure!(
+                    rects == 1,
+                    "the server put {} more rectangle(s) after the rekey",
+                    rects - 1
+                );
+                let (generation, keys) = vnc_record::unwrap_rekey(wrap_key, &body);
+                debug!("vnc: rekey generation {generation}");
+                return Ok(keys);
+            }
+            // Bell. Nothing to ring, and no reason to end the session over it.
+            2 => {}
+            other => anyhow::bail!(
+                "the server sent message type {other} before the record layer was up"
+            ),
+        }
+    }
+}
+
 /// Drive the active session: framebuffer updates out, browser input in.
-async fn active_loop(
-    reader: Reader,
-    writer: OwnedWriteHalf,
+async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
+    downlink: R,
+    uplink: Uplink,
     size: (u16, u16),
     flags: Flags,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: TileSink,
 ) -> anyhow::Result<()> {
-    let Flags { macos, resize, clipboard: clipboard_enabled, default_size } = flags;
-    // The writer is shared: the read loop sends the next update request after
-    // each update, the input side sends pointer/key/resize messages.
-    let writer: SharedWriter = Arc::new(Mutex::new(writer));
+    let Flags {
+        macos,
+        resize,
+        clipboard: clipboard_enabled,
+        default_size,
+        apple,
+        poll,
+    } = flags;
+    // The uplink is shared: the read loop answers the server (update requests,
+    // re-arming), the input side sends pointer/key/display messages.
+    let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
+        scale: UNSCALED,
         screen: None,
         pending: None,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
     let shadow: SharedShadow = Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1)));
+    let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
     let shared = Shared {
-        writer: Arc::clone(&writer),
+        uplink: Arc::clone(&uplink),
         desktop: Arc::clone(&desktop),
         cursor: Arc::clone(&cursor),
         clipboard: Arc::clone(&clipboard),
         shadow: Arc::clone(&shadow),
+        display: Arc::clone(&display),
     };
 
-    // Kick off the update cycle with one full (non-incremental) request.
-    write_to(&writer, &update_request(false, size)).await?;
+    // Kick off the update cycle with one full (non-incremental) request. On the
+    // 003.889 wire this is also the second half of the arming pair the preface
+    // began, which is why it is unconditional.
+    send(&uplink, &update_request(false, size)).await?;
 
     let mut read_task = tokio::spawn(read_loop(
-        reader,
+        downlink,
         shared,
-        clipboard_enabled,
+        ReadFlags {
+            clipboard: clipboard_enabled,
+            poll,
+        },
+        apple.then(Apple::default),
         sink.clone(),
     ));
 
@@ -452,7 +889,7 @@ async fn active_loop(
                 };
                 let sent = if let Some(size) = wanted_size {
                     if resize {
-                        request_resize(&writer, &desktop, size).await
+                        request_resize(&uplink, &desktop, size).await
                     } else {
                         Ok(())
                     }
@@ -471,15 +908,11 @@ async fn active_loop(
                     // non-incremental update brings back is then new, which is
                     // the truth — a browser that just attached has nothing.
                     shadow.lock().unwrap().forget();
-                    let size = desktop.lock().unwrap().size;
-                    if let Err(e) = sink
-                        .msg(ServerMsg::Resize {
-                            w: size.0,
-                            h: size.1,
-                            scale: UNSCALED,
-                        })
-                        .await
-                    {
+                    let (size, resize_msg) = {
+                        let d = desktop.lock().unwrap();
+                        (d.size, d.resize_msg())
+                    };
+                    if let Err(e) = sink.msg(resize_msg).await {
                         break Err(e);
                     }
                     if let Err(e) = sink.msg(ServerMsg::RemoteOs { macos }).await {
@@ -493,7 +926,17 @@ async fn active_loop(
                     {
                         break Err(e);
                     }
-                    write_to(&writer, &update_request(false, size)).await
+                    // The display list is the same story: the Mac reports it when
+                    // its layout changes, which may have been long before this
+                    // browser arrived, and a client holds no display state of its
+                    // own to fall back on.
+                    let displays_msg = display.lock().unwrap().displays_msg();
+                    if let Some(msg) = displays_msg
+                        && let Err(e) = sink.msg(msg).await
+                    {
+                        break Err(e);
+                    }
+                    send(&uplink, &update_request(false, size)).await
                 } else if matches!(input, ClientMsg::ClipboardRequest) {
                     // Answered from the buffer the read loop fills: RFB has no
                     // way to *ask* the server for its clipboard. Empty until
@@ -545,23 +988,50 @@ async fn active_loop(
                         };
                         if extended {
                             let notify = vnc_clipboard::notify(vnc_clipboard::FORMAT_TEXT);
-                            write_to(&writer, &cut_text_extended(&notify)).await
+                            send(&uplink, &cut_text_extended(&notify)).await
                         } else {
                             // Unreachable None: the branch above refused
                             // anything over the ceiling.
                             match client_cut_text(text) {
-                                Some(msg) => write_to(&writer, &msg).await,
+                                Some(msg) => send(&uplink, &msg).await,
                                 None => Ok(()),
                             }
                         }
                     } else {
                         Ok(())
                     }
-                } else {
-                    match translate_input(input, &mut button_mask, &mut last_pos, &mut pressed_keys) {
-                        bytes if bytes.is_empty() => Ok(()),
-                        bytes => write_to(&writer, &bytes).await,
+                } else if let ClientMsg::SelectDisplay { id } = input {
+                    // Handled here rather than in `translate_input`, which is a
+                    // pure function of the input and has no way to record what was
+                    // asked for. Only the Apple dialect can act on it: standard RFB
+                    // exposes one framebuffer and has no message for this.
+                    if apple {
+                        let known = {
+                            let mut state = display.lock().unwrap();
+                            let known = state.displays.iter().any(|d| d.id == id);
+                            if known {
+                                state.requested = Some(id);
+                            }
+                            known
+                        };
+                        if known {
+                            debug!("vnc: asking the Mac for display {id}");
+                            send(&uplink, &vnc_apple::set_display_message(id)).await
+                        } else {
+                            // A screen that has been unplugged since the list was
+                            // sent. Dropped rather than forwarded, so the Mac is
+                            // not asked to bind to something that is gone and the
+                            // checkmark stays where it is.
+                            debug!("vnc: ignoring a selection of unknown display {id}");
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
                     }
+                } else {
+                    let msgs =
+                        translate_input(input, &mut button_mask, &mut last_pos, &mut pressed_keys);
+                    send_all(&uplink, &msgs).await
                 };
                 // Break instead of `?`: the error must pass the trailing
                 // read_task.abort() on its way out.
@@ -578,8 +1048,8 @@ async fn active_loop(
 /// Handle a browser viewport report (dynamic resize): send
 /// SetDesktopSize once the server has declared support via an
 /// ExtendedDesktopSize rect; until then, stash the report for replay.
-async fn request_resize<W: AsyncWrite + Unpin>(
-    writer: &Arc<Mutex<W>>,
+async fn request_resize(
+    uplink: &SharedUplink,
     desktop: &SharedDesktop,
     want: (u16, u16),
 ) -> anyhow::Result<()> {
@@ -603,28 +1073,34 @@ async fn request_resize<W: AsyncWrite + Unpin>(
         }
     };
     debug!("vnc: requesting desktop resize to {}x{}", want.0, want.1);
-    write_to(writer, &msg).await
+    send(uplink, &msg).await
 }
 
 /// Everything the read loop and the rect handlers under it share with the input
 /// side. Grouped because it all travels together and none of it is optional.
 #[derive(Clone)]
 struct Shared {
-    writer: SharedWriter,
+    uplink: SharedUplink,
     desktop: SharedDesktop,
     cursor: SharedCursor,
     clipboard: SharedClipboard,
     shadow: SharedShadow,
+    display: SharedDisplay,
 }
 
 /// Read server messages forever, forwarding framebuffer updates as tiles.
-async fn read_loop(
-    mut reader: Reader,
+///
+/// `apple` is `Some` on the RFB 003.889 dialect and carries the decoding state
+/// only that dialect's encodings need.
+async fn read_loop<R: AsyncRead + Unpin>(
+    mut reader: R,
     shared: Shared,
-    clipboard_enabled: bool,
+    flags: ReadFlags,
+    mut apple: Option<Apple>,
     sink: TileSink,
 ) -> anyhow::Result<()> {
-    let Shared { writer, desktop, clipboard, .. } = &shared;
+    let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
+    let Shared { uplink, desktop, clipboard, .. } = &shared;
     loop {
         let msg_type = match reader.read_u8().await {
             Ok(t) => t,
@@ -648,6 +1124,12 @@ async fn read_loop(
                     engine::keepalive_budget().as_secs()
                 ));
             }
+            // The record layer's own refusals, which have already been phrased for
+            // a person. Passed through rather than wrapped in "read server
+            // message", which would bury them.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(anyhow::anyhow!("{e}"));
+            }
             Err(e) => return Err(anyhow::anyhow!("read server message: {e}")),
         };
         match msg_type {
@@ -657,12 +1139,17 @@ async fn read_loop(
                 let rects = reader.read_u16().await?;
                 let mut resized = false;
                 for _ in 0..rects {
-                    resized |= read_rect(&mut reader, &shared, &sink).await?;
+                    resized |= read_rect(&mut reader, &shared, &mut apple, &sink).await?;
                 }
-                // Complete the cycle. A resize invalidates the old contents,
-                // so repaint fully; otherwise ask for the next increment.
-                let size = desktop.lock().unwrap().size;
-                write_to(writer, &update_request(!resized, size)).await?;
+                // Complete the cycle — but only where there is a cycle to
+                // complete. On the 003.889 wire `AutoFrameBufferUpdate` made the
+                // server the driver, and a request per update would be a second
+                // client racing the first. A resize still invalidates the old
+                // contents, so it is asked for again there and only there.
+                if poll || resized {
+                    let size = desktop.lock().unwrap().size;
+                    send(uplink, &update_request(poll && !resized, size)).await?;
+                }
             }
             // SetColourMapEntries — can't happen for the true-colour format we
             // set, but consume it correctly rather than desyncing the stream.
@@ -724,7 +1211,7 @@ async fn read_loop(
                 reader.read_exact(&mut bytes).await?;
 
                 if signed < 0 {
-                    if extended_cut_text(&bytes, writer, clipboard, &sink).await? {
+                    if extended_cut_text(&bytes, uplink, clipboard, &sink).await? {
                         return Ok(()); // browser link gone
                     }
                     continue;
@@ -762,7 +1249,7 @@ async fn read_loop(
 /// Everything here is a reply to the server, so it writes rather than returns.
 async fn extended_cut_text(
     body: &[u8],
-    writer: &SharedWriter,
+    uplink: &SharedUplink,
     clipboard: &SharedClipboard,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
@@ -786,14 +1273,14 @@ async fn extended_cut_text(
                 caps.actions, caps.formats
             );
             clipboard.lock().unwrap().server = Some(caps);
-            write_to(writer, &cut_text_extended(&vnc_clipboard::caps())).await?;
+            send(uplink, &cut_text_extended(&vnc_clipboard::caps())).await?;
         }
         // The remote copied something. Ask for it, so the browser gets it
         // without anyone pressing Fetch.
         vnc_clipboard::Incoming::Notify(formats) => {
             if formats & vnc_clipboard::FORMAT_TEXT != 0 {
                 let request = vnc_clipboard::request(vnc_clipboard::FORMAT_TEXT);
-                write_to(writer, &cut_text_extended(&request)).await?;
+                send(uplink, &cut_text_extended(&request)).await?;
             } else {
                 // An image or file copy, or `formats == 0` for a clipboard
                 // that was cleared. Either way the remote no longer holds the
@@ -871,7 +1358,7 @@ async fn extended_cut_text(
             {
                 debug!("vnc: handing {} bytes to the remote's paste", text.len());
                 let provide = vnc_clipboard::provide(&text)?;
-                write_to(writer, &cut_text_extended(&provide)).await?;
+                send(uplink, &cut_text_extended(&provide)).await?;
             }
         }
         // "What do you have?" — answered with a notify either way, since
@@ -881,7 +1368,7 @@ async fn extended_cut_text(
                 Some(_) => vnc_clipboard::FORMAT_TEXT,
                 None => 0,
             };
-            write_to(writer, &cut_text_extended(&vnc_clipboard::notify(formats))).await?;
+            send(uplink, &cut_text_extended(&vnc_clipboard::notify(formats))).await?;
         }
         vnc_clipboard::Incoming::Unknown(action) => {
             debug!("vnc: ignoring extended clipboard action {action:#x}");
@@ -890,20 +1377,25 @@ async fn extended_cut_text(
     Ok(false)
 }
 
-/// Read one FramebufferUpdate rectangle — raw pixels compared against what the
-/// browser holds and forwarded as PNG tiles, or one of the resize
-/// pseudo-encodings. Returns whether the desktop was resized.
-async fn read_rect(
-    reader: &mut Reader,
+/// Read one FramebufferUpdate rectangle — pixels compared against what the
+/// browser holds and forwarded as tiles, or one of the pseudo-encodings that
+/// carry a cursor, a size or a display layout instead. Returns whether the desktop
+/// was resized.
+async fn read_rect<R: AsyncRead + Unpin>(
+    reader: &mut R,
     shared: &Shared,
+    apple: &mut Option<Apple>,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
-    let Shared { writer, desktop, cursor, shadow, .. } = shared;
+    let Shared { uplink, desktop, cursor, shadow, .. } = shared;
     let x = reader.read_u16().await?;
     let y = reader.read_u16().await?;
     let w = reader.read_u16().await?;
     let h = reader.read_u16().await?;
     let encoding = reader.read_i32().await?;
+    // Whether the pixels below arrive deflated. Decided here so the bounds check
+    // and the tile path stay one path for both.
+    let mut deflated = false;
     match encoding {
         ENCODING_RAW => {}
         // Cursor: the rect header carries the hotspot (x, y) and the shape
@@ -914,17 +1406,46 @@ async fn read_rect(
             return Ok(false);
         }
         // DesktopSize: the rect itself is the announcement; no payload.
-        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, shadow, (w, h), sink).await,
+        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, shadow, (w, h), UNSCALED, sink).await,
         ENCODING_EXTENDED_DESKTOP_SIZE => {
             return read_extended_desktop_size(
                 reader,
-                writer,
+                uplink,
                 desktop,
                 shadow,
                 (x, y, w, h),
                 sink,
             )
             .await;
+        }
+        vnc_apple::ENCODING_ZLIB if apple.is_some() => deflated = true,
+        vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
+            read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
+            return Ok(false);
+        }
+        vnc_apple::ENCODING_DISPLAY_LAYOUT if apple.is_some() => {
+            return read_display_layout(reader, shared, sink).await;
+        }
+        // The Mac's keyboard and hardware, none of which this gateway acts on. The
+        // length prefix is the whole point of reading them: the RFB stream has no
+        // framing of its own, so walking past by the wrong number of bytes would
+        // desync everything after it.
+        vnc_apple::ENCODING_VENDOR_KEYSYMS
+        | vnc_apple::ENCODING_KEYBOARD_SOURCE
+        | vnc_apple::ENCODING_DEVICE_INFO
+            if apple.is_some() =>
+        {
+            let len = reader.read_u16().await?;
+            discard(reader, vnc_apple::metadata_remainder(len) as u64).await?;
+            return Ok(false);
+        }
+        // A second rekey. The key could be recovered — the wrap key rotates to the
+        // last content key — but installing it means swapping the ciphers on both
+        // halves of a running session at the same instant, and the read and write
+        // halves are in different tasks. Named and closed instead: macOS sends one
+        // rekey per session, so if this is ever seen the log says what to build.
+        vnc_apple::ENCODING_REKEY if apple.is_some() => {
+            anyhow::bail!("the server re-keyed mid-session, which this client does not implement")
         }
         other => anyhow::bail!("server sent encoding {other}, which was not advertised"),
     }
@@ -943,8 +1464,28 @@ async fn read_rect(
         return Ok(false);
     }
 
-    let mut pixels = vec![0u8; usize::from(w) * usize::from(h) * BPP];
-    reader.read_exact(&mut pixels).await?;
+    let expect = usize::from(w) * usize::from(h) * BPP;
+    let pixels = if deflated {
+        // One `u32` of length, then that much of the connection's single deflate
+        // stream. The stream is the connection's, not the rectangle's — see
+        // [`ZlibStream`].
+        let len = reader.read_u32().await?;
+        anyhow::ensure!(
+            u64::from(len) <= expect as u64,
+            "a zlib rect claims {len} compressed bytes for {expect} of pixels"
+        );
+        let mut chunk = vec![0u8; len as usize];
+        reader.read_exact(&mut chunk).await?;
+        let apple = apple.as_mut().expect("zlib is the Apple dialect's alone");
+        apple
+            .zlib
+            .get_or_insert_with(|| ZlibStream::new("zlib"))
+            .inflate(&chunk, expect)?
+    } else {
+        let mut pixels = vec![0u8; expect];
+        reader.read_exact(&mut pixels).await?;
+        pixels
+    };
     let Some(rect) = Rect::from_size(x, y, w, h) else {
         return Ok(false);
     };
@@ -1027,9 +1568,9 @@ fn cursor_msg(cursor: &SharedCursor) -> Option<ServerMsg> {
 /// y = status when the reason is 1 (0 = ok), w/h = the framebuffer size; the
 /// payload is the screen layout. Receiving one at all is the server's
 /// declaration that SetDesktopSize is supported.
-async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
     reader: &mut R,
-    writer: &Arc<Mutex<W>>,
+    uplink: &SharedUplink,
     desktop: &SharedDesktop,
     shadow: &SharedShadow,
     (reason, status, w, h): (u16, u16, u16, u16),
@@ -1061,7 +1602,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>
         warn!("vnc: server rejected SetDesktopSize (status {status})");
         false
     } else {
-        apply_resize(desktop, shadow, (w, h), sink).await?
+        apply_resize(desktop, shadow, (w, h), UNSCALED, sink).await?
     };
 
     // Replay a viewport report that arrived before support was declared.
@@ -1074,18 +1615,24 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>
         };
         if let Some(msg) = msg {
             debug!("vnc: requesting desktop resize to {}x{} (replayed)", want.0, want.1);
-            write_to(writer, &msg).await?;
+            send(uplink, &msg).await?;
         }
     }
     Ok(resized)
 }
 
 /// Apply a server-announced framebuffer size: update the shared geometry and
-/// forward it to the browser. Returns whether the size actually changed.
+/// forward it to the browser. Returns whether anything actually changed.
+///
+/// `scale` is how large those pixels should look — [`UNSCALED`] on plain RFB,
+/// which has no way to say otherwise, and the Mac's own ratio on the Apple
+/// dialect. A scale change with no size change still counts: the same pixels shown
+/// at a different size is a different canvas.
 async fn apply_resize(
     desktop: &SharedDesktop,
     shadow: &SharedShadow,
     new: (u16, u16),
+    scale: f32,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     anyhow::ensure!(
@@ -1094,39 +1641,140 @@ async fn apply_resize(
         new.0,
         new.1
     );
-    {
+    let resize_msg = {
         let mut d = desktop.lock().unwrap();
-        if d.size == new {
+        if d.size == new && d.scale == scale {
             return Ok(false);
         }
         d.size = new;
-    }
+        d.scale = scale;
+        d.resize_msg()
+    };
     // The old pixels describe a framebuffer that no longer exists, and the
     // browser is about to reallocate its canvas.
     shadow.lock().unwrap().resize(new.0, new.1);
-    info!("vnc: desktop resized to {}x{}", new.0, new.1);
-    sink
-        .msg(ServerMsg::Resize {
-            w: new.0,
-            h: new.1,
-            scale: UNSCALED,
-        })
-        .await?;
+    info!("vnc: desktop resized to {}x{} at {scale}x", new.0, new.1);
+    sink.msg(resize_msg).await?;
     Ok(true)
+}
+
+/// Handle an Apple `CursorImage` rect: a shape stored once under an id, then
+/// re-selected by that id every time the pointer changes shape.
+///
+/// The whole body is read before anything is decided, so an oversized or unknown
+/// shape costs the stream nothing — the alternative is a partially consumed
+/// rectangle, which desyncs everything after it.
+async fn read_cursor_image<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    apple: &mut Option<Apple>,
+    cursor: &SharedCursor,
+    hotspot: (u16, u16),
+    size: (u16, u16),
+    sink: &TileSink,
+) -> anyhow::Result<()> {
+    let id = reader.read_u32().await?;
+    let len = reader.read_u32().await?;
+    anyhow::ensure!(
+        u64::from(len) <= MAX_CURSOR_BYTES,
+        "a cursor rect claims {len} compressed bytes, past the {MAX_CURSOR_BYTES} ceiling"
+    );
+    let mut deflated = vec![0u8; len as usize];
+    reader.read_exact(&mut deflated).await?;
+
+    let apple = apple.as_mut().expect("cursor images are the Apple dialect's alone");
+    let (state, msg) = match apple.cursors.accept(id, hotspot, size, &deflated)? {
+        vnc_apple::Cursor::Shape(shape) => (
+            CursorState::Shape(shape.clone()),
+            Some(ServerMsg::Cursor(Some(shape))),
+        ),
+        vnc_apple::Cursor::Hidden => (CursorState::Hidden, Some(ServerMsg::Cursor(None))),
+        // Nothing to draw and nothing to say: the pointer keeps the shape it has,
+        // which is closer to the truth than blanking it.
+        vnc_apple::Cursor::Unchanged => return Ok(()),
+    };
+    *cursor.lock().unwrap() = state;
+    match msg {
+        Some(msg) => sink.msg(msg).await,
+        None => Ok(()),
+    }
+}
+
+/// Handle an `AppleDisplayLayout` rect: the Mac's screens, and the geometry it is
+/// rendering them at.
+///
+/// Three things follow from one of these, and the third is the one that is easy to
+/// miss. The framebuffer may have changed size. The display list may have changed.
+/// And the server's *arming* has been dropped — a layout is emitted at a login, a
+/// lock and a fast-user-switch as well as at a real geometry change, and after any
+/// of them the server stops sending on its own. Not re-arming does not look like an
+/// error: the desktop keeps painting and the pointer silently freezes on whatever
+/// shape it last had.
+async fn read_display_layout<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    shared: &Shared,
+    sink: &TileSink,
+) -> anyhow::Result<bool> {
+    let Shared { uplink, desktop, shadow, display, .. } = shared;
+    let declared = reader.read_u16().await?;
+    anyhow::ensure!(
+        usize::from(declared) >= 2,
+        "a display layout declared {declared} bytes, less than its own length prefix"
+    );
+    let mut payload = declared.to_be_bytes().to_vec();
+    payload.resize(usize::from(declared), 0);
+    reader.read_exact(&mut payload[2..]).await?;
+    let layout = vnc_apple::parse_layout(&payload)?;
+
+    let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
+
+    // Which screen is being shared is what this gateway asked for, confirmed by
+    // this layout having arrived at all. Falling back to the main screen covers the
+    // first layout of a session, where nothing has been asked for yet.
+    let msg = {
+        let mut state = display.lock().unwrap();
+        let main = layout.displays.iter().find(|d| d.main).map(|d| d.id);
+        state.active = state
+            .requested
+            .take()
+            .or(main)
+            .unwrap_or(layout.displays[0].id);
+        let changed = state.displays != layout.displays;
+        state.displays = layout.displays;
+        // Sent whenever either half changes, since a client holds no display state
+        // of its own and the checkmark is the only thing telling it what it is
+        // looking at.
+        (changed || state.requested.is_none()).then(|| state.displays_msg()).flatten()
+    };
+    if let Some(msg) = msg {
+        sink.msg(msg).await?;
+    }
+
+    // Re-arm, on every layout and not only on a change of geometry.
+    let size = desktop.lock().unwrap().size;
+    let mut uplink = uplink.lock().await;
+    uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
+    uplink.send(&update_request(false, size)).await?;
+    Ok(resized)
 }
 
 /// Translate one browser input message into RFB client messages, updating the
 /// tracked pointer state.
+///
+/// A *list* of messages, not one buffer of them. A wheel notch is a press and a
+/// release, and on the 003.889 wire each has to go in a record of its own: two
+/// concatenated into one record means the server reads the press and drops the
+/// release, leaving a wheel button held down. Keeping them separate here is what
+/// makes that impossible rather than remembered.
 fn translate_input(
     input: ClientMsg,
     button_mask: &mut u8,
     last_pos: &mut (u16, u16),
     pressed_keys: &mut HashMap<String, u32>,
-) -> Vec<u8> {
+) -> Vec<Vec<u8>> {
     match input {
         ClientMsg::MouseMove { x, y } => {
             *last_pos = (clamp_u16(x), clamp_u16(y));
-            pointer_event(*button_mask, *last_pos).to_vec()
+            vec![pointer_event(*button_mask, *last_pos).to_vec()]
         }
         // `clicks` goes nowhere: RFB carries a button mask alone, and the guest
         // counts the clicks itself from the events it receives.
@@ -1146,7 +1794,7 @@ fn translate_input(
             } else {
                 *button_mask &= !bit;
             }
-            pointer_event(*button_mask, *last_pos).to_vec()
+            vec![pointer_event(*button_mask, *last_pos).to_vec()]
         }
         // The unit is dropped: RFB has one notch and no way to say how big it is.
         ClientMsg::Wheel { dx, dy, .. } => {
@@ -1157,8 +1805,8 @@ fn translate_input(
             for (delta, negative_bit, positive_bit) in [(dy, 0x08, 0x10), (dx, 0x20, 0x40)] {
                 if delta != 0.0 {
                     let bit = if delta > 0.0 { positive_bit } else { negative_bit };
-                    out.extend_from_slice(&pointer_event(*button_mask | bit, *last_pos));
-                    out.extend_from_slice(&pointer_event(*button_mask, *last_pos));
+                    out.push(pointer_event(*button_mask | bit, *last_pos).to_vec());
+                    out.push(pointer_event(*button_mask, *last_pos).to_vec());
                 }
             }
             out
@@ -1186,7 +1834,7 @@ fn translate_input(
                 match keymap::keysym(&code, shift) {
                     Some(sym) => {
                         pressed_keys.insert(code, sym);
-                        key_event(true, sym).to_vec()
+                        vec![key_event(true, sym).to_vec()]
                     }
                     None => {
                         debug!("vnc: unmapped key code {code}");
@@ -1200,7 +1848,7 @@ fn translate_input(
                     .remove(&code)
                     .or_else(|| keymap::keysym(&code, false))
                 {
-                    Some(sym) => key_event(false, sym).to_vec(),
+                    Some(sym) => vec![key_event(false, sym).to_vec()],
                     None => {
                         debug!("vnc: unmapped key code {code}");
                         Vec::new()
@@ -1224,12 +1872,11 @@ fn translate_input(
         | ClientMsg::Disconnect
         | ClientMsg::CacheReset
         | ClientMsg::Audio { .. } => Vec::new(),
-        // Standard RFB exposes one framebuffer spanning all screens: the
-        // ExtendedDesktopSize screen list describes how they are laid out inside
-        // it, not a set of things to choose between. Picking a single display
-        // over macOS Screen Sharing (ARD) is planned but not implemented (see
-        // docs/roadmap.md), so for now this engine sends no display list and the
-        // no-op stands.
+        // Intercepted by the input loop, which is where the requested screen is
+        // recorded — see the `SelectDisplay` branch there. Standard RFB has nothing
+        // for it in any case: one framebuffer spans every screen, and the
+        // ExtendedDesktopSize list describes how they are laid out inside it rather
+        // than offering a set to choose between.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
         // Nothing to act on: RFB has no backing scale, and a VNC server's
         // framebuffer is already the pixels it has. Clients send this
@@ -1402,11 +2049,16 @@ fn choose_security(
     subtype: Option<Subtype>,
     vnc_password: &str,
 ) -> anyhow::Result<u8> {
-    if subtype == Some(Subtype::Ard) {
+    // Both Apple subtypes authenticate the same way and neither falls back: the
+    // credentials are a macOS account's, and there is nothing else on the list that
+    // could carry them. The subtype names itself in the refusal, since the two are
+    // configured differently and the reader needs to know which one they wrote.
+    if let Some(subtype) = subtype.filter(|s| s.apple_authentication()) {
         anyhow::ensure!(
             types.contains(&SECURITY_ARD),
-            "the target is subtype \"ard\", whose authentication this server does not \
-             offer (types {types:?}) — it is not macOS Screen Sharing"
+            "the target is subtype {:?}, whose authentication this server does not \
+             offer (types {types:?}) — it is not macOS Screen Sharing",
+            subtype.name()
         );
         return Ok(SECURITY_ARD);
     }
@@ -1446,7 +2098,7 @@ async fn ard_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     writer: &mut W,
     username: &str,
     password: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<[u8; 16]> {
     let generator = reader.read_u16().await?;
     let key_len = usize::from(reader.read_u16().await?);
     anyhow::ensure!(
@@ -1486,10 +2138,11 @@ async fn ard_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     rng.fill_bytes(&mut filler);
 
     let (secret, public) = ard_exchange(generator, &prime, &peer_public, &private);
+    let key = ard_wrap_key(&secret);
     let credentials = ard_credentials(username, password, filler)?;
-    writer.write_all(&ard_encrypt(&secret, &credentials)).await?;
+    writer.write_all(&ard_encrypt(&key, &credentials)).await?;
     writer.write_all(&public).await?;
-    Ok(())
+    Ok(key)
 }
 
 /// The Diffie-Hellman half: the shared secret and the public key to send with
@@ -1545,14 +2198,24 @@ fn ard_credentials(
     Ok(blob)
 }
 
+/// The AES-128 key derived from a Diffie-Hellman shared secret: its MD5.
+///
+/// Named, rather than computed inside [`ard_encrypt`], because it is not private
+/// to the credential encryption: on the 003.889 wire the same digest is the
+/// record layer's first wrap key (see [`crate::vnc_record`]). One derivation, two
+/// readers, and no chance of them drifting apart.
+fn ard_wrap_key(secret: &[u8]) -> [u8; 16] {
+    Md5::digest(secret).into()
+}
+
 /// Encrypt the credential blob under the shared secret: AES-128 in ECB mode,
-/// keyed by the MD5 of the secret. ECB is Apple's choice, not one available to
+/// keyed by [`ard_wrap_key`]. ECB is Apple's choice, not one available to
 /// us — the blob is exactly eight blocks and the server decrypts them
 /// independently.
-fn ard_encrypt(secret: &[u8], credentials: &[u8; ARD_CREDENTIALS_LEN]) -> Vec<u8> {
+fn ard_encrypt(key: &[u8; 16], credentials: &[u8; ARD_CREDENTIALS_LEN]) -> Vec<u8> {
     use aes::cipher::{BlockCipherEncrypt as _, KeyInit as _};
 
-    let cipher = Aes128::new(&Md5::digest(secret));
+    let cipher = Aes128::new(key.into());
     let mut out = credentials.to_vec();
     for block in out.chunks_exact_mut(16) {
         cipher.encrypt_block((&mut *block).try_into().expect("16-byte AES block"));
@@ -1618,7 +2281,7 @@ fn masked_bgrx_to_rgba(bgrx: &[u8], mask: &[u8], w: u16) -> Vec<u8> {
 
 /// Read a u32-length-prefixed latin-1 string (reason or desktop name),
 /// truncated to [`MAX_STRING`] with the excess drained off the stream.
-async fn read_string(reader: &mut Reader) -> anyhow::Result<String> {
+async fn read_string<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<String> {
     let len = reader.read_u32().await?;
     let keep = len.min(MAX_STRING);
     let mut buf = vec![0u8; keep as usize];
@@ -1632,18 +2295,6 @@ async fn discard<R: AsyncRead + Unpin>(reader: &mut R, n: u64) -> anyhow::Result
     let copied = tokio::io::copy(&mut reader.take(n), &mut tokio::io::sink()).await?;
     anyhow::ensure!(copied == n, "connection closed while skipping {n} bytes");
     Ok(())
-}
-
-async fn write_to<W: AsyncWrite + Unpin>(
-    writer: &Arc<Mutex<W>>,
-    bytes: &[u8],
-) -> anyhow::Result<()> {
-    writer
-        .lock()
-        .await
-        .write_all(bytes)
-        .await
-        .map_err(|e| anyhow::anyhow!("write to VNC server: {e}"))
 }
 
 #[cfg(test)]
@@ -1700,6 +2351,32 @@ mod tests {
         let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), "pw")
             .unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
+
+        // The high-performance subtype authenticates identically — the dialect
+        // above it differs, the security type does not — and names itself when the
+        // server cannot answer.
+        assert_eq!(
+            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "").unwrap(),
+            SECURITY_ARD
+        );
+        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("\"ard-high-performance\""), "{err:#}");
+    }
+
+    #[test]
+    fn the_dialect_follows_the_subtype() {
+        assert_eq!(Dialect::of(None), Dialect::Rfb38);
+        assert_eq!(Dialect::of(Some(Subtype::Ard)), Dialect::Rfb38);
+        assert_eq!(
+            Dialect::of(Some(Subtype::ArdHighPerformance)),
+            Dialect::Apple889
+        );
+        // The two bytes that are the whole visible difference on the wire.
+        assert_eq!(Dialect::Rfb38.banner(), b"RFB 003.008\n");
+        assert_eq!(Dialect::Apple889.banner(), b"RFB 003.889\n");
+        assert_eq!(Dialect::Rfb38.client_init(), 1);
+        assert_eq!(Dialect::Apple889.client_init(), 0xc1);
     }
 
     #[test]
@@ -1738,7 +2415,7 @@ mod tests {
         let mut credentials = [0u8; ARD_CREDENTIALS_LEN];
         credentials[..16].copy_from_slice(&[9u8; 16]);
         credentials[16..32].copy_from_slice(&[9u8; 16]);
-        let out = ard_encrypt(b"shared secret", &credentials);
+        let out = ard_encrypt(&ard_wrap_key(b"shared secret"), &credentials);
         assert_eq!(out.len(), ARD_CREDENTIALS_LEN);
         assert_eq!(out[..16], out[16..32]);
         assert_ne!(out[..16], credentials[..16], "the blob is not sent in clear");
@@ -2128,7 +2805,7 @@ mod tests {
             &mut pos,
             &mut keys,
         );
-        assert_eq!(bytes, pointer_event(0x01, (10, 20)).to_vec());
+        assert_eq!(bytes, vec![pointer_event(0x01, (10, 20)).to_vec()]);
 
         // A move while the button is held keeps it in the mask (drag).
         let bytes = translate_input(
@@ -2137,7 +2814,7 @@ mod tests {
             &mut pos,
             &mut keys,
         );
-        assert_eq!(bytes, pointer_event(0x01, (30, 40)).to_vec());
+        assert_eq!(bytes, vec![pointer_event(0x01, (30, 40)).to_vec()]);
 
         // Scroll down = button 5 (0x10) press + release, on top of the held mask.
         let bytes = translate_input(
@@ -2146,9 +2823,16 @@ mod tests {
             &mut pos,
             &mut keys,
         );
-        let mut expected = pointer_event(0x11, (30, 40)).to_vec();
-        expected.extend_from_slice(&pointer_event(0x01, (30, 40)));
-        assert_eq!(bytes, expected);
+        // Two *separate* messages, not one buffer of both: on the 003.889 wire
+        // each has to go in a record of its own or the release is dropped and the
+        // wheel button stays down.
+        assert_eq!(
+            bytes,
+            vec![
+                pointer_event(0x11, (30, 40)).to_vec(),
+                pointer_event(0x01, (30, 40)).to_vec(),
+            ]
+        );
 
         let bytes = translate_input(
             ClientMsg::MouseButton {
@@ -2160,19 +2844,63 @@ mod tests {
             &mut pos,
             &mut keys,
         );
-        assert_eq!(bytes, pointer_event(0x00, (30, 40)).to_vec());
+        assert_eq!(bytes, vec![pointer_event(0x00, (30, 40)).to_vec()]);
     }
 
-    // ── Resize state machine (no sockets: Cursor writer, slice reader) ──────
+    // ── Resize state machine (no sockets: in-memory uplink, slice reader) ───
 
-    type TestWriter = Arc<Mutex<std::io::Cursor<Vec<u8>>>>;
+    /// An [`AsyncWrite`] whose bytes a test can read back while [`Uplink`] still
+    /// owns it. Cloneable for exactly that reason: `Uplink` boxes its socket, so
+    /// there is no getting at it afterwards.
+    #[derive(Clone, Default)]
+    struct Wire(Arc<std::sync::Mutex<Vec<u8>>>);
 
-    fn test_writer() -> TestWriter {
-        Arc::new(Mutex::new(std::io::Cursor::new(Vec::new())))
+    impl AsyncWrite for Wire {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
     }
 
-    async fn written(writer: &TestWriter) -> Vec<u8> {
-        writer.lock().await.get_ref().clone()
+    /// A plain uplink and the buffer behind it.
+    fn test_uplink() -> (SharedUplink, Wire) {
+        let wire = Wire::default();
+        (
+            Arc::new(Mutex::new(Uplink::plain(wire.clone()))),
+            wire,
+        )
+    }
+
+    /// An uplink that frames what it sends into Apple records, and the buffer
+    /// behind it. `keys` is handed back so a test can read the records again.
+    fn test_records_uplink(keys: Keys) -> (SharedUplink, Wire) {
+        let wire = Wire::default();
+        (
+            Arc::new(Mutex::new(Uplink::records(wire.clone(), keys))),
+            wire,
+        )
+    }
+
+    fn written(wire: &Wire) -> Vec<u8> {
+        wire.0.lock().unwrap().clone()
     }
 
     fn shared_desktop(
@@ -2180,7 +2908,25 @@ mod tests {
         screen: Option<Screen>,
         pending: Option<(u16, u16)>,
     ) -> SharedDesktop {
-        Arc::new(std::sync::Mutex::new(DesktopState { size, screen, pending }))
+        Arc::new(std::sync::Mutex::new(DesktopState {
+            size,
+            scale: UNSCALED,
+            screen,
+            pending,
+        }))
+    }
+
+    /// The shared state the rect handlers take, with only the desktop and shadow
+    /// meant to be looked at.
+    fn test_shared(uplink: SharedUplink, desktop: SharedDesktop, shadow: SharedShadow) -> Shared {
+        Shared {
+            uplink,
+            desktop,
+            cursor: Arc::new(std::sync::Mutex::new(CursorState::default())),
+            clipboard: Arc::new(std::sync::Mutex::new(ClipboardState::default())),
+            shadow,
+            display: Arc::new(std::sync::Mutex::new(DisplayState::default())),
+        }
     }
 
     // A server that hangs up mid-session has to reach `run`'s error branch. Ending
@@ -2227,14 +2973,13 @@ mod tests {
         let (sink, _frames) = test_sink();
         let err = read_loop(
             BufReader::new(read_half),
-            Shared {
-                writer: Arc::new(Mutex::new(write_half)),
-                desktop: shared_desktop((1280, 800), None, None),
-                cursor: Arc::new(std::sync::Mutex::new(CursorState::default())),
-                clipboard: Arc::new(std::sync::Mutex::new(ClipboardState::default())),
-                shadow: test_shadow((1280, 800)),
-            },
-            false,
+            test_shared(
+                Arc::new(Mutex::new(Uplink::plain(write_half))),
+                shared_desktop((1280, 800), None, None),
+                test_shadow((1280, 800)),
+            ),
+            ReadFlags { clipboard: false, poll: true },
+            None,
             sink,
         )
         .await
@@ -2256,34 +3001,34 @@ mod tests {
 
     #[tokio::test]
     async fn request_resize_stashes_until_support_and_skips_noops() {
-        let writer = test_writer();
+        let (uplink, wire) = test_uplink();
         let desktop = shared_desktop((1024, 768), None, None);
 
         // Matching the current size or a zero dimension: no-ops.
-        request_resize(&writer, &desktop, (1024, 768)).await.unwrap();
-        request_resize(&writer, &desktop, (0, 600)).await.unwrap();
+        request_resize(&uplink, &desktop, (1024, 768)).await.unwrap();
+        request_resize(&uplink, &desktop, (0, 600)).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
-        assert!(written(&writer).await.is_empty());
+        assert!(written(&wire).is_empty());
 
         // Support not declared yet: stashed, nothing on the wire.
-        request_resize(&writer, &desktop, (800, 600)).await.unwrap();
+        request_resize(&uplink, &desktop, (800, 600)).await.unwrap();
         assert_eq!(desktop.lock().unwrap().pending, Some((800, 600)));
-        assert!(written(&writer).await.is_empty());
+        assert!(written(&wire).is_empty());
 
         // Browser back at the current size: the stale stash is dropped.
-        request_resize(&writer, &desktop, (1024, 768)).await.unwrap();
+        request_resize(&uplink, &desktop, (1024, 768)).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
 
         // Support declared: SetDesktopSize goes out immediately.
         let screen = Screen { id: 7, flags: 0 };
         desktop.lock().unwrap().screen = Some(screen);
-        request_resize(&writer, &desktop, (800, 600)).await.unwrap();
-        assert_eq!(written(&writer).await, set_desktop_size((800, 600), screen));
+        request_resize(&uplink, &desktop, (800, 600)).await.unwrap();
+        assert_eq!(written(&wire), set_desktop_size((800, 600), screen));
     }
 
     #[tokio::test]
     async fn extended_desktop_size_declares_support_and_replays_pending() {
-        let writer = test_writer();
+        let (uplink, wire) = test_uplink();
         let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((1024, 768), None, Some((800, 600)));
         let screen = Screen { id: 3, flags: 0 };
@@ -2292,7 +3037,7 @@ mod tests {
         let payload = eds_payload(screen);
         let resized = read_extended_desktop_size(
             &mut payload.as_slice(),
-            &writer,
+            &uplink,
             &desktop,
             &test_shadow((1024, 768)),
             (0, 0, 1024, 768),
@@ -2310,12 +3055,12 @@ mod tests {
         assert_eq!(pending, None, "stash consumed");
         // No browser resize (same size), but the stashed report replays.
         assert!(forwarded(&sink, &mut rx).await.is_none());
-        assert_eq!(written(&writer).await, set_desktop_size((800, 600), screen));
+        assert_eq!(written(&wire), set_desktop_size((800, 600), screen));
     }
 
     #[tokio::test]
     async fn extended_desktop_size_applies_a_change_and_tells_the_browser() {
-        let writer = test_writer();
+        let (uplink, wire) = test_uplink();
         let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((1024, 768), None, None);
 
@@ -2323,7 +3068,7 @@ mod tests {
         let payload = eds_payload(Screen { id: 1, flags: 0 });
         let resized = read_extended_desktop_size(
             &mut payload.as_slice(),
-            &writer,
+            &uplink,
             &desktop,
             &test_shadow((1024, 768)),
             (1, 0, 800, 600),
@@ -2336,12 +3081,12 @@ mod tests {
         assert_eq!(desktop.lock().unwrap().size, (800, 600));
         let resize = forwarded(&sink, &mut rx).await;
         assert!(matches!(resize, Some(ServerMsg::Resize { w: 800, h: 600, scale: UNSCALED })));
-        assert!(written(&writer).await.is_empty(), "nothing left to request");
+        assert!(written(&wire).is_empty(), "nothing left to request");
     }
 
     #[tokio::test]
     async fn rejected_set_desktop_size_leaves_the_size_alone() {
-        let writer = test_writer();
+        let (uplink, wire) = test_uplink();
         let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((1024, 768), Some(Screen { id: 1, flags: 0 }), None);
 
@@ -2349,7 +3094,7 @@ mod tests {
         let payload = eds_payload(Screen { id: 1, flags: 0 });
         let resized = read_extended_desktop_size(
             &mut payload.as_slice(),
-            &writer,
+            &uplink,
             &desktop,
             &test_shadow((1024, 768)),
             (1, 1, 640, 480),
@@ -2361,7 +3106,7 @@ mod tests {
         assert!(!resized);
         assert_eq!(desktop.lock().unwrap().size, (1024, 768));
         assert!(forwarded(&sink, &mut rx).await.is_none(), "no resize reported to the browser");
-        assert!(written(&writer).await.is_empty());
+        assert!(written(&wire).is_empty());
     }
 
     #[tokio::test]
@@ -2371,11 +3116,11 @@ mod tests {
         let shadow = test_shadow((1024, 768));
 
         // Same size: no change, nothing sent to the browser.
-        assert!(!apply_resize(&desktop, &shadow, (1024, 768), &sink).await.unwrap());
+        assert!(!apply_resize(&desktop, &shadow, (1024, 768), UNSCALED, &sink).await.unwrap());
         assert!(forwarded(&sink, &mut rx).await.is_none());
 
         // A real change updates the state and reaches the browser.
-        assert!(apply_resize(&desktop, &shadow, (640, 480), &sink).await.unwrap());
+        assert!(apply_resize(&desktop, &shadow, (640, 480), UNSCALED, &sink).await.unwrap());
         assert_eq!(desktop.lock().unwrap().size, (640, 480));
         let resize = forwarded(&sink, &mut rx).await;
         assert!(matches!(resize, Some(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED })));
@@ -2384,11 +3129,15 @@ mod tests {
         assert_eq!(shadow.lock().unwrap().size(), (640, 480));
 
         // A zero dimension is a protocol violation, not a resize.
-        assert!(apply_resize(&desktop, &shadow, (0, 480), &sink).await.is_err());
+        assert!(apply_resize(&desktop, &shadow, (0, 480), UNSCALED, &sink).await.is_err());
     }
 
     /// Feed one key event through `translate_input`, carrying the browser's
     /// `caps` state (as the wire message does) and sharing the pressed-key map.
+    ///
+    /// Flattened to a single buffer, which loses nothing: a key is always one
+    /// message or none. Only the wheel produces more than one, and its test asserts
+    /// on the list.
     fn key(keys: &mut HashMap<String, u32>, code: &str, pressed: bool, caps: bool) -> Vec<u8> {
         let (mut mask, mut pos) = (0u8, (0u16, 0u16));
         translate_input(
@@ -2401,6 +3150,7 @@ mod tests {
             &mut pos,
             keys,
         )
+        .concat()
     }
 
     #[test]
@@ -2483,5 +3233,289 @@ mod tests {
             key(&mut keys, "KeyA", true, true),
             key_event(true, 0x61).to_vec()
         ); // 'a'
+    }
+
+    // ── The Apple dialect (no sockets: framed records over a slice) ─────────
+
+    fn apple_keys() -> Keys {
+        Keys {
+            key: *b"aaaaaaaaaaaaaaaa",
+            iv: *b"bbbbbbbbbbbbbbbb",
+        }
+    }
+
+    /// A cleartext FramebufferUpdate carrying one rekey rectangle, which is how the
+    /// record layer's key arrives.
+    fn rekey_update(wrap_key: &[u8; 16], keys: Keys) -> Vec<u8> {
+        use aes::cipher::{BlockCipherEncrypt as _, KeyInit as _};
+        let cipher = Aes128::new(wrap_key.into());
+        let wrapped = |mut block: [u8; 16]| {
+            cipher.encrypt_block((&mut block).into());
+            block
+        };
+
+        let mut msg = vec![0u8, 0]; // FramebufferUpdate + padding
+        msg.extend_from_slice(&1u16.to_be_bytes()); // one rectangle
+        msg.extend_from_slice(&[0u8; 8]); // x, y, w, h all zero
+        msg.extend_from_slice(&vnc_apple::ENCODING_REKEY.to_be_bytes());
+        msg.extend_from_slice(&1u32.to_be_bytes()); // generation
+        msg.extend_from_slice(&wrapped(keys.key));
+        msg.extend_from_slice(&wrapped(keys.iv));
+        msg
+    }
+
+    #[tokio::test]
+    async fn the_rekey_is_read_out_of_a_cleartext_rectangle() {
+        let wrap = [7u8; 16];
+        let wire = rekey_update(&wrap, apple_keys());
+        let got = await_rekey(&mut wire.as_slice(), &wrap).await.unwrap();
+        assert_eq!(got, apple_keys());
+
+        // A Bell first is tolerated; the rekey behind it is still found.
+        let mut wire = vec![2u8];
+        wire.extend_from_slice(&rekey_update(&wrap, apple_keys()));
+        assert_eq!(
+            await_rekey(&mut wire.as_slice(), &wrap).await.unwrap(),
+            apple_keys()
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_may_precede_the_rekey() {
+        let wrap = [7u8; 16];
+
+        // A pixel rectangle. Everything after the rekey is ciphertext, so a stream
+        // that puts anything else first has gone somewhere this client cannot follow.
+        let mut wire = vec![0u8, 0];
+        wire.extend_from_slice(&1u16.to_be_bytes());
+        wire.extend_from_slice(&[0u8; 8]);
+        wire.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        let err = await_rekey(&mut wire.as_slice(), &wrap).await.unwrap_err();
+        assert!(format!("{err:#}").contains("before the record layer was up"), "{err:#}");
+
+        // A second rectangle in the same update, which would already be encrypted.
+        let mut wire = rekey_update(&wrap, apple_keys());
+        wire[2..4].copy_from_slice(&2u16.to_be_bytes());
+        let err = await_rekey(&mut wire.as_slice(), &wrap).await.unwrap_err();
+        assert!(format!("{err:#}").contains("after the rekey"), "{err:#}");
+
+        // SetColourMapEntries, which cannot arrive before a pixel format is set.
+        let err = await_rekey(&mut [1u8, 0, 0, 0, 0, 0].as_slice(), &wrap)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("message type 1"), "{err:#}");
+    }
+
+    /// Frame a run of server messages into records, as the Mac would.
+    fn framed(msgs: &[Vec<u8>]) -> Vec<u8> {
+        let mut writer = RecordWriter::new(apple_keys());
+        let mut wire = Vec::new();
+        for msg in msgs {
+            wire.extend_from_slice(writer.frame(msg).unwrap());
+        }
+        wire
+    }
+
+    /// A FramebufferUpdate of one raw rectangle covering the whole 2x2 desktop.
+    fn raw_update() -> Vec<u8> {
+        let mut msg = vec![0u8, 0];
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&0u16.to_be_bytes()); // x
+        msg.extend_from_slice(&0u16.to_be_bytes()); // y
+        msg.extend_from_slice(&2u16.to_be_bytes()); // w
+        msg.extend_from_slice(&2u16.to_be_bytes()); // h
+        msg.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        // Four BGRX pixels, all distinct so the shadow cannot mistake them for
+        // what the browser already has.
+        for i in 0..4u8 {
+            msg.extend_from_slice(&[i, 0x40, 0x80, 0]);
+        }
+        msg
+    }
+
+    /// The whole read-side design in one test: a rectangle whose bytes are split
+    /// across two records reaches the tile path as one rectangle, and nothing above
+    /// the record layer knows the records were there.
+    #[tokio::test]
+    async fn a_rectangle_split_across_records_still_becomes_tiles() {
+        let update = raw_update();
+        let (a, b) = update.split_at(update.len() - 6);
+        let wire = framed(&[a.to_vec(), b.to_vec()]);
+
+        let (uplink, _sent) = test_records_uplink(apple_keys());
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        // Reading past the last record is a clean end of stream, so the loop ends
+        // with the hang-up error rather than hanging.
+        let err = read_loop(
+            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+            shared,
+            ReadFlags { clipboard: false, poll: false },
+            Some(Apple::default()),
+            sink.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
+
+        // The tile arrived whole, which is the point: one 2x2 rectangle, not two
+        // fragments of one.
+        sink.flush().await;
+        let msg = rx.try_recv().expect("a tile");
+        match msg {
+            ServerMsg::Tile(tile) => assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 2, 2)),
+            other => panic!("expected a tile, got {other:?}"),
+        }
+    }
+
+    /// Under `AutoFrameBufferUpdate` the server drives, so a request per update
+    /// would be a second client racing the first.
+    #[tokio::test]
+    async fn an_armed_session_does_not_poll_for_the_next_update() {
+        for poll in [true, false] {
+            let wire = framed(&[raw_update()]);
+            let (uplink, sent) = test_records_uplink(apple_keys());
+            let (sink, _rx) = test_sink();
+            let shared = test_shared(
+                uplink,
+                shared_desktop((2, 2), None, None),
+                test_shadow((2, 2)),
+            );
+            let _ = read_loop(
+                RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+                shared,
+                ReadFlags { clipboard: false, poll },
+                Some(Apple::default()),
+                sink,
+            )
+            .await;
+            assert_eq!(
+                written(&sent).is_empty(),
+                !poll,
+                "poll = {poll} should{} have asked for the next update",
+                if poll { "" } else { " not" }
+            );
+        }
+    }
+
+    /// One screen as a test writes it: id, logical size, backing size, flags.
+    type TestScreen = (u32, (u16, u16), (u16, u16), u32);
+
+    /// A layout payload as the Mac's encoder writes it: a 0x14-byte header, then a
+    /// 0x38-byte record per screen.
+    fn layout_payload(displays: &[TestScreen]) -> Vec<u8> {
+        let total = 0x14 + displays.len() * 0x38;
+        let mut p = vec![0u8; 0x14];
+        p[..2].copy_from_slice(&u16::try_from(total).unwrap().to_be_bytes());
+        p[2..4].copy_from_slice(&5u16.to_be_bytes());
+        let first = displays[0];
+        p[4..6].copy_from_slice(&first.1.0.to_be_bytes());
+        p[6..8].copy_from_slice(&first.1.1.to_be_bytes());
+        p[8..10].copy_from_slice(&first.2.0.to_be_bytes());
+        p[10..12].copy_from_slice(&first.2.1.to_be_bytes());
+        for (id, logical, backing, flags) in displays {
+            let mut r = vec![0u8; 0x38];
+            r[0x10..0x14].copy_from_slice(&id.to_be_bytes());
+            r[0x18..0x1a].copy_from_slice(&logical.0.to_be_bytes());
+            r[0x1a..0x1c].copy_from_slice(&logical.1.to_be_bytes());
+            r[0x20..0x22].copy_from_slice(&backing.0.to_be_bytes());
+            r[0x22..0x24].copy_from_slice(&backing.1.to_be_bytes());
+            r[0x24..0x28].copy_from_slice(&flags.to_be_bytes());
+            p.extend_from_slice(&r);
+        }
+        p
+    }
+
+    /// A layout does three things, and the third is the one that is easy to miss:
+    /// it resizes, it reports the screens, and it re-arms the server. Without the
+    /// re-arm the desktop keeps painting and only the pointer silently freezes, so
+    /// nothing else here would catch its absence.
+    #[tokio::test]
+    async fn a_display_layout_resizes_reports_and_re_arms() {
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)));
+
+        let payload = layout_payload(&[
+            (11, (1920, 1080), (3840, 2160), 0x01),
+            (22, (1600, 1000), (1600, 1000), 0x00),
+        ]);
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, &sink)
+            .await
+            .unwrap();
+        assert!(resized);
+
+        // The framebuffer is the *backing* pixels, shown at the Mac's own density —
+        // 100% of the logical desktop, not a canvas scaled to fit anything.
+        assert_eq!(desktop.lock().unwrap().size, (3840, 2160));
+        assert_eq!(desktop.lock().unwrap().scale, 2.0);
+        sink.flush().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::Resize { w: 3840, h: 2160, scale }) if scale == 2.0
+        ));
+
+        // The screens, with the checkmark on the main one because nothing has been
+        // asked for yet.
+        match rx.try_recv().expect("a display list") {
+            ServerMsg::Displays { active, displays } => {
+                assert_eq!(active, 11);
+                assert_eq!(displays.len(), 2);
+                assert_eq!(displays[1].label, "Display 2");
+            }
+            other => panic!("expected a display list, got {other:?}"),
+        }
+
+        // And the re-arm pair, in that order.
+        let mut expected = vnc_apple::auto_framebuffer_update((3840, 2160));
+        expected.extend_from_slice(&update_request(false, (3840, 2160)));
+        assert_eq!(written(&sent), expected);
+    }
+
+    /// The checkmark follows the Mac, never the click: a request moves it only once
+    /// a layout has come back to say the Mac acted on it.
+    #[tokio::test]
+    async fn a_requested_display_becomes_active_only_once_a_layout_confirms() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((1600, 1000), None, None),
+            test_shadow((1600, 1000)),
+        );
+        let screens: [TestScreen; 2] = [
+            (11, (1920, 1080), (1920, 1080), 0x01),
+            (22, (1600, 1000), (1600, 1000), 0x00),
+        ];
+
+        // First layout: the main screen.
+        read_display_layout(&mut layout_payload(&screens).as_slice(), &shared, &sink)
+            .await
+            .unwrap();
+        assert_eq!(shared.display.lock().unwrap().active, 11);
+
+        // A request on its own moves nothing.
+        shared.display.lock().unwrap().requested = Some(22);
+        assert_eq!(shared.display.lock().unwrap().active, 11);
+
+        // The layout the Mac answers with is what moves it.
+        read_display_layout(&mut layout_payload(&screens).as_slice(), &shared, &sink)
+            .await
+            .unwrap();
+        assert_eq!(shared.display.lock().unwrap().active, 22);
+
+        sink.flush().await;
+        let mut actives = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Displays { active, .. } = msg {
+                actives.push(active);
+            }
+        }
+        assert_eq!(actives, vec![11, 22]);
     }
 }

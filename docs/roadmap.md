@@ -36,19 +36,44 @@ deleted rxa agent ran. It is deferred until the fixed dial proves insufficient; 
 design and its salvage point are recorded in
 [proposals/motion-adaptive-jpeg.md](proposals/motion-adaptive-jpeg.md).
 
-### Apple Screen Sharing display picking and high performance
+### Apple Screen Sharing: what is left after display picking
 
-macOS Screen Sharing can natively pick a single display: the stock Screen Sharing
-app shows a Both Displays / Display 1 / Display 2 choice. The gateway does not do
-this yet. Today it shares the Mac's real screen(s) as-is over standard screen
-sharing; teaching the VNC/ARD path to enumerate the Mac's displays and bind to one
-is not implemented. The `ClientMsg::SelectDisplay` / `ServerMsg::Displays` wire is
-kept as scaffolding for exactly that — display picking builds on it rather than
-adding new wire — and `src/vnc.rs` currently returns an empty display list.
+`subtype = "ard-high-performance"` ships Apple's RFB 003.889 wire — the record
+layer, the display list, and zlib rectangles — so picking one of a Mac's screens
+works, the way the stock Screen Sharing app's Display menu does. What remains on
+that wire, each for its own reason:
 
-"High-performance" screen sharing goes one step further: it spins up a resizable
-virtual display and allows dynamic resize the way RDP does. That is where `resize`
-on an `ard` target becomes real — it is rejected at configuration time today.
+- **Dynamic resolution**, which is the Apple name for what `resize` means on a VNC
+  or RDP target. It needs the *full dynamic descriptor* on `SetDisplayConfiguration`
+  — the dynamic-resolution flag set, `display_type = 4`, a populated mode table —
+  which makes the Mac create a resizable virtual display, plus the renegotiation
+  that follows every size change. The gateway sends the static descriptor instead
+  and `resize` is refused for the subtype at configuration time. Note that this is
+  never a reason to scale on the client: see the 100% rule in `CLAUDE.md`.
+- **Both Displays**, the aggregate. One byte (`combine_all_displays`) on the message
+  the gateway already sends, but the framebuffer layout it produces is unspecified
+  in the reference, so it is not attempted. Every screen at once is what a session
+  does anyway before anything is picked.
+- **The pasteboard.** Apple carries it over messages of its own — an announcement,
+  a fetch, then a zlib'd multi-flavour archive — not over RFB's Extended Clipboard,
+  which is all `src/vnc_clipboard.rs` implements. `clipboard` is refused for the
+  subtype rather than accepted and left inert.
+- **Apple's still-image codecs** (`0x3ea` and the per-tile `0x3f3`), which would
+  compress far better than zlib. Blocked, not deferred: the reference this was
+  written from marks `0x3ea`'s rectangle body and `0x3f3`'s command-code table as
+  unresolved, so they cannot be written from it — and a client must not advertise an
+  encoding it cannot decode. ZRLE is the decodable middle ground if zlib ever proves
+  insufficient.
+- **The Adaptive media path**: HEVC and AAC over SRTP/UDP, negotiated by
+  `MediaStreamOptions`. A large amount of work for a link that is usually a LAN, and
+  the negotiation's own schema is only partly recovered.
+- **Authentication types 33, 35 and 36** (RSA-SRP, Kerberos, direct SRP). Type 30's
+  Diffie-Hellman reaches the same record layer and is what the gateway already had;
+  the others are only needed against a Mac that stops offering it.
+- **A second rekey.** macOS sends one per session; a mid-session one closes the
+  session with a named error rather than being installed, because swapping the
+  ciphers on both halves of a running session at the same instant is not something
+  the two-task shape supports.
 
 ### A virtual-display-only macOS utility (deferred, low priority)
 

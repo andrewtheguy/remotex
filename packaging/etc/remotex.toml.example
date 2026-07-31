@@ -45,35 +45,24 @@ site_passwd = ""
 # gateways on one machine share one session cookie and each login silently evicts
 # the other. Every label under .localhost resolves to loopback without DNS
 # (RFC 6761) and is a distinct cookie origin, so two gateways become two
-# independent logins in one browser. Running two is the only way to test rxa
-# session takeover, which is why this exists at all.
+# independent logins in one browser. Running two gateways against one target is
+# the only way to test session takeover, which is why this exists at all.
 #
 # One DNS label: letters, digits and inner hyphens, no dots.
 #dev_subdomain = "gw-a"
-
-# This gateway's identity on the "rxa" protocol — the macOS agent (see the rxa
-# target near the end of this file). Required as soon as any target is
-# protocol = "rxa", and unused otherwise.
-#
-# One key for the whole server, not one per Mac: this is the [Interface] half of
-# a WireGuard-style pairing, and every agent carries its public half on the list
-# of gateways it will answer.
-# Generate with:      remotex gen-key
-# Read the public half with:   remotex rxa-pubkey
-#[rxa]
-#private_key = "rxgs..."
 
 # Target profiles (at least one required). Each needs a unique name. Every
 # profile is served; the browser picks one from a picker after login (there is
 # no --target selector).
 [[targets]]
 name = "example"
-protocol = "rdp"           # required: "rdp", "vnc" or "rxa"
+protocol = "rdp"           # required: "rdp" or "vnc"
 # Which flavour of that protocol the far end is, where a protocol has more than
-# one. Only "vnc" has any: subtype = "ard" is macOS Screen Sharing (see below).
+# one. Only "vnc" has any, and both are macOS Screen Sharing: "ard" and
+# "ard-high-performance" (see the two Mac targets below).
 #subtype = "ard"
 host = "192.0.2.10"
-# Default: the protocol's standard port (3389 rdp, 5900 vnc, 52381 rxa).
+# Default: the protocol's standard port (3389 rdp, 5900 vnc).
 #port = 3389
 
 # Credentials (used server-side only; never sent to the browser).
@@ -91,8 +80,7 @@ password = "change-me"
 # RDP connects at this size. A VNC server keeps its own instead and consults these
 # only to answer a client that has no desktop-shaped window of its own — a phone
 # asking for whatever this end considers right — which needs `resize = true` below
-# before anything can be applied. rxa ignores them entirely: the size of a display
-# the agent made is stated in the agent's own config, not here.
+# before anything can be applied.
 #
 # On an RDP target with `resize` these are *points*, not pixels: the connect
 # happens at 1x and a Retina client then asks for twice the pixels.
@@ -109,9 +97,9 @@ password = "change-me"
 # ("Resize to window", and the default), or continuously ("Auto resize"), with the
 # choice made per session and never remembered.
 #
-# Two narrowings that are not the client's to make. On VNC it works only on servers
-# that accept SetDesktopSize — the TigerVNC family. On rxa it reaches only a
-# display the agent made: see the rxa section below.
+# One narrowing that is not the client's to make: on VNC it works only on servers
+# that accept SetDesktopSize — the TigerVNC family. Both Mac subtypes refuse it, so
+# a Mac keeps the resolution set on the Mac (see the two Mac targets below).
 #
 # Without it — and by default — the desktop keeps its connect-time size, no client
 # offers either control, and the ones that ask anyway are ignored.
@@ -124,16 +112,17 @@ password = "change-me"
 # all. (The macOS viewer has no such restriction: it reads NSPasteboard
 # directly.) The Clipboard panel always works regardless, and is the way to move
 # text when automatic sync cannot run.
-# Every protocol supports it. RDP (MS-RDPECLIP) and the Mac agent ("rxa")
-# always carry full UTF-8. VNC does too on servers implementing the Extended
-# Clipboard extension (TigerVNC does); on servers that do not (TightVNC), RFB
-# falls back to latin-1 and anything outside it becomes "?".
+# RDP (MS-RDPECLIP) always carries full UTF-8. VNC does too on servers implementing
+# the Extended Clipboard extension (TigerVNC does); on servers that do not
+# (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
+# `subtype = "ard-high-performance"` refuses it: Apple's own protocol revision
+# carries the pasteboard over messages of its own, which is not implemented.
 #clipboard = false
 
 # Remote audio (opt-in): redirect this target's sound to whichever client asks for
 # it — the browser's floating-menu Audio button, or remotex.app's Remote > Enable
 # Audio. RDP only — MS-RDPEA is the one audio channel the gateway speaks, so this is
-# refused on "vnc" and "rxa" rather than accepted and left doing nothing.
+# refused on "vnc" rather than accepted and left doing nothing.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
@@ -158,15 +147,18 @@ password = "change-me"
 # host = "10.0.0.2"
 # vnc_password = "change-me"
 
-# A Mac can use its built-in Screen Sharing service through this same path,
-# without installing the companion agent — say so with subtype = "ard", and give
-# it an *account* rather than the Screen Sharing password. Apple's DH
-# authentication is the only way to tell a Mac who is connecting, and macOS
-# answers a viewer that names nobody by creating a new login window on a virtual
-# display instead of sharing its screen. So the subtype requires username and
-# password (that account's), takes no vnc_password, and rejects resize, which
-# macOS accepts and then ignores. A third-party VNC server that happens to run
-# on a Mac is not this: it is a plain "vnc" target.
+# A Mac uses its built-in Screen Sharing service through this same path, with no
+# companion software — say so with a subtype, and give it an *account* rather than
+# the Screen Sharing password. Apple's DH authentication is the only way to tell a
+# Mac who is connecting, and macOS answers a viewer that names nobody by creating a
+# new login window on a virtual display instead of sharing its screen. So both
+# subtypes require username and password (that account's), take no vnc_password,
+# and reject resize, which macOS accepts and then ignores. A third-party VNC server
+# that happens to run on a Mac is not this: it is a plain "vnc" target.
+#
+# `subtype = "ard"` is standard screen sharing on the ordinary RFB wire. Raw pixels,
+# Extended Clipboard where the Mac offers it, and one framebuffer holding every
+# attached display at once.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
@@ -175,51 +167,45 @@ password = "change-me"
 # username = "andrew"
 # password = "the-account-password"
 
-# As an optional alternative, a Mac can run the remotex agent (protocol "rxa")
-# for RealVNC-like reconnect behavior. Reconnects authenticate from a keypair on
-# each end instead of returning to Screen Sharing's login gate.
+# `subtype = "ard-high-performance"` is the same Mac and the same credentials over
+# Apple's own protocol revision. Two things it can do that the wire above cannot:
 #
-# Pairing is two public keys, one each way — the way WireGuard pairs an interface
-# with a peer. Neither is a secret; the private key behind each stays on the
-# machine that made it:
+#   1. **Pick a screen.** The Mac reports its displays and the gateway binds to one,
+#      which is the Both Displays / Display 1 / Display 2 choice the stock Screen
+#      Sharing app offers. Both clients already have the UI: the browser's Display
+#      panel and the viewer's Display menu, which stay hidden on every other kind of
+#      target because there is nothing to choose. There is no "Both Displays" entry —
+#      that is what a session shows before anything is picked.
+#   2. **Compress the picture** (zlib) instead of sending raw pixels.
 #
-#   1. This gateway's identity is [rxa].private_key, above. Its public half —
-#      printed by `remotex rxa-pubkey` — goes on the Mac's list of gateways it
-#      will answer: one `<rxgp key> <name>` per line in
-#      ~/Library/Application Support/remotex-agent/authorized_gateways, or via
-#      Authorized gateways > Manage... in the agent's Settings dialog.
-#   2. The Mac's public key goes in `agent_public_key` below. Its Settings dialog
-#      shows it with a Copy button, and `remotex-agent --public-key` prints it.
-#
-# One [rxa].private_key serves every rxa target: it is this server's identity,
-# not a per-Mac credential. And the Mac's side is a list, the way
-# ~/.ssh/authorized_keys is, so a Mac can be reachable from a second gateway by
-# adding a line there — no new key material, and the first gateway's config stays
-# valid. Several gateways may be authorized; one holds the Mac at a time, and a
-# second is refused until its client takes the session over.
-#
-# The agent runs in the Mac user's login session and needs two one-time grants
-# in System Settings -> Privacy & Security: Screen Recording and Accessibility.
-# It cannot run at the login window, so nobody logged in means nothing to reach.
-#
-# username/password/domain/width/height/security are all ignored here.
-# `clipboard` is supported: the agent reads and writes the Mac's pasteboard.
-#
-# `resize` is supported, for one display only. A Mac's own screens are set on the
-# Mac, in System Settings, and nothing here asks a physical panel to change; the
-# agent notices whatever mode it is put in and the client follows. But the agent
-# can also create a private display for itself (`virtual_display` in its own
-# config), and nobody is sitting at that one — so with `resize = true` here, a
-# client may resize it, on request or continuously, like any other target it is
-# allowed to resize.
-#
-# What is narrower is *which display*, and that moves during a session: the
-# permission applies only while the agent's own display is the one being shared.
-# The viewer keeps its three View-menu items and greys them out otherwise; the
-# browser shows its Resize section only while they apply. On a Mac whose agent has
-# no such display it never applies at all.
+# It costs two keys, both refused here rather than accepted and left inert:
+# `clipboard`, because Apple carries the pasteboard over its own messages on this
+# wire; and `resize`, for the same reason plain "ard" refuses it — asking a Mac for a
+# resizable desktop means asking it to create a virtual display, which is not
+# implemented. Everything else is identical, so switching between the two subtypes is
+# one line.
 # [[targets]]
-# name = "mac"
-# protocol = "rxa"
-# host = "mac.local"
-# agent_public_key = "rxap..."
+# name = "mac-pick-a-screen"
+# protocol = "vnc"
+# subtype = "ard-high-performance"
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
+
+# How this target's pixels are compressed on their way to the browser. Two keys and
+# a dial, and they apply to every protocol.
+#
+# render_type = "full" (the default) is lossless PNG: exact pixels, and the right
+# answer on a LAN. "fixed-quality" trades exactness for bytes at a constant quality,
+# which is what a slow or metered link wants.
+#
+# render_subtype picks the codec and only matters for "fixed-quality": "jpeg" is
+# decoded by everything, "webp" is roughly 30% smaller at a matched quality and is
+# decoded natively by both clients. With "full" the subtype must be "png".
+#
+# render_quality is 1-100 and is *required* by "fixed-quality" and refused by
+# "full" — there is no default, because a quality nobody chose is not a quality.
+# Higher is larger and closer to exact.
+#render_type = "full"
+#render_subtype = "png"
+#render_quality = 75
