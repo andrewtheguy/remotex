@@ -27,9 +27,8 @@ struct AboutPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 14) {
-                // The Dock icon, which for an instance carrying its own `icon.icns` is
-                // that icon — so this panel says which instance it belongs to twice
-                // over. See `InstanceDirectory.iconURL`.
+                // The Dock icon, which for a variant bundle is that variant's own — so
+                // this panel says which instance it belongs to twice over.
                 //
                 // Bound through an optional deliberately: `applicationIconImage` is an
                 // implicitly unwrapped `NSImage!`, and an About panel that traps rather
