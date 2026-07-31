@@ -213,10 +213,9 @@ pub fn auto_framebuffer_update((w, h): (u16, u16)) -> Vec<u8> {
     msg.push(0x09);
     msg.push(0);
     msg.extend_from_slice(&1u16.to_be_bytes()); // version
-    // "all/main displays" rather than a screen index: which screen is shared is
-    // said with `set_display_message`, and pinning it twice invites the two to
-    // disagree.
-    msg.extend_from_slice(&u32::MAX.to_be_bytes());
+    // Update interval, zero for the server default. This is not a display id:
+    // `SetDisplayMessage` is the one and only place a screen is selected.
+    msg.extend_from_slice(&0u32.to_be_bytes());
     for value in [0, 0, w, h] {
         msg.extend_from_slice(&value.to_be_bytes());
     }
@@ -249,6 +248,10 @@ pub struct Display {
     /// `+0x02`. 1.0 or 2.0 on every Mac measured, and cross-checked against the
     /// screen's own two bounds rects, which must agree.
     pub density: f32,
+    /// This screen's backing-pixel size. The full repaint after a combined
+    /// layout consists of one such region per non-mirrored display; gaps in the
+    /// bounding framebuffer are not rectangles the Mac sends.
+    pub backing: (u16, u16),
 }
 
 /// The Mac's display layout: which screens it has, which one it is sending, and
@@ -290,6 +293,21 @@ impl Layout {
     /// The screens as a client is offered them.
     pub fn infos(&self) -> Vec<DisplayInfo> {
         self.displays.iter().map(|d| d.info.clone()).collect()
+    }
+
+    /// Pixels a non-incremental update must cover before polling may resume.
+    ///
+    /// A selected display fills its framebuffer. The combined framebuffer can
+    /// contain gaps around unequal screens, so its full paint is the sum of the
+    /// real display regions rather than the bounding width times height.
+    pub fn repaint_pixels(&self) -> u64 {
+        if self.current.is_some() {
+            return u64::from(self.backing.0) * u64::from(self.backing.1);
+        }
+        self.displays
+            .iter()
+            .map(|display| u64::from(display.backing.0) * u64::from(display.backing.1))
+            .sum()
     }
 }
 
@@ -439,6 +457,7 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
                 virtual_display: false,
             },
             density,
+            backing,
         });
     }
 
@@ -453,19 +472,40 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
     Ok(Layout { backing, current, displays })
 }
 
-/// The connection's zlib inflate stream.
+/// The connection's framebuffer-zlib inflate stream.
 ///
 /// One deflate stream for the life of the connection, chunked across rectangles:
 /// the sliding window carries over, so this context is created once and never
 /// reset. A fresh one per rectangle decodes the first rectangle and then fails —
 /// or, worse, succeeds with the wrong pixels.
-pub struct ZlibStream {
+pub struct FramebufferZlib {
+    inflater: Inflater,
+}
+
+impl Default for FramebufferZlib {
+    fn default() -> Self {
+        Self { inflater: Inflater::new("zlib") }
+    }
+}
+
+impl FramebufferZlib {
+    pub fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
+        self.inflater.inflate(chunk, expect)
+    }
+}
+
+/// An inflater whose lifetime is chosen by the encoding that owns it.
+///
+/// Keep this private: framebuffer zlib owns one through [`FramebufferZlib`],
+/// while self-contained Apple payloads call [`inflate_independent`] and cannot
+/// accidentally inherit connection-wide state.
+struct Inflater {
     inflate: flate2::Decompress,
     what: &'static str,
 }
 
-impl ZlibStream {
-    pub fn new(what: &'static str) -> Self {
+impl Inflater {
+    fn new(what: &'static str) -> Self {
         Self {
             inflate: flate2::Decompress::new(true),
             what,
@@ -478,7 +518,7 @@ impl ZlibStream {
     /// payload that wants to expand past it is a protocol violation rather than a
     /// buffer to grow — which is also what keeps a compression bomb from being
     /// answered with memory.
-    pub fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
+    fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
         anyhow::ensure!(
             expect <= MAX_INFLATED,
             "a {} rectangle wants {expect} inflated bytes, past the {MAX_INFLATED} ceiling",
@@ -509,6 +549,14 @@ impl ZlibStream {
     }
 }
 
+fn inflate_independent(
+    what: &'static str,
+    chunk: &[u8],
+    expect: usize,
+) -> anyhow::Result<Vec<u8>> {
+    Inflater::new(what).inflate(chunk, expect)
+}
+
 /// Apple's cursor shapes, which arrive as a cache rather than as pixels.
 ///
 /// A shape is sent once with pixels (*store*) and then re-selected by id every
@@ -520,7 +568,6 @@ impl ZlibStream {
 #[derive(Default)]
 pub struct CursorCache {
     shapes: HashMap<u32, CursorShape>,
-    zlib: Option<ZlibStream>,
 }
 
 /// What a cursor rectangle asked for.
@@ -533,9 +580,7 @@ pub enum Cursor {
     ///
     /// There is no "the server hid the pointer" here. On the plain RFB Cursor
     /// pseudo-encoding a zero-sized rectangle means exactly that, but this encoding
-    /// never says how it is spelled, and treating a zero-sized *store* as hidden
-    /// meant discarding a chunk of the shared deflate stream — see
-    /// [`CursorCache::accept`].
+    /// never says how it is spelled.
     Unchanged,
 }
 
@@ -561,14 +606,10 @@ impl CursorCache {
                 }
             });
         }
-        // A store this client cannot decode cannot be *skipped* either. Its payload
-        // is a chunk of the connection's single deflate stream, so not feeding it
-        // leaves that stream one chunk behind for the rest of the session and every
-        // later shape inflates to rubbish — silently, since rubbish of the right
-        // length still parses. Nor can it be fed and discarded: a zero-dimension
-        // store gives no expected size to inflate to, and an oversized one gives a
-        // size up to 21 GB. So both are fatal, which for shapes a real Mac never
-        // sends costs nothing and removes the one path that could corrupt the rest.
+        // Each store is an independent zlib stream. Unlike framebuffer encoding 6,
+        // Apple does not carry the deflate window from one cursor image to the next.
+        // A fresh inflater also means a malformed shape can be skipped without
+        // poisoning every cursor that follows it.
         anyhow::ensure!(
             w != 0 && h != 0,
             "a cursor store carried {} compressed bytes for a {w}x{h} shape",
@@ -580,10 +621,7 @@ impl CursorCache {
         );
 
         let pixels = usize::from(w) * usize::from(h);
-        let stream = self
-            .zlib
-            .get_or_insert_with(|| ZlibStream::new("cursor image"));
-        let raw = stream.inflate(deflated, pixels * 4 + pixels)?;
+        let raw = inflate_independent("cursor image", deflated, pixels * 4 + pixels)?;
         // BGRA pixels, then a *separate* alpha plane. The fourth byte of each
         // pixel is not the alpha — folding it in is how a cursor comes out
         // uniformly opaque or invisible.
@@ -698,7 +736,7 @@ mod tests {
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
         assert_eq!(be16(&arm, 2), 1);
-        assert_eq!(be32(&arm, 4), u32::MAX, "all/main displays");
+        assert_eq!(be32(&arm, 4), 0, "server-default update interval");
         assert_eq!(be16(&arm, 12), 3840);
         assert_eq!(be16(&arm, 14), 2160);
 
@@ -777,6 +815,11 @@ mod tests {
         assert_eq!(parsed.backing, (4480, 1800), "the framebuffer, from the header");
         assert_eq!(parsed.current, None, "0xffffffff is the combined view");
         assert_eq!(parsed.displays.len(), 2);
+        assert_eq!(
+            parsed.repaint_pixels(),
+            1280 * 800 + 3200 * 1800,
+            "the gap below the shorter display is not part of a full paint"
+        );
 
         let main = &parsed.displays[0];
         assert_eq!(main.info.id, 1, "the CGDirectDisplayID SSH also reported");
@@ -812,6 +855,7 @@ mod tests {
         assert_eq!(retina.current, Some(4));
         assert_eq!(retina.backing, (3200, 1800));
         assert_eq!(retina.scale(), 2.0);
+        assert_eq!(retina.repaint_pixels(), 3200 * 1800);
 
         payload[0x08..0x0a].copy_from_slice(&1280u16.to_be_bytes());
         payload[0x0a..0x0c].copy_from_slice(&800u16.to_be_bytes());
@@ -930,7 +974,7 @@ mod tests {
     /// all here. Two chunks of one deflate stream inflate in sequence and fail
     /// separately.
     #[test]
-    fn zlib_inflates_across_rectangles_but_not_out_of_order() {
+    fn framebuffer_zlib_inflates_across_rectangles_but_not_out_of_order() {
         use flate2::{Compress, Compression, FlushCompress};
 
         let first = vec![0xabu8; 4096];
@@ -952,17 +996,17 @@ mod tests {
         let a = chunk(&mut deflate, &first);
         let b = chunk(&mut deflate, &second);
 
-        let mut stream = ZlibStream::new("test");
+        let mut stream = FramebufferZlib::default();
         assert_eq!(stream.inflate(&a, first.len()).unwrap(), first);
         assert_eq!(stream.inflate(&b, second.len()).unwrap(), second);
 
         // The second chunk alone, through a stream that never saw the first: no
         // zlib header, no window, nothing.
-        let mut fresh = ZlibStream::new("test");
+        let mut fresh = FramebufferZlib::default();
         assert!(fresh.inflate(&b, second.len()).is_err());
 
         // A chunk that does not inflate to the size its geometry claims.
-        let mut stream = ZlibStream::new("test");
+        let mut stream = FramebufferZlib::default();
         let err = stream.inflate(&a, first.len() + 1).unwrap_err();
         assert!(format!("{err:#}").contains("its geometry claims"), "{err:#}");
     }
@@ -973,6 +1017,15 @@ mod tests {
     fn a_cursor_is_stored_once_and_selected_by_id() {
         use flate2::{Compress, Compression, FlushCompress};
 
+        fn compress(raw: &[u8]) -> Vec<u8> {
+            let mut deflate = Compress::new(Compression::default(), true);
+            let mut compressed = Vec::with_capacity(raw.len() + 128);
+            deflate
+                .compress_vec(raw, &mut compressed, FlushCompress::Sync)
+                .unwrap();
+            compressed
+        }
+
         let (w, h) = (2u16, 2u16);
         let pixels = usize::from(w) * usize::from(h);
         let mut raw = Vec::new();
@@ -982,11 +1035,7 @@ mod tests {
         }
         raw.extend_from_slice(&[0x00, 0x40, 0x80, 0xff]); // the real alpha plane
 
-        let mut deflate = Compress::new(Compression::default(), true);
-        let mut deflated = Vec::with_capacity(raw.len());
-        deflate
-            .compress_vec(&raw, &mut deflated, FlushCompress::Sync)
-            .unwrap();
+        let deflated = compress(&raw);
 
         let mut cache = CursorCache::default();
         let stored = cache.accept(1000, (1, 1), (w, h), &deflated).unwrap();
@@ -1011,9 +1060,20 @@ mod tests {
             Cursor::Unchanged
         ));
 
-        // A store this client cannot decode is fatal rather than skipped: its
-        // payload belongs to the shared deflate stream, and dropping it would leave
-        // every later shape inflating to rubbish of plausible length.
+        // A second store begins a new zlib stream. Reusing the first store's
+        // inflater here rejects the second stream's zlib header as an invalid
+        // stored block, which is the live-session failure this guards against.
+        raw[0] = 99;
+        let second = cache.accept(1002, (0, 0), (w, h), &compress(&raw)).unwrap();
+        assert!(matches!(second, Cursor::Shape(_)));
+
+        // A malformed independent store does not alter the cache or poison the
+        // next independently compressed shape.
+        assert!(cache.accept(1003, (0, 0), (w, h), &[1, 2, 3]).is_err());
+        raw[0] = 101;
+        let after_bad = cache.accept(1004, (0, 0), (w, h), &compress(&raw)).unwrap();
+        assert!(matches!(after_bad, Cursor::Shape(_)));
+
         let err = cache.accept(1002, (0, 0), (0, 0), &deflated).unwrap_err();
         assert!(format!("{err:#}").contains("for a 0x0 shape"), "{err:#}");
         let err = cache

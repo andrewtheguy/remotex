@@ -446,6 +446,13 @@ async fn serve_fake_mac(
     let mut writer = RecordWriter::new(keys);
     let mut shade = 0x40u8;
     let mut sent_layout = false;
+    // A real Mac accepts a full-frame request queued directly behind a display
+    // selection and applies it to the framebuffer the selection produces. Model
+    // that dependency explicitly: the layout and its first full frame are emitted
+    // together when the request arrives. A gateway that waits for the layout before
+    // asking deadlocks here, standing in for the real failure where the late request
+    // earns only incremental damage and the freshly resized client stays black.
+    let mut pending_display = None;
 
     loop {
         let mut kind = [0u8; 1];
@@ -479,6 +486,16 @@ async fn serve_fake_mac(
                     rect.extend_from_slice(&fake_mac_layout(None));
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
+                if let Some(id) = pending_display.take() {
+                    let mut rect = vec![0u8, 0];
+                    rect.extend_from_slice(&1u16.to_be_bytes());
+                    rect.extend_from_slice(&[0u8; 8]);
+                    rect.extend_from_slice(&0x451i32.to_be_bytes());
+                    rect.extend_from_slice(&fake_mac_layout(
+                        (id != u32::MAX).then_some(id),
+                    ));
+                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                }
                 shade = shade.wrapping_add(0x10);
                 write_half
                     .write_all(writer.frame(&fake_mac_update(shade)).unwrap())
@@ -498,9 +515,10 @@ async fn serve_fake_mac(
                 records.read_exact(&mut [0u8; 15]).await?;
             }
             // SetDisplayMessage: the whole point of the subtype. Reported to the
-            // test, then answered with a layout naming what was asked for, which is
-            // how a real Mac confirms it acted — and the only thing that moves a
-            // client's checkmark.
+            // test, then held until the full-frame request queued behind it. The
+            // resulting layout names what was asked for, which is how a real Mac
+            // confirms it acted — and the only thing that moves a client's
+            // checkmark.
             0x0d => {
                 let mut body = [0u8; 7];
                 records.read_exact(&mut body).await?;
@@ -509,13 +527,9 @@ async fn serve_fake_mac(
                 if combine_all {
                     assert_eq!(id, 0, "a combining request names no screen");
                 }
-                let _ = selected.send(if combine_all { u32::MAX } else { id });
-                let mut rect = vec![0u8, 0];
-                rect.extend_from_slice(&1u16.to_be_bytes());
-                rect.extend_from_slice(&[0u8; 8]);
-                rect.extend_from_slice(&0x451i32.to_be_bytes());
-                rect.extend_from_slice(&fake_mac_layout((!combine_all).then_some(id)));
-                write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                let wanted = if combine_all { u32::MAX } else { id };
+                let _ = selected.send(wanted);
+                pending_display = Some(wanted);
             }
             // SetDisplayConfiguration, which must never arrive. Sending one makes a
             // real macOS 26 build create a virtual display spanning the real screens

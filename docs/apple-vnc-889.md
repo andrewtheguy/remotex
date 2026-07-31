@@ -306,7 +306,11 @@ at all — see the note above about which `SetEncodings` it may appear in.
 **The cursor cache (`0x450`).** STORE when `compressed_len > 0`, SELECT when zero,
 and the payload really is a `w·h·4` BGRA pixmap followed by a **separate** `w·h`
 alpha plane — folding the fourth pixel byte in as alpha produces a uniformly opaque
-cursor. Real cursors arrived and rendered.
+cursor. Each STORE starts an **independent zlib stream**; it does not share the
+connection-wide inflater used by framebuffer encoding `0x06`, nor the inflater from
+the preceding cursor. A malformed STORE can therefore be consumed and ignored
+without poisoning the next cursor or ending the desktop session. Real cursors
+arrived and rendered.
 
 **The metadata encodings** `0x453`, `0x455`, `0x456`. All three frame themselves the
 same way — a `u16` giving how much follows — so one rule steps over all of them
