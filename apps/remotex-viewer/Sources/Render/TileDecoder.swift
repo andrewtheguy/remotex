@@ -25,15 +25,14 @@ actor TileDecoder {
     /// Decode one tile, or nil if the payload is unusable.
     ///
     /// Everything goes through a `CGContext` rather than reading the decoded
-    /// image's own bytes, because those bytes differ per payload: WebP's lossy
-    /// bitstream decodes as three-channel RGB while its lossless one can carry an
-    /// alpha channel, and ImageIO is free to hand back either. Drawing into a
-    /// context of a known layout normalizes both, and it is the only place the row
-    /// order can be fixed.
+    /// image's own bytes, because those bytes differ per payload: a JPEG decodes as
+    /// three-channel RGB while a PNG can carry an alpha channel, and ImageIO is free
+    /// to hand back either. Drawing into a context of a known layout normalizes
+    /// both, and it is the only place the row order can be fixed.
     ///
-    /// This never reads `frame.format`, and did not when there were two codecs:
-    /// ImageIO identifies a payload from its own container. So the format byte is
-    /// checked at `BatchFrame.decode` and used for nothing here.
+    /// This never reads `frame.format`, even though there are two codecs: ImageIO
+    /// identifies a payload from its own container. So the format byte is checked
+    /// at `BatchFrame.decode` and used for nothing here.
     func decode(_ frame: TileFrame) -> DecodedTile? {
         let w = Int(frame.w)
         let h = Int(frame.h)
@@ -62,7 +61,7 @@ actor TileDecoder {
             // byte-for-byte match for .bgra8Unorm, so the upload needs no
             // swizzle. Alpha is discarded rather than premultiplied because
             // screen tiles are opaque by construction: both ends encode from
-            // packed RGB888 with no alpha channel to carry (`encode_webp` in
+            // packed RGB888 with no alpha channel to carry (`encode_png` in
             // `src/protocol.rs`, `encode.rs` in the agent), and the gateway's own
             // roundtrip test asserts a payload does not come back with one.
             //

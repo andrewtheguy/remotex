@@ -438,9 +438,9 @@ mod tests {
 
     /// Write the Opus fixtures the macOS viewer's tests decode.
     ///
-    /// Checked in for a different reason than the WebP ones ([`crate::protocol`]'s
-    /// `write_swift_webp_fixtures`, which exists because ImageIO cannot *write* WebP):
-    /// macOS can encode Opus perfectly well, and the point is that it must not. The
+    /// Checked in because macOS can encode Opus perfectly well, and the point is
+    /// that it must not — unlike the tile codecs, where the viewer's tests encode
+    /// their own PNG/JPEG payloads at runtime through ImageIO. The
     /// viewer's decoder test has to answer to *this* encoder — the resampler, the 20 ms
     /// framing, the bitrate and the pre-skip in this file — or the two ends agree with
     /// their own fixtures and disagree with each other, which is the failure the

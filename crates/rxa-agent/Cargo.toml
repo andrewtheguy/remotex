@@ -28,15 +28,12 @@ toml = "1"
 # concurrency runtime and the agent dies at startup.
 screencapturekit = "8"
 
-# Tile codec. Same crate and the same settings the gateway uses, so a lossless
-# tile from the agent is byte-comparable with one from the VNC engine — and one
-# codec covers both branches of the per-tile classifier (see encode.rs), which is
-# what retired `png` and `jpeg-encoder` from here.
-#
-# Not pure Rust: libwebp-sys compiles vendored libwebp C with `cc`. No new class of
-# requirement for this crate — `ring`, via snow under rxa-proto, already does — and
-# arm64 needs no feature flags for it, since libwebp-sys enables NEON by default.
-webp = { version = "0.3.1", default-features = false }
+# Tile codecs. Same `png` version and Fast compression the gateway uses, so a
+# PNG tile from the agent is byte-comparable with one from the VNC engine.
+png = "0.18"
+# Pure Rust, no C dependency; `simd` matters because this runs per tile on a
+# Retina desktop.
+jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Deciding whether a strip's pixels changed at all, before paying to encode them
 # (see capture.rs). Same choice and same reasoning as the gateway's.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

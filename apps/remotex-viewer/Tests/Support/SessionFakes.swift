@@ -418,37 +418,12 @@ func referenceRecord(slot: UInt16, x: UInt16, y: UInt16) -> Data {
     return record
 }
 
-/// A checked-in WebP payload from `Tests/Fixtures`.
+/// One real single-colour PNG `TILE` record, header and all. Encoded rather than
+/// hand-rolled so the decode under test is the same one production runs.
 ///
-/// These are produced by the gateway's own encoder — `write_swift_webp_fixtures`
-/// in `src/protocol.rs` — and checked in rather than encoded here, because ImageIO
-/// reads WebP but cannot write it: `CGImageDestinationCopyTypeIdentifiers()` has no
-/// `org.webmproject.webp`. So a test payload cannot be built the way it was when
-/// tiles were PNG.
-///
-/// The trade is worth naming. A generated fixture could not freeze one encoder's
-/// choices into the test; a checked-in one can. What it freezes, though, is the
-/// choices of the encoder that *ships*, which is the payload a real session
-/// carries — and the generator reads each file back and asserts its size and alpha
-/// channel are what its name says, so a fixture cannot quietly become something
-/// else.
-func webpFixture(_ name: String) throws -> Data {
-    let url = try #require(
-        Bundle.module.url(forResource: "Fixtures/\(name)", withExtension: "webp"),
-        """
-        missing fixture \(name).webp — regenerate with
-        `cargo test --lib -- --ignored --nocapture swift_webp_fixtures`
-        """
-    )
-    return try Data(contentsOf: url)
-}
-
-/// One real single-colour WebP `TILE` record, header and all.
-///
-/// `red` selects between fixtures rather than being drawn: only the fixtures the
-/// generator writes exist, and asking for another fails by name. It stays a colour
-/// argument because what the tests want from it is "a tile distinguishable from
-/// that other tile", which is what the decoded bytes then show.
+/// `red` is drawn into the pixels rather than selecting a fixture, so a test can
+/// ask for "a tile distinguishable from that other tile" at any colour; the other
+/// two channels are fixed so the decoded bytes name what was asked for.
 ///
 /// `slot` defaults to "do not remember this", so a test only names one when the
 /// cache is what it is about.
@@ -459,8 +434,34 @@ func tileRecord(
     red: UInt8 = 0xFF,
     slot: UInt16 = BatchFrame.noSlot
 ) throws -> Data {
-    let payload = try webpFixture(String(format: "solid-%dx%d-%02x", size, size, red))
-    return tileRecord(x: x, y: y, w: size, h: size, slot: slot, payload: payload)
+    let side = Int(size)
+    var pixels = [UInt8]()
+    for _ in 0 ..< side * side {
+        pixels.append(contentsOf: [red, 0x20, 0x40, 0xFF])
+    }
+    let provider = try #require(CGDataProvider(data: Data(pixels) as CFData))
+    let image = try #require(
+        CGImage(
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: side * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    )
+    let encoded = NSMutableData()
+    let destination = try #require(
+        CGImageDestinationCreateWithData(encoded, UTType.png.identifier as CFString, 1, nil)
+    )
+    CGImageDestinationAddImage(destination, image, nil)
+    #expect(CGImageDestinationFinalize(destination))
+    return tileRecord(x: x, y: y, w: size, h: size, slot: slot, payload: encoded as Data)
 }
 
 /// A `TILE` record around an arbitrary payload, for the cases that care about the
@@ -473,7 +474,7 @@ func tileRecord(
     slot: UInt16 = BatchFrame.noSlot,
     payload: Data
 ) -> Data {
-    var record = Data([BatchFrame.opTile, TileFormat.webp.rawValue])
+    var record = Data([BatchFrame.opTile, TileFormat.png.rawValue])
     for value in [slot, x, y, w, h] {
         record.append(UInt8(value & 0xFF))
         record.append(UInt8(value >> 8))

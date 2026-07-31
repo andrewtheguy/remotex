@@ -891,7 +891,7 @@ async fn extended_cut_text(
 }
 
 /// Read one FramebufferUpdate rectangle — raw pixels compared against what the
-/// browser holds and forwarded as WebP tiles, or one of the resize
+/// browser holds and forwarded as PNG tiles, or one of the resize
 /// pseudo-encodings. Returns whether the desktop was resized.
 async fn read_rect(
     reader: &mut Reader,

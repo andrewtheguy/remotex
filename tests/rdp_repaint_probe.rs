@@ -14,7 +14,7 @@
 //!   REMOTEX_PROBE_TARGET=desktop-vnvgdaf \
 //!     cargo test --release --test rdp_repaint_probe -- --ignored --nocapture
 //!
-//! `--release` is not optional here. A debug libwebp is several times slower, which
+//! `--release` is not optional here. A debug PNG encode is several times slower, which
 //! would flatter every depth equally and tell you nothing about the real one.
 //!
 //! Read two lines out of a run: this probe's own `PROBE:` line for wall clock per
