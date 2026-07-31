@@ -61,8 +61,11 @@ struct RemoteCommands: Commands {
             Toggle(
                 "Enable Audio",
                 isOn: Binding(
+                    // The live session state to show, and a setter that also writes
+                    // the remembered default — one value the picker's toggle edits
+                    // too, so muting mid-session is what the next connect starts from.
                     get: { model.audio.isEnabled },
-                    set: { model.audio.setEnabled($0) }
+                    set: { model.setAudioEnabled($0) }
                 )
             )
             .disabled(!model.audio.isAvailable)

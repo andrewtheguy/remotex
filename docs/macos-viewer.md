@@ -365,8 +365,13 @@ mid-session.
 The three View menu items are one decision:
 
 - **Auto Resize** hands the remote's size to the window, which then follows every
-  change, debounced and deduplicated. Off by default, per session: it is not
-  remembered, and every connection starts manual.
+  change, debounced and deduplicated. Off until set, and then **remembered**: it
+  is one value with two editors — this menu item and the picker's *Auto-resize the
+  remote to the window, if compatible* — so a choice made mid-session is the one
+  the next connection starts from. It is applied to a new connection only where the
+  target allows resize (for RXA, once an owned display is shared); where it does
+  not, the remembered default silently does nothing, which is the picker caption's
+  "if compatible". See `ViewerPreferences.autoResizeByDefault`.
 - **Resize to Window** asks the remote to adopt the viewer's available size, once.
 - **Resize to Display** changes the local window so the current remote desktop
   fits at its point size; it sends nothing to the gateway.
@@ -459,6 +464,15 @@ boundary — set per target in the app's own configuration.
 **Remote → Enable Audio** is available when `connected.audio` is true. The
 gateway owns the wire format and bounded audio queue; the viewer owns decoding
 and playback scheduling.
+
+Like **Auto Resize**, the toggle writes a **remembered** default — the same value
+the picker's *Play the remote's sound, if compatible* toggle edits
+(`ViewerPreferences.audioByDefault`). When it is on, a pick or takeover of a
+target that carries audio subscribes on its own, without the menu being touched;
+a target with no audio starts silent, and a *silent reattach* — a reconnect the
+user did not ask for — is left as it was rather than re-seeded, so a mid-session
+mute survives a dropped socket. On the macOS side there is no browser-style
+gesture requirement, so the subscription is asserted straight from `connected`.
 
 The viewer decodes bare Opus packets with `AVAudioConverter` and
 `kAudioFormatOpus`; it needs neither a container nor a vendored decoder.

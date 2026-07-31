@@ -43,6 +43,10 @@ export default function RemoteDesktop({
     canAudio,
     audioEnabled,
     audioError,
+    autoResizeByDefault,
+    audioByDefault,
+    setAutoResizeByDefault,
+    setAudioByDefault,
     displays,
     activeDisplayId,
     remoteClipboard,
@@ -142,6 +146,10 @@ export default function RemoteDesktop({
           pendingTarget={pendingTarget}
           connectError={connectError}
           remoteBusy={remoteBusy}
+          autoResizeByDefault={autoResizeByDefault}
+          audioByDefault={audioByDefault}
+          onAutoResizeByDefaultChange={setAutoResizeByDefault}
+          onAudioByDefaultChange={setAudioByDefault}
           onLogout={onLogout}
           onUnauthorized={onUnauthorized}
         />

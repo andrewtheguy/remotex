@@ -72,6 +72,7 @@ struct TargetPickerView: View {
             // why this branches rather than greying items out.
             VStack(spacing: 12) {
                 Divider()
+                defaultsFooter
                 if model.usesEmbeddedGateway {
                     localFooter
                 } else {
@@ -83,6 +84,39 @@ struct TargetPickerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
+    }
+
+    /// The two remembered defaults, shown here as the one place they can be set
+    /// before a target is picked — and the same values the Remote and View menus'
+    /// live controls edit mid-session. Both gateways show them: they are the
+    /// client's own preferences, not the gateway's, so they sit above the branch
+    /// that differs between the two.
+    ///
+    /// "if compatible" is a fixed caption, not a per-target check: the picker never
+    /// learns a target's capabilities (the target list carries none), so each is an
+    /// intent, applied on connect only where `connected` reports the target can
+    /// honour it.
+    @ViewBuilder
+    private var defaultsFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(
+                "Auto-resize the remote to the window, if compatible",
+                isOn: Binding(
+                    get: { model.autoResizeByDefault },
+                    set: { model.autoResizeByDefault = $0 }
+                )
+            )
+            Toggle(
+                "Play the remote's sound, if compatible",
+                isOn: Binding(
+                    get: { model.audioByDefault },
+                    set: { model.audioByDefault = $0 }
+                )
+            )
+        }
+        .toggleStyle(.checkbox)
+        .font(.callout)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The two things to do when the local gateway's list is empty: add a machine,
