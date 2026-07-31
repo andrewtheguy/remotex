@@ -208,9 +208,12 @@ const MAC_PASSWORD: &str = "s3cr3t-should-not-leak";
 /// The two screens the fake Mac reports, so a display list has something in it.
 const MAC_MAIN_DISPLAY: u32 = 0x2b00_4501;
 const MAC_SECOND_DISPLAY: u32 = 0x2b00_4502;
-/// The framebuffer the layout declares: a 1x logical size equal to its backing
-/// size, so the test asserts on one number and the density path stays out of it.
+/// ServerInit's size, and the logical size of both screens. The first screen is 1x,
+/// so this is its backing size too.
 const MAC_DESKTOP: u16 = 32;
+/// The second screen's backing size: twice its logical one, which is what a Retina
+/// screen looks like on the wire and what the browser must be told to halve.
+const MAC_RETINA: u16 = MAC_DESKTOP * 2;
 
 /// A scripted macOS Screen Sharing server. Returns the port, and a channel
 /// reporting each `SetDisplayMessage` the gateway sends — which is how the test
@@ -287,33 +290,65 @@ async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 1
     Ok(key)
 }
 
-/// The `AppleDisplayLayout` payload for this Mac's two screens.
+/// The `AppleDisplayLayout` payload for this Mac's two screens, with `current` the
+/// one it is sending — `None` for the combined view of both.
 ///
-/// Built here from the field model rather than by calling the gateway's builder —
-/// there is none, the gateway only parses this — so the offsets are asserted from
-/// both ends.
-fn fake_mac_layout() -> Vec<u8> {
+/// Built here from the wire format rather than by calling the gateway, which only
+/// parses this, so the offsets are asserted from both ends. They are the *measured*
+/// offsets: every record field two bytes later than the reference document says, a
+/// scale factor as a big-endian `f64`, and both bounds rects as
+/// `(top, left, bottom, right)` rather than `(x, y, w, h)`.
+///
+/// The second screen is Retina, which is what makes this exercise the density: a
+/// layout naming it must reach the browser as a `scale` of 2, and the combined view
+/// of a 1x screen beside a 2x one has no single scale at all.
+fn fake_mac_layout(current: Option<u32>) -> Vec<u8> {
     const RECORD: usize = 0x38;
     const HEAD: usize = 0x14;
-    let screens = [(MAC_MAIN_DISPLAY, 0x01u32), (MAC_SECOND_DISPLAY, 0x00)];
+    // id, flags, logical size, backing size.
+    let screens = [
+        (MAC_MAIN_DISPLAY, 0x01u32, MAC_DESKTOP, MAC_DESKTOP),
+        (MAC_SECOND_DISPLAY, 0x00, MAC_DESKTOP, MAC_RETINA),
+    ];
 
     let mut p = vec![0u8; HEAD];
     p[..2].copy_from_slice(&((HEAD + screens.len() * RECORD) as u16).to_be_bytes());
     p[2..4].copy_from_slice(&5u16.to_be_bytes()); // version
-    // The leading geometry, which is the first screen's two rects.
-    for at in [4, 6, 8, 10] {
-        p[at..at + 2].copy_from_slice(&MAC_DESKTOP.to_be_bytes());
-    }
-    for (id, flags) in screens {
+    // The header's logical geometry spans every screen and does not move; its
+    // backing is the framebuffer, which narrows to one screen when one is picked.
+    let framebuffer = match current.and_then(|id| screens.iter().find(|s| s.0 == id)) {
+        Some(&(.., backing)) => (backing, backing),
+        None => (MAC_DESKTOP + MAC_RETINA, MAC_RETINA),
+    };
+    p[4..6].copy_from_slice(&(MAC_DESKTOP * 2).to_be_bytes());
+    p[6..8].copy_from_slice(&MAC_DESKTOP.to_be_bytes());
+    p[8..10].copy_from_slice(&framebuffer.0.to_be_bytes());
+    p[10..12].copy_from_slice(&framebuffer.1.to_be_bytes());
+    p[12..16].copy_from_slice(&current.unwrap_or(u32::MAX).to_be_bytes());
+
+    let mut left = 0u16;
+    for (id, flags, logical, backing) in screens {
         let mut r = vec![0u8; RECORD];
-        r[0x10..0x14].copy_from_slice(&id.to_be_bytes());
-        r[0x18..0x1a].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // logical w
-        r[0x1a..0x1c].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // logical h
-        r[0x20..0x22].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // backing w
-        r[0x22..0x24].copy_from_slice(&MAC_DESKTOP.to_be_bytes()); // backing h
-        r[0x24..0x28].copy_from_slice(&flags.to_be_bytes());
+        let density = f64::from(backing) / f64::from(logical);
+        r[0x02..0x0a].copy_from_slice(&density.to_be_bytes());
+        r[0x0a..0x12].copy_from_slice(&1.0f64.to_be_bytes()); // viewer scale
+        r[0x12..0x16].copy_from_slice(&id.to_be_bytes());
+        let mut edges = |at: usize, size: u16| {
+            r[at + 2..at + 4].copy_from_slice(&left.to_be_bytes());
+            r[at + 4..at + 6].copy_from_slice(&size.to_be_bytes());
+            r[at + 6..at + 8].copy_from_slice(&(left + size).to_be_bytes());
+        };
+        edges(0x16, logical);
+        edges(0x1e, backing);
+        r[0x26..0x2a].copy_from_slice(&flags.to_be_bytes());
         p.extend_from_slice(&r);
+        left += logical;
     }
+    // And two bytes short of the last record, which is where a real Mac stops even
+    // though the length prefix counts them. Reading the declared count instead eats
+    // the first two bytes of the next message and the session dies several messages
+    // later blaming an encoding nobody sent, so it is worth a fake Mac reproducing.
+    p.truncate(p.len() - 2);
     p
 }
 
@@ -441,7 +476,7 @@ async fn serve_fake_mac(
                     rect.extend_from_slice(&1u16.to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout());
+                    rect.extend_from_slice(&fake_mac_layout(None));
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
                 shade = shade.wrapping_add(0x10);
@@ -463,42 +498,35 @@ async fn serve_fake_mac(
                 records.read_exact(&mut [0u8; 15]).await?;
             }
             // SetDisplayMessage: the whole point of the subtype. Reported to the
-            // test, then answered with a layout, which is how a real Mac confirms
-            // it acted.
+            // test, then answered with a layout naming what was asked for, which is
+            // how a real Mac confirms it acted — and the only thing that moves a
+            // client's checkmark.
             0x0d => {
                 let mut body = [0u8; 7];
                 records.read_exact(&mut body).await?;
-                assert_eq!(body[0], 0, "the aggregate is not implemented");
+                let combine_all = body[0] != 0;
                 let id = u32::from_be_bytes([body[3], body[4], body[5], body[6]]);
-                let _ = selected.send(id);
+                if combine_all {
+                    assert_eq!(id, 0, "a combining request names no screen");
+                }
+                let _ = selected.send(if combine_all { u32::MAX } else { id });
                 let mut rect = vec![0u8, 0];
                 rect.extend_from_slice(&1u16.to_be_bytes());
                 rect.extend_from_slice(&[0u8; 8]);
                 rect.extend_from_slice(&0x451i32.to_be_bytes());
-                rect.extend_from_slice(&fake_mac_layout());
+                rect.extend_from_slice(&fake_mac_layout((!combine_all).then_some(id)));
                 write_half.write_all(writer.frame(&rect).unwrap()).await?;
             }
-            // SetDisplayConfiguration
-            0x1d => {
-                let mut head = [0u8; 3];
-                records.read_exact(&mut head).await?;
-                let size = u16::from_be_bytes([head[1], head[2]]);
-                let mut body = vec![0u8; usize::from(size)];
-                records.read_exact(&mut body).await?;
-                // Named, because the alternative is an index-out-of-bounds panic
-                // naming a byte offset instead of the message that was too short.
-                assert!(
-                    body.len() >= 8 + 0x9c,
-                    "a display configuration carried {} body bytes, too few for a descriptor",
-                    body.len()
-                );
-                // The static descriptor: no dynamic-resolution flag and no virtual
-                // display, which is what says this session is fixed-size.
-                let d = &body[8..]; // past version, display_count, flags
-                assert_eq!(&d[0x7a..0x7e], &[0u8; 4], "no dynamic-resolution flag");
-                assert_eq!(&d[0x7e..0x82], &[0u8; 4], "not a virtual display");
-                assert_ne!(&d[0x9a..0x9c], &[0u8; 2], "mode_count must not be zero");
-            }
+            // SetDisplayConfiguration, which must never arrive. Sending one makes a
+            // real macOS 26 build create a virtual display spanning the real screens
+            // and turn them off for the session, so there is nothing left to
+            // enumerate or pick and the density flattens to 1. That is what this
+            // subtype used to do; nothing but a Mac would notice it coming back, so
+            // this assertion is the stand-in.
+            0x1d => panic!(
+                "the gateway sent SetDisplayConfiguration, which makes a Mac \
+                 synthesize a virtual display and hide its real screens"
+            ),
             other => panic!("fake Mac got unexpected message type {other:#x}"),
         }
     }
@@ -1114,25 +1142,42 @@ async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
     );
 }
 
-/// Read until a `displays` control message arrives, and hand back its payload.
-async fn expect_displays(ws: &mut Ws) -> serde_json::Value {
+/// Read until a control message of `kind` arrives, and hand back its payload.
+///
+/// Matched on the parsed top-level `type`, not on a substring of the line. A
+/// `displays` message carries remote-supplied strings — screen labels and details —
+/// so a substring match is a match against content the *remote* chooses, and a
+/// screen named `"type":"resize"` would satisfy a search for a resize.
+async fn expect_control(ws: &mut Ws, kind: &str) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
-                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
-                    if text.contains(r#""type":"displays""#) {
-                        return serde_json::from_str::<serde_json::Value>(&text).unwrap();
+                    let parsed: serde_json::Value = serde_json::from_str(&text)
+                        .unwrap_or_else(|e| panic!("control message is not JSON ({e}): {text}"));
+                    assert_ne!(parsed["type"], "error", "session failed: {text}");
+                    if parsed["type"] == kind {
+                        return parsed;
                     }
                 }
-                Message::Close(frame) => panic!("closed while waiting for displays: {frame:?}"),
+                Message::Close(frame) => panic!("closed while waiting for {kind}: {frame:?}"),
                 _ => {}
             }
         }
-        panic!("websocket ended while waiting for displays");
+        panic!("websocket ended while waiting for {kind}");
     })
     .await
-    .expect("timed out waiting for a display list")
+    .unwrap_or_else(|_| panic!("timed out waiting for a {kind} message"))
+}
+
+async fn expect_displays(ws: &mut Ws) -> serde_json::Value {
+    expect_control(ws, "displays").await
+}
+
+/// A `resize`, as a value — unlike [`expect_resize`], which asserts the whole line
+/// and so cannot be used where the scale is the thing under test.
+async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
+    expect_control(ws, "resize").await
 }
 
 /// The whole `ard-high-performance` wire, end to end: Apple's version banner and
@@ -1160,16 +1205,22 @@ async fn apple_screen_sharing_reports_its_displays_and_binds_to_one() {
     // opens its metadata burst — and `expect_tile` skips text messages on its way
     // past, so asking for the tile first would consume this and then time out.
     let msg = expect_displays(&mut ws).await;
-    assert_eq!(msg["active"], MAC_MAIN_DISPLAY, "{msg}");
+    // A session opens on the combined view, which is what the Mac reports when
+    // nothing has asked otherwise, and which is listed so there is a way back to it.
+    assert_eq!(msg["active"], u32::MAX, "{msg}");
     let displays = msg["displays"].as_array().expect("a display array");
-    assert_eq!(displays.len(), 2, "{msg}");
-    assert_eq!(displays[0]["id"], MAC_MAIN_DISPLAY);
-    assert_eq!(displays[0]["label"], "Display 1");
-    assert_eq!(displays[0]["main"], true);
-    assert_eq!(displays[1]["id"], MAC_SECOND_DISPLAY);
-    assert_eq!(displays[1]["main"], false);
+    assert_eq!(displays.len(), 3, "{msg}");
+    assert_eq!(displays[0]["id"], u32::MAX);
+    assert_eq!(displays[0]["label"], "All Displays");
+    assert_eq!(displays[1]["id"], MAC_MAIN_DISPLAY);
+    assert_eq!(displays[1]["label"], "Display 1");
+    assert_eq!(displays[1]["main"], true);
+    assert_eq!(displays[1]["detail"], format!("{MAC_DESKTOP}×{MAC_DESKTOP}"));
+    assert_eq!(displays[2]["id"], MAC_SECOND_DISPLAY);
+    assert_eq!(displays[2]["main"], false);
+    assert_eq!(displays[2]["detail"], format!("{MAC_DESKTOP}×{MAC_DESKTOP} at 2x"));
     // Never a virtual display: this subtype asks the Mac for its own screens.
-    assert_eq!(displays[0]["virtual"], false);
+    assert_eq!(displays[1]["virtual"], false);
 
     // And the desktop paints, which means every step above it went through: the
     // record layer is up in both directions and RFB is running inside it.
@@ -1187,9 +1238,41 @@ async fn apple_screen_sharing_reports_its_displays_and_binds_to_one() {
         .expect("the selection channel closed");
     assert_eq!(asked, MAC_SECOND_DISPLAY);
 
+    // …the framebuffer narrows to that screen and, because it is Retina, the
+    // browser is told to draw its pixels at half size. This is the assertion the
+    // whole change exists for: without it the desktop paints at twice the size the
+    // Mac thinks it is.
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_RETINA, "{resize}");
+    assert_eq!(resize["h"], MAC_RETINA, "{resize}");
+    assert_eq!(resize["scale"], 2.0, "{resize}");
+
     // …and the checkmark follows the Mac's answering layout, not the click.
     let msg = expect_displays(&mut ws).await;
     assert_eq!(msg["active"], MAC_SECOND_DISPLAY, "{msg}");
+
+    // Back to every screen at once, which is the gateway's own list entry rather
+    // than an id the Mac named, and reaches it as the combining byte instead.
+    ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{}}}"#, u32::MAX)))
+        .await
+        .unwrap();
+    let asked = tokio::time::timeout(Duration::from_secs(10), selected.recv())
+        .await
+        .expect("timed out waiting for the combining request")
+        .expect("the selection channel closed");
+    assert_eq!(asked, u32::MAX, "combine_all_displays, not an id");
+
+    // The framebuffer widens back to the union of both screens — and the scale drops
+    // to 1, because a 1x screen beside a 2x one has no single density and the desktop
+    // is shown at its pixel size. The other half of the density story: it is *picking
+    // a screen* that makes the geometry exact.
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_DESKTOP + MAC_RETINA, "{resize}");
+    assert_eq!(resize["h"], MAC_RETINA, "{resize}");
+    assert_eq!(resize["scale"], 1.0, "{resize}");
+
+    let msg = expect_displays(&mut ws).await;
+    assert_eq!(msg["active"], u32::MAX, "{msg}");
 }
 
 /// A selection of a screen the Mac never listed is dropped rather than forwarded.

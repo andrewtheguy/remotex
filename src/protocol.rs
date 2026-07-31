@@ -231,10 +231,10 @@ pub enum ClientMsg {
     ClipboardRequest,
     /// Share the display identified by the last [`ServerMsg::Displays`].
     ///
-    /// Acted on by the VNC engine's Apple dialect and by nothing else — and in
-    /// practice by nothing at all, because no Mac has been seen to report a display
-    /// list to begin with (see docs/apple-vnc-889.md). A client that never receives
-    /// [`ServerMsg::Displays`] never has an id to name here.
+    /// Acted on by the VNC engine's Apple dialect and by nothing else: RDP and plain
+    /// VNC each deliver one framebuffer spanning every remote screen and have no
+    /// message for this. A client that never receives [`ServerMsg::Displays`] never
+    /// has an id to name here, which is how the panel stays hidden on those engines.
     SelectDisplay { id: u32 },
     /// Start or stop audio delivery for this attachment.
     Audio { enabled: bool },
@@ -590,8 +590,8 @@ pub const UNSCALED: f32 = 1.0;
 pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
     /// [`ClientMsg::SelectDisplay`]. On the Apple dialect it is a
-    /// `CGDirectDisplayID`. No engine has yet been able to fill a display list in
-    /// practice: see docs/apple-vnc-889.md.
+    /// `CGDirectDisplayID`, except for `0xffffffff`, which the engine uses for its
+    /// own "All Displays" entry (and which is Apple's own sentinel for that).
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,

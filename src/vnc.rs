@@ -7,10 +7,12 @@
 //! **RFB 003.889**, Apple's own revision, under `subtype =
 //! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
 //! record layer ([`crate::vnc_record`]), alongside Apple's control messages
-//! ([`crate::vnc_apple`]). What that buys is **zlib instead of raw pixels**. What
-//! it costs is the Mac's real screens, which macOS replaces with one synthesized
-//! display for the duration of such a session — see docs/apple-vnc-889.md, which
-//! records that and the two places the protocol reference is wrong.
+//! ([`crate::vnc_apple`]). What that buys is **zlib instead of raw pixels**, the
+//! Mac's screens listed so one of them can be picked, and each screen's **pixel
+//! density**, which is what lets a Retina desktop be drawn at 100% instead of twice
+//! its size. See docs/apple-vnc-889.md, which records the several places the
+//! protocol reference is wrong — including the message this gateway used to send
+//! that made the Mac hide its real screens.
 //!
 //! The difference is contained in three places and nowhere else: [`Dialect`]
 //! (which banner, which ClientInit byte), the two preface functions after
@@ -82,6 +84,10 @@ const ENCODING_DESKTOP_SIZE: i32 = -223;
 /// ExtendedDesktopSize pseudo-encoding: size announcements with a screen
 /// layout, and the server's declaration that it accepts SetDesktopSize.
 const ENCODING_EXTENDED_DESKTOP_SIZE: i32 = -308;
+/// LastRect pseudo-encoding: this update has no more rectangles, whatever its
+/// header's count said. Servers use it to start sending an update before they know
+/// how many rectangles it will hold, declaring `0xffff` of them.
+const ENCODING_LAST_RECT: i32 = -224;
 /// Bytes per pixel of the format we force with SetPixelFormat.
 const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.
@@ -277,18 +283,25 @@ type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
 #[derive(Debug, Default)]
 struct DisplayState {
     displays: Vec<DisplayInfo>,
-    /// The screen a client's checkmark sits on.
-    active: u32,
-    /// A selection sent to the Mac but not yet confirmed by a layout.
+    /// The entry a client's checkmark sits on: a screen id, or
+    /// [`DisplayState::COMBINED`].
     ///
-    /// Kept separate from `active` so a request the Mac ignores leaves the menu
-    /// honest: nothing moves until a layout comes back, which is the Mac saying it
-    /// acted. Client state is never optimistic here — see
-    /// [`ServerMsg::Displays`].
-    requested: Option<u32>,
+    /// Only ever written from a layout, which is the Mac naming the screen it is
+    /// sending. So a selection the Mac declines leaves the menu agreeing with what
+    /// is on the canvas rather than with what was clicked — client state is never
+    /// optimistic here, see [`ServerMsg::Displays`].
+    active: u32,
 }
 
 impl DisplayState {
+    /// The list entry for every screen at once, which is the state a session
+    /// starts in and the only one a client cannot name by `CGDirectDisplayID`.
+    ///
+    /// `0xffffffff` because that is already the sentinel Apple's own wire uses for
+    /// it, in both directions: the `combine_all_displays` request and the
+    /// `current_display` a layout answers with.
+    const COMBINED: u32 = u32::MAX;
+
     /// The message that tells a client the list and the selection, or `None` while
     /// there is nothing to choose between.
     fn displays_msg(&self) -> Option<ServerMsg> {
@@ -312,6 +325,13 @@ struct Apple {
     /// first one, never reset — see [`ZlibStream`].
     zlib: Option<ZlibStream>,
     cursors: CursorCache,
+    /// Whether zlib has been asked for yet.
+    ///
+    /// It cannot be in the first `SetEncodings` — see
+    /// [`vnc_apple::ENCODINGS_WITH_ZLIB`] — so it is asked for in a second one, once
+    /// the Mac has reported its displays and there is nothing left to lose by it.
+    /// Once, hence the flag: a layout arrives at every login and lock.
+    asked_for_zlib: bool,
 }
 
 /// The pixels the browser has already been sent, so an update carrying none of
@@ -637,10 +657,44 @@ async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Resul
     let height = reader.read_u16().await?;
     let mut native_format = [0u8; 16];
     reader.read_exact(&mut native_format).await?;
-    let name = read_string(reader).await?;
-    debug!("vnc: server desktop {name:?}");
+    // Read outside the `debug!`, which does not evaluate its arguments when the
+    // level is off — leaving the name field on the stream and every rectangle after
+    // it misaligned.
+    let name = read_bytes(reader).await?;
+    debug!("vnc: server desktop {}", describe_desktop(&name));
     anyhow::ensure!(width > 0 && height > 0, "server reported a {width}x{height} desktop");
     Ok(ServerInit { width, height })
+}
+
+/// Describe ServerInit's name field, which on Apple's revision is not a name.
+///
+/// A Mac prefixes it with 22 bytes: a zero marker, a `u32` of session flags, and a
+/// 16-byte capability bitmap, with the UTF-8 name after all of it. Printing the lot
+/// as a string gave a log line of mojibake with the real name buried in it, and
+/// hid the flags — of which one, `0x04`, would mean a whole negotiation follows
+/// ServerInit that this client does not implement. Saying so is the point of
+/// reading them; nothing here is acted on.
+///
+/// Anything that is not shaped like that is a name, which is what every other
+/// server sends.
+fn describe_desktop(field: &[u8]) -> String {
+    if field.len() < 22 || field[0] != 0 {
+        return format!("{:?}", String::from_utf8_lossy(field));
+    }
+    let flags = u32::from_be_bytes(field[2..6].try_into().expect("four bytes of flags"));
+    let name = String::from_utf8_lossy(&field[22..]);
+    let mut named: Vec<&str> = [(0x01, "observe"), (0x02, "may-control"), (0x08, "no-virtual-display")]
+        .into_iter()
+        .filter(|(bit, _)| flags & bit != 0)
+        .map(|(_, name)| name)
+        .collect();
+    // Called out rather than listed with the rest: a server that offers it expects
+    // a SessionInfo/SessionCommand/SessionResult exchange before anything else, and
+    // the symptom of not answering is a session that stops here in silence.
+    if flags & 0x04 != 0 {
+        named.push("SESSION-SELECT, which this client does not implement");
+    }
+    format!("{name:?} (Apple flags {flags:#010x}: {})", named.join(", "))
 }
 
 /// The RFB 3.8 tail: force our pixel format and the encoding set.
@@ -724,9 +778,13 @@ async fn apple_preface(
     info!("vnc: Apple record layer active");
 
     let mut uplink = Uplink::records(sock, keys);
-    uplink
-        .send(&vnc_apple::set_display_configuration(server.size()))
-        .await?;
+    // No `SetDisplayConfiguration` (`0x1d`), and its absence is the load-bearing
+    // part of this preface. Sending one — the bare static descriptor included —
+    // makes macOS 26 create a virtual display spanning the real screens, turn them
+    // off for the session's duration, and report a single-screen layout at a flat
+    // density of 1. That is what made display picking and the Retina density both
+    // look impossible on this wire. Omitting it is what gets the Mac's own screens,
+    // their ids, and their individual scale factors. See [`crate::vnc_apple`].
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
     // Arm the server's sender. On this Mac it does *not* take over the update
@@ -1008,17 +1066,15 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // asked for. Only the Apple dialect can act on it: standard RFB
                     // exposes one framebuffer and has no message for this.
                     if apple {
-                        let known = {
-                            let mut state = display.lock().unwrap();
-                            let known = state.displays.iter().any(|d| d.id == id);
-                            if known {
-                                state.requested = Some(id);
-                            }
-                            known
-                        };
+                        let known =
+                            display.lock().unwrap().displays.iter().any(|d| d.id == id);
                         if known {
-                            debug!("vnc: asking the Mac for display {id}");
-                            send(&uplink, &vnc_apple::set_display_message(id)).await
+                            // `COMBINED` is this gateway's own list entry, not a
+                            // screen the Mac named, so it maps back to the
+                            // `combine_all_displays` byte rather than to an id.
+                            let pick = (id != DisplayState::COMBINED).then_some(id);
+                            debug!("vnc: asking the Mac for display {pick:?}");
+                            send(&uplink, &vnc_apple::set_display_message(pick)).await
                         } else {
                             // A screen that has been unplugged since the list was
                             // sent. Dropped rather than forwarded, so the Mac is
@@ -1138,10 +1194,20 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // FramebufferUpdate
             0 => {
                 reader.read_u8().await?; // padding
+                // `0xffff` here means "as many as it takes, ended by a LastRect" —
+                // an update a server starts sending before it knows how long it
+                // will be. macOS uses it for the metadata burst, so on the Apple
+                // dialect this is the normal form rather than a curiosity. The count
+                // still bounds the loop, so a server that promises a LastRect and
+                // never sends one is stopped by the same code either way.
                 let rects = reader.read_u16().await?;
                 let mut resized = false;
                 for _ in 0..rects {
-                    resized |= read_rect(&mut reader, &shared, &mut apple, &sink).await?;
+                    let effect = read_rect(&mut reader, &shared, &mut apple, &sink).await?;
+                    resized |= effect.resized;
+                    if effect.last {
+                        break;
+                    }
                 }
                 // Complete the cycle — but only where there is a cycle to
                 // complete. On the 003.889 wire `AutoFrameBufferUpdate` made the
@@ -1239,6 +1305,22 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 {
                     return Ok(()); // browser link gone; the session layer handles it
                 }
+            }
+            // Apple's own server messages, which arrive alongside the rectangles on
+            // the 003.889 wire and end the session if they are not stepped over.
+            //
+            // `0x04` ServerAck and `0x07` NOP carry no body at all. The metadata
+            // encodings each *also* come as a bare message whose type is the
+            // encoding's low byte — `0x451` as `0x51`, `0x453` as `0x53` — with the
+            // same `u16` length prefix, and a live session sends both forms of the
+            // same content. Read for their length and dropped, exactly as the
+            // rectangle forms are: nothing here is acted on, but walking past by the
+            // wrong number of bytes would desync everything after it.
+            0x04 | 0x07 if apple.is_some() => {}
+            0x51 | 0x53 | 0x55 | 0x56 if apple.is_some() => {
+                let len = reader.read_u16().await?;
+                debug!("vnc: Apple message type {msg_type:#02x}, {len} bytes");
+                discard(&mut reader, u64::from(len)).await?;
             }
             other => anyhow::bail!("unknown server message type {other}"),
         }
@@ -1379,16 +1461,33 @@ async fn extended_cut_text(
     Ok(false)
 }
 
+/// What reading one rectangle did, beyond whatever it painted.
+#[derive(Debug, Default, Clone, Copy)]
+struct RectEffect {
+    /// The desktop changed size, so what the browser holds is stale.
+    resized: bool,
+    /// A `LastRect`: this update ends here, whatever its header's count claimed.
+    last: bool,
+}
+
+impl RectEffect {
+    const NOTHING: Self = Self { resized: false, last: false };
+    const LAST: Self = Self { resized: false, last: true };
+
+    const fn resized(resized: bool) -> Self {
+        Self { resized, last: false }
+    }
+}
+
 /// Read one FramebufferUpdate rectangle — pixels compared against what the
 /// browser holds and forwarded as tiles, or one of the pseudo-encodings that
-/// carry a cursor, a size or a display layout instead. Returns whether the desktop
-/// was resized.
+/// carry a cursor, a size or a display layout instead.
 async fn read_rect<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
     apple: &mut Option<Apple>,
     sink: &TileSink,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<RectEffect> {
     let Shared { uplink, desktop, cursor, shadow, .. } = shared;
     let x = reader.read_u16().await?;
     let y = reader.read_u16().await?;
@@ -1405,41 +1504,92 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // and tile path below entirely.
         ENCODING_CURSOR => {
             read_cursor(reader, cursor, (x, y, w, h), sink).await?;
-            return Ok(false);
+            return Ok(RectEffect::NOTHING);
         }
+        // No payload at all: the rectangle's presence is the whole message.
+        ENCODING_LAST_RECT => return Ok(RectEffect::LAST),
         // DesktopSize: the rect itself is the announcement; no payload.
-        ENCODING_DESKTOP_SIZE => return apply_resize(desktop, shadow, (w, h), UNSCALED, sink).await,
-        ENCODING_EXTENDED_DESKTOP_SIZE => {
-            return read_extended_desktop_size(
-                reader,
-                uplink,
-                desktop,
-                shadow,
-                (x, y, w, h),
-                sink,
-            )
-            .await;
+        //
+        // Plain-RFB only, and the guard is not decoration: it carries no density, so
+        // applying one on the Apple dialect would overwrite a scale learned from a
+        // display layout with `UNSCALED` and double the desktop's apparent size. It
+        // *is* advertised there — [`vnc_apple::ENCODINGS`] must contain it or no
+        // layout arrives at all — so this arm is reached in practice, and dropping
+        // the rect is right: the layout carries the same size and the density with
+        // it, and one arrives with every geometry change.
+        ENCODING_DESKTOP_SIZE => {
+            if apple.is_some() {
+                debug!("vnc: ignoring a DesktopSize rect; the display layout is authoritative");
+                return Ok(RectEffect::NOTHING);
+            }
+            return apply_resize(desktop, shadow, (w, h), UNSCALED, sink).await.map(RectEffect::resized);
+        }
+        ENCODING_EXTENDED_DESKTOP_SIZE if apple.is_none() => {
+            return read_extended_desktop_size(reader, uplink, desktop, shadow, (x, y, w, h), sink)
+                .await
+                .map(RectEffect::resized);
         }
         vnc_apple::ENCODING_ZLIB if apple.is_some() => deflated = true,
         vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
             read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
-            return Ok(false);
+            return Ok(RectEffect::NOTHING);
         }
         vnc_apple::ENCODING_DISPLAY_LAYOUT if apple.is_some() => {
-            return read_display_layout(reader, shared, sink).await;
+            let first = apple.as_ref().is_some_and(|a| !a.asked_for_zlib);
+            if let Some(a) = apple.as_mut() {
+                a.asked_for_zlib = true;
+            }
+            read_display_layout(reader, shared, first, sink).await?;
+            // Deliberately *not* reported as a resize, even when it was one.
+            // [`read_display_layout`] issues its own non-incremental request as part
+            // of re-arming the server, so telling the caller the desktop resized
+            // would have it ask for the same full frame a second time — which on a
+            // 4480x1800 desktop is a wasted 400 KB every login and lock.
+            return Ok(RectEffect::NOTHING);
         }
-        // The Mac's keyboard and hardware, none of which this gateway acts on. The
-        // length prefix is the whole point of reading them: the RFB stream has no
-        // framing of its own, so walking past by the wrong number of bytes would
-        // desync everything after it.
+        // Where the pointer is, which the rect header carries and nothing else does.
+        // Advertised because the layout depends on the exact list, and ignored
+        // because a client draws the pointer where it last put it.
+        vnc_apple::ENCODING_CURSOR_POS if apple.is_some() => return Ok(RectEffect::NOTHING),
+        // The Mac's keyboard and its hardware, neither of which this gateway acts on.
+        // All three frame themselves the same way — a `u16` saying how much follows —
+        // so one rule steps over all of them, and reading that length is the whole
+        // point: the RFB stream above the record layer has no framing of its own, so
+        // walking past by the wrong number of bytes desyncs everything after it.
         vnc_apple::ENCODING_VENDOR_KEYSYMS
         | vnc_apple::ENCODING_KEYBOARD_SOURCE
         | vnc_apple::ENCODING_DEVICE_INFO
             if apple.is_some() =>
         {
             let len = reader.read_u16().await?;
-            discard(reader, vnc_apple::metadata_remainder(len) as u64).await?;
-            return Ok(false);
+            discard(reader, u64::from(len)).await?;
+            return Ok(RectEffect::NOTHING);
+        }
+        // Two more that frame themselves differently, so they cannot share the rule
+        // above. `DisplayInfo` is in [`vnc_apple::ENCODINGS`] and so must be
+        // steppable — advertising an encoding is a promise to be able to; `UserInfo`
+        // is not advertised and is handled anyway, on the same grounds as
+        // `DeviceInfo`. Neither was ever seen on macOS 26.
+        //
+        // `DisplayInfo` is the older display list — a header of four `u16`s, then
+        // 0x1c bytes per screen — and carries no density, which is why the layout is
+        // used instead even if this does turn up.
+        vnc_apple::ENCODING_DISPLAY_INFO if apple.is_some() => {
+            let mut head = [0u8; 8];
+            reader.read_exact(&mut head).await?;
+            let count = u64::from(u16::from_be_bytes([head[4], head[5]]));
+            discard(reader, count * 0x1c).await?;
+            return Ok(RectEffect::NOTHING);
+        }
+        // `UserInfo` is the logged-in account and its avatar: a counted name, then a
+        // counted (zlib'd PNG) image.
+        vnc_apple::ENCODING_USER_INFO if apple.is_some() => {
+            let name = u64::from(reader.read_u16().await?);
+            discard(reader, name).await?;
+            let image = u64::from(reader.read_u32().await?);
+            reader.read_u32().await?; // the image's encoding, which is not read
+            discard(reader, image).await?;
+            return Ok(RectEffect::NOTHING);
         }
         // A second rekey. The key could be recovered — the wrap key rotates to the
         // last content key — but installing it means swapping the ciphers on both
@@ -1463,7 +1613,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         size.1
     );
     if w == 0 || h == 0 {
-        return Ok(false);
+        return Ok(RectEffect::NOTHING);
     }
 
     let expect = usize::from(w) * usize::from(h) * BPP;
@@ -1497,7 +1647,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         pixels
     };
     let Some(rect) = Rect::from_size(x, y, w, h) else {
-        return Ok(false);
+        return Ok(RectEffect::NOTHING);
     };
     let rgb = bgrx_to_rgb(&pixels);
 
@@ -1506,7 +1656,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // boundary or a client asking for a full update — stops costing the browser
     // link anything here.
     let Some(changed) = shadow.lock().unwrap().accept(rect, &rgb) else {
-        return Ok(false);
+        return Ok(RectEffect::NOTHING);
     };
 
     for band in changed.bands() {
@@ -1518,7 +1668,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         sink.tile(band.left, band.top, band.w(), band.h(), pixels)
             .await?;
     }
-    Ok(false)
+    Ok(RectEffect::NOTHING)
 }
 
 /// Handle a Cursor rect: `w * h` pixels in the negotiated format, followed by
@@ -1715,49 +1865,77 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
 async fn read_display_layout<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
+    ask_for_zlib: bool,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, .. } = shared;
     let declared = reader.read_u16().await?;
+    // Two fewer than declared, which is the count the Mac actually sends — see
+    // [`vnc_apple::parse_layout`], where the reason and the measurement are.
     anyhow::ensure!(
-        usize::from(declared) >= 2,
+        declared >= 4,
         "a display layout declared {declared} bytes, less than its own length prefix"
     );
     let mut payload = declared.to_be_bytes().to_vec();
-    payload.resize(usize::from(declared), 0);
+    payload.resize(usize::from(declared) - 2, 0);
     reader.read_exact(&mut payload[2..]).await?;
     let layout = vnc_apple::parse_layout(&payload)?;
 
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
 
-    // Which screen is being shared is what this gateway asked for, confirmed by
-    // this layout having arrived at all. Falling back to the main screen covers the
-    // first layout of a session, where nothing has been asked for yet.
+    // The Mac says which screen it is sending, so nothing here has to be inferred
+    // from what was asked for. `current` is a screen id, or `None` for the combined
+    // view of all of them — which is what a session starts on, and which
+    // [`DisplayState::COMBINED`] is the client-facing name for.
     let msg = {
         let mut state = display.lock().unwrap();
-        let main = layout.displays.iter().find(|d| d.main).map(|d| d.id);
-        // Captured before the `take`, because after it the field is always `None`
-        // and asking again would answer for every layout rather than for the ones
-        // that confirmed something.
-        let confirmed = state.requested.take();
-        state.active = confirmed.or(main).unwrap_or(layout.displays[0].id);
-        let changed = state.displays != layout.displays;
-        state.displays = layout.displays;
-        // Sent whenever either half changes, since a client holds no display state
-        // of its own and the checkmark is the only thing telling it what it is
-        // looking at. A layout that changes neither — which is most of them, since
-        // one arrives at every login and lock — says nothing new.
-        (changed || confirmed.is_some())
-            .then(|| state.displays_msg())
-            .flatten()
+        let mut infos = layout.infos();
+        // With more than one screen there is a combined view to go back to, and it
+        // has to be listed or a client that picks a screen can never leave it. With
+        // one screen there is nothing to combine, and the entry would be the same
+        // picture under a second name.
+        if infos.len() > 1 {
+            // No size on this one, deliberately. The framebuffer is only the union
+            // of every screen while the combined view is the one selected; ask for a
+            // single screen and the next layout reports that screen's size instead,
+            // so any number here would be wrong half the time.
+            let detail = format!("{} screens side by side", infos.len());
+            infos.insert(
+                0,
+                DisplayInfo {
+                    id: DisplayState::COMBINED,
+                    label: "All Displays".into(),
+                    detail,
+                    main: false,
+                    virtual_display: false,
+                },
+            );
+        }
+        let active = layout.current.unwrap_or(DisplayState::COMBINED);
+        let changed = state.displays != infos || state.active != active;
+        state.displays = infos;
+        state.active = active;
+        // Sent only on a change, since a client holds no display state of its own
+        // and the checkmark is the only thing telling it what it is looking at. Most
+        // layouts change neither half — one arrives at every login and lock — and
+        // say nothing new.
+        changed.then(|| state.displays_msg()).flatten()
     };
     if let Some(msg) = msg {
         sink.msg(msg).await?;
     }
 
-    // Re-arm, on every layout and not only on a change of geometry.
     let size = desktop.lock().unwrap().size;
     let mut uplink = uplink.lock().await;
+    // Now that the Mac has said what it has, ask for compression. This has to wait
+    // for a layout: zlib in the *first* `SetEncodings` costs the layout entirely, and
+    // asking again here keeps the display state and merely changes encoder. Sent
+    // before the re-arm so the update that follows is the compressed one.
+    if ask_for_zlib {
+        debug!("vnc: display layout received, asking for zlib");
+        uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
+    }
+    // Re-arm, on every layout and not only on a change of geometry.
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
     uplink.send(&update_request(false, size)).await?;
     Ok(resized)
@@ -2285,15 +2463,21 @@ fn masked_bgrx_to_rgba(bgrx: &[u8], mask: &[u8], w: u16) -> Vec<u8> {
     rgba
 }
 
-/// Read a u32-length-prefixed latin-1 string (reason or desktop name),
-/// truncated to [`MAX_STRING`] with the excess drained off the stream.
+/// Read a u32-length-prefixed latin-1 string (a failure reason), truncated to
+/// [`MAX_STRING`] with the excess drained off the stream.
 async fn read_string<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<String> {
+    Ok(read_bytes(reader).await?.iter().map(|&b| char::from(b)).collect())
+}
+
+/// The same field, undecoded. ServerInit's is not latin-1 and not always a string
+/// at all — see [`describe_desktop`].
+async fn read_bytes<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<Vec<u8>> {
     let len = reader.read_u32().await?;
     let keep = len.min(MAX_STRING);
     let mut buf = vec![0u8; keep as usize];
     reader.read_exact(&mut buf).await?;
     discard(reader, u64::from(len - keep)).await?;
-    Ok(buf.iter().map(|&b| char::from(b)).collect())
+    Ok(buf)
 }
 
 /// Drain and drop exactly `n` bytes.
@@ -3408,33 +3592,11 @@ mod tests {
         }
     }
 
-    /// One screen as a test writes it: id, logical size, backing size, flags.
-    type TestScreen = (u32, (u16, u16), (u16, u16), u32);
-
-    /// A layout payload as the Mac's encoder writes it: a 0x14-byte header, then a
-    /// 0x38-byte record per screen.
-    fn layout_payload(displays: &[TestScreen]) -> Vec<u8> {
-        let total = 0x14 + displays.len() * 0x38;
-        let mut p = vec![0u8; 0x14];
-        p[..2].copy_from_slice(&u16::try_from(total).unwrap().to_be_bytes());
-        p[2..4].copy_from_slice(&5u16.to_be_bytes());
-        let first = displays[0];
-        p[4..6].copy_from_slice(&first.1.0.to_be_bytes());
-        p[6..8].copy_from_slice(&first.1.1.to_be_bytes());
-        p[8..10].copy_from_slice(&first.2.0.to_be_bytes());
-        p[10..12].copy_from_slice(&first.2.1.to_be_bytes());
-        for (id, logical, backing, flags) in displays {
-            let mut r = vec![0u8; 0x38];
-            r[0x10..0x14].copy_from_slice(&id.to_be_bytes());
-            r[0x18..0x1a].copy_from_slice(&logical.0.to_be_bytes());
-            r[0x1a..0x1c].copy_from_slice(&logical.1.to_be_bytes());
-            r[0x20..0x22].copy_from_slice(&backing.0.to_be_bytes());
-            r[0x22..0x24].copy_from_slice(&backing.1.to_be_bytes());
-            r[0x24..0x28].copy_from_slice(&flags.to_be_bytes());
-            p.extend_from_slice(&r);
-        }
-        p
-    }
+    /// The layout payload builder, shared with `vnc_apple`'s own tests rather than
+    /// copied: it encodes the measured record offsets, and a second copy of those
+    /// would have to be kept in step with the parser by hand. `vnc_apple` is also
+    /// where it is cross-checked against a captured payload.
+    use crate::vnc_apple::{TestScreen, test_layout as layout_payload};
 
     /// A layout does three things, and the third is the one that is easy to miss:
     /// it resizes, it reports the screens, and it re-arms the server. Without the
@@ -3447,17 +3609,19 @@ mod tests {
         let desktop = shared_desktop((100, 100), None, None);
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)));
 
-        let payload = layout_payload(&[
-            (11, (1920, 1080), (3840, 2160), 0x01),
-            (22, (1600, 1000), (1600, 1000), 0x00),
-        ]);
-        let resized = read_display_layout(&mut payload.as_slice(), &shared, &sink)
+        // The Retina screen selected, which is the case the density matters in.
+        let payload = layout_payload(
+            Some(11),
+            &[(11, (1920, 1080), (3840, 2160), 0x01), (22, (1600, 1000), (1600, 1000), 0x00)],
+        );
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, &sink)
             .await
             .unwrap();
         assert!(resized);
 
-        // The framebuffer is the *backing* pixels, shown at the Mac's own density —
-        // 100% of the logical desktop, not a canvas scaled to fit anything.
+        // The framebuffer is the *backing* pixels, shown at that screen's own
+        // density — 100% of the logical desktop, not a canvas scaled to fit
+        // anything.
         assert_eq!(desktop.lock().unwrap().size, (3840, 2160));
         assert_eq!(desktop.lock().unwrap().scale, 2.0);
         sink.flush().await;
@@ -3466,27 +3630,39 @@ mod tests {
             Ok(ServerMsg::Resize { w: 3840, h: 2160, scale }) if scale == 2.0
         ));
 
-        // The screens, with the checkmark on the main one because nothing has been
-        // asked for yet.
+        // The screens, with the checkmark where the Mac put it, and a way back to
+        // the combined view listed ahead of them.
         match rx.try_recv().expect("a display list") {
             ServerMsg::Displays { active, displays } => {
                 assert_eq!(active, 11);
-                assert_eq!(displays.len(), 2);
-                assert_eq!(displays[1].label, "Display 2");
+                assert_eq!(displays.len(), 3);
+                assert_eq!(displays[0].id, DisplayState::COMBINED);
+                assert_eq!(displays[0].label, "All Displays");
+                assert_eq!(displays[1].detail, "1920×1080 at 2x");
+                assert_eq!(displays[2].label, "Display 2");
             }
             other => panic!("expected a display list, got {other:?}"),
         }
 
-        // And the re-arm pair, in that order.
-        let mut expected = vnc_apple::auto_framebuffer_update((3840, 2160));
+        // What went back, in order: the second `SetEncodings` — the one that finally
+        // asks for zlib, which cannot be in the first without costing this whole
+        // layout — and then the re-arm pair.
+        let mut expected = set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB);
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
         expected.extend_from_slice(&update_request(false, (3840, 2160)));
         assert_eq!(written(&sent), expected);
+        assert!(
+            vnc_apple::ENCODINGS_WITH_ZLIB.contains(&vnc_apple::ENCODING_ZLIB)
+                && !vnc_apple::ENCODINGS.contains(&vnc_apple::ENCODING_ZLIB),
+            "the first list must not carry zlib and the second must"
+        );
     }
 
-    /// The checkmark follows the Mac, never the click: a request moves it only once
-    /// a layout has come back to say the Mac acted on it.
+    /// The checkmark follows the Mac and nothing else. It is placed from the
+    /// `current_display` a layout carries, so a selection the Mac declines leaves the
+    /// menu agreeing with what is on the canvas rather than with what was clicked.
     #[tokio::test]
-    async fn a_requested_display_becomes_active_only_once_a_layout_confirms() {
+    async fn the_checkmark_comes_from_the_mac_not_from_the_request() {
         let (uplink, _sent) = test_uplink();
         let (sink, mut rx) = test_sink();
         let shared = test_shared(
@@ -3498,22 +3674,19 @@ mod tests {
             (11, (1920, 1080), (1920, 1080), 0x01),
             (22, (1600, 1000), (1600, 1000), 0x00),
         ];
+        let layout = |current| layout_payload(current, &screens);
 
-        // First layout: the main screen.
-        read_display_layout(&mut layout_payload(&screens).as_slice(), &shared, &sink)
-            .await
-            .unwrap();
-        assert_eq!(shared.display.lock().unwrap().active, 11);
+        // A session opens on the combined view, which is what the Mac sends when
+        // nothing has asked otherwise.
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink).await.unwrap();
+        assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
-        // A request on its own moves nothing.
-        shared.display.lock().unwrap().requested = Some(22);
-        assert_eq!(shared.display.lock().unwrap().active, 11);
-
-        // The layout the Mac answers with is what moves it.
-        read_display_layout(&mut layout_payload(&screens).as_slice(), &shared, &sink)
-            .await
-            .unwrap();
+        // Then a screen, then back again. Each move is a layout, never a request.
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink).await.unwrap();
         assert_eq!(shared.display.lock().unwrap().active, 22);
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink).await.unwrap();
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink).await.unwrap();
+        assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         sink.flush().await;
         let mut actives = Vec::new();
@@ -3522,6 +3695,9 @@ mod tests {
                 actives.push(active);
             }
         }
-        assert_eq!(actives, vec![11, 22]);
+        // Four layouts, three messages: the repeated one says nothing new. A client
+        // holds no display state of its own, so a message it cannot act on is one it
+        // would have to ignore.
+        assert_eq!(actives, vec![DisplayState::COMBINED, 22, DisplayState::COMBINED]);
     }
 }

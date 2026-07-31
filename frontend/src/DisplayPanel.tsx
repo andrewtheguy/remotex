@@ -8,10 +8,11 @@
 // panel agreeing with what is actually on the canvas rather than with what was
 // clicked.
 //
-// No engine populates the list yet: RDP and VNC each deliver one framebuffer
-// spanning every remote screen, so they send nothing and the FAB shows no
-// Display section. Picking a display over macOS Screen Sharing (ARD) is a
-// planned phase-2 feature.
+// One engine populates the list: a VNC target with subtype
+// "ard-high-performance", which speaks Apple's own protocol revision. It sends the
+// Mac's screens plus an "All Displays" entry. RDP and plain VNC each deliver one
+// framebuffer spanning every remote screen, so they send nothing and the FAB shows
+// no Display section at all.
 
 import { useRef } from "react";
 import type { DisplayInfo } from "./protocol.ts";

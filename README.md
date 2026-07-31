@@ -57,12 +57,14 @@ so the connection lands at the user's own screen rather than a login-window
 session.
 
 `subtype = "ard-high-performance"` takes the same credentials and speaks Apple's own
-protocol revision instead, which **compresses the picture** rather than sending raw
-pixels — around fifty times fewer bytes on a static desktop. In exchange macOS
-replaces the Mac's real displays with one synthesized display for the duration of the
-session, so use plain `ard` if you want the actual screens. It does not support
-`resize` or `clipboard`; plain `ard` supports `clipboard`. See
-[`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
+protocol revision instead, which adds three things: it **compresses the picture**
+rather than sending raw pixels (around fifty times fewer bytes on a static desktop),
+it **lists the Mac's screens** so a client can look at one instead of all of them, and
+it reports each screen's **pixel density**, so a Retina desktop is drawn at 100%
+rather than twice its size. Picking a single screen is what makes that exact: a
+framebuffer spanning screens of different densities has no one scale factor and is
+shown at its pixel size. It does not support `resize` or `clipboard`; plain `ard`
+supports `clipboard`. See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 ## Container
 

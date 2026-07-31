@@ -38,43 +38,38 @@ design and its salvage point are recorded in
 
 ### Apple Screen Sharing: picking a display
 
-**Not solved, and not solvable the way it was attempted.** `subtype =
-"ard-high-performance"` ships Apple's RFB 003.889 wire — the record layer and zlib
-rectangles — but the reason that wire was reached for was to pick one of a Mac's
-screens, and it does not offer that.
+**Done.** `subtype = "ard-high-performance"` lists the Mac's screens with an *All
+Displays* entry, binds one with `SetDisplayMessage`, and reports each screen's pixel
+density — so a Retina Mac finally draws at 100% instead of twice its size. The
+checkmark follows the Mac's answering layout rather than the click.
 
-Measured on macOS 26.5.2: a 003.889 session makes macOS **synthesize a single
-display and remove the Mac's real ones** for the session's duration, with a fresh
-`CGDirectDisplayID` each time. It does this whether or not the client sends
-`SetDisplayConfiguration`, for `display_type` 0, 2 and 4, with the
-dynamic-resolution flag set or clear, and for ClientInit `0x01` as well as `0xC1`.
-So no `AppleDisplayLayout` ever arrives and `SetDisplayMessage` is ignored — there
-is only ever one display to pick. A plain RFB 3.8 session leaves the real displays
-alone, which is the check that rules out coincidence.
+The earlier conclusion here — that a 003.889 session replaces the Mac's screens with
+one synthesized display and there is nothing to pick — was wrong, and wrong in an
+instructive way: **this gateway was asking for that synthesized display and did not
+know it.** Sending `SetDisplayConfiguration` (`0x1d`) at all, the bare static
+descriptor included, is what causes it. Not sending the message is what gets the real
+screens. The measurement that said otherwise had a second session open against the
+same Mac, which does not see the same display state.
 
-**The workaround is `subtype = "ard"`**, which shares every real screen in one
-framebuffer. Zooming in on one of them is not available from this gateway.
+Two further constraints on that wire are load-bearing and neither is guessable from
+the reference: the *first* `SetEncodings` must be an exact list — adding, removing or
+reordering one entry costs the display layout entirely, so zlib is asked for in a
+second one after a layout has arrived — and a layout payload is two bytes shorter
+than its own length prefix says. Both are measured in
+[`apple-vnc-889.md`](apple-vnc-889.md), along with what is still unexplained.
 
-How Screen Sharing.app populates its Both Displays / Display 1 / Display 2 menu is
-unresolved, and the reverse-engineered reference is no help because this is exactly
-where it is wrong. Settling it needs a packet capture of that app against a
-two-display Mac. The parser, the selection path and the `ServerMsg::Displays` wire
-are all implemented and unit-tested, so if that capture reveals a mechanism, the
-work is in reaching it and not in handling it. Full measurements, including the two
-places the reference is outright wrong, are in
-[`apple-vnc-889.md`](apple-vnc-889.md).
-
-What else remains on that wire, each for its own reason:
+What remains on that wire, each for its own reason:
 
 - **Dynamic resolution**, which is the Apple name for what `resize` means on a VNC
   or RDP target. It needs the *full dynamic descriptor* on `SetDisplayConfiguration`
   — the dynamic-resolution flag set, `display_type = 4`, a populated mode table —
-  which makes the Mac create a resizable virtual display, plus the renegotiation
-  that follows every size change. The gateway sends the static descriptor instead
-  and `resize` is refused for the subtype at configuration time. Note that this is
-  never a reason to scale on the client: see the 100% rule in `CLAUDE.md`.
-- **Both Displays**, the aggregate — moot while the above holds, since a session
-  already has exactly one display and it is not one of the Mac's.
+  plus the renegotiation that follows every size change. That is now known to be in
+  direct tension with picking a screen: sending **any** `0x1d` descriptor is what
+  makes the Mac synthesize a virtual display and hide its real ones, so a resizable
+  session and a session showing the Mac's own screens may simply be exclusive. The
+  gateway sends no descriptor and `resize` is refused for the subtype at
+  configuration time. Note that none of this is ever a reason to scale on the client:
+  see the 100% rule in `CLAUDE.md`.
 - **The pasteboard.** Apple carries it over messages of its own — an announcement,
   a fetch, then a zlib'd multi-flavour archive — not over RFB's Extended Clipboard,
   which is all `src/vnc_clipboard.rs` implements. `clipboard` is refused for the

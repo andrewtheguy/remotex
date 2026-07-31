@@ -178,17 +178,17 @@ resize acts on it, quantizing to 1x or 2x at the same midpoint; the resulting
 density travels back as the `scale` on `resize`, and clients present the
 framebuffer at `pixels / scale`. Other engines ignore the message.
 
-No server the gateway has been pointed at reports a display list, so in practice
-neither client shows a picker. The gateway is not the missing piece: the VNC engine's
-Apple dialect parses an `AppleDisplayLayout` into a `displays` message and acts on a
-`selectDisplay` by binding that screen, and both paths are unit- and end-to-end
-tested. What is missing is a server that sends such a layout. Binding one of a Mac's
-displays — which the stock Screen Sharing app does natively — was attempted over
-Apple's protocol revision and does not work there: macOS replaces the Mac's real
-displays with one synthesized display for the duration of such a session, so no layout
-arrives and there is nothing to pick. Until some server provides one, the wire stays
-exercised only by tests. See [`apple-vnc-889.md`](apple-vnc-889.md) and
-[`roadmap.md`](roadmap.md).
+A client shows the display picker exactly when the target sends it a
+`ServerMsg::Displays`, and hides it otherwise. One engine sends one: the VNC engine's
+Apple dialect, which parses an `AppleDisplayLayout` into a `displays` message and
+acts on a `selectDisplay` by binding that screen. RDP and plain VNC each expose a
+single framebuffer spanning every remote screen and have nothing to enumerate, so
+they never send the message and the picker stays hidden on those targets.
+
+Where the list is sent, the engine prepends an *All Displays* entry of its own so a
+client that picks a screen can get back, and it moves the checkmark only when a
+layout comes back naming the screen the Mac is now sending — never on the click. See
+[`apple-vnc-889.md`](apple-vnc-889.md).
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine.
@@ -272,16 +272,23 @@ a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it
 **What the subtype buys is compression**: zlib rectangles instead of raw pixels,
 around fifty times fewer bytes on a static desktop.
 
-What it costs is the Mac's real screens. This wire was reached for in order to *pick
-a screen*, which is the one thing standard RFB cannot express — and it turns out not
-to offer that either. A 003.889 session makes macOS 26 synthesize a single display
-and remove the Mac's real ones until the session ends, whatever the client asks for
-and whether or not it sends `SetDisplayConfiguration` at all. So no
-`AppleDisplayLayout` ever arrives, `SetDisplayMessage` is ignored, and there is only
-ever one display to pick. **Plain `subtype = "ard"` is the one that shares the real
-screens.** The layout parser and the selection path are implemented, unit-tested and
-dormant; they would light up if a Mac ever sent a layout. The measurements, and the
-two places the protocol reference is outright wrong, are in
+It also does the thing standard RFB cannot express at all: **picking one of the
+Mac's screens**, and with it learning each screen's pixel density, so a Retina
+desktop is drawn at 100% rather than twice its size. Picking is what makes the
+density exact — a framebuffer spanning screens at different densities has no single
+scale factor and is shown at its pixel size.
+
+There is one trap, and this gateway fell into it for a release: macOS 26 synthesizes
+a single display and removes the Mac's real ones for the session's duration — **if**
+the client sends
+`SetDisplayConfiguration` (`0x1d`). This gateway therefore does not send one, and
+that omission is what gets the Mac's own screens, their `CGDirectDisplayID`s and
+their individual scale factors. Two more constraints there are load-bearing and
+neither is guessable: the *first* `SetEncodings` must be an exact list (adding,
+removing or reordering one entry costs the display layout entirely), so zlib is asked
+for in a second one after a layout has arrived; and a layout payload is two bytes
+shorter than its own length prefix claims. All three, and the several places the
+protocol reference is outright wrong, are in
 [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
 Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
