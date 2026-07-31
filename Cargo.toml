@@ -44,6 +44,12 @@ toml = "1"
 # — the macOS agent's arrive already PNG-encoded from AppKit. `encode_png` in
 # src/protocol.rs is shared by both. Fast compression on the session's hot path.
 png = "0.18"
+# JPEG for the lossy tile path: a target with `render_type = "fixed-quality"`,
+# `render_subtype = "jpeg"` encodes every tile at a fixed `render_quality` instead
+# of lossless PNG (`Tile::from_rgb_jpeg` in src/protocol.rs). The format byte
+# already distinguishes PNG from JPEG on the wire and both clients decode either,
+# so this is a gateway-only encoder. `simd` because it runs on the session hot path.
+jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a

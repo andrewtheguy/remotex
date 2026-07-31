@@ -92,6 +92,42 @@ impl Protocol {
     }
 }
 
+/// How a target's tiles are encoded — the quality *strategy*, the first of the
+/// two render axes (the second is [`RenderSubtype`], the codec, and a lossy
+/// strategy also reads [`TargetConfig::render_quality`]). Two flat sibling keys
+/// rather than a nested table, matching the rest of the target schema.
+///
+/// Only the two implemented strategies are variants; a config naming a planned
+/// one (`adaptive`, quality that follows motion or link speed) is refused by
+/// serde with the list of what is accepted. See docs/proposals/quality-dial.md.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RenderType {
+    /// Lossless: every tile is PNG, byte-for-byte what the gateway has always
+    /// sent. The default, so an existing config behaves exactly as before. Pairs
+    /// only with [`RenderSubtype::Png`].
+    #[default]
+    Full,
+    /// One quality for the whole session, set by [`TargetConfig::render_quality`]
+    /// and never varied. Pairs with a lossy codec ([`RenderSubtype::Jpeg`]).
+    FixedQuality,
+}
+
+/// The codec a target's tiles are encoded with — the second render axis, paired
+/// with [`RenderType`]. Only implemented codecs are variants; a planned one
+/// (`adaptive-jpeg`, a per-tile PNG/JPEG classifier; `video`) is refused by serde.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RenderSubtype {
+    /// Lossless PNG. The default, and the only codec [`RenderType::Full`] takes.
+    #[default]
+    Png,
+    /// Baseline JPEG at [`TargetConfig::render_quality`]. Every tile goes to JPEG
+    /// — there is no content classifier — so flat UI and text soften along with
+    /// photographic content. That is the trade the fixed dial makes.
+    Jpeg,
+}
+
 /// One `[[targets]]` profile: a remote machine plus its credentials.
 ///
 /// Credentials live here (server-side) and are used during the RDP handshake.
@@ -195,6 +231,37 @@ pub struct TargetConfig {
     /// client subscribes. Rejected for VNC.
     #[serde(default)]
     pub audio: bool,
+    /// Quality *strategy* for this target's tiles. Defaults to [`RenderType::Full`]
+    /// (lossless PNG), so an unset target is byte-identical to before the dial
+    /// existed. Validated against [`Self::render_subtype`] and [`Self::render_quality`]
+    /// in [`ConfigFile::parse_with`]. Works for both RDP and VNC.
+    #[serde(default)]
+    pub render_type: RenderType,
+    /// Codec for this target's tiles. Defaults to [`RenderSubtype::Png`]. The
+    /// legal pairing with [`Self::render_type`] is enforced at parse time.
+    #[serde(default)]
+    pub render_subtype: RenderSubtype,
+    /// Fixed JPEG quality (1–100) for [`RenderType::FixedQuality`]. Required for
+    /// that strategy and refused for [`RenderType::Full`], which is lossless and
+    /// has no dial. `None` (unset) is the default.
+    #[serde(default)]
+    pub render_quality: Option<u8>,
+}
+
+impl TargetConfig {
+    /// The fixed JPEG quality the tile encoder should use for this target, or
+    /// `None` for the lossless PNG default. This is the whole of the render dial
+    /// as the engines see it: the two axes and the quality collapse to one
+    /// `Option<u8>` here, so `rdp::run` / `vnc::run` need not know the enums.
+    ///
+    /// `Some(q)` only for `fixed-quality` + `jpeg`, where [`ConfigFile::parse_with`]
+    /// has already guaranteed a quality in range is present.
+    pub fn jpeg_quality(&self) -> Option<u8> {
+        match (self.render_type, self.render_subtype) {
+            (RenderType::FixedQuality, RenderSubtype::Jpeg) => self.render_quality,
+            _ => None,
+        }
+    }
 }
 
 fn default_width() -> u16 {
@@ -467,6 +534,46 @@ impl ConfigFile {
                     target.name,
                     target.protocol.name()
                 );
+            }
+            // The render dial has two axes and they are validated together,
+            // because only some pairings mean anything and `render_quality`
+            // belongs to exactly one of them. The match is exhaustive so a future
+            // variant cannot be added without deciding what it pairs with here.
+            match (target.render_type, target.render_subtype) {
+                (RenderType::Full, RenderSubtype::Png) => {
+                    anyhow::ensure!(
+                        target.render_quality.is_none(),
+                        "target {:?} sets render_quality, which render_type \"full\" has no \
+                         use for — it is lossless PNG. Set render_type = \"fixed-quality\" \
+                         with render_subtype = \"jpeg\" to choose a quality",
+                        target.name
+                    );
+                }
+                (RenderType::FixedQuality, RenderSubtype::Jpeg) => {
+                    let q = target.render_quality.with_context(|| format!(
+                        "target {:?} is render_type \"fixed-quality\" but sets no \
+                         render_quality — it needs one, an integer 1–100",
+                        target.name
+                    ))?;
+                    anyhow::ensure!(
+                        (1..=100).contains(&q),
+                        "target {:?} sets render_quality = {q}, which is out of range — it \
+                         must be 1–100",
+                        target.name
+                    );
+                }
+                (RenderType::Full, RenderSubtype::Jpeg) => anyhow::bail!(
+                    "target {:?} sets render_type \"full\" with render_subtype \"jpeg\": \
+                     \"full\" is lossless and pairs only with render_subtype \"png\". Use \
+                     render_type = \"fixed-quality\" for JPEG",
+                    target.name
+                ),
+                (RenderType::FixedQuality, RenderSubtype::Png) => anyhow::bail!(
+                    "target {:?} sets render_type \"fixed-quality\" with render_subtype \
+                     \"png\": PNG is lossless and has no quality dial. Use render_subtype = \
+                     \"jpeg\", or render_type = \"full\" to stay lossless",
+                    target.name
+                ),
             }
         }
         Ok(config)
@@ -958,6 +1065,143 @@ mod tests {
         // The error should say what is supported.
         let msg = format!("{err:#}");
         assert!(msg.contains("rdp") && msg.contains("vnc"), "{msg}");
+    }
+
+    #[test]
+    fn render_defaults_to_lossless_png() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            "#,
+        )
+        .unwrap();
+        let t = &cfg.targets[0];
+        assert_eq!(t.render_type, RenderType::Full);
+        assert_eq!(t.render_subtype, RenderSubtype::Png);
+        assert_eq!(t.render_quality, None);
+    }
+
+    #[test]
+    fn fixed_quality_jpeg_is_accepted() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "fixed-quality"
+            render_subtype = "jpeg"
+            render_quality = 60
+            "#,
+        )
+        .unwrap();
+        let t = &cfg.targets[0];
+        assert_eq!(t.render_type, RenderType::FixedQuality);
+        assert_eq!(t.render_subtype, RenderSubtype::Jpeg);
+        assert_eq!(t.render_quality, Some(60));
+    }
+
+    #[test]
+    fn fixed_quality_without_a_quality_is_rejected() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "fixed-quality"
+            render_subtype = "jpeg"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_quality"), "{err:#}");
+    }
+
+    #[test]
+    fn a_render_quality_out_of_range_is_rejected() {
+        for q in ["0", "101"] {
+            let toml = format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "fixed-quality"
+                render_subtype = "jpeg"
+                render_quality = {q}
+                "#
+            );
+            let err = ConfigFile::parse(&toml).unwrap_err();
+            assert!(format!("{err:#}").contains("1–100"), "q={q}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn render_quality_on_full_is_rejected() {
+        // render_type/subtype default to full/png, so a stray quality has nothing
+        // to apply to.
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_quality = 50
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("full"), "{err:#}");
+    }
+
+    #[test]
+    fn mismatched_render_axes_are_rejected() {
+        // full + jpeg: full is lossless.
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "full"
+            render_subtype = "jpeg"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("lossless"), "{err:#}");
+
+        // fixed-quality + png: PNG has no dial.
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "fixed-quality"
+            render_subtype = "png"
+            render_quality = 50
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("quality dial"), "{err:#}");
+    }
+
+    #[test]
+    fn an_unknown_render_type_names_the_supported_ones() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "adaptive"
+            "#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("full") && msg.contains("fixed-quality"), "{msg}");
     }
 
     // Nothing in a target says what the remote runs. The engines discover it

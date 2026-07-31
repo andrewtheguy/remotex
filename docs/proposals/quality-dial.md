@@ -1,98 +1,116 @@
-# Proposal: a fixed per-target quality dial
+# Proposal: a per-target render dial
 
-Status: **proposed, not started.** This is the intended next release after the
-rxa removal (0.0.72). It is the path-of-least-resistance version of lowering
-bandwidth; the dynamic, motion-adaptive scheme is a separate, deferred proposal
-(see [motion-adaptive-jpeg.md](motion-adaptive-jpeg.md)).
+Status: **fixed-quality JPEG implemented; the rest is the scaffolding it grew.**
+This is the path-of-least-resistance version of lowering bandwidth; the dynamic,
+motion-adaptive scheme is a separate, deferred proposal (see
+[motion-adaptive-jpeg.md](motion-adaptive-jpeg.md)).
 
 ## Why
 
-The gateway encodes every tile as PNG (`Tile::from_rgb`, `src/protocol.rs`).
+The gateway encoded every tile as PNG (`Tile::from_rgb`, `src/protocol.rs`).
 PNG is lossless and correct for text and flat UI, but wasteful for photographic
 or full-motion content, where a JPEG at moderate quality is a fraction of the
-bytes and indistinguishable in motion. There is no way to trade that today.
+bytes and indistinguishable in motion. There was no way to trade that.
 
 The wire already carries the choice: a tile record's first byte is its format,
-`Tile::FORMAT_PNG` / `Tile::FORMAT_JPEG`, and the browser and viewer already
-decode JPEG tiles. So this is an encoder-side change with **zero wire change**
+`Tile::FORMAT_PNG` / `Tile::FORMAT_JPEG`, and both clients decode either (the
+browser's `createImageBitmap` from a MIME type, the Swift viewer's ImageIO from
+the container itself). So this is an encoder-side change with **zero wire change**
 and no protocol-version bump.
 
-## The dial
+## The two axes
 
-One new per-target field in `TargetConfig` (`src/config.rs`), alongside
-`resize` / `clipboard` / `audio`:
+Rather than a single `quality` scalar, the dial is two flat per-target fields —
+a **type** (the quality strategy) and a **subtype** (the codec) — plus a
+`render_quality` for the strategies that take one. Flat sibling keys, not a
+nested table, matching the rest of the target schema (`resize` / `clipboard` /
+`audio`):
 
 ```toml
 [[targets]]
-name = "..."
-quality = "full"   # the default; or an integer 1–100
+render_type    = "fixed-quality"   # full (default) | fixed-quality
+render_subtype = "jpeg"            # png (default) | jpeg
+render_quality = 60                # 1–100, for fixed-quality
+# default (all omitted) = full + png, byte-identical to the PNG-only gateway
 ```
 
-- `quality = "full"` (or unset) → **today's PNG-only path, byte-identical to the
-  0.0.72 release.** No JPEG, no classifier — the existing `Tile::from_rgb`. This
-  is the default, so an existing config behaves exactly as it does now.
-- `quality = <1–100>` → encode tiles as **JPEG at that fixed quality**. One dial,
-  set once in config: no churn tracking, no cleanup pass, no per-frame decision.
+Two axes because the strategy and the codec vary independently, and future
+strategies (below) each compose with a codec rather than each being one more
+flat mode. The pairing is validated at config-load time (`ConfigFile::parse_with`
+in `src/config.rs`), the same way other target fields validate.
 
-The field parses to an enum (`Full` | `Jpeg(u8)`), rejecting `0` and anything
-over `100` at config-load time with a typed error, the same way other target
-fields validate.
+### The matrix
+
+| `render_type` | `render_subtype` | status | behaviour |
+|---|---|---|---|
+| `full` | `png` | **shipped** (default) | lossless PNG, byte-identical to before the dial |
+| `fixed-quality` | `jpeg` | **shipped** | every tile JPEG at `render_quality`, no classifier |
+| `adaptive` | *(any)* | future | quality varies automatically — by motion or by link speed |
+| `fixed-quality` / `adaptive` | `adaptive-jpeg` | future | per-tile classify: photographic → JPEG, flat UI/text → PNG |
+| *(any)* | `video` | future | an inter-frame codec for full-motion regions |
+
+Only the shipped variants are `RenderType` / `RenderSubtype` enum variants; a
+config naming a future one is refused by serde with the list of what is
+accepted. The future rows are recorded here, not in code. The `adaptive-jpeg`
+classifier is the content-based cousin of the churn-based
+[motion-adaptive scheme](motion-adaptive-jpeg.md); `adaptive` is where a quality
+that follows motion or connection speed would live.
+
+## Settled: no classifier in the fixed dial
+
+An earlier draft asked whether a numeric quality should run a PNG/JPEG classifier
+first (flat UI stays lossless, photographic tiles go JPEG). **The fixed dial does
+not**: `render_subtype = "jpeg"` sends *every* tile as JPEG at `render_quality`,
+so flat UI and text soften along with everything else. That is the honest trade
+of a single fixed knob, and it is the least code. A classifier is a strictly
+better behaviour but belongs to a distinct subtype (`adaptive-jpeg`, future),
+not smuggled into `jpeg` — so the name says what it does.
 
 ## Threading
 
-The value flows from config to the encoder and nowhere else:
+The value flows from config to the encoder and nowhere else. The two axes and the
+quality collapse to a single `Option<u8>` at the config boundary
+(`TargetConfig::jpeg_quality`), so the engines never see the enums:
 
 ```
-TargetConfig.quality
-  → vnc::run / rdp::run          (read the resolved target)
-  → TileSink::new(engine, frame_tx, quality)
-  → the per-tile encode call
+TargetConfig.render_type / render_subtype / render_quality
+  → TargetConfig::jpeg_quality()  →  Option<u8>   (None = PNG, Some(q) = JPEG@q)
+  → vnc::run / rdp::run
+  → TileSink::new(engine, frame_tx, jpeg_quality)
+  → the per-tile encode call: Tile::from_rgb (None) or Tile::from_rgb_jpeg (Some)
 ```
 
-`TileSink` is engine-agnostic and shared by both engines, so one change gives
-RDP and VNC the feature together. When `quality` is `Full`, `TileSink` calls
-`Tile::from_rgb` unchanged and touches no new code; only a numeric quality
-reaches a JPEG encode path.
+`TileSink` is engine-agnostic and shared by both engines, so one change gave RDP
+and VNC the feature together. When the quality is `None`, `TileSink` calls
+`Tile::from_rgb` unchanged and touches no new code.
 
 ## The JPEG encoder
 
-`encode_jpeg` and the `jpeg-encoder` dependency are retrievable from the deleted
-agent tree at commit `8990971`:
-
-```sh
-git show 8990971:crates/rxa-agent/src/encode.rs
-```
-
-Port `encode_jpeg(w, h, rgb, quality)` next to `encode_png` in
-`src/protocol.rs`, rewiring its format byte to `Tile::FORMAT_JPEG`. Add
-`jpeg-encoder = { version = "0.7", features = ["simd"] }` to the root
-`Cargo.toml`. Add a **separate** entry point (e.g. `Tile::from_rgb_jpeg`) rather
-than changing `from_rgb`, so the PNG path and its
-`from_rgb_still_marks_its_payload_as_png` test stay exactly as they are.
-
-## One question to settle when building
-
-Whether a numeric `quality` should encode **every** tile as JPEG, or run the
-PNG/JPEG classifier first (`is_photographic` in the same `8990971` file — flat
-UI and text stay lossless PNG, photographic tiles go JPEG at the set quality).
-The classifier is the safer default: it never blurs text. Decide when building,
-with a real target in front of you; both pieces are in the same salvaged file.
+`encode_jpeg` and the `jpeg-encoder` dependency were salvaged from the deleted
+agent tree at commit `8990971` (`git show 8990971:crates/rxa-agent/src/encode.rs`):
+`encode_jpeg(w, h, rgb, quality)` sits next to `encode_png` in `src/protocol.rs`,
+and `Tile::from_rgb_jpeg` is the JPEG counterpart of `Tile::from_rgb`. The
+classifier (`is_photographic`) and the churn ramp (`quality_for_churn`) in the
+same salvaged file were **left behind** — they belong to the future
+`adaptive-jpeg` subtype and the motion-adaptive scheme, not to the fixed dial.
 
 ## Verification
 
-- `cargo clippy -- -D warnings` and `cargo test`; then in `frontend/`, biome +
-  `tsc -b` + `bun test` + **`bun run build`**.
-- Unit: `quality = "full"` produces a PNG tile (unchanged); a numeric quality
-  produces a smaller JPEG tile on a photographic input.
+- `cargo clippy -- -D warnings` and `cargo test`. Unit tests cover: default →
+  PNG; `fixed-quality`+`jpeg` → JPEG and smaller than PNG on photographic input;
+  the two mismatched axis pairings and an out-of-range or missing quality are
+  rejected; `TileSink` with a quality emits JPEG tiles.
+- No frontend or Swift change — both already decode JPEG from the container.
 - A/B on the real RDP target and on the macOS Screen Sharing (VNC/ARD) target:
-  full-motion content is materially smaller at a numeric quality, static content
-  looks unchanged, and a `"full"` target is byte-identical to 0.0.72.
-- Playwright stays format-agnostic — assert record/frame relationships and
-  header fields, never PNG magic bytes (a target may now emit JPEG).
+  full-motion content is materially smaller at a numeric quality, and a target on
+  the default is byte-identical to the PNG-only gateway.
+- Playwright stays format-agnostic — assert record/frame relationships and header
+  fields, never PNG magic bytes (a target may now emit JPEG).
 
 ## Out of scope for this proposal
 
 - Any dynamic, per-cell, or motion-adaptive behaviour — that is
-  [motion-adaptive-jpeg.md](motion-adaptive-jpeg.md).
-- Progressive JPEG or an H.264 region path.
+  [motion-adaptive-jpeg.md](motion-adaptive-jpeg.md), the future `adaptive` type /
+  `adaptive-jpeg` subtype.
+- Progressive JPEG or an H.264/`video` region path.
 - Any wire or protocol-version change.

@@ -172,7 +172,7 @@ pub async fn run(
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx);
+    let sink = TileSink::new("rdp", frame_tx, config.jpeg_quality());
     session(config, input_rx, &sink, audio).await;
     sink.finish().await;
 }
@@ -1707,6 +1707,9 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: false,
+            render_type: crate::config::RenderType::Full,
+            render_subtype: crate::config::RenderSubtype::Png,
+            render_quality: None,
         };
         assert!(!build_connector_config(&target).enable_audio_playback);
         target.audio = true;
@@ -1746,6 +1749,9 @@ mod tests {
                 resize,
                 clipboard,
                 audio,
+                render_type: crate::config::RenderType::Full,
+                render_subtype: crate::config::RenderSubtype::Png,
+                render_quality: None,
             };
             let (clip_tx, _clip_rx) = mpsc::unbounded_channel();
             let bridge = audio.then(|| Arc::new(AudioBridge::new()));

@@ -74,15 +74,30 @@ pub struct TileSink {
     engine: &'static str,
     tx: mpsc::Sender<Pending>,
     shared: Arc<Shared>,
+    /// The fixed JPEG quality this session encodes tiles at, or `None` for the
+    /// lossless PNG default. Resolved once from the target's render dial in
+    /// `rdp::run` / `vnc::run` (see [`crate::config::RenderType`]).
+    jpeg_quality: Option<u8>,
 }
 
 impl TileSink {
     /// Start an encoder for one engine. `engine` prefixes its log lines.
-    pub fn new(engine: &'static str, frame_tx: mpsc::Sender<ServerMsg>) -> Self {
+    /// `jpeg_quality` is `Some(1..=100)` to encode every tile as JPEG at that
+    /// quality, or `None` for lossless PNG.
+    pub fn new(
+        engine: &'static str,
+        frame_tx: mpsc::Sender<ServerMsg>,
+        jpeg_quality: Option<u8>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(ENCODE_DEPTH);
         let shared = Arc::new(Shared::default());
         tokio::spawn(order_loop(engine, rx, frame_tx, Arc::clone(&shared)));
-        Self { engine, tx, shared }
+        Self {
+            engine,
+            tx,
+            shared,
+            jpeg_quality,
+        }
     }
 
     /// Queue a band of packed RGB888 for encoding.
@@ -91,9 +106,13 @@ impl TileSink {
     /// gone by the time a worker reads it — the read loop has moved on to the next
     /// PDU. The encode starts immediately; only its *place in the order* is queued.
     pub async fn tile(&self, x: u16, y: u16, w: u16, h: u16, rgb: Vec<u8>) -> anyhow::Result<()> {
+        let jpeg_quality = self.jpeg_quality;
         let handle = tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let tile = Tile::from_rgb(x, y, w, h, &rgb)?;
+            let tile = match jpeg_quality {
+                Some(q) => Tile::from_rgb_jpeg(x, y, w, h, &rgb, q)?,
+                None => Tile::from_rgb(x, y, w, h, &rgb)?,
+            };
             Ok((tile, micros(started)))
         });
         self.push(Pending::Tile(handle)).await
@@ -320,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn tiles_reach_the_frame_channel_in_push_order() {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
-        let sink = TileSink::new("test", frame_tx);
+        let sink = TileSink::new("test", frame_tx, None);
 
         for i in 0..64u16 {
             let (w, h) = (320 - i * 4, 64);
@@ -337,12 +356,29 @@ mod tests {
         }
     }
 
+    /// A sink built with a JPEG quality encodes its tiles as JPEG; the default
+    /// (`None`, asserted above) stays PNG. The one bit the render dial threads
+    /// all the way to the wire.
+    #[tokio::test]
+    async fn a_jpeg_quality_makes_tiles_jpeg() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let sink = TileSink::new("test", frame_tx, Some(60));
+
+        sink.tile(0, 0, 320, 64, rgb(320, 64, 1)).await.unwrap();
+        sink.flush().await;
+
+        let ServerMsg::Tile(tile) = &drain(&mut frame_rx, 1).await[0] else {
+            panic!("expected a tile");
+        };
+        assert_eq!(tile.format, Tile::FORMAT_JPEG);
+    }
+
     /// The hazard a side channel for control messages would create: the client
     /// must learn a new size before a tile in the new coordinate space arrives.
     #[tokio::test]
     async fn a_control_message_cannot_overtake_the_tiles_before_it() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx);
+        let sink = TileSink::new("test", frame_tx, None);
 
         for i in 0..8u16 {
             sink.tile(0, i * 64, 320, 64, rgb(320, 64, i as u8)).await.unwrap();
@@ -368,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn flush_waits_for_everything_pushed_before_it() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx);
+        let sink = TileSink::new("test", frame_tx, None);
 
         for i in 0..16u16 {
             sink.tile(0, i * 64, 320, 64, rgb(320, 64, i as u8)).await.unwrap();
@@ -390,7 +426,7 @@ mod tests {
     #[tokio::test]
     async fn an_encode_failure_stops_the_sink_and_reports_itself() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx);
+        let sink = TileSink::new("test", frame_tx, None);
 
         // A payload one byte short of the geometry: `Tile::from_rgb` rejects it on
         // its length check rather than handing a short buffer to the PNG encoder.
@@ -418,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn a_dropped_frame_channel_is_reported_as_a_closed_channel() {
         let (frame_tx, frame_rx) = mpsc::channel(1);
-        let sink = TileSink::new("test", frame_tx);
+        let sink = TileSink::new("test", frame_tx, None);
         drop(frame_rx);
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 0)).await.unwrap();

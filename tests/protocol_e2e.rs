@@ -233,6 +233,9 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         resize: false,
         clipboard,
         audio: false,
+        render_type: remotex::config::RenderType::Full,
+        render_subtype: remotex::config::RenderSubtype::Png,
+        render_quality: None,
     }
 }
 

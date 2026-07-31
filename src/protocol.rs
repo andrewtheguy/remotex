@@ -339,10 +339,11 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// PNG or JPEG, named by the `format` byte so `createImageBitmap` gets the right
 /// MIME type.
 ///
-/// The RDP and VNC engines decode a framebuffer and PNG-compress it here
-/// ([`Tile::from_rgb`]). A pass-through path also exists for a source that hands
-/// over frames already encoded as PNG or JPEG ([`Tile::encoded`]), which no
-/// current engine uses; it is why the format travels with the tile instead of
+/// The RDP and VNC engines decode a framebuffer and compress it here: lossless
+/// PNG ([`Tile::from_rgb`], the default) or, for a target on the fixed-quality
+/// dial, JPEG ([`Tile::from_rgb_jpeg`]). A pass-through path also exists for a
+/// source that hands over frames already encoded ([`Tile::encoded`]), which no
+/// current engine uses; either way the format travels with the tile instead of
 /// being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
@@ -371,6 +372,33 @@ impl Tile {
         let data = encode_png(w, h, png::ColorType::Rgb, rgb)?;
         Ok(Self {
             format: Self::FORMAT_PNG,
+            x,
+            y,
+            w,
+            h,
+            data,
+        })
+    }
+
+    /// Build a tile from packed RGB888 pixels, JPEG-compressing the payload at a
+    /// fixed `quality` (1–100). The lossy counterpart to [`Tile::from_rgb`], taken
+    /// by an engine only when its target set `render_type = "fixed-quality"`,
+    /// `render_subtype = "jpeg"` (see [`crate::config::RenderType`]); the format
+    /// byte carries the choice, so no client is told anything new.
+    ///
+    /// Every tile goes to JPEG here — there is no content classifier — so flat UI
+    /// and text soften along with everything else. That is the documented trade of
+    /// the fixed dial; a classifying subtype is a separate, future render subtype.
+    pub fn from_rgb_jpeg(x: u16, y: u16, w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Self> {
+        let expected = usize::from(w) * usize::from(h) * 3;
+        anyhow::ensure!(
+            rgb.len() == expected,
+            "tile payload is {} bytes, expected {expected} for {w}x{h} RGB",
+            rgb.len()
+        );
+        let data = encode_jpeg(w, h, rgb, quality)?;
+        Ok(Self {
+            format: Self::FORMAT_JPEG,
             x,
             y,
             w,
@@ -476,6 +504,19 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
     let mut writer = encoder.write_header()?;
     writer.write_image_data(pixels)?;
     writer.finish()?;
+    Ok(out)
+}
+
+/// JPEG-encode packed RGB888 at a fixed `quality` (1–100). The lossy tile path
+/// ([`Tile::from_rgb_jpeg`]); JPEG embeds its own quantization tables, so the
+/// quality rides no wire and the decoder needs no telling. Salvaged from the
+/// deleted agent's encoder (commit 8990971).
+fn encode_jpeg(w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
+    encoder
+        .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
+        .map_err(|e| anyhow::anyhow!("JPEG encode failed: {e}"))?;
     Ok(out)
 }
 
@@ -1214,6 +1255,65 @@ mod tests {
         let mut out = Vec::new();
         tile.write_record(batch::NO_SLOT, &mut out);
         assert_eq!(out[1], Tile::FORMAT_PNG);
+    }
+
+    // The lossy path stamps JPEG and produces a real JFIF stream (SOI marker).
+    #[test]
+    fn from_rgb_jpeg_marks_its_payload_as_jpeg() {
+        let (w, h) = (16, 16);
+        let tile = Tile::from_rgb_jpeg(0, 0, w, h, &vec![0u8; usize::from(w) * usize::from(h) * 3], 60).unwrap();
+        assert_eq!(tile.format, Tile::FORMAT_JPEG);
+        assert_eq!(&tile.data[..2], &[0xFF, 0xD8], "JPEG start-of-image marker");
+        let mut out = Vec::new();
+        tile.write_record(batch::NO_SLOT, &mut out);
+        assert_eq!(out[1], Tile::FORMAT_JPEG);
+    }
+
+    /// A high-entropy, photographic-like strip: PNG cannot compress it, which is
+    /// exactly where a lossy codec earns its keep (a smooth gradient is the
+    /// opposite case — PNG wins it, so it is no test of the JPEG path).
+    fn noisy_rgb(w: u16, h: u16) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+        for y in 0..u32::from(h) {
+            for x in 0..u32::from(w) {
+                let n = x
+                    .wrapping_mul(2_654_435_761)
+                    .wrapping_add(y.wrapping_mul(40_503))
+                    .rotate_left(13);
+                rgb.extend_from_slice(&[n as u8, (n >> 8) as u8, (n >> 16) as u8]);
+            }
+        }
+        rgb
+    }
+
+    // The whole point of the dial: a photographic strip is far smaller as JPEG
+    // than as lossless PNG, and a lower quality is smaller still.
+    #[test]
+    fn jpeg_is_smaller_than_png_on_photographic_content() {
+        let (w, h) = (320, 64);
+        let rgb = noisy_rgb(w, h);
+        let png = Tile::from_rgb(0, 0, w, h, &rgb).unwrap();
+        let jpeg = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 60).unwrap();
+        assert!(
+            jpeg.data.len() < png.data.len(),
+            "JPEG should beat PNG on a gradient: {} vs {}",
+            jpeg.data.len(),
+            png.data.len()
+        );
+        let lower = Tile::from_rgb_jpeg(0, 0, w, h, &rgb, 20).unwrap();
+        assert!(
+            lower.data.len() < jpeg.data.len(),
+            "lower quality should be smaller: {} vs {}",
+            lower.data.len(),
+            jpeg.data.len()
+        );
+    }
+
+    // A payload whose length disagrees with its geometry is rejected, same as the
+    // PNG constructor.
+    #[test]
+    fn from_rgb_jpeg_rejects_a_mismatched_payload() {
+        assert!(Tile::from_rgb_jpeg(0, 0, 2, 2, &[0u8; 11], 60).is_err());
     }
 
     /// A desktop-like strip: horizontal gradient, repeated rows.

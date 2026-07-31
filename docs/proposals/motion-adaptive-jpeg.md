@@ -1,8 +1,10 @@
 # Proposal: motion-adaptive JPEG quality (deferred)
 
-Status: **on paper only, deferred.** Do not build this before the fixed
-[quality dial](quality-dial.md) ships and proves insufficient. It is recorded
-here so the design is not re-derived, and so the salvage point is not lost.
+Status: **on paper only, deferred.** The fixed
+[render dial](quality-dial.md) has shipped (`fixed-quality` + `jpeg`); do not build
+this before that dial proves insufficient. This is the dynamic form of its future
+`adaptive` type — quality chosen per cell from motion rather than fixed. It is
+recorded here so the design is not re-derived, and so the salvage point is not lost.
 
 This is the scheme the deleted rxa agent ran. Its full logic is pinned at commit
 `8990971` — `crates/rxa-agent/src/encode.rs` (classifier, `encode_jpeg`,
