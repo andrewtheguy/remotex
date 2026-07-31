@@ -167,23 +167,35 @@ struct GatewayConfigStoreTests {
         #expect(await reads.count == 2)
     }
 
-    /// A per-instance Dock icon is a file, not a setting: present or absent, `.icns`
-    /// preferred over `.png` because that is what macOS wants. Absent is the ordinary
-    /// case and leaves the app its own icon.
+    /// The bundle names the instance, which is what lets a stamped-out variant be a
+    /// separate installation with no argument to pass — LaunchServices gives a
+    /// double-clicked app none. The shipped bundle is `remotex`, so this must leave
+    /// that one exactly where it was.
     @Test
-    func aninstanceIconIsWhicheverFileIsThere() throws {
-        let directory = try ScratchDirectory()
-        let instance = directory.instance
-        #expect(instance.iconURL() == nil, "nothing dropped in yet")
+    func theInstanceIsNamedAfterTheBundle() {
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "remotex") == "remotex")
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "remotex-work") == "remotex-work")
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "  remotex-work  ") == "remotex-work")
+    }
 
-        try directory.write("icon.png", "not really a png")
-        #expect(instance.iconURL()?.lastPathComponent == "icon.png")
+    /// An unbundled build has no `CFBundleName` at all — `swift test` is one, and so is
+    /// anything run out of `.build` — and still has to look somewhere.
+    @Test
+    func aBundleWithNoNameFallsBackToTheDefault() {
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: nil) == "remotex")
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "") == "remotex")
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "   ") == "remotex")
+    }
 
-        try directory.write("icon.icns", "not really an icns")
-        #expect(
-            instance.iconURL()?.lastPathComponent == "icon.icns",
-            "the format macOS wants wins when both are there"
-        )
+    /// Whatever the bundle is called, the result is one visible path component: a `/`
+    /// would put this instance inside another directory, and a leading `.` would hide
+    /// the folder somebody is expected to be able to open.
+    @Test
+    func theNameIsAlwaysOneVisibleComponent() {
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "remotex/work") == "remotex-work")
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "remotex:work") == "remotex-work")
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: ".hidden") == "hidden")
+        #expect(InstanceDirectory.instanceName(ofBundleNamed: "...") == "remotex")
     }
 
     // MARK: - Helpers

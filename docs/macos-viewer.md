@@ -74,10 +74,12 @@ that end, the gateway's blocking read returns end-of-file, and the gateway exits
 
 ### The instance directory
 
-`--instance-dir <path>`, or `~/Library/Application Support/remotex` (mode `0700`).
-Everything this launch reads or writes is under it, and **nothing under
-`/opt/remotex` is ever consulted** — a Mac can run the server install and this app at
-once without either changing what the other does.
+`--instance-dir <path>`, or `~/Library/Application Support/<CFBundleName>` (mode
+`0700`) — `remotex` for the shipped bundle, and its own name for a variant stamped out
+by `make-instance-bundle.sh`, which is what lets a second bundle be a second
+installation with no argument to pass. Everything this launch reads or writes is under
+it, and **nothing under `/opt/remotex` is ever consulted** — a Mac can run the server
+install and this app at once without either changing what the other does.
 
 | file | |
 |---|---|
@@ -153,64 +155,65 @@ because a key in that block could not name an app whose config has no such block
 
 ## Running more than one instance
 
-An instance is a directory, so a second one is a second directory. Two run side by
-side with no coordination: separate configs, separate gateways on separate ephemeral
-ports, separate `rxa` identities, nothing shared.
-
-The obstacle is only ever *launching* them. Double-clicking `remotex.app` passes no
-arguments — LaunchServices does not — and `open` without `-n` reactivates the copy
-already running and silently discards `--args`. Both halves are the same trap the
-Chrome `--user-data-dir` launchers hit, and the answer is the same: a small launcher
-app per instance.
-
-### 1. A launcher of its own
-
-`packaging/macos-viewer/instance-launcher.applescript` is the template. Edit the app
-path and the instance name in it, then compile it into an app:
+**A second instance is a second app.** One command stamps it out:
 
 ```sh
-osacompile -o ~/Applications/remotex\ Work.app \
-  packaging/macos-viewer/instance-launcher.applescript
+packaging/macos-viewer/make-instance-bundle.sh remotex-work ~/Pictures/work.png
 ```
 
-It runs one line — `open -n /Applications/remotex.app --args --instance-dir <dir>` —
-and exits, so what stays in the Dock is remotex itself. The launcher is a real bundle:
-give it any name, drop an icon on its **Get Info** window, pin it, find it in
-Spotlight.
+That writes `~/Applications/remotex-work.app` — a copy of `remotex.app` with its own
+`CFBundleIdentifier`, its own `CFBundleName` and its own icon, ad-hoc re-signed. Double
+-click it. There is no flag to pass, no launcher to keep, and nothing to remember.
 
-Nothing stops you doing the same from a `.command` file or a Shortcuts.app *Run Shell
-Script* action. What you must **not** do is duplicate `remotex.app` and edit the copy:
-the bundle is signed with a hardened runtime, so any change to it invalidates the
-signature and breaks the TCC grants, which are keyed on the code identity.
+### Why a whole bundle, and not a launcher
 
-### 2. Name it
+Because the argument has nowhere to come from. LaunchServices hands a double-clicked
+app no arguments, and `open` without `-n` reactivates the running copy and *silently
+discards* `--args` — so `--instance-dir` can only arrive via a wrapper that shells out,
+and then the thing in the Dock is remotex rather than the instance. That is the trap the
+Chrome `--user-data-dir` launchers hit.
 
-Both instances are otherwise called "remotex" everywhere. Give each config a heading:
+So the instance directory is read from the bundle instead:
+`~/Library/Application Support/<CFBundleName>` (`InstanceDirectory.defaultURL`). The
+shipped bundle is named `remotex`, so its instance is exactly where it always was, and a
+variant named `remotex-work` gets its own with nothing passed to it.
+
+This is what Chrome's **Create Shortcut** does — a separate bundle per profile, with its
+own identifier and icon, in `~/Applications` — except that Chrome ships a few-KB
+`app_mode_loader` shim that talks to the one installed browser, because duplicating 200
+MB per shortcut would be absurd. remotex.app is 13 MB, so a plain copy is cheaper than
+the machinery to avoid one.
+
+`--instance-dir` remains, and is now what it should always have been: the override a QA
+run uses to point the *stock* bundle at a throwaway directory.
+
+### What a variant costs
+
+- **13 MB, and it goes stale.** The copy carries its own client and gateway binaries, so
+  it keeps running the build it was stamped from. Re-run the script after updating
+  `remotex.app`; it replaces the bundle, keeps the name and icon, and never touches the
+  instance directory.
+- **Nothing else.** No entitlements, no notarization, no TCC. The shipped bundle is
+  ad-hoc signed itself (`codesign -dv` → `Signature=adhoc`), and the viewer holds no TCC
+  grants for a change of code identity to break: it captures keys with a *local*
+  `NSEvent` monitor, which needs no Accessibility permission. That is all the **agent**,
+  which is a different program with a different problem.
+
+What you must still **not** do is edit `remotex.app` in place. The script copies first
+and re-signs the copy, which is a different operation from breaking the seal on the one
+Apple's installer put there.
+
+### Naming the window too
+
+The bundle name reaches the Dock, ⌘-Tab and the menu bar. The *window* is named by the
+config:
 
 ```toml
 branding = "Work"
 ```
 
-That reaches the window title, the picker heading and the launch screen — everywhere
-the *window* identifies itself.
-
-### 3. Give it a face
-
-Drop an `icon.icns` (or `icon.png`) into the instance directory:
-
-```text
-~/Library/Application Support/remotex-work/
-  remotex.toml
-  icon.icns        ← this instance's Dock icon
-```
-
-The app loads it at launch and sets it as its own icon, so the Dock, ⌘-Tab and the
-window's proxy icon all show it. A file rather than a config key: an instance either
-has one or it does not, so there is nothing to validate and nothing to spell wrong.
-`.icns` wins over `.png` when both are present, because it is the format macOS wants.
-
-The launcher's icon and the instance's icon are different things and both are worth
-setting — the first is what you click, the second is what you then see running.
+That reaches the window title, the picker heading and the launch screen. Worth setting
+as well — one names the app, the other names what is on screen.
 
 ### What a new instance costs
 

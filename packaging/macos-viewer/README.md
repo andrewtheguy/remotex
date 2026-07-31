@@ -59,6 +59,17 @@ config, gateway log, preferences — from the real instance in
 deliberately no way to point the app at another gateway, on the command line or in the
 UI.
 
+To run a second instance *without* a flag, stamp out a bundle of its own:
+
+```sh
+packaging/macos-viewer/make-instance-bundle.sh remotex-work ~/Pictures/work.png
+```
+
+It copies the app, gives it its own identifier, name and icon, and re-signs it into
+`~/Applications`. The instance directory follows `CFBundleName`, so the variant is
+double-clickable with nothing to pass — see docs/macos-viewer.md, "Running more than
+one instance". It is a copy, so re-run it after each update.
+
 Getting in is one step and it is automatic: the app starts its gateway and lands on
 the target picker, or on a launch screen carrying the gateway's own explanation.
 Targets are added in **Remote › Configuration…**, which checks the file before saving

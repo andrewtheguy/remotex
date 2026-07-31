@@ -21,12 +21,44 @@ struct InstanceDirectory: Equatable, Sendable {
     /// The flag that names a directory other than the default one.
     static let flag = "--instance-dir"
 
-    /// `~/Library/Application Support/remotex`.
+    /// `~/Library/Application Support/<this bundle's name>`.
     ///
-    /// `remotex`, not `remotex-viewer`: the app is the product now, and the agent's
-    /// own directory next to it is `remotex-agent`, so the three names stay apart.
+    /// Derived from the bundle rather than hardcoded, and that is the whole of what
+    /// makes a second *bundle* a second installation: LaunchServices hands a
+    /// double-clicked app no arguments at all, so anything an instance depends on has
+    /// to come from the bundle itself. A variant stamped out by
+    /// `packaging/macos-viewer/make-instance-bundle.sh` therefore needs no launcher and
+    /// no flag — it is its own app, with its own name, icon and instance.
+    ///
+    /// The shipped bundle is named `remotex`, so this is exactly where it always was.
+    /// The agent's own directory beside it is `remotex-agent`, and the names stay apart.
     static var defaultURL: URL {
-        URL.applicationSupportDirectory.appending(path: "remotex", directoryHint: .isDirectory)
+        URL.applicationSupportDirectory.appending(
+            path: instanceName(ofBundleNamed: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String),
+            directoryHint: .isDirectory
+        )
+    }
+
+    /// The directory name a bundle name maps to.
+    ///
+    /// Split out from [`defaultURL`] so it can be tested at all: these tests run
+    /// unbundled, where there is no `CFBundleName` to read — which is also the case
+    /// this has to answer for, since an unbundled build still has to look somewhere.
+    static func instanceName(ofBundleNamed bundleName: String?) -> String {
+        let fallback = "remotex"
+        guard let raw = bundleName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty
+        else {
+            return fallback
+        }
+        // Forced into one path component, whatever the bundle is called. A `/` would
+        // silently put the instance in a subdirectory of somebody else's, and a
+        // leading `.` would hide the directory somebody is meant to be able to open.
+        let cleaned = raw
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .drop(while: { $0 == "." })
+        return cleaned.isEmpty ? fallback : String(cleaned)
     }
 
     /// The directory this launch owns.
@@ -77,26 +109,6 @@ struct InstanceDirectory: Equatable, Sendable {
     /// The client's preferences (see [`ViewerPreferences`]).
     var preferencesURL: URL {
         url.appending(path: "viewer.json")
-    }
-
-    /// Icon file names this instance may carry, in the order they are preferred.
-    ///
-    /// `.icns` first because it is what macOS wants — multiple resolutions in one file —
-    /// with `.png` accepted because it is what somebody actually has to hand.
-    static let iconNames = ["icon.icns", "icon.png"]
-
-    /// A Dock icon for *this* instance, if one has been dropped into its directory.
-    ///
-    /// A file rather than a config key, so it needs no schema and no validation: an
-    /// instance either has an `icon.icns` beside its config or it does not. Two
-    /// instances running at once are otherwise identical in the Dock and in ⌘-Tab —
-    /// `branding` distinguishes their windows, and this distinguishes everything else.
-    ///
-    /// Nil is the ordinary case and means the app keeps its own icon.
-    func iconURL() -> URL? {
-        Self.iconNames
-            .map { url.appending(path: $0) }
-            .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     /// Create the directory if it is not there, owner-only.
