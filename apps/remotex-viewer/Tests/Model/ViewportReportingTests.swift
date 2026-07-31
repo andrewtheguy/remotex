@@ -39,12 +39,13 @@ struct ViewportReportingTests {
         try await session.expectViewport(w: 1600, h: 1000)
 
         // Switch away and back to the same size: the socket, and so the queue's
-        // memo, outlive the trip to the picker — and the mode does not, so it has
-        // to be asked for again.
+        // memo, outlive the trip to the picker. Turning auto on remembered it, so
+        // the reconnect re-applies the mode on its own and re-sends the measured
+        // viewport — that same size gets out only because the memo was reset on
+        // `connected`.
         session.model.apply(.control(.picker))
         session.connect(protocolName: "vnc")
-        #expect(!session.model.autoResizes, "the mode belongs to the session that ended")
-        session.model.setAutoResize(true)
+        #expect(session.model.autoResizes, "the remembered default is re-applied on connect")
 
         try await session.expectViewport(w: 1600, h: 1000, count: 2)
     }

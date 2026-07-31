@@ -711,6 +711,23 @@ async fn active_loop(
                 };
                 if let Some((w, h)) = wanted_size {
                     if resize {
+                        // KNOWN LIMITATION (not yet fixed): the outcome is dropped,
+                        // and an `Asked::NotReady` here is lost with it. Unlike a
+                        // density change, which schedules a retry (`pending_density`
+                        // / `density_retry_at`), a size request that arrives before
+                        // the Display Control channel has its capabilities is simply
+                        // gone — and a client states a viewport once and dedupes it,
+                        // so nothing re-sends it. The window this opens is exactly
+                        // the start of a session: a client that turns auto-resize on
+                        // *by default* reports its window from `connected`, before
+                        // the channel is up, so on RDP the desktop stays at its
+                        // connect size until the next window change (a manual resize)
+                        // lands after the channel has opened. VNC and rxa have no such
+                        // gate. The fix is to retry a `NotReady` size the way density
+                        // is retried, but serialized with the density retry — two
+                        // independent layout retries racing would each drive a
+                        // reactivation and desync `applied` from the desktop actually
+                        // negotiated (see the `DeactivateAll` arm's invariant).
                         request_layout(
                             &mut active_stage,
                             &mut framed,

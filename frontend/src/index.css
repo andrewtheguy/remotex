@@ -387,6 +387,33 @@ body {
   font-size: 0.8rem;
 }
 
+/* The two remembered "… if compatible" defaults, above Log out. Quiet, and
+   left-aligned rather than centred like the button below: they read as settings,
+   not as an action. */
+.picker-defaults {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-self: stretch;
+  margin-top: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #21262d;
+}
+
+.picker-default {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #c9d1d9;
+  cursor: pointer;
+}
+
+.picker-default input {
+  accent-color: #2f81f7;
+  cursor: pointer;
+}
+
 .picker-logout {
   align-self: center;
   margin-top: 0.25rem;

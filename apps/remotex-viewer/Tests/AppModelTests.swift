@@ -169,10 +169,11 @@ struct AppModelTests {
         #expect(!model.autoResizes)
     }
 
-    /// It goes with the session, like the audio answer: the next target is asked about
-    /// separately rather than inheriting an answer given for another machine.
+    /// Turning auto-resize on is now a lasting choice, not a per-session one: it
+    /// writes the remembered default, so the next compatible target inherits it.
+    /// The picker screen in between shows manual — it has no live session to follow.
     @Test
-    func autoResizeIsForgottenOnTheWayToThePicker() {
+    func autoResizeIsRememberedAndInheritedByTheNextTarget() {
         let model = makeModel()
         model.apply(.status(.connected))
         model.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
@@ -180,10 +181,10 @@ struct AppModelTests {
         #expect(model.autoResizes)
 
         model.apply(.control(.picker))
-        #expect(!model.autoResizes)
+        #expect(!model.autoResizes, "the picker has no live session to follow")
 
         model.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
-        #expect(!model.autoResizes)
+        #expect(model.autoResizes, "a compatible target inherits the remembered default")
     }
 
     /// Both are disabled off the desktop and before the first `resize`: there is no
@@ -221,6 +222,22 @@ struct AppModelTests {
         #expect(model.session.screen == .desktop)
         #expect(model.session.connectedTarget == "mac")
         #expect(model.session.canClipboard)
+        #expect(model.windowTitle == "mac — remotex")
+    }
+
+    /// A speaker joins the window title while sound is playing, and only then — the
+    /// one persistent surface that can show it, since the toggle is a menu item.
+    @Test
+    func theWindowTitleGainsASpeakerWhileAudioPlays() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "rdp", audio: true))))
+        #expect(model.windowTitle == "mac — remotex", "silent unless asked for")
+
+        model.setAudioEnabled(true)
+        #expect(model.windowTitle == "mac — remotex 🔊")
+
+        model.setAudioEnabled(false)
         #expect(model.windowTitle == "mac — remotex")
     }
 
@@ -855,6 +872,122 @@ struct AppModelTests {
             model.apply(.control(.displays(active: active, displays: twoDisplays)))
             #expect(!model.session.canResize, "active=\(active)")
         }
+    }
+
+    // MARK: - Remembered resize and audio defaults
+
+    /// Both default off and survive a relaunch, like the keyboard preference — they
+    /// are the same kind of lasting choice, kept in the same instance file.
+    @Test
+    func resizeAndAudioDefaultsAreOffAndPersist() throws {
+        let directory = try ScratchDirectory()
+        let url = directory.url.appending(path: "viewer.json")
+
+        let initial = AppModel(preferences: ViewerPreferences(url: url))
+        #expect(!initial.autoResizeByDefault)
+        #expect(!initial.audioByDefault)
+
+        initial.autoResizeByDefault = true
+        initial.audioByDefault = true
+
+        let restored = AppModel(preferences: ViewerPreferences(url: url))
+        #expect(restored.autoResizeByDefault)
+        #expect(restored.audioByDefault)
+    }
+
+    /// The remembered auto-resize default takes effect on a target that settles its
+    /// permission at `connected`, and does nothing on one that allows no resize —
+    /// the "… if compatible" the picker's caption promises, decided by the
+    /// `connected` capability rather than by anything the picker knew.
+    @Test
+    func theAutoResizeDefaultFollowsACompatibleTarget() {
+        let willing = makeModel()
+        willing.autoResizeByDefault = true
+        willing.apply(.status(.connected))
+        willing.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
+        #expect(willing.autoResizes, "a resizable target adopts the remembered default")
+
+        let unwilling = makeModel()
+        unwilling.autoResizeByDefault = true
+        unwilling.apply(.status(.connected))
+        unwilling.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
+        #expect(!unwilling.autoResizes, "no permission, so the default does nothing")
+    }
+
+    /// rxa settles resize on a display list, so the default waits for the first
+    /// owned display rather than firing at `connected` — and it is imposed once, not
+    /// re-applied on a later switch over a mid-session change of mind.
+    @Test
+    func theAutoResizeDefaultWaitsForAnOwnedDisplayOnRxa() {
+        let model = makeModel()
+        model.autoResizeByDefault = true
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "rxa", resize: true))))
+        #expect(!model.autoResizes, "no display yet says the default may apply")
+
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+        #expect(model.autoResizes, "the first owned display adopts the default")
+
+        // A change of mind for this session, then away from the owned display and
+        // back: the one-time seed is spent, so the user's choice stands.
+        model.setAutoResize(false)
+        model.apply(.control(.displays(active: 7, displays: twoDisplays)))
+        model.apply(.control(.displays(active: 9, displays: twoDisplays)))
+        #expect(!model.autoResizes, "seeded once, not re-imposed on every switch")
+    }
+
+    /// The remembered audio default is adopted on a pick when the target carries
+    /// sound, and silently not when it does not or when the default is off.
+    @Test
+    func theAudioDefaultFollowsACompatibleTargetOnAPick() {
+        func pickAndConnect(pref: Bool, audio: Bool) -> AppModel {
+            let model = makeModel()
+            model.audioByDefault = pref
+            model.apply(.status(.connected))
+            model.apply(.control(.picker))
+            model.connect(to: "mac")
+            model.apply(.control(.connected(connected(protocolName: "rdp", audio: audio))))
+            return model
+        }
+        #expect(pickAndConnect(pref: true, audio: true).audio.isEnabled)
+        #expect(!pickAndConnect(pref: true, audio: false).audio.isEnabled, "no sound to play")
+        #expect(!pickAndConnect(pref: false, audio: true).audio.isEnabled, "the default is off")
+    }
+
+    /// A silent reattach — one the user did not ask for — must not turn sound on
+    /// from the default: a reconnect keeps the last attachment's intent, and
+    /// re-seeding would un-mute a session the user had quietened before it dropped.
+    @Test
+    func theAudioDefaultIsNotSeededOnASilentReattach() {
+        let model = makeModel()
+        model.audioByDefault = true
+        model.apply(.status(.connected))
+        // No pick precedes this `connected`, so `pendingTarget` is nil — a reattach.
+        model.apply(.control(.connected(connected(protocolName: "rdp", audio: true))))
+        #expect(!model.audio.isEnabled)
+    }
+
+    /// The live menu controls write the same remembered value the picker's toggles
+    /// do — one setting, two editors — so a mid-session choice is the one the next
+    /// connect starts from, and it persists.
+    @Test
+    func theLiveControlsWriteTheRememberedDefaults() throws {
+        let directory = try ScratchDirectory()
+        let url = directory.url.appending(path: "viewer.json")
+        let model = AppModel(preferences: ViewerPreferences(url: url))
+        model.apply(.status(.connected))
+        model.apply(
+            .control(.connected(connected(protocolName: "vnc", resize: true, audio: true)))
+        )
+
+        model.setAutoResize(true)
+        model.setAudioEnabled(true)
+        #expect(model.autoResizeByDefault)
+        #expect(model.audioByDefault)
+
+        let restored = AppModel(preferences: ViewerPreferences(url: url))
+        #expect(restored.autoResizeByDefault, "the View menu's choice is remembered")
+        #expect(restored.audioByDefault, "the Remote menu's choice is remembered")
     }
 
     private func connected(

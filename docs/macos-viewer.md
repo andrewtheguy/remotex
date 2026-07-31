@@ -365,8 +365,23 @@ mid-session.
 The three View menu items are one decision:
 
 - **Auto Resize** hands the remote's size to the window, which then follows every
-  change, debounced and deduplicated. Off by default, per session: it is not
-  remembered, and every connection starts manual.
+  change, debounced and deduplicated. Off until set, and then **remembered**: it
+  is one value with two editors — this menu item and the picker's *Auto-resize the
+  remote to the window, if compatible* — so a choice made mid-session is the one
+  the next connection starts from. It is applied to a new connection only where the
+  target allows resize (for RXA, once an owned display is shared); where it does
+  not, the remembered default silently does nothing, which is the picker caption's
+  "if compatible". See `ViewerPreferences.autoResizeByDefault`.
+
+  > **Known limitation on RDP.** When the default is on, the client reports its
+  > window from the `connected` handshake — before RDP's Display Control channel
+  > has finished opening. The gateway drops a size request that arrives that early
+  > (`Asked::NotReady`) and, unlike a density change, does not retry it, so on an
+  > RDP target the desktop stays at its connect size until the next window change
+  > lands after the channel is up. Turning **Auto Resize** off and on, or nudging
+  > the window, applies it. VNC and rxa are unaffected. This is a server-side gap
+  > documented at the `Viewport` arm in `src/rdp.rs`; the browser client has the
+  > same symptom for the same reason.
 - **Resize to Window** asks the remote to adopt the viewer's available size, once.
 - **Resize to Display** changes the local window so the current remote desktop
   fits at its point size; it sends nothing to the gateway.
@@ -459,6 +474,20 @@ boundary — set per target in the app's own configuration.
 **Remote → Enable Audio** is available when `connected.audio` is true. The
 gateway owns the wire format and bounded audio queue; the viewer owns decoding
 and playback scheduling.
+
+Like **Auto Resize**, the toggle writes a **remembered** default — the same value
+the picker's *Play the remote's sound, if compatible* toggle edits
+(`ViewerPreferences.audioByDefault`). When it is on, a pick or takeover of a
+target that carries audio subscribes on its own, without the menu being touched;
+a target with no audio starts silent, and a *silent reattach* — a reconnect the
+user did not ask for — is left as it was rather than re-seeded, so a mid-session
+mute survives a dropped socket. On the macOS side there is no browser-style
+gesture requirement, so the subscription is asserted straight from `connected`.
+
+While sound is playing the window title gains a trailing `🔊` (`windowTitle`) —
+the one persistent surface that can show it, since the toggle is a menu item. The
+browser does the same on its tab title, but at the front, where a truncated-from-
+the-right tab title keeps it visible.
 
 The viewer decodes bare Opus packets with `AVAudioConverter` and
 `kAudioFormatOpus`; it needs neither a container nor a vendored decoder.

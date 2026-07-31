@@ -81,6 +81,14 @@ export const SESSION_KEY = "remotex.sessionId";
 // than sessionStorage: unlike the session identity this is a lasting choice about
 // how this machine's keyboard behaves, and it should survive a new tab.
 const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
+// The two "by default" session preferences, both off unless set — remembered
+// like the Mac-keys one, and for the same reason: they are lasting choices, not
+// per-tab session state. Each is applied to a new connection only where the
+// target can honour it (the picker's "… if compatible"), and toggling the live
+// control in the desktop menu writes the same value back, so there is one setting
+// with two places to set it.
+const AUTO_RESIZE_KEY = "remotex.autoResizeByDefault";
+const AUDIO_KEY = "remotex.audioByDefault";
 // Evaluated once: the host OS cannot change under a running tab, and the input
 // effect must not pay for it per keystroke.
 const IS_MAC_HOST = isMacHost();
@@ -92,6 +100,16 @@ function readMacKeyOverridesPreference(): boolean {
     return localStorage.getItem(MAC_KEYS_KEY) !== "off";
   } catch {
     return true; // storage disabled or blocked; the default is still the default
+  }
+}
+// Both default off — an unset key is a target the user has not asked to reshape
+// or to hear, which is the safe reading of silence for either. So `=== "on"`,
+// where the Mac-keys default-on reader above is `!== "off"`.
+function readOnByKey(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "on";
+  } catch {
+    return false; // storage disabled or blocked; the default is still the default
   }
 }
 // Touch clients keep a fixed guest size and use fit-to-width plus pinch zoom.
@@ -512,6 +530,18 @@ export function useRemoteDesktop(
   const [macKeyOverridesEnabled, setMacKeyOverridesEnabled] = useState(
     readMacKeyOverridesPreference,
   );
+  // The two remembered "by default" preferences, edited from the picker and from
+  // the desktop menu alike (see AUTO_RESIZE_KEY). Applied to a compatible
+  // connection in `handleConnected`/`handleDisplays`, and read there through refs
+  // so the connection effect never re-subscribes when either changes.
+  const [autoResizeByDefault, setAutoResizeByDefault] = useState(() =>
+    readOnByKey(AUTO_RESIZE_KEY),
+  );
+  const [audioByDefault, setAudioByDefault] = useState(() =>
+    readOnByKey(AUDIO_KEY),
+  );
+  const autoResizeByDefaultRef = useRef(autoResizeByDefault);
+  const audioByDefaultRef = useRef(audioByDefault);
   // All three conditions, which the toolbar shows and the input effect obeys: a
   // Mac keyboard to translate from, a guest that is not a Mac to translate for,
   // and the user's consent. Off on a non-Mac host means the physical `code` goes
@@ -557,6 +587,26 @@ export function useRemoteDesktop(
       // Storage blocked: the preference still holds for this tab.
     }
   }, [macKeyOverridesEnabled]);
+
+  // Mirror each "by default" preference into its ref (the connection effect reads
+  // it there) and persist it, whatever set it — the picker's toggle or the
+  // desktop menu's live control.
+  useEffect(() => {
+    autoResizeByDefaultRef.current = autoResizeByDefault;
+    try {
+      localStorage.setItem(AUTO_RESIZE_KEY, autoResizeByDefault ? "on" : "off");
+    } catch {
+      // Storage blocked: the preference still holds for this tab.
+    }
+  }, [autoResizeByDefault]);
+  useEffect(() => {
+    audioByDefaultRef.current = audioByDefault;
+    try {
+      localStorage.setItem(AUDIO_KEY, audioByDefault ? "on" : "off");
+    } catch {
+      // Storage blocked: the preference still holds for this tab.
+    }
+  }, [audioByDefault]);
 
   // Settle everyone waiting on a fetch. `null` means "no answer came".
   const settleClipboardWaiters = useCallback(
@@ -629,13 +679,27 @@ export function useRemoteDesktop(
   // read as a control that did nothing. The dedupe makes it free when it already
   // matches, and this deliberately reuses the manual path — turning auto on is a
   // resize the user asked for.
-  const setAutoResize = useCallback((enabled: boolean) => {
+  // The session-only half: set the mode this connection runs in. The internal
+  // resets (a fresh `connected`, a return to the picker) and the connect-time seed
+  // all come through here, so none of them touches the remembered default.
+  const applyAutoResize = useCallback((enabled: boolean) => {
     autoResizeRef.current = enabled;
     setAutoResizeState(enabled);
     if (enabled) {
       resizeToWindowRef.current?.();
     }
   }, []);
+
+  // The desktop menu's "Auto resize" toggle: the same live effect, and it also
+  // writes the remembered default, so a value set mid-session is the one the next
+  // connection starts from. Only the user's toggle persists — never a reset.
+  const setAutoResize = useCallback(
+    (enabled: boolean) => {
+      setAutoResizeByDefault(enabled);
+      applyAutoResize(enabled);
+    },
+    [applyAutoResize],
+  );
 
   // The engine's latest pointer state, and where the touch gesture layer's
   // virtual pointer sits (null while a hardware mouse is driving). Both are
@@ -904,6 +968,12 @@ export function useRemoteDesktop(
     let sharedDisplay: number | null = null;
     // RXA resize requires both target permission and an active owned display.
     let rxaResize = false;
+    // Whether the remembered auto-resize default still owes this connection its
+    // effect. Set on `connected` when the target is rxa (whose permission is not
+    // settled until a display list names an owned display) and cleared the first
+    // time `handleDisplays` grants it, so a later switch onto and off a real screen
+    // does not keep re-imposing a mode the user may since have turned off.
+    let autoResizePending = false;
     const sendHostScale = () => {
       const scale = hostScaleHundredths();
       // Recorded before either guard below, and whether or not it is sent: the
@@ -1222,12 +1292,38 @@ export function useRemoteDesktop(
         const allowed = active?.virtual === true;
         resizeAllowedRef.current = allowed;
         setCanResize(allowed);
+        // The remembered default asked to follow the window and this is the first
+        // owned display that can — apply it once, then drop the debt, so a later
+        // switch does not re-impose it over a mid-session choice.
+        if (autoResizePending && allowed) {
+          autoResizePending = false;
+          applyAutoResize(true);
+        }
       }
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
       if (switched) {
         lastHostScale = null;
         sendHostScale();
+      }
+    };
+
+    // Audio belongs to one attachment: whatever was playing was on a socket that
+    // is gone, so a subscription has to be asked for again, and that ask needs a
+    // click's gesture for the AudioContext to be allowed to play. So the only way
+    // sound comes up already on is when the user wants it by default *and* this
+    // connect carried a gesture — `connect` primed a context inside the picker
+    // click, which is the only place `audioContextRef` is set — *and* the target
+    // actually carries audio. Anything else (a reattach with no gesture, a target
+    // with no sound, the default off) starts silent.
+    const seedAudioForAttachment = (hasAudio: boolean) => {
+      setAudioError(null);
+      if (audioByDefaultRef.current && hasAudio && audioContextRef.current) {
+        setAudioEnabled(true);
+        sendRef.current({ type: "audio", enabled: true });
+      } else {
+        releaseAudio();
+        setAudioEnabled(false);
       }
     };
 
@@ -1243,19 +1339,15 @@ export function useRemoteDesktop(
       setMode("desktop");
       setCanClipboard(msg.clipboard);
       setCanAudio(msg.audio);
-      // Audio starts off on every `connected`, reattach and takeover included, and
-      // that is not a reset for tidiness: a subscription belongs to one attachment,
-      // so the gateway is not sending any, and asking again has to come from a click
-      // for the AudioContext to be allowed to play. Whatever was playing belonged to
-      // a socket that is gone.
-      releaseAudio();
-      setAudioEnabled(false);
-      setAudioError(null);
-      // Manual on every connect, before either branch: the mode is this client's
-      // and it is per session, so a reattach, a target switch and a takeover all
-      // arrive with the remote's own size left alone.
-      setAutoResize(false);
+      seedAudioForAttachment(msg.audio);
+      // Manual on every connect, before either branch: a reattach, a target switch
+      // and a takeover all arrive with the remote's own size left alone. The
+      // remembered default is then applied below, once permission is known — and it
+      // reuses this session-only setter, so seeding a mode never rewrites the
+      // preference it came from.
+      applyAutoResize(false);
       lastViewport = null;
+      const wantAutoResize = autoResizeByDefaultRef.current;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
         // and never let this window's shape reach the remote again. So neither
@@ -1268,6 +1360,10 @@ export function useRemoteDesktop(
         rxaResize = false;
         setCanResize(false);
         mobileSizePending = msg.resize;
+        // No auto-follow on a pinch-zoom device whatever the default says: the
+        // window it would hand the remote is the one this client deliberately never
+        // reshapes it to.
+        autoResizePending = false;
       } else {
         // Permission, and permission only — what the operator allowed. Whether the
         // window then drives the remote is the user's, above, and identical for
@@ -1282,6 +1378,15 @@ export function useRemoteDesktop(
         const allowed = msg.resize && msg.protocol !== "rxa";
         resizeAllowedRef.current = allowed;
         setCanResize(allowed);
+        // Apply the remembered default now for VNC and RDP, whose permission is
+        // settled here; for rxa hold it until `handleDisplays` names an owned
+        // display it can honour. Where the target allows no resize at all, neither
+        // fires and the default silently does nothing — "… if compatible".
+        if (wantAutoResize && allowed) {
+          applyAutoResize(true);
+        } else {
+          autoResizePending = wantAutoResize && rxaResize;
+        }
       }
       // And this screen's density, which is what lets a display the agent made
       // come up matching the window it is about to be shown in rather than at
@@ -1404,8 +1509,11 @@ export function useRemoteDesktop(
           // No engine to resize, and the mode goes with the session: the next
           // target is asked about separately.
           resizeAllowedRef.current = false;
-          setAutoResize(false);
+          // Session-only, not the persisting setter: returning to the picker must
+          // not wipe the remembered default the next connect will apply.
+          applyAutoResize(false);
           rxaResize = false;
+          autoResizePending = false;
           setCanResize(false);
           setCanClipboard(false);
           // No engine, so no queue to subscribe to: the row goes away rather than
@@ -1519,7 +1627,7 @@ export function useRemoteDesktop(
     syncCursor,
     settleClipboardWaiters,
     releaseAudio,
-    setAutoResize,
+    applyAutoResize,
   ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
@@ -1537,13 +1645,27 @@ export function useRemoteDesktop(
   // the `remoteBusy` this picker just showed. It says nothing about this gateway's
   // own slot, which was claimed over HTTP before this socket existed — that
   // takeover is `takeOver()`.
-  const connect = useCallback((target: string, force = false) => {
-    setConnectError(null);
-    setRemoteBusy(null);
-    setPendingTarget(target);
-    sessionTargetRef.current = target;
-    sendRef.current({ type: "connect", target, force });
-  }, []);
+  const connect = useCallback(
+    (target: string, force = false) => {
+      setConnectError(null);
+      setRemoteBusy(null);
+      setPendingTarget(target);
+      sessionTargetRef.current = target;
+      // If the user wants sound by default, spend this click's gesture on an
+      // AudioContext now — the only moment one is playable (see setAudio). The
+      // `connected` that decides whether the target actually carries audio arrives
+      // a round trip later, long past any gesture, so it cannot make one then:
+      // `handleConnected` either adopts this primed context or, when the target has
+      // no audio or the default is off, releases it. Skipped where WebCodecs cannot
+      // decode Opus at all, which is the one thing there is no gesture to fix.
+      if (audioByDefaultRef.current && !audioUnavailable()) {
+        releaseAudio();
+        audioContextRef.current = createAudioContext();
+      }
+      sendRef.current({ type: "connect", target, force });
+    },
+    [releaseAudio],
+  );
 
   // Switch target: tear the current session down and return to the picker. The
   // server answers `picker`, which flips `mode` back.
@@ -1579,6 +1701,12 @@ export function useRemoteDesktop(
   // open for the answer. A gateway that has nothing to send simply sends nothing.
   const setAudio = useCallback(
     (enabled: boolean) => {
+      // The live control also writes the remembered default, so a choice made
+      // mid-session is the one the next connect starts from — the same single value
+      // the picker's toggle edits. Recorded as the intent whether or not this
+      // browser can decode: the picker's checkbox then honestly reflects what was
+      // asked for, and a capable browser later in the same profile obeys it.
+      setAudioByDefault(enabled);
       setAudioError(null);
       setAudioEnabled(enabled);
       releaseAudio();
@@ -1932,6 +2060,12 @@ export function useRemoteDesktop(
     canAudio,
     audioEnabled,
     audioError,
+    // The two remembered "by default" preferences and their setters, for the
+    // picker's "… if compatible" toggles.
+    autoResizeByDefault,
+    audioByDefault,
+    setAutoResizeByDefault,
+    setAudioByDefault,
     displays,
     activeDisplayId,
     remoteClipboard,

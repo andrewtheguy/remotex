@@ -30,6 +30,34 @@ final class ViewerPreferences {
         }
     }
 
+    /// Whether a new connection should follow this window's size where the target
+    /// allows it. Default off. Set from the picker's "… if compatible" toggle and
+    /// from the View menu's live "Auto Resize" alike — one remembered value, two
+    /// places to set it — and applied to a session only where `connected` (and, for
+    /// rxa, an owned display) says the target can honour it.
+    var autoResizeByDefault: Bool {
+        didSet {
+            guard autoResizeByDefault != oldValue else {
+                return
+            }
+            save()
+        }
+    }
+
+    /// Whether a new connection should play the remote's sound where the target
+    /// carries it. Default off. The same one-value-two-places arrangement as
+    /// `autoResizeByDefault`: the picker's toggle and the Remote menu's live
+    /// "Enable Audio" write it, and it is applied on connect only when the target
+    /// actually offers audio.
+    var audioByDefault: Bool {
+        didSet {
+            guard audioByDefault != oldValue else {
+                return
+            }
+            save()
+        }
+    }
+
     /// Which option the home screen offers first: the last one that worked.
     ///
     /// The choice is remembered and the screen is still shown. Remembering it and
@@ -84,6 +112,8 @@ final class ViewerPreferences {
     /// Stored preferences, defaulted for anything absent.
     private struct Stored: Codable {
         var macOSKeyboardOverridesEnabled: Bool?
+        var autoResizeByDefault: Bool?
+        var audioByDefault: Bool?
         var prefersRemoteGateway: Bool?
         var remoteGatewayAddress: String?
         var remoteSessionToken: String?
@@ -97,6 +127,8 @@ final class ViewerPreferences {
             .flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONDecoder().decode(Stored.self, from: $0) }
         macOSKeyboardOverridesEnabled = stored?.macOSKeyboardOverridesEnabled ?? true
+        autoResizeByDefault = stored?.autoResizeByDefault ?? false
+        audioByDefault = stored?.audioByDefault ?? false
         prefersRemoteGateway = stored?.prefersRemoteGateway ?? false
         remoteGatewayAddress = stored?.remoteGatewayAddress
         remoteSessionToken = stored?.remoteSessionToken
@@ -108,6 +140,8 @@ final class ViewerPreferences {
         }
         let stored = Stored(
             macOSKeyboardOverridesEnabled: macOSKeyboardOverridesEnabled,
+            autoResizeByDefault: autoResizeByDefault,
+            audioByDefault: audioByDefault,
             prefersRemoteGateway: prefersRemoteGateway,
             remoteGatewayAddress: remoteGatewayAddress,
             remoteSessionToken: remoteSessionToken

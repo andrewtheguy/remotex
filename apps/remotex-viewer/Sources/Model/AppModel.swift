@@ -21,6 +21,33 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// The remembered "follow this window's size" default, bound to the picker's
+    /// "… if compatible" toggle. One value with two editors: the View menu's live
+    /// "Auto Resize" writes it too (through `setAutoResize`), so a choice made
+    /// mid-session is the one the next connection starts from. Applied to a session
+    /// in `handle(_:)` only where the target can honour it.
+    var autoResizeByDefault: Bool {
+        didSet {
+            guard autoResizeByDefault != oldValue else {
+                return
+            }
+            preferences.autoResizeByDefault = autoResizeByDefault
+        }
+    }
+
+    /// The remembered "play the remote's sound" default, bound to the picker's
+    /// "… if compatible" toggle. Same one-value-two-places arrangement as
+    /// `autoResizeByDefault`; the Remote menu's live "Enable Audio" writes it
+    /// through `setAudioEnabled`.
+    var audioByDefault: Bool {
+        didSet {
+            guard audioByDefault != oldValue else {
+                return
+            }
+            preferences.audioByDefault = audioByDefault
+        }
+    }
+
     /// Bound to the home screen's address field. Not the choice itself — see
     /// `chosen` — because a field being typed into is not yet a decision.
     var gatewayAddress: String
@@ -143,6 +170,14 @@ final class AppModel: GatewaySessionSink {
     /// even if it repeats the number.
     @ObservationIgnored
     private var lastHostScale: UInt16?
+    /// Whether the remembered auto-resize default still owes this connection its
+    /// effect. Set on `connected` for an rxa target, whose permission is not
+    /// settled until a `displays` message names an owned display, and cleared the
+    /// first time one does — so a later switch onto and off a real screen does not
+    /// keep re-imposing a mode the user may since have turned off. VNC and RDP
+    /// settle at `connected`, so they never leave it set.
+    @ObservationIgnored
+    private var pendingAutoResizeSeed = false
     /// This screen's density in hundredths, for the Display menu to show beside
     /// the remote's. Nothing about how the desktop is presented reads it — that
     /// comes from `session.remoteScale` alone, see `RemoteGeometry`. Observed
@@ -185,6 +220,8 @@ final class AppModel: GatewaySessionSink {
         self.clipboard = clipboard
         self.urlSession = urlSession
         macOSKeyboardOverridesEnabled = preferences.macOSKeyboardOverridesEnabled
+        autoResizeByDefault = preferences.autoResizeByDefault
+        audioByDefault = preferences.audioByDefault
         gatewayAddress = preferences.remoteGatewayAddress ?? ""
         // An app with no gateway to run has one option, and it is the other one. The
         // preference cannot say so on a first launch, so the bundle does.
@@ -210,11 +247,15 @@ final class AppModel: GatewaySessionSink {
     // MARK: - Derived UI state
 
     var windowTitle: String {
-        if let target = session.connectedTarget {
-            "\(target) — remotex"
-        } else {
-            branding
+        guard let target = session.connectedTarget else {
+            return branding
         }
+        // A speaker suffix while sound is playing — the one persistent surface that
+        // can say so, since the toggle is a menu item nobody is looking at. In
+        // session only: `audio.isEnabled` is cleared on the way to the picker, so
+        // this never trails the branding on the picker screen.
+        let base = "\(target) — remotex"
+        return audio.isEnabled ? "\(base) 🔊" : base
     }
 
     /// Whether this session runs on the gateway in this bundle.
@@ -784,6 +825,9 @@ final class AppModel: GatewaySessionSink {
             // `AudioOutput.update(available:)` handles — a reconnect keeps playing.
             audio.reset()
             viewportPolicy = ViewportPolicy()
+            // No connection left to owe the resize default to; the next pick sets
+            // this again from `connected`.
+            pendingAutoResizeSeed = false
             updateClipboardEnablement()
             updateAudioAvailability()
             clipboard.failPendingFetch()
@@ -793,6 +837,13 @@ final class AppModel: GatewaySessionSink {
             session.screen = .desktop
             session.connectedTarget = payload.name
             session.protocolName = payload.protocolName
+            // Whether this attach is one the user asked for — a pick or a takeover,
+            // both of which set `pendingTarget` — as opposed to a silent reconnect,
+            // which does not. Read before the line below clears it. Only a
+            // user-initiated attach seeds the audio default: a reconnect keeps the
+            // last attachment's intent (see the audio block below), and re-seeding
+            // there would un-mute a session the user muted before it dropped.
+            let userInitiated = session.pendingTarget != nil
             session.pendingTarget = nil
             setConnectError(nil)
             // The remote is ours after all, so an offer to take it over has nothing
@@ -812,11 +863,22 @@ final class AppModel: GatewaySessionSink {
             updateClipboardEnablement()
             session.canAudio = payload.audio
             updateAudioAvailability()
-            // The gateway's audio subscription belongs to an *attachment*, so a
-            // reconnect arrives with it off while the menu still says on. Re-asserted
-            // here for the same reason the viewport and the host scale are below: a
-            // freshly attached session knows nothing about this client.
-            audio.reassert()
+            if userInitiated, audioByDefault, session.canAudio {
+                // A pick or takeover, the remembered default wants sound, and the
+                // target carries it: subscribe. `audio.reset()` on the `picker`
+                // before this left intent off, so this is the first ask of the
+                // attachment — where the target has no audio the default silently
+                // does nothing, which is the "… if compatible" of the picker toggle.
+                audio.setEnabled(true)
+            } else {
+                // A reconnect, or no default, or a target with no sound. The
+                // gateway's subscription belongs to an *attachment*, so a reconnect
+                // arrives with it off while the menu still says on; re-asserted here
+                // for the same reason the viewport and host scale are below — a
+                // freshly attached session knows nothing about this client. A no-op
+                // when intent is off, so it also covers the other two cases.
+                audio.reassert()
+            }
             // Both dedupes would otherwise swallow the first report of this session
             // for repeating a size already sent — for the previous target, or for
             // the picker. Both have to be cleared, not just the policy's: the
@@ -829,6 +891,19 @@ final class AppModel: GatewaySessionSink {
             // `setAutoResize(true)` does.
             viewportPolicy.resetForNewConnection()
             connection?.resetViewportMemo()
+            // Seed the remembered auto-resize default now that the dedupes are
+            // clear — its first act is a viewport report, and reporting before the
+            // reset above would have it swallowed. VNC and RDP have their permission
+            // settled, so the default takes or does not take effect here; rxa's
+            // permission waits on a `displays` naming an owned display, so defer to
+            // the first one. Where the target allows no resize, neither path fires
+            // and the default silently does nothing.
+            if autoResizeByDefault, session.canResize {
+                applyAutoResize(true)
+                pendingAutoResizeSeed = false
+            } else {
+                pendingAutoResizeSeed = autoResizeByDefault
+            }
             // And this window's screen density, so a display the agent made comes
             // up matching the screen it is about to be shown on rather than at
             // whatever it was left at. Undeduped for the same reason as the
@@ -862,6 +937,14 @@ final class AppModel: GatewaySessionSink {
             // Harmless for RDP and VNC, whose policy the call above cannot touch:
             // it writes back the values that are already there.
             publishViewportPolicy()
+            // The remembered auto-resize default asked to follow the window and this
+            // is the first owned display that can honour it — apply it once, then
+            // drop the debt, so a later switch onto and off a real screen does not
+            // re-impose a mode the user may since have turned off.
+            if pendingAutoResizeSeed, session.canResize {
+                pendingAutoResizeSeed = false
+                applyAutoResize(true)
+            }
             // A different display is being shared, and the density was only ever
             // reported *at* the previous one — the agent acts on it for the display
             // it is currently sharing, so a switch onto one the agent made would
@@ -1108,6 +1191,17 @@ final class AppModel: GatewaySessionSink {
     /// deliberately: turning this on *is* a resize the user asked for, and the
     /// dedupe makes it free when the size already matches.
     func setAutoResize(_ enabled: Bool) {
+        // The View menu's toggle also writes the remembered default, so the value
+        // set mid-session is the one the next connect starts from — the same single
+        // value the picker's toggle edits.
+        autoResizeByDefault = enabled
+        applyAutoResize(enabled)
+    }
+
+    /// The session-only half of `setAutoResize`: set the mode this connection runs
+    /// in without touching the remembered default. The connect-time seed uses this,
+    /// so applying a remembered default never rewrites it.
+    private func applyAutoResize(_ enabled: Bool) {
         guard session.canResize else {
             return
         }
@@ -1116,6 +1210,14 @@ final class AppModel: GatewaySessionSink {
         if enabled {
             sendViewport(manual: true)
         }
+    }
+
+    /// The Remote menu's "Enable Audio" toggle. Like `setAutoResize` it also writes
+    /// the remembered default, so muting or unmuting mid-session is remembered for
+    /// the next connect. The live effect is `AudioOutput`'s.
+    func setAudioEnabled(_ enabled: Bool) {
+        audioByDefault = enabled
+        audio.setEnabled(enabled)
     }
 
     /// "Resize to Window": one report, now, whatever the mode.
