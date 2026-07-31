@@ -19,10 +19,10 @@ axum server ── single session slot ── protocol engine
                                          └─ RXA macOS agent
 ```
 
-RDP and VNC frames are decoded in the gateway and encoded as WebP tiles. The
-RXA agent sends browser-ready WebP, which the gateway relays unchanged. RDP
-audio is converted from PCM to Opus and sent on the same WebSocket independently
-of the tile encoder and batching queue.
+RDP and VNC frames are decoded in the gateway and encoded as PNG tiles. The
+RXA agent sends browser-ready PNG or JPEG, classified per tile, which the gateway
+relays unchanged. RDP audio is converted from PCM to Opus and sent on the same
+WebSocket independently of the tile encoder and batching queue.
 
 ## Constraints
 
@@ -51,7 +51,7 @@ of the tile encoder and batching queue.
 | `rdp.rs` | RDP connection, framebuffer, input, clipboard, audio, resize |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `rxa.rs` | authenticated Mac-agent connection and tile relay |
-| `encode.rs`, `tiles.rs` | ordered WebP encoding and change detection |
+| `encode.rs`, `tiles.rs` | ordered PNG encoding and change detection |
 | `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding, MS-RDPEA |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -113,7 +113,7 @@ TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 TILE_REF op 0x02: u16 slot | u16 x | u16 y
 ```
 
-The only tile format is WebP. One frame carries multiple ready updates so a
+Tile formats are PNG and JPEG. One frame carries multiple ready updates so a
 repaint does not require one WebSocket event per tile. Receivers reject nonzero
 flags, unknown operations, truncated records, and unsupported formats.
 
@@ -232,7 +232,7 @@ verify the agent process and reconnect transient failures.
 
 IronRDP handles TLS and optional NLA/CredSSP. The engine maintains a decoded
 framebuffer, compares dirty rectangles with a shadow of pixels already sent,
-splits remaining damage into bands, and encodes WebP off the protocol read loop.
+splits remaining damage into bands, and encodes PNG off the protocol read loop.
 Input uses fast-path PDUs after DOM-code-to-scancode mapping.
 
 With `resize = true`, the Display Control Virtual Channel applies explicit
