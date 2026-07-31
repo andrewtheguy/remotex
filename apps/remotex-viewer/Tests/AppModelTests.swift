@@ -312,32 +312,227 @@ struct AppModelTests {
         #expect(relative?.path.hasPrefix("/") == true)
     }
 
-    /// There is nothing to talk to before the gateway is up, and nothing to type
-    /// either: the app starts on the launch screen and no input reaches a remote from
-    /// there.
+    /// The app asks before it does anything. Nothing is contacted, no gateway is
+    /// started, and no input reaches a remote from here — the whole point of the
+    /// screen is that which gateway to use is a question only the user can answer.
     @Test
-    func theAppStartsOnTheLaunchScreenWithNoGateway() {
+    func theAppStartsOnTheHomeScreenHavingContactedNothing() {
         let model = makeModel()
-        #expect(model.session.screen == .launching)
+        #expect(model.session.screen == .home)
+        #expect(model.chosen == nil, "nothing chosen, so nothing local to act on")
+        #expect(!model.usesEmbeddedGateway)
         #expect(!model.canSendInput)
-        #expect(model.launchError == nil, "not a failure yet — nothing has been tried")
+        #expect(model.homeError == nil, "not a failure yet — nothing has been tried")
+        #expect(model.launchError == nil)
         // Unbundled, so there is no gateway binary to run and no config store over it.
         #expect(model.gateway == nil)
         #expect(model.config == nil)
     }
 
-    /// Launching without a gateway in the bundle says so rather than looking like a
-    /// network problem, and leaves the app where it can be retried.
+    /// A build with no gateway beside it has one option, so the home screen comes up
+    /// on it rather than on the one that cannot work.
     @Test
-    func launchingWithoutABundledGatewaySaysSo() async {
-        let model = makeModel()
+    func aBuildWithNoBundledGatewayOffersTheRemoteOptionFirst() {
+        #expect(makeModel().prefersRemoteGateway)
+    }
 
-        await model.launch()
+    /// Choosing the local gateway without one in the bundle says so rather than
+    /// looking like a network problem, and leaves the app where it can be retried.
+    ///
+    /// Unreachable from the home screen, which disables the option — this is the
+    /// model's own guard, and it has to hold because `chooseGateway` is what a
+    /// keyboard default action reaches.
+    @Test
+    func choosingAMissingLocalGatewaySaysSo() async {
+        let model = makeModel()
+        model.prefersRemoteGateway = false
+
+        await model.chooseGateway()
 
         #expect(model.session.screen == .launching)
         let error = model.launchError ?? ""
         #expect(error.contains("incomplete"), "got: \(error)")
         #expect(!model.isBusy, "and the retry button is usable")
+    }
+
+    /// An address that is not one never leaves the home screen: it is answered where
+    /// it was typed, before a process is started or a request is made.
+    @Test
+    func anUnusableAddressIsRefusedOnTheHomeScreen() async {
+        let model = makeModel()
+        model.prefersRemoteGateway = true
+
+        for address in ["", "   ", "ftp://remotex.example.com", "http://"] {
+            model.gatewayAddress = address
+            await model.chooseGateway()
+            #expect(model.session.screen == .home, "for \(address.debugDescription)")
+            #expect(model.homeError != nil, "for \(address.debugDescription)")
+            #expect(model.chosen == nil, "for \(address.debugDescription)")
+        }
+    }
+
+    /// A remote gateway that answers is chosen, and its login is what comes next.
+    ///
+    /// Also what is *remembered*, and when: the address only after the gateway
+    /// answered, so a typo never becomes the address the next launch starts from.
+    @Test
+    func aRemoteGatewayThatAnswersLandsOnItsLoginScreen() async throws {
+        let directory = try ScratchDirectory()
+        let preferences = ViewerPreferences(url: directory.url.appending(path: "viewer.json"))
+        let (model, address) = makeRemoteModel(preferences: preferences) { request in
+            request.url?.path.hasSuffix("/auth/status") == true
+                ? (200, #"{"authenticated":false}"#)
+                : (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+        // Typed the way somebody would: no scheme, and the case they used.
+        model.gatewayAddress = model.gatewayAddress
+            .replacingOccurrences(of: "https://", with: "")
+            .uppercased()
+
+        await model.chooseGateway()
+
+        #expect(model.session.screen == .login)
+        #expect(model.chosen == .remote(try GatewayLocation.parse(address)))
+        #expect(!model.usesEmbeddedGateway)
+        #expect(model.branding == "acme")
+        #expect(model.homeError == nil)
+        // Normalized on the way through, so what is shown and stored is what answered.
+        #expect(model.gatewayAddress == address)
+        #expect(preferences.remoteGatewayAddress == address)
+        #expect(preferences.prefersRemoteGateway)
+    }
+
+    /// The local gateway's config file and its rxa key describe the gateway in *this*
+    /// bundle. Against a remote one they are not part of the session — its targets and
+    /// its key are its own — so neither is offered.
+    @Test
+    func aRemoteGatewayOffersNoLocalConfigurationAndNoKey() async throws {
+        let (model, _) = makeRemoteModel { request in
+            request.url?.path.hasSuffix("/auth/status") == true
+                ? (200, #"{"authenticated":false}"#)
+                : (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+        await model.chooseGateway()
+
+        #expect(!model.usesEmbeddedGateway)
+        #expect(!model.canEditConfiguration, "and the key row goes with it — see RootView")
+        model.editConfiguration()
+        #expect(model.configurationRequests == 0, "refused at the model, not only greyed")
+
+        // The same guard on the other local-only action: there is no process of ours
+        // behind a remote gateway to restart.
+        await model.relaunchGateway()
+        #expect(model.session.screen == .login, "still where it was")
+    }
+
+    /// A remote gateway on another wire protocol is refused on the home screen,
+    /// before a login is even offered — the viewer ships separately from a remote
+    /// gateway, so this is the check that keeps a mismatch from becoming an
+    /// unreadable frame later. `configuration()` runs ahead of `authState()`, so the
+    /// incompatibility is what the user sees rather than a login they cannot pass.
+    @Test
+    func anIncompatibleRemoteGatewayIsRefusedBeforeItsLogin() async throws {
+        let (model, _) = makeRemoteModel { request in
+            request.url?.path.hasSuffix("/auth/status") == true
+                ? (200, #"{"authenticated":false}"#)
+                : (200, #"{"branding":"acme","protocolVersion":9999}"#)
+        }
+
+        await model.chooseGateway()
+
+        #expect(model.session.screen == .home, "not the login screen")
+        #expect(model.chosen == nil)
+        #expect(model.homeError?.contains("protocol") == true, "got: \(model.homeError ?? "")")
+    }
+
+    /// Pointing the app at another copy of *itself* — an embedded gateway, which
+    /// refuses `/api/auth/*` — is answered with the reason rather than with a login
+    /// form that could never succeed.
+    @Test
+    func aGatewayWithNoLoginIsRefusedWithTheReason() async throws {
+        let (model, _) = makeRemoteModel { request in
+            request.url?.path.hasSuffix("/auth/status") == true
+                ? (403, "forbidden")
+                : (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+
+        await model.chooseGateway()
+
+        #expect(model.session.screen == .home)
+        #expect(model.chosen == nil)
+        #expect(model.homeError?.contains("embedded gateway") == true, "got: \(model.homeError ?? "")")
+    }
+
+    /// A remembered login is a hint and never an assumption — the gateway's sessions
+    /// live in its memory — but when it still holds, the login screen is skipped.
+    ///
+    /// The claim answers 409, which is a state the user acts on rather than a failure:
+    /// it parks the session without opening a socket, so what this asserts is the
+    /// screen it got to and not a race with the network.
+    @Test
+    func arememberedLoginSkipsTheLoginScreen() async throws {
+        let directory = try ScratchDirectory()
+        let preferences = ViewerPreferences(url: directory.url.appending(path: "viewer.json"))
+        preferences.remoteSessionToken = "sess-9"
+        let (model, _) = makeRemoteModel(preferences: preferences) { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/auth/status") {
+                return (200, #"{"authenticated":true}"#)
+            }
+            if path.hasSuffix("/session") {
+                return (409, "another client holds the session")
+            }
+            return (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+
+        await model.chooseGateway()
+
+        #expect(model.session.screen == .picker, "past the login, into the session")
+        #expect(preferences.remoteSessionToken == "sess-9", "and it is still remembered")
+    }
+
+    /// A stored token the gateway no longer knows costs one request and the login
+    /// screen — and is forgotten, so the next launch does not present it again.
+    @Test
+    func aStaleStoredLoginIsDroppedRatherThanRetried() async throws {
+        let directory = try ScratchDirectory()
+        let preferences = ViewerPreferences(url: directory.url.appending(path: "viewer.json"))
+        preferences.remoteSessionToken = "sess-expired"
+        let (model, _) = makeRemoteModel(preferences: preferences) { request in
+            request.url?.path.hasSuffix("/auth/status") == true
+                ? (200, #"{"authenticated":false}"#)
+                : (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+
+        await model.chooseGateway()
+
+        #expect(model.session.screen == .login)
+        #expect(preferences.remoteSessionToken == nil)
+    }
+
+    /// Changing gateway gives up everything that stood on the one being left: the
+    /// session, the stored login, and the screen.
+    @Test
+    func changingGatewayGivesUpTheLoginAndReturnsHome() async throws {
+        let directory = try ScratchDirectory()
+        let preferences = ViewerPreferences(url: directory.url.appending(path: "viewer.json"))
+        let (model, address) = makeRemoteModel(preferences: preferences) { request in
+            request.url?.path.hasSuffix("/auth/status") == true
+                ? (200, #"{"authenticated":false}"#)
+                : (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+        await model.chooseGateway()
+        #expect(model.canChangeGateway)
+
+        await model.changeGateway()
+
+        #expect(model.session.screen == .home)
+        #expect(model.chosen == nil)
+        #expect(preferences.remoteSessionToken == nil)
+        #expect(model.targets.isEmpty)
+        #expect(!model.canChangeGateway, "nothing left to change away from")
+        // The address survives, because it is what the field comes up filled with.
+        #expect(preferences.remoteGatewayAddress == address)
     }
 
     /// The menu item and the picker's button both go through the model, because a
@@ -534,6 +729,35 @@ struct AppModelTests {
                 startsPolling: false
             )
         )
+    }
+
+    /// A model whose HTTP goes to a stub, for the remote branch.
+    ///
+    /// Only the HTTP: `URLProtocol` does not intercept `URLSessionWebSocketTask`, so
+    /// every test using this stops at a point no socket has been opened from — the
+    /// login screen, or a claim the stub answered 409. That is a real limit and not a
+    /// convenience: what a session does once it is up belongs to the tests that drive
+    /// a scripted transport (`AttachedSession`), and one that let a real socket out
+    /// would be testing this machine's network.
+    private func makeRemoteModel(
+        preferences: ViewerPreferences = ViewerPreferences(url: nil),
+        _ handler: @escaping StubURLProtocol.Handler
+    ) -> (model: AppModel, address: String) {
+        // Its own host, so a suite running beside this one cannot answer its
+        // requests — see `StubURLProtocol`.
+        let host = StubURLProtocol.uniqueHost()
+        StubURLProtocol.register(host: host, handler: handler)
+        let model = AppModel(
+            preferences: preferences,
+            clipboard: ClipboardSynchronizer(
+                pasteboard: NSPasteboard.withUniqueName(),
+                startsPolling: false
+            ),
+            urlSession: StubURLProtocol.session()
+        )
+        model.prefersRemoteGateway = true
+        model.gatewayAddress = "https://\(host)"
+        return (model, "https://\(host)/")
     }
 
     /// A Mac with a screen somebody is at and an extra one the agent made.

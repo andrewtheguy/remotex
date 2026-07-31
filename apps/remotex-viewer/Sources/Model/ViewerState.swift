@@ -1,12 +1,22 @@
 import Foundation
 
 enum ViewerScreen: String {
+    /// Which gateway to use: the one in this bundle, or one at an address.
+    ///
+    /// The landing screen, and the reason there is one at all. The embedded gateway
+    /// is the right answer for a Mac on the same network as its targets and the wrong
+    /// one when the link to them is slow — there the gateway belongs near the target
+    /// and this app should be talking to *it*. Only the user knows which case they
+    /// are in, so the app asks instead of deciding.
+    case home
+    /// Credentials for a remote gateway. Never reached for the embedded one, which
+    /// has no login to offer (`no_login_handler` in src/server.rs).
+    case login
     /// Starting the gateway in this bundle, or explaining why it did not start.
     ///
-    /// The only screen ahead of the picker, and it asks nothing: there is no address
-    /// to choose — the gateway is the one this app carries — and no credentials to
-    /// type, because the token it prints is the whole of the authentication. So this
-    /// is a progress indicator that occasionally becomes an error message.
+    /// The embedded branch's own screen, and it asks nothing: the token the gateway
+    /// prints is the whole of the authentication. So this is a progress indicator
+    /// that occasionally becomes an error message.
     case launching
     case picker
     case desktop
@@ -72,7 +82,7 @@ func displaySummary(
 /// Every field here is derived from the gateway's own control messages, which is
 /// why the derivations are spelled out where they happen (`AppModel.handle`).
 struct ViewerSessionState: Equatable {
-    var screen = ViewerScreen.launching
+    var screen = ViewerScreen.home
     var connectionStatus: ViewerConnectionStatus?
     var connectedTarget: String?
     /// `"rdp"`, `"vnc"`, or `"rxa"`, from `connected`. Decides the resize

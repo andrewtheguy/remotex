@@ -20,6 +20,13 @@ struct AboutPanel: View {
     /// describe. The version above still is one, which is the reason this panel does
     /// not require a store to open.
     let store: GatewayConfigStore?
+    /// Whether to show the rxa public key of the gateway in this bundle.
+    ///
+    /// False while the app is talking to a gateway somewhere else, which is the case
+    /// this flag exists for: the instance below is still this app's, but that key is
+    /// not the one the session presents to any Mac agent — the remote gateway has its
+    /// own, and it is that one a target has to authorize. See `AppModel.chosen`.
+    let showsGatewayKey: Bool
 
     @Environment(\.dismiss)
     private var dismiss
@@ -93,6 +100,8 @@ struct AboutPanel: View {
             }
         }
 
-        GatewayKeyRow(store: store)
+        if showsGatewayKey {
+            GatewayKeyRow(store: store)
+        }
     }
 }

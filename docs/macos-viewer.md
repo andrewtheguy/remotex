@@ -1,12 +1,30 @@
 # remotex.app
 
-`remotex.app` is a native macOS 26 client that carries its own gateway. It starts
-that gateway on an ephemeral loopback port at launch, authenticates to it with a
-token nobody types, and shuts it down when the app quits — so there is no server to
-install, no address to enter, and no login. It owns target selection, session
-recovery, tile decoding, Metal rendering, input, clipboard synchronization, and
-audio playback; it contains no `WKWebView` and shares protocol behavior, not
-implementation, with the browser client.
+`remotex.app` is a native macOS 26 client that **carries** its own gateway and can
+also be pointed at one. It owns target selection, session recovery, tile decoding,
+Metal rendering, input, clipboard synchronization, and audio playback; it contains no
+`WKWebView` and shares protocol behavior, not implementation, with the browser client.
+
+The two gateways are the app's first question, asked on the `home` screen at every
+launch with the last answer preselected:
+
+| | the embedded gateway | a remote gateway |
+|---|---|---|
+| where it runs | in this bundle, started at launch | wherever it was installed |
+| address | an ephemeral loopback port it picks | typed, and remembered once it answers |
+| credential | a bearer token nobody types | a username and password, once per session |
+| who reaches the target | this Mac | that gateway |
+| **Configuration…**, the rxa key | this instance's | not shown — they are that gateway's |
+
+Neither is a default the app can pick for somebody. The embedded gateway is the right
+answer for targets this Mac can reach directly — nothing to install, nothing to sign
+in to. It is the wrong one when the link to the target is slow, because then every
+tile crosses that link and the gateway belongs at the far end with this app talking to
+*it*. Only the user knows which case they are in.
+
+Below the choice, the two are the same program: `/api/config`, `/api/targets`,
+`/api/session` and `/ws` are one route table with one set of shapes. The single
+difference is which header carries the credential — see `GatewayCredential`.
 
 The client has no RDP, VNC, or RXA implementation. Engine-specific behavior is
 reported by the gateway, with resize policy as the only client-side branch.
@@ -250,21 +268,40 @@ Contract tests protect both sides:
 
 ## Entry and session lifecycle
 
-There is one screen ahead of the target picker and it asks for nothing: `launching`
-shows a spinner, or the reason the gateway did not start with the gateway's own
-stderr beneath it and **Configuration…** / **Try Again** to act on it. A gateway that
-exits while the app is using it lands on the same screen — deliberately not restarted
-automatically, since one that died on a config it accepted will die again, and a
-silent retry loop would hide the output that explains why.
+`ViewerScreen` is `home`, `login`, `launching`, `picker`, `desktop`. The first is the
+gateway choice above; the branches meet again at `picker`.
+
+**The embedded branch** goes `home` → `launching` → `picker`. `launching` asks for
+nothing: it shows a spinner, or the reason the gateway did not start with the
+gateway's own stderr beneath it and **Configuration…** / **Change Gateway…** /
+**Try Again** to act on it. A gateway that exits while the app is using it lands on
+the same screen — deliberately not restarted automatically, since one that died on a
+config it accepted will die again, and a silent retry loop would hide the output that
+explains why.
+
+**The remote branch** goes `home` → `login` → `picker`, and skips `login` when the
+stored session cookie is still one the gateway knows. The address is validated on
+`home` — reachable, and speaking a protocol version this build can — so a failure on
+`login` can only be about the credentials. A gateway that answers `403` from
+`/api/auth/status` is an embedded one somebody typed the address of; it is refused by
+name rather than shown a login form that could never succeed.
+
+**Change Gateway…** is the way back to `home` from anywhere, and it is also the log
+out: a remote gateway is told, so its login and its session slot are released rather
+than left for the reattach grace period.
 
 Authentication and session ownership stay separate, as before:
 
-- the bearer token authorizes this client to the gateway;
+- the credential authorizes this client to the gateway;
 - the claim token owns the program's one active session slot.
 
-A `401` no longer means "sign in again": the token is good for as long as the process
-that minted it lives, so it means the gateway behind that port is not the one that
-issued it. The app restarts the gateway instead.
+What a `401` means is the one thing that differs between the branches after a session
+has started. On a remote gateway the login has expired or been ended elsewhere, so the
+`login` screen comes back and the stored cookie is dropped. On the embedded one there
+is no login to offer: the token is good for as long as the process that minted it
+lives, so a `401` means the gateway behind that port is not the one that issued it, and
+the app restarts the gateway instead — once, then it shows the launch screen rather
+than looping.
 
 `SessionStateMachine` implements claim, attach, reconnect and takeover as a pure state
 machine. Network reconnects use capped exponential backoff up to 15 seconds. A busy
@@ -443,15 +480,35 @@ log carries that diagnosis.
 
 ## Networking
 
-The gateway is reached over plain HTTP on loopback, and ATS treats `ws://` as
-`http://`, so the bundle uses `NSAllowsArbitraryLoads`.
+The embedded gateway is reached over plain HTTP on loopback, and a remote one may be
+plain HTTP too; ATS treats `ws://` as `http://`, so the bundle uses
+`NSAllowsArbitraryLoads`.
 
-Every request carries `Authorization: Bearer <token>`, including `/api/config`, which
-needs no credential: a client that authenticates only the routes it believes are
-guarded is one route away from a 401 nobody expected. The WebSocket upgrade carries it
-too — `require_auth` runs before the upgrade, so omitting it is a bare 401 rather than
-a socket that closes with a reason. `httpShouldHandleCookies` is off everywhere; there
-are no cookies in this arrangement.
+Every request carries this client's credential, including `/api/config`, which needs
+none: a client that authenticates only the routes it believes are guarded is one route
+away from a 401 nobody expected. The WebSocket upgrade carries it too — `require_auth`
+runs before the upgrade, so omitting it is a bare 401 rather than a socket that closes
+with a reason.
+
+Which header depends on the gateway, and they are not interchangeable — `require_auth`
+reads the cookie on a login gateway and the bearer on a token one, and neither looks at
+the other:
+
+| gateway | header |
+|---|---|
+| embedded | `Authorization: Bearer <token>` |
+| remote, signed in | `Cookie: remotex_session=<token>` |
+| remote, not yet | none. The public routes are what the `home` screen asks |
+
+`httpShouldHandleCookies` is off everywhere, on both. The session cookie is held by
+the client and set by hand, never by `HTTPCookieStorage`, for two reasons: that storage
+matches a `Secure` cookie only against an `https` scheme, and behind a TLS-terminating
+proxy the gateway does set `Secure` while the socket's scheme is `wss` — so the cookie
+would be dropped for a 401 with nothing to explain it; and it matches by host while
+**ignoring the port**, so two instances against two gateways on one host would share
+one login and each would log the other out. The cookie is stored in the instance's
+`viewer.json` (mode `0600`), which is what makes quitting the app not mean typing the
+password again.
 
 Two different tokens meet on the upgrade and are not interchangeable: the query's
 `session` is the claim, deciding whose turn it is, and the header's is this client's
@@ -475,17 +532,21 @@ isolation: config, log and preferences are all under the directory it names, so 
 run cannot touch what a real one keeps in
 `~/Library/Application Support/remotex`. Clear the slate by deleting the directory.
 
-There is deliberately no way to point the app at another gateway — not on the command
-line and not in the UI. The gateway it talks to is the one in its own bundle.
+`--instance-dir` remains the only argument the app takes. Pointing it at another
+gateway is a UI decision, not a command-line one: type the address on the `home`
+screen. There is deliberately no `--gateway` flag — an address that a launcher can
+pass is one an instance can be silently launched with, and the instance directory is
+what isolation is built on here.
 
 Always validate the packaged `.app`; `swift run`, standalone `swift build`, and
 the executable under `.build` bypass bundle menus, `Info.plist` behavior, and the
 bundled gateway (`Bundle.main.url(forAuxiliaryExecutable:)` finds nothing, so the app
 comes up saying it is incomplete).
 
-For socket-level diagnostics, `--probe` starts the same embedded gateway and prints
-received control and frame information. It takes no address or credentials, because
-there is no other gateway for it to reach:
+For socket-level diagnostics, `--probe` starts the embedded gateway and prints
+received control and frame information. It takes no address or credentials — it is a
+diagnostic for the embedded path only, and a remote gateway's socket is that
+deployment's own to measure:
 
 ```sh
 dist/remotex.app/Contents/MacOS/remotex-viewer \

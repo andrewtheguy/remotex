@@ -21,15 +21,35 @@ final class AppModel: GatewaySessionSink {
         }
     }
 
+    /// Bound to the home screen's address field. Not the choice itself — see
+    /// `chosen` — because a field being typed into is not yet a decision.
+    var gatewayAddress: String
+    /// Which of the two options the home screen has selected.
+    var prefersRemoteGateway: Bool
+
     private(set) var branding = "remotex"
     private(set) var session = ViewerSessionState()
     private(set) var targets: [TargetInfo] = []
-    /// A launch or a relaunch is in flight, so the controls that would start
+    /// Which gateway this session is against, once one has been chosen. Nil on the
+    /// home screen, which is the screen that answers it.
+    ///
+    /// Everything that differs between the two branches reads this: whether there is
+    /// a process of ours to restart, whether the configuration panel and the rxa key
+    /// describe anything the session can see, and what a 401 means.
+    private(set) var chosen: GatewayChoice?
+    /// A launch, a login or a relaunch is in flight, so the controls that would start
     /// another are locked.
     private(set) var isBusy = false
+    /// Shown on the home screen: an address that will not parse, a gateway that
+    /// cannot be reached, or one speaking a protocol this build does not.
+    private(set) var homeError: String?
+    /// Shown under the credentials on the login screen.
+    private(set) var loginError: String?
     /// Why there is no gateway to talk to, if there is not: an incomplete bundle, a
     /// config it refused, a gateway that died. Shown on the launch screen with the
     /// gateway's own output beneath it, because that output is what names the fix.
+    /// The embedded branch only — a remote gateway's failures land on the home
+    /// screen, where the address that produced them is.
     private(set) var launchError: String?
     /// The gateway's recent stderr, shown under `launchError`.
     private(set) var launchLog = ""
@@ -53,9 +73,12 @@ final class AppModel: GatewaySessionSink {
     let clipboard: ClipboardSynchronizer
     let audio = AudioOutput()
 
-    /// The gateway this app runs, and the config it runs on. Held rather than
-    /// created per launch: `stop()` has to reach the same process `start()` made,
-    /// and the configuration panel edits the same instance the gateway reads.
+    /// The gateway this app can run, and the config it would run on. Held rather
+    /// than created per launch: `stop()` has to reach the same process `start()`
+    /// made, and the configuration panel edits the same instance the gateway reads.
+    ///
+    /// Present whether or not it is in use — this is the bundle's gateway, not the
+    /// session's. `usesEmbeddedGateway` is the question about the session.
     @ObservationIgnored
     let gateway: EmbeddedGateway?
     @ObservationIgnored
@@ -162,6 +185,10 @@ final class AppModel: GatewaySessionSink {
         self.clipboard = clipboard
         self.urlSession = urlSession
         macOSKeyboardOverridesEnabled = preferences.macOSKeyboardOverridesEnabled
+        gatewayAddress = preferences.remoteGatewayAddress ?? ""
+        // An app with no gateway to run has one option, and it is the other one. The
+        // preference cannot say so on a first launch, so the bundle does.
+        prefersRemoteGateway = preferences.prefersRemoteGateway || gateway == nil
     }
 
     /// The app's own model: the instance directory this launch was given, the
@@ -188,6 +215,33 @@ final class AppModel: GatewaySessionSink {
         } else {
             branding
         }
+    }
+
+    /// Whether this session runs on the gateway in this bundle.
+    ///
+    /// False on the home screen too, where nothing has been chosen yet: everything
+    /// that reads this is asking "may I act on the local gateway", and before a
+    /// choice the answer is no.
+    var usesEmbeddedGateway: Bool {
+        chosen?.isEmbedded ?? false
+    }
+
+    /// Whether **Configuration…** and the rxa public key mean anything right now.
+    ///
+    /// They describe the gateway in this bundle: the file is the one
+    /// `serve-embedded` reads, and the key is the one a Mac agent has to authorize
+    /// before *this app's* gateway may connect to it. Against a remote gateway
+    /// neither is part of the session — its targets and its key are its own, edited
+    /// wherever it runs — so offering them would be offering to edit a file nothing
+    /// on screen is reading, and showing a key nothing is going to present.
+    var canEditConfiguration: Bool {
+        config != nil && usesEmbeddedGateway
+    }
+
+    /// Whether there is a live session to leave, which is what decides between
+    /// "Change Gateway…" being a way back and being the screen you are already on.
+    var canChangeGateway: Bool {
+        chosen != nil && !isBusy
     }
 
     /// Whether anything the user does may reach the remote. The single gate every
@@ -262,16 +316,166 @@ final class AppModel: GatewaySessionSink {
             || (session.screen == .desktop && session.remoteSize == nil)
     }
 
+    // MARK: - Choosing a gateway
+
+    /// Act on the home screen's choice.
+    ///
+    /// The two branches diverge here and nowhere else: the embedded one starts a
+    /// process and takes the token it prints, the remote one validates an address and
+    /// asks whether this client is signed in. Past this point they are the same
+    /// session over the same routes — see `GatewayClient`.
+    func chooseGateway() async {
+        guard !isBusy, session.screen == .home else {
+            return
+        }
+        homeError = nil
+        loginError = nil
+        guard prefersRemoteGateway else {
+            preferences.prefersRemoteGateway = false
+            await launch()
+            return
+        }
+
+        let location: GatewayLocation
+        do {
+            location = try GatewayLocation.parse(gatewayAddress)
+        } catch {
+            homeError = error.localizedDescription
+            return
+        }
+        // Normalized: a bare host gains a scheme, a path is dropped. Shown back
+        // before anything is attempted, so what answered is what is on screen.
+        gatewayAddress = location.url.absoluteString
+        await connectToRemote(location)
+    }
+
+    /// Validate a remote gateway and go on to its login or its picker.
+    private func connectToRemote(_ location: GatewayLocation) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        // The stored token is a hint, not an assumption: sessions live in the
+        // gateway's memory with a sliding expiry, so one that restarted an hour ago
+        // has forgotten this. `authState` is what decides.
+        var client = GatewayClient(
+            gateway: location,
+            credential: preferences.remoteSessionToken.map { .session($0) } ?? .none,
+            session: urlSession
+        )
+
+        let state: GatewayAuthState
+        do {
+            branding = try await client.configuration().branding
+            state = try await client.authState()
+        } catch {
+            homeError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return
+        }
+        if state == .noLoginOffered {
+            // Almost always another copy of this app: `serve-embedded` binds
+            // loopback and refuses `/api/auth/*`, and its token was handed to the
+            // client that started it and to nothing else.
+            homeError = """
+                That gateway takes no login, so nothing here can sign in to it. \
+                It is an embedded gateway, which only the app that started it can use.
+                """
+            return
+        }
+        // Persisted only once it answered, so a typo does not become the address the
+        // next launch starts from.
+        chosen = .remote(location)
+        preferences.prefersRemoteGateway = true
+        preferences.remoteGatewayAddress = location.url.absoluteString
+
+        guard state == .authenticated else {
+            // The stored token, if there was one, is not one any more.
+            preferences.remoteSessionToken = nil
+            client = client.with(credential: .none)
+            self.client = client
+            session = ViewerSessionState(screen: .login)
+            return
+        }
+        self.client = client
+        await beginSession(over: client)
+    }
+
+    /// Sign in to the remote gateway. The address was already validated by the home
+    /// screen, so a failure here can only be about who you are.
+    func logIn(username: String, password: String) async {
+        guard !isBusy, let client, case .remote = chosen else {
+            return
+        }
+        isBusy = true
+        defer { isBusy = false }
+        loginError = nil
+        do {
+            switch try await client.logIn(username: username, password: password) {
+            case .ok(let token):
+                let authenticated = client.with(credential: .session(token))
+                self.client = authenticated
+                preferences.remoteSessionToken = token
+                await beginSession(over: authenticated)
+            case .invalidCredentials:
+                loginError = "Invalid credentials"
+            case .missingSessionCookie:
+                loginError = "The gateway accepted the login but set no session cookie."
+            case .noLoginOffered:
+                loginError = "That gateway takes no login."
+            case .failed(let status):
+                loginError = "Login failed (\(status))"
+            }
+        } catch {
+            // The reason, not the word "network": half of what reaches here is not
+            // the network at all, and the half that is says which half far better
+            // than this could (see `GatewayClientError`).
+            loginError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+        }
+    }
+
+    /// Back to the home screen, to choose again.
+    ///
+    /// The one way out of a chosen gateway, and it gives up everything that stood on
+    /// it: the session, the login, and the gateway process if it was ours. A remote
+    /// gateway is told, so its own session slot and login are released rather than
+    /// left for the reattach grace period — which is what made a browser that came
+    /// back inside the minute resume a desktop instead of seeing the picker (see
+    /// `logout_handler` in src/server.rs).
+    func changeGateway() async {
+        guard !isBusy else {
+            return
+        }
+        isBusy = true
+        defer { isBusy = false }
+        await teardown()
+        if case .remote = chosen, let client {
+            try? await client.logOut()
+        }
+        preferences.remoteSessionToken = nil
+        await gateway?.stop()
+        client = nil
+        chosen = nil
+        relaunchedForUnauthorized = false
+        session = ViewerSessionState(screen: .home)
+        targets = []
+        remoteCursor = nil
+        branding = "remotex"
+        launchError = nil
+        launchLog = ""
+        loginError = nil
+        homeError = nil
+    }
+
     // MARK: - Launching the gateway
 
-    /// Bring the app up: make sure there is a config, start the gateway, and attach
-    /// to it.
+    /// Bring the embedded gateway up: make sure there is a config, start it, and
+    /// attach.
     ///
-    /// There is nothing to ask first. The gateway is in this bundle, its address is
-    /// whatever port it reports, and the token it prints is the whole of the
-    /// authentication — so the screen between launching and the target picker exists
-    /// only to say what went wrong when something does.
-    func launch() async {
+    /// Nothing is asked here. The gateway is in this bundle, its address is whatever
+    /// port it reports, and the token it prints is the whole of the authentication —
+    /// so the screen between launching and the target picker exists only to say what
+    /// went wrong when something does.
+    private func launch() async {
         guard !isBusy else {
             return
         }
@@ -279,6 +483,7 @@ final class AppModel: GatewaySessionSink {
         defer { isBusy = false }
         launchError = nil
         launchLog = ""
+        chosen = .embedded
         session.screen = .launching
 
         guard let gateway else {
@@ -311,7 +516,7 @@ final class AppModel: GatewaySessionSink {
 
         let client = GatewayClient(
             gateway: .loopback(port: handshake.port),
-            token: handshake.token,
+            credential: .token(handshake.token),
             session: urlSession
         )
         self.client = client
@@ -334,9 +539,17 @@ final class AppModel: GatewaySessionSink {
     /// session goes with it — the gateway is the session's ground, and a new process
     /// has no memory of the old one's slot.
     ///
+    /// The embedded branch only, and the guard is why it is safe to leave the menu
+    /// item enabled by a condition rather than by a screen: there is no process of
+    /// ours behind a remote gateway to restart, and "restart" there would mean
+    /// restarting somebody else's server.
+    ///
     /// Asking for it clears the automatic-relaunch budget below: a person pressing
     /// Retry is entitled to the same one free recovery a fresh launch gets.
     func relaunchGateway() async {
+        guard usesEmbeddedGateway else {
+            return
+        }
         relaunchedForUnauthorized = false
         await restartGateway()
     }
@@ -350,11 +563,11 @@ final class AppModel: GatewaySessionSink {
         await launch()
     }
 
-    /// Ask the window to open the configuration panel. Available wherever the app is:
-    /// on the launch screen it is the fix for a refused config, and from the Remote
-    /// menu it is how a target gets added.
+    /// Ask the window to open the configuration panel. Available wherever the
+    /// embedded gateway is in use: on the launch screen it is the fix for a refused
+    /// config, and from the Remote menu it is how a target gets added.
     func editConfiguration() {
-        guard config != nil else {
+        guard canEditConfiguration else {
             return
         }
         configurationRequests += 1
@@ -386,7 +599,11 @@ final class AppModel: GatewaySessionSink {
     /// will die again, and a silent retry loop would hide the output that explains
     /// why. Retry is a button.
     private func gatewayDied(_ failure: EmbeddedGateway.LaunchFailure) {
-        guard session.screen != .launching else {
+        // Not while the launch screen is already up, and not at all once this app has
+        // moved to a remote gateway: `changeGateway` stops the local one on the way
+        // past, and an exit it asked for must not put a failure screen over the
+        // session that replaced it.
+        guard session.screen != .launching, usesEmbeddedGateway else {
             return
         }
         Task {
@@ -435,19 +652,36 @@ final class AppModel: GatewaySessionSink {
         audio.reset()
     }
 
-    /// The gateway refused this client's token.
+    /// The gateway refused this client's credential — and what that means is the one
+    /// place the two branches genuinely differ after a session has started.
     ///
-    /// There is no "sign in again" any more: the token was minted by the process this
-    /// app started and is good for as long as that process lives, so a 401 means the
-    /// gateway behind it is not the one that issued it — it restarted, or died and
-    /// something else answered on its port. Either way the answer is a fresh gateway,
-    /// not fresh credentials.
+    /// **A remote gateway** issued a session that has expired, been logged out
+    /// elsewhere, or died with the process holding it. That is what a login is for,
+    /// so it is offered: the stored token is dropped so the next launch does not
+    /// present it again, and the login screen comes up.
     ///
-    /// **Once.** A relaunch that comes straight back with another 401 is not a
-    /// situation more relaunches improve, and each one spawns a process — so the second
-    /// refusal goes to the launch screen with the gateway's own output instead, where
-    /// Retry is a decision somebody makes rather than a loop nobody can see.
+    /// **The embedded gateway** has no login to offer. Its token was minted by the
+    /// process this app started and is good for as long as that process lives, so a
+    /// 401 means the gateway behind that port is not the one that issued it — it
+    /// restarted, or died and something else answered there. The answer is a fresh
+    /// gateway, not fresh credentials.
+    ///
+    /// **Once,** on that branch. A relaunch that comes straight back with another 401
+    /// is not a situation more relaunches improve, and each one spawns a process — so
+    /// the second refusal goes to the launch screen with the gateway's own output
+    /// instead, where Retry is a decision somebody makes rather than a loop nobody
+    /// can see.
     private func handleUnauthorized() async {
+        guard usesEmbeddedGateway else {
+            await teardown()
+            preferences.remoteSessionToken = nil
+            client = client?.with(credential: .none)
+            session = ViewerSessionState(screen: .login)
+            targets = []
+            remoteCursor = nil
+            loginError = "The gateway ended this session. Sign in again."
+            return
+        }
         guard !relaunchedForUnauthorized else {
             await teardown()
             fail(with: EmbeddedGateway.LaunchFailure.refused(gateway?.log() ?? ""))

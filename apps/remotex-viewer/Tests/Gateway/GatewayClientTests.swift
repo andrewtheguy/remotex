@@ -2,15 +2,14 @@ import Foundation
 import Testing
 @testable import RemotexViewer
 
-/// Serialized because `StubURLProtocol` routes through static state, and using
-/// an ephemeral session configuration throughout so nothing here touches the
-/// real cookie jar.
+/// Ephemeral session configurations throughout, so nothing here touches the real
+/// cookie jar — and one stubbed gateway per client, so nothing here touches another
+/// test's either (`StubURLProtocol`).
 ///
 /// Note what is *not* tested with a stub: the session socket. `URLProtocol` does
 /// not intercept `URLSessionWebSocketTask`, so what is checked here is the
 /// upgrade request the client builds — the socket itself is covered by
 /// `GatewayConnectionTests` through the transport seam.
-@Suite(.serialized)
 struct GatewayClientTests {
     @Test
     func aMatchingProtocolVersionYieldsTheBranding() async throws {
@@ -130,6 +129,131 @@ struct GatewayClientTests {
         #expect(recorded.request?.httpMethod == "POST")
     }
 
+    // MARK: - The two credentials
+
+    /// The one thing that differs between an embedded gateway and a remote one, and
+    /// it differs in exactly one place: which header the credential rides in.
+    ///
+    /// They are not interchangeable at the other end — `require_auth` reads the
+    /// cookie on a login gateway and the bearer on a token one, and neither looks at
+    /// the other — so a credential in the wrong header is not a weak credential, it
+    /// is none at all.
+    @Test
+    func eachCredentialRidesInItsOwnHeaderAndNotTheOther() async throws {
+        let cases: [(credential: GatewayCredential, field: String, value: String?)] = [
+            (.token("tok-abc"), "Authorization", "Bearer tok-abc"),
+            (.session("sess-1"), "Cookie", "remotex_session=sess-1"),
+            (.none, "Authorization", nil),
+        ]
+        for expectation in cases {
+            let recorded = Recorder()
+            let client = client(credential: expectation.credential) { request in
+                recorded.store(request)
+                return (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+            }
+            _ = try await client.configuration()
+            let request = try #require(recorded.request)
+            #expect(
+                request.value(forHTTPHeaderField: expectation.field) == expectation.value,
+                "\(expectation.credential)"
+            )
+            // The other header is absent, not empty: a cookie on a token gateway is
+            // refused outright rather than ignored.
+            let other = expectation.field == "Cookie" ? "Authorization" : "Cookie"
+            #expect(request.value(forHTTPHeaderField: other) == nil, "\(expectation.credential)")
+            #expect(
+                request.httpShouldHandleCookies == false,
+                "this client carries its own cookie — see GatewayCredential.session"
+            )
+        }
+    }
+
+    /// A remote gateway before its login still has public routes to ask, and asking
+    /// them is what the home screen does. So no credential must not mean no request.
+    @Test
+    func aClientWithNoCredentialStillReadsThePublicRoutes() async throws {
+        let client = client(credential: .none) { _ in
+            (200, #"{"branding":"acme","protocolVersion":\#(ProductInfo.protocolVersion)}"#)
+        }
+        #expect(try await client.configuration().branding == "acme")
+    }
+
+    // MARK: - Authentication
+
+    @Test
+    func authStateMapsFromTheStatusRoute() async throws {
+        #expect(try await client { _ in (200, #"{"authenticated":true}"#) }
+            .authState() == .authenticated)
+        #expect(try await client { _ in (200, #"{"authenticated":false}"#) }
+            .authState() == .needsLogin)
+        // `no_login_handler` — an embedded gateway, which somebody typed the address
+        // of. Its own answer, because a login form would never succeed against it.
+        #expect(try await client { _ in (403, "forbidden") }
+            .authState() == .noLoginOffered)
+        await #expect(throws: GatewayClientError.unexpectedStatus(503)) {
+            _ = try await client { _ in (503, "nope") }.authState()
+        }
+    }
+
+    /// The login's whole product is the cookie it sets, so a client that does not
+    /// come away holding it has not signed in whatever the status said.
+    @Test
+    func aLoginKeepsTheSessionCookieItWasSet() async throws {
+        let client = client(
+            credential: .none,
+            headers: { _ in
+                ["Set-Cookie": "remotex_session=sess-9; HttpOnly; SameSite=Strict; Path=/"]
+            }
+        ) { _ in (200, #"{"ok":true}"#) }
+
+        #expect(try await client.logIn(username: "admin", password: "hunter2")
+            == .ok(session: "sess-9"))
+    }
+
+    /// A working login that leaves nothing to authenticate with is its own outcome.
+    /// Read as success it would present as an immediate 401 on the next request, with
+    /// nothing on screen to connect the two.
+    @Test
+    func aLoginThatSetsNoCookieIsNotSignedIn() async throws {
+        let client = client(credential: .none) { _ in (200, #"{"ok":true}"#) }
+        #expect(try await client.logIn(username: "admin", password: "hunter2")
+            == .missingSessionCookie)
+    }
+
+    @Test
+    func aRefusedLoginIsAnOutcomeRatherThanAnError() async throws {
+        #expect(try await client(credential: .none) { _ in (401, "no") }
+            .logIn(username: "admin", password: "wrong") == .invalidCredentials)
+        #expect(try await client(credential: .none) { _ in (403, "no") }
+            .logIn(username: "admin", password: "x") == .noLoginOffered)
+        #expect(try await client(credential: .none) { _ in (503, "no") }
+            .logIn(username: "admin", password: "x") == .failed(status: 503))
+    }
+
+    /// The parser, against the shapes the gateway actually produces — including the
+    /// logout, which sets the same cookie to nothing and must not read as a
+    /// credential.
+    @Test
+    func theSessionCookieIsFoundAmongItsAttributes() throws {
+        let token = { (header: String?) -> String? in
+            let fields = header.map { ["Set-Cookie": $0] } ?? [:]
+            let response = HTTPURLResponse(
+                url: URL(string: "http://127.0.0.1:1/api/auth/login")!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: fields
+            )!
+            return GatewayClient.sessionToken(fromSetCookie: response)
+        }
+        #expect(token("remotex_session=abc; HttpOnly; SameSite=Strict; Path=/") == "abc")
+        #expect(token("remotex_session=abc; HttpOnly; SameSite=Strict; Path=/; Secure") == "abc")
+        #expect(token("other=1; remotex_session=abc; Path=/") == "abc")
+        // `logout_handler`: the same name, deliberately emptied.
+        #expect(token("remotex_session=; HttpOnly; Path=/; Max-Age=0") == nil)
+        #expect(token("other=1; Path=/") == nil)
+        #expect(token(nil) == nil)
+    }
+
     // MARK: - The upgrade request
 
     /// Two different tokens meet on this one request and neither may end up where the
@@ -139,7 +263,7 @@ struct GatewayClientTests {
     func theUpgradeRequestCarriesBothTokensInTheirOwnPlaces() throws {
         let client = GatewayClient(
             gateway: .loopback(port: 52675),
-            token: "tok-abc",
+            credential: .token("tok-abc"),
             session: stubSession()
         )
 
@@ -149,8 +273,36 @@ struct GatewayClientTests {
             request.value(forHTTPHeaderField: "Authorization") == "Bearer tok-abc",
             "require_auth runs before the upgrade — see webSocketRequest"
         )
-        #expect(request.value(forHTTPHeaderField: "Cookie") == nil, "no cookies anywhere")
+        #expect(
+            request.value(forHTTPHeaderField: "Cookie") == nil,
+            "a token gateway refuses a cookie outright"
+        )
         #expect(request.httpShouldHandleCookies == false)
+    }
+
+    /// The same request for a remote gateway, whose credential is a cookie this
+    /// client sets by hand.
+    ///
+    /// This is the request that could never be left to `HTTPCookieStorage`: behind a
+    /// TLS-terminating proxy the gateway sets `Secure`, the scheme here is `wss`, and
+    /// the cookie would be dropped — for a 401 before the upgrade, with nothing to
+    /// explain it.
+    @Test
+    func theUpgradeRequestCarriesASessionCookieWhenThatIsTheCredential() throws {
+        let client = GatewayClient(
+            gateway: try GatewayLocation.parse("https://remote.example.com"),
+            credential: .session("sess-9"),
+            session: stubSession()
+        )
+
+        let request = try client.webSocketRequest(sessionToken: "claim-7")
+        #expect(request.url?.absoluteString == "wss://remote.example.com/ws?session=claim-7")
+        #expect(request.value(forHTTPHeaderField: "Cookie") == "remotex_session=sess-9")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(
+            request.httpShouldHandleCookies == false,
+            "the cookie is set here precisely so URLSession cannot drop it"
+        )
     }
 
     /// The scheme still follows the gateway's, even though this build only ever talks
@@ -160,7 +312,7 @@ struct GatewayClientTests {
     func anHTTPSGatewayUpgradesOverWSS() throws {
         let client = GatewayClient(
             gateway: try GatewayLocation.parse("https://remote.example.com"),
-            token: "tok-abc",
+            credential: .token("tok-abc"),
             session: stubSession()
         )
         let request = try client.webSocketRequest(sessionToken: "a b")
@@ -181,21 +333,25 @@ struct GatewayClientTests {
 
     // MARK: - Plumbing
 
+    /// A client against a gateway only this call is using — see
+    /// `StubURLProtocol.uniqueHost`. Per call rather than per test, so the several
+    /// clients a table-driven test builds cannot answer each other's requests either.
     private func client(
-        _ handler: @escaping @Sendable (URLRequest) -> (Int, String)?
+        credential: GatewayCredential = .token("tok-abc"),
+        headers: StubURLProtocol.Headers? = nil,
+        _ handler: @escaping StubURLProtocol.Handler
     ) -> GatewayClient {
-        StubURLProtocol.handler = handler
+        let host = StubURLProtocol.uniqueHost()
+        StubURLProtocol.register(host: host, headers: headers, handler: handler)
         return GatewayClient(
-            gateway: .loopback(port: 52675),
-            token: "tok-abc",
+            gateway: try! GatewayLocation.parse("http://\(host)"),
+            credential: credential,
             session: stubSession()
         )
     }
 
     private func stubSession() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        return URLSession(configuration: configuration)
+        StubURLProtocol.session()
     }
 }
 
@@ -237,39 +393,4 @@ private final class Recorder: @unchecked Sendable {
         }
         return data
     }
-}
-
-/// Answers requests from a per-test closure. `nil` stands for an unreachable
-/// gateway.
-final class StubURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var handler: (@Sendable (URLRequest) -> (Int, String)?)?
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let answer = Self.handler?(request) else {
-            client?.urlProtocol(
-                self,
-                didFailWithError: URLError(.cannotConnectToHost)
-            )
-            return
-        }
-        let response = HTTPURLResponse(
-            url: request.url!,
-            statusCode: answer.0,
-            httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
-        )!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(answer.1.utf8))
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
 }

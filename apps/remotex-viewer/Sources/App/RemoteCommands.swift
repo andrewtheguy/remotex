@@ -91,9 +91,26 @@ struct RemoteCommands: Commands {
 
             Divider()
 
-            // Where the targets come from. Reachable from every screen, including the
-            // launch failure — a config the gateway refused is the likeliest reason to
-            // be looking for this item at all.
+            // Back to the home screen, to run the local gateway instead of a remote
+            // one or the other way round. Also the log out: a remote gateway is told,
+            // so the login and the session slot are given up rather than left for the
+            // reattach grace period.
+            //
+            // Named for what it does on both branches. "Log Out" would be wrong on
+            // the embedded one, where there is no login to end, and two items that
+            // are the same action under two names would be worse than one.
+            Button("Change Gateway…") {
+                Task { await model.changeGateway() }
+            }
+            .disabled(!model.canChangeGateway)
+
+            // Where the targets come from. Reachable from every screen the local
+            // gateway is behind, including the launch failure — a config it refused is
+            // the likeliest reason to be looking for this item at all.
+            //
+            // Greyed against a remote gateway, which reads its own config wherever it
+            // runs: this panel edits the file in *this* instance, and Save restarts a
+            // process that session is not using. See `AppModel.canEditConfiguration`.
             //
             // No chord for the same reason nothing else here has one, ⌘, included:
             // while a desktop is focused every Command chord belongs to the guest, so
@@ -101,16 +118,15 @@ struct RemoteCommands: Commands {
             Button("Configuration…") {
                 model.editConfiguration()
             }
-            .disabled(model.config == nil)
+            .disabled(!model.canEditConfiguration)
 
             // Restart the gateway this app runs. Not a "log out" — there is no session
-            // with the gateway to end, and no address to go back to — but it is the
-            // same escape hatch: everything below the app is rebuilt from the config on
-            // disk.
+            // with the gateway to end — but it is the same escape hatch: everything
+            // below the app is rebuilt from the config on disk.
             Button("Restart Local Gateway") {
                 Task { await model.relaunchGateway() }
             }
-            .disabled(model.gateway == nil || model.isBusy)
+            .disabled(!model.usesEmbeddedGateway || model.isBusy)
         }
 
         // RXA display selection; other engines leave the stable menu disabled.

@@ -17,6 +17,10 @@ struct RootView: View {
     var body: some View {
         ZStack {
             switch model.session.screen {
+            case .home:
+                HomeView(model: model)
+            case .login:
+                LoginView(model: model)
             case .launching:
                 LaunchView(model: model) { isEditingConfiguration = true }
             case .picker, .desktop:
@@ -24,7 +28,11 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $isEditingConfiguration) {
-            if let config = model.config {
+            // `canEditConfiguration` and not merely `config != nil`: this panel edits
+            // the file `serve-embedded` reads, and Save restarts that gateway. Against
+            // a remote one it would be editing a config nothing on screen is running
+            // from — see `AppModel.canEditConfiguration`.
+            if model.canEditConfiguration, let config = model.config {
                 ConfigurationPanel(store: config) {
                     Task { await model.relaunchGateway() }
                 }
@@ -40,7 +48,17 @@ struct RootView: View {
         // the previous one's result, which is what keeps two presentations on one view
         // from contending for the same slot.
         .sheet(isPresented: $isShowingAbout) {
-            AboutPanel(branding: model.branding, store: model.config)
+            // The instance is a fact about this app whichever gateway it is talking
+            // to — it is where these preferences and this log live — so it is always
+            // shown. The key is not: it identifies the gateway *in this bundle* to a
+            // Mac agent, and against a remote gateway nothing is going to present it.
+            // Showing it there is an invitation to authorize the wrong machine and
+            // then wonder why the pairing did nothing.
+            AboutPanel(
+                branding: model.branding,
+                store: model.config,
+                showsGatewayKey: model.usesEmbeddedGateway
+            )
         }
         .onChange(of: model.aboutRequests) { _, _ in
             isShowingAbout = true
