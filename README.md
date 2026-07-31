@@ -15,12 +15,14 @@ that was asked for rather than a resampling of the size it used to be.
   Sharing.
 - The optional macOS companion `remotex-agent` provides a dedicated-agent
   alternative over the encrypted `rxa` protocol.
-- The optional macOS 26 `remotex-viewer` is a native client with Metal
-  rendering, AppKit input, menus, clipboard access, and audio playback.
+- The optional macOS 26 `remotex.app` is a self-contained native client: it
+  carries its own gateway, starts it on a loopback port at launch, and needs no
+  server, address, or login. Metal rendering, AppKit input, menus, clipboard
+  access, and audio playback.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/mac-agent-architecture.md`](docs/mac-agent-architecture.md) for the
-macOS agent, and [`docs/macos-viewer.md`](docs/macos-viewer.md) for the viewer.
+macOS agent, and [`docs/macos-viewer.md`](docs/macos-viewer.md) for the app.
 
 ## Install
 
@@ -98,7 +100,7 @@ The main directories are:
 |---|---|
 | `src/` | gateway, session management, and RDP/VNC/`rxa` engines |
 | `frontend/` | React SPA |
-| `apps/remotex-viewer/` | native macOS 26 SwiftUI/Metal viewer |
+| `apps/remotex-viewer/` | `remotex.app`, the native macOS 26 SwiftUI/Metal client |
 | `crates/rxa-proto/` | protocol shared by gateway and macOS agent |
 | `crates/rxa-agent/` | macOS agent |
 | `tests/` | protocol and engine end-to-end tests |
@@ -178,5 +180,6 @@ bash packaging/build-tarball.sh
 ```
 
 The tarball contains the gateway binary and built frontend. The macOS agent is
-a separate DMG built by `packaging/macos/build-agent-app.sh`. The foreground
-macOS viewer is built by `packaging/macos-viewer/build-viewer-app.sh`.
+a separate DMG built by `packaging/macos/build-agent-app.sh`. `remotex.app` is
+built by `packaging/macos-viewer/build-viewer-app.sh`, which bundles the gateway
+binary into the app rather than shipping the frontend.

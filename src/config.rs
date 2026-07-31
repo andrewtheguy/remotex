@@ -1,12 +1,16 @@
 //! Global TOML configuration: one `[server]` block and `[[targets]]` profiles.
 //! Only the selected config file is read; target credentials remain server-side.
+//!
+//! One schema, read by two kinds of gateway — see [`Audience`]. The `[[targets]]`
+//! half is identical for both, because a target is a target; `[server]` belongs to
+//! the one a browser reaches.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use serde::Deserialize;
 
-use crate::auth::SitePasswd;
+use crate::auth::{EmbeddedToken, GatewayAuth, SitePasswd};
 
 /// RDP security negotiation mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -231,10 +235,10 @@ pub struct ServerSection {
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
-    /// Display name shown on the login screen, the interstitials, and as the
-    /// browser tab title. Defaults to [`DEFAULT_BRANDING`]; whitespace-only is
-    /// treated as absent.
-    pub branding: Option<String>,
+    // No `branding` here: it is a top-level key now (see `ConfigFile::branding`),
+    // because `remotex.app`'s config has no `[server]` block to hold it and one
+    // value with two spellings is one of them going stale. `deny_unknown_fields`
+    // refuses a file that still has it here.
     /// **Development only.** A label to give this gateway its own hostname on
     /// loopback: a browser arriving at `127.0.0.1`, `::1` or `localhost` is
     /// redirected to `<label>.localhost`, keeping the port and path.
@@ -279,12 +283,49 @@ pub struct RxaSection {
     pub private_key: String,
 }
 
+/// Who a config file is for, and therefore which rules it is held to.
+///
+/// The difference is not cosmetic — each audience makes a demand the other one
+/// cannot meet — which is why this is a parameter of parsing rather than something
+/// checked later by whoever happens to remember to:
+///
+/// - a [`Self::Served`] gateway is useless without a target to offer and a
+///   credential to guard it, and it is told where to listen;
+/// - an [`Self::Embedded`] one is started by `remotex.app` with the port, the
+///   secret and the (absent) web root decided by the app, so a `[server]` block
+///   could only contradict it — and it must come up with **no targets at all**,
+///   because that is what a first launch has and the picker's job is to say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Audience {
+    /// `remotex serve`: a browser's gateway, and the macOS agent's peer.
+    Served,
+    /// `remotex serve-embedded`: the gateway inside `remotex.app`.
+    Embedded,
+}
+
 /// The parsed TOML file, before a target is selected.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
+    /// `None` when the file has no `[server]` block at all, which is what an
+    /// embedded gateway's config must look like — distinguishing "absent" from
+    /// "present and empty" is the whole reason this is an `Option`.
     #[serde(default)]
-    pub server: ServerSection,
+    pub server: Option<ServerSection>,
+    /// Display name of this gateway: the browser's login screen, interstitials and
+    /// tab title, and in `remotex.app` the heading above its target list, its window
+    /// title and its launch screen.
+    ///
+    /// Top-level rather than in `[server]`, and it is the **only** place to set it.
+    /// `remotex.app`'s config has no `[server]` block at all
+    /// ([`Audience::Embedded`]), so a key that lived there could not name the app —
+    /// and accepting both spellings would be two places to write one value, with the
+    /// loser losing silently. `deny_unknown_fields` refuses a file that still has it
+    /// under `[server]`, which is the whole of the migration.
+    ///
+    /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
+    #[serde(default)]
+    pub branding: Option<String>,
     #[serde(default)]
     pub rxa: RxaSection,
     #[serde(default)]
@@ -297,16 +338,24 @@ pub struct ConfigFile {
 pub struct AppConfig {
     /// Host/interface the web server binds to.
     pub host: String,
-    /// Port the web server binds to.
+    /// Port the web server binds to. `0` asks the kernel for an ephemeral one,
+    /// which is what an embedded gateway does — the port it got is then read off
+    /// the listener and told to its client, never guessed.
     pub port: u16,
     /// Directory holding the built frontend (index.html + assets), served from
     /// disk. Defaults to [`default_static_dir`].
-    pub static_dir: PathBuf,
+    ///
+    /// `None` means **there is no web UI**, and it is not a fallback for a
+    /// directory that turned out to be missing: an embedded gateway ships no SPA
+    /// on purpose, so it serves none rather than 404ing its way through one. Every
+    /// path outside `/api` and `/ws` is a 404 (see [`crate::server::router`]).
+    pub static_dir: Option<PathBuf>,
     /// Every target profile this process serves; the post-login picker selects
-    /// one. Guaranteed non-empty by [`ConfigFile::parse`].
+    /// one. Non-empty for [`Audience::Served`]; possibly empty for an embedded
+    /// gateway, whose client shows "no targets are configured" instead.
     pub targets: Vec<TargetConfig>,
-    /// Web-login credential guarding `/api/*` and `/ws`.
-    pub site_passwd: SitePasswd,
+    /// What gets a request past the door: a login, or the embedded client's token.
+    pub auth: GatewayAuth,
     /// Display name for the login screen, interstitials, and browser tab title.
     pub branding: String,
     /// `<label>.localhost` to send a loopback browser to, from
@@ -319,7 +368,18 @@ pub struct AppConfig {
 }
 
 impl ConfigFile {
+    /// Parse a browser gateway's config. See [`Self::parse_with`] for the other
+    /// audience.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
+        Self::parse_with(text, Audience::Served)
+    }
+
+    /// Parse a config file for `audience`.
+    ///
+    /// Everything about the targets is checked identically for both — the two
+    /// audiences differ only in what they may say about the *server*, and in
+    /// whether having nothing to offer yet is an error or a first launch.
+    pub fn parse_with(text: &str, audience: Audience) -> anyhow::Result<Self> {
         let mut config: ConfigFile = toml::from_str(text).context("invalid TOML config")?;
         // An omitted port deserializes as 0 (never a valid target port), which
         // resolves here to the protocol's standard port.
@@ -328,10 +388,26 @@ impl ConfigFile {
                 target.port = target.protocol.default_port();
             }
         }
-        anyhow::ensure!(
-            !config.targets.is_empty(),
-            "config has no [[targets]] — at least one target profile is required"
-        );
+        if audience == Audience::Embedded {
+            // Refused rather than ignored, and named as a whole block rather than
+            // key by key: every one of them is a decision the app has already made
+            // for this gateway — an ephemeral loopback port it reads back off the
+            // socket, no web root because no SPA ships in the bundle, and a token
+            // instead of a login. A key that is quietly overridden is worse than
+            // one that is refused: it reads as configuration and behaves as
+            // decoration.
+            anyhow::ensure!(
+                config.server.is_none(),
+                "this config is remotex.app's own and may not have a [server] block: \
+                 the app decides where its gateway listens, serves no web UI, and \
+                 authenticates itself. Only branding, [rxa] and [[targets]] belong here"
+            );
+        } else {
+            anyhow::ensure!(
+                !config.targets.is_empty(),
+                "config has no [[targets]] — at least one target profile is required"
+            );
+        }
         for target in &config.targets {
             anyhow::ensure!(
                 !target.name.is_empty(),
@@ -473,20 +549,62 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// Resolve the runtime configuration: validate the web-login credential and
-    /// carry over every target profile (the browser picks one after login).
-    pub fn resolve(mut self) -> anyhow::Result<AppConfig> {
-        // One server identity, handed to every target that speaks the protocol
-        // it belongs to — see `TargetConfig::gateway_private_key` for why it
-        // rides along on the target rather than beside it.
+    /// Hand this gateway's `rxa` identity to every target that speaks it.
+    ///
+    /// One server identity for all of them — see `TargetConfig::gateway_private_key`
+    /// for why it rides along on the target rather than beside it.
+    fn spread_rxa_identity(&mut self) {
         let private_key = self.rxa.private_key.trim().to_owned();
         for target in &mut self.targets {
             if target.protocol == Protocol::Rxa {
                 target.gateway_private_key = private_key.clone();
             }
         }
-        let site_passwd = self
-            .server
+    }
+
+    /// Resolve the runtime configuration of the gateway inside `remotex.app`:
+    /// loopback, an ephemeral port, no web UI, and a freshly minted token.
+    ///
+    /// Every one of those is a constant here rather than a default that
+    /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
+    /// the way in. `branding` is the one thing such a config *may* say about the
+    /// gateway itself, because it is about the app rather than about the server: it
+    /// names a window, not a deployment, and two instances on one Mac are easier to
+    /// tell apart if they can be called different things.
+    pub fn resolve_embedded(mut self, token: EmbeddedToken) -> anyhow::Result<AppConfig> {
+        self.spread_rxa_identity();
+        Ok(AppConfig {
+            // Not `localhost`: that name resolves to both loopbacks and the client
+            // is told one port on one address. The app connects to 127.0.0.1.
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            static_dir: None,
+            targets: self.targets,
+            auth: GatewayAuth::Token(token),
+            branding: Self::resolve_branding(self.branding.as_deref()),
+            dev_hostname: None,
+        })
+    }
+
+    /// The display name, or [`DEFAULT_BRANDING`].
+    ///
+    /// Whitespace-only counts as absent: a heading of one space is not a name
+    /// somebody meant to give. Shared by both audiences because it is one key now,
+    /// and a second copy of this three-line rule is how the two would come to differ.
+    fn resolve_branding(configured: Option<&str>) -> String {
+        configured
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_BRANDING)
+            .to_owned()
+    }
+
+    /// Resolve the runtime configuration: validate the web-login credential and
+    /// carry over every target profile (the browser picks one after login).
+    pub fn resolve(mut self) -> anyhow::Result<AppConfig> {
+        self.spread_rxa_identity();
+        let server = self.server.unwrap_or_default();
+        let site_passwd = server
             .site_passwd
             .as_deref()
             .map(str::trim)
@@ -498,22 +616,14 @@ impl ConfigFile {
         let site_passwd =
             SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
         Ok(AppConfig {
-            host: self.server.host.unwrap_or_else(|| "127.0.0.1".to_owned()),
-            port: self.server.port.unwrap_or(52380),
-            static_dir: self.server.static_dir.unwrap_or_else(default_static_dir),
+            host: server.host.unwrap_or_else(|| "127.0.0.1".to_owned()),
+            port: server.port.unwrap_or(52380),
+            static_dir: Some(server.static_dir.unwrap_or_else(default_static_dir)),
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
-            site_passwd,
-            branding: self
-                .server
-                .branding
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(DEFAULT_BRANDING)
-                .to_owned(),
-            dev_hostname: self
-                .server
+            auth: GatewayAuth::Login(site_passwd),
+            branding: Self::resolve_branding(self.branding.as_deref()),
+            dev_hostname: server
                 .dev_subdomain
                 .as_deref()
                 .map(str::trim)
@@ -679,7 +789,10 @@ mod tests {
         let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 52380);
-        assert_eq!(config.site_passwd.username(), "admin");
+        let GatewayAuth::Login(site_passwd) = &config.auth else {
+            panic!("a served gateway logs in");
+        };
+        assert_eq!(site_passwd.username(), "admin");
         assert_eq!(config.targets.len(), 1);
         let t = &config.targets[0];
         assert_eq!(t.name, "one");
@@ -782,11 +895,13 @@ mod tests {
         let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
         assert_eq!(config.branding, DEFAULT_BRANDING);
 
-        // Set → carried through, trimmed.
+        // Set → carried through, trimmed. Top-level, which is the only place it
+        // lives: an app instance's config has no [server] block to hold it.
         let toml = format!(
             r#"
-            [server]
             branding = "  Acme Remote  "
+
+            [server]
             {}
 
             [[targets]]
@@ -838,7 +953,7 @@ mod tests {
         let config = config.resolve().unwrap();
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 8080);
-        assert_eq!(config.static_dir, PathBuf::from("/srv/web"));
+        assert_eq!(config.static_dir, Some(PathBuf::from("/srv/web")));
         // Every profile is carried over, in file order, for the picker.
         assert_eq!(config.targets.len(), 2);
         let win = &config.targets[0];

@@ -180,7 +180,6 @@ struct ResizeMenuTargetTests {
 
     private func makeModel() -> AppModel {
         AppModel(
-            defaults: UserDefaults(suiteName: "ResizeMenuTargetTests.\(UUID().uuidString)")!,
             clipboard: ClipboardSynchronizer(
                 pasteboard: NSPasteboard.withUniqueName(),
                 startsPolling: false

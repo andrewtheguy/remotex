@@ -212,7 +212,7 @@ jobs:
       - name: Test the native viewer
         run: swift test --package-path apps/remotex-viewer
 
-      - name: Build remotex-viewer.app and its disk image
+      - name: Build remotex.app and its disk image
         env:
           CODESIGN_IDENTITY: "-"
         run: bash packaging/macos-viewer/build-viewer-app.sh
@@ -228,16 +228,30 @@ jobs:
             echo "::error::the viewer image has no /Applications symlink"
             exit 1
           }
-          /usr/bin/ditto "$mnt/remotex-viewer.app" \
-            "$RUNNER_TEMP/viewer-installed/remotex-viewer.app"
+          /usr/bin/ditto "$mnt/remotex.app" \
+            "$RUNNER_TEMP/viewer-installed/remotex.app"
           hdiutil detach "$mnt"
-          app="$RUNNER_TEMP/viewer-installed/remotex-viewer.app"
+          app="$RUNNER_TEMP/viewer-installed/remotex.app"
           codesign --verify --deep --strict --verbose=2 "$app"
+          # Both executables, because an app with only one of them is not an app: the
+          # client cannot serve itself and the gateway has no window. Checked after the
+          # archive round-trip, which is where a lost execute bit would show up.
           got=$("$app/Contents/MacOS/remotex-viewer" --version)
           [ "$got" = "remotex-viewer ${version}" ] || {
             echo "::error::expected 'remotex-viewer ${version}', got '${got}'"
             exit 1
           }
+          got=$("$app/Contents/MacOS/remotex-gateway" --version)
+          [ "$got" = "remotex ${version}" ] || {
+            echo "::error::expected 'remotex ${version}', got '${got}'"
+            exit 1
+          }
+          # No frontend ships in the app: the embedded gateway serves no web UI, and a
+          # web root appearing here would mean it had started to.
+          if find "$app" -name index.html -print -quit | grep -q .; then
+            echo "::error::remotex.app must not ship a frontend"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

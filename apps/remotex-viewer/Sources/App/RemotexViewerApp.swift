@@ -32,6 +32,7 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
             return
         }
         resizeMenuTarget = ResizeMenuTarget(model: model)
+        gateway = model.gateway
         enforceMenuBarRules()
     }
 
@@ -39,6 +40,21 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     /// delivered inside a menu mutation rather than after one: re-entering the
     /// check mid-insert would find the menu not yet in the bar and insert a second.
     private var isEnforcingMenuBarRules = false
+
+    /// The gateway to stop when this app does. Set by the scene, for the same reason
+    /// `resizeMenuTarget` is: the delegate exists before there is a model.
+    private var gateway: EmbeddedGateway?
+
+    /// Stop the gateway on the way out.
+    ///
+    /// Belt on top of braces. The guarantee is the liveness pipe — the kernel closes
+    /// our end of it however this process ends, and the gateway exits on the EOF (see
+    /// `EmbeddedGateway`) — so this is only here to make the ordinary quit immediate
+    /// rather than a few milliseconds later. It must stay synchronous: the process may
+    /// be gone the moment this returns, so there is nothing to await in.
+    func applicationWillTerminate(_ notification: Notification) {
+        gateway?.terminateNow()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // SwiftUI and AppKit build and rebuild menus after launch. Reapply the
@@ -119,12 +135,10 @@ enum ViewerMain {
 struct RemotexViewerApp: App {
     @NSApplicationDelegateAdaptor(ViewerApplicationDelegate.self)
     private var applicationDelegate
-    // Both from `ViewerDefaults`, so a `--settings` run keeps the real gateway
-    // address and the real login untouched. See that file.
-    @State private var model = AppModel(
-        defaults: ViewerDefaults.resolved,
-        urlSession: ViewerDefaults.urlSession
-    )
+    /// Everything this launch owns comes from one instance directory — the config,
+    /// the log, the preferences — so `--instance-dir` swaps all of it at once. See
+    /// `InstanceDirectory`.
+    @State private var model = AppModel.forApp()
 
     var body: some Scene {
         WindowGroup {
@@ -133,7 +147,14 @@ struct RemotexViewerApp: App {
                 // The View menu's resize items are AppKit's and need a target —
                 // see `ViewerMenus.ensureResizeItems`. This is the first point
                 // where both the delegate and the model exist.
-                .task { applicationDelegate.bind(model: model) }
+                .task {
+                    applicationDelegate.bind(model: model)
+                    // Unlike the old launch, which deliberately contacted nothing:
+                    // there is no address to be wrong now, and the gateway is ours to
+                    // start. Waiting for a button here would be waiting for the user
+                    // to confirm the only thing this app can do.
+                    await model.launch()
+                }
         }
         .defaultSize(width: 1440, height: 900)
         // Toolbar height reduces the viewport reported to a following guest.
@@ -141,7 +162,8 @@ struct RemotexViewerApp: App {
         .commandsReplaced {
             RemoteCommands(model: model)
         }
-        // No Settings scene: the gateway address lives on the login screen, next
-        // to the credentials it goes with.
+        // No Settings scene: what there is to configure is the gateway's own config
+        // file, and it is edited in a sheet over the window (`ConfigurationPanel`) so
+        // that saving it can restart the gateway the window is attached to.
     }
 }

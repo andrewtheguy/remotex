@@ -1,13 +1,13 @@
 import Foundation
 
 enum ViewerScreen: String {
-    /// Choose a gateway and confirm it can be spoken to. Its own step ahead of
-    /// the credentials, because "can this address be reached, and does it speak a
-    /// protocol this build knows" is a separate question from "who are you" — and
-    /// it is answered when the user asks for it, not as a side effect of signing
-    /// in.
-    case server
-    case login
+    /// Starting the gateway in this bundle, or explaining why it did not start.
+    ///
+    /// The only screen ahead of the picker, and it asks nothing: there is no address
+    /// to choose — the gateway is the one this app carries — and no credentials to
+    /// type, because the token it prints is the whole of the authentication. So this
+    /// is a progress indicator that occasionally becomes an error message.
+    case launching
     case picker
     case desktop
 }
@@ -72,7 +72,7 @@ func displaySummary(
 /// Every field here is derived from the gateway's own control messages, which is
 /// why the derivations are spelled out where they happen (`AppModel.handle`).
 struct ViewerSessionState: Equatable {
-    var screen = ViewerScreen.server
+    var screen = ViewerScreen.launching
     var connectionStatus: ViewerConnectionStatus?
     var connectedTarget: String?
     /// `"rdp"`, `"vnc"`, or `"rxa"`, from `connected`. Decides the resize

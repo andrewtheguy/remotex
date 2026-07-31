@@ -5,16 +5,32 @@ import SwiftUI
 struct RootView: View {
     let model: AppModel
 
+    /// Whether the configuration sheet is up. Held here rather than on the model
+    /// because it is a fact about this window, not about the session — and both the
+    /// launch screen and the Remote menu open the same one.
+    @State private var isEditingConfiguration = false
+
     var body: some View {
         ZStack {
             switch model.session.screen {
-            case .server:
-                ServerView(model: model)
-            case .login:
-                LoginView(model: model)
+            case .launching:
+                LaunchView(model: model) { isEditingConfiguration = true }
             case .picker, .desktop:
                 DesktopScreen(model: model)
             }
+        }
+        .sheet(isPresented: $isEditingConfiguration) {
+            if let config = model.config {
+                ConfigurationPanel(store: config) {
+                    Task { await model.relaunchGateway() }
+                }
+            }
+        }
+        // The Remote menu's item is an AppKit-side action on the model, so the sheet
+        // it wants is opened by watching the model rather than by calling into this
+        // view — which nothing outside SwiftUI can do.
+        .onChange(of: model.configurationRequests) { _, _ in
+            isEditingConfiguration = true
         }
         .overlay(alignment: .bottomTrailing) {
             if model.clipboard.isPresented {

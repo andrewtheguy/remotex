@@ -81,14 +81,26 @@ struct RemoteCommands: Commands {
 
             Divider()
 
-            // Session exit; connection entry stays on the corresponding screens.
-            Button("Log Out") {
-                Task { await model.logOut() }
+            // Where the targets come from. Reachable from every screen, including the
+            // launch failure — a config the gateway refused is the likeliest reason to
+            // be looking for this item at all.
+            //
+            // No chord for the same reason nothing else here has one, ⌘, included:
+            // while a desktop is focused every Command chord belongs to the guest, so
+            // an advertised shortcut would be one that does something else.
+            Button("Configuration…") {
+                model.editConfiguration()
             }
-            .disabled(
-                model.session.screen != .picker
-                    && model.session.screen != .desktop
-            )
+            .disabled(model.config == nil)
+
+            // Restart the gateway this app runs. Not a "log out" — there is no session
+            // with the gateway to end, and no address to go back to — but it is the
+            // same escape hatch: everything below the app is rebuilt from the config on
+            // disk.
+            Button("Restart Local Gateway") {
+                Task { await model.relaunchGateway() }
+            }
+            .disabled(model.gateway == nil || model.isBusy)
         }
 
         // RXA display selection; other engines leave the stable menu disabled.

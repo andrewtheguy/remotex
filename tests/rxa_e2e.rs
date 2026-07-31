@@ -538,7 +538,7 @@ async fn spawn_app_with(
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,
-        static_dir: std::path::PathBuf::from("frontend/dist"),
+        static_dir: Some(std::path::PathBuf::from("frontend/dist")),
         targets: vec![TargetConfig {
             name: "mac".to_owned(),
             protocol: Protocol::Rxa,
@@ -562,7 +562,7 @@ async fn spawn_app_with(
             // target; these tests build the resolved config directly.
             gateway_private_key: keys.gateway_private_key.clone(),
         }],
-        site_passwd: common::test_site_passwd(),
+        auth: common::test_auth(),
         branding: "remotex".to_owned(),
         dev_hostname: None,
     };

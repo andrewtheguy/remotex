@@ -11,9 +11,19 @@ struct TargetPickerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(model.branding)
-                .font(.largeTitle.weight(.semibold))
-                .padding(.top, 32)
+            // The instance's name, then what this screen is for — the same pair, in
+            // the same order, as the SPA's `picker-brand` and its `<h1>`. Deliberately
+            // the smaller and quieter of the two, as it is there: the branding is what
+            // this is, and "Pick a target" is only what to do about it.
+            VStack(spacing: 4) {
+                Text(model.branding)
+                    .font(.largeTitle.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text("Pick a target")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 32)
 
             if let error = model.session.connectError {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -32,9 +42,17 @@ struct TargetPickerView: View {
             }
 
             if model.targets.isEmpty {
-                Text("No targets are configured on this gateway.")
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 24)
+                // A first launch lands here, so this is not only an empty state but
+                // the app's front door: the sentence says what is missing and the
+                // button below is where it gets added.
+                VStack(spacing: 6) {
+                    Text("No machines are configured yet.")
+                        .foregroundStyle(.secondary)
+                    Text("Add one in Configuration, below.")
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.top, 24)
             } else {
                 ScrollView {
                     VStack(spacing: 10) {
@@ -49,9 +67,13 @@ struct TargetPickerView: View {
             }
 
             Spacer()
-            Button("Log Out") {
-                Task { await model.logOut() }
+            // Where "Log Out" used to be, and for the same reason it was there: this
+            // is the one screen with nothing else to do on it. There is no logging out
+            // of a gateway this app started for itself.
+            Button("Configuration…") {
+                model.editConfiguration()
             }
+            .disabled(model.config == nil)
             .padding(.bottom, 20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

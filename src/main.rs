@@ -35,6 +35,27 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve()?;
             serve(config).await?;
         }
+        Commands::ServeEmbedded { instance_dir } => {
+            serve_embedded(&remotex::embedded::Instance::new(instance_dir)).await?;
+        }
+        Commands::CheckConfig { config, embedded } => {
+            let audience = if embedded {
+                remotex::config::Audience::Embedded
+            } else {
+                remotex::config::Audience::Served
+            };
+            // The message is the product here: this subcommand exists to be run by
+            // the app's configuration editor and have its stderr shown to somebody
+            // about to fix the file. `{:#}` keeps the whole `anyhow` chain, which
+            // is what names the target the complaint is about.
+            if let Err(e) = remotex::embedded::check(
+                &remotex::embedded::read_candidate(config.as_deref())?,
+                audience,
+            ) {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        }
         Commands::GenPasswd { username } => gen_passwd(&username)?,
         // Only this half is minted here. The public half is derived on demand
         // (`rxa-pubkey`) rather than stored beside it: two copies of one fact
@@ -86,19 +107,42 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the gateway `remotex.app` started, and stop when the app does.
+///
+/// Three ways out, and the first is the one the guarantee rests on: the app's end
+/// of our stdin closing, which happens however the app ended — see
+/// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
+/// hand, and the server arm only completes by failing.
+async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
+    tokio::select! {
+        result = remotex::embedded::serve(instance) => result?,
+        _ = remotex::embedded::parent_closed() => {
+            info!("stdin closed: whatever started this gateway is gone; stopping");
+        }
+        _ = shutdown_signal() => info!("shutdown signal received; stopping"),
+    }
+    Ok(())
+}
+
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
     // Surface a misconfigured static path before we start listening. The SPA
     // handler still 404s per-request; this just makes the cause obvious.
-    if !config.static_dir.is_dir() {
-        warn!(
-            "static dir {} not found — the web UI will 404 (set static_dir under [server])",
-            config.static_dir.display()
-        );
-    } else if !config.static_dir.join("index.html").is_file() {
-        warn!(
-            "no index.html in static dir {} — the web UI will 404",
-            config.static_dir.display()
-        );
+    //
+    // Only for a gateway that has a web root at all: `None` is not a path that went
+    // missing, it is an embedded gateway that ships no SPA — and it never reaches
+    // this function anyway (see `serve_embedded`).
+    if let Some(static_dir) = config.static_dir.as_deref() {
+        if !static_dir.is_dir() {
+            warn!(
+                "static dir {} not found — the web UI will 404 (set static_dir under [server])",
+                static_dir.display()
+            );
+        } else if !static_dir.join("index.html").is_file() {
+            warn!(
+                "no index.html in static dir {} — the web UI will 404",
+                static_dir.display()
+            );
+        }
     }
 
     let app = server::router(config.clone());
@@ -139,7 +183,9 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             target.name, target.host, target.port, target.protocol
         );
     }
-    info!("web login: user {:?}", config.site_passwd.username());
+    if let remotex::auth::GatewayAuth::Login(site_passwd) = &config.auth {
+        info!("web login: user {:?}", site_passwd.username());
+    }
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

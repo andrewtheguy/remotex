@@ -1,6 +1,6 @@
 ## General
 
-- strict no backward compatibility since it is a personal project
+- strict no backward compatibility or legacy code path since it is a personal project
 - no cargo fmt
 - run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
 - run biome checks on frontend/ after JS/TS code changes
@@ -35,14 +35,17 @@ Headless Playwright, in `tests/playwright/`.
 - keep approved specs in `tests/playwright/` rather than leaving one-off copies in `tmp/`, and run a new one several times before relying on it
 - a spec that parses a wire format should implement its own parser rather than importing the SPA's, or a wrong parser agrees with itself. This is the only place the wire is checked as the real SPA uses it: the Rust e2e tests drive a raw WebSocket client, and the Swift and TypeScript unit tests parse frames they built themselves, so both ends can otherwise agree with their own fixtures and disagree with each other
 
-## macOS viewer
+## remotex.app (the macOS client)
 
-- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then run `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and launch the packaged app
-- launch a QA run with its own settings, never bare: `open -n dist/remotex-viewer.app --args --settings qa --gateway http://127.0.0.1:<test port>`. `--settings qa` puts the gateway address in its own `UserDefaults` suite and gives the run an ephemeral cookie jar, so a test run cannot overwrite the address a real one saved or log the real session out — `HTTPCookieStorage` matches by host and ignores the port, so without it a test gateway on `127.0.0.1` shares the real one's login cookie. The trade is that a QA launch always starts at the login screen instead of resuming. Wipe the slate with `defaults delete remotex-viewer.qa`
-- never validate the viewer with `swift run`, a standalone `swift build`, or the executable under `.build`; those bypass the `.app` bundle and can behave differently, including missing menus and `Info.plist` metadata
-- for routine viewer development, the disk-image layer is out of scope: use `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and work exclusively with `dist/remotex-viewer.app`
-- use the viewer script's default DMG build only for production/release validation, changes to the viewer's DMG packaging, or when the user explicitly asks for it
-- no intrusive QA automation for the macOS viewer GUI; manual QA only
+- **the app carries its own gateway and talks to nothing else.** `dist/remotex.app` holds two executables: the Swift client at `Contents/MacOS/remotex-viewer` and the gateway binary at `Contents/MacOS/remotex-gateway`. At launch the client spawns `remotex-gateway serve-embedded --instance-dir <dir>`, which binds an ephemeral port on `127.0.0.1`, serves no web UI, and prints one line of JSON on its stdout — the port and a bearer token — which is the whole of the authentication. There is no address to type, no login, and no way to point the app at another gateway: `--gateway` and `--settings` are gone, and the Server and Login screens with them
+- **the gateway always dies with the app, and the layer that guarantees it is a pipe.** The client holds the write end of the gateway's stdin and nothing is ever sent on it; the kernel closes that end however the app ends — clean quit, crash, Force Quit, `kill -9` — so the gateway reads EOF and exits with no code of ours having to run. `SIGTERM` and the terminate-on-quit path are conveniences on top. When touching any of it, keep `aGatewayIgnoringSignalsStillDiesWithThePipe` honest: it proves the pipe alone does the work by trapping `SIGTERM` in the child
+- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then run `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and launch the packaged app. That script also builds the gateway binary, so a Rust change reaches the app only through it
+- launch a QA run with its own instance, never bare: `open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"`. `--instance-dir` is the only argument the app takes and it is the whole of the isolation — the config, the gateway log and the client's preferences all live under it, so a QA run cannot touch the real instance in `~/Library/Application Support/remotex`. Wipe the slate by deleting the directory. Preferences are a JSON file in there rather than a `UserDefaults` suite for exactly this reason: a suite lives in the user's own `Preferences` whatever the app was told
+- the app's config is `<instance>/remotex.toml`, `[rxa]` and `[[targets]]` only — a `[server]` block is refused, since the app decides the port, the web root and the credential. Zero targets is a valid first launch. Edit it in the app (**Remote › Configuration…**), which validates through `remotex-gateway check-config --embedded` and writes nothing on a refusal; that call is why there is no TOML parser in Swift, and there must not be one
+- never validate the client with `swift run`, a standalone `swift build`, or the executable under `.build`; those bypass the `.app` bundle and behave differently — missing menus, no `Info.plist` metadata, and no bundled gateway at all, so the app comes up saying the copy is incomplete
+- for routine development, the disk-image layer is out of scope: use `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and work exclusively with `dist/remotex.app`
+- use the script's default DMG build only for production/release validation, changes to its DMG packaging, or when the user explicitly asks for it. The image's file name keeps the `remotex-viewer-<version>` prefix; the app inside it is `remotex.app`
+- no intrusive QA automation for the macOS GUI; manual QA only
 
 ## macOS remotex agent
 

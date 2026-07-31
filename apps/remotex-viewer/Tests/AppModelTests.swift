@@ -7,18 +7,20 @@ import Testing
 /// snapshot and is now derived here from the gateway's own control messages.
 @MainActor
 struct AppModelTests {
+    /// The one preference this client keeps, in the instance directory with
+    /// everything else — see `ViewerPreferences` for why that is not a defaults
+    /// suite any more.
     @Test
-    func keyboardOverridesDefaultToEnabledAndPersist() {
-        let suiteName = "AppModelTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+    func keyboardOverridesDefaultToEnabledAndPersist() throws {
+        let directory = try ScratchDirectory()
+        let url = directory.url.appending(path: "viewer.json")
 
-        let initial = AppModel(defaults: defaults)
+        let initial = AppModel(preferences: ViewerPreferences(url: url))
         #expect(initial.macOSKeyboardOverridesEnabled)
 
         initial.macOSKeyboardOverridesEnabled = false
 
-        let restored = AppModel(defaults: defaults)
+        let restored = AppModel(preferences: ViewerPreferences(url: url))
         #expect(!restored.macOSKeyboardOverridesEnabled)
     }
 
@@ -288,40 +290,67 @@ struct AppModelTests {
         #expect(model.session.activeDisplayID == 9)
     }
 
-    /// The gateway address is read from the defaults this model was handed, which
-    /// is what `--settings` relies on: a QA run must not read — or later write —
-    /// the address a real one left in `UserDefaults.standard`.
-    @Test
-    func theGatewayAddressComesFromTheDefaultsThisModelWasGiven() {
-        let defaults = UserDefaults(suiteName: "AppModelTests.\(UUID().uuidString)")!
-        // Stored as `GatewayLocation` normalizes it, trailing slash and all —
-        // this is a round trip through the same parse a real launch does.
-        defaults.set("http://10.0.0.9:52380/", forKey: "gatewayAddress")
-        let model = AppModel(
-            defaults: defaults,
-            clipboard: ClipboardSynchronizer(
-                pasteboard: NSPasteboard.withUniqueName(),
-                startsPolling: false
-            )
-        )
-        #expect(model.gatewayAddress == "http://10.0.0.9:52380/")
-    }
-
-    /// `--settings <name>` is the flag that keeps a QA run's gateway address and
-    /// login off the real ones. Parsed from an argument list rather than from
+    /// `--instance-dir <path>` is the whole of this app's configurability, and the one
+    /// thing a QA run needs: everything the launch reads or writes is under the
+    /// directory it names. Parsed from an argument list rather than from
     /// `ProcessInfo`, which a test process cannot choose.
     @Test
-    func theSettingsFlagNamesASuiteOnlyWhenItHasOne() {
-        #expect(ViewerDefaults.settingsName(in: ["remotex-viewer"]) == nil)
+    func theInstanceFlagNamesADirectoryOnlyWhenItHasOne() {
+        #expect(InstanceDirectory.named(in: ["remotex-viewer"]) == nil)
         #expect(
-            ViewerDefaults.settingsName(
-                in: ["remotex-viewer", "--settings", "qa", "--gateway", "http://x"]
-            ) == "qa"
+            InstanceDirectory.named(in: ["remotex-viewer", "--instance-dir", "/tmp/qa"])?.path
+                == "/tmp/qa"
         )
-        // A trailing flag, or one with only spaces after it, is a mistake — and
-        // must not become a suite named "".
-        #expect(ViewerDefaults.settingsName(in: ["remotex-viewer", "--settings"]) == nil)
-        #expect(ViewerDefaults.settingsName(in: ["remotex-viewer", "--settings", "  "]) == nil)
+        // A trailing flag, or one with only spaces after it, is a mistake — and must
+        // fall back to the real instance rather than to a directory called "".
+        #expect(InstanceDirectory.named(in: ["remotex-viewer", "--instance-dir"]) == nil)
+        #expect(InstanceDirectory.named(in: ["remotex-viewer", "--instance-dir", "  "]) == nil)
+        // A relative path is resolved, because an app launched by `open` inherits `/`
+        // as its working directory and would otherwise write somewhere nobody meant.
+        let relative = InstanceDirectory.named(in: ["x", "--instance-dir", "qa/here"])
+        #expect(relative?.path.hasSuffix("qa/here") == true)
+        #expect(relative?.path.hasPrefix("/") == true)
+    }
+
+    /// There is nothing to talk to before the gateway is up, and nothing to type
+    /// either: the app starts on the launch screen and no input reaches a remote from
+    /// there.
+    @Test
+    func theAppStartsOnTheLaunchScreenWithNoGateway() {
+        let model = makeModel()
+        #expect(model.session.screen == .launching)
+        #expect(!model.canSendInput)
+        #expect(model.launchError == nil, "not a failure yet — nothing has been tried")
+        // Unbundled, so there is no gateway binary to run and no config store over it.
+        #expect(model.gateway == nil)
+        #expect(model.config == nil)
+    }
+
+    /// Launching without a gateway in the bundle says so rather than looking like a
+    /// network problem, and leaves the app where it can be retried.
+    @Test
+    func launchingWithoutABundledGatewaySaysSo() async {
+        let model = makeModel()
+
+        await model.launch()
+
+        #expect(model.session.screen == .launching)
+        let error = model.launchError ?? ""
+        #expect(error.contains("incomplete"), "got: \(error)")
+        #expect(!model.isBusy, "and the retry button is usable")
+    }
+
+    /// The menu item and the picker's button both go through the model, because a
+    /// SwiftUI command cannot present a sheet. Two presses have to be two events, or
+    /// opening the panel after cancelling it would do nothing.
+    @Test
+    func askingForTheConfigurationPanelIsAnEventPerRequest() {
+        let model = makeModel()
+        // Without a config store there is nothing to edit, so the request is refused
+        // rather than opening an empty sheet.
+        #expect(model.configurationRequests == 0)
+        model.editConfiguration()
+        #expect(model.configurationRequests == 0, "no store, no panel")
     }
 
     /// An engine error is not a dead end: the socket stays up and the session
@@ -485,10 +514,7 @@ struct AppModelTests {
     // MARK: - Helpers
 
     private func makeModel(pasteboard: NSPasteboard? = nil) -> AppModel {
-        let suiteName = "AppModelTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        return AppModel(
-            defaults: defaults,
+        AppModel(
             clipboard: ClipboardSynchronizer(
                 pasteboard: pasteboard ?? NSPasteboard.withUniqueName(),
                 startsPolling: false
