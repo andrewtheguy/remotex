@@ -1227,7 +1227,7 @@ fn translate_input(
         // Standard RFB exposes one framebuffer spanning all screens: the
         // ExtendedDesktopSize screen list describes how they are laid out inside
         // it, not a set of things to choose between. Picking a single display
-        // over macOS Screen Sharing (ARD) is a planned phase-2 feature (see
+        // over macOS Screen Sharing (ARD) is planned but not implemented (see
         // docs/roadmap.md), so for now this engine sends no display list and the
         // no-op stands.
         ClientMsg::SelectDisplay { .. } => Vec::new(),

@@ -8,38 +8,30 @@ is the only place they can be read in context.
 
 ## Planned
 
-### macOS login-window and unattended access
+### Per-target quality dial
 
-The gateway reaches a Mac through its built-in Screen Sharing over VNC, in the
-signed-in user's Aqua session. So the desktop cannot be reached from the macOS
-login screen, and if the screen is locked the user must unlock it at the Mac
-before remotex can connect.
+The gateway encodes every tile as lossless PNG, with no way to trade quality for
+bytes on photographic or full-motion content. The next release adds a per-target
+`quality` field: `"full"` (the default, today's PNG path unchanged) or an
+integer 1–100 to encode tiles as JPEG at that fixed quality. Zero wire change —
+the tile format byte already carries PNG vs JPEG and every client decodes both.
+Detailed proposal: [proposals/quality-dial.md](proposals/quality-dial.md).
 
-The shape of an answer is established: RealVNC's
-[Service Mode](https://help.realvnc.com/hc/en-us/articles/360002253238-Understanding-RealVNC-Server-Modes)
-and RustDesk's installed-service mode both provide login-window access, by
-installing launch components that declare the `LoginWindow` session type
-alongside `Aqua`, rather than running only in a per-user Aqua session.
+A dynamic, motion-adaptive variant — quality chosen per cell from how fast it is
+changing, with a cleanup pass when it settles — is the scheme the deleted rxa
+agent ran. It is deferred until the fixed dial proves insufficient; the design
+and its salvage point are recorded in
+[proposals/motion-adaptive-jpeg.md](proposals/motion-adaptive-jpeg.md).
 
-Nothing past that shape is settled, and none of it should be designed here first.
-What has to be measured on a real Mac: how the single listener is held across the
-login transition and fast user switching, where a configuration readable by both
-the configured user and the UID 0 login-window process should live, and whether
-Screen Recording and Accessibility grants reach the service in the
-`LoginWindow` session at all.
-
-FileVault is the one boundary none of it crosses: no remote-access process runs
-before pre-boot disk unlock.
-
-### Phase 2 — Apple Screen Sharing display picking and high performance
+### Apple Screen Sharing display picking and high performance
 
 macOS Screen Sharing can natively pick a single display: the stock Screen Sharing
 app shows a Both Displays / Display 1 / Display 2 choice. The gateway does not do
 this yet. Today it shares the Mac's real screen(s) as-is over standard screen
 sharing; teaching the VNC/ARD path to enumerate the Mac's displays and bind to one
-is phase 2. The `ClientMsg::SelectDisplay` / `ServerMsg::Displays` wire is kept as
-scaffolding for exactly that, and `src/vnc.rs` currently returns an empty display
-list.
+is not implemented. The `ClientMsg::SelectDisplay` / `ServerMsg::Displays` wire is
+kept as scaffolding for exactly that — display picking builds on it rather than
+adding new wire — and `src/vnc.rs` currently returns an empty display list.
 
 "High-performance" screen sharing goes one step further: it spins up a resizable
 virtual display and allows dynamic resize the way RDP does. That is where `resize`

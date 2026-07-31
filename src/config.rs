@@ -427,13 +427,13 @@ impl ConfigFile {
                     // resolution is set on the Mac. Dynamic resize over ARD is a
                     // high-performance-mode feature — Screen Sharing can spin up a
                     // resizable virtual display, like RDP — and is not implemented
-                    // yet (see docs/roadmap.md, phase 2).
+                    // yet (see docs/roadmap.md).
                     anyhow::ensure!(
                         !target.resize,
                         "target {:?} is subtype \"ard\" and sets resize, which this gateway \
                          does not support yet: standard macOS Screen Sharing shares the Mac's \
                          real screens at the size set on the Mac, and dynamic resize is \
-                         high-performance ARD (phase 2)",
+                         high-performance ARD, which is not implemented yet",
                         target.name
                     );
                 }
@@ -1081,7 +1081,7 @@ mod tests {
         assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
 
         // Resize is rejected: only standard screen sharing is supported today, and
-        // dynamic resize over ARD is a phase-2 (high-performance) feature.
+        // dynamic resize over ARD is a high-performance feature, not implemented yet.
         let err =
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
         assert!(format!("{err:#}").contains("does not support yet"), "{err:#}");

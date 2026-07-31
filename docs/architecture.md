@@ -180,9 +180,9 @@ framebuffer at `pixels / scale`. Other engines ignore the message.
 
 RDP and VNC each expose one framebuffer today. Enumerating a Mac's displays and
 binding to a single one over macOS Screen Sharing — which the stock Screen Sharing
-app does natively — is planned as phase 2; the `selectDisplay` / `Displays` wire is
-kept as scaffolding for it, and `src/vnc.rs` currently reports an empty display
-list. See [`roadmap.md`](roadmap.md).
+app does natively — is planned but not implemented; the `selectDisplay` /
+`Displays` wire is kept as scaffolding it builds on, and `src/vnc.rs` currently
+reports an empty display list. See [`roadmap.md`](roadmap.md).
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine.
@@ -253,7 +253,8 @@ With `resize = true`, the client advertises DesktopSize and ExtendedDesktopSize
 against VNC servers that accept them. macOS Screen Sharing today shares the Mac's
 real screen(s) as-is and neither picks a single display nor resizes, so an `ard`
 target rejects the option during configuration; both are real Screen Sharing
-capabilities planned as phase 2 (see [`roadmap.md`](roadmap.md)). Clipboard
+capabilities that are planned but not implemented (see [`roadmap.md`](roadmap.md)).
+Clipboard
 support uses Extended Clipboard when the server advertises it and falls back to
 Latin-1 `ServerCutText` otherwise.
 
