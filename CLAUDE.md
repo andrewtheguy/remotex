@@ -11,6 +11,14 @@
 - keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
 - multi session is always out of scope (never planned, not merely deferred): no concurrent sessions, session sharing, or session broker. It means **one active session per gateway instance, forever** — a new browser force-claims it and evicts the previous holder (`src/session.rs`), which a client offers with a Take over button, the same shape as the browser prompt and as Windows Remote Desktop. A reconnect, a target switch and a browser takeover are all the same session coming back, so none of them costs a prompt
 
+## The desktop is always shown at 100%
+
+**Never add fit-to-window, zoom-to-fit, or scale-to-viewport logic to a pointer client.** A desktop that does not fit the window is scrolled, not shrunk. Mobile is the single exception: `CAN_PINCH_ZOOM` in `frontend/src/useRemoteDesktop.ts` gates a fit-to-width base scale with pinch zoom on top, and that branch is the only place a scale factor may come from the *viewport*.
+
+`ServerMsg::Resize { w, h, scale }` is **not** a fit factor — `scale` is the remote's pixel density, and `applyCanvasCss` lays the canvas out at `w / scale` by `h / scale` CSS pixels. So a 3840×2160 framebuffer with `scale: 2.0` is 1920×1080 CSS px, which is 100% of what the remote thinks its desktop is, at full pixel fidelity on a Retina host. `Density` in `src/rdp.rs` and the Apple display layout's backing-over-logical ratio (`src/vnc_apple.rs`) are the two producers, and neither knows the viewport exists.
+
+The way a desktop is *made* to fit a window is to ask the remote to render at that size — `resize = true`, `ClientMsg::Viewport`, RDP's Display Control channel. **Dynamic resolution is the Apple name for exactly that**: `resize` on a VNC target, `resize` on an RDP target, and Apple's dynamic-resolution descriptor are the same feature under three names, and any of them being unimplemented is never a reason to scale on the client instead.
+
 ## Browser tests
 
 Headless Playwright, in `tests/playwright/`.
