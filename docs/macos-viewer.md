@@ -484,6 +484,11 @@ user did not ask for — is left as it was rather than re-seeded, so a mid-sessi
 mute survives a dropped socket. On the macOS side there is no browser-style
 gesture requirement, so the subscription is asserted straight from `connected`.
 
+While sound is playing the window title gains a trailing `🔊` (`windowTitle`) —
+the one persistent surface that can show it, since the toggle is a menu item. The
+browser does the same on its tab title, but at the front, where a truncated-from-
+the-right tab title keeps it visible.
+
 The viewer decodes bare Opus packets with `AVAudioConverter` and
 `kAudioFormatOpus`; it needs neither a container nor a vendored decoder.
 `AVAudioConverter` does not apply the `OpusHead` pre-skip, so `OpusDecoder`

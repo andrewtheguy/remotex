@@ -225,6 +225,22 @@ struct AppModelTests {
         #expect(model.windowTitle == "mac — remotex")
     }
 
+    /// A speaker joins the window title while sound is playing, and only then — the
+    /// one persistent surface that can show it, since the toggle is a menu item.
+    @Test
+    func theWindowTitleGainsASpeakerWhileAudioPlays() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(.control(.connected(connected(protocolName: "rdp", audio: true))))
+        #expect(model.windowTitle == "mac — remotex", "silent unless asked for")
+
+        model.setAudioEnabled(true)
+        #expect(model.windowTitle == "mac — remotex 🔊")
+
+        model.setAudioEnabled(false)
+        #expect(model.windowTitle == "mac — remotex")
+    }
+
     /// Everything about the old target goes, so a later connect starts from a
     /// clean "waiting for the remote desktop" rather than showing stale pixels or
     /// a stale resolution menu.

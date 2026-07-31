@@ -247,11 +247,15 @@ final class AppModel: GatewaySessionSink {
     // MARK: - Derived UI state
 
     var windowTitle: String {
-        if let target = session.connectedTarget {
-            "\(target) — remotex"
-        } else {
-            branding
+        guard let target = session.connectedTarget else {
+            return branding
         }
+        // A speaker suffix while sound is playing — the one persistent surface that
+        // can say so, since the toggle is a menu item nobody is looking at. In
+        // session only: `audio.isEnabled` is cleared on the way to the picker, so
+        // this never trails the branding on the picker screen.
+        let base = "\(target) — remotex"
+        return audio.isEnabled ? "\(base) 🔊" : base
     }
 
     /// Whether this session runs on the gateway in this bundle.

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import FloatingMenu from "./FloatingMenu.tsx";
 import TargetPicker from "./TargetPicker.tsx";
 import {
@@ -69,6 +69,15 @@ export default function RemoteDesktop({
     sendClipboard,
     setBottomInset,
   } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
+
+  // A speaker on the tab title while sound is playing — the one place the desktop
+  // has room to say so, since the toggle lives in the drawer. At the *front*, not
+  // the end: a tab title is truncated from the right, so a suffix is the first
+  // thing to vanish. Desktop only, so the picker's tab stays the plain branding.
+  useEffect(() => {
+    document.title =
+      mode === "desktop" && audioEnabled ? `🔊 ${branding}` : branding;
+  }, [mode, audioEnabled, branding]);
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
