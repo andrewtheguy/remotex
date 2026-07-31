@@ -1074,7 +1074,23 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             // `combine_all_displays` byte rather than to an id.
                             let pick = (id != DisplayState::COMBINED).then_some(id);
                             debug!("vnc: asking the Mac for display {pick:?}");
-                            send(&uplink, &vnc_apple::set_display_message(pick)).await
+                            // Queue the repaint while the selection is still the
+                            // message in front of the Mac. Asking only after its
+                            // answering layout is too late on macOS 26: the layout
+                            // and resize arrive, but the request then earns only
+                            // later damage. A client has just cleared its resized
+                            // framebuffer, so a quiet screen stays black. The Mac
+                            // accepts the old framebuffer bounds here and applies
+                            // the request to the screen it is switching to.
+                            let size = desktop.lock().unwrap().size;
+                            send_all(
+                                &uplink,
+                                &[
+                                    vnc_apple::set_display_message(pick),
+                                    update_request(false, size).to_vec(),
+                                ],
+                            )
+                            .await
                         } else {
                             // A screen that has been unplugged since the list was
                             // sent. Dropped rather than forwarded, so the Mac is
