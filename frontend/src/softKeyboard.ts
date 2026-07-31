@@ -122,7 +122,12 @@ const ROW_QWERTY: SoftKeyDefinition[] = [
   p("p", "KeyP"),
 ];
 
-const ROW_HOME: SoftKeyDefinition[] = [
+// Exported so the panel can recognise it by identity and bracket it with half-key
+// spacers. Nine keys where the rows around it have ten units, so without them
+// `a`–`l` stretch to the full width, come out wider than the keys above, and stop
+// lining up with the row they are meant to sit under. Identity rather than a row
+// index, so inserting a row above cannot silently indent the wrong one.
+export const ROW_HOME: SoftKeyDefinition[] = [
   p("a", "KeyA"),
   p("s", "KeyS"),
   p("d", "KeyD"),
