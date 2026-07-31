@@ -1238,18 +1238,26 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 if full_repaint_owed {
                     // Layout metadata and empty updates can arrive before the
                     // pixels this request earns. Hold the polling loop until the
-                    // actual display regions have arrived, or a later incremental
-                    // request replaces this full one on macOS.
+                    // actual display regions have arrived or the bounded request
+                    // budget is exhausted, so an incremental request cannot
+                    // immediately replace this full one on macOS.
                     let expected = display.lock().unwrap().repaint_pixels;
                     full_repaint = Some(FullRepaint::new(expected));
                     send(uplink, &update_request(false, size)).await?;
-                } else if full_repaint.as_ref().is_some_and(FullRepaint::complete) {
-                    full_repaint = None;
-                    if poll {
-                        send(uplink, &update_request(true, size)).await?;
+                } else {
+                    if let Some(repaint) = &mut full_repaint {
+                        repaint.finish_update();
                     }
-                } else if full_repaint.is_none() && (poll || resized) {
-                    send(uplink, &update_request(poll && !resized, size)).await?;
+                    if full_repaint.as_ref().is_some_and(FullRepaint::complete) {
+                        full_repaint = None;
+                        if poll {
+                            send(uplink, &update_request(true, size)).await?;
+                        }
+                    } else if full_repaint.is_some() {
+                        send(uplink, &update_request(false, size)).await?;
+                    } else if poll || resized {
+                        send(uplink, &update_request(poll && !resized, size)).await?;
+                    }
                 }
             }
             // SetColourMapEntries — can't happen for the true-colour format we
@@ -1499,23 +1507,46 @@ async fn extended_cut_text(
 /// Apple sends a combined desktop as one rectangle per display, sometimes with
 /// metadata or damage updates between them. Rectangle union is tracked exactly so
 /// overlapping damage cannot masquerade as the full repaint.
+///
+/// Eight full requests tolerate the metadata and small-damage bursts measured
+/// around a display switch without letting a server that never repaints stall the
+/// polling loop forever.
+const FULL_REPAINT_UPDATE_BUDGET: u8 = 8;
+
 #[derive(Debug)]
 struct FullRepaint {
     expected_pixels: u64,
     regions: Vec<Rect>,
+    updates_left: u8,
+    coverage_complete: bool,
 }
 
 impl FullRepaint {
     fn new(expected_pixels: u64) -> Self {
-        Self { expected_pixels, regions: Vec::new() }
+        Self {
+            expected_pixels,
+            regions: Vec::new(),
+            updates_left: FULL_REPAINT_UPDATE_BUDGET,
+            coverage_complete: expected_pixels == 0,
+        }
     }
 
     fn accept(&mut self, rect: Rect) {
+        if self.complete() || self.regions.iter().any(|region| region.contains(&rect)) {
+            return;
+        }
         self.regions.push(rect);
+        self.coverage_complete = union_pixels(&self.regions) >= self.expected_pixels;
+    }
+
+    fn finish_update(&mut self) {
+        if !self.complete() {
+            self.updates_left = self.updates_left.saturating_sub(1);
+        }
     }
 
     fn complete(&self) -> bool {
-        self.expected_pixels > 0 && union_pixels(&self.regions) >= self.expected_pixels
+        self.coverage_complete || self.updates_left == 0
     }
 }
 
@@ -3791,6 +3822,34 @@ mod tests {
         assert_eq!(union_pixels(&[a, b]), 150);
     }
 
+    #[test]
+    fn full_repaint_drops_contained_and_post_completion_regions() {
+        let mut repaint = FullRepaint::new(200);
+        let first = Rect::from_size(0, 0, 10, 10).unwrap();
+        repaint.accept(first);
+        repaint.accept(Rect::from_size(2, 2, 2, 2).unwrap());
+        assert_eq!(repaint.regions, vec![first]);
+
+        repaint.accept(Rect::from_size(10, 0, 10, 10).unwrap());
+        assert!(repaint.complete());
+        repaint.accept(Rect::from_size(20, 0, 10, 10).unwrap());
+        assert_eq!(repaint.regions.len(), 2);
+    }
+
+    #[test]
+    fn full_repaint_zero_and_exhausted_budget_are_complete() {
+        let zero = FullRepaint::new(0);
+        assert!(zero.complete());
+
+        let mut incomplete = FullRepaint::new(1);
+        for _ in 1..FULL_REPAINT_UPDATE_BUDGET {
+            incomplete.finish_update();
+            assert!(!incomplete.complete());
+        }
+        incomplete.finish_update();
+        assert!(incomplete.complete());
+    }
+
     /// The Mac can answer a display selection with its layout, then empty
     /// metadata updates and small damage before the non-incremental pixels. None
     /// of those may earn the normal incremental poll: on macOS it replaces the
@@ -3823,6 +3882,41 @@ mod tests {
 
         let mut expected = vnc_apple::auto_framebuffer_update((2, 2));
         expected.extend_from_slice(&update_request(false, (2, 2)));
+        expected.extend_from_slice(&update_request(false, (2, 2)));
+        expected.extend_from_slice(&update_request(false, (2, 2)));
+        expected.extend_from_slice(&update_request(true, (2, 2)));
+        assert_eq!(written(&sent), expected);
+    }
+
+    #[tokio::test]
+    async fn apple_poll_settles_after_bounded_incomplete_updates() {
+        let mut updates = vec![apple_layout_update(Some(11), (2, 2))];
+        for _ in 0..FULL_REPAINT_UPDATE_BUDGET {
+            updates.push(vec![0, 0, 0, 0]);
+        }
+        let wire = framed(&updates);
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let apple = Apple { asked_for_zlib: true, ..Apple::default() };
+
+        let _ = read_loop(
+            RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
+            shared,
+            ReadFlags { clipboard: false, poll: true },
+            Some(apple),
+            sink,
+        )
+        .await;
+
+        let mut expected = vnc_apple::auto_framebuffer_update((2, 2));
+        for _ in 0..FULL_REPAINT_UPDATE_BUDGET {
+            expected.extend_from_slice(&update_request(false, (2, 2)));
+        }
         expected.extend_from_slice(&update_request(true, (2, 2)));
         assert_eq!(written(&sent), expected);
     }

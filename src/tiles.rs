@@ -42,6 +42,13 @@ impl Rect {
         self.bottom - self.top + 1
     }
 
+    pub fn contains(&self, other: &Self) -> bool {
+        self.left <= other.left
+            && self.top <= other.top
+            && self.right >= other.right
+            && self.bottom >= other.bottom
+    }
+
     /// This rectangle split into pieces at most [`CELL_H`] rows tall, top down.
     ///
     /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
