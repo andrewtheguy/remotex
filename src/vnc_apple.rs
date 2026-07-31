@@ -8,16 +8,19 @@
 //!
 //! ## What the extension is for, here
 //!
-//! Two things standard RFB cannot do:
+//! **Compression**: standard zlib ([`ENCODING_ZLIB`]) instead of raw pixels, which
+//! is around fifty times fewer bytes on a static desktop. Apple's own still-image
+//! codecs would do better still, but their payload formats are unresolved in the
+//! reference this was written from, and a client must not advertise an encoding it
+//! cannot decode.
 //!
-//! - **Picking a screen.** A Mac with two displays is one RFB framebuffer with
-//!   both of them in it, and there is no way to ask for one. Apple's server
-//!   reports its displays in [`ENCODING_DISPLAY_LAYOUT`] and binds to one on a
-//!   [`set_display_message`], which is the Display menu in Screen Sharing.app.
-//! - **Compression.** Standard zlib ([`ENCODING_ZLIB`]) instead of raw pixels.
-//!   Apple's own still-image codecs would compress far better, but their payload
-//!   formats are unresolved in the reference this was written from, and a client
-//!   must not advertise an encoding it cannot decode.
+//! **Not** picking a screen, which is what this wire was reached for. A 003.889
+//! session makes macOS 26 synthesize one display and remove the Mac's real ones
+//! until it ends, so no [`ENCODING_DISPLAY_LAYOUT`] ever arrives and
+//! [`set_display_message`] is ignored — there is only ever one display to pick.
+//! Both are still implemented and unit-tested against the reference's field model,
+//! and both are dormant. Do not read their presence as evidence that picking works;
+//! docs/apple-vnc-889.md has the measurements.
 //!
 //! ## What is deliberately absent
 //!

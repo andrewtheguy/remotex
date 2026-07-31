@@ -358,17 +358,16 @@ one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-The Display menu is filled by one target kind only: a Mac reached with
-`subtype = "ard-high-performance"`, whose protocol revision reports the Mac's
-screens and lets one be bound. Everything else — RDP, plain VNC, and a Mac on plain
-`subtype = "ard"` — exposes a single framebuffer spanning every screen, sends no
-display list, and leaves the menu saying so.
+**No engine fills the Display menu today, so it always says so.** RDP, plain VNC and
+both Mac subtypes each expose a single framebuffer and send no display list.
 
-The checkmark follows the Mac, never the click: a selection is sent, and the menu
-moves only when the Mac answers with a new layout. A screen unplugged between the
-list arriving and the click is dropped by the gateway rather than forwarded. There
-is no **Both Displays** entry — the aggregate is not implemented, and it is what a
-session shows before anything is picked. See [`roadmap.md`](roadmap.md).
+Picking one of a Mac's screens was attempted through Apple's own protocol revision
+(`subtype = "ard-high-performance"`) and does not work: macOS replaces the Mac's real
+displays with one synthesized display for the duration of such a session, so there is
+nothing to enumerate. `subtype = "ard"` shares every real screen, in one framebuffer.
+The `selectDisplay` / `Displays` wire and this menu remain in place, and the gateway
+side is implemented and tested, waiting on a mechanism that reports a list — see
+[`apple-vnc-889.md`](apple-vnc-889.md) and [`roadmap.md`](roadmap.md).
 
 ### Viewport measurement
 

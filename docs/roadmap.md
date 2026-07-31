@@ -36,12 +36,35 @@ deleted rxa agent ran. It is deferred until the fixed dial proves insufficient; 
 design and its salvage point are recorded in
 [proposals/motion-adaptive-jpeg.md](proposals/motion-adaptive-jpeg.md).
 
-### Apple Screen Sharing: what is left after display picking
+### Apple Screen Sharing: picking a display
 
-`subtype = "ard-high-performance"` ships Apple's RFB 003.889 wire — the record
-layer, the display list, and zlib rectangles — so picking one of a Mac's screens
-works, the way the stock Screen Sharing app's Display menu does. What remains on
-that wire, each for its own reason:
+**Not solved, and not solvable the way it was attempted.** `subtype =
+"ard-high-performance"` ships Apple's RFB 003.889 wire — the record layer and zlib
+rectangles — but the reason that wire was reached for was to pick one of a Mac's
+screens, and it does not offer that.
+
+Measured on macOS 26.5.2: a 003.889 session makes macOS **synthesize a single
+display and remove the Mac's real ones** for the session's duration, with a fresh
+`CGDirectDisplayID` each time. It does this whether or not the client sends
+`SetDisplayConfiguration`, for `display_type` 0, 2 and 4, with the
+dynamic-resolution flag set or clear, and for ClientInit `0x01` as well as `0xC1`.
+So no `AppleDisplayLayout` ever arrives and `SetDisplayMessage` is ignored — there
+is only ever one display to pick. A plain RFB 3.8 session leaves the real displays
+alone, which is the check that rules out coincidence.
+
+**The workaround is `subtype = "ard"`**, which shares every real screen in one
+framebuffer. Zooming in on one of them is not available from this gateway.
+
+How Screen Sharing.app populates its Both Displays / Display 1 / Display 2 menu is
+unresolved, and the reverse-engineered reference is no help because this is exactly
+where it is wrong. Settling it needs a packet capture of that app against a
+two-display Mac. The parser, the selection path and the `ServerMsg::Displays` wire
+are all implemented and unit-tested, so if that capture reveals a mechanism, the
+work is in reaching it and not in handling it. Full measurements, including the two
+places the reference is outright wrong, are in
+[`apple-vnc-889.md`](apple-vnc-889.md).
+
+What else remains on that wire, each for its own reason:
 
 - **Dynamic resolution**, which is the Apple name for what `resize` means on a VNC
   or RDP target. It needs the *full dynamic descriptor* on `SetDisplayConfiguration`
@@ -50,10 +73,8 @@ that wire, each for its own reason:
   that follows every size change. The gateway sends the static descriptor instead
   and `resize` is refused for the subtype at configuration time. Note that this is
   never a reason to scale on the client: see the 100% rule in `CLAUDE.md`.
-- **Both Displays**, the aggregate. One byte (`combine_all_displays`) on the message
-  the gateway already sends, but the framebuffer layout it produces is unspecified
-  in the reference, so it is not attempted. Every screen at once is what a session
-  does anyway before anything is picked.
+- **Both Displays**, the aggregate — moot while the above holds, since a session
+  already has exactly one display and it is not one of the Mac's.
 - **The pasteboard.** Apple carries it over messages of its own — an announcement,
   a fetch, then a zlib'd multi-flavour archive — not over RFB's Extended Clipboard,
   which is all `src/vnc_clipboard.rs` implements. `clipboard` is refused for the

@@ -178,11 +178,14 @@ resize acts on it, quantizing to 1x or 2x at the same midpoint; the resulting
 density travels back as the `scale` on `resize`, and clients present the
 framebuffer at `pixels / scale`. Other engines ignore the message.
 
-RDP and VNC each expose one framebuffer today. Enumerating a Mac's displays and
-binding to a single one over macOS Screen Sharing — which the stock Screen Sharing
-app does natively — is planned but not implemented; the `selectDisplay` /
-`Displays` wire is kept as scaffolding it builds on, and `src/vnc.rs` currently
-reports an empty display list. See [`roadmap.md`](roadmap.md).
+RDP and VNC each expose one framebuffer, so no engine reports a display list and
+neither client shows a picker. Binding to a single one of a Mac's displays — which
+the stock Screen Sharing app does natively — was attempted over Apple's protocol
+revision and does not work there: macOS replaces the Mac's real displays with one
+synthesized display for such a session. The `selectDisplay` / `Displays` wire and the
+gateway's handling of it are implemented and tested, waiting on a mechanism that
+reports a list. See [`apple-vnc-889.md`](apple-vnc-889.md) and
+[`roadmap.md`](roadmap.md).
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine.
@@ -255,30 +258,35 @@ accept them. Clipboard support uses Extended Clipboard when the server advertise
 it and falls back to Latin-1 `ServerCutText` otherwise.
 
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
-revision, and the only wire on which a Mac will let a client *pick a screen*. It
-authenticates identically — the same security type 30 — and then differs in three
-places and nowhere else: the version banner, the `0xC1` ClientInit byte, and a
-cleartext prelude (`ViewerInfo`, `SetEncryption`) after which every byte in both
+revision. It authenticates identically — the same security type 30 — and then
+differs in three places and nowhere else: the version banner, the `0xC1` ClientInit
+byte, and a cleartext `SetEncryption` prelude after which every byte in both
 directions rides inside an AES-128-CBC record layer keyed by a rekey message the
 server delivers, of all places, inside a framebuffer rectangle. `src/vnc_record.rs`
 is that transport, exposed to the rest of the engine as an ordinary `AsyncRead` and
 a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it.
 
-What the subtype buys is `AppleDisplayLayout`, which reports the Mac's screens and
-fills in the `ClientMsg::SelectDisplay` / `ServerMsg::Displays` wire that both
-clients have always had a UI for, and zlib-compressed rectangles instead of raw
-pixels. Which screen is being shared is tracked from what the gateway asked for and
-only believed once a layout comes back, so a request the Mac ignores leaves the
-checkmark where it was. A layout also re-arms the server's sender, which macOS
-silently drops at a login, a lock or a fast-user-switch — without the re-arm the
-desktop keeps painting and only the pointer freezes.
+**What the subtype buys is compression**: zlib rectangles instead of raw pixels,
+around fifty times fewer bytes on a static desktop.
 
-Deliberately absent from the 003.889 path: Apple's own still-image codecs and the
-Adaptive HEVC media transport (the reference these were written from leaves their
-payload formats unresolved, and a client must not advertise an encoding it cannot
-decode); the pasteboard, which Apple carries over messages of its own rather than
-RFB's, so `clipboard` is refused for the subtype at configuration time; and dynamic
-resolution, so `resize` is refused there too. See [`roadmap.md`](roadmap.md).
+What it costs is the Mac's real screens. This wire was reached for in order to *pick
+a screen*, which is the one thing standard RFB cannot express — and it turns out not
+to offer that either. A 003.889 session makes macOS 26 synthesize a single display
+and remove the Mac's real ones until the session ends, whatever the client asks for
+and whether or not it sends `SetDisplayConfiguration` at all. So no
+`AppleDisplayLayout` ever arrives, `SetDisplayMessage` is ignored, and there is only
+ever one display to pick. **Plain `subtype = "ard"` is the one that shares the real
+screens.** The layout parser and the selection path are implemented, unit-tested and
+dormant; they would light up if a Mac ever sent a layout. The measurements, and the
+two places the protocol reference is outright wrong, are in
+[`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
+
+Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
+transport (the reference leaves their payload formats unresolved, and a client must
+not advertise an encoding it cannot decode); the pasteboard, which Apple carries over
+messages of its own rather than RFB's, so `clipboard` is refused for the subtype at
+configuration time; and dynamic resolution, so `resize` is refused there too. See
+[`roadmap.md`](roadmap.md).
 
 ## Clients
 

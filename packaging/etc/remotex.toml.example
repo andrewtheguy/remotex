@@ -168,24 +168,22 @@ password = "change-me"
 # password = "the-account-password"
 
 # `subtype = "ard-high-performance"` is the same Mac and the same credentials over
-# Apple's own protocol revision. Two things it can do that the wire above cannot:
+# Apple's own protocol revision. What it buys is **compression**: zlib instead of raw
+# pixels, which on a static desktop is around fifty times fewer bytes.
 #
-#   1. **Pick a screen.** The Mac reports its displays and the gateway binds to one,
-#      which is the Both Displays / Display 1 / Display 2 choice the stock Screen
-#      Sharing app offers. Both clients already have the UI: the browser's Display
-#      panel and the viewer's Display menu, which stay hidden on every other kind of
-#      target because there is nothing to choose. There is no "Both Displays" entry —
-#      that is what a session shows before anything is picked.
-#   2. **Compress the picture** (zlib) instead of sending raw pixels.
+# What it costs is the Mac's real screens. A session on this wire makes macOS
+# synthesize one display and remove the real ones until it ends, so what you see is a
+# single canvas that is none of the Mac's monitors. If you want the actual screens,
+# use plain "ard" above — it shares all of them, in one framebuffer. (This wire was
+# reached for in order to *pick* a screen, the way the stock Screen Sharing app does;
+# it turns out not to offer that. See docs/apple-vnc-889.md.)
 #
-# It costs two keys, both refused here rather than accepted and left inert:
-# `clipboard`, because Apple carries the pasteboard over its own messages on this
-# wire; and `resize`, for the same reason plain "ard" refuses it — asking a Mac for a
-# resizable desktop means asking it to create a virtual display, which is not
-# implemented. Everything else is identical, so switching between the two subtypes is
-# one line.
+# It also refuses two keys rather than accepting them and doing nothing: `clipboard`,
+# because Apple carries the pasteboard over its own messages here; and `resize`, for
+# the same reason plain "ard" refuses it. Everything else is identical, so switching
+# between the two subtypes is one line.
 # [[targets]]
-# name = "mac-pick-a-screen"
+# name = "mac-compressed"
 # protocol = "vnc"
 # subtype = "ard-high-performance"
 # host = "10.0.0.3"

@@ -56,11 +56,13 @@ account's username and password; that selects Apple Remote Desktop authenticatio
 so the connection lands at the user's own screen rather than a login-window
 session.
 
-`subtype = "ard-high-performance"` takes the same credentials and speaks Apple's
-own protocol revision instead. On a Mac with more than one display that is what
-lets you **pick a screen** — the choice the stock Screen Sharing app offers in its
-Display menu — and it compresses the picture rather than sending raw pixels. It
-does not support `resize` or `clipboard`; plain `ard` supports `clipboard`.
+`subtype = "ard-high-performance"` takes the same credentials and speaks Apple's own
+protocol revision instead, which **compresses the picture** rather than sending raw
+pixels — around fifty times fewer bytes on a static desktop. In exchange macOS
+replaces the Mac's real displays with one synthesized display for the duration of the
+session, so use plain `ard` if you want the actual screens. It does not support
+`resize` or `clipboard`; plain `ard` supports `clipboard`. See
+[`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 ## Container
 
@@ -125,8 +127,8 @@ password = "change-me"
 ```
 
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
-target with `subtype = "ard"` (or `"ard-high-performance"`, to pick a screen) and
-the Mac account's username and password. Keep the config mode `0600`; target
+target with `subtype = "ard"` (or `"ard-high-performance"`, to compress the picture)
+and the Mac account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in

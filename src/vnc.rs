@@ -7,8 +7,10 @@
 //! **RFB 003.889**, Apple's own revision, under `subtype =
 //! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
 //! record layer ([`crate::vnc_record`]), alongside Apple's control messages
-//! ([`crate::vnc_apple`]). What that buys is a *choice of screen* — which
-//! standard RFB cannot express — and zlib instead of raw pixels.
+//! ([`crate::vnc_apple`]). What that buys is **zlib instead of raw pixels**. What
+//! it costs is the Mac's real screens, which macOS replaces with one synthesized
+//! display for the duration of such a session — see docs/apple-vnc-889.md, which
+//! records that and the two places the protocol reference is wrong.
 //!
 //! The difference is contained in three places and nowhere else: [`Dialect`]
 //! (which banner, which ClientInit byte), the two preface functions after

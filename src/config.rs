@@ -64,18 +64,23 @@ pub enum Subtype {
     /// VNC server that happens to run on a Mac is not this — it is a plain `vnc`
     /// target.
     ///
-    /// One framebuffer spanning every attached display, at the size the Mac is
-    /// set to. For a choice of screen, see [`Subtype::ArdHighPerformance`].
+    /// One framebuffer spanning every attached display, at the size the Mac is set
+    /// to — and the only subtype that shares the real screens at all, which is why
+    /// it is the one to reach for on a Mac with more than one.
     Ard,
     /// The same Mac over Apple's own protocol revision, RFB 003.889: an
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
     /// control messages (see [`crate::vnc_apple`]).
     ///
-    /// What it buys over [`Subtype::Ard`] is what only this wire can do: the Mac
-    /// reports its displays and one of them can be picked, the way Screen
-    /// Sharing.app's Display menu does, and pixels arrive zlib-compressed rather
-    /// than raw. What it does not buy is dynamic resize — that is a further
-    /// feature of this wire and is not implemented (see docs/roadmap.md).
+    /// **What it buys is compression** — zlib rather than raw pixels, which on a
+    /// static desktop is around fifty times fewer bytes.
+    ///
+    /// What it costs is the Mac's real screens. Measured on macOS 26: a 003.889
+    /// session makes macOS synthesize *one* display and remove the real ones until
+    /// the session ends, whatever the client asks for. So this subtype shares a
+    /// single canvas that is not any of the Mac's monitors, and there is nothing to
+    /// pick between. [`Subtype::Ard`] is the one that shares the real screens —
+    /// all of them, in one framebuffer. See docs/apple-vnc-889.md.
     ArdHighPerformance,
 }
 

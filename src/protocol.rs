@@ -229,10 +229,12 @@ pub enum ClientMsg {
     /// alongside the automatic pushes: a browser attaching mid-session has
     /// missed every one of them. See docs/architecture.md.
     ClipboardRequest,
-    /// Share the display identified by the last [`ServerMsg::Displays`]. No
-    /// engine acts on it yet — display picking over macOS Screen Sharing (ARD)
-    /// is planned but not implemented, and builds on this wire (see
-    /// docs/roadmap.md).
+    /// Share the display identified by the last [`ServerMsg::Displays`].
+    ///
+    /// Acted on by the VNC engine's Apple dialect and by nothing else — and in
+    /// practice by nothing at all, because no Mac has been seen to report a display
+    /// list to begin with (see docs/apple-vnc-889.md). A client that never receives
+    /// [`ServerMsg::Displays`] never has an id to name here.
     SelectDisplay { id: u32 },
     /// Start or stop audio delivery for this attachment.
     Audio { enabled: bool },
@@ -587,9 +589,9 @@ pub const UNSCALED: f32 = 1.0;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
-    /// [`ClientMsg::SelectDisplay`]. No current engine emits a display list;
-    /// per-display selection is planned but not implemented (see
-    /// docs/roadmap.md).
+    /// [`ClientMsg::SelectDisplay`]. On the Apple dialect it is a
+    /// `CGDirectDisplayID`. No engine has yet been able to fill a display list in
+    /// practice: see docs/apple-vnc-889.md.
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,
