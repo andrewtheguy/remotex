@@ -12,6 +12,16 @@ struct RemoteCommands: Commands {
         // desktop is focused, so advertising it on this item would be advertising a
         // shortcut that does something else. Moving focus off the desktop is what
         // makes the menu reachable from the keyboard again.
+        // And About, for the same reason and with the same consequence if it is left
+        // out: `commandsReplaced` removes the standard application menu whole, so the
+        // one place a Mac app states its version had no item in it at all. Named after
+        // the instance's `branding`, which is what the rest of its windows say.
+        CommandGroup(replacing: .appInfo) {
+            Button("About \(model.branding)") {
+                model.showAbout()
+            }
+        }
+
         CommandGroup(replacing: .appTermination) {
             Button("Quit remotex") {
                 NSApp.terminate(nil)

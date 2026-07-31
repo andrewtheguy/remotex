@@ -40,6 +40,12 @@ final class AppModel: GatewaySessionSink {
     /// open the configuration panel. A counter rather than a flag: two requests in a
     /// row have to be two events, or the second one after a cancel does nothing.
     private(set) var configurationRequests = 0
+    /// The same arrangement for the About panel, and a counter for the same reason.
+    ///
+    /// Unlike the configuration request this is never refused: what About is mainly
+    /// for is the version, which an unbundled build with no gateway and no instance
+    /// still has.
+    private(set) var aboutRequests = 0
     /// The remote's pointer shape, once an engine hands one over. Nil means the
     /// remote is drawing its own pointer into the framebuffer.
     private(set) var remoteCursor: ServerMessage.Cursor?
@@ -352,6 +358,12 @@ final class AppModel: GatewaySessionSink {
             return
         }
         configurationRequests += 1
+    }
+
+    /// Ask the window to open the About panel — which version this is, which instance
+    /// it runs, and the gateway key a Mac has to authorize.
+    func showAbout() {
+        aboutRequests += 1
     }
 
     /// Put the launch screen up with a reason and whatever the gateway said.

@@ -101,6 +101,41 @@ terminal.
 editor, Reveal in Finder, Cancel, Save, and this instance's `rxa` public key with a
 Copy button — the value a Mac agent needs in its `authorized_gateways`.
 
+### About
+
+**remotex › About remotex** — named after the instance's `branding`, so a second
+instance's item says its own name — states the three things that identify a running
+app, none of which is visible anywhere else:
+
+- **the version**, from `CFBundleShortVersionString`, plus the wire protocol number
+  the gateway is checked against;
+- **the instance directory**, with Reveal in Finder;
+- **the `rxa` public key**, with Copy — the same `GatewayKeyRow` the picker and the
+  configuration panel show, because pairing a Mac is a reason to want it without
+  editing anything.
+
+It exists as an explicit item because `commandsReplaced` takes the standard
+application menu down whole (see `RemoteCommands`): About is not restored unless it is
+put back, and until it was, a running app could not say which build it was.
+
+### The gateway key, in three places
+
+`GatewayKeyRow` is the only value in the app that has to *leave* it — an agent answers
+no gateway missing from its `authorized_gateways` — so it appears wherever somebody
+would look for it:
+
+- **the target picker's footer**, beside Configuration…. The screen a first launch
+  lands on and the one a target switch comes back to, so this is the unburied copy;
+- **About**, as part of what this instance is;
+- **the configuration panel**, beside the target being paired.
+
+The row is always present, in all three: when there is no `[rxa].private_key` it says
+so, rather than disappearing and reading as a feature the app does not have. Deriving
+the key costs a gateway process (`rxa-pubkey`), so `GatewayConfigStore` remembers a
+successful answer and retires it on a save — which is the one thing that can change
+the identity. A failed read is not cached, because bootstrapping is what mints the key
+and a `nil` remembered before it ran would stick for the life of the app.
+
 Save validates first, by running the bundled gateway's `check-config --embedded` on
 the candidate text. So what the editor accepts is by construction what the gateway
 starts on, and there is no second idea of what a config means: a refusal keeps the
@@ -181,7 +216,8 @@ setting — the first is what you click, the second is what you then see running
 
 - **A new `rxa` identity.** A fresh directory mints its own `[rxa].private_key` on
   first launch, so every Mac agent it should reach needs *that* instance's public key
-  on its `authorized_gateways` list — copy it from **Configuration…**. The keys are
+  on its `authorized_gateways` list — copy it from **About** or **Configuration…**,
+  both of which show that instance's own key. The keys are
   genuinely different; one instance being paired says nothing about another.
 - **A turn at the agent.** An agent serves one session at a time, so whichever
   instance reaches a shared Mac second is refused with a **Take over** button. That is

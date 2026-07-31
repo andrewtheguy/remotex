@@ -24,8 +24,6 @@ struct ConfigurationPanel: View {
     @State private var text = ""
     @State private var problem: String?
     @State private var isSaving = false
-    @State private var publicKey: String?
-    @State private var copiedKey = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -61,7 +59,10 @@ struct ConfigurationPanel: View {
                 .accessibilityLabel("Configuration error")
             }
 
-            publicKeyRow
+            // The value a Mac needs before it will answer this gateway at all, beside
+            // the target being paired. Also in About, which is where somebody looks
+            // for it when they are not editing anything — see `GatewayKeyRow`.
+            GatewayKeyRow(store: store)
 
             HStack {
                 Button("Reveal in Finder") {
@@ -85,39 +86,6 @@ struct ConfigurationPanel: View {
         .frame(width: 620)
         .task {
             text = store.read()
-            publicKey = await store.publicKey()
-        }
-    }
-
-    /// This instance's `rxa` public key, which a Mac agent needs in its
-    /// `authorized_gateways` before it will answer at all.
-    ///
-    /// Here because there is nowhere else it could be: the key belongs to the gateway
-    /// inside this app, and without it in front of somebody, pairing a Mac would mean
-    /// running the bundled binary from a terminal — which is exactly the kind of thing
-    /// this app exists to avoid.
-    @ViewBuilder
-    private var publicKeyRow: some View {
-        if let publicKey {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("This app's gateway key")
-                        .font(.callout.weight(.medium))
-                    Text(publicKey)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                }
-                Spacer()
-                Button(copiedKey ? "Copied" : "Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(publicKey, forType: .string)
-                    copiedKey = true
-                }
-            }
-            .help("Add this line to a Mac's authorized_gateways to let this app reach it")
         }
     }
 

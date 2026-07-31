@@ -9,6 +9,10 @@ struct RootView: View {
     /// because it is a fact about this window, not about the session — and both the
     /// launch screen and the Remote menu open the same one.
     @State private var isEditingConfiguration = false
+    /// Whether the About panel is up. Same reasoning, and its own flag rather than one
+    /// enum of "which sheet": the two are opened from different places and neither ever
+    /// replaces the other.
+    @State private var isShowingAbout = false
 
     var body: some View {
         ZStack {
@@ -31,6 +35,15 @@ struct RootView: View {
         // view — which nothing outside SwiftUI can do.
         .onChange(of: model.configurationRequests) { _, _ in
             isEditingConfiguration = true
+        }
+        // Chained rather than a second `.sheet` on the same view: each modifier wraps
+        // the previous one's result, which is what keeps two presentations on one view
+        // from contending for the same slot.
+        .sheet(isPresented: $isShowingAbout) {
+            AboutPanel(branding: model.branding, store: model.config)
+        }
+        .onChange(of: model.aboutRequests) { _, _ in
+            isShowingAbout = true
         }
         .overlay(alignment: .bottomTrailing) {
             if model.clipboard.isPresented {
@@ -84,8 +97,8 @@ struct RootView: View {
                 Text(model.actionError ?? "")
             }
         )
-        // Deliberately no launch `.task`: the gateway is contacted when the user
-        // presses Continue, not on appear.
+        // No launch `.task` here: the gateway is started by the scene
+        // (`RemotexViewerApp`), which is where the model's lifetime is.
     }
 
     private var clipboardHelp: String {

@@ -119,6 +119,54 @@ struct GatewayConfigStoreTests {
         #expect(await unpaired.publicKey() == nil, "no identity yet")
     }
 
+    /// Deriving the key costs a gateway process, and three places on screen ask for
+    /// it — the picker most often, since it is shown again after every target switch.
+    /// So a successful answer is remembered, and only a save can retire it.
+    @Test
+    func thePublicKeyIsDerivedOnceAndAgainAfterASave() async throws {
+        let directory = try ScratchDirectory()
+        let reads = Counter()
+        let store = GatewayConfigStore(
+            instance: directory.instance,
+            validate: { _ in .success(()) },
+            readValue: { _ in
+                await reads.increment()
+                return "rxap-public"
+            }
+        )
+
+        #expect(await store.publicKey() == "rxap-public")
+        #expect(await store.publicKey() == "rxap-public")
+        #expect(await reads.count == 1, "the second read came from the cache")
+
+        // A saved config may carry a different identity, so the app must not go on
+        // showing the key it had.
+        _ = await store.save("# a new config\n")
+        #expect(await store.publicKey() == "rxap-public")
+        #expect(await reads.count == 2, "a save retires it")
+    }
+
+    /// A read that failed is not remembered: the config may simply have no identity
+    /// yet — bootstrapping is what mints one — and caching `nil` would leave the row
+    /// saying so for the life of the app.
+    @Test
+    func aFailedReadIsAskedAgain() async throws {
+        let directory = try ScratchDirectory()
+        let reads = Counter()
+        let store = GatewayConfigStore(
+            instance: directory.instance,
+            validate: { _ in .success(()) },
+            readValue: { _ in
+                await reads.increment()
+                return nil
+            }
+        )
+
+        #expect(await store.publicKey() == nil)
+        #expect(await store.publicKey() == nil)
+        #expect(await reads.count == 2)
+    }
+
     /// A per-instance Dock icon is a file, not a setting: present or absent, `.icns`
     /// preferred over `.png` because that is what macOS wants. Absent is the ordinary
     /// case and leaves the app its own icon.
@@ -155,5 +203,15 @@ struct GatewayConfigStoreTests {
     private func mode(of url: URL) throws -> Int {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         return (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
+    }
+}
+
+/// How many times an injected closure was called. An actor because the closures the
+/// store takes are `@Sendable` and may run anywhere.
+private actor Counter {
+    private(set) var count = 0
+
+    func increment() {
+        count += 1
     }
 }
