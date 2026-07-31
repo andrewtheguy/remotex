@@ -361,8 +361,8 @@ fitting itself to the window.
 Neither engine reports individually selectable displays today: RDP and VNC each
 expose one framebuffer, so the Display menu has nothing to offer. Picking a single
 one of a Mac's displays over macOS Screen Sharing — which the stock Screen Sharing
-app does natively — is planned as phase 2; the `selectDisplay` / `Displays` wire is
-kept as scaffolding for it. See [`roadmap.md`](roadmap.md).
+app does natively — is planned but not implemented; the `selectDisplay` /
+`Displays` wire is kept as scaffolding it builds on. See [`roadmap.md`](roadmap.md).
 
 ### Viewport measurement
 

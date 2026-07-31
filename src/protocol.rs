@@ -231,7 +231,8 @@ pub enum ClientMsg {
     ClipboardRequest,
     /// Share the display identified by the last [`ServerMsg::Displays`]. No
     /// engine acts on it yet — display picking over macOS Screen Sharing (ARD)
-    /// is a planned phase-2 feature (see docs/roadmap.md).
+    /// is planned but not implemented, and builds on this wire (see
+    /// docs/roadmap.md).
     SelectDisplay { id: u32 },
     /// Start or stop audio delivery for this attachment.
     Audio { enabled: bool },
@@ -499,7 +500,8 @@ pub const UNSCALED: f32 = 1.0;
 pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
     /// [`ClientMsg::SelectDisplay`]. No current engine emits a display list;
-    /// per-display selection is a phase-2 feature (see docs/roadmap.md).
+    /// per-display selection is planned but not implemented (see
+    /// docs/roadmap.md).
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,
