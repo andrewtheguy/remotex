@@ -16,7 +16,7 @@ members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.72"
+version = "0.0.73"
 
 [package]
 name = "remotex"
