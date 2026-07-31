@@ -353,6 +353,20 @@ struct AppModelTests {
         #expect(model.configurationRequests == 0, "no store, no panel")
     }
 
+    /// About is asked for the same way and, unlike the configuration panel, is never
+    /// refused: the version is the reason it exists, and a build with no gateway
+    /// beside it still has one to show.
+    @Test
+    func askingForAboutIsAnEventPerRequestAndNeedsNoGateway() {
+        let model = makeModel()
+        #expect(model.aboutRequests == 0)
+
+        model.showAbout()
+        model.showAbout()
+
+        #expect(model.aboutRequests == 2, "two presses, two events")
+    }
+
     /// An engine error is not a dead end: the socket stays up and the session
     /// returns to the picker, so the message belongs there and the pending pick
     /// has to clear or the picker stays locked.

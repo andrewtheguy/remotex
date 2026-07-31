@@ -32,6 +32,14 @@ final class GatewayConfigStore {
     let instance: InstanceDirectory
     private let validate: Validator
     private let readValue: ValueReader
+    /// The last answer [`publicKey`] got, because deriving it costs a process.
+    ///
+    /// Three places show it now — the picker, About and the configuration panel — and
+    /// the picker's is on screen again after every target switch, so an uncached read
+    /// would spawn a gateway to re-derive a value that only a save can change. Only a
+    /// *successful* read is remembered, so a config with no identity yet is asked
+    /// again rather than being written off for the life of the app.
+    private var cachedPublicKey: String?
 
     init(
         instance: InstanceDirectory,
@@ -96,7 +104,12 @@ final class GatewayConfigStore {
     /// This instance's `rxa` public key — the value a Mac's `authorized_gateways`
     /// needs. `nil` when the config has no identity yet.
     func publicKey() async -> String? {
-        await readValue(["rxa-pubkey", "--config", instance.configURL.path])
+        if let cachedPublicKey {
+            return cachedPublicKey
+        }
+        let key = await readValue(["rxa-pubkey", "--config", instance.configURL.path])
+        cachedPublicKey = key
+        return key
     }
 
     /// Check `text` and write it only if the gateway would serve it.
@@ -110,6 +123,10 @@ final class GatewayConfigStore {
         }
         do {
             try write(text)
+            // The saved text may carry a different `[rxa].private_key`, which makes
+            // this instance a different gateway on the wire — so the key on screen
+            // has to be re-derived rather than kept.
+            cachedPublicKey = nil
             return .success(())
         } catch {
             return .failure(

@@ -67,13 +67,24 @@ struct TargetPickerView: View {
             }
 
             Spacer()
-            // Where "Log Out" used to be, and for the same reason it was there: this
-            // is the one screen with nothing else to do on it. There is no logging out
-            // of a gateway this app started for itself.
-            Button("Configuration…") {
-                model.editConfiguration()
+            // The two things to do when nothing here is connectable yet, together at
+            // the foot of the screen: add a machine, and hand this gateway's key to
+            // one. The key is here rather than only in About and the configuration
+            // sheet because this is the screen a first launch lands on and the screen
+            // a target switch comes back to — and a value somebody has to copy onto
+            // another Mac is no use two panels deep.
+            VStack(spacing: 12) {
+                Divider()
+                GatewayKeyRow(store: model.config)
+                // Where "Log Out" used to be, and for the same reason it was there:
+                // this is the one screen with nothing else to do on it. There is no
+                // logging out of a gateway this app started for itself.
+                Button("Configuration…") {
+                    model.editConfiguration()
+                }
+                .disabled(model.config == nil)
             }
-            .disabled(model.config == nil)
+            .frame(width: 420)
             .padding(.bottom, 20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
