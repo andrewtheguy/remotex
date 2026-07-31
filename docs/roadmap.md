@@ -12,11 +12,12 @@ is the only place they can be read in context.
 
 The gateway used to encode every tile as lossless PNG. It now has a two-axis
 per-target render dial — a `render_type` (quality strategy) and a
-`render_subtype` (codec), plus `render_quality` — whose first lossy combination,
-`fixed-quality` + `jpeg` (every tile JPEG at a fixed quality), is **implemented**.
-The default, `full` + `png`, is byte-identical to the PNG-only gateway. Zero wire
-change: the tile format byte already carries PNG vs JPEG and both clients decode
-either. Detailed proposal and the full type×subtype matrix:
+`render_subtype` (codec), plus `render_quality` — whose lossy combinations
+`fixed-quality` + `jpeg` and `fixed-quality` + `webp` (every tile encoded at a
+fixed quality; WebP is ~30% smaller than JPEG) are **implemented**. The default,
+`full` + `png`, is byte-identical to the PNG-only gateway. Zero wire change: the
+tile format byte carries the codec and both clients decode all three. Detailed
+proposal and the full type×subtype matrix:
 [proposals/quality-dial.md](proposals/quality-dial.md).
 
 What remains planned are further points on those two axes, each a new enum variant

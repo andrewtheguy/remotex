@@ -183,10 +183,10 @@ export interface TileMsg {
   slot: number;
   // An encoded image stream, in `mime`.
   data: Uint8Array;
-  // What `data` is, for the Blob handed to createImageBitmap. The gateway's
-  // engines send PNG; the macOS agent classifies each tile and sends PNG for flat
-  // UI or JPEG for photographic content, so the codec travels with the tile.
-  mime: "image/png" | "image/jpeg";
+  // What `data` is, for the Blob handed to createImageBitmap. The gateway sends
+  // lossless PNG by default; a target on the fixed-quality render dial sends JPEG
+  // or WebP instead, so the codec travels with the tile.
+  mime: "image/png" | "image/jpeg" | "image/webp";
 }
 
 // "Draw what you have in `slot` at (x, y)" — seven bytes instead of a payload.
@@ -210,12 +210,13 @@ const OP_TILE_REF = 0x02;
 const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
 // The format byte, as the MIME type `createImageBitmap` needs for its Blob:
-// `Tile::FORMAT_PNG` and `Tile::FORMAT_JPEG`. A byte outside this map (a stale
+// `Tile::FORMAT_PNG`, `Tile::FORMAT_JPEG`, `Tile::FORMAT_WEBP`. A byte outside this map (a stale
 // gateway's, or a corrupt frame) yields `undefined`, and `decodeTile` drops the
 // record rather than handing unknown bytes to a decoder.
 const MIME_BY_FORMAT: Record<number, TileMsg["mime"] | undefined> = {
   1: "image/png",
   2: "image/jpeg",
+  3: "image/webp",
 };
 export const NO_SLOT = 0xffff;
 // How many tiles the server may ask this client to remember. Part of the wire

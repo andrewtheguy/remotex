@@ -105,20 +105,20 @@ struct TileFrameTests {
         }
     }
 
-    /// Only 1 (PNG) and 2 (JPEG) are codecs this build knows; 3 was WebP once and
-    /// is retired, so a gateway that still sent it would be one this build cannot
-    /// render. Rejecting the frame is the intended outcome — `GatewayClient`'s
-    /// `protocolVersion` check turns that into a legible refusal before a session
-    /// even opens.
+    /// Only 1 (PNG), 2 (JPEG) and 3 (WebP) are codecs this build knows; any other
+    /// byte is a gateway this build cannot render. Rejecting the frame is the
+    /// intended outcome — `GatewayClient`'s `protocolVersion` check turns that into
+    /// a legible refusal before a session even opens.
     @Test
     func anUnknownFormatIsRejected() {
-        for format: UInt8 in [0x00, 0x03, 0x04, 0xFF] {
+        for format: UInt8 in [0x00, 0x04, 0x05, 0xFF] {
             #expect(BatchFrame.decode(batch(tile(format: format, w: 8, h: 8))) == nil)
         }
     }
 
-    /// The other side of that gate: 2 (JPEG) is a codec this build knows, so its
-    /// record decodes and keeps its codec — `aWellFormedRecordDecodes` covers PNG.
+    /// The other side of that gate: 2 (JPEG) and 3 (WebP) are codecs this build
+    /// knows, so their records decode and keep their codec — `aWellFormedRecordDecodes`
+    /// covers PNG.
     @Test
     func aJpegRecordDecodesAsJpeg() throws {
         let tiles = try #require(
@@ -126,6 +126,15 @@ struct TileFrameTests {
         )
         #expect(tiles.count == 1)
         #expect(tiles[0].format == .jpeg)
+    }
+
+    @Test
+    func aWebpRecordDecodesAsWebp() throws {
+        let tiles = try #require(
+            tileRecords(batch(tile(format: TileFormat.webp.rawValue, w: 8, h: 8, payload: [0x01])))
+        )
+        #expect(tiles.count == 1)
+        #expect(tiles[0].format == .webp)
     }
 
     /// A truncated frame is only detectable because the header carries a count:

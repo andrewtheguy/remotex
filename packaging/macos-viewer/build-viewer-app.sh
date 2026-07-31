@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and sign remotex.app — the macOS 26 client and the gateway it runs —
+# Build and sign remotex.app — the macOS 15+ client and the gateway it runs —
 # optionally wrapping it in a DMG.
 #
 # Usage:

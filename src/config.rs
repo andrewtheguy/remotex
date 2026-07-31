@@ -109,7 +109,8 @@ pub enum RenderType {
     #[default]
     Full,
     /// One quality for the whole session, set by [`TargetConfig::render_quality`]
-    /// and never varied. Pairs with a lossy codec ([`RenderSubtype::Jpeg`]).
+    /// and never varied. Pairs with a lossy codec ([`RenderSubtype::Jpeg`] or
+    /// [`RenderSubtype::Webp`]).
     FixedQuality,
 }
 
@@ -126,6 +127,24 @@ pub enum RenderSubtype {
     /// — there is no content classifier — so flat UI and text soften along with
     /// photographic content. That is the trade the fixed dial makes.
     Jpeg,
+    /// WebP at [`TargetConfig::render_quality`] — the same fixed-quality, no-
+    /// classifier trade as [`Self::Jpeg`], but typically ~30% fewer bytes at a
+    /// matched quality. Both clients decode it natively.
+    Webp,
+}
+
+/// The tile encoder an engine uses, resolved from a target's render dial by
+/// [`TargetConfig::tile_codec`]. The two axes and the quality collapse to this,
+/// so `rdp::run` / `vnc::run` and [`crate::encode::TileSink`] match on one value
+/// and never touch the config enums.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileCodec {
+    /// Lossless PNG — the default path.
+    Png,
+    /// JPEG at the given quality (1–100).
+    Jpeg(u8),
+    /// WebP at the given quality (1–100).
+    Webp(u8),
 }
 
 /// One `[[targets]]` profile: a remote machine plus its credentials.
@@ -241,25 +260,28 @@ pub struct TargetConfig {
     /// legal pairing with [`Self::render_type`] is enforced at parse time.
     #[serde(default)]
     pub render_subtype: RenderSubtype,
-    /// Fixed JPEG quality (1–100) for [`RenderType::FixedQuality`]. Required for
-    /// that strategy and refused for [`RenderType::Full`], which is lossless and
-    /// has no dial. `None` (unset) is the default.
+    /// Fixed quality (1–100) for [`RenderType::FixedQuality`], applied by whichever
+    /// lossy codec [`Self::render_subtype`] selects ([`RenderSubtype::Jpeg`] or
+    /// [`RenderSubtype::Webp`]). Required for that strategy and refused for
+    /// [`RenderType::Full`], which is lossless and has no dial. `None` (unset) is
+    /// the default.
     #[serde(default)]
     pub render_quality: Option<u8>,
 }
 
 impl TargetConfig {
-    /// The fixed JPEG quality the tile encoder should use for this target, or
-    /// `None` for the lossless PNG default. This is the whole of the render dial
-    /// as the engines see it: the two axes and the quality collapse to one
-    /// `Option<u8>` here, so `rdp::run` / `vnc::run` need not know the enums.
+    /// The tile encoder to use for this target. This is the whole of the render
+    /// dial as the engines see it: the two axes and the quality collapse to one
+    /// [`TileCodec`], so `rdp::run` / `vnc::run` need not know the config enums.
     ///
-    /// `Some(q)` only for `fixed-quality` + `jpeg`, where [`ConfigFile::parse_with`]
-    /// has already guaranteed a quality in range is present.
-    pub fn jpeg_quality(&self) -> Option<u8> {
-        match (self.render_type, self.render_subtype) {
-            (RenderType::FixedQuality, RenderSubtype::Jpeg) => self.render_quality,
-            _ => None,
+    /// A lossy codec carries its quality, which [`ConfigFile::parse_with`] has
+    /// already guaranteed is present and in range for a `fixed-quality` target;
+    /// the `None` arm falls back to lossless PNG rather than trusting that here.
+    pub fn tile_codec(&self) -> TileCodec {
+        match (self.render_type, self.render_subtype, self.render_quality) {
+            (RenderType::FixedQuality, RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
+            (RenderType::FixedQuality, RenderSubtype::Webp, Some(q)) => TileCodec::Webp(q),
+            _ => TileCodec::Png,
         }
     }
 }
@@ -545,11 +567,11 @@ impl ConfigFile {
                         target.render_quality.is_none(),
                         "target {:?} sets render_quality, which render_type \"full\" has no \
                          use for — it is lossless PNG. Set render_type = \"fixed-quality\" \
-                         with render_subtype = \"jpeg\" to choose a quality",
+                         with a lossy render_subtype (\"jpeg\" or \"webp\") to choose a quality",
                         target.name
                     );
                 }
-                (RenderType::FixedQuality, RenderSubtype::Jpeg) => {
+                (RenderType::FixedQuality, RenderSubtype::Jpeg | RenderSubtype::Webp) => {
                     let q = target.render_quality.with_context(|| format!(
                         "target {:?} is render_type \"fixed-quality\" but sets no \
                          render_quality — it needs one, an integer 1–100",
@@ -562,16 +584,16 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (RenderType::Full, RenderSubtype::Jpeg) => anyhow::bail!(
-                    "target {:?} sets render_type \"full\" with render_subtype \"jpeg\": \
+                (RenderType::Full, RenderSubtype::Jpeg | RenderSubtype::Webp) => anyhow::bail!(
+                    "target {:?} sets render_type \"full\" with a lossy render_subtype: \
                      \"full\" is lossless and pairs only with render_subtype \"png\". Use \
-                     render_type = \"fixed-quality\" for JPEG",
+                     render_type = \"fixed-quality\" for JPEG or WebP",
                     target.name
                 ),
                 (RenderType::FixedQuality, RenderSubtype::Png) => anyhow::bail!(
                     "target {:?} sets render_type \"fixed-quality\" with render_subtype \
                      \"png\": PNG is lossless and has no quality dial. Use render_subtype = \
-                     \"jpeg\", or render_type = \"full\" to stay lossless",
+                     \"jpeg\" or \"webp\", or render_type = \"full\" to stay lossless",
                     target.name
                 ),
             }
@@ -1102,6 +1124,41 @@ mod tests {
         assert_eq!(t.render_type, RenderType::FixedQuality);
         assert_eq!(t.render_subtype, RenderSubtype::Jpeg);
         assert_eq!(t.render_quality, Some(60));
+        assert_eq!(t.tile_codec(), TileCodec::Jpeg(60));
+    }
+
+    #[test]
+    fn fixed_quality_webp_is_accepted() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "fixed-quality"
+            render_subtype = "webp"
+            render_quality = 50
+            "#,
+        )
+        .unwrap();
+        let t = &cfg.targets[0];
+        assert_eq!(t.render_subtype, RenderSubtype::Webp);
+        assert_eq!(t.tile_codec(), TileCodec::Webp(50));
+    }
+
+    #[test]
+    fn full_with_webp_is_rejected() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_subtype = "webp"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("lossless"), "{err:#}");
     }
 
     #[test]
