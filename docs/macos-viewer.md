@@ -358,11 +358,11 @@ one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-**One engine fills the Display menu: `subtype = "ard-high-performance"`.** It lists
-the Mac's screens plus an *All Displays* entry, and picking one narrows the session
-to that screen's own pixels. RDP and plain VNC (`subtype = "ard"` included) each
-expose a single framebuffer spanning every remote screen and send no list, so the
-menu holds one disabled item reading *No Displays to Choose From*.
+**Both Apple VNC subtypes fill the Display menu.** `subtype = "ard"` and
+`subtype = "ard-high-performance"` list the Mac's screens plus an *All Displays*
+entry, and picking one narrows the session to that screen's own pixels. RDP and
+generic VNC expose a single framebuffer spanning every remote screen and send no
+list, so the menu holds one disabled item reading *No Displays to Choose From*.
 
 The checkmark follows the Mac, not the click: it moves when the Mac answers with a
 display layout naming the screen it is now sending, so a selection it declines leaves

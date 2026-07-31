@@ -64,25 +64,22 @@ pub enum Subtype {
     /// VNC server that happens to run on a Mac is not this — it is a plain `vnc`
     /// target.
     ///
-    /// One framebuffer spanning every attached display, at the size the Mac is set
-    /// to, with no way to narrow it to one screen and no pixel density: a Retina Mac
-    /// arrives at its backing resolution and is drawn at twice the size it should be.
-    /// [`Subtype::ArdHighPerformance`] is the one that fixes both.
+    /// The Mac's metadata extension lists every attached display, permits selecting
+    /// one or their combined desktop, and supplies each display's pixel density.
+    /// Apple's native pasteboard is available, while pixels stay raw so this is
+    /// the uncompressed alternative to Apple's record-layer subtype.
     Ard,
     /// The same Mac over Apple's own protocol revision, RFB 003.889: an
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
     /// control messages (see [`crate::vnc_apple`]).
     ///
-    /// Three things over [`Subtype::Ard`]: **compression** (zlib rather than raw
-    /// pixels, around fifty times fewer bytes on a static desktop), the Mac's
-    /// **screens listed** so a client can look at one of them, and each screen's
-    /// **pixel density**, which is what lets a Retina desktop be drawn at 100%
-    /// instead of twice its size.
+    /// It carries the same screen list, selection and density as [`Subtype::Ard`],
+    /// adds zlib pixels, and uses Apple's encrypted record transport.
     ///
     /// What it costs is `clipboard` and `resize`, both refused below: Apple carries
-    /// the pasteboard over messages of its own rather than RFB's, and dynamic
-    /// resolution needs the very message that makes the Mac hide its real screens.
-    /// See docs/apple-vnc-889.md.
+    /// the pasteboard over messages of its own rather than RFB's on this transport,
+    /// and dynamic resolution needs the very message that makes the Mac hide its
+    /// real screens. See docs/apple-vnc-889.md.
     ArdHighPerformance,
 }
 
@@ -558,19 +555,15 @@ impl ConfigFile {
                          for a resizable virtual display instead, which is not implemented",
                         target.name
                     );
-                    // Refused on the high-performance subtype alone, because it is
-                    // the one subtype where the key would be a lie: `clipboard`
-                    // advertises RFB's Extended Clipboard (src/vnc_clipboard.rs),
-                    // and on the 003.889 wire the Mac carries the pasteboard over
-                    // Apple's own messages instead, which is not implemented. Plain
-                    // `ard` is standard RFB and honours the key.
+                    // Refused on the high-performance subtype alone: plain `ard`
+                    // implements Apple's native pasteboard on its byte stream, but
+                    // that message path is not enabled inside 003.889 records yet.
                     anyhow::ensure!(
                         !(target.clipboard && subtype == Subtype::ArdHighPerformance),
                         "target {:?} is subtype {name:?} and sets clipboard, which this \
                          gateway does not support yet: on Apple's own protocol revision the \
-                         Mac carries the pasteboard over its own messages rather than RFB's \
-                         Extended Clipboard, which is not implemented. Plain subtype \"ard\" \
-                         does support clipboard",
+                         Mac carries the pasteboard over its own messages. Plain subtype \
+                         \"ard\" implements those messages and does support clipboard",
                         target.name
                     );
                 }
@@ -1435,8 +1428,8 @@ mod tests {
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
         assert!(format!("{err:#}").contains("does not support yet"), "{err:#}");
 
-        // Clipboard is *not* rejected here: plain `ard` is standard RFB and its
-        // Extended Clipboard works. Only the high-performance subtype refuses it.
+        // Clipboard is *not* rejected here: plain `ard` uses Apple's native
+        // pasteboard messages. Only the high-performance subtype refuses it.
         assert!(ard("username = \"andrew\"\npassword = \"h\"\nclipboard = true").is_ok());
 
         // And it is a VNC subtype only.

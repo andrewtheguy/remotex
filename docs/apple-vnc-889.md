@@ -11,8 +11,9 @@ live Mac disagrees — plus the ones worth knowing are confirmed, because a
 reverse-engineered document gives no way to tell a measured field from an inferred
 one.
 
-The implementation is `src/vnc_record.rs` (the transport), `src/vnc_apple.rs` (the
-messages), and the `Dialect::Apple889` path in `src/vnc.rs`.
+The implementation is `src/vnc_record.rs` (the 003.889 transport),
+`src/vnc_apple.rs` (messages shared by both Apple subtypes), and the two Apple
+paths in `src/vnc.rs`.
 
 > **This document was substantially wrong in its first revision**, which claimed a
 > 003.889 session cannot enumerate or pick displays and cannot learn a screen's
@@ -40,7 +41,7 @@ non-mirrored displays (1280×800 at (0,0) and 1600×900 at (1280,0)):
 | session | `CGGetActiveDisplayList` says | `AppleDisplayLayout` says |
 |---|---|---|
 | none | `active: 2` — id 1 at 1280×800, id 4 at 1600×900 | — |
-| plain RFB 3.8 (`subtype = "ard"`) | `active: 2` — unchanged | not sent on that wire |
+| plain RFB 3.8 (`subtype = "ard"`) | `active: 2` — unchanged | **both real screens, ids 1 and 4, densities 1 and 2** |
 | 003.889 **with** a `0x1d` descriptor | `active: 1` — one display at 4480×1800 | one screen, fresh id (10, 11, 12, 15, 16 — it increments every session), density 1 |
 | 003.889 **without** `0x1d` | `active: 2` — unchanged | **both real screens, ids 1 and 4, densities 1 and 2** |
 
@@ -56,6 +57,19 @@ virtual display appeared anyway. That measurement was confounded: those runs wer
 made against a Mac that already had another 003.889 session open from the gateway
 under test, and a second concurrent session does not see the same display state.
 **Kill every session before measuring anything here.**
+
+The Standard-mode result was remeasured separately on July 31, 2026: after Apple
+DH authentication, replying `RFB 003.008` and sending the same ten-entry metadata
+encoding list produced `AppleDisplayLayout` unsolicited. Selecting ids 4 and 1
+then produced 3200×1800 at 2x and 1280×800 at 1x respectively. Standard mode
+therefore uses the same display protocol without the 003.889 record layer; remotex
+keeps its pixels raw as the uncompressed alternative.
+
+Its native pasteboard also works on that stream, but only after the Standard
+client prelude: `ViewerInfo`, `SetMode(control)`, then `AutoPasteboard(start)`.
+Without the first two messages the Mac accepts browser-to-Mac writes and explicit
+fetches but does not emit the `MiscStatus(cmd=2)` notification needed for automatic
+Mac-to-client synchronization.
 
 ### Picking a screen
 
