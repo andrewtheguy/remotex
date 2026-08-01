@@ -4157,25 +4157,7 @@ mod tests {
         msg
     }
 
-    /// Deflate one rectangle's worth into a continuing stream.
-    ///
-    /// Runs until a call produces nothing new: consuming the input is not the end of
-    /// it, since the sync flush that closes the rectangle has bytes of its own.
-    fn deflate_chunk(deflate: &mut flate2::Compress, raw: &[u8]) -> Vec<u8> {
-        let mut chunk = Vec::new();
-        let mut fed = 0;
-        loop {
-            let before = (deflate.total_in(), deflate.total_out());
-            chunk.reserve(raw.len() + 64);
-            deflate
-                .compress_vec(&raw[fed..], &mut chunk, flate2::FlushCompress::Sync)
-                .unwrap();
-            fed += (deflate.total_in() - before.0) as usize;
-            if fed == raw.len() && deflate.total_out() == before.1 {
-                return chunk;
-            }
-        }
-    }
+    use crate::vnc_encodings::deflate_chunk;
 
     /// A zlib rectangle: the geometry, then a `u32` length and that much of a
     /// deflate stream.
@@ -4307,14 +4289,19 @@ mod tests {
             shared_desktop((2, 2), None, None),
             test_shadow((2, 2)),
         );
-        let _ = read_loop(
+        // Kept, not discarded: a decoder that bailed on the third encoding would
+        // leave the first rectangle's tile sitting there and the count below would
+        // still read 1. Running out of stream is the only acceptable way to stop.
+        let err = read_loop(
             std::io::Cursor::new(update(&rects)),
             shared,
             ReadFlags { clipboard: false, poll: false },
             None,
             sink.clone(),
         )
-        .await;
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
         sink.flush().await;
         let mut tiles = 0;
@@ -4342,14 +4329,16 @@ mod tests {
             shared_desktop((4, 2), None, None),
             test_shadow((4, 2)),
         );
-        let _ = read_loop(
+        let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: false, poll: false },
             None,
             sink.clone(),
         )
-        .await;
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
         sink.flush().await;
         let mut tiles = Vec::new();
@@ -4379,14 +4368,16 @@ mod tests {
             shared_desktop((4, 2), None, None),
             test_shadow((4, 2)),
         );
-        let _ = read_loop(
+        let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
             ReadFlags { clipboard: false, poll: false },
             None,
             sink.clone(),
         )
-        .await;
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
         assert_eq!(written(&sent), update_request(false, (4, 2)));
         sink.flush().await;

@@ -662,15 +662,26 @@ impl Inflater {
     /// payload that wants to expand past it is a protocol violation rather than a
     /// buffer to grow — which is also what keeps a compression bomb from being
     /// answered with memory.
+    ///
+    /// The whole chunk is fed even once `expect` bytes are out. A rectangle ends
+    /// with a sync flush, whose bytes produce no output at all, and this inflater
+    /// lives for the connection: bytes left unfed here are bytes the *next*
+    /// rectangle's chunk is decoded as, which is a desync rather than a bad pixel. A
+    /// rectangle of no pixels is the case that makes this plain — it is all flush.
     fn exact(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
         anyhow::ensure!(
             expect <= MAX_INFLATED,
             "a {} rectangle wants {expect} inflated bytes, past the {MAX_INFLATED} ceiling",
             self.what
         );
-        let mut out = Vec::with_capacity(expect);
+        // One byte of slack: `decompress_vec` writes into spare capacity, and zlib
+        // consumes no input once it has nowhere to put the output — so a buffer sized
+        // exactly to `expect` would stall on the trailing flush instead of reading it.
+        // The slack also turns an over-long stream into a size mismatch below rather
+        // than a silent truncation.
+        let mut out = Vec::with_capacity(expect + 1);
         let mut fed = 0;
-        while fed < chunk.len() && out.len() < expect {
+        while fed < chunk.len() {
             let before = (self.inflate.total_in(), self.inflate.total_out());
             self.inflate
                 .decompress_vec(&chunk[fed..], &mut out, flate2::FlushDecompress::Sync)
@@ -679,7 +690,7 @@ impl Inflater {
             if (self.inflate.total_in(), self.inflate.total_out()) == before {
                 // Neither side moved, so feeding more of the same chunk cannot
                 // help: either the stream wants output space this rectangle does
-                // not claim, or it is truncated.
+                // not claim, or it is truncated. The size check names which.
                 break;
             }
         }
@@ -743,6 +754,34 @@ impl Inflater {
     }
 }
 
+/// Deflate `raw` into one chunk of a continuing stream, the way a server emits one
+/// rectangle's worth.
+///
+/// Consuming the input is not the end of it: the sync flush that closes the
+/// rectangle has bytes of its own, and stopping at the last input byte truncates
+/// them into a chunk no decoder should accept. So this runs until a call produces
+/// nothing new.
+///
+/// Shared with [`crate::vnc`]'s tests rather than copied — a second copy of this
+/// loop is a second chance to write the truncated version and call the decoder
+/// wrong.
+#[cfg(test)]
+pub(crate) fn deflate_chunk(deflate: &mut flate2::Compress, raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut fed = 0;
+    loop {
+        let before = (deflate.total_in(), deflate.total_out());
+        out.reserve(raw.len() + 64);
+        deflate
+            .compress_vec(&raw[fed..], &mut out, flate2::FlushCompress::Sync)
+            .unwrap();
+        fed += (deflate.total_in() - before.0) as usize;
+        if fed == raw.len() && deflate.total_out() == before.1 {
+            return out;
+        }
+    }
+}
+
 /// Inflate a payload that carries its own complete deflate stream.
 pub fn inflate_independent(
     what: &'static str,
@@ -756,27 +795,7 @@ pub fn inflate_independent(
 mod tests {
     use super::*;
 
-    /// Deflate `raw` into one chunk of a continuing stream, the way a server emits
-    /// one rectangle's worth.
-    ///
-    /// Consuming the input is not the end of it: the sync flush that closes the
-    /// rectangle has bytes of its own, and stopping at the last input byte truncates
-    /// them. So this runs until a call produces nothing new.
-    fn chunk(deflate: &mut flate2::Compress, raw: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut fed = 0;
-        loop {
-            let before = (deflate.total_in(), deflate.total_out());
-            out.reserve(raw.len() + 64);
-            deflate
-                .compress_vec(&raw[fed..], &mut out, flate2::FlushCompress::Sync)
-                .unwrap();
-            fed += (deflate.total_in() - before.0) as usize;
-            if fed == raw.len() && deflate.total_out() == before.1 {
-                return out;
-            }
-        }
-    }
+    use super::deflate_chunk as chunk;
 
     /// A zlib rectangle as it arrives: the `u32` length, then the chunk.
     fn zlib_payload(chunk: &[u8]) -> Vec<u8> {
@@ -861,6 +880,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("its geometry claims"), "{err:#}");
+    }
+
+    /// A rectangle of no pixels is all sync flush: no output, but input the
+    /// connection's inflater still has to swallow. Stopping once `expect` bytes are
+    /// out leaves those bytes for the next rectangle's chunk to be decoded as, which
+    /// is a desync — every rectangle after it is wrong, not just this one.
+    #[tokio::test]
+    async fn a_zlib_rect_of_no_pixels_still_advances_the_stream() {
+        let mut deflate = flate2::Compress::new(flate2::Compression::default(), true);
+        // What a server sends for a 0x0 rect: the stream header and a flush, framing
+        // no pixels at all. Then a real rectangle behind it.
+        let empty = zlib_payload(&chunk(&mut deflate, &[]));
+        let pixels = bgrx(64);
+        let real = zlib_payload(&chunk(&mut deflate, &pixels));
+
+        let shadow = unused_shadow();
+        let mut decoders = Decoders::default();
+        assert_eq!(
+            decoders.decode(&mut empty.as_slice(), Payload::Zlib, &shadow, 0, 0).await.unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            decoders.decode(&mut real.as_slice(), Payload::Zlib, &shadow, 8, 8).await.unwrap(),
+            Some(bgrx_to_rgb(&pixels)),
+            "the rectangle behind the empty one"
+        );
     }
 
     #[tokio::test]

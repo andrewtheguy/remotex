@@ -23,13 +23,31 @@ RUN apt-get update \
 RUN printf 'secret42\n' | tigervncpasswd -f > /etc/vncpasswd
 # Start the server, then keep trying to paint until the display answers. xsetroot
 # is the wait as well as the paint: it fails until the X server is listening.
+#
+# The wait is bounded twice over — the server having died, and a deadline — because
+# an unbounded `until` turns any startup failure into a container that sits there
+# healthy-looking until the test's own timeout fires, reported as whatever the test
+# was really asserting. Failing here names the actual cause.
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'Xtigervnc :1 -rfbport 5900 -interface 0.0.0.0 \' \
     '  -SecurityTypes VncAuth -PasswordFile /etc/vncpasswd \' \
     '  -geometry 1024x768 -depth 24 &' \
-    'until xsetroot -display :1 -mod 16 16 -fg red -bg blue 2>/dev/null; do sleep 0.1; done' \
-    'wait' \
+    'xvnc=$!' \
+    'waited=0' \
+    'until xsetroot -display :1 -mod 16 16 -fg red -bg blue 2>/dev/null; do' \
+    '  if ! kill -0 "$xvnc" 2>/dev/null; then' \
+    '    echo "dummy-vnc: Xtigervnc exited before it accepted a connection" >&2' \
+    '    exit 1' \
+    '  fi' \
+    '  waited=$((waited + 1))' \
+    '  if [ "$waited" -ge 300 ]; then' \
+    '    echo "dummy-vnc: Xtigervnc was not ready after 30s" >&2' \
+    '    exit 1' \
+    '  fi' \
+    '  sleep 0.1' \
+    'done' \
+    'wait "$xvnc"' \
     > /usr/local/bin/dummy-vnc && chmod +x /usr/local/bin/dummy-vnc
 EXPOSE 5900
 CMD ["/usr/local/bin/dummy-vnc"]
