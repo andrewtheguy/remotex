@@ -1049,15 +1049,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 } else if matches!(input, ClientMsg::ClipboardRequest) {
                     if clipboard_enabled && apple {
                         // Unlike standard RFB, Apple's pasteboard can be read on
-                        // demand. Ask now so opening the panel cannot reveal a
-                        // stale value merely because this Mac did not push its
-                        // latest change notification on the 3.8 transport.
-                        let session_id = {
-                            let mut state = clipboard.lock().unwrap();
-                            state.apple_requests = state.apple_requests.saturating_add(1);
-                            state.apple_session_id
-                        };
-                        send(&uplink, &vnc_apple_clipboard::fetch(session_id)).await
+                        // demand. Answer from the cache first so a silent Mac
+                        // cannot strand the browser's read, then fetch so a later
+                        // response refreshes that cache and the open panel.
+                        request_apple_clipboard(&clipboard, &uplink, &sink).await
                     } else if clipboard_enabled {
                         // Standard RFB can only answer from the buffer the read
                         // loop fills. Empty means nothing has been copied there
@@ -1530,7 +1525,20 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             }
                         }
                     }
-                    Err(e) => warn!("vnc: unreadable Apple pasteboard: {e:#}"),
+                    Err(e) => {
+                        warn!("vnc: unreadable Apple pasteboard: {e:#}");
+                        if requested {
+                            let snapshot = clipboard
+                                .lock()
+                                .unwrap()
+                                .remote
+                                .clone()
+                                .unwrap_or_else(ClipboardSnapshot::unobserved);
+                            if emit_clipboard(&sink, snapshot, true).await {
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
             }
             // Apple's own server messages, which arrive alongside the rectangles on
@@ -1565,6 +1573,35 @@ async fn emit_clipboard(sink: &TileSink, snapshot: ClipboardSnapshot, requested:
     })
     .await
     .is_err()
+}
+
+/// Answer an Apple clipboard read immediately, then refresh it asynchronously
+/// from the Mac. The cache reply is the browser request's guaranteed response;
+/// the fetch may be ignored by a server or arrive later as a second update.
+async fn request_apple_clipboard(
+    clipboard: &SharedClipboard,
+    uplink: &SharedUplink,
+    sink: &TileSink,
+) -> anyhow::Result<()> {
+    let (session_id, snapshot) = {
+        let mut state = clipboard.lock().unwrap();
+        state.apple_requests = state.apple_requests.saturating_add(1);
+        (
+            state.apple_session_id,
+            state
+                .remote
+                .clone()
+                .unwrap_or_else(ClipboardSnapshot::unobserved),
+        )
+    };
+    sink.msg(ServerMsg::Clipboard {
+        text: snapshot.text,
+        changed_at_ms: snapshot.changed_at_ms,
+        requested: true,
+        oversized_bytes: snapshot.oversized_bytes,
+    })
+    .await?;
+    send(uplink, &vnc_apple_clipboard::fetch(session_id)).await
 }
 
 /// Handle one Extended Clipboard message from the server.
@@ -4024,6 +4061,73 @@ mod tests {
                 oversized_bytes: None,
                 ..
             }) if text == "copied on the Mac ✓"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_apple_clipboard_read_answers_before_its_fetch_returns() {
+        let (uplink, sent) = test_uplink();
+        let clipboard = Arc::new(std::sync::Mutex::new(ClipboardState {
+            remote: Some(ClipboardSnapshot::changed("cached".to_owned(), None)),
+            apple_session_id: 7,
+            ..ClipboardState::default()
+        }));
+        let (sink, mut rx) = test_sink();
+
+        request_apple_clipboard(&clipboard, &uplink, &sink).await.unwrap();
+
+        assert_eq!(clipboard.lock().unwrap().apple_requests, 1);
+        assert_eq!(written(&sent), vnc_apple_clipboard::fetch(7));
+        sink.flush().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::Clipboard {
+                text,
+                requested: true,
+                oversized_bytes: None,
+                ..
+            }) if text == "cached"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_requested_bad_apple_pasteboard_still_answers_from_cache() {
+        let mut wire = vec![0x1f, 0, 0, 0];
+        wire.extend_from_slice(&7u32.to_be_bytes());
+        wire.extend_from_slice(&10u32.to_be_bytes());
+        wire.extend_from_slice(&4u32.to_be_bytes());
+        wire.extend_from_slice(&[0, 0, 0, 0]);
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        {
+            let mut clipboard = shared.clipboard.lock().unwrap();
+            clipboard.remote = Some(ClipboardSnapshot::changed("cached".to_owned(), None));
+            clipboard.apple_requests = 1;
+        }
+
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: true, poll: false },
+            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            sink.clone(),
+        )
+        .await;
+
+        sink.flush().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::Clipboard {
+                text,
+                requested: true,
+                oversized_bytes: None,
+                ..
+            }) if text == "cached"
         ));
     }
 

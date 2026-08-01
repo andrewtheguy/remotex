@@ -8,7 +8,7 @@
 //! in [`crate::vnc`].
 
 use anyhow::Context as _;
-use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
+use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
 use crate::protocol::{MAX_CLIPBOARD_BYTES, clipboard_fits};
 
@@ -145,15 +145,45 @@ fn parse_archive(mut input: &[u8]) -> anyhow::Result<Incoming> {
 
 fn deflate(input: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut encoder = Compress::new(Compression::default(), true);
-    let mut out = Vec::with_capacity(input.len() + 64);
-    encoder
-        .compress_vec(input, &mut out, FlushCompress::Sync)
-        .context("deflating the Apple pasteboard")?;
+    // A Vec's spare capacity is the entire output buffer `compress_vec` gets: it
+    // never reallocates. This is a generous single-pass bound, while the loop is
+    // still required because Sync output may exceed ordinary deflate bounds.
+    let bound = input.len().saturating_add(input.len() / 16).saturating_add(256);
+    let mut out = Vec::with_capacity(bound);
+    let flush_status = loop {
+        if out.spare_capacity_mut().len() < 32 * 1024 {
+            out.reserve(32 * 1024);
+        }
+        let available = out.spare_capacity_mut().len();
+        let before_in = encoder.total_in();
+        let before_out = encoder.total_out();
+        let consumed = encoder.total_in() as usize;
+        let status = encoder
+            .compress_vec(&input[consumed..], &mut out, FlushCompress::Sync)
+            .context("deflating the Apple pasteboard")?;
+        let read = encoder.total_in() - before_in;
+        let written = encoder.total_out() - before_out;
+        anyhow::ensure!(
+            status != Status::StreamEnd,
+            "Apple pasteboard compressor ended a Sync-flushed stream"
+        );
+        if encoder.total_in() == input.len() as u64 && written < available as u64 {
+            break status;
+        }
+        anyhow::ensure!(
+            read != 0 || written != 0,
+            "Apple pasteboard compressor made no progress before completing its Sync flush"
+        );
+    };
     anyhow::ensure!(
         encoder.total_in() == input.len() as u64,
         "Apple pasteboard compressor consumed {} of {} bytes",
         encoder.total_in(),
         input.len()
+    );
+    anyhow::ensure!(
+        matches!(flush_status, Status::Ok | Status::BufError),
+        "Apple pasteboard compressor did not complete its Sync flush"
     );
     Ok(out)
 }
@@ -213,6 +243,22 @@ mod tests {
             parse(header, &msg[16..]).unwrap(),
             Incoming::Text("copied ☕".to_owned())
         );
+    }
+
+    #[test]
+    fn a_large_incompressible_stream_is_fully_sync_flushed() {
+        let mut state = 0x1234_5678u32;
+        let input: Vec<u8> = (0..256 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        let compressed = deflate(&input).unwrap();
+        assert!(compressed.ends_with(&[0, 0, 0xff, 0xff]));
+        assert_eq!(inflate(&compressed, input.len()).unwrap(), input);
     }
 
     #[test]
