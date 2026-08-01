@@ -218,21 +218,22 @@ enum MacRequest {
     Display(u32),
 }
 
-/// A scripted High Performance Screen Sharing server. Returns the port and a
-/// channel reporting its display-control requests in wire order.
-async fn spawn_fake_mac() -> (u16, mpsc::UnboundedReceiver<MacRequest>) {
+/// A scripted High Performance Screen Sharing server. Returns the port, a channel
+/// reporting display-control requests in wire order, and the task that records
+/// every display configuration.
+async fn spawn_fake_mac() -> (
+    u16,
+    mpsc::UnboundedReceiver<MacRequest>,
+    tokio::task::JoinHandle<std::io::Result<Vec<(u16, u16)>>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let _ = serve_fake_mac(stream, tx).await;
-            });
-        }
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        serve_fake_mac(stream, tx).await
     });
-    (port, rx)
+    (port, rx, task)
 }
 
 /// The server half of Apple's DH authentication: offer the group, then recover the
@@ -331,6 +332,11 @@ fn fake_mac_layout((w, h): (u16, u16)) -> Vec<u8> {
 /// Parse `SetDisplayConfiguration` independently of the implementation that wrote
 /// it, asserting the descriptor and mode-table fields consumed by the server.
 fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
+    const D: usize = 8;
+    const DESCRIPTOR_HEAD: usize = 0x9c;
+    const MODE_ENTRY: usize = 0x1c;
+    assert_eq!(body.len(), D + DESCRIPTOR_HEAD + MODE_ENTRY);
+
     let be16 = |at: usize| u16::from_be_bytes([body[at], body[at + 1]]);
     let be32 = |at: usize| {
         u32::from_be_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]])
@@ -339,13 +345,9 @@ fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
     assert_eq!(be16(2), 1, "one display descriptor");
     assert_eq!(be32(4), 0, "configuration flags");
 
-    const D: usize = 8;
-    const DESCRIPTOR_HEAD: usize = 0x9c;
-    const MODE_ENTRY: usize = 0x1c;
     let modes = usize::from(be16(D + 0x9a));
     assert_eq!(modes, 1);
     assert_eq!(usize::from(be16(D)), DESCRIPTOR_HEAD + MODE_ENTRY);
-    assert_eq!(body.len(), D + DESCRIPTOR_HEAD + MODE_ENTRY);
     assert_eq!(be32(D + 0x7a), 1, "display_flags");
     assert_eq!(be32(D + 0x7e), 4, "virtual display_type");
     assert_eq!(be16(D + 0x92), 0, "current mode");
@@ -384,7 +386,7 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
 async fn serve_fake_mac(
     mut stream: TcpStream,
     requests: mpsc::UnboundedSender<MacRequest>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<(u16, u16)>> {
     use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
     use tokio::io::AsyncReadExt as _;
 
@@ -458,11 +460,17 @@ async fn serve_fake_mac(
     let mut writer = RecordWriter::new(keys);
     let mut shade = 0x40u8;
     let mut sent_layout = false;
-    let mut configured = None;
+    let mut configurations = Vec::new();
 
     loop {
         let mut kind = [0u8; 1];
-        records.read_exact(&mut kind).await?;
+        match records.read_exact(&mut kind).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(configurations);
+            }
+            Err(err) => return Err(err),
+        }
         match kind[0] {
             // SetPixelFormat
             0 => {
@@ -484,7 +492,10 @@ async fn serve_fake_mac(
                 if req[0] != 0 {
                     continue;
                 }
-                let size = configured.expect("the display configuration precedes updates");
+                let size = configurations
+                    .last()
+                    .copied()
+                    .expect("the display configuration precedes updates");
                 if !std::mem::replace(&mut sent_layout, true) {
                     let mut rect = vec![0u8, 0];
                     rect.extend_from_slice(&1u16.to_be_bytes());
@@ -533,8 +544,8 @@ async fn serve_fake_mac(
                 let mut body = vec![0u8; size];
                 records.read_exact(&mut body).await?;
                 let requested = fake_mac_read_configuration(&body);
-                assert!(configured.replace(requested).is_none(), "a second display configuration");
                 let _ = requests.send(MacRequest::Configuration(requested));
+                configurations.push(requested);
             }
             other => panic!("fake Mac got unexpected message type {other:#x}"),
         }
@@ -1202,7 +1213,7 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
 /// one virtual-display configuration, the answering layout, and pixels.
 #[tokio::test]
 async fn high_performance_requests_one_configured_virtual_display() {
-    let (mac_port, mut requests) = spawn_fake_mac().await;
+    let (mac_port, mut requests, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
@@ -1246,4 +1257,12 @@ async fn high_performance_requests_one_configured_virtual_display() {
         MacRequest::Display(MAC_VIRTUAL_DISPLAY),
         "the viewport produced another display configuration"
     );
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert_eq!(configurations.len(), 1, "unexpected display configurations: {configurations:?}");
 }

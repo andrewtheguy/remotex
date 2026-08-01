@@ -542,6 +542,15 @@ impl ConfigFile {
                          account credentials above instead",
                         target.name
                     );
+                    anyhow::ensure!(
+                        subtype != Subtype::ArdHighPerformance
+                            || (target.width != 0 && target.height != 0),
+                        "target {:?} is subtype {name:?} and requests a virtual display at \
+                         {}×{}, but width and height must both be greater than zero",
+                        target.name,
+                        target.width,
+                        target.height
+                    );
                     // Standard mode shares the Mac's physical displays; High
                     // Performance requests one configured virtual-display mode.
                     // Apple's undocumented dynamic-resolution controls are not
@@ -1480,6 +1489,20 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
+    }
+
+    #[test]
+    fn the_high_performance_virtual_display_requires_nonzero_dimensions() {
+        for dimensions in ["width = 0\nheight = 1000", "width = 1600\nheight = 0"] {
+            let err = ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{dimensions}"
+            )))
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("width and height must both be greater than zero"),
+                "{err:#}"
+            );
+        }
     }
 
     #[test]
