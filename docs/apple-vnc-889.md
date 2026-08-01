@@ -34,13 +34,16 @@ physical displays. `subtype = "ard-high-performance"` is Apple's High Performanc
 mode over RFB 003.889. It uses virtual displays rather than the Mac's physical
 displays.
 
-Apple's Screen Sharing app can choose one or two virtual displays in High
+Once the High Performance session connects, it disables the remote Mac's physical
+displays and places all of the remote Mac's windows on the virtual display. Apple's
+official macOS Screen Sharing client can choose up to two virtual displays in High
 Performance mode. It can dynamically change them to arbitrary sizes; without
 dynamic resolution it offers resolution presets. Remotex requests one virtual
 display during setup at the target's configured `width` and `height`. With
-`resize = true`, a client viewport report sends another full dynamic display
-configuration on the same session; the Mac confirms the effective size with its
-next `AppleDisplayLayout`.
+`resize = true`, Remotex supports **Resize to Window** like RDP, using Apple's
+dynamic-resolution feature: a client viewport report sends another full display
+configuration on the same session, and the Mac confirms the effective size with
+its next `AppleDisplayLayout`.
 
 ```toml
 [[targets]]

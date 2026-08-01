@@ -44,12 +44,16 @@ lists the Mac's physical screens with an *All Displays* entry, binds one with
 the Mac's answering layout rather than the click.
 
 `subtype = "ard-high-performance"` is High Performance Screen Sharing and requests
-one virtual display at the target's configured `width` and `height`. It uses Apple's
-003.889 record transport and adds zlib. With `resize = true`, each client viewport
-report replaces that display's full dynamic descriptor and the Mac's answering
+one virtual display at the target's configured `width` and `height`. After it
+connects, the remote Mac's physical displays are disabled and all of its windows
+are placed on that virtual display. Apple's official macOS Screen Sharing client
+can choose up to two virtual displays; Remotex always requests one. It uses Apple's
+003.889 record transport and adds zlib. With `resize = true`, it supports
+**Resize to Window** like RDP, using Apple's dynamic-resolution feature: each client
+viewport report replaces that display's full descriptor and the Mac's answering
 layout is authoritative. The setup descriptor carries the dynamic flag regardless
 of that permission, so every new connection restores the Mac's Dynamic resolution
-checkbox to on. Apple's one/two-virtual-display picker and fixed resolution presets
+checkbox to on. Apple's virtual-display-count picker and fixed resolution presets
 remain intentionally absent.
 
 The 003.889 wire constraints remain load-bearing: the first `SetEncodings` is the

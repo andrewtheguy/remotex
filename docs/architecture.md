@@ -171,7 +171,7 @@ What is engine-specific is the shape of the permission:
 | Engine | With `resize` |
 |---|---|
 | Generic VNC | applies a requested size, on servers accepting SetDesktopSize |
-| Apple High Performance VNC | replaces its virtual display's dynamic configuration |
+| Apple High Performance VNC | supports Resize to Window through Apple dynamic resolution |
 | RDP | applies a requested size, and the client's reported display density |
 
 `hostScale` reports the density of the screen the client's window is on. RDP with
@@ -275,12 +275,16 @@ a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it
 
 **High Performance mode is a virtual-display mode.** The gateway sends
 `SetDisplayConfiguration` (`0x1d`) during setup, with one 1x mode built from the
-target's `width` and `height`. The full descriptor enables dynamic resolution on
-every fresh session. With `resize = true`, later viewport reports resend the same
-full descriptor with the requested mode, and the Mac's answering display layout
-sets the actual framebuffer geometry. The Mac supplies that virtual display over
-the 003.889 record transport, with zlib rectangles instead of raw pixels. Apple's
-one/two-virtual-display and resolution-preset controls remain unimplemented.
+target's `width` and `height`. Once connected, the remote Mac's physical displays
+are disabled and all of its windows are placed on that virtual display. Apple's
+official macOS Screen Sharing client can choose up to two virtual displays, while
+Remotex always requests one. The full descriptor enables dynamic resolution on
+every fresh session. With `resize = true`, it supports **Resize to Window** like
+RDP, using Apple's dynamic-resolution feature: later viewport reports resend the
+same full descriptor with the requested mode, and the Mac's answering display
+layout sets the actual framebuffer geometry. The Mac supplies that virtual display
+over the 003.889 record transport, with zlib rectangles instead of raw pixels.
+Apple's virtual-display-count and resolution-preset controls remain unimplemented.
 
 The wire constraints remain load-bearing: the *first* `SetEncodings` must be the
 measured exact list, so zlib is requested in a second one after a layout has arrived;

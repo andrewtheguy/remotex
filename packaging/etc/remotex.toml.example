@@ -99,10 +99,11 @@ password = "change-me"
 # ("Resize to window", and the default), or continuously ("Auto resize"), with the
 # choice made per session and never remembered.
 #
-# One narrowing that is not the client's to make: on VNC it works only on servers
-# that accept SetDesktopSize — the TigerVNC family. Both Mac subtypes refuse it.
-# Apple's undocumented High Performance dynamic-resolution controls are not
-# implemented; its configured virtual-display mode stays fixed for the session.
+# One narrowing that is not the client's to make: generic VNC needs a server that
+# accepts SetDesktopSize — the TigerVNC family — and Standard Apple `ard` refuses
+# it because it shares physical displays. Apple `ard-high-performance` instead
+# supports Resize to Window like RDP, using Apple's dynamic-resolution feature to
+# replace its one virtual display's configuration from viewport reports.
 #
 # Without it — and by default — the desktop keeps its connect-time size, no client
 # offers either control, and the ones that ask anyway are ignored.
@@ -172,13 +173,16 @@ password = "change-me"
 
 # `subtype = "ard-high-performance"` requests one virtual display instead of the
 # Mac's physical displays. `width` and `height` select the mode requested during
-# setup, and zlib compresses the pixels over Apple's own protocol revision. The mode
-# remains fixed for the session: Apple's undocumented dynamic-resolution and
-# one/two-virtual-display controls are not implemented.
+# setup. Once connected, the Mac's physical displays are disabled and all of its
+# windows are placed on this virtual display. Zlib compresses the pixels over
+# Apple's own protocol revision. Apple's official macOS Screen Sharing client can
+# choose up to two virtual displays; Remotex requests one. With `resize = true`,
+# it supports Resize to Window like RDP, using Apple's dynamic-resolution feature
+# to replace that virtual display's mode from client viewport reports. Apple's
+# display-count and fixed-resolution-preset controls are not implemented.
 #
 # `clipboard = true` enables the native Apple pasteboard in both directions.
-# `resize` remains refused because the undocumented dynamic controls are out of
-# scope. See docs/apple-vnc-889.md.
+# See docs/apple-vnc-889.md.
 # [[targets]]
 # name = "mac-virtual-display"
 # protocol = "vnc"
@@ -189,6 +193,7 @@ password = "change-me"
 # width = 1600
 # height = 1000
 # clipboard = true
+# resize = true
 
 # How this target's pixels are compressed on their way to the browser. Two keys and
 # a dial, and they apply to every protocol.

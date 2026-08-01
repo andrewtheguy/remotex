@@ -59,13 +59,17 @@ session.
 Standard `ard` lists the Mac's physical screens, can show one screen or all of them,
 reports each screen's pixel density, keeps pixels raw, and supports the native Apple
 pasteboard. `ard-high-performance` takes the same credentials, requests one virtual
-display at the target's configured `width` and `height`, and adds zlib compression
-over Apple's record-layer revision (around fifty times fewer bytes on a static
-desktop). Both Apple subtypes support the native Apple pasteboard when
-`clipboard = true`. High Performance also supports `resize = true`: it replaces
-the virtual display's mode from client viewport reports. Every fresh connection
-turns the Mac's Dynamic resolution setting back on. Standard `ard` still refuses
-resize, and the one/two-virtual-display control is not implemented. See
+display at the target's configured `width` and `height`, disables the remote Mac's
+physical displays once connected, and puts all of the remote Mac's windows on that
+virtual display. It also adds zlib compression over Apple's record-layer revision
+(around fifty times fewer bytes on a static desktop). Apple's official macOS Screen
+Sharing client can instead choose up to two virtual displays. Both Apple subtypes
+support the native Apple pasteboard when `clipboard = true`. With `resize = true`,
+High Performance supports **Resize to Window** like RDP, using Apple's dynamic
+resolution feature to replace the virtual display's mode from client viewport
+reports. Every fresh connection turns the Mac's Dynamic resolution setting back
+on. Standard `ard` still refuses resize, and the one/two-virtual-display control
+is not implemented. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 ## Container
@@ -132,8 +136,9 @@ password = "change-me"
 
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for its physical displays, or
-`"ard-high-performance"` for a configured virtual display with compression, and the
-Mac account's username and password. Keep the config mode `0600`; target
+`"ard-high-performance"` for one configured virtual display containing all of its
+windows, with its physical displays disabled for the connection, and the Mac
+account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in
