@@ -6,7 +6,7 @@ import {
   createAudioPlayer,
   decodeAudioHead,
 } from "./audioPlayer.ts";
-import { desktopCanvasSize } from "./desktopCanvas.ts";
+import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { createSender } from "./outbound.ts";
 import {
@@ -175,9 +175,10 @@ const ATTEMPTS_BEFORE_REPORTING = 4;
 // a slow link or a fetch made mid-reconnect can still leave a request unanswered.
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
-// Lay out a pointer desktop with at most one remote framebuffer pixel per host
-// device pixel. A Retina guest keeps its point size on a Retina host, but stays at
-// full framebuffer size on a 1x host and scrolls instead of being downsampled.
+// The canvas bitmap remains the full remote framebuffer; only its CSS box is
+// sized here, in the remote's own points. This is the same high-density canvas
+// split used by ordinary DPR-aware renderers, except the guest has already drawn
+// the high-density pixels, so the 2D context needs no scale transform.
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
   size: RemoteSize | null,
@@ -211,7 +212,7 @@ function applyCanvasCss(
     canvas.style.transform = `translate3d(${view.pan.x}px, ${view.pan.y}px, 0)`;
     return;
   }
-  let { w, h } = desktopCanvasSize(size, size.scale, window.devicePixelRatio);
+  let { w, h } = desktopCanvasGeometry(size, size.scale).layout;
   // When the remote matched the viewport (dynamic resize), snap to it
   // exactly so fractional-dpr rounding can't spawn phantom scrollbars. The
   // ≤1px scale this introduces is imperceptible.
@@ -1208,8 +1209,9 @@ export function useRemoteDesktop(
       const canvas = canvasRef.current;
       const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
       if (canvas) {
-        canvas.width = msg.w;
-        canvas.height = msg.h;
+        const { bitmap } = desktopCanvasGeometry(s, s.scale);
+        canvas.width = bitmap.w;
+        canvas.height = bitmap.h;
         applyCanvasCss(canvas, s, viewRef.current, bottomInsetRef.current);
         const ctx = canvas.getContext("2d");
         ctxRef.current = ctx;
@@ -1482,10 +1484,9 @@ export function useRemoteDesktop(
     };
     window.addEventListener("resize", onViewportChange);
 
-    // A density change affects both presentation and what a resizable remote is
-    // asked to render. Reapply the canvas CSS immediately so dragging a Retina
-    // guest onto a 1x monitor restores its full pixel size and native scrollbars.
-    // The report separately lets RDP or a display the agent made match the host.
+    // A devicePixelRatio change affects what a resizable remote is asked to
+    // render, not the canvas's layout: the bitmap and CSS box describe the
+    // guest's pixels and points, while the browser rasterizes them for the host.
     // There is no devicePixelRatio event, so this is the standard
     // trick: a media query pinned to the current ratio, which stops matching the
     // moment the ratio changes, re-armed each time from the new value.
@@ -1498,13 +1499,6 @@ export function useRemoteDesktop(
       dprQuery.addEventListener("change", onDprChange);
     };
     function onDprChange() {
-      applyCanvasCss(
-        canvasRef.current,
-        sizeRef.current,
-        viewRef.current,
-        bottomInsetRef.current,
-      );
-      syncCursor();
       sendHostScale();
       watchDpr();
     }

@@ -60,6 +60,25 @@ second one after a layout has arrived — and a layout payload is two bytes shor
 than its own length prefix says. Both are measured in
 [`apple-vnc-889.md`](apple-vnc-889.md), along with what is still unexplained.
 
+Two display-density items remain planned:
+
+- **Make All Displays point-correct on mixed-density Macs.** Apple's combined
+  framebuffer is a mosaic of each screen's backing pixels, but the current wire
+  `Resize` describes the whole canvas with one scale. No one scale is true for a
+  1× display beside a 2× display, so the combined view falls back to 1× and the
+  Retina screen appears at twice its logical size. Apple's own client instead
+  composes each screen in logical coordinates. The gateway needs a density-aware
+  compositor that normalizes each screen's backing rectangle into one logical
+  coordinate space, with the corresponding tile and pointer transforms.
+- **Avoid sending unused Retina pixels for one selected display.** A selected 2×
+  display is point-correct today because clients retain its full-resolution
+  framebuffer and present it at half the CSS or AppKit size. On a 1× viewer that
+  means transmitting and decoding four source pixels for every physical output
+  pixel. A future gateway-side density conversion should use the client's reported
+  host scale to resize the framebuffer and tiles before they enter the wire, while
+  preserving the remote's logical size and input coordinates. This is a bandwidth
+  optimization, not fit-to-window scaling.
+
 What remains on that wire, each for its own reason:
 
 - **Dynamic resolution**, which is the Apple name for what `resize` means on a VNC

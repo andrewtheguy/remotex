@@ -1,38 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { desktopCanvasSize } from "./desktopCanvas.ts";
+import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 
-test("a Retina guest is never downsampled on a 1x host", () => {
-  assert.deepEqual(desktopCanvasSize({ w: 3200, h: 1800 }, 2, 1), {
-    w: 3200,
-    h: 1800,
+test("a Retina guest keeps a full-size bitmap in a point-size layout", () => {
+  assert.deepEqual(desktopCanvasGeometry({ w: 3200, h: 1800 }, 2), {
+    bitmap: { w: 3200, h: 1800 },
+    layout: { w: 1600, h: 900 },
   });
 });
 
-test("matching host density presents the guest at its point size", () => {
-  assert.deepEqual(desktopCanvasSize({ w: 3200, h: 1800 }, 2, 2), {
-    w: 1600,
-    h: 900,
+test("a 1x guest has matching bitmap and layout sizes", () => {
+  assert.deepEqual(desktopCanvasGeometry({ w: 1920, h: 1080 }, 1), {
+    bitmap: { w: 1920, h: 1080 },
+    layout: { w: 1920, h: 1080 },
   });
 });
 
-test("fractional host density preserves one framebuffer pixel per device pixel", () => {
-  assert.deepEqual(desktopCanvasSize({ w: 3000, h: 1800 }, 2, 1.5), {
-    w: 2000,
-    h: 1200,
-  });
-});
-
-test("a denser host never shrinks a 1x guest", () => {
-  assert.deepEqual(desktopCanvasSize({ w: 1920, h: 1080 }, 1, 2), {
-    w: 1920,
-    h: 1080,
-  });
-});
-
-test("invalid densities fall back to 1x", () => {
-  assert.deepEqual(desktopCanvasSize({ w: 800, h: 600 }, 0, Number.NaN), {
-    w: 800,
-    h: 600,
+test("an invalid guest density falls back to a 1x layout", () => {
+  assert.deepEqual(desktopCanvasGeometry({ w: 800, h: 600 }, Number.NaN), {
+    bitmap: { w: 800, h: 600 },
+    layout: { w: 800, h: 600 },
   });
 });

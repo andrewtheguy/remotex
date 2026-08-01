@@ -46,8 +46,7 @@ export type ClientMsg =
   // Sent on connect and again whenever the window moves to a screen of a
   // different density.
   //
-  // RDP density matching acts on this. Pointer desktops also cap their
-  // presentation density at this value so a denser remote is not downsampled.
+  // RDP density matching acts on this; it does not affect canvas layout.
   | { type: "hostScale"; scale: number }
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
@@ -117,8 +116,9 @@ export interface DisplayInfo {
 export type ControlMsg =
   // `w`/`h` are framebuffer pixels; `scale` is how many of them the remote draws
   // per point of its *own* desktop (1 for VNC, RDP and a 1x Mac, 2 for a Retina
-  // one). A pointer desktop uses at most the host screen's density: on a 1x host,
-  // a denser framebuffer remains pixel-sized and scrolls instead of shrinking.
+  // one). The canvas bitmap remains `w` by `h`, while its CSS box is
+  // `w / scale` by `h / scale`, preserving every source pixel without changing
+  // the remote desktop's logical size.
   | { type: "resize"; w: number; h: number; scale: number }
   // The remote pointer shape, sent only by engines whose server hands the
   // cursor over instead of drawing it into the framebuffer (the VNC Cursor
