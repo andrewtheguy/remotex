@@ -90,7 +90,8 @@ export default function RemoteDesktop({
     <div className={`screen${CAN_PINCH_ZOOM ? " screen-touch" : ""}`}>
       <div className="surface">
         {/* Starts 0×0 so no ghost block shows before the first resize; the
-            resize handler sets its pixel and density-aware CSS sizes. Kept
+            resize handler keeps the full pixel bitmap separate from its
+            remote-point CSS size. Kept
             mounted in both modes so the hook's canvas ref stays stable. */}
         <canvas ref={canvasRef} className="framebuffer" width={0} height={0} />
         {/* Transparent overlay captures mouse + keyboard input. tabIndex

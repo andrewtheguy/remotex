@@ -3,19 +3,27 @@ export interface CanvasSize {
   h: number;
 }
 
-// Size a pointer desktop without discarding framebuffer pixels the host screen
-// could not represent. A 2x guest may use its point size on a 2x host, but on a
-// 1x host it stays at its full pixel size and native scrolling exposes the rest.
-export function desktopCanvasSize(
+export interface CanvasGeometry {
+  // The canvas bitmap: one canvas pixel for every remote framebuffer pixel.
+  bitmap: CanvasSize;
+  // The element's CSS box: the remote desktop's own logical size.
+  layout: CanvasSize;
+}
+
+// Keep the high-density bitmap separate from the canvas's on-screen size. The
+// browser rasterizes the remote's logical points for whichever host display the
+// window occupies; host density never changes the desktop's layout.
+export function desktopCanvasGeometry(
   framebuffer: CanvasSize,
   guestDensity: number,
-  hostDensity: number,
-): CanvasSize {
-  const usable = (density: number) =>
-    Number.isFinite(density) && density > 0 ? density : 1;
-  const density = Math.min(usable(guestDensity), usable(hostDensity));
+): CanvasGeometry {
+  const density =
+    Number.isFinite(guestDensity) && guestDensity > 0 ? guestDensity : 1;
   return {
-    w: framebuffer.w / density,
-    h: framebuffer.h / density,
+    bitmap: { w: framebuffer.w, h: framebuffer.h },
+    layout: {
+      w: framebuffer.w / density,
+      h: framebuffer.h / density,
+    },
   };
 }

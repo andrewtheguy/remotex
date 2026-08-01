@@ -19,9 +19,9 @@ body {
   color: #e6edf3;
 }
 
-/* Phase 3: the screen IS the viewport. The framebuffer uses at most the host's
-   pixel density; when the remote desktop is larger than the viewport this
-   container scrolls natively in both axes — no fit-to-window scaling. */
+/* Phase 3: the screen IS the viewport. The framebuffer bitmap keeps every
+   remote pixel while its CSS box uses the remote's own logical size; when that
+   desktop is larger than the viewport this container scrolls natively. */
 .screen {
   width: 100%;
   height: 100%;
@@ -40,7 +40,10 @@ body {
 
 .framebuffer {
   display: block;
-  image-rendering: pixelated;
+  /* Tiles land 1:1 in the framebuffer-sized canvas bitmap. When guest and host
+     densities differ, let the browser smoothly resample that finished bitmap
+     into the CSS box, as Core Animation does for the native viewer. */
+  image-rendering: auto;
 }
 
 .input-overlay {
