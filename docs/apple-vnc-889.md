@@ -47,8 +47,8 @@ next `AppleDisplayLayout`.
 name = "macvirtualdisplay"
 protocol = "vnc"
 subtype = "ard-high-performance"
-host = "192.168.64.14"
-username = "andrew"
+host = "192.168.64.16"
+username = "sandbox2"
 password = "qwertasdfg"
 width = 1600
 height = 1000
