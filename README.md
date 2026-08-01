@@ -56,16 +56,14 @@ account's username and password; that selects Apple Remote Desktop authenticatio
 so the connection lands at the user's own screen rather than a login-window
 session.
 
-Both Apple subtypes list the Mac's screens, can show one screen or all of them, and
-report each screen's pixel density. A selected screen is drawn at its 100% point
-size when the host density is at least the guest density. A higher-density guest on
-a lower-density host instead remains pixel-sized and may require scrolling. Picking
-a single screen is what makes its density exact: a framebuffer spanning screens of
-different densities has no one scale factor and is shown at its pixel size. Plain
-`ard` keeps pixels raw and supports the native Apple pasteboard;
-`ard-high-performance` takes the same credentials and adds zlib compression over
-Apple's record-layer revision (around fifty times fewer bytes on a static desktop),
-but does not yet support `clipboard`. Neither supports `resize`. See
+Standard `ard` lists the Mac's physical screens, can show one screen or all of them,
+reports each screen's pixel density, keeps pixels raw, and supports the native Apple
+pasteboard. `ard-high-performance` takes the same credentials, requests one virtual
+display at the target's configured `width` and `height`, and adds zlib compression
+over Apple's record-layer revision (around fifty times fewer bytes on a static
+desktop), but does not yet support `clipboard`. Apple's undocumented dynamic
+resolution and one/two-virtual-display controls are not implemented; neither subtype
+supports `resize`. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 ## Container
@@ -131,8 +129,9 @@ password = "change-me"
 ```
 
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
-target with `subtype = "ard"` (or `"ard-high-performance"`, to compress the picture)
-and the Mac account's username and password. Keep the config mode `0600`; target
+target with `subtype = "ard"` for its physical displays, or
+`"ard-high-performance"` for a configured virtual display with compression, and the
+Mac account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in

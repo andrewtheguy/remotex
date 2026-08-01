@@ -272,31 +272,26 @@ server delivers, of all places, inside a framebuffer rectangle. `src/vnc_record.
 is that transport, exposed to the rest of the engine as an ordinary `AsyncRead` and
 a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it.
 
-**What the high-performance subtype buys is compression**: zlib rectangles instead
-of raw pixels, around fifty times fewer bytes on a static desktop. Both Apple
-subtypes pick one of the Mac's screens and learn each screen's pixel density, so a
-Retina desktop is drawn at 100% rather than twice its size. Picking is what makes
-the density exact — a framebuffer spanning screens at different densities has no
-single scale factor and is shown at its pixel size.
+**High Performance mode is a virtual-display mode.** The gateway sends one
+`SetDisplayConfiguration` (`0x1d`) during setup, with one 1x mode built from the
+target's `width` and `height`. The Mac then supplies the virtual display over the
+003.889 record transport, with zlib rectangles instead of raw pixels. Apple's own
+client has undocumented controls for choosing one or two virtual displays,
+resolution presets, and dynamic resolution in this mode; this gateway implements
+none of them and does not resend the descriptor after setup.
 
-There is one trap, and this gateway fell into it for a release: macOS 26 synthesizes
-a single display and removes the Mac's real ones for the session's duration — **if**
-the client sends
-`SetDisplayConfiguration` (`0x1d`). This gateway therefore does not send one, and
-that omission is what gets the Mac's own screens, their `CGDirectDisplayID`s and
-their individual scale factors. Two more constraints there are load-bearing and
-neither is guessable: the *first* `SetEncodings` must be an exact list (adding,
-removing or reordering one entry costs the display layout entirely), so zlib is asked
-for in a second one after a layout has arrived; and a layout payload is two bytes
-shorter than its own length prefix claims. All three, and the several places the
-protocol reference is outright wrong, are in
+The wire constraints remain load-bearing: the *first* `SetEncodings` must be the
+measured exact list, so zlib is requested in a second one after a layout has arrived;
+and a layout payload is two bytes shorter than its own length prefix claims. The
+byte layouts and measured protocol corrections are in
 [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.
 
 Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
 transport (the reference leaves their payload formats unresolved, and a client must
 not advertise an encoding it cannot decode); the pasteboard, which Apple carries over
 messages of its own rather than RFB's, so `clipboard` is refused for the subtype at
-configuration time; and dynamic resolution, so `resize` is refused there too. See
+configuration time; and Apple's undocumented dynamic resolution, so `resize` is
+refused there too. See
 [`roadmap.md`](roadmap.md).
 
 ## Clients

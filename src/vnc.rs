@@ -2,17 +2,15 @@
 //!
 //! **RFB 3.8**, which is every VNC server including a Mac's under `subtype =
 //! "ard"`: classic or Apple DH authentication. A Mac also accepts Apple's
-//! metadata and pasteboard messages on this transport, exposing the same display
-//! list, selection and density as its own revision while pixels stay raw.
+//! metadata and pasteboard messages on this transport, exposing the Mac's physical
+//! display list, selection and density while pixels stay raw.
 //!
 //! **RFB 003.889**, Apple's own revision, under `subtype =
 //! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
 //! record layer ([`crate::vnc_record`]), alongside Apple's control messages
-//! ([`crate::vnc_apple`]). It exposes the same screens and pixel density, but its
-//! pasteboard is a separate Apple protocol rather than RFB Extended Clipboard.
-//! See docs/apple-vnc-889.md, which records the several places the protocol
-//! reference is wrong — including the message this gateway used to send that made
-//! the Mac hide its real screens.
+//! ([`crate::vnc_apple`]). This mode requests one virtual display at the target's
+//! configured `width` and `height`. Its pasteboard is a separate Apple protocol
+//! rather than RFB Extended Clipboard. See docs/apple-vnc-889.md.
 //!
 //! The transport difference is contained in three places and nowhere else:
 //! [`Dialect`] (which banner and ClientInit byte), the two preface functions after
@@ -328,6 +326,9 @@ struct Apple {
     /// first one, never reset — see [`FramebufferZlib`].
     zlib: Option<FramebufferZlib>,
     cursors: CursorCache,
+    /// True for High Performance mode, whose setup requested a virtual display.
+    /// Layout records do not carry this fact themselves.
+    virtual_display: bool,
     /// Whether zlib has been asked for yet.
     ///
     /// It cannot be in the first `SetEncodings` — see
@@ -461,7 +462,7 @@ async fn session(
             clipboard: config.clipboard,
             default_size: (config.width, config.height),
             apple,
-            apple_zlib: Dialect::of(config.subtype) == Dialect::Apple889,
+            high_performance: Dialect::of(config.subtype) == Dialect::Apple889,
             poll,
         },
         input_rx,
@@ -490,19 +491,18 @@ struct Flags {
     /// the config at the point of use because [`active_loop`] is given the
     /// handshaken link and these switches, not the profile behind them.
     ///
-    /// A VNC target's size was ignored before this: the server's own size was
-    /// the connect-time size and nothing here could name another. Honouring it
-    /// costs nothing at connect — it is only ever consulted for a client that
-    /// asks — and it is what lets an operator say what a phone should get
-    /// without a second constant existing anywhere.
+    /// Generic VNC and Standard `ard` consult it only when a client asks.
+    /// High Performance mode also uses it during setup for its virtual display;
+    /// retaining it here keeps `DefaultSize` consistent with that configured mode.
     default_size: (u16, u16),
     /// Whether Apple's metadata encodings were negotiated, giving the read loop
     /// its zlib stream, cursor cache and display list to report. Both Apple
     /// subtypes negotiate them; only one uses the 003.889 record transport.
     apple: bool,
-    /// Whether zlib must wait for the first Apple layout. Plain `ard` deliberately
-    /// stays raw; this is only the 003.889 subtype's compression upgrade.
-    apple_zlib: bool,
+    /// Whether this is Apple's High Performance mode. It requests a virtual display
+    /// during setup and asks for zlib after the first layout; plain `ard` does
+    /// neither.
+    high_performance: bool,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
 }
@@ -594,7 +594,7 @@ async fn connect(config: &TargetConfig, stream: tokio::net::TcpStream) -> anyhow
 
     match dialect {
         Dialect::Rfb38 => rfb38_preface(reader, sock, server, macos, config).await,
-        Dialect::Apple889 => apple_preface(reader, sock, server, macos, wrap_key).await,
+        Dialect::Apple889 => apple_preface(reader, sock, server, macos, wrap_key, config).await,
     }
 }
 
@@ -795,6 +795,7 @@ async fn apple_preface(
     server: ServerInit,
     macos: bool,
     wrap_key: Option<[u8; 16]>,
+    config: &TargetConfig,
 ) -> anyhow::Result<Connected> {
     let wrap_key = wrap_key.ok_or_else(|| {
         anyhow::anyhow!(
@@ -822,13 +823,13 @@ async fn apple_preface(
     info!("vnc: Apple record layer active");
 
     let mut uplink = Uplink::records(sock, keys);
-    // No `SetDisplayConfiguration` (`0x1d`), and its absence is the load-bearing
-    // part of this preface. Sending one — the bare static descriptor included —
-    // makes macOS 26 create a virtual display spanning the real screens, turn them
-    // off for the session's duration, and report a single-screen layout at a flat
-    // density of 1. That is what made display picking and the Retina density both
-    // look impossible on this wire. Omitting it is what gets the Mac's own screens,
-    // their ids, and their individual scale factors. See [`crate::vnc_apple`].
+    // High Performance mode is a virtual-display session. Request its one configured
+    // mode before the pixel format and encoding list. This message is never resent:
+    // undocumented dynamic resolution and the native one/two-display controls are
+    // intentionally out of scope.
+    uplink
+        .send(&vnc_apple::set_display_configuration((config.width, config.height)))
+        .await?;
     uplink.send(&set_pixel_format()).await?;
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
     // Arm the server's sender. On this Mac it does *not* take over the update
@@ -919,7 +920,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         clipboard: clipboard_enabled,
         default_size,
         apple,
-        apple_zlib,
+        high_performance,
         poll,
     } = flags;
     // The uplink is shared: the read loop answers the server (update requests,
@@ -957,7 +958,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             poll,
         },
         apple.then(|| Apple {
-            asked_for_zlib: !apple_zlib,
+            asked_for_zlib: !high_performance,
+            virtual_display: high_performance,
             ..Apple::default()
         }),
         sink.clone(),
@@ -1925,10 +1927,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
         }
         vnc_apple::ENCODING_DISPLAY_LAYOUT if apple.is_some() => {
             let first = apple.as_ref().is_some_and(|a| !a.asked_for_zlib);
+            let virtual_display = apple.as_ref().is_some_and(|a| a.virtual_display);
             if let Some(a) = apple.as_mut() {
                 a.asked_for_zlib = true;
             }
-            read_display_layout(reader, shared, first, sink).await?;
+            read_display_layout(reader, shared, first, virtual_display, sink).await?;
             // Finish consuming this FramebufferUpdate before asking for the full
             // repaint. If the layout handler asks here, the poll loop queues its
             // normal incremental request directly behind it. macOS keeps only the
@@ -2262,6 +2265,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
     ask_for_zlib: bool,
+    virtual_display: bool,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, .. } = shared;
@@ -2275,7 +2279,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     let mut payload = declared.to_be_bytes().to_vec();
     payload.resize(usize::from(declared) - 2, 0);
     reader.read_exact(&mut payload[2..]).await?;
-    let layout = vnc_apple::parse_layout(&payload)?;
+    let layout = if virtual_display {
+        vnc_apple::parse_virtual_display_layout(&payload)?
+    } else {
+        vnc_apple::parse_layout(&payload)?
+    };
 
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
 
@@ -4335,7 +4343,7 @@ mod tests {
             Some(11),
             &[(11, (1920, 1080), (3840, 2160), 0x01), (22, (1600, 1000), (1600, 1000), 0x00)],
         );
-        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, &sink)
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, false, &sink)
             .await
             .unwrap();
         assert!(resized);
@@ -4400,14 +4408,22 @@ mod tests {
 
         // A session opens on the combined view, which is what the Mac sends when
         // nothing has asked otherwise.
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink).await.unwrap();
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+            .await
+            .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         // Then a screen, then back again. Each move is a layout, never a request.
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink).await.unwrap();
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+            .await
+            .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, 22);
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink).await.unwrap();
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink).await.unwrap();
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+            .await
+            .unwrap();
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+            .await
+            .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         sink.flush().await;

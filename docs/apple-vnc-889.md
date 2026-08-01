@@ -12,51 +12,76 @@ reverse-engineered document gives no way to tell a measured field from an inferr
 one.
 
 The implementation is `src/vnc_record.rs` (the 003.889 transport),
-`src/vnc_apple.rs` (messages shared by both Apple subtypes), and the two Apple
-paths in `src/vnc.rs`.
+`src/vnc_apple.rs` (Apple messages and encodings), and the two Apple paths in
+`src/vnc.rs`.
 
-> **This document was substantially wrong in its first revision**, which claimed a
-> 003.889 session cannot enumerate or pick displays and cannot learn a screen's
-> pixel density. It can do both. The mistake was that this gateway was *asking* the
-> Mac to hide its screens, and did not know it. What follows is the corrected
-> account; §"The display finding" is the part that changed.
+The display behavior in earlier revisions of this document mixed Standard and High
+Performance Screen Sharing and drew conclusions from confounded sessions. Those
+conclusions have been removed. The protocol-level measurements remain below.
 
 ## Summary
 
 | | |
 |---|---|
-| Confirmed | The handshake, type-30 authentication and its wrap key; the rekey; the record layer in full; zlib; the cursor cache; the metadata encodings. |
-| **Wrong** | `AutoFrameBufferUpdate` does not make the server stream. `SetDisplayConfiguration` must **not** be sent — it is what hides the Mac's real screens. A display record's fields are two bytes later than documented. A layout payload is two bytes **shorter** than its own length prefix says. `ViewerInfo`'s body carries no strings. |
-| **Found** | Displays *can* be enumerated and picked, and each one states its own pixel density. Also: ServerInit's name field is structured, the metadata encodings arrive as bare messages as well as rectangles, and the first `SetEncodings` decides whether any of it happens. |
+| Confirmed | `subtype = "ard"` is Standard mode and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode and uses virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
+| Protocol corrections | `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. |
+| Not implemented | Apple's High Performance controls for choosing one or two virtual displays, choosing among resolution presets, and changing resolution dynamically. They are undocumented. |
 
-## The display finding, which is the important one
+## Confirmed display modes
 
-**`SetDisplayConfiguration` (`0x1d`) is what makes a Mac synthesize a display and
-hide its real ones.** Omit it and the Mac shares its actual screens, names them, and
-states each one's scale factor.
+`subtype = "ard"` is Standard Screen Sharing over RFB 3.8. It shares the Mac's
+physical displays. `subtype = "ard-high-performance"` is Apple's High Performance
+mode over RFB 003.889. It uses virtual displays rather than the Mac's physical
+displays.
 
-Enumerated with `CGGetActiveDisplayList` over SSH on a Mac with two distinct,
-non-mirrored displays (1280×800 at (0,0) and 1600×900 at (1280,0)):
+Apple's Screen Sharing app can choose one or two virtual displays in High
+Performance mode. It can dynamically change them to arbitrary sizes; without
+dynamic resolution it offers resolution presets. Those controls are undocumented,
+so remotex does not attempt to reproduce them. It requests one virtual display once,
+during setup, with the target's configured `width` and `height`, and does not resend
+the request for viewport changes.
 
-| session | `CGGetActiveDisplayList` says | `AppleDisplayLayout` says |
-|---|---|---|
-| none | `active: 2` — id 1 at 1280×800, id 4 at 1600×900 | — |
-| plain RFB 3.8 (`subtype = "ard"`) | `active: 2` — unchanged | **both real screens, ids 1 and 4, densities 1 and 2** |
-| 003.889 **with** a `0x1d` descriptor | `active: 1` — one display at 4480×1800 | one screen, fresh id (10, 11, 12, 15, 16 — it increments every session), density 1 |
-| 003.889 **without** `0x1d` | `active: 2` — unchanged | **both real screens, ids 1 and 4, densities 1 and 2** |
+```toml
+[[targets]]
+name = "macvirtualdisplay"
+protocol = "vnc"
+subtype = "ard-high-performance"
+host = "192.168.64.14"
+username = "andrew"
+password = "qwertasdfg"
+width = 1600
+height = 1000
+```
 
-The bare *static* descriptor is enough to trigger it — the one the reference
-presents as asking for the Mac's real screens at their current size, with no
-dynamic-resolution flag and `display_type = 0`. There is no descriptor that means
-"leave my screens alone"; not sending the message is what means that. The
-synthesized display is sized to the union of the real ones, is not a mirror
-(`CGDisplayIsInMirrorSet` is false), and is destroyed on disconnect.
+### The display-configuration wire shape
 
-The first revision of this document tested "0x1d omitted" and recorded that the
-virtual display appeared anyway. That measurement was confounded: those runs were
-made against a Mac that already had another 003.889 session open from the gateway
-under test, and a second concurrent session does not see the same display state.
-**Kill every session before measuring anything here.**
+The setup request is `SetDisplayConfiguration` (`0x1d`): a four-byte Apple message
+header followed by one display descriptor and one mode entry. The header's `u16`
+length counts the body only. The body begins with `u16 version = 1`, `u16
+display_count = 1`, and `u32 flags = 0`.
+
+The descriptor is `0x9c` bytes before its `0x1c`-byte mode table:
+
+```text
++0x00 u16      descriptor size, including the mode table
++0x02 120B     opaque region
++0x7a u32      display_flags = 1
++0x7e u32      display_type = 4 (virtual display)
++0x82 f32 BE   physical width in millimetres
++0x86 f32 BE   physical height in millimetres
++0x8a u32      maximum width
++0x8e u32      maximum height
++0x92 u16      current mode index = 0
++0x94 u16      preferred mode index = 0
++0x96 u32      rotations = 0
++0x9a u16      mode count = 1
+```
+
+The one mode entry is `u32 width`, `u32 height`, `u32 scaled_width`, `u32
+scaled_height`, `f64 refresh_rate_hz = 60`, and `u32 flags = 0`. Width equals
+scaled width and height equals scaled height. The reverse-engineered specification
+names bit 0 of `display_flags` as dynamic resolution; remotex does not implement the
+follow-up messages or behavior implied by that name.
 
 The Standard-mode result was remeasured separately on July 31, 2026: after Apple
 DH authentication, replying `RFB 003.008` and sending the same ten-entry metadata
@@ -71,9 +96,10 @@ Without the first two messages the Mac accepts browser-to-Mac writes and explici
 fetches but does not emit the `MiscStatus(cmd=2)` notification needed for automatic
 Mac-to-client synchronization.
 
-### Picking a screen
+### Picking a physical screen in Standard mode
 
-`SetDisplayMessage` (`0x0d`) works in both directions, and the Mac confirms by
+For `subtype = "ard"`, `SetDisplayMessage` (`0x0d`) selects a physical display, and
+the Mac confirms by
 echoing its choice in the next layout's `current_display`:
 
 | sent | `current_display` comes back | framebuffer becomes |
@@ -129,9 +155,8 @@ Two consequences for an implementer:
 
 - **zlib cannot be in the first `SetEncodings`.** Send a second one, with zlib
   appended, once a layout has arrived: the Mac keeps its display state and simply
-  changes encoder. Measured at 398 KB for a 3200×1800 frame against 23 MB raw, with
-  display selection still working afterwards. This is what `ENCODINGS_WITH_ZLIB` and
-  the `asked_for_zlib` flag in `src/vnc.rs` are for.
+  changes encoder. Measured at 398 KB for a 3200×1800 frame against 23 MB raw. This
+  is what `ENCODINGS_WITH_ZLIB` and the `asked_for_zlib` flag in `src/vnc.rs` are for.
 - **Advertising is a promise.** Every entry in that list has to be decodable or at
   least steppable, and two of them do not share the common length rule: `CursorPos`
   (`0x44c`) has no payload at all, and `DisplayInfo` (`0x44d`) is four `u16`s then
@@ -144,9 +169,9 @@ Two consequences for an implementer:
 **One honest qualification to all of the above.** The list the probe measured had
 eleven entries; `vnc_apple::ENCODINGS` ships ten, `UserInfo` having been dropped
 between the two. That single-entry removal was *not* among the sixteen variants tried,
-and the shipped ten-entry list was afterwards verified against the same Mac to produce
-a layout, a display list and a working selection — twice, through the gateway rather
-than the probe. So "any single removal costs the layout" is what the bisection
+and the shipped ten-entry list was afterwards verified against the same Mac to
+produce a layout — twice, through the gateway rather than the probe. So "any single
+removal costs the layout" is what the bisection
 measured, and it has one known exception. Which entries actually matter is therefore
 still unresolved, and the safe reading is the one in the code: leave the list alone.
 
@@ -345,10 +370,6 @@ without desyncing.
 - The Adaptive media path (`0x1c`, SRTP, HEVC): not attempted.
 - Authentication types 33, 35 and 36: not attempted, type 30 being sufficient.
 - Multi-rekey, and whether sequence counters survive a second one.
-- Dynamic resolution, which is what a full dynamic `0x1d` descriptor drives — and
-  which is now doubly interesting, since `0x1d` is the message that hides the real
-  screens. Asking for a resizable virtual display and asking to see the Mac's own
-  screens may simply be exclusive.
 
 ## Reproducing any of this
 
@@ -361,14 +382,12 @@ read the rekey, then a record layer as specified above around ordinary RFB.
 
 Three instruments did the work, and two of them were outside the protocol:
 
-1. **Enumerating displays over SSH with `CGGetActiveDisplayList` while a session was
-   live.** This is what found the synthesized display, and no amount of protocol
-   reading would have.
+1. **Enumerating displays over SSH with `CGGetActiveDisplayList` while a Standard
+   session was live.** This validated the physical display ids and geometry used to
+   check `AppleDisplayLayout`.
 2. **Bisecting one message or one encoding at a time, on a fresh connection each
-   time.** This is what found `0x1d`, and what mapped the `SetEncodings` behaviour.
-   It only works with **every other session closed** — the gateway included. A
-   stale session invalidated a whole round of measurements and is what put the wrong
-   conclusion in the first revision of this document.
+   time.** This mapped the `SetEncodings` behaviour. It only works with every other
+   session closed; stale sessions invalidate display-state observations.
 3. **A rolling log of every byte handed upward, dumped on the first parse failure.**
    Framing bugs here surface many messages after their cause; nothing else would
    have found the two-byte layout length.
