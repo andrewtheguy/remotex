@@ -330,15 +330,15 @@ export function attachTouchGestures(
     });
   }
 
-  // One scroll notch at the cursor; the server maps any nonzero delta to one
-  // wheel tick, so only the sign carries meaning.
+  // One scroll step at the cursor, carrying the finger travel it stands for.
+  //
+  // Pixels, because that is what the deltas are: a step is a step's worth of
+  // finger movement, and the engines turn a distance into as many wheel pulses
+  // as the far side needs to scroll that far.
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();
     deps.send({ type: "mouseMove", x: c.x, y: c.y });
-    // Lines, not pixels: these deltas are a notch each rather than a distance
-    // the finger travelled, and calling them pixels would scroll by a few of
-    // them and go nowhere.
-    deps.send({ type: "wheel", dx, dy, unit: "line" });
+    deps.send({ type: "wheel", dx, dy, unit: "pixel" });
   }
 
   // Move the cursor by a finger step (screen px -> remote px through the
@@ -685,11 +685,11 @@ export function attachTouchGestures(
 
     if (scroll.axis === "x") {
       scroll.carryX = drainScrollCarry(scroll.carryX + stepX, (dir) =>
-        sendScrollTick(dir, 0),
+        sendScrollTick(dir * THREE_FINGER_SCROLL_STEP_PX, 0),
       );
     } else {
       scroll.carryY = drainScrollCarry(scroll.carryY + stepY, (dir) =>
-        sendScrollTick(0, dir),
+        sendScrollTick(0, dir * THREE_FINGER_SCROLL_STEP_PX),
       );
     }
     return true;

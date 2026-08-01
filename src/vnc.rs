@@ -38,7 +38,7 @@ use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES, MouseButton,
-    ServerMsg, UNSCALED, clipboard_fits,
+    ServerMsg, UNSCALED, WheelUnit, clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
@@ -1031,6 +1031,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // tracked here — every key event carries the browser's authoritative lock
     // state (see [`ClientMsg::Key`]).
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
+    let mut wheel = Wheel::new(macos);
 
     let result = loop {
         tokio::select! {
@@ -1228,8 +1229,13 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         Ok(())
                     }
                 } else {
-                    let msgs =
-                        translate_input(input, &mut button_mask, &mut last_pos, &mut pressed_keys);
+                    let msgs = translate_input(
+                        input,
+                        &mut button_mask,
+                        &mut last_pos,
+                        &mut pressed_keys,
+                        &mut wheel,
+                    );
                     send_all(&uplink, &msgs).await
                 };
                 // Break instead of `?`: the error must pass the trailing
@@ -2425,6 +2431,85 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     Ok(resized)
 }
 
+/// Scroll intent turned into RFB wheel pulses, carrying the sub-pulse remainder
+/// between events.
+///
+/// RFB has no scroll magnitude: a wheel is buttons 4-7, and the only thing a
+/// client can vary is how many times it pulses one. How far a single pulse
+/// scrolls is therefore the server's business, and the two servers remotex meets
+/// disagree by about three times — macOS Screen Sharing spends a pulse as one
+/// line, while an X11 server hands it to a toolkit that spends it as a notch's
+/// worth, conventionally three. Spending any nonzero delta as exactly one pulse
+/// is what made a Mac crawl: a browser wheel notch is ~120px of intent, and one
+/// line is a seventh of it. Apple's own client feels fast here because Screen
+/// Sharing's native protocol carries the delta itself; a pulse count is the only
+/// thing standard RFB can say, which is why every standard client — RealVNC
+/// included — crawls against a Mac until it sends enough of them.
+struct Wheel {
+    /// What one line of scrolling is worth here, in pulses.
+    pulses_per_line: f32,
+    /// Intent not yet worth a whole pulse, per axis, in pulses.
+    pending: (f32, f32),
+}
+
+impl Wheel {
+    /// The line height pixel deltas are measured against. Trackpads and
+    /// pixel-precise wheels report a distance rather than notches, and lines are
+    /// the unit both server kinds actually scroll in.
+    const LINE_PX: f32 = 16.0;
+    /// A `page` delta, in lines: a screenful, which is what the DOM means by it.
+    const PAGE_LINES: f32 = 20.0;
+    /// The most one event may spend. A single absurd delta — a flick, or a
+    /// client that reports a whole document — must not turn into thousands of
+    /// pointer events queued ahead of everything else on the uplink.
+    const MAX_PULSES: f32 = 16.0;
+
+    fn new(macos: bool) -> Self {
+        Self {
+            pulses_per_line: if macos { 1.0 } else { 1.0 / 3.0 },
+            pending: (0.0, 0.0),
+        }
+    }
+
+    /// Whole pulses to send for one wheel event, as (horizontal, vertical).
+    fn pulses(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
+        let lines = |delta: f32| match unit {
+            WheelUnit::Pixel => delta / Self::LINE_PX,
+            WheelUnit::Line => delta,
+            WheelUnit::Page => delta * Self::PAGE_LINES,
+        };
+        let scale = self.pulses_per_line;
+        (
+            Self::spend(&mut self.pending.0, lines(dx) * scale),
+            Self::spend(&mut self.pending.1, lines(dy) * scale),
+        )
+    }
+
+    /// Add one axis' worth of intent and take the whole pulses out of it. The
+    /// fraction stays behind, so a slow trackpad glide of deltas too small to be
+    /// a pulse on their own still adds up to one.
+    fn spend(pending: &mut f32, add: f32) -> i32 {
+        if add == 0.0 || !add.is_finite() {
+            return 0;
+        }
+        // A reversal starts over rather than first paying off the remainder of
+        // the direction the user just left, which would swallow the flick back.
+        if pending.signum() != add.signum() {
+            *pending = 0.0;
+        }
+        *pending += add;
+        let whole = pending.trunc();
+        if whole.abs() > Self::MAX_PULSES {
+            // Capped: the surplus is dropped rather than kept, so a flick cannot
+            // leave pulses trickling out under the next few events.
+            *pending = 0.0;
+            return (whole.signum() * Self::MAX_PULSES) as i32;
+        }
+        *pending -= whole;
+        whole as i32
+    }
+}
+
 /// Translate one browser input message into RFB client messages, updating the
 /// tracked pointer state.
 ///
@@ -2438,6 +2523,7 @@ fn translate_input(
     button_mask: &mut u8,
     last_pos: &mut (u16, u16),
     pressed_keys: &mut HashMap<String, u32>,
+    wheel: &mut Wheel,
 ) -> Vec<Vec<u8>> {
     match input {
         ClientMsg::MouseMove { x, y } => {
@@ -2464,15 +2550,16 @@ fn translate_input(
             }
             vec![pointer_event(*button_mask, *last_pos).to_vec()]
         }
-        // The unit is dropped: RFB has one notch and no way to say how big it is.
-        ClientMsg::Wheel { dx, dy, .. } => {
-            // A wheel notch is a press+release of buttons 4-7 (mask bits 3-6):
-            // 4 = up, 5 = down, 6 = left, 7 = right. One notch per event,
-            // like the RDP engine.
+        ClientMsg::Wheel { dx, dy, unit } => {
+            // A wheel pulse is a press+release of buttons 4-7 (mask bits 3-6):
+            // 4 = up, 5 = down, 6 = left, 7 = right. How many of them this delta
+            // is worth is [`Wheel`]'s business — the magnitude has nowhere else
+            // to go on this wire.
+            let (px, py) = wheel.pulses(dx, dy, unit);
             let mut out = Vec::new();
-            for (delta, negative_bit, positive_bit) in [(dy, 0x08, 0x10), (dx, 0x20, 0x40)] {
-                if delta != 0.0 {
-                    let bit = if delta > 0.0 { positive_bit } else { negative_bit };
+            for (pulses, negative_bit, positive_bit) in [(py, 0x08, 0x10), (px, 0x20, 0x40)] {
+                let bit = if pulses > 0 { positive_bit } else { negative_bit };
+                for _ in 0..pulses.abs() {
                     out.push(pointer_event(*button_mask | bit, *last_pos).to_vec());
                     out.push(pointer_event(*button_mask, *last_pos).to_vec());
                 }
@@ -3580,6 +3667,7 @@ mod tests {
         let mut mask = 0u8;
         let mut pos = (10, 20);
         let mut keys = HashMap::new();
+        let mut wheel = Wheel::new(true);
 
         let bytes = translate_input(
             ClientMsg::MouseButton {
@@ -3590,6 +3678,7 @@ mod tests {
             &mut mask,
             &mut pos,
             &mut keys,
+            &mut wheel,
         );
         assert_eq!(bytes, vec![pointer_event(0x01, (10, 20)).to_vec()]);
 
@@ -3599,15 +3688,18 @@ mod tests {
             &mut mask,
             &mut pos,
             &mut keys,
+            &mut wheel,
         );
         assert_eq!(bytes, vec![pointer_event(0x01, (30, 40)).to_vec()]);
 
         // Scroll down = button 5 (0x10) press + release, on top of the held mask.
+        // One line of intent is one pulse on a Mac.
         let bytes = translate_input(
-            ClientMsg::Wheel { dx: 0.0, dy: 3.0, unit: WheelUnit::Pixel },
+            ClientMsg::Wheel { dx: 0.0, dy: 1.0, unit: WheelUnit::Line },
             &mut mask,
             &mut pos,
             &mut keys,
+            &mut wheel,
         );
         // Two *separate* messages, not one buffer of both: on the 003.889 wire
         // each has to go in a record of its own or the release is dropped and the
@@ -3629,8 +3721,81 @@ mod tests {
             &mut mask,
             &mut pos,
             &mut keys,
+            &mut wheel,
         );
         assert_eq!(bytes, vec![pointer_event(0x00, (30, 40)).to_vec()]);
+    }
+
+    /// Pulses for one wheel event, as (horizontal, vertical).
+    fn scroll(wheel: &mut Wheel, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
+        wheel.pulses(dx, dy, unit)
+    }
+
+    #[test]
+    fn a_wheel_notch_is_worth_a_notch_of_scrolling() {
+        // A browser reports ~120px for one notch of a physical wheel. A Mac
+        // spends a pulse as one line, so that has to arrive as several: sending
+        // one is the whole reason a Mac used to crawl.
+        let mut mac = Wheel::new(true);
+        assert_eq!(scroll(&mut mac, 0.0, 120.0, WheelUnit::Pixel).1, 7);
+        // The same intent against a server whose toolkit spends a pulse as three
+        // lines needs a third as many.
+        let mut generic = Wheel::new(false);
+        assert_eq!(scroll(&mut generic, 0.0, 120.0, WheelUnit::Pixel).1, 2);
+    }
+
+    #[test]
+    fn scroll_direction_picks_the_wheel_button() {
+        let mut wheel = Wheel::new(true);
+        // Up is negative in the DOM and button 4; down is button 5.
+        assert_eq!(scroll(&mut wheel, 0.0, -32.0, WheelUnit::Pixel).1, -2);
+        assert_eq!(scroll(&mut wheel, 48.0, 0.0, WheelUnit::Pixel).0, 3);
+    }
+
+    #[test]
+    fn sub_pulse_glides_accumulate_instead_of_vanishing() {
+        let mut wheel = Wheel::new(true);
+        // A trackpad reports deltas far too small to be a pulse each. Spending
+        // one apiece would scroll wildly; dropping them would scroll never.
+        for _ in 0..7 {
+            assert_eq!(scroll(&mut wheel, 0.0, 2.0, WheelUnit::Pixel).1, 0);
+        }
+        assert_eq!(scroll(&mut wheel, 0.0, 2.0, WheelUnit::Pixel).1, 1);
+    }
+
+    #[test]
+    fn a_reversal_does_not_pay_off_the_old_directions_remainder() {
+        let mut wheel = Wheel::new(true);
+        assert_eq!(scroll(&mut wheel, 0.0, 12.0, WheelUnit::Pixel).1, 0);
+        // Flicking back scrolls back immediately rather than first burning the
+        // three quarters of a downward pulse left over.
+        assert_eq!(scroll(&mut wheel, 0.0, -20.0, WheelUnit::Pixel).1, -1);
+    }
+
+    #[test]
+    fn one_absurd_delta_cannot_flood_the_uplink() {
+        let mut wheel = Wheel::new(true);
+        assert_eq!(
+            scroll(&mut wheel, 0.0, 100_000.0, WheelUnit::Pixel).1,
+            Wheel::MAX_PULSES as i32
+        );
+        // The surplus is dropped, not left trickling into later events.
+        assert_eq!(scroll(&mut wheel, 0.0, 2.0, WheelUnit::Pixel).1, 0);
+        // A delta a client should never send at all buys nothing.
+        assert_eq!(scroll(&mut wheel, f32::NAN, f32::INFINITY, WheelUnit::Pixel), (0, 0));
+    }
+
+    #[test]
+    fn line_and_page_deltas_are_sized_in_lines() {
+        let mut wheel = Wheel::new(true);
+        // Firefox reports notches in lines rather than pixels.
+        assert_eq!(scroll(&mut wheel, 0.0, 3.0, WheelUnit::Line).1, 3);
+        // A page is a screenful, which is more lines than one event may spend;
+        // the cap decides, and a screenful of pulses is close enough to one.
+        assert_eq!(
+            scroll(&mut wheel, 0.0, 1.0, WheelUnit::Page).1,
+            Wheel::MAX_PULSES as i32
+        );
     }
 
     // ── Resize state machine (no sockets: in-memory uplink, slice reader) ───
@@ -3949,6 +4114,7 @@ mod tests {
             &mut mask,
             &mut pos,
             keys,
+            &mut Wheel::new(true),
         )
         .concat()
     }

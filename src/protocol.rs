@@ -143,8 +143,8 @@ pub enum MouseButton {
 
 /// What a wheel delta is measured in — the DOM's `deltaMode`, carried rather
 /// than normalised because only the client knows whether its scroll came from a
-/// trackpad (pixels) or a notched wheel (lines). Carried to the RDP and VNC
-/// engines but not yet acted on: both spend any nonzero delta as one notch.
+/// trackpad (pixels) or a notched wheel (lines). The VNC engine reads it to size
+/// the delta in lines; RDP still spends any nonzero delta as one rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WheelUnit {
@@ -169,8 +169,9 @@ pub enum ClientMsg {
         pressed: bool,
         clicks: u8,
     },
-    /// Scroll wheel delta, in `unit`. No engine reads the unit today: RDP and
-    /// VNC spend any nonzero delta as one notch whatever it was measured in.
+    /// Scroll wheel delta, in `unit`. The VNC engine converts it to a count of
+    /// wheel-button pulses sized for the server it is talking to; RDP spends any
+    /// nonzero delta as one rotation and leaves the scaling to the guest.
     Wheel { dx: f32, dy: f32, unit: WheelUnit },
     /// A key was pressed or released. `code` is the DOM `KeyboardEvent.code`.
     /// `caps` is the browser's authoritative CapsLock lock state at the moment
