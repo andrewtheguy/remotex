@@ -30,16 +30,19 @@
 //!
 //! **A virtual display in High Performance mode**:
 //! [`set_display_configuration`] asks for one virtual display at the configured
-//! mode. The message is sent once during setup; this gateway does not implement
-//! Apple's undocumented dynamic-resolution controls or its one/two-display picker.
+//! mode. When the target allows resize, a viewport report sends the same message
+//! with a replacement mode. The dynamic-resolution flag is set on every message,
+//! including setup, so a new connection always restores that Mac checkbox to on.
+//! The one/two-display picker remains absent.
 //!
 //! ## What is otherwise absent
 //!
-//! No Apple dynamic resolution, so `resize` is refused for both Apple subtypes at
-//! config load. No Adaptive media path (HEVC/AAC over SRTP), so
-//! `RFBMediaStreamMessage1` is never advertised. Both Apple subtypes use Apple's
-//! native pasteboard protocol; High Performance enables monitoring before the
-//! rekey and carries fetches and clipboard data inside the encrypted transport.
+//! Standard `ard` refuses resize because it shares physical displays; High
+//! Performance can resize its virtual display. No Adaptive media path (HEVC/AAC
+//! over SRTP), so `RFBMediaStreamMessage1` is never advertised. Both Apple subtypes
+//! use Apple's native pasteboard protocol; High Performance enables monitoring
+//! before the rekey and carries fetches and clipboard data inside the encrypted
+//! transport.
 //!
 //! ## Reading the offsets in here
 //!
@@ -279,10 +282,11 @@ pub fn set_display_message(id: Option<u32>) -> Vec<u8> {
 /// `SetDisplayConfiguration`: request one virtual display whose only advertised
 /// mode is `(w, h)`.
 ///
-/// This is sent once while establishing an `ard-high-performance` session. It is
-/// not reused for viewport reports: Apple's dynamic-resolution behavior and its
-/// native one/two-virtual-display controls are undocumented and are not implemented
-/// here.
+/// This is sent while establishing an `ard-high-performance` session and again for
+/// each accepted viewport change. `display_flags` bit 0 enables dynamic resolution;
+/// it is deliberately set even for the initial configured size, so reconnecting
+/// restores the Mac's Dynamic resolution checkbox to on if it was changed there.
+/// The native one/two-virtual-display control is not implemented.
 ///
 /// The descriptor layout follows the reverse-engineered wire specification. The
 /// mode and scaled-mode dimensions are equal, so the requested mode is 1x.
@@ -300,7 +304,7 @@ pub fn set_display_configuration((w, h): (u16, u16)) -> Vec<u8> {
             .to_be_bytes(),
     );
     display.resize(0x7a, 0); // opaque 120-byte region
-    display.extend_from_slice(&1u32.to_be_bytes()); // display_flags
+    display.extend_from_slice(&1u32.to_be_bytes()); // display_flags: dynamic resolution
     display.extend_from_slice(&4u32.to_be_bytes()); // display_type: virtual
     let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
     display.extend_from_slice(&mm(w));
@@ -309,7 +313,11 @@ pub fn set_display_configuration((w, h): (u16, u16)) -> Vec<u8> {
     display.extend_from_slice(&u32::from(h).to_be_bytes()); // max_height
     display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
     display.extend_from_slice(&0u16.to_be_bytes()); // preferred_mode_index
-    display.extend_from_slice(&0u32.to_be_bytes()); // rotations: upright
+    // Native Screen Sharing's full dynamic descriptor sends 7 here. The field is
+    // passed to SLVirtualDisplaySettings as `rotations`; the exact bit meanings are
+    // private, but matching the captured dynamic shape matters more than guessing a
+    // tidier upright-only value.
+    display.extend_from_slice(&7u32.to_be_bytes());
     display.extend_from_slice(&1u16.to_be_bytes()); // mode_count
     debug_assert_eq!(display.len(), DESCRIPTOR_HEAD);
     for value in [w, h, w, h] {
@@ -873,7 +881,7 @@ mod tests {
         assert_eq!(be32(display, 0x8e), 1000, "maximum height");
         assert_eq!(be16(display, 0x92), 0, "current mode");
         assert_eq!(be16(display, 0x94), 0, "preferred mode");
-        assert_eq!(be32(display, 0x96), 0, "upright rotation");
+        assert_eq!(be32(display, 0x96), 7, "native dynamic rotations value");
         assert_eq!(be16(display, 0x9a), 1, "one mode");
         assert_eq!(be32(display, 0x9c), 1600);
         assert_eq!(be32(display, 0xa0), 1000);

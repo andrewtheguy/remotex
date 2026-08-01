@@ -3,7 +3,7 @@
 Corrections and confirmations for the reverse-engineered specification this
 gateway's `ard-high-performance` subtype was written from, gathered by speaking the
 protocol by hand against **macOS 26.5.2** (an Apple Virtualization guest) in
-July 2026.
+July and August 2026.
 
 Read this *with* that document, not instead of it: the framing, offsets and
 key derivations there are mostly right, and what follows is only the places where a
@@ -23,9 +23,9 @@ conclusions have been removed. The protocol-level measurements remain below.
 
 | | |
 |---|---|
-| Confirmed | `subtype = "ard"` is Standard mode and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode and uses virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
+| Confirmed | `subtype = "ard"` is Standard mode and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
 | Protocol corrections | `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. |
-| Not implemented | Apple's High Performance controls for choosing one or two virtual displays, choosing among resolution presets, and changing resolution dynamically. They are undocumented. |
+| Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
 
 ## Confirmed display modes
 
@@ -36,10 +36,11 @@ displays.
 
 Apple's Screen Sharing app can choose one or two virtual displays in High
 Performance mode. It can dynamically change them to arbitrary sizes; without
-dynamic resolution it offers resolution presets. Those controls are undocumented,
-so remotex does not attempt to reproduce them. It requests one virtual display once,
-during setup, with the target's configured `width` and `height`, and does not resend
-the request for viewport changes.
+dynamic resolution it offers resolution presets. Remotex requests one virtual
+display during setup at the target's configured `width` and `height`. With
+`resize = true`, a client viewport report sends another full dynamic display
+configuration on the same session; the Mac confirms the effective size with its
+next `AppleDisplayLayout`.
 
 ```toml
 [[targets]]
@@ -51,6 +52,7 @@ username = "andrew"
 password = "qwertasdfg"
 width = 1600
 height = 1000
+resize = true
 ```
 
 ### The display-configuration wire shape
@@ -73,15 +75,23 @@ The descriptor is `0x9c` bytes before its `0x1c`-byte mode table:
 +0x8e u32      maximum height
 +0x92 u16      current mode index = 0
 +0x94 u16      preferred mode index = 0
-+0x96 u32      rotations = 0
++0x96 u32      native full-dynamic rotations value = 7
 +0x9a u16      mode count = 1
 ```
 
 The one mode entry is `u32 width`, `u32 height`, `u32 scaled_width`, `u32
 scaled_height`, `f64 refresh_rate_hz = 60`, and `u32 flags = 0`. Width equals
-scaled width and height equals scaled height. The reverse-engineered specification
-names bit 0 of `display_flags` as dynamic resolution; remotex does not implement the
-follow-up messages or behavior implied by that name.
+scaled width and height equals scaled height. Bit 0 of `display_flags` enables
+dynamic geometry, and the rest of this full descriptor is repeated with a
+replacement mode for each accepted viewport change. The `+0x96` field is passed
+through as rotations by the server; `7` is the value captured in Apple's full
+dynamic descriptor, whose private bit meanings are not inferred here.
+
+The initial descriptor always uses this dynamic shape, even when the target does not
+grant clients `resize` permission. Consequently, disconnecting and reconnecting
+turns the Mac's **Dynamic resolution** checkbox back on if it was switched off in
+System Settings. This is deliberate. The target's `resize` key only controls whether
+remotex acts on later viewport reports.
 
 The Standard-mode result was remeasured separately on July 31, 2026: after Apple
 DH authentication, replying `RFB 003.008` and sending the same ten-entry metadata

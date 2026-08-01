@@ -826,9 +826,9 @@ async fn apple_preface(
 
     let mut uplink = Uplink::records(sock, keys);
     // High Performance mode is a virtual-display session. Request its one configured
-    // mode before the pixel format and encoding list. This message is never resent:
-    // undocumented dynamic resolution and the native one/two-display controls are
-    // intentionally out of scope.
+    // mode before the pixel format and encoding list. The same message is resent for
+    // viewport reports when resize is permitted; its dynamic-resolution flag is set
+    // here regardless, so every fresh session restores the Mac's checkbox to on.
     uplink
         .send(&vnc_apple::set_display_configuration((config.width, config.height)))
         .await?;
@@ -1002,7 +1002,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 };
                 let sent = if let Some(size) = wanted_size {
                     if resize {
-                        request_resize(&uplink, &desktop, size).await
+                        request_resize(&uplink, &desktop, size, high_performance).await
                     } else {
                         Ok(())
                     }
@@ -1190,13 +1190,17 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     result
 }
 
-/// Handle a browser viewport report (dynamic resize): send
-/// SetDesktopSize once the server has declared support via an
-/// ExtendedDesktopSize rect; until then, stash the report for replay.
+/// Handle a browser viewport report (dynamic resize).
+///
+/// A High Performance Mac owns a virtual display, so replacing its one-mode
+/// `SetDisplayConfiguration` is the resize request. Generic VNC uses
+/// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
+/// rect; until then, its report is stashed for replay.
 async fn request_resize(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
     want: (u16, u16),
+    high_performance: bool,
 ) -> anyhow::Result<()> {
     let msg = {
         let mut d = desktop.lock().unwrap();
@@ -1209,15 +1213,24 @@ async fn request_resize(
             d.pending = None;
             return Ok(());
         }
-        match d.screen {
-            Some(screen) => set_desktop_size(want, screen),
-            None => {
-                d.pending = Some(want);
-                return Ok(());
+        if high_performance {
+            vnc_apple::set_display_configuration(want)
+        } else {
+            match d.screen {
+                Some(screen) => set_desktop_size(want, screen).to_vec(),
+                None => {
+                    d.pending = Some(want);
+                    return Ok(());
+                }
             }
         }
     };
-    debug!("vnc: requesting desktop resize to {}x{}", want.0, want.1);
+    debug!(
+        "vnc: requesting {} resize to {}x{}",
+        if high_performance { "Apple virtual-display" } else { "desktop" },
+        want.0,
+        want.1
+    );
     send(uplink, &msg).await
 }
 
@@ -3671,25 +3684,39 @@ mod tests {
         let desktop = shared_desktop((1024, 768), None, None);
 
         // Matching the current size or a zero dimension: no-ops.
-        request_resize(&uplink, &desktop, (1024, 768)).await.unwrap();
-        request_resize(&uplink, &desktop, (0, 600)).await.unwrap();
+        request_resize(&uplink, &desktop, (1024, 768), false).await.unwrap();
+        request_resize(&uplink, &desktop, (0, 600), false).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
         assert!(written(&wire).is_empty());
 
         // Support not declared yet: stashed, nothing on the wire.
-        request_resize(&uplink, &desktop, (800, 600)).await.unwrap();
+        request_resize(&uplink, &desktop, (800, 600), false).await.unwrap();
         assert_eq!(desktop.lock().unwrap().pending, Some((800, 600)));
         assert!(written(&wire).is_empty());
 
         // Browser back at the current size: the stale stash is dropped.
-        request_resize(&uplink, &desktop, (1024, 768)).await.unwrap();
+        request_resize(&uplink, &desktop, (1024, 768), false).await.unwrap();
         assert!(desktop.lock().unwrap().pending.is_none());
 
         // Support declared: SetDesktopSize goes out immediately.
         let screen = Screen { id: 7, flags: 0 };
         desktop.lock().unwrap().screen = Some(screen);
-        request_resize(&uplink, &desktop, (800, 600)).await.unwrap();
+        request_resize(&uplink, &desktop, (800, 600), false).await.unwrap();
         assert_eq!(written(&wire), set_desktop_size((800, 600), screen));
+    }
+
+    #[tokio::test]
+    async fn high_performance_resize_sends_a_full_dynamic_configuration() {
+        let (uplink, wire) = test_uplink();
+        let desktop = shared_desktop((1024, 768), None, None);
+
+        request_resize(&uplink, &desktop, (800, 600), true).await.unwrap();
+
+        assert_eq!(
+            written(&wire),
+            vnc_apple::set_display_configuration((800, 600))
+        );
+        assert!(desktop.lock().unwrap().pending.is_none());
     }
 
     #[tokio::test]

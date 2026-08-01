@@ -358,7 +358,7 @@ fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
     assert_eq!(be32(D + 0x7e), 4, "virtual display_type");
     assert_eq!(be16(D + 0x92), 0, "current mode");
     assert_eq!(be16(D + 0x94), 0, "preferred mode");
-    assert_eq!(be32(D + 0x96), 0, "upright rotation");
+    assert_eq!(be32(D + 0x96), 7, "native dynamic rotations value");
 
     let mode = D + DESCRIPTOR_HEAD;
     let size = (
@@ -674,6 +674,17 @@ async fn serve_fake_mac(
                 let requested = fake_mac_read_configuration(&body);
                 let _ = requests.send(MacRequest::Configuration(requested));
                 configurations.push(requested);
+                // Setup is answered by the first non-incremental request below.
+                // A steady-state dynamic configuration is answered immediately by
+                // a fresh authoritative layout, as the real Mac does.
+                if sent_layout {
+                    let mut rect = vec![0u8, 0];
+                    rect.extend_from_slice(&1u16.to_be_bytes());
+                    rect.extend_from_slice(&[0u8; 8]);
+                    rect.extend_from_slice(&0x451i32.to_be_bytes());
+                    rect.extend_from_slice(&fake_mac_layout(requested));
+                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                }
             }
             // ClipboardSend: independently inflate and parse what the browser put
             // on the fake Mac's pasteboard.
@@ -767,6 +778,7 @@ fn mac_target(port: u16) -> TargetConfig {
         password: MAC_PASSWORD.to_owned(),
         width: MAC_VIRTUAL_WIDTH,
         height: MAC_VIRTUAL_HEIGHT,
+        resize: true,
         clipboard: true,
         ..target(Protocol::Vnc, port)
     }
@@ -1351,8 +1363,8 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
 }
 
 /// The whole `ard-high-performance` wire, end to end: authentication, record setup,
-/// one virtual-display configuration, pixels, and native Apple pasteboard messages
-/// in both directions.
+/// initial and dynamic virtual-display configurations, pixels, and native Apple
+/// pasteboard messages in both directions.
 #[tokio::test]
 async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard() {
     let (mac_port, mut requests, fake_mac) = spawn_fake_mac().await;
@@ -1429,21 +1441,26 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         }
     );
 
-    // A viewport report must not become a second configuration. The display request
-    // after it gives the fake server a deterministic later message to report.
+    // Dynamic resize is another full configuration on the same record stream. The
+    // fake Mac independently checks that the dynamic flag and the rest of the native
+    // descriptor shape remain present, then answers with an authoritative layout.
     ws.send(Message::text(r#"{"type":"viewport","w":24,"h":18}"#))
         .await
         .unwrap();
-    ws.send(Message::text(format!(
-        r#"{{"type":"selectDisplay","id":{MAC_VIRTUAL_DISPLAY}}}"#
-    )))
-    .await
-    .unwrap();
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Display(MAC_VIRTUAL_DISPLAY),
-        "the viewport produced another display configuration"
+        MacRequest::Configuration((24, 18))
     );
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], 24, "{resize}");
+    assert_eq!(resize["h"], 18, "{resize}");
+    assert_eq!(resize["scale"], 1.0, "{resize}");
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoPasteboard(true),
+        "the dynamic layout did not re-arm its pasteboard"
+    );
+    expect_tile(&mut ws).await;
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;
@@ -1451,5 +1468,9 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .await
         .expect("the fake Mac task panicked")
         .expect("the fake Mac task failed");
-    assert_eq!(configurations.len(), 1, "unexpected display configurations: {configurations:?}");
+    assert_eq!(
+        configurations,
+        vec![(MAC_VIRTUAL_WIDTH, MAC_VIRTUAL_HEIGHT), (24, 18)],
+        "unexpected display configurations"
+    );
 }
