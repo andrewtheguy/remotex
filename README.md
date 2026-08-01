@@ -187,11 +187,12 @@ resolved for the tests' direct RDP and VNC connections.
 ## Build
 
 ```sh
-cd frontend && bun install && bun run build && cd ..
+bun install --cwd frontend
 cargo build --release
 bash packaging/build-tarball.sh
 ```
 
-The tarball contains the gateway binary and built frontend. `remotex.app` is
-built by `packaging/macos-viewer/build-viewer-app.sh`, which bundles the gateway
-binary into the app rather than shipping the frontend.
+Local Cargo builds automatically rebuild the frontend when its sources change.
+The tarball contains the gateway binary and built frontend. `remotex.app` is built
+by `packaging/macos-viewer/build-viewer-app.sh`, which bundles the gateway binary
+into the app rather than shipping the frontend.
