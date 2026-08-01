@@ -776,10 +776,35 @@ fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
         return vnc_apple::ENCODINGS.to_vec();
     }
 
+    // A preference order, because a server reads it as one: it encodes with the
+    // first entry it supports and keeps that choice for the session.
+    //
+    // CopyRect leads because it is not a competitor. It carries no pixels, so a
+    // server does not pick it *instead* of something — it uses it for scrolls and
+    // window moves whatever else it chose. ZRLE is first among the pixel encodings:
+    // it takes the redundancy out tile by tile before deflate sees the bytes, so it
+    // beats plain zlib on interface content, and RFC 6143 defines it, so a modern
+    // server has it. zlib next for the servers that do not. Hextile and RRE are the
+    // uncompressed fallbacks, in the order of how much they usually save. Raw last —
+    // the encoding every server has and none should choose.
+    //
+    // Deliberately absent: Tight and TightPNG are vendor encodings, JPEG and H.264
+    // are lossy, and a gateway that re-encodes every tile for the browser anyway
+    // gains nothing from pixels that have already lost information. Advertising an
+    // encoding is a promise to decode it.
+    //
     // Cursor is unconditional (the browser can always draw a pointer). The resize
     // pseudo-encodings are advertised only when the target opts in; without them
     // the server never announces support and keeps its connect-time size.
-    let mut encodings = vec![ENCODING_RAW, ENCODING_CURSOR];
+    let mut encodings = vec![
+        ENCODING_COPY_RECT,
+        ENCODING_ZRLE,
+        ENCODING_ZLIB,
+        ENCODING_HEXTILE,
+        ENCODING_RRE,
+        ENCODING_RAW,
+        ENCODING_CURSOR,
+    ];
     if resize {
         encodings.push(ENCODING_EXTENDED_DESKTOP_SIZE);
         encodings.push(ENCODING_DESKTOP_SIZE);
@@ -3284,6 +3309,63 @@ mod tests {
         assert_eq!(&msg[8..12], &(-239i32).to_be_bytes());
         assert_eq!(&msg[12..16], &(-308i32).to_be_bytes());
         assert_eq!(&msg[16..20], &(-223i32).to_be_bytes());
+    }
+
+    /// A server reads the list as a preference order, so the order is the decision.
+    /// Every pixel encoding in it must also have an arm in `read_rect`: advertising
+    /// one is a promise to decode it.
+    #[tokio::test]
+    async fn the_generic_encoding_list_is_in_preference_order() {
+        assert_eq!(
+            rfb38_encoding_list(false, false, false),
+            vec![
+                ENCODING_COPY_RECT,
+                ENCODING_ZRLE,
+                ENCODING_ZLIB,
+                ENCODING_HEXTILE,
+                ENCODING_RRE,
+                ENCODING_RAW,
+                ENCODING_CURSOR,
+            ]
+        );
+
+        // Every pixel encoding advertised is one this side can be handed. A rect
+        // header alone is enough to prove it: an unrecognised encoding bails with
+        // "not advertised" before any payload is read, and the promised ones do not.
+        //
+        // Pixel encodings are the non-negative ones. The pseudo-encodings are
+        // excluded because a server never sends one as a rectangle at all — the
+        // clipboard's arrives as a ServerCutText, not here.
+        let pixel_encodings = rfb38_encoding_list(false, true, true)
+            .into_iter()
+            .filter(|encoding| *encoding >= 0);
+        for encoding in pixel_encodings {
+            let mut wire = vec![0u8, 0];
+            wire.extend_from_slice(&1u16.to_be_bytes());
+            wire.extend_from_slice(&[0u8; 8]); // a 0x0 rect at the origin
+            wire.extend_from_slice(&encoding.to_be_bytes());
+
+            let (uplink, _sent) = test_uplink();
+            let (sink, _rx) = test_sink();
+            let shared = test_shared(
+                uplink,
+                shared_desktop((2, 2), None, None),
+                test_shadow((2, 2)),
+            );
+            let err = read_loop(
+                std::io::Cursor::new(wire),
+                shared,
+                ReadFlags { clipboard: true, poll: false },
+                None,
+                sink,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                !format!("{err:#}").contains("not advertised"),
+                "encoding {encoding} is advertised but not decoded: {err:#}"
+            );
+        }
     }
 
     #[test]
