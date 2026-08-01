@@ -24,6 +24,7 @@ const NO_SLOT = 0xffff;
 const SLOT_COUNT = 256;
 const TILE_FORMAT_PNG = 1;
 const TILE_FORMAT_JPEG = 2;
+const TILE_FORMAT_WEBP = 3;
 
 interface Record {
   op: number;
@@ -96,7 +97,8 @@ function parseBatch(payload: Buffer): Batch {
 }
 
 test.describe("v3 batch envelope", () => {
-  // Needs the Mac agent to be up: the frames under test are its screen arriving.
+  // Needs the Mac's Screen Sharing service to be up: the frames under test are
+  // its screen arriving through the gateway.
   skipUnlessLiveMac();
 
   test("screen updates arrive as batch frames the SPA can parse", async ({
@@ -152,10 +154,13 @@ test.describe("v3 batch envelope", () => {
           expect(record.slot).toBeLessThan(SLOT_COUNT);
           continue;
         }
-        // 1 = PNG, 2 = JPEG. The gateway's engines send PNG; the Mac agent picks
-        // per tile, so any sample is one of the two — the relationship that holds
-        // whatever the desktop happens to be showing.
-        expect([TILE_FORMAT_PNG, TILE_FORMAT_JPEG]).toContain(record.format);
+        // The gateway encodes tiles as PNG, JPEG, or WebP according to the target's
+        // render dial, so any sample uses one of the three wire formats.
+        expect([
+          TILE_FORMAT_PNG,
+          TILE_FORMAT_JPEG,
+          TILE_FORMAT_WEBP,
+        ]).toContain(record.format);
         // Either a slot inside the cache, or "do not remember this".
         if (record.slot !== NO_SLOT) {
           expect(record.slot).toBeLessThan(SLOT_COUNT);

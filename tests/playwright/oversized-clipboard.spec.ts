@@ -2,9 +2,10 @@
 // MAX_CLIPBOARD_BYTES is reported as its size rather than transferred in part.
 //
 // Worth a live test rather than only unit coverage, because the claim spans five
-// layers that each used to truncate independently — agent, gateway, browser link,
-// panel state, and the panel's own buttons — and the interesting failure is a
-// truncated value arriving *successfully*, which no single layer can catch.
+// layers that each used to truncate independently — macOS Screen Sharing, gateway,
+// browser link, panel state, and the panel's own buttons — and the interesting
+// failure is a truncated value arriving *successfully*, which no single layer can
+// catch.
 import { expect, test } from "@playwright/test";
 import {
   logInAndConnect,
@@ -30,9 +31,9 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
 
   await logInAndConnect(page);
 
-  // Set *after* the session is up, on purpose: the agent baselines the
-  // pasteboard's change count when the watch starts, so a clipboard that was
-  // already there is not a change and is never read at all.
+  // Set *after* the session is up, on purpose: the gateway starts the remote
+  // pasteboard watch during connection, so a value that was already there is not
+  // a change and is never read at all.
   const localSentinel = `remotex-ui-local-${Date.now()}`;
   await page.evaluate(
     (text) => navigator.clipboard.writeText(text),

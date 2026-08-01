@@ -34,9 +34,9 @@ revealing the panel leave the local clipboard untouched until explicit Copy.
 `oversized-clipboard.spec.ts` covers the refusal path: a Mac pasteboard larger
 than `MAX_CLIPBOARD_BYTES` reaches the panel as its size, not as the first 64 KiB
 of itself. It is here rather than only in the Rust and Swift unit tests because
-the claim spans the agent, the gateway, the browser link and the panel, and the
-failure it guards against — a truncated value arriving *successfully* — is
-invisible to any one of them.
+the claim spans macOS Screen Sharing, the gateway, the browser link and the panel,
+and the failure it guards against — a truncated value arriving *successfully* —
+is invisible to any one of them.
 
 `support.ts` holds what both share: the login/target flow and the SSH hooks that
 read and write the Mac's pasteboard. Two conventions live there. Every spec ends
@@ -73,15 +73,15 @@ REMOTEX_PLAYWRIGHT_USERNAME='<username>' \
 REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_TARGET='mac' \
 REMOTEX_PLAYWRIGHT_MAC_SSH='<ssh-user>@<mac-host>' \
-REMOTEX_PLAYWRIGHT_AGENT='<mac-host>:52381' \
+REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING='<mac-host>:5900' \
 npx playwright test
 ```
 
-`REMOTEX_PLAYWRIGHT_AGENT` is what asks for the specs that need the Mac agent to be
-*running*; without it they skip, so a plain `npx playwright test` never assumes a VM
-is up. It is also checked: nothing listening at that address skips them too, with
-the address in the reason, rather than failing twenty seconds later inside the
-browser and reading as a bug in whatever was being changed. This is the same bargain
+`REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING` opts into the specs that need a live Mac
+target; without it they skip, so a plain `npx playwright test` never assumes a VM
+is up. The helper checks that the Mac's Screen Sharing service is listening at
+that address before starting, rather than failing later inside the browser and
+making an unavailable target look like a product bug. This is the same bargain
 the Rust e2e tests make with `#[ignore]`.
 
 That runs all specs. `npm run test:clipboard` and `npm run test:oversized` run

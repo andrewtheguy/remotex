@@ -191,8 +191,7 @@ run uses to point the *stock* bundle at a throwaway directory.
 - **Nothing else.** No entitlements, no notarization, no TCC. The shipped bundle is
   ad-hoc signed itself (`codesign -dv` → `Signature=adhoc`), and the viewer holds no TCC
   grants for a change of code identity to break: it captures keys with a *local*
-  `NSEvent` monitor, which needs no Accessibility permission. That is all the **agent**,
-  which is a different program with a different problem.
+  `NSEvent` monitor, which needs no Accessibility permission.
 
 What you must still **not** do is edit `remotex.app` in place. The script copies first
 and re-signs the copy, which is a different operation from breaking the seal on the one

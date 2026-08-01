@@ -23,28 +23,29 @@ export const MISSING_ENV = Object.entries(REQUIRED_ENV)
   .filter(([, value]) => !value)
   .map(([name]) => name);
 
-/// Where the Mac agent listens, as `host:port` — and the opt-in for every spec that
-/// needs it to be running.
+/// Where the Mac's Screen Sharing service listens, as `host:port` — and the opt-in
+/// for every spec that needs a live Mac target.
 ///
 /// An endpoint rather than a flag, because it is the specific thing those specs
 /// depend on and the only thing that can be checked: credentials do not tell you a
-/// VM is up, and with the agent's machine merely stopped the specs failed on a
+/// VM is up, and with the Mac merely stopped the specs failed on a
 /// connect timeout deep inside the browser, reading as a bug in whatever was being
-/// changed. Unset by default, so a plain run never assumes an agent — the
+/// changed. Unset by default, so a plain run never assumes a live Mac — the
 /// browser-side equivalent of `#[ignore]` on the Rust e2e tests that need a
 /// container.
 ///
-///     REMOTEX_PLAYWRIGHT_AGENT=... npx playwright test
-export const AGENT_ENDPOINT = process.env.REMOTEX_PLAYWRIGHT_AGENT;
+///     REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING=... npx playwright test
+export const SCREEN_SHARING_ENDPOINT =
+  process.env.REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING;
 
-/// Whether something is listening at [`AGENT_ENDPOINT`].
+/// Whether something is listening at [`SCREEN_SHARING_ENDPOINT`].
 ///
-/// A TCP connect is all that can be asked without the gateway's keys — the agent
-/// refuses everything else until the Noise handshake. `nc`, because this has to
-/// answer synchronously for a `test.skip` at suite level, and this file already
-/// shells out for the pasteboard. A probe that cannot run at all (no `nc`) answers
-/// `true`: the point is to skip a *known* absent agent, not to guess at one.
-function agentIsListening(endpoint: string): boolean {
+/// A TCP connect is sufficient to establish that Screen Sharing is reachable.
+/// `nc`, because this has to answer synchronously for a `test.skip` at suite level,
+/// and this file already shells out for the pasteboard. A probe that cannot run at
+/// all (no `nc`) answers `true`: the point is to skip a *known* absent service, not
+/// to guess at one.
+function screenSharingIsListening(endpoint: string): boolean {
   const at = endpoint.lastIndexOf(":");
   const host = at > 0 ? endpoint.slice(0, at) : endpoint;
   const port = at > 0 ? endpoint.slice(at + 1) : "";
@@ -61,14 +62,15 @@ function agentIsListening(endpoint: string): boolean {
   }
 }
 
-/// Skip the enclosing spec or suite unless a live Mac agent was asked for, can be
-/// reached, and the environment to drive it is set. One place for all three, so every
-/// such spec skips for the same reasons and says which one applied.
+/// Skip the enclosing spec or suite unless a live Mac target was requested, its
+/// Screen Sharing service can be reached, and the environment to drive it is set.
+/// One place for all three, so every such spec skips for the same reasons and says
+/// which one applied.
 export function skipUnlessLiveMac(): void {
-  if (!AGENT_ENDPOINT) {
+  if (!SCREEN_SHARING_ENDPOINT) {
     test.skip(
       true,
-      "set REMOTEX_PLAYWRIGHT_AGENT=host:port to run the specs that need a live Mac agent",
+      "set REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING=host:port to run the live-Mac specs",
     );
     return;
   }
@@ -77,8 +79,8 @@ export function skipUnlessLiveMac(): void {
     return;
   }
   test.skip(
-    !agentIsListening(AGENT_ENDPOINT),
-    `nothing is listening at ${AGENT_ENDPOINT} — start the Mac agent's machine`,
+    !screenSharingIsListening(SCREEN_SHARING_ENDPOINT),
+    `nothing is listening at ${SCREEN_SHARING_ENDPOINT} — start Screen Sharing on the Mac`,
   );
 }
 

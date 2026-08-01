@@ -93,8 +93,8 @@ and VNC every codec together. When the codec is `Png`, `TileSink` calls
 
 ## The encoders
 
-`encode_jpeg` and the `jpeg-encoder` dependency were salvaged from the deleted
-agent tree at commit `8990971` (`git show 8990971:crates/rxa-agent/src/encode.rs`);
+`encode_jpeg` and the `jpeg-encoder` dependency were salvaged from an earlier
+implementation at commit `8990971`;
 `encode_webp` wraps the `webp` crate's `libwebp` (built by `cc` with the target's
 SIMD, no cmake, and `thread_level = 1` so an encode can use all cores). Both sit
 next to `encode_png` in `src/protocol.rs`, with `Tile::from_rgb_jpeg` /

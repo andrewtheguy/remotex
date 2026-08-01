@@ -1,18 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The master artwork for remotex-agent.app's icon. Everything shipped is
-  rasterized from this file by packaging/macos/make-icon.sh into AppIcon.icns —
+  The master artwork for remotex.app's icon. Everything shipped is rasterized
+  from this file by packaging/macos-viewer/make-icon.sh into AppIcon.icns —
   edit this, run that, commit both.
 
-  LSUIElement means there is no Dock tile, so this icon is not decoration: it is
-  what identifies the agent in the Finder, in System Settings > Login Items, in
-  the two Privacy & Security lists, and in the TCC permission prompts — the exact
-  places a user has to recognise it to grant it anything.
+  The icon identifies the viewer in Finder, the Dock, and the app switcher.
 
   Why it looks like this:
 
-  * A display, because that is what the agent shares and what its idle menu bar
-    icon already is ("display").
+  * A display, because the app is a remote desktop viewer.
   * Bright frame, dark lit screen, nothing on it. The 16x16 rendering is the one
     that has to survive, and at that size the artwork is two tones on a blue
     body: a monitor silhouette reads, anything drawn inside the screen does not.

@@ -31,9 +31,9 @@ the config already refuses by name until it is built:
 - **`video` subtype** — an inter-frame codec for full-motion regions.
 
 The dynamic, motion-adaptive form of `adaptive` — quality chosen per cell from how
-fast it is changing, with a cleanup pass when it settles — is the scheme the
-deleted rxa agent ran. It is deferred until the fixed dial proves insufficient; the
-design and its salvage point are recorded in
+fast it is changing, with a cleanup pass when it settles — existed in an earlier
+prototype. It is deferred until the fixed dial proves insufficient; the design and
+its salvage point are recorded in
 [proposals/motion-adaptive-jpeg.md](proposals/motion-adaptive-jpeg.md).
 
 ### Apple Screen Sharing display modes

@@ -6,10 +6,9 @@ this before that dial proves insufficient. This is the dynamic form of its futur
 `adaptive` type — quality chosen per cell from motion rather than fixed. It is
 recorded here so the design is not re-derived, and so the salvage point is not lost.
 
-This is the scheme the deleted rxa agent ran. Its full logic is pinned at commit
-`8990971` — `crates/rxa-agent/src/encode.rs` (classifier, `encode_jpeg`,
-`quality_for_churn`) and `crates/rxa-agent/src/session.rs` (churn tracking and
-cleanup, roughly lines 1425–1560). Retrieve with `git show 8990971:<path>`.
+An earlier implementation of this scheme is pinned at commit `8990971`. Use
+`git grep -n 'quality_for_churn\|split_cells\|CLEANUP_IDLE' 8990971` to locate
+the classifier, cell splitting, churn tracking, and cleanup logic in that tree.
 
 ## Idea
 
@@ -37,10 +36,10 @@ target on any other dial setting keeps its current path — nothing below runs
 unless a target opts into the adaptive type. The pieces:
 
 - **Cell identity.** The gateway `Shadow` is pixel-exact and has no stable cell
-  identity, so add the agent's fixed **320×64 grid** (`CELL_W` / `CELL_H`,
-  already declared in `src/protocol.rs`) as the churn key. Snap each changed rect
-  *outward* to cell boundaries; each cell has a stable `(col, row)` identity.
-  Mirror `split_cells` from `8990971:crates/rxa-agent/src/capture.rs`.
+  identity, so add the earlier implementation's fixed **320×64 grid** (`CELL_W` /
+  `CELL_H`, already declared in `src/protocol.rs`) as the churn key. Snap each
+  changed rect *outward* to cell boundaries; each cell has a stable `(col, row)`
+  identity. Mirror `split_cells` from commit `8990971`.
 - **Churn → quality.** Per cell, count changed frames in a short window
   (`CHURN_WINDOW`), map it through `quality_for_churn` (`JPEG_QUALITY_STATIC=80`,
   `JPEG_QUALITY_MOVING=45`, `CHURN_FULL_SPEED=4`), and encode that cell at the
@@ -55,7 +54,7 @@ unless a target opts into the adaptive type. The pieces:
   `TileSink` is shared, RDP and VNC both get the feature from one implementation.
   Clear `Motion` on resize and on reattach/forget in both engines.
 
-Constants from the agent tree: `CHURN_WINDOW=8`, `CLEANUP_IDLE=500ms`,
+Constants from the earlier implementation: `CHURN_WINDOW=8`, `CLEANUP_IDLE=500ms`,
 `CLEANUP_TICK=250ms`, `MAX_CLEANUPS_PER_TICK=8`, `MAX_STASH_BYTES=8MB`.
 
 ## Verification (when built)

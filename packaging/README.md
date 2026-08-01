@@ -46,7 +46,7 @@ Output is written to `dist/remotex-<version>-<os>-<arch>.tar.gz`.
 ## Releases
 
 `.github/workflows/release.yml` creates a draft, builds gateway tarballs for
-Linux x86_64, Linux arm64, and macOS arm64, builds the macOS agent DMG, then
+Linux x86_64, Linux arm64, and macOS arm64, builds the macOS viewer DMG, then
 publishes only after all assets succeed.
 
 The frontend is built once and reused for every platform. Container images are
