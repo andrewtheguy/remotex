@@ -137,7 +137,11 @@ struct AudioControlTests {
     /// sense, or the interesting case above proves nothing.
     @Test
     func theOrdinaryFormatSaysNothing() async throws {
-        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        let audio = AudioOutput(startDevice: { _ in nil })
+        let session = try await AttachedSession.attached(
+            suite: "AudioControlTests",
+            audio: audio
+        )
         session.connect(protocolName: "rdp", audio: true)
         session.model.audio.setEnabled(true)
 

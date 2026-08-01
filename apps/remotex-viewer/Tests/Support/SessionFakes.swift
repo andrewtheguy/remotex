@@ -286,7 +286,10 @@ struct AttachedSession {
     /// pushed. Its own, never the user's.
     let pasteboard: NSPasteboard
 
-    static func attached(suite: String) async throws -> AttachedSession {
+    static func attached(
+        suite: String,
+        audio: AudioOutput = AudioOutput()
+    ) async throws -> AttachedSession {
         let socket = FakeWebSocketTransport(closeAfterDraining: false)
         let pasteboard = NSPasteboard.withUniqueName()
         // No gateway and no preferences file: the subject of every suite that uses
@@ -298,7 +301,8 @@ struct AttachedSession {
             clipboard: ClipboardSynchronizer(
                 pasteboard: pasteboard,
                 startsPolling: false
-            )
+            ),
+            audio: audio
         )
         await model.beginSession(
             over: FakeGateway(claims: [.claimed("tok")], sockets: [socket])
