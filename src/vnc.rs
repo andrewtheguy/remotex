@@ -4113,34 +4113,45 @@ mod tests {
         msg
     }
 
+    /// A rectangle header: where it goes, how big it is, and how it is encoded.
+    fn geometry(x: u16, y: u16, w: u16, h: u16, encoding: i32) -> Vec<u8> {
+        let mut msg = Vec::new();
+        for value in [x, y, w, h] {
+            msg.extend_from_slice(&value.to_be_bytes());
+        }
+        msg.extend_from_slice(&encoding.to_be_bytes());
+        msg
+    }
+
+    /// Deflate one rectangle's worth into a continuing stream.
+    ///
+    /// Runs until a call produces nothing new: consuming the input is not the end of
+    /// it, since the sync flush that closes the rectangle has bytes of its own.
+    fn deflate_chunk(deflate: &mut flate2::Compress, raw: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::new();
+        let mut fed = 0;
+        loop {
+            let before = (deflate.total_in(), deflate.total_out());
+            chunk.reserve(raw.len() + 64);
+            deflate
+                .compress_vec(&raw[fed..], &mut chunk, flate2::FlushCompress::Sync)
+                .unwrap();
+            fed += (deflate.total_in() - before.0) as usize;
+            if fed == raw.len() && deflate.total_out() == before.1 {
+                return chunk;
+            }
+        }
+    }
+
     /// A zlib rectangle: the geometry, then a `u32` length and that much of a
-    /// deflate stream. `count` is the rectangle count of the enclosing update, so a
-    /// caller can put more rectangles behind this one.
+    /// deflate stream.
     fn zlib_rect(
         deflate: &mut flate2::Compress,
         (x, y, w, h): (u16, u16, u16, u16),
         pixels: &[u8],
     ) -> Vec<u8> {
-        // Runs until a call produces nothing new: consuming the input is not the end
-        // of it, since the sync flush that closes the rectangle has bytes of its own.
-        let mut chunk = Vec::new();
-        let mut fed = 0;
-        loop {
-            let before = (deflate.total_in(), deflate.total_out());
-            chunk.reserve(pixels.len() + 64);
-            deflate
-                .compress_vec(&pixels[fed..], &mut chunk, flate2::FlushCompress::Sync)
-                .unwrap();
-            fed += (deflate.total_in() - before.0) as usize;
-            if fed == pixels.len() && deflate.total_out() == before.1 {
-                break;
-            }
-        }
-        let mut msg = Vec::new();
-        for value in [x, y, w, h] {
-            msg.extend_from_slice(&value.to_be_bytes());
-        }
-        msg.extend_from_slice(&ENCODING_ZLIB.to_be_bytes());
+        let chunk = deflate_chunk(deflate, pixels);
+        let mut msg = geometry(x, y, w, h, ENCODING_ZLIB);
         msg.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
         msg.extend_from_slice(&chunk);
         msg
@@ -4148,11 +4159,7 @@ mod tests {
 
     /// A CopyRect rectangle: the destination geometry, then the source position.
     fn copy_rect(dst: (u16, u16, u16, u16), src: (u16, u16)) -> Vec<u8> {
-        let mut msg = Vec::new();
-        for value in [dst.0, dst.1, dst.2, dst.3] {
-            msg.extend_from_slice(&value.to_be_bytes());
-        }
-        msg.extend_from_slice(&ENCODING_COPY_RECT.to_be_bytes());
+        let mut msg = geometry(dst.0, dst.1, dst.2, dst.3, ENCODING_COPY_RECT);
         msg.extend_from_slice(&src.0.to_be_bytes());
         msg.extend_from_slice(&src.1.to_be_bytes());
         msg
@@ -4160,11 +4167,7 @@ mod tests {
 
     /// A raw rectangle with a colour whose channels all differ, so a swap shows.
     fn raw_rect(x: u16, y: u16, w: u16, h: u16, bgr: [u8; 3]) -> Vec<u8> {
-        let mut msg = Vec::new();
-        for value in [x, y, w, h] {
-            msg.extend_from_slice(&value.to_be_bytes());
-        }
-        msg.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        let mut msg = geometry(x, y, w, h, ENCODING_RAW);
         msg.extend(
             std::iter::repeat_n(
                 [bgr[0], bgr[1], bgr[2], 0],
@@ -4200,6 +4203,95 @@ mod tests {
     /// The whole read-side design in one test: a rectangle whose bytes are split
     /// across two records reaches the tile path as one rectangle, and nothing above
     /// the record layer knows the records were there.
+    /// The same picture in five encodings, and only the first of them is forwarded.
+    ///
+    /// The shadow suppresses an update that holds nothing new, so four of these
+    /// costing nothing *is* the proof that all five decoders produced the same
+    /// bytes — no table of expected pixels can go stale against it, and a channel
+    /// swapped in one decoder alone cannot pass. The picture is deliberately not
+    /// grey and not solid: a wrong byte order or a transposed tile shows up as a
+    /// second tile on the channel.
+    #[tokio::test]
+    async fn the_same_picture_in_five_encodings_is_forwarded_once() {
+        // A 2x2 of four different colours, which every encoding below has to spell
+        // out in its own way.
+        let colours: [[u8; 3]; 4] = [
+            [0xf0, 0x00, 0x00],
+            [0x00, 0xf0, 0x00],
+            [0x00, 0x00, 0xf0],
+            [0x10, 0x20, 0x30],
+        ];
+        let bgrx: Vec<u8> = colours
+            .iter()
+            .flat_map(|c| [c[2], c[1], c[0], 0])
+            .collect();
+
+        let mut rects = Vec::new();
+        // Raw.
+        let mut raw = geometry(0, 0, 2, 2, ENCODING_RAW);
+        raw.extend_from_slice(&bgrx);
+        rects.push(raw);
+
+        // Hextile: one tile, raw, since a 2x2 of four colours is what raw is for.
+        let mut hextile = geometry(0, 0, 2, 2, ENCODING_HEXTILE);
+        hextile.push(0x01);
+        hextile.extend_from_slice(&bgrx);
+        rects.push(hextile);
+
+        // RRE: any background, then a subrect per pixel.
+        let mut rre = geometry(0, 0, 2, 2, ENCODING_RRE);
+        rre.extend_from_slice(&4u32.to_be_bytes());
+        rre.extend_from_slice(&[0, 0, 0, 0]);
+        for (i, colour) in colours.iter().enumerate() {
+            rre.extend_from_slice(&[colour[2], colour[1], colour[0], 0]);
+            for value in [(i % 2) as u16, (i / 2) as u16, 1, 1] {
+                rre.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        rects.push(rre);
+
+        // ZRLE: one raw tile of CPIXELs, in its own deflate stream.
+        let mut zrle_stream = flate2::Compress::new(flate2::Compression::default(), true);
+        let mut tile = vec![0u8];
+        for colour in &colours {
+            tile.extend_from_slice(&[colour[2], colour[1], colour[0]]);
+        }
+        let mut zrle = geometry(0, 0, 2, 2, ENCODING_ZRLE);
+        let chunk = deflate_chunk(&mut zrle_stream, &tile);
+        zrle.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        zrle.extend_from_slice(&chunk);
+        rects.push(zrle);
+
+        // zlib: the raw pixels, in a stream of their own.
+        let mut zlib_stream = flate2::Compress::new(flate2::Compression::default(), true);
+        rects.push(zlib_rect(&mut zlib_stream, (0, 0, 2, 2), &bgrx));
+
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(update(&rects)),
+            shared,
+            ReadFlags { clipboard: false, poll: false },
+            None,
+            sink.clone(),
+        )
+        .await;
+
+        sink.flush().await;
+        let mut tiles = 0;
+        while let Ok(msg) = rx.try_recv() {
+            if matches!(msg, ServerMsg::Tile(_)) {
+                tiles += 1;
+            }
+        }
+        assert_eq!(tiles, 1, "five encodings of one picture, one tile");
+    }
+
     /// CopyRect saves the VNC link the pixels but not the browser link: the tile
     /// still has to be sent, built out of the shadow rather than off the wire.
     #[tokio::test]
