@@ -78,10 +78,10 @@ pub enum Subtype {
     /// target's [`TargetConfig::width`] and [`TargetConfig::height`], adds zlib
     /// pixels, and uses Apple's encrypted record transport.
     ///
-    /// `clipboard` is refused below because Apple carries the pasteboard over
-    /// messages of its own rather than RFB's on this transport. `resize` is also
-    /// refused: Apple's undocumented dynamic-resolution controls are not
-    /// implemented. See docs/apple-vnc-889.md.
+    /// Apple's native pasteboard payloads are carried inside the encrypted record
+    /// transport when `clipboard` is enabled. `resize` is refused: Apple's
+    /// undocumented dynamic-resolution controls are not implemented. See
+    /// docs/apple-vnc-889.md.
     ArdHighPerformance,
 }
 
@@ -560,17 +560,6 @@ impl ConfigFile {
                         "target {:?} is subtype {name:?} and sets resize, which this gateway \
                          does not support: Apple dynamic resolution is undocumented and is not \
                          implemented",
-                        target.name
-                    );
-                    // Refused on the high-performance subtype alone: plain `ard`
-                    // implements Apple's native pasteboard on its byte stream, but
-                    // that message path is not enabled inside 003.889 records yet.
-                    anyhow::ensure!(
-                        !(target.clipboard && subtype == Subtype::ArdHighPerformance),
-                        "target {:?} is subtype {name:?} and sets clipboard, which this \
-                         gateway does not support yet: on Apple's own protocol revision the \
-                         Mac carries the pasteboard over its own messages. Plain subtype \
-                         \"ard\" implements those messages and does support clipboard",
                         target.name
                     );
                 }
@@ -1434,8 +1423,7 @@ mod tests {
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
         assert!(format!("{err:#}").contains("does not support"), "{err:#}");
 
-        // Clipboard is *not* rejected here: plain `ard` uses Apple's native
-        // pasteboard messages. Only the high-performance subtype refuses it.
+        // Both Apple subtypes use Apple's native pasteboard messages.
         assert!(ard("username = \"andrew\"\npassword = \"h\"\nclipboard = true").is_ok());
 
         // And it is a VNC subtype only.
@@ -1459,26 +1447,26 @@ mod tests {
         assert!(msg.contains("only \"vnc\" targets have"), "{msg}");
     }
 
-    /// The high-performance subtype carries the same account credentials as plain
-    /// `ard`, requests a virtual display at width/height, and refuses one key more:
-    /// the pasteboard is Apple's own on that wire.
+    /// The high-performance subtype carries the same account credentials and native
+    /// Apple pasteboard as plain `ard`, and requests a virtual display at
+    /// width/height.
     #[test]
-    fn the_high_performance_subtype_refuses_clipboard_as_well_as_resize() {
+    fn the_high_performance_subtype_accepts_clipboard_and_refuses_resize() {
         let hp = |extra: &str| {
             ConfigFile::parse(&vnc_toml(&format!(
                 "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
             )))
         };
 
-        let target = &hp("width = 1600\nheight = 1000").unwrap().targets[0];
+        let target = &hp("width = 1600\nheight = 1000\nclipboard = true")
+            .unwrap()
+            .targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
         assert_eq!((target.width, target.height), (1600, 1000));
+        assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
         // kebab-case, not lowercase, and this is what pins that.
         assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
-
-        let err = hp("clipboard = true").unwrap_err();
-        assert!(format!("{err:#}").contains("Apple's own protocol revision"), "{err:#}");
 
         let err = hp("resize = true").unwrap_err();
         assert!(format!("{err:#}").contains("does not support"), "{err:#}");

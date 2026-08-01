@@ -1,11 +1,13 @@
 //! Apple's Screen Sharing pasteboard messages.
 //!
 //! macOS does not bridge its pasteboard through RFB Client/ServerCutText, even
-//! after accepting the Extended Clipboard pseudo-encoding. Its Standard viewer
-//! instead enables `AutoPasteboard`, receives change status messages, fetches a
-//! compressed pasteboard archive, and sends the same archive shape in reverse.
-//! This module owns those byte formats; session state and browser messages remain
-//! in [`crate::vnc`].
+//! after accepting the Extended Clipboard pseudo-encoding. Apple's viewers instead
+//! enable `AutoPasteboard`, receive change status messages, fetch a compressed
+//! pasteboard archive, and send the same archive shape in reverse. Standard mode
+//! carries those messages on the plain RFB stream. High Performance enables
+//! monitoring before encryption starts, then carries fetches and archive data
+//! inside encrypted records. This module owns the byte formats; session state and
+//! browser messages remain in [`crate::vnc`].
 
 use anyhow::Context as _;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};

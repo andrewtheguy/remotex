@@ -118,8 +118,8 @@ password = "change-me"
 # RDP (MS-RDPECLIP) always carries full UTF-8. VNC does too on servers implementing
 # the Extended Clipboard extension (TigerVNC does); on servers that do not
 # (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
-# `subtype = "ard-high-performance"` refuses it: Apple's own protocol revision
-# carries the pasteboard over messages of its own, which is not implemented.
+# Both Apple subtypes use the Mac's native UTF-8 pasteboard protocol; High
+# Performance carries its fetches and data inside the encrypted record transport.
 #clipboard = false
 
 # Remote audio (opt-in): redirect this target's sound to whichever client asks for
@@ -176,9 +176,9 @@ password = "change-me"
 # remains fixed for the session: Apple's undocumented dynamic-resolution and
 # one/two-virtual-display controls are not implemented.
 #
-# It refuses `clipboard`, because Apple carries the pasteboard over messages of its
-# own here, and `resize`, because the undocumented dynamic controls are out of scope.
-# See docs/apple-vnc-889.md.
+# `clipboard = true` enables the native Apple pasteboard in both directions.
+# `resize` remains refused because the undocumented dynamic controls are out of
+# scope. See docs/apple-vnc-889.md.
 # [[targets]]
 # name = "mac-virtual-display"
 # protocol = "vnc"
@@ -188,6 +188,7 @@ password = "change-me"
 # password = "the-account-password"
 # width = 1600
 # height = 1000
+# clipboard = true
 
 # How this target's pixels are compressed on their way to the browser. Two keys and
 # a dial, and they apply to every protocol.

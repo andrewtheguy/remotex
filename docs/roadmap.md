@@ -76,10 +76,6 @@ Two display-density items remain planned:
 
 What remains on that wire, each for its own reason:
 
-- **The high-performance pasteboard.** Apple carries it over messages of its own —
-  an announcement, a fetch, then a zlib'd multi-flavour archive. Standard `ard`
-  implements that protocol on its plain stream; `clipboard` remains refused on
-  003.889 until the same messages are enabled on its record transport.
 - **Apple's still-image codecs** (`0x3ea` and the per-tile `0x3f3`), which would
   compress far better than zlib. Blocked, not deferred: the reference this was
   written from marks `0x3ea`'s rectangle body and `0x3f3`'s command-code table as

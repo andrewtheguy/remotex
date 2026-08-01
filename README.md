@@ -61,9 +61,10 @@ reports each screen's pixel density, keeps pixels raw, and supports the native A
 pasteboard. `ard-high-performance` takes the same credentials, requests one virtual
 display at the target's configured `width` and `height`, and adds zlib compression
 over Apple's record-layer revision (around fifty times fewer bytes on a static
-desktop), but does not yet support `clipboard`. Apple's undocumented dynamic
-resolution and one/two-virtual-display controls are not implemented; neither subtype
-supports `resize`. See
+desktop). Both Apple subtypes support the native Apple pasteboard when
+`clipboard = true`. Apple's undocumented dynamic resolution and
+one/two-virtual-display controls are not implemented; neither subtype supports
+`resize`. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 ## Container
