@@ -247,6 +247,25 @@ async fn send_all(uplink: &SharedUplink, msgs: &[Vec<u8>]) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Send wheel pulses spaced out in time, a press+release pair at a time.
+///
+/// The lock is dropped between pairs rather than held across the whole burst: a
+/// pair must not be split, but there is no reason the read loop's update
+/// requests should wait out every pulse behind it.
+async fn send_paced(
+    uplink: &SharedUplink,
+    msgs: &[Vec<u8>],
+    gap: std::time::Duration,
+) -> anyhow::Result<()> {
+    for (i, pair) in msgs.chunks(2).enumerate() {
+        if i > 0 {
+            tokio::time::sleep(gap).await;
+        }
+        send_all(uplink, pair).await?;
+    }
+    Ok(())
+}
+
 /// One screen in the server's ExtendedDesktopSize layout. Only the id and
 /// flags matter here: SetDesktopSize echoes them back with new dimensions.
 #[derive(Debug, Clone, Copy)]
@@ -1229,6 +1248,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         Ok(())
                     }
                 } else {
+                    let scrolled = matches!(input, ClientMsg::Wheel { .. });
+                    let gap = wheel.gap;
                     let msgs = translate_input(
                         input,
                         &mut button_mask,
@@ -1236,7 +1257,11 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         &mut pressed_keys,
                         &mut wheel,
                     );
-                    send_all(&uplink, &msgs).await
+                    if scrolled && !gap.is_zero() {
+                        send_paced(&uplink, &msgs, gap).await
+                    } else {
+                        send_all(&uplink, &msgs).await
+                    }
                 };
                 // Break instead of `?`: the error must pass the trailing
                 // read_task.abort() on its way out.
@@ -2431,6 +2456,15 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     Ok(resized)
 }
 
+/// A positive, finite number from the environment, or nothing. Temporary, with
+/// the [`Wheel`] QA knobs it reads for.
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
 /// Scroll intent turned into RFB wheel pulses, carrying the sub-pulse remainder
 /// between events.
 ///
@@ -2448,6 +2482,10 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 struct Wheel {
     /// Pixels of scroll intent one pulse buys on this server.
     px_per_pulse: f32,
+    /// The most one event may spend.
+    max_pulses: f32,
+    /// How long to wait between pulses, or zero to send them back to back.
+    gap: std::time::Duration,
     /// Intent not yet worth a whole pulse, per axis, in pulses.
     pending: (f32, f32),
 }
@@ -2474,18 +2512,25 @@ impl Wheel {
         } else {
             Self::GENERIC_PX_PER_PULSE
         };
-        // A QA override while the Mac's real pulse size is still being measured
-        // against a live target: how far one pulse actually scrolls is the one
-        // number in here that cannot be derived, only observed. Remove once it
-        // has been pinned down.
-        let px_per_pulse = std::env::var("REMOTEX_VNC_WHEEL_PX")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(default);
-        info!("vnc: one wheel pulse is worth {px_per_pulse}px of scrolling (macos={macos})");
+        // QA overrides while the Mac's response to a burst of pulses is being
+        // measured against a live target. What one pulse is worth, how many of
+        // them one event may spend, and whether they have to be spaced out in
+        // time are all things only a real Mac can answer. All three come out
+        // once the answer is known.
+        let px_per_pulse = env_f32("REMOTEX_VNC_WHEEL_PX").unwrap_or(default);
+        let max_pulses = env_f32("REMOTEX_VNC_WHEEL_MAX").unwrap_or(Self::MAX_PULSES);
+        let gap = std::time::Duration::from_millis(
+            env_f32("REMOTEX_VNC_WHEEL_GAP_MS").unwrap_or(0.0) as u64,
+        );
+        info!(
+            "vnc: a wheel pulse is worth {px_per_pulse}px, at most {max_pulses} per event, \
+             {}ms apart (macos={macos})",
+            gap.as_millis()
+        );
         Self {
             px_per_pulse,
+            max_pulses,
+            gap,
             pending: (0.0, 0.0),
         }
     }
@@ -2497,17 +2542,17 @@ impl Wheel {
             WheelUnit::Line => delta * Self::LINE_PX,
             WheelUnit::Page => delta * Self::PAGE_LINES * Self::LINE_PX,
         };
-        let step = self.px_per_pulse;
+        let (step, max) = (self.px_per_pulse, self.max_pulses);
         (
-            Self::spend(&mut self.pending.0, px(dx) / step),
-            Self::spend(&mut self.pending.1, px(dy) / step),
+            Self::spend(&mut self.pending.0, px(dx) / step, max),
+            Self::spend(&mut self.pending.1, px(dy) / step, max),
         )
     }
 
     /// Add one axis' worth of intent and take the whole pulses out of it. The
     /// fraction stays behind, so a slow trackpad glide of deltas too small to be
     /// a pulse on their own still adds up to one.
-    fn spend(pending: &mut f32, add: f32) -> i32 {
+    fn spend(pending: &mut f32, add: f32, max: f32) -> i32 {
         if add == 0.0 || !add.is_finite() {
             return 0;
         }
@@ -2518,11 +2563,11 @@ impl Wheel {
         }
         *pending += add;
         let whole = pending.trunc();
-        if whole.abs() > Self::MAX_PULSES {
+        if whole.abs() > max {
             // Capped: the surplus is dropped rather than kept, so a flick cannot
             // leave pulses trickling out under the next few events.
             *pending = 0.0;
-            return (whole.signum() * Self::MAX_PULSES) as i32;
+            return (whole.signum() * max) as i32;
         }
         *pending -= whole;
         whole as i32
