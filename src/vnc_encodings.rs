@@ -24,9 +24,10 @@
 //! promise to decode it.
 
 use anyhow::Context as _;
-use log::info;
+use log::{debug, info};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
+use crate::tiles::{Rect, Shadow};
 use crate::vnc::BPP;
 
 /// Ceiling on one inflated payload, so a hostile or broken stream cannot be
@@ -51,6 +52,10 @@ pub enum Payload {
     /// A `u32` length, then that much of the connection's zlib stream, holding the
     /// same raw pixels (encoding 6).
     Zlib,
+    /// No pixels at all: a position in the framebuffer whose pixels this side has
+    /// to read back out of the shadow, because a client here is sent tiles rather
+    /// than draw commands (encoding 1).
+    CopyRect,
 }
 
 impl Payload {
@@ -59,6 +64,7 @@ impl Payload {
         match self {
             Payload::Raw => "raw",
             Payload::Zlib => "zlib",
+            Payload::CopyRect => "copyrect",
         }
     }
 }
@@ -80,21 +86,28 @@ impl Decoders {
     /// Decode one rectangle's payload into packed RGB888.
     ///
     /// The payload is read whatever the geometry says, including for a rectangle of
-    /// no pixels: an encoding that frames itself — a length word, a subrect count —
-    /// still sends that framing, and consuming it is what keeps the stream in step.
-    /// The RFB stream has no framing of its own above the record layer, so walking
-    /// past by the wrong number of bytes desyncs everything after it.
+    /// no pixels: an encoding that frames itself — a length word, a subrect count,
+    /// a source position — still sends that framing, and consuming it is what keeps
+    /// the stream in step. The RFB stream has no framing of its own above the record
+    /// layer, so walking past by the wrong number of bytes desyncs everything after
+    /// it.
+    ///
+    /// `None` means the rectangle was understood but its pixels cannot be produced,
+    /// which only CopyRect can say: its source is a region the shadow never learned.
+    /// The caller answers that with a repaint request.
     pub async fn decode<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,
         payload: Payload,
+        shadow: &std::sync::Mutex<Shadow>,
         w: u16,
         h: u16,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.note(payload);
         match payload {
-            Payload::Raw => raw(reader, w, h).await,
-            Payload::Zlib => self.zlib(reader, w, h).await,
+            Payload::Raw => raw(reader, w, h).await.map(Some),
+            Payload::Zlib => self.zlib(reader, w, h).await.map(Some),
+            Payload::CopyRect => copy_rect(reader, shadow, w, h).await,
         }
     }
 
@@ -139,6 +152,38 @@ impl Decoders {
             .exact(&chunk, expect)?;
         Ok(bgrx_to_rgb(&inflated))
     }
+}
+
+/// Encoding 1: two `u16`s naming where in the framebuffer these pixels already
+/// are.
+///
+/// A server sends this for a scroll or a window move — the pixels are on both
+/// sides of the link already, so neither has to carry them again. The browser and
+/// the Swift client take tiles and cannot blit, so the saving stops at this
+/// gateway: the source is read out of the shadow and forwarded as ordinary pixels,
+/// which is still the whole of the VNC link's traffic saved.
+async fn copy_rect<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    shadow: &std::sync::Mutex<Shadow>,
+    w: u16,
+    h: u16,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    // Read the source before anything can return: four bytes arrive whatever the
+    // geometry says.
+    let src_x = reader.read_u16().await?;
+    let src_y = reader.read_u16().await?;
+    let Some(src) = Rect::from_size(src_x, src_y, w, h) else {
+        return Ok(Some(Vec::new()));
+    };
+    let copied = shadow.lock().unwrap().copy_out(src);
+    if copied.is_none() {
+        // Not an error: a server that copies from a region this side never learned
+        // costs one repaint, not the session. Logged because a *repeating* one is
+        // the only way this becomes a problem, and the source rect is what
+        // identifies it.
+        debug!("vnc: copyrect source {w}x{h}+{src_x}+{src_y} is not in the shadow; repainting");
+    }
+    Ok(copied)
 }
 
 /// Encoding 0: `w * h` pixels in the forced wire format, and the fallback every
@@ -260,6 +305,25 @@ mod tests {
             .collect()
     }
 
+    /// A shadow for the encodings that never look at one.
+    fn unused_shadow() -> std::sync::Mutex<Shadow> {
+        std::sync::Mutex::new(Shadow::new("test", 1, 1))
+    }
+
+    /// A shadow that knows `rgb` as its whole contents.
+    fn shadow_of(w: u16, h: u16, rgb: &[u8]) -> std::sync::Mutex<Shadow> {
+        let mut shadow = Shadow::new("test", w, h);
+        shadow.accept(Rect::from_size(0, 0, w, h).unwrap(), rgb);
+        std::sync::Mutex::new(shadow)
+    }
+
+    /// A CopyRect payload: the source position, and nothing else.
+    fn copy_rect_payload(src_x: u16, src_y: u16) -> Vec<u8> {
+        let mut wire = src_x.to_be_bytes().to_vec();
+        wire.extend_from_slice(&src_y.to_be_bytes());
+        wire
+    }
+
     #[test]
     fn bgrx_repacks_to_rgb() {
         // Two pixels: pure red and pure blue in BGRX order.
@@ -285,25 +349,28 @@ mod tests {
         let a = zlib_payload(&chunk(&mut deflate, &first));
         let b = zlib_payload(&chunk(&mut deflate, &second));
 
+        let shadow = unused_shadow();
         let mut decoders = Decoders::default();
         assert_eq!(
-            decoders.decode(&mut a.as_slice(), Payload::Zlib, 32, 32).await.unwrap(),
-            bgrx_to_rgb(&first)
+            decoders.decode(&mut a.as_slice(), Payload::Zlib, &shadow, 32, 32).await.unwrap(),
+            Some(bgrx_to_rgb(&first))
         );
         assert_eq!(
-            decoders.decode(&mut b.as_slice(), Payload::Zlib, 32, 32).await.unwrap(),
-            bgrx_to_rgb(&second)
+            decoders.decode(&mut b.as_slice(), Payload::Zlib, &shadow, 32, 32).await.unwrap(),
+            Some(bgrx_to_rgb(&second))
         );
 
         // The second chunk alone, through a stream that never saw the first: no
         // zlib header, no window, nothing.
         let mut fresh = Decoders::default();
-        assert!(fresh.decode(&mut b.as_slice(), Payload::Zlib, 32, 32).await.is_err());
+        assert!(
+            fresh.decode(&mut b.as_slice(), Payload::Zlib, &shadow, 32, 32).await.is_err()
+        );
 
         // A chunk that does not inflate to the size its geometry claims.
         let mut decoders = Decoders::default();
         let err = decoders
-            .decode(&mut a.as_slice(), Payload::Zlib, 32, 33)
+            .decode(&mut a.as_slice(), Payload::Zlib, &shadow, 32, 33)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("its geometry claims"), "{err:#}");
@@ -313,9 +380,55 @@ mod tests {
     async fn a_zlib_rect_claiming_more_bytes_than_it_could_need_is_refused() {
         let wire = u32::MAX.to_be_bytes();
         let err = Decoders::default()
-            .decode(&mut wire.as_slice(), Payload::Zlib, 2, 2)
+            .decode(&mut wire.as_slice(), Payload::Zlib, &unused_shadow(), 2, 2)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("even an incompressible one"), "{err:#}");
+    }
+
+    /// The source is read out before the destination is written, so a copy that
+    /// overlaps itself moves the original pixels rather than smearing the ones it
+    /// has just laid down.
+    #[tokio::test]
+    async fn an_overlapping_copy_rect_moves_the_original_pixels() {
+        // Eight pixels across, each a different red channel.
+        let rgb: Vec<u8> = (0..8u8).flat_map(|i| [i * 0x10, 0x20, 0x30]).collect();
+        let shadow = shadow_of(8, 1, &rgb);
+
+        // Copy [0..4] two to the right, over [2..6].
+        let wire = copy_rect_payload(0, 0);
+        let copied = copy_rect(&mut wire.as_slice(), &shadow, 4, 1)
+            .await
+            .unwrap()
+            .expect("the whole shadow is known");
+        assert_eq!(copied, rgb[..4 * 3]);
+    }
+
+    #[tokio::test]
+    async fn a_copy_rect_from_an_unknown_region_asks_for_nothing_rather_than_guessing() {
+        // A shadow that knows its left half only.
+        let rgb: Vec<u8> = (0..4u8).flat_map(|i| [i * 0x10, 0x20, 0x30]).collect();
+        let mut shadow = Shadow::new("test", 8, 1);
+        shadow.accept(Rect::from_size(0, 0, 4, 1).unwrap(), &rgb);
+        let shadow = std::sync::Mutex::new(shadow);
+
+        let known = copy_rect_payload(0, 0);
+        assert!(copy_rect(&mut known.as_slice(), &shadow, 4, 1).await.unwrap().is_some());
+
+        // One pixel into the half nothing has ever painted.
+        let unknown = copy_rect_payload(1, 0);
+        assert!(copy_rect(&mut unknown.as_slice(), &shadow, 4, 1).await.unwrap().is_none());
+    }
+
+    /// Off the edge of the framebuffer is the same answer as unknown — one repaint,
+    /// not a dead session — and the four bytes are still consumed.
+    #[tokio::test]
+    async fn a_copy_rect_sourced_off_the_framebuffer_is_refused_not_fatal() {
+        let rgb = vec![0x10, 0x20, 0x30];
+        let shadow = shadow_of(1, 1, &rgb);
+        let wire = copy_rect_payload(1, 0);
+        let mut reader = wire.as_slice();
+        assert!(copy_rect(&mut reader, &shadow, 1, 1).await.unwrap().is_none());
+        assert!(reader.is_empty(), "the source position is consumed either way");
     }
 }

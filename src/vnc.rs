@@ -74,6 +74,9 @@ const MIN_ARD_KEY_BYTES: usize = 128;
 const ARD_CREDENTIALS_LEN: usize = 128;
 const ARD_FIELD_LEN: usize = 64;
 const ENCODING_RAW: i32 = 0;
+/// CopyRect: two `u16`s naming where in the framebuffer this rectangle's pixels
+/// already are, and no pixels at all.
+const ENCODING_COPY_RECT: i32 = 1;
 /// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
 /// shared by every rectangle on the connection. Not a vendor encoding and not
 /// Apple's alone, though Apple's High Performance mode is where it arrived here
@@ -1922,6 +1925,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     let payload;
     match encoding {
         ENCODING_RAW => payload = Payload::Raw,
+        ENCODING_COPY_RECT => payload = Payload::CopyRect,
         // Cursor: the rect header carries the hotspot (x, y) and the shape
         // size, never a framebuffer position — so it skips the bounds check
         // and tile path below entirely.
@@ -2051,7 +2055,12 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // position — sends that framing whatever its geometry says, and the RFB stream
     // has no framing of its own above the record layer, so stepping past by the
     // wrong number of bytes desyncs everything after it.
-    let rgb = decoders.decode(reader, payload, w, h).await?;
+    let Some(rgb) = decoders.decode(reader, payload, shadow, w, h).await? else {
+        // A CopyRect whose source this side never learned. Guessing would leave
+        // wrong pixels on screen until something else happened to change that area;
+        // one full request makes the source known instead.
+        return Ok(RectEffect::FULL_REPAINT);
+    };
     let Some(rect) = Rect::from_size(x, y, w, h) else {
         return Ok(RectEffect::NOTHING);
     };
@@ -4042,6 +4051,45 @@ mod tests {
         msg
     }
 
+    /// A CopyRect rectangle: the destination geometry, then the source position.
+    fn copy_rect(dst: (u16, u16, u16, u16), src: (u16, u16)) -> Vec<u8> {
+        let mut msg = Vec::new();
+        for value in [dst.0, dst.1, dst.2, dst.3] {
+            msg.extend_from_slice(&value.to_be_bytes());
+        }
+        msg.extend_from_slice(&ENCODING_COPY_RECT.to_be_bytes());
+        msg.extend_from_slice(&src.0.to_be_bytes());
+        msg.extend_from_slice(&src.1.to_be_bytes());
+        msg
+    }
+
+    /// A raw rectangle with a colour whose channels all differ, so a swap shows.
+    fn raw_rect(x: u16, y: u16, w: u16, h: u16, bgr: [u8; 3]) -> Vec<u8> {
+        let mut msg = Vec::new();
+        for value in [x, y, w, h] {
+            msg.extend_from_slice(&value.to_be_bytes());
+        }
+        msg.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        msg.extend(
+            std::iter::repeat_n(
+                [bgr[0], bgr[1], bgr[2], 0],
+                usize::from(w) * usize::from(h),
+            )
+            .flatten(),
+        );
+        msg
+    }
+
+    /// Wrap rectangles in one FramebufferUpdate.
+    fn update(rects: &[Vec<u8>]) -> Vec<u8> {
+        let mut msg = vec![0u8, 0];
+        msg.extend_from_slice(&(rects.len() as u16).to_be_bytes());
+        for rect in rects {
+            msg.extend_from_slice(rect);
+        }
+        msg
+    }
+
     fn apple_layout_update(current: Option<u32>, backing: (u16, u16)) -> Vec<u8> {
         let mut msg = vec![0u8, 0];
         msg.extend_from_slice(&1u16.to_be_bytes());
@@ -4057,6 +4105,73 @@ mod tests {
     /// The whole read-side design in one test: a rectangle whose bytes are split
     /// across two records reaches the tile path as one rectangle, and nothing above
     /// the record layer knows the records were there.
+    /// CopyRect saves the VNC link the pixels but not the browser link: the tile
+    /// still has to be sent, built out of the shadow rather than off the wire.
+    #[tokio::test]
+    async fn a_copy_rect_moves_pixels_the_browser_already_has() {
+        let wire = update(&[
+            raw_rect(0, 0, 2, 2, [0x30, 0x20, 0x10]),
+            copy_rect((2, 0, 2, 2), (0, 0)),
+        ]);
+
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((4, 2), None, None),
+            test_shadow((4, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: false },
+            None,
+            sink.clone(),
+        )
+        .await;
+
+        sink.flush().await;
+        let mut tiles = Vec::new();
+        while let Ok(ServerMsg::Tile(tile)) = rx.try_recv() {
+            tiles.push(tile);
+        }
+        assert_eq!(tiles.len(), 2, "the painted rect and the copy of it");
+        assert_eq!((tiles[0].x, tiles[0].y), (0, 0));
+        assert_eq!(
+            (tiles[1].x, tiles[1].y, tiles[1].w, tiles[1].h),
+            (2, 0, 2, 2),
+            "the copy lands at the destination, not the source"
+        );
+    }
+
+    /// A source the shadow never learned cannot be reproduced, and inventing pixels
+    /// would leave them wrong until something else happened to change that area. So
+    /// the rectangle costs one non-incremental request instead.
+    #[tokio::test]
+    async fn a_copy_rect_with_an_unknown_source_asks_for_a_full_repaint() {
+        let wire = update(&[copy_rect((2, 0, 2, 2), (0, 0))]);
+
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((4, 2), None, None),
+            test_shadow((4, 2)),
+        );
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: false },
+            None,
+            sink.clone(),
+        )
+        .await;
+
+        assert_eq!(written(&sent), update_request(false, (4, 2)));
+        sink.flush().await;
+        assert!(rx.try_recv().is_err(), "and no invented pixels");
+    }
+
     /// A rectangle of no pixels still carries its encoding's framing, and stepping
     /// past that framing is what keeps everything behind it readable.
     ///
