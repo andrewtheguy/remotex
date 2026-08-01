@@ -300,8 +300,9 @@ async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 1
 /// `(top, left, bottom, right)` rather than `(x, y, w, h)`.
 ///
 /// The second screen is Retina, which is what makes this exercise the density: a
-/// layout naming it must reach the browser as a `scale` of 2, and the combined view
-/// of a 1x screen beside a 2x one has no single scale at all.
+/// layout naming it must reach the browser as a `scale` of 2. In the combined view
+/// the gateway has to map the two backing rectangles into this logical geometry,
+/// because a 1x screen beside a 2x one has no single scale at all.
 fn fake_mac_layout(current: Option<u32>) -> Vec<u8> {
     const RECORD: usize = 0x38;
     const HEAD: usize = 0x14;
@@ -1276,13 +1277,14 @@ async fn apple_screen_sharing_reports_its_displays_and_binds_to_one() {
         .expect("the selection channel closed");
     assert_eq!(asked, u32::MAX, "combine_all_displays, not an id");
 
-    // The framebuffer widens back to the union of both screens — and the scale drops
-    // to 1, because a 1x screen beside a 2x one has no single density and the desktop
-    // is shown at its pixel size. The other half of the density story: it is *picking
-    // a screen* that makes the geometry exact.
+    // The RFB framebuffer widens back to the 96x64 backing-pixel union, but the
+    // gateway composes it into the two screens' 64x32 logical union before it
+    // reaches the browser. This is the other half of the density story: no single
+    // scale can describe a 1x screen beside a 2x one, so each display is normalized
+    // inside its own bounds.
     let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], MAC_DESKTOP + MAC_RETINA, "{resize}");
-    assert_eq!(resize["h"], MAC_RETINA, "{resize}");
+    assert_eq!(resize["w"], MAC_DESKTOP * 2, "{resize}");
+    assert_eq!(resize["h"], MAC_DESKTOP, "{resize}");
     assert_eq!(resize["scale"], 1.0, "{resize}");
 
     let msg = expect_displays(&mut ws).await;

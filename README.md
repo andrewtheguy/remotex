@@ -58,10 +58,10 @@ session.
 
 Both Apple subtypes list the Mac's screens, can show one screen or all of them, and
 report each screen's pixel density. A selected screen is drawn at its 100% point
-size when the host density is at least the guest density. A higher-density guest on
-a lower-density host instead remains pixel-sized and may require scrolling. Picking
-a single screen is what makes its density exact: a framebuffer spanning screens of
-different densities has no one scale factor and is shown at its pixel size. Plain
+size from its full backing-pixel framebuffer; the host resamples it when the two
+displays have different densities. For *All Displays*, the gateway composes every
+screen's backing rectangle into the combined logical coordinate space, so mixed 1×
+and 2× displays keep their correct relative sizes. Plain
 `ard` keeps pixels raw and supports the native Apple pasteboard;
 `ard-high-performance` takes the same credentials and adds zlib compression over
 Apple's record-layer revision (around fifty times fewer bytes on a static desktop),

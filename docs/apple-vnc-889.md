@@ -85,7 +85,7 @@ echoing its choice in the next layout's `current_display`:
 So a client never has to assume a selection took: the layout is the answer, and
 `src/vnc.rs` moves the checkmark only when one arrives.
 
-### The density, and why picking a screen is what fixes it
+### Per-display density and the combined compositor
 
 Each display record carries **its own scale factor** as a big-endian `f64`: 1.0 for
 the 1280×800 screen, 2.0 for the Retina one. It agrees exactly with the ratio of
@@ -95,10 +95,11 @@ The consequence is that **a combined framebuffer has no single density.** 4480×
 is a 1× 1280×800 beside a 2× 3200×1800, spanning 2880×900 points; no one scale
 describes it, and the header's own backing-pixels-to-logical-points ratio
 (4480/2880 = 1.56) is a meaningless number that happens to look plausible — it is
-neither screen's density and not an average of anything. `Layout::scale` therefore
-reports `UNSCALED` for the combined view and the selected screen's own density
-otherwise — which makes picking a screen the thing that makes the geometry exact,
-rather than a convenience.
+neither screen's density and not an average of anything. The gateway therefore
+retains that source framebuffer, downsamples damage within each screen's backing
+bounds into its logical bounds, and sends clients a 2880×900 framebuffer at 1×.
+Pointer coordinates take the inverse mapping. A selected screen bypasses the
+compositor and carries its own exact density instead.
 
 ## The other corrections
 

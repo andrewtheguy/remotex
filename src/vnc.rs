@@ -245,8 +245,12 @@ struct Screen {
 /// The lock is never held across an await.
 #[derive(Debug)]
 struct DesktopState {
-    /// Current framebuffer size, in pixels.
+    /// Framebuffer size presented to clients, in pixels.
     size: (u16, u16),
+    /// Framebuffer size addressed by RFB update requests and rectangle headers.
+    /// This differs only for a mixed-density Apple combined view, which the
+    /// gateway normalizes before sending it to clients.
+    source_size: (u16, u16),
     /// Pixels per point: how large `size` should be *shown*, as opposed to how
     /// many pixels it has.
     ///
@@ -294,6 +298,9 @@ struct DisplayState {
     /// is on the canvas rather than with what was clicked — client state is never
     /// optimistic here, see [`ServerMsg::Displays`].
     active: u32,
+    /// The combined Apple framebuffer's density normalizer. `None` while one
+    /// display is selected and on non-Apple VNC.
+    compositor: Option<vnc_apple::Compositor>,
 }
 
 impl DisplayState {
@@ -311,6 +318,22 @@ impl DisplayState {
         (!self.displays.is_empty()).then(|| ServerMsg::Displays {
             active: self.active,
             displays: self.displays.clone(),
+        })
+    }
+
+    fn install_compositor(&mut self, next: Option<vnc_apple::Compositor>) {
+        if matches!(
+            (&self.compositor, &next),
+            (Some(current), Some(next)) if current.same_layout(next)
+        ) {
+            return;
+        }
+        self.compositor = next;
+    }
+
+    fn remote_point(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        self.compositor.as_ref().map_or(Some((x, y)), |compositor| {
+            compositor.remote_point(x, y)
         })
     }
 }
@@ -927,6 +950,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
+        source_size: size,
         scale: UNSCALED,
         screen: None,
         pending: None,
@@ -1019,7 +1043,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     shadow.lock().unwrap().forget();
                     let (size, resize_msg) = {
                         let d = desktop.lock().unwrap();
-                        (d.size, d.resize_msg())
+                        (d.source_size, d.resize_msg())
                     };
                     if let Err(e) = sink.msg(resize_msg).await {
                         break Err(e);
@@ -1149,7 +1173,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             // framebuffer, so a quiet screen stays black. The Mac
                             // accepts the old framebuffer bounds here and applies
                             // the request to the screen it is switching to.
-                            let size = desktop.lock().unwrap().size;
+                            let size = desktop.lock().unwrap().source_size;
                             send_all(
                                 &uplink,
                                 &[
@@ -1170,8 +1194,22 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         Ok(())
                     }
                 } else {
-                    let msgs =
-                        translate_input(input, &mut button_mask, &mut last_pos, &mut pressed_keys);
+                    let input = match input {
+                        ClientMsg::MouseMove { x, y } => display
+                            .lock()
+                            .unwrap()
+                            .remote_point(x, y)
+                            .map(|(x, y)| ClientMsg::MouseMove { x, y }),
+                        other => Some(other),
+                    };
+                    let msgs = input.map_or_else(Vec::new, |input| {
+                        translate_input(
+                            input,
+                            &mut button_mask,
+                            &mut last_pos,
+                            &mut pressed_keys,
+                        )
+                    });
                     send_all(&uplink, &msgs).await
                 };
                 // Break instead of `?`: the error must pass the trailing
@@ -1298,7 +1336,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         break;
                     }
                 }
-                let size = desktop.lock().unwrap().size;
+                let size = desktop.lock().unwrap().source_size;
                 if full_repaint_owed {
                     // Layout metadata and empty updates can arrive before the
                     // pixels this request earns. Hold the polling loop until the
@@ -1877,7 +1915,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     apple: &mut Option<Apple>,
     sink: &TileSink,
 ) -> anyhow::Result<RectEffect> {
-    let Shared { uplink, desktop, cursor, shadow, .. } = shared;
+    let Shared { uplink, desktop, cursor, shadow, display, .. } = shared;
     let x = reader.read_u16().await?;
     let y = reader.read_u16().await?;
     let w = reader.read_u16().await?;
@@ -1991,7 +2029,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         other => anyhow::bail!("server sent encoding {other}, which was not advertised"),
     }
 
-    let size = desktop.lock().unwrap().size;
+    let size = desktop.lock().unwrap().source_size;
     // Bounds-check before allocating: a rect outside the announced desktop is
     // a protocol violation (and would let a bad length drive the allocation).
     anyhow::ensure!(
@@ -2040,12 +2078,40 @@ async fn read_rect<R: AsyncRead + Unpin>(
     };
     let rgb = bgrx_to_rgb(&pixels);
 
+    let composed = {
+        let mut state = display.lock().unwrap();
+        state
+            .compositor
+            .as_mut()
+            .map(|compositor| compositor.update(rect, &rgb))
+            .transpose()?
+    };
+    if let Some(updates) = composed {
+        for update in updates {
+            forward_pixels(update.rect, &update.rgb, shadow, sink).await?;
+        }
+        return Ok(RectEffect::pixels(rect));
+    }
+
+    forward_pixels(rect, &rgb, shadow, sink).await?;
+    Ok(RectEffect::pixels(rect))
+}
+
+/// Compare one client-coordinate RGB region with the sent shadow and queue its
+/// changed bands. Apple composition and the direct VNC path meet here.
+async fn forward_pixels(
+    rect: Rect,
+    rgb: &[u8],
+    shadow: &SharedShadow,
+    sink: &TileSink,
+) -> anyhow::Result<()> {
+
     // What of this rect the browser does not already have. A server that
     // re-sends unchanged pixels — and they do, on a cursor crossing a window
     // boundary or a client asking for a full update — stops costing the browser
     // link anything here.
-    let Some(changed) = shadow.lock().unwrap().accept(rect, &rgb) else {
-        return Ok(RectEffect::pixels(rect));
+    let Some(changed) = shadow.lock().unwrap().accept(rect, rgb) else {
+        return Ok(());
     };
 
     for band in changed.bands() {
@@ -2053,11 +2119,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // bytes are the same and this needs no lock. Its own buffer per band, since
         // the encoder reads it after this function has returned and `rgb` is gone.
         let mut pixels = Vec::new();
-        tiles::crop(&rgb, rect, band, &mut pixels);
+        tiles::crop(rgb, rect, band, &mut pixels);
         sink.tile(band.left, band.top, band.w(), band.h(), pixels)
             .await?;
     }
-    Ok(RectEffect::pixels(rect))
+    Ok(())
 }
 
 /// Handle a Cursor rect: `w * h` pixels in the negotiated format, followed by
@@ -2184,25 +2250,45 @@ async fn apply_resize(
     scale: f32,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
+    apply_geometry(desktop, shadow, new, new, scale, sink).await
+}
+
+/// Apply distinct server and client framebuffer sizes. They are identical for
+/// ordinary RFB and a selected Apple display; the combined Apple view is read in
+/// backing pixels and emitted in normalized logical pixels.
+async fn apply_geometry(
+    desktop: &SharedDesktop,
+    shadow: &SharedShadow,
+    source: (u16, u16),
+    presented: (u16, u16),
+    scale: f32,
+    sink: &TileSink,
+) -> anyhow::Result<bool> {
     anyhow::ensure!(
-        new.0 > 0 && new.1 > 0,
-        "server resized the desktop to {}x{}",
-        new.0,
-        new.1
+        source.0 > 0 && source.1 > 0 && presented.0 > 0 && presented.1 > 0,
+        "server resized the desktop to {}x{} backing / {}x{} presented",
+        source.0,
+        source.1,
+        presented.0,
+        presented.1
     );
     let resize_msg = {
         let mut d = desktop.lock().unwrap();
-        if d.size == new && d.scale == scale {
+        if d.source_size == source && d.size == presented && d.scale == scale {
             return Ok(false);
         }
-        d.size = new;
+        d.source_size = source;
+        d.size = presented;
         d.scale = scale;
         d.resize_msg()
     };
     // The old pixels describe a framebuffer that no longer exists, and the
     // browser is about to reallocate its canvas.
-    shadow.lock().unwrap().resize(new.0, new.1);
-    info!("vnc: desktop resized to {}x{} at {scale}x", new.0, new.1);
+    shadow.lock().unwrap().resize(presented.0, presented.1);
+    info!(
+        "vnc: desktop resized to {}x{} backing, {}x{} presented at {scale}x",
+        source.0, source.1, presented.0, presented.1
+    );
     sink.msg(resize_msg).await?;
     Ok(true)
 }
@@ -2277,7 +2363,10 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     reader.read_exact(&mut payload[2..]).await?;
     let layout = vnc_apple::parse_layout(&payload)?;
 
-    let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
+    let compositor = layout.compositor()?;
+    let (presented, scale) = layout.presented();
+    let resized =
+        apply_geometry(desktop, shadow, layout.backing, presented, scale, sink).await?;
 
     // The Mac says which screen it is sending, so nothing here has to be inferred
     // from what was asked for. `current` is a screen id, or `None` for the combined
@@ -2309,6 +2398,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         }
         let active = layout.current.unwrap_or(DisplayState::COMBINED);
         state.repaint_pixels = layout.repaint_pixels();
+        state.install_compositor(compositor);
         let changed = state.displays != infos || state.active != active;
         state.displays = infos;
         state.active = active;
@@ -2322,7 +2412,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         sink.msg(msg).await?;
     }
 
-    let size = desktop.lock().unwrap().size;
+    let size = desktop.lock().unwrap().source_size;
     let mut uplink = uplink.lock().await;
     // Now that the Mac has said what it has, ask for compression. This has to wait
     // for a layout: zlib in the *first* `SetEncodings` costs the layout entirely, and
@@ -3548,6 +3638,7 @@ mod tests {
     ) -> SharedDesktop {
         Arc::new(std::sync::Mutex::new(DesktopState {
             size,
+            source_size: size,
             scale: UNSCALED,
             screen,
             pending,
@@ -4344,6 +4435,7 @@ mod tests {
         // density — 100% of the logical desktop, not a canvas scaled to fit
         // anything.
         assert_eq!(desktop.lock().unwrap().size, (3840, 2160));
+        assert_eq!(desktop.lock().unwrap().source_size, (3840, 2160));
         assert_eq!(desktop.lock().unwrap().scale, 2.0);
         sink.flush().await;
         assert!(matches!(
@@ -4378,6 +4470,74 @@ mod tests {
                 && !vnc_apple::ENCODINGS.contains(&vnc_apple::ENCODING_ZLIB),
             "the first list must not carry zlib and the second must"
         );
+    }
+
+    /// The Apple framebuffer keeps every display's backing pixels in one mosaic.
+    /// The client must never see that source geometry: it receives one point-sized
+    /// desktop, with the Retina display downsampled into its logical bounds.
+    #[tokio::test]
+    async fn a_mixed_density_combined_view_is_composed_before_tiles_reach_the_client() {
+        let screens: [TestScreen; 2] = [
+            (11, (2, 1), (2, 1), 0x01),
+            (22, (2, 1), (4, 2), 0x00),
+        ];
+        let mut layout = vec![0u8, 0];
+        layout.extend_from_slice(&1u16.to_be_bytes());
+        layout.extend_from_slice(&[0u8; 8]);
+        layout.extend_from_slice(&vnc_apple::ENCODING_DISPLAY_LAYOUT.to_be_bytes());
+        layout.extend_from_slice(&layout_payload(None, &screens));
+
+        // Only Display 2 paints here. Its 4x2 source rectangle becomes 2x1 at
+        // logical x=2, rather than extending the client desktop to x=6.
+        let mut wire = layout;
+        wire.extend_from_slice(&raw_rect_update(2, 0, 4, 2, 80));
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)));
+
+        let err = read_loop(
+            std::io::Cursor::new(wire),
+            shared.clone(),
+            ReadFlags { clipboard: false, poll: false },
+            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            sink.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
+
+        {
+            let state = desktop.lock().unwrap();
+            assert_eq!(state.source_size, (6, 2), "RFB still addresses backing pixels");
+            assert_eq!(state.size, (4, 1), "clients address the point-sized desktop");
+            assert_eq!(state.scale, UNSCALED);
+        }
+        assert_eq!(shared.shadow.lock().unwrap().size(), (4, 1));
+        assert_eq!(
+            shared.display.lock().unwrap().remote_point(3, 0),
+            Some((4, 0)),
+            "input on the Retina display maps back into backing coordinates"
+        );
+
+        sink.flush().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::Resize { w: 4, h: 1, scale }) if scale == UNSCALED
+        ));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Displays { active, .. }) if active == DisplayState::COMBINED));
+        match rx.try_recv().expect("a normalized tile") {
+            ServerMsg::Tile(tile) => {
+                assert_eq!((tile.x, tile.y, tile.w, tile.h), (2, 0, 2, 1));
+                let decoder = png::Decoder::new(std::io::Cursor::new(tile.data));
+                let mut reader = decoder.read_info().unwrap();
+                let mut rgb = vec![0; reader.output_buffer_size().unwrap()];
+                let info = reader.next_frame(&mut rgb).unwrap();
+                assert_eq!(info.color_type, png::ColorType::Rgb);
+                assert_eq!(&rgb[..info.buffer_size()], &[80; 6]);
+            }
+            other => panic!("expected a tile, got {other:?}"),
+        }
     }
 
     /// The checkmark follows the Mac and nothing else. It is placed from the

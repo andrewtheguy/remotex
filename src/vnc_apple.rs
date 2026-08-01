@@ -21,10 +21,9 @@
 //!
 //! **The pixel density**, which comes with it. Each screen states its own scale,
 //! so a 2x display arrives at 3200x1800 and is reported as 1600x900 points — the
-//! desktop then draws at 100% instead of twice its size. Because the density is
-//! per screen, the *combined* view of a mixed-density Mac has no single scale (see
-//! [`Layout::scale`]), which makes picking a screen the thing that makes the
-//! geometry exact rather than a convenience.
+//! desktop then draws at 100% instead of twice its size. The *combined* view has
+//! no single density, so [`Compositor`] maps each screen's backing rectangle into
+//! its own logical bounds before clients see it.
 //!
 //! ## `SetDisplayConfiguration` is deliberately not sent
 //!
@@ -59,6 +58,7 @@ use anyhow::Context as _;
 use log::{debug, warn};
 
 use crate::protocol::{CursorShape, DisplayInfo};
+use crate::tiles::Rect;
 
 /// Raw pixels, the standard RFB encoding, still the fallback here.
 const ENCODING_RAW: i32 = 0;
@@ -271,8 +271,43 @@ pub fn set_display_message(id: Option<u32>) -> Vec<u8> {
     msg
 }
 
-/// One screen out of a display layout: what a client is offered, plus the two
-/// facts the gateway needs about it that a client never sees.
+/// One rectangle from Apple's display layout, with exclusive bottom/right edges
+/// exactly as the wire carries them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bounds {
+    pub top: u16,
+    pub left: u16,
+    pub bottom: u16,
+    pub right: u16,
+}
+
+impl Bounds {
+    fn from_record(record: &[u8], at: usize) -> Option<Self> {
+        let bounds = Self {
+            top: be16(record, at),
+            left: be16(record, at + 2),
+            bottom: be16(record, at + 4),
+            right: be16(record, at + 6),
+        };
+        (bounds.right > bounds.left && bounds.bottom > bounds.top).then_some(bounds)
+    }
+
+    pub fn size(self) -> (u16, u16) {
+        (self.right - self.left, self.bottom - self.top)
+    }
+
+    fn pixels(self) -> u64 {
+        let size = self.size();
+        u64::from(size.0) * u64::from(size.1)
+    }
+
+    fn contains(self, x: u16, y: u16) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
+
+/// One screen out of a display layout: what a client is offered, plus the facts
+/// the gateway needs to compose the combined framebuffer that a client never sees.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Display {
     pub info: DisplayInfo,
@@ -280,16 +315,21 @@ pub struct Display {
     /// `+0x02`. 1.0 or 2.0 on every Mac measured, and cross-checked against the
     /// screen's own two bounds rects, which must agree.
     pub density: f32,
-    /// This screen's backing-pixel size. The full repaint after a combined
-    /// layout consists of one such region per non-mirrored display; gaps in the
-    /// bounding framebuffer are not rectangles the Mac sends.
-    pub backing: (u16, u16),
+    /// Where this screen belongs in the point-sized combined desktop.
+    pub logical: Bounds,
+    /// Where this screen's pixels live in the combined backing framebuffer. The
+    /// full repaint consists of one such region per non-mirrored display; gaps in
+    /// the bounding framebuffer are not rectangles the Mac sends.
+    pub backing: Bounds,
 }
 
 /// The Mac's display layout: which screens it has, which one it is sending, and
 /// the framebuffer size that follows from that.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layout {
+    /// The combined desktop's size in points. This header field stays combined
+    /// even while one display is selected, so it is used only for composition.
+    pub logical: (u16, u16),
     /// The framebuffer's size in pixels — what rectangles are addressed in. From
     /// the header, and the authoritative value: it tracks a selection, where the
     /// per-screen rects do not.
@@ -307,9 +347,8 @@ impl Layout {
     /// single number is true. The combined view is a mosaic of screens at
     /// different densities — the measured Mac puts a 1x 1280x800 beside a 2x
     /// 1600x900, giving a 4480x1800 framebuffer of 2880x900 points — and no one
-    /// scale describes it. There it reports [`UNSCALED`], which shows the
-    /// framebuffer at its pixel size: too large on the Retina half, but nothing
-    /// is misrepresented, and picking a screen is what makes it exact.
+    /// scale describes it. [`Compositor`] converts that mosaic to one pixel per
+    /// logical point, so [`UNSCALED`] is then the exact density clients receive.
     ///
     /// [`UNSCALED`]: crate::protocol::UNSCALED
     pub fn scale(&self) -> f32 {
@@ -338,9 +377,257 @@ impl Layout {
         }
         self.displays
             .iter()
-            .map(|display| u64::from(display.backing.0) * u64::from(display.backing.1))
+            .map(|display| display.backing.pixels())
             .sum()
     }
+
+    /// What clients receive. A selected display remains its full backing bitmap
+    /// plus its density; the combined view is normalized to one pixel per point.
+    pub fn presented(&self) -> ((u16, u16), f32) {
+        if self.current.is_none() {
+            (self.logical, crate::protocol::UNSCALED)
+        } else {
+            (self.backing, self.scale())
+        }
+    }
+
+    /// A compositor only exists for the combined view. A selected screen already
+    /// has one honest density and keeps the direct framebuffer path; an all-1×
+    /// combined view is already in logical coordinates and stays direct too.
+    pub fn compositor(&self) -> anyhow::Result<Option<Compositor>> {
+        (self.current.is_none()
+            && self
+                .displays
+                .iter()
+                .any(|display| display.logical != display.backing))
+            .then(|| Compositor::new(self.backing, self.logical, &self.displays))
+            .transpose()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mapping {
+    logical: Bounds,
+    backing: Bounds,
+}
+
+/// One normalized piece of a combined Apple framebuffer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CompositeUpdate {
+    pub rect: Rect,
+    pub rgb: Vec<u8>,
+}
+
+/// Turns Apple's mixed-density backing-pixel mosaic into one 1× logical desktop.
+///
+/// The complete source framebuffer is retained because a damage rectangle need
+/// not cover every backing pixel contributing to an output pixel. At 2×, one
+/// changed source pixel still requires the other three pixels of its 2×2 block to
+/// resample correctly.
+#[derive(Debug)]
+pub struct Compositor {
+    source_size: (u16, u16),
+    output_size: (u16, u16),
+    mappings: Vec<Mapping>,
+    source: Vec<u8>,
+}
+
+impl Compositor {
+    const CHANNELS: usize = 3;
+    const MAX_EDGE: u16 = 8192;
+
+    fn new(
+        source_size: (u16, u16),
+        output_size: (u16, u16),
+        displays: &[Display],
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            source_size.0 <= Self::MAX_EDGE
+                && source_size.1 <= Self::MAX_EDGE
+                && output_size.0 <= Self::MAX_EDGE
+                && output_size.1 <= Self::MAX_EDGE,
+            "a combined Apple desktop is {}x{} backing / {}x{} logical, past the {} pixel compositor ceiling",
+            source_size.0,
+            source_size.1,
+            output_size.0,
+            output_size.1,
+            Self::MAX_EDGE
+        );
+        let mappings = displays
+            .iter()
+            .map(|display| Mapping { logical: display.logical, backing: display.backing })
+            .collect::<Vec<_>>();
+        for mapping in &mappings {
+            anyhow::ensure!(
+                mapping.backing.right <= source_size.0
+                    && mapping.backing.bottom <= source_size.1
+                    && mapping.logical.right <= output_size.0
+                    && mapping.logical.bottom <= output_size.1,
+                "display bounds backing {:?} / logical {:?} exceed the combined {}x{} / {}x{} desktop",
+                mapping.backing,
+                mapping.logical,
+                source_size.0,
+                source_size.1,
+                output_size.0,
+                output_size.1
+            );
+        }
+        let bytes = usize::from(source_size.0)
+            .checked_mul(usize::from(source_size.1))
+            .and_then(|pixels| pixels.checked_mul(Self::CHANNELS))
+            .context("combined Apple framebuffer byte count overflowed")?;
+        Ok(Self { source_size, output_size, mappings, source: vec![0; bytes] })
+    }
+
+    pub fn same_layout(&self, other: &Self) -> bool {
+        self.source_size == other.source_size
+            && self.output_size == other.output_size
+            && self.mappings == other.mappings
+    }
+
+    /// Map one point in the normalized client framebuffer back into the Mac's
+    /// combined backing-pixel coordinate space.
+    pub fn remote_point(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        let (x, y) = (u16::try_from(x).ok()?, u16::try_from(y).ok()?);
+        let mapping = self.mappings.iter().find(|mapping| mapping.logical.contains(x, y))?;
+        let logical = mapping.logical.size();
+        let backing = mapping.backing.size();
+        let remote_x = u32::from(mapping.backing.left)
+            + u32::from(x - mapping.logical.left) * u32::from(backing.0)
+                / u32::from(logical.0);
+        let remote_y = u32::from(mapping.backing.top)
+            + u32::from(y - mapping.logical.top) * u32::from(backing.1)
+                / u32::from(logical.1);
+        Some((i32::try_from(remote_x).ok()?, i32::try_from(remote_y).ok()?))
+    }
+
+    /// Store one source rectangle and return the logical regions it changes.
+    pub fn update(&mut self, rect: Rect, rgb: &[u8]) -> anyhow::Result<Vec<CompositeUpdate>> {
+        anyhow::ensure!(
+            rect.right < self.source_size.0 && rect.bottom < self.source_size.1,
+            "combined Apple rect {:?} exceeds its {}x{} source",
+            rect,
+            self.source_size.0,
+            self.source_size.1
+        );
+        let row_bytes = usize::from(rect.w()) * Self::CHANNELS;
+        anyhow::ensure!(
+            rgb.len() == row_bytes * usize::from(rect.h()),
+            "combined Apple rect {:?} carries {} RGB bytes, expected {}",
+            rect,
+            rgb.len(),
+            row_bytes * usize::from(rect.h())
+        );
+        for row in 0..usize::from(rect.h()) {
+            let y = usize::from(rect.top) + row;
+            let start = (y * usize::from(self.source_size.0) + usize::from(rect.left))
+                * Self::CHANNELS;
+            self.source[start..start + row_bytes]
+                .copy_from_slice(&rgb[row * row_bytes..(row + 1) * row_bytes]);
+        }
+
+        let changed = Bounds {
+            top: rect.top,
+            left: rect.left,
+            bottom: rect.bottom + 1,
+            right: rect.right + 1,
+        };
+        let mappings = self.mappings.clone();
+        let mut updates = Vec::new();
+        for mapping in mappings {
+            let Some(source) = intersection(changed, mapping.backing) else {
+                continue;
+            };
+            let destination = affected_destination(source, mapping);
+            updates.push(CompositeUpdate {
+                rect: destination,
+                rgb: self.resample(mapping, destination),
+            });
+        }
+        Ok(updates)
+    }
+
+    fn resample(&self, mapping: Mapping, destination: Rect) -> Vec<u8> {
+        let logical = mapping.logical.size();
+        let backing = mapping.backing.size();
+        let mut out = Vec::with_capacity(
+            usize::from(destination.w()) * usize::from(destination.h()) * Self::CHANNELS,
+        );
+        for y in destination.top..=destination.bottom {
+            let local_y = u32::from(y - mapping.logical.top);
+            let source_top = u32::from(mapping.backing.top)
+                + local_y * u32::from(backing.1) / u32::from(logical.1);
+            let source_bottom = u32::from(mapping.backing.top)
+                + div_ceil((local_y + 1) * u32::from(backing.1), u32::from(logical.1));
+            for x in destination.left..=destination.right {
+                let local_x = u32::from(x - mapping.logical.left);
+                let source_left = u32::from(mapping.backing.left)
+                    + local_x * u32::from(backing.0) / u32::from(logical.0);
+                let source_right = u32::from(mapping.backing.left)
+                    + div_ceil((local_x + 1) * u32::from(backing.0), u32::from(logical.0));
+                let mut sums = [0u32; Self::CHANNELS];
+                let mut samples = 0u32;
+                for source_y in source_top..source_bottom {
+                    for source_x in source_left..source_right {
+                        let at = (usize::try_from(source_y).unwrap()
+                            * usize::from(self.source_size.0)
+                            + usize::try_from(source_x).unwrap())
+                            * Self::CHANNELS;
+                        for (channel, sum) in sums.iter_mut().enumerate() {
+                            *sum += u32::from(self.source[at + channel]);
+                        }
+                        samples += 1;
+                    }
+                }
+                for sum in sums {
+                    out.push(u8::try_from((sum + samples / 2) / samples).unwrap());
+                }
+            }
+        }
+        out
+    }
+}
+
+fn intersection(a: Bounds, b: Bounds) -> Option<Bounds> {
+    let bounds = Bounds {
+        top: a.top.max(b.top),
+        left: a.left.max(b.left),
+        bottom: a.bottom.min(b.bottom),
+        right: a.right.min(b.right),
+    };
+    (bounds.right > bounds.left && bounds.bottom > bounds.top).then_some(bounds)
+}
+
+fn affected_destination(source: Bounds, mapping: Mapping) -> Rect {
+    let logical = mapping.logical.size();
+    let backing = mapping.backing.size();
+    let x = u32::from(mapping.logical.left)
+        + u32::from(source.left - mapping.backing.left) * u32::from(logical.0)
+            / u32::from(backing.0);
+    let y = u32::from(mapping.logical.top)
+        + u32::from(source.top - mapping.backing.top) * u32::from(logical.1)
+            / u32::from(backing.1);
+    let right = u32::from(mapping.logical.left)
+        + div_ceil(
+            u32::from(source.right - mapping.backing.left) * u32::from(logical.0),
+            u32::from(backing.0),
+        );
+    let bottom = u32::from(mapping.logical.top)
+        + div_ceil(
+            u32::from(source.bottom - mapping.backing.top) * u32::from(logical.1),
+            u32::from(backing.1),
+        );
+    Rect::from_size(
+        u16::try_from(x).unwrap(),
+        u16::try_from(y).unwrap(),
+        u16::try_from(right - x).unwrap(),
+        u16::try_from(bottom - y).unwrap(),
+    )
+    .expect("an intersecting source region affects at least one output pixel")
+}
+
+fn div_ceil(value: u32, divisor: u32) -> u32 {
+    value.div_ceil(divisor)
 }
 
 /// Parse an `AppleDisplayLayout` payload.
@@ -406,6 +693,20 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
         records / LAYOUT_RECORD,
         &payload[..LAYOUT_HEAD]
     );
+    let logical_size = (be16(payload, 0x04), be16(payload, 0x06));
+    let backing_size = (be16(payload, 0x08), be16(payload, 0x0a));
+    anyhow::ensure!(
+        logical_size.0 > 0 && logical_size.1 > 0,
+        "a display layout gives a {}x{} logical desktop",
+        logical_size.0,
+        logical_size.1
+    );
+    anyhow::ensure!(
+        backing_size.0 > 0 && backing_size.1 > 0,
+        "a display layout gives a {}x{} framebuffer",
+        backing_size.0,
+        backing_size.1
+    );
 
     let mut displays = Vec::new();
     // `chunks`, not `chunks_exact`: the last record is two bytes short. Every field
@@ -424,30 +725,22 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
         if flags & 0x02 != 0 {
             continue;
         }
-        let edges = |at: usize| {
-            let (top, left, bottom, right) = (
-                be16(record, at),
-                be16(record, at + 2),
-                be16(record, at + 4),
-                be16(record, at + 6),
-            );
-            (right.saturating_sub(left), bottom.saturating_sub(top))
-        };
-        let logical = edges(0x16);
-        let backing = edges(0x1e);
+        let logical = Bounds::from_record(record, 0x16);
+        let backing = Bounds::from_record(record, 0x1e);
         // An unusable screen is dropped, the way a mirrored one is, rather than
         // taking the whole layout with it. One odd record among good ones would
         // otherwise cost the entire display list *and* the resize — and a layout
         // arrives at every login and lock, so that is a session-long outage over one
         // screen. If every record is unusable the emptiness check below still fails
         // loudly, which is what a wrong set of offsets looks like.
-        if logical.0 == 0 || logical.1 == 0 {
+        let (Some(logical), Some(backing)) = (logical, backing) else {
             warn!(
-                "vnc: display layout record {index} is {}x{} points; not offering it",
-                logical.0, logical.1
+                "vnc: display layout record {index} has an empty or inverted bounds rect; not offering it"
             );
             continue;
-        }
+        };
+        let logical_size = logical.size();
+        let backing_size = backing.size();
         // The Mac states the density twice over — once as a double, once as the
         // ratio of the two rects. Taking the double and checking the ratio means a
         // build that disagrees with itself says so, instead of quietly halving a
@@ -463,12 +756,17 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
             continue;
         }
         let density = stated as f32;
-        let ratio = f32::from(backing.0) / f32::from(logical.0);
-        if (ratio - density).abs() > 0.01 {
+        let ratios = [
+            f32::from(backing_size.0) / f32::from(logical_size.0),
+            f32::from(backing_size.1) / f32::from(logical_size.1),
+        ];
+        if ratios.iter().any(|ratio| (ratio - density).abs() > 0.01) {
             warn!(
-                "vnc: display {} states scale {density} but its rects give {ratio}; \
+                "vnc: display {} states scale {density} but its rects give {}x{}; \
                  using the stated one",
-                be32(record, 0x12)
+                be32(record, 0x12),
+                ratios[0],
+                ratios[1]
             );
         }
         // "1600×900 at 2x" — the points a window occupies, which is the size a
@@ -480,7 +778,7 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
             info: DisplayInfo {
                 id: be32(record, 0x12),
                 label: format!("Display {}", index + 1),
-                detail: format!("{}×{}{suffix}", logical.0, logical.1),
+                detail: format!("{}×{}{suffix}", logical_size.0, logical_size.1),
                 main: flags & 0x01 != 0,
                 // Never: this client asks for the Mac's own screens and does not
                 // ask it to make one. Asking is precisely what
@@ -489,19 +787,13 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
                 virtual_display: false,
             },
             density,
+            logical,
             backing,
         });
     }
 
     anyhow::ensure!(!displays.is_empty(), "a display layout listed no usable display");
-    let backing = (be16(payload, 0x08), be16(payload, 0x0a));
-    anyhow::ensure!(
-        backing.0 > 0 && backing.1 > 0,
-        "a display layout gives a {}x{} framebuffer",
-        backing.0,
-        backing.1
-    );
-    Ok(Layout { backing, current, displays })
+    Ok(Layout { logical: logical_size, backing: backing_size, current, displays })
 }
 
 /// The connection's framebuffer-zlib inflate stream.
@@ -688,9 +980,10 @@ pub(crate) fn test_layout(current: Option<u32>, displays: &[TestScreen]) -> Vec<
     let total = LAYOUT_HEAD + displays.len() * LAYOUT_RECORD;
     payload[..2].copy_from_slice(&u16::try_from(total).unwrap().to_be_bytes());
     payload[2..4].copy_from_slice(&5u16.to_be_bytes());
-    let first = displays.first().expect("at least one display");
+    assert!(!displays.is_empty(), "at least one display");
     // The header's logical geometry spans every screen and does not move.
     let span: u16 = displays.iter().map(|d| d.1.0).sum();
+    let logical_height = displays.iter().map(|d| d.1.1).max().unwrap_or(0);
     // Its backing is the framebuffer: that screen's own pixels when one is selected,
     // and the union of every screen's when none is — which is what makes a
     // mixed-density Mac's framebuffer wider than any single scale explains.
@@ -698,15 +991,20 @@ pub(crate) fn test_layout(current: Option<u32>, displays: &[TestScreen]) -> Vec<
         .and_then(|id| displays.iter().find(|d| d.0 == id))
         .map_or_else(
             || {
-                (
-                    displays.iter().map(|d| d.2.0).sum(),
-                    displays.iter().map(|d| d.2.1).max().unwrap_or(0),
-                )
+                let mut logical_left = 0u16;
+                let mut backing_right = 0u16;
+                let mut backing_bottom = 0u16;
+                for (_, logical, backing, _) in displays {
+                    backing_right = backing_right.max(logical_left + backing.0);
+                    backing_bottom = backing_bottom.max(backing.1);
+                    logical_left += logical.0;
+                }
+                (backing_right, backing_bottom)
             },
             |d| d.2,
-        );
+    );
     payload[4..6].copy_from_slice(&span.to_be_bytes());
-    payload[6..8].copy_from_slice(&first.1.1.to_be_bytes());
+    payload[6..8].copy_from_slice(&logical_height.to_be_bytes());
     payload[8..10].copy_from_slice(&framebuffer.0.to_be_bytes());
     payload[10..12].copy_from_slice(&framebuffer.1.to_be_bytes());
     payload[12..16].copy_from_slice(&current.unwrap_or(u32::MAX).to_be_bytes());
@@ -860,6 +1158,7 @@ mod tests {
     fn a_captured_layout_reproduces_the_macs_real_screens() {
         let parsed = parse_layout(TWO_REAL_SCREENS).unwrap();
 
+        assert_eq!(parsed.logical, (2880, 900), "the point-sized union, from the header");
         assert_eq!(parsed.backing, (4480, 1800), "the framebuffer, from the header");
         assert_eq!(parsed.current, None, "0xffffffff is the combined view");
         assert_eq!(parsed.displays.len(), 2);
@@ -874,6 +1173,11 @@ mod tests {
         assert_eq!(main.info.label, "Display 1");
         assert_eq!(main.info.detail, "1280×800", "no suffix on a 1x screen");
         assert_eq!(main.density, 1.0);
+        assert_eq!(
+            main.logical,
+            Bounds { top: 0, left: 0, bottom: 800, right: 1280 }
+        );
+        assert_eq!(main.backing, main.logical);
         assert!(main.info.main);
         assert!(!main.info.virtual_display);
 
@@ -882,7 +1186,59 @@ mod tests {
         assert_eq!(retina.info.label, "Display 2");
         assert_eq!(retina.info.detail, "1600×900 at 2x", "points, then the density");
         assert_eq!(retina.density, 2.0);
+        assert_eq!(
+            retina.logical,
+            Bounds { top: 0, left: 1280, bottom: 900, right: 2880 }
+        );
+        assert_eq!(
+            retina.backing,
+            Bounds { top: 0, left: 1280, bottom: 1800, right: 4480 }
+        );
         assert!(!retina.info.main);
+    }
+
+    #[test]
+    fn a_combined_retina_region_is_halved_inside_a_point_sized_desktop() {
+        let layout = parse_layout(&layout(
+            None,
+            &[(1, (2, 1), (2, 1), 0x01), (4, (2, 1), (4, 2), 0x00)],
+        ))
+        .unwrap();
+        assert_eq!(layout.presented(), ((4, 1), crate::protocol::UNSCALED));
+        let mut compositor = layout.compositor().unwrap().expect("combined view");
+
+        // Display 2 begins at source x=2 and occupies 4x2 backing pixels. Each
+        // output value is the rounded average of one 2x2 block.
+        let mut rgb = Vec::new();
+        for value in [10u8, 20, 50, 60, 30, 40, 70, 80] {
+            rgb.extend_from_slice(&[value; 3]);
+        }
+        let updates = compositor.update(Rect::from_size(2, 0, 4, 2).unwrap(), &rgb).unwrap();
+        assert_eq!(
+            updates,
+            vec![CompositeUpdate {
+                rect: Rect::from_size(2, 0, 2, 1).unwrap(),
+                rgb: vec![25, 25, 25, 65, 65, 65],
+            }]
+        );
+
+        // A one-backing-pixel damage update still recomputes its whole logical
+        // pixel from the retained neighbours instead of black or stale pixels.
+        let updates = compositor
+            .update(Rect::from_size(3, 1, 1, 1).unwrap(), &[100, 100, 100])
+            .unwrap();
+        assert_eq!(
+            updates,
+            vec![CompositeUpdate {
+                rect: Rect::from_size(2, 0, 1, 1).unwrap(),
+                rgb: vec![40, 40, 40],
+            }]
+        );
+
+        assert_eq!(compositor.remote_point(1, 0), Some((1, 0)), "1x display");
+        assert_eq!(compositor.remote_point(2, 0), Some((2, 0)), "Retina left edge");
+        assert_eq!(compositor.remote_point(3, 0), Some((4, 0)), "Retina points become pixels");
+        assert_eq!(compositor.remote_point(4, 0), None, "outside the logical desktop");
     }
 
     #[test]
@@ -911,11 +1267,22 @@ mod tests {
         let plain = parse_layout(&payload).unwrap();
         assert_eq!(plain.scale(), 1.0);
         assert_eq!(plain.backing, (1280, 800));
+        assert!(plain.compositor().unwrap().is_none(), "selected displays stay direct");
 
         // A screen that is gone by the time the id is looked up leaves the desktop
         // at its pixel size rather than guessing at another screen's density.
         payload[0x0c..0x10].copy_from_slice(&99u32.to_be_bytes());
         assert_eq!(parse_layout(&payload).unwrap().scale(), crate::protocol::UNSCALED);
+
+        let combined_1x = parse_layout(&layout(
+            None,
+            &[(1, (2, 1), (2, 1), 0x01), (4, (2, 1), (2, 1), 0x00)],
+        ))
+        .unwrap();
+        assert!(
+            combined_1x.compositor().unwrap().is_none(),
+            "an all-1x combined desktop needs no copy or resample"
+        );
     }
 
     /// The shared builder, which lives outside this module so [`crate::vnc`]'s tests

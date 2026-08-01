@@ -366,9 +366,10 @@ list, so the menu holds one disabled item reading *No Displays to Choose From*.
 
 The checkmark follows the Mac, not the click: it moves when the Mac answers with a
 display layout naming the screen it is now sending, so a selection it declines leaves
-the menu agreeing with what is on screen. Picking a single screen is also what makes
-a Retina Mac render at 100% — a combined framebuffer of screens at different
-densities has no single scale factor, so it is shown at its pixel size. See
+the menu agreeing with what is on screen. A selected Retina display keeps its full
+backing pixels and density. For *All Displays*, the gateway maps each screen's
+backing rectangle into its logical bounds, because a combined framebuffer of
+screens at different densities has no truthful single scale factor. See
 [`apple-vnc-889.md`](apple-vnc-889.md).
 
 ### Viewport measurement

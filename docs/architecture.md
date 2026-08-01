@@ -275,9 +275,10 @@ a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it
 **What the high-performance subtype buys is compression**: zlib rectangles instead
 of raw pixels, around fifty times fewer bytes on a static desktop. Both Apple
 subtypes pick one of the Mac's screens and learn each screen's pixel density, so a
-Retina desktop is drawn at 100% rather than twice its size. Picking is what makes
-the density exact — a framebuffer spanning screens at different densities has no
-single scale factor and is shown at its pixel size.
+Retina desktop is drawn at 100% rather than twice its size. In the combined view,
+the gateway composes each backing-pixel rectangle into the screen's logical bounds;
+this is necessary because displays at different densities have no truthful single
+scale factor.
 
 There is one trap, and this gateway fell into it for a release: macOS 26 synthesizes
 a single display and removes the Mac's real ones for the session's duration — **if**
