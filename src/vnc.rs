@@ -41,7 +41,8 @@ use crate::protocol::{
     ServerMsg, UNSCALED, clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
-use crate::vnc_apple::{self, CursorCache, FramebufferZlib};
+use crate::vnc_apple::{self, CursorCache};
+use crate::vnc_encodings::{Decoders, Payload};
 use crate::vnc_apple_clipboard;
 use crate::vnc_clipboard;
 use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
@@ -73,6 +74,11 @@ const MIN_ARD_KEY_BYTES: usize = 128;
 const ARD_CREDENTIALS_LEN: usize = 128;
 const ARD_FIELD_LEN: usize = 64;
 const ENCODING_RAW: i32 = 0;
+/// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
+/// shared by every rectangle on the connection. Not a vendor encoding and not
+/// Apple's alone, though Apple's High Performance mode is where it arrived here
+/// first — see [`vnc_apple::ENCODINGS_WITH_ZLIB`].
+pub(crate) const ENCODING_ZLIB: i32 = 6;
 /// Cursor pseudo-encoding: the server hands over the pointer shape (pixels +
 /// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
 /// the framebuffer.
@@ -87,7 +93,7 @@ const ENCODING_EXTENDED_DESKTOP_SIZE: i32 = -308;
 /// how many rectangles it will hold, declaring `0xffff` of them.
 const ENCODING_LAST_RECT: i32 = -224;
 /// Bytes per pixel of the format we force with SetPixelFormat.
-const BPP: usize = 4;
+pub(crate) const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.
 const MAX_STRING: u32 = 1024;
 /// Largest cursor edge accepted. Real pointers are 32x32 or 64x64; anything
@@ -317,14 +323,12 @@ type SharedDisplay = Arc<std::sync::Mutex<DisplayState>>;
 
 /// Apple's display/cursor decoding state, owned by the read loop.
 ///
-/// Not in [`Shared`]: the zlib stream and the cursor cache are touched by nothing
-/// else, and a lock on the pixel path to say so would be a lock that never
-/// contends.
+/// Not in [`Shared`]: the cursor cache is touched by nothing else, and a lock on
+/// the pixel path to say so would be a lock that never contends. The zlib stream
+/// used to live here too; it moved to [`vnc_encodings::Decoders`] when encoding 6
+/// stopped being the Apple dialect's alone.
 #[derive(Default)]
 struct Apple {
-    /// One inflate stream for the connection's zlib rectangles. Created on the
-    /// first one, never reset — see [`FramebufferZlib`].
-    zlib: Option<FramebufferZlib>,
     cursors: CursorCache,
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
@@ -1260,6 +1264,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared { uplink, desktop, clipboard, display, .. } = &shared;
     let mut full_repaint: Option<FullRepaint> = None;
+    // The connection's decoder state: the deflate streams and whatever else an
+    // encoding carries from one rectangle to the next.
+    let mut decoders = Decoders::default();
     loop {
         let msg_type = match reader.read_u8().await {
             Ok(t) => t,
@@ -1305,9 +1312,15 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let mut resized = false;
                 let mut full_repaint_owed = false;
                 for _ in 0..rects {
-                    let effect =
-                        read_rect(&mut reader, &shared, &mut apple, clipboard_enabled, &sink)
-                            .await?;
+                    let effect = read_rect(
+                        &mut reader,
+                        &shared,
+                        &mut apple,
+                        &mut decoders,
+                        clipboard_enabled,
+                        &sink,
+                    )
+                    .await?;
                     resized |= effect.resized;
                     full_repaint_owed |= effect.full_repaint_owed;
                     if let (Some(repaint), Some(rect)) = (&mut full_repaint, effect.pixels) {
@@ -1894,6 +1907,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
     apple: &mut Option<Apple>,
+    decoders: &mut Decoders,
     clipboard_enabled: bool,
     sink: &TileSink,
 ) -> anyhow::Result<RectEffect> {
@@ -1903,11 +1917,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
     let w = reader.read_u16().await?;
     let h = reader.read_u16().await?;
     let encoding = reader.read_i32().await?;
-    // Whether the pixels below arrive deflated. Decided here so the bounds check
-    // and the tile path stay one path for both.
-    let mut deflated = false;
+    // How this rectangle's pixels arrive. Decided here so the bounds check and the
+    // tile path stay one path for all of them.
+    let payload;
     match encoding {
-        ENCODING_RAW => {}
+        ENCODING_RAW => payload = Payload::Raw,
         // Cursor: the rect header carries the hotspot (x, y) and the shape
         // size, never a framebuffer position — so it skips the bounds check
         // and tile path below entirely.
@@ -1938,7 +1952,9 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 .await
                 .map(RectEffect::resized);
         }
-        vnc_apple::ENCODING_ZLIB if apple.is_some() => deflated = true,
+        // Ungated, like [`ENCODING_RAW`]: every generic target is offered zlib too,
+        // and an Apple server cannot send what its own measured list omits.
+        ENCODING_ZLIB => payload = Payload::Zlib,
         vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
             read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
             return Ok(RectEffect::NOTHING);
@@ -2030,44 +2046,15 @@ async fn read_rect<R: AsyncRead + Unpin>(
         size.0,
         size.1
     );
-    if w == 0 || h == 0 {
-        return Ok(RectEffect::NOTHING);
-    }
-
-    let expect = usize::from(w) * usize::from(h) * BPP;
-    let pixels = if deflated {
-        // One `u32` of length, then that much of the connection's single deflate
-        // stream. The stream is the connection's, not the rectangle's — see
-        // [`FramebufferZlib`].
-        let len = reader.read_u32().await?;
-        // Deflate can *expand*, and on a small rectangle it always does: the
-        // stream header and one sync flush cost more than a 1x1 rectangle's four
-        // pixels (measured: nine bytes for four). So bounding this at `expect`
-        // would refuse legitimate rectangles. A generous multiple still bounds the
-        // read, which is all this check is for — the inflated size is checked
-        // exactly, by `FramebufferZlib::inflate`.
-        let ceiling = expect + expect / 64 + 1024;
-        anyhow::ensure!(
-            u64::from(len) <= ceiling as u64,
-            "a zlib rect claims {len} compressed bytes for {expect} of pixels, past the \
-             {ceiling} that even an incompressible one would take"
-        );
-        let mut chunk = vec![0u8; len as usize];
-        reader.read_exact(&mut chunk).await?;
-        let apple = apple.as_mut().expect("zlib is the Apple dialect's alone");
-        apple
-            .zlib
-            .get_or_insert_with(FramebufferZlib::default)
-            .inflate(&chunk, expect)?
-    } else {
-        let mut pixels = vec![0u8; expect];
-        reader.read_exact(&mut pixels).await?;
-        pixels
-    };
+    // Read the payload before deciding a rectangle of no pixels has nothing to do.
+    // An encoding that frames itself — a length word, a subrect count, a source
+    // position — sends that framing whatever its geometry says, and the RFB stream
+    // has no framing of its own above the record layer, so stepping past by the
+    // wrong number of bytes desyncs everything after it.
+    let rgb = decoders.decode(reader, payload, w, h).await?;
     let Some(rect) = Rect::from_size(x, y, w, h) else {
         return Ok(RectEffect::NOTHING);
     };
-    let rgb = bgrx_to_rgb(&pixels);
 
     // What of this rect the browser does not already have. A server that
     // re-sends unchanged pixels — and they do, on a cursor crossing a window
@@ -2868,15 +2855,6 @@ fn is_macos_server(minor: u32, security_types: &[u8]) -> bool {
     minor == 889 || security_types.iter().any(|t| matches!(t, 30 | 35))
 }
 
-/// Repack BGRX pixels (our forced format on the wire) into packed RGB888.
-fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
-    let mut rgb = Vec::with_capacity(bgrx.len() / BPP * 3);
-    for px in bgrx.chunks_exact(BPP) {
-        rgb.extend_from_slice(&[px[2], px[1], px[0]]);
-    }
-    rgb
-}
-
 /// Repack a cursor's BGRX pixels into RGBA, folding the RFB 1-bit mask into
 /// the alpha channel: rows are padded to whole bytes and scanned MSB first,
 /// with a set bit meaning opaque. Pixels outside the mask are cleared to fully
@@ -3225,13 +3203,6 @@ mod tests {
     }
 
     #[test]
-    fn bgrx_repacks_to_rgb() {
-        // Two pixels: pure red and pure blue in BGRX order.
-        let bgrx = [0, 0, 255, 0, 255, 0, 0, 0];
-        assert_eq!(bgrx_to_rgb(&bgrx), vec![255, 0, 0, 0, 0, 255]);
-    }
-
-    #[test]
     fn client_cut_text_is_type_6_with_a_big_endian_length() {
         let msg = client_cut_text("hi").expect("fits");
         assert_eq!(msg[0], 6);
@@ -3300,7 +3271,7 @@ mod tests {
         let encodings = rfb38_encoding_list(true, false, true);
         assert_eq!(encodings, vnc_apple::ENCODINGS);
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
-        assert!(!encodings.contains(&vnc_apple::ENCODING_ZLIB));
+        assert!(!encodings.contains(&ENCODING_ZLIB));
         assert!(!encodings.contains(&vnc_clipboard::ENCODING));
     }
 
@@ -4040,6 +4011,37 @@ mod tests {
         msg
     }
 
+    /// A zlib rectangle: the geometry, then a `u32` length and that much of a
+    /// deflate stream. `count` is the rectangle count of the enclosing update, so a
+    /// caller can put more rectangles behind this one.
+    fn zlib_rect(
+        deflate: &mut flate2::Compress,
+        (x, y, w, h): (u16, u16, u16, u16),
+        pixels: &[u8],
+    ) -> Vec<u8> {
+        let mut chunk = Vec::with_capacity(pixels.len() + 64);
+        let mut fed = 0;
+        loop {
+            let before = deflate.total_in();
+            chunk.reserve(pixels.len() + 64);
+            deflate
+                .compress_vec(&pixels[fed..], &mut chunk, flate2::FlushCompress::Sync)
+                .unwrap();
+            fed += (deflate.total_in() - before) as usize;
+            if fed == pixels.len() {
+                break;
+            }
+        }
+        let mut msg = Vec::new();
+        for value in [x, y, w, h] {
+            msg.extend_from_slice(&value.to_be_bytes());
+        }
+        msg.extend_from_slice(&ENCODING_ZLIB.to_be_bytes());
+        msg.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        msg.extend_from_slice(&chunk);
+        msg
+    }
+
     fn apple_layout_update(current: Option<u32>, backing: (u16, u16)) -> Vec<u8> {
         let mut msg = vec![0u8, 0];
         msg.extend_from_slice(&1u16.to_be_bytes());
@@ -4055,6 +4057,54 @@ mod tests {
     /// The whole read-side design in one test: a rectangle whose bytes are split
     /// across two records reaches the tile path as one rectangle, and nothing above
     /// the record layer knows the records were there.
+    /// A rectangle of no pixels still carries its encoding's framing, and stepping
+    /// past that framing is what keeps everything behind it readable.
+    ///
+    /// The zero-size check used to run *before* the payload was read, so a 0x0 zlib
+    /// rectangle left its length word and chunk in the stream and every byte after
+    /// it was read as something else.
+    #[tokio::test]
+    async fn a_zero_sized_rectangle_still_consumes_its_payload() {
+        let mut deflate = flate2::Compress::new(flate2::Compression::default(), true);
+        let mut wire = vec![0u8, 0];
+        wire.extend_from_slice(&2u16.to_be_bytes()); // two rectangles
+        wire.extend_from_slice(&zlib_rect(&mut deflate, (0, 0, 0, 0), &[]));
+        // The rectangle that has to survive the one before it.
+        let mut raw = Vec::new();
+        for value in [0u16, 0, 2, 2] {
+            raw.extend_from_slice(&value.to_be_bytes());
+        }
+        raw.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        raw.extend(std::iter::repeat_n([0x30u8, 0x20, 0x10, 0], 4).flatten());
+        wire.extend_from_slice(&raw);
+
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        let err = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: false, poll: false },
+            None,
+            sink.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
+
+        sink.flush().await;
+        match rx.try_recv().expect("the rectangle behind the empty one") {
+            ServerMsg::Tile(tile) => {
+                assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 2, 2));
+            }
+            other => panic!("expected a tile, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_rectangle_split_across_records_still_becomes_tiles() {
         let update = raw_update();
@@ -4429,8 +4479,8 @@ mod tests {
         expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
         assert_eq!(written(&sent), expected);
         assert!(
-            vnc_apple::ENCODINGS_WITH_ZLIB.contains(&vnc_apple::ENCODING_ZLIB)
-                && !vnc_apple::ENCODINGS.contains(&vnc_apple::ENCODING_ZLIB),
+            vnc_apple::ENCODINGS_WITH_ZLIB.contains(&ENCODING_ZLIB)
+                && !vnc_apple::ENCODINGS.contains(&ENCODING_ZLIB),
             "the first list must not carry zlib and the second must"
         );
     }
