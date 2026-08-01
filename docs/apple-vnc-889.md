@@ -96,6 +96,15 @@ Without the first two messages the Mac accepts browser-to-Mac writes and explici
 fetches but does not emit the `MiscStatus(cmd=2)` notification needed for automatic
 Mac-to-client synchronization.
 
+With `clipboard = true`, the High Performance subtype uses the same native Apple
+pasteboard messages in both directions. It sends the native cleartext `ViewerInfo`,
+`SetMode(control)`, and `AutoPasteboard(start)` prelude before encryption setup. The
+gateway repeats the idempotent `AutoPasteboard(start)` after the virtual display's
+answering layout. The Mac reports changes with `MiscStatus(cmd=2)`;
+`ClipboardFetch` and the zlib-compressed `ClipboardSend` archive carry the contents.
+Each complete post-rekey client message is carried in an encrypted 003.889 record;
+archive and session-id handling are shared with Standard mode.
+
 ### Picking a physical screen in Standard mode
 
 For `subtype = "ard"`, `SetDisplayMessage` (`0x0d`) selects a physical display, and
@@ -290,9 +299,11 @@ The first revision of this document recorded "ViewerInfo must not be sent", beca
 a body built from the string description is mis-sized: macOS reads more bytes for
 the message than its own `body_len` declares, swallows the `SetEncryption` behind
 it, and waits forever with no error from either end. Sending the 66 bytes above
-does not do that. **It is also not required** — the layout arrives with or without
-it — so this gateway does not send one, and the shape is recorded here rather than
-in code that nothing calls.
+does not do that. The layout arrives with or without it. A live High Performance
+probe that sent `AutoPasteboard(start)` in the cleartext native prelude emitted
+`MiscStatus(cmd=2)` after the Mac pasteboard changed; sending the enable only inside
+the record layer did not. The gateway therefore enables it before encryption and
+repeats it after the answering virtual-display layout.
 
 ### The metadata encodings also arrive as bare messages
 

@@ -211,11 +211,17 @@ const MAC_VIRTUAL_DISPLAY: u32 = 0x2b00_45ff;
 const MAC_DESKTOP: u16 = 32;
 const MAC_VIRTUAL_WIDTH: u16 = 40;
 const MAC_VIRTUAL_HEIGHT: u16 = 30;
+const MAC_CLIPBOARD_SESSION: u32 = 0x1234_5678;
+const MAC_REMOTE_CLIPBOARD: &str = "copied on virtual Mac ✓";
+const MAC_BROWSER_CLIPBOARD: &str = "sent from browser ☕";
 
 #[derive(Debug, PartialEq, Eq)]
 enum MacRequest {
     Configuration((u16, u16)),
     Display(u32),
+    AutoPasteboard(bool),
+    ClipboardFetch(u32),
+    ClipboardSend { session_id: u32, text: String },
 }
 
 /// A scripted High Performance Screen Sharing server. Returns the port, a channel
@@ -366,6 +372,70 @@ fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
     size
 }
 
+/// Build the server-to-client Apple pasteboard message independently of the
+/// gateway implementation. The archive has one UTF-8 text flavor.
+fn fake_mac_clipboard_message(session_id: u32, text: &str) -> Vec<u8> {
+    use std::io::Write as _;
+
+    const UTF8_TEXT: &[u8] = b"public.utf8-plain-text";
+    let mut archive = Vec::new();
+    archive.extend_from_slice(&1u32.to_be_bytes());
+    archive.extend_from_slice(&(UTF8_TEXT.len() as u32).to_be_bytes());
+    archive.extend_from_slice(UTF8_TEXT);
+    archive.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    archive.extend_from_slice(&0u32.to_be_bytes()); // no aliases
+    archive.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    archive.extend_from_slice(text.as_bytes());
+
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&archive).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let mut message = vec![0x1f, 0, 0, 0];
+    message.extend_from_slice(&session_id.to_be_bytes());
+    message.extend_from_slice(&(archive.len() as u32).to_be_bytes());
+    message.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+    message.extend_from_slice(&compressed);
+    message
+}
+
+/// Parse a client-to-server Apple pasteboard message without using the gateway's
+/// parser. This pins the session id, zlib envelope, archive fields, and UTF-8
+/// payload on the real 003.889 record stream.
+fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String) {
+    assert_eq!(&header[..3], &[0, 0, 0], "clipboard header padding");
+    let session_id = u32::from_be_bytes(header[3..7].try_into().unwrap());
+    let inflated_len = u32::from_be_bytes(header[7..11].try_into().unwrap()) as usize;
+    let compressed_len = u32::from_be_bytes(header[11..15].try_into().unwrap()) as usize;
+    assert_eq!(compressed.len(), compressed_len, "compressed clipboard length");
+
+    let mut decoder = flate2::Decompress::new(true);
+    let mut archive = Vec::with_capacity(inflated_len);
+    decoder
+        .decompress_vec(compressed, &mut archive, flate2::FlushDecompress::Sync)
+        .unwrap();
+    assert_eq!(decoder.total_in() as usize, compressed.len());
+    assert_eq!(archive.len(), inflated_len, "inflated clipboard length");
+
+    fn word(input: &[u8], at: &mut usize) -> usize {
+        let bytes: [u8; 4] = input[*at..*at + 4].try_into().unwrap();
+        *at += 4;
+        u32::from_be_bytes(bytes) as usize
+    }
+
+    let mut at = 0usize;
+    assert_eq!(word(&archive, &mut at), 1, "one pasteboard flavor");
+    let flavor_len = word(&archive, &mut at);
+    assert_eq!(&archive[at..at + flavor_len], b"public.utf8-plain-text");
+    at += flavor_len;
+    assert_eq!(word(&archive, &mut at), 0, "pasteboard reserved word");
+    assert_eq!(word(&archive, &mut at), 0, "pasteboard alias count");
+    let text_len = word(&archive, &mut at);
+    assert_eq!(archive.len(), at + text_len, "pasteboard text length");
+    let text = std::str::from_utf8(&archive[at..]).unwrap().to_owned();
+    (session_id, text)
+}
+
 /// One raw framebuffer update covering the whole desktop, in a colour derived from
 /// `shade` so two of them are never mistaken for one repeat.
 fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
@@ -415,22 +485,51 @@ async fn serve_fake_mac(
     server_init.extend_from_slice(b"mac");
     stream.write_all(&server_init).await?;
 
-    // The cleartext prelude: SetEncryption twice, and nothing else.
-    //
-    // A `ViewerInfo` here would be a bug, and this is where it is caught: a real Mac
-    // reads more bytes for that message than its own length declares, swallows the
-    // SetEncryption behind it, and then waits forever — with no error from either
-    // end. That failure is invisible without a Mac, so the asserts below are the
-    // stand-in.
-    for expected in [1u16, 2] {
-        let mut msg = [0u8; 4];
-        stream.read_exact(&mut msg).await?;
-        assert_eq!(msg[0], 0x12, "the prelude is SetEncryption and nothing else");
-        assert_eq!(u16::from_be_bytes([msg[2], msg[3]]), expected);
-        // command 1 carries a method list, command 2 two words.
-        let rest = if expected == 1 { 8 } else { 4 };
-        stream.read_exact(&mut vec![0u8; rest]).await?;
-    }
+    // The measured native cleartext control prelude. ViewerInfo's body is fixed
+    // numeric fields (not the mis-sized strings in the reverse-engineered
+    // reference), followed by control mode, pasteboard monitoring, and the two
+    // encryption commands.
+    let mut expected_viewer = [0u8; 66];
+    expected_viewer[0] = 0x21;
+    expected_viewer[2..4].copy_from_slice(&62u16.to_be_bytes());
+    expected_viewer[4..6].copy_from_slice(&1u16.to_be_bytes());
+    expected_viewer[6..10].copy_from_slice(&2u32.to_be_bytes());
+    expected_viewer[10..14].copy_from_slice(&6u32.to_be_bytes());
+    expected_viewer[14..18].copy_from_slice(&1u32.to_be_bytes());
+    expected_viewer[34] = 0xb0;
+    expected_viewer[36] = 0x0c;
+    expected_viewer[37] = 0x03;
+    expected_viewer[38] = 0x90;
+    expected_viewer[44] = 0x40;
+    let mut viewer = [0u8; 66];
+    stream.read_exact(&mut viewer).await?;
+    assert_eq!(viewer, expected_viewer, "ViewerInfo");
+
+    let mut mode = [0u8; 4];
+    stream.read_exact(&mut mode).await?;
+    assert_eq!(mode, [0x0a, 0, 0, 1], "SetMode control");
+    let mut auto_pasteboard = [0u8; 8];
+    stream.read_exact(&mut auto_pasteboard).await?;
+    assert_eq!(
+        auto_pasteboard,
+        [0x15, 0, 0, 1, 0, 0, 0, 0],
+        "AutoPasteboard start"
+    );
+    let _ = requests.send(MacRequest::AutoPasteboard(true));
+    let mut encryption_start = [0u8; 12];
+    stream.read_exact(&mut encryption_start).await?;
+    assert_eq!(
+        encryption_start,
+        [0x12, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1],
+        "SetEncryption start"
+    );
+    let mut encryption_stop = [0u8; 8];
+    stream.read_exact(&mut encryption_stop).await?;
+    assert_eq!(
+        encryption_stop,
+        [0x12, 0, 0, 2, 0, 1, 0, 0],
+        "SetEncryption stop"
+    );
 
     // The rekey, wrapped under MD5(shared): from here everything is records.
     let keys = Keys {
@@ -460,6 +559,7 @@ async fn serve_fake_mac(
     let mut writer = RecordWriter::new(keys);
     let mut shade = 0x40u8;
     let mut sent_layout = false;
+    let mut sent_clipboard_status = false;
     let mut configurations = Vec::new();
 
     loop {
@@ -522,6 +622,26 @@ async fn serve_fake_mac(
             0x09 => {
                 records.read_exact(&mut [0u8; 15]).await?;
             }
+            // High Performance repeats AutoPasteboard after the virtual display's
+            // answering layout so monitoring remains enabled after setup.
+            0x15 => {
+                let mut body = [0u8; 7];
+                records.read_exact(&mut body).await?;
+                assert_eq!(body, [0, 0, 1, 0, 0, 0, 0], "AutoPasteboard re-arm");
+                let _ = requests.send(MacRequest::AutoPasteboard(true));
+            }
+            // ClipboardFetch: answer with the fake Mac's current UTF-8 text and
+            // a nonzero session id that subsequent browser writes must preserve.
+            0x0b => {
+                let mut body = [0u8; 7];
+                records.read_exact(&mut body).await?;
+                assert_eq!(&body[..3], &[0, 0, 0], "clipboard fetch padding");
+                let session_id = u32::from_be_bytes(body[3..7].try_into().unwrap());
+                let _ = requests.send(MacRequest::ClipboardFetch(session_id));
+                let message =
+                    fake_mac_clipboard_message(MAC_CLIPBOARD_SESSION, MAC_REMOTE_CLIPBOARD);
+                write_half.write_all(writer.frame(&message).unwrap()).await?;
+            }
             // SetDisplayMessage, reported so a later request can order assertions
             // without relying on a timeout.
             0x0d => {
@@ -534,6 +654,14 @@ async fn serve_fake_mac(
                 }
                 let wanted = if combine_all { u32::MAX } else { id };
                 let _ = requests.send(MacRequest::Display(wanted));
+                // The explicit display request is a deterministic test-side fence:
+                // pixels have already arrived before this change notification, so
+                // no clipboard control message can be consumed while waiting for a
+                // tile. A real Mac may send this status at any time after setup.
+                if !std::mem::replace(&mut sent_clipboard_status, true) {
+                    let status = [0x14, 0, 0, 4, 0, 1, 0, 2];
+                    write_half.write_all(writer.frame(&status).unwrap()).await?;
+                }
             }
             // SetDisplayConfiguration: the High Performance subtype's one virtual
             // display request. It must occur once during setup.
@@ -546,6 +674,18 @@ async fn serve_fake_mac(
                 let requested = fake_mac_read_configuration(&body);
                 let _ = requests.send(MacRequest::Configuration(requested));
                 configurations.push(requested);
+            }
+            // ClipboardSend: independently inflate and parse what the browser put
+            // on the fake Mac's pasteboard.
+            0x1f => {
+                let mut header = [0u8; 15];
+                records.read_exact(&mut header).await?;
+                let compressed_len =
+                    u32::from_be_bytes(header[11..15].try_into().unwrap()) as usize;
+                let mut compressed = vec![0u8; compressed_len];
+                records.read_exact(&mut compressed).await?;
+                let (session_id, text) = fake_mac_read_clipboard(&header, &compressed);
+                let _ = requests.send(MacRequest::ClipboardSend { session_id, text });
             }
             other => panic!("fake Mac got unexpected message type {other:#x}"),
         }
@@ -627,6 +767,7 @@ fn mac_target(port: u16) -> TargetConfig {
         password: MAC_PASSWORD.to_owned(),
         width: MAC_VIRTUAL_WIDTH,
         height: MAC_VIRTUAL_HEIGHT,
+        clipboard: true,
         ..target(Protocol::Vnc, port)
     }
 }
@@ -1210,9 +1351,10 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
 }
 
 /// The whole `ard-high-performance` wire, end to end: authentication, record setup,
-/// one virtual-display configuration, the answering layout, and pixels.
+/// one virtual-display configuration, pixels, and native Apple pasteboard messages
+/// in both directions.
 #[tokio::test]
-async fn high_performance_requests_one_configured_virtual_display() {
+async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard() {
     let (mac_port, mut requests, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
@@ -1220,6 +1362,10 @@ async fn high_performance_requests_one_configured_virtual_display() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
 
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoPasteboard(true)
+    );
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::Configuration((MAC_VIRTUAL_WIDTH, MAC_VIRTUAL_HEIGHT))
@@ -1241,6 +1387,47 @@ async fn high_performance_requests_one_configured_virtual_display() {
     assert_eq!(displays[0]["virtual"], true, "{msg}");
     assert_eq!(msg["active"], MAC_VIRTUAL_DISPLAY, "{msg}");
     expect_tile(&mut ws).await;
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoPasteboard(true),
+        "the virtual display's answering layout did not re-arm its pasteboard"
+    );
+
+    // Remote → browser. Selecting the already-active display gives the fake Mac
+    // a deterministic point to announce a pasteboard change; the gateway fetches
+    // the archive and forwards its UTF-8 text.
+    ws.send(Message::text(format!(
+        r#"{{"type":"selectDisplay","id":{MAC_VIRTUAL_DISPLAY}}}"#
+    )))
+    .await
+    .unwrap();
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::Display(MAC_VIRTUAL_DISPLAY)
+    );
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::ClipboardFetch(0)
+    );
+    let remote_clipboard = expect_clipboard(&mut ws).await;
+    assert_eq!(remote_clipboard.text, MAC_REMOTE_CLIPBOARD);
+    assert!(remote_clipboard.changed_at_ms.is_some());
+    assert!(!remote_clipboard.requested);
+
+    // Browser → remote. The session id learned from the server archive must be
+    // returned with the same native pasteboard envelope inside the record layer.
+    ws.send(Message::text(format!(
+        r#"{{"type":"clipboard","text":"{MAC_BROWSER_CLIPBOARD}"}}"#
+    )))
+    .await
+    .unwrap();
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::ClipboardSend {
+            session_id: MAC_CLIPBOARD_SESSION,
+            text: MAC_BROWSER_CLIPBOARD.to_owned(),
+        }
+    );
 
     // A viewport report must not become a second configuration. The display request
     // after it gives the fake server a deterministic later message to report.

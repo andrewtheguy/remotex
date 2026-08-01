@@ -199,7 +199,7 @@ Clipboard support is a per-target opt-in available on all engines. The backend
 holds the latest remote value and its observed change time:
 
 - generic VNC forwards and buffers `ServerCutText` or Extended Clipboard data;
-- Apple Standard VNC reads and writes the Mac's native compressed pasteboard;
+- both Apple VNC subtypes read and write the Mac's native compressed pasteboard;
 - RDP requests `CF_UNICODETEXT` after a remote format announcement.
 
 Clients may request the current value after attaching, since they may have
@@ -288,10 +288,10 @@ byte layouts and measured protocol corrections are in
 
 Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
 transport (the reference leaves their payload formats unresolved, and a client must
-not advertise an encoding it cannot decode); the pasteboard, which Apple carries over
-messages of its own rather than RFB's, so `clipboard` is refused for the subtype at
-configuration time; and Apple's undocumented dynamic resolution, so `resize` is
-refused there too. See
+not advertise an encoding it cannot decode); and Apple's undocumented dynamic
+resolution, so `resize` is refused there. The native Apple pasteboard works on both
+subtypes; 003.889 enables monitoring before the rekey and carries the fetch and data
+messages inside its encrypted record layer. See
 [`roadmap.md`](roadmap.md).
 
 ## Clients

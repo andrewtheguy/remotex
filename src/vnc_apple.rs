@@ -37,10 +37,9 @@
 //!
 //! No Apple dynamic resolution, so `resize` is refused for both Apple subtypes at
 //! config load. No Adaptive media path (HEVC/AAC over SRTP), so
-//! `RFBMediaStreamMessage1` is never advertised. On the 003.889 transport the Mac
-//! carries the clipboard over messages of its own rather than RFB's, so
-//! `clipboard` is refused there; plain `ard` uses Apple's pasteboard messages on
-//! the unencrypted RFB stream.
+//! `RFBMediaStreamMessage1` is never advertised. Both Apple subtypes use Apple's
+//! native pasteboard protocol; High Performance enables monitoring before the
+//! rekey and carries fetches and clipboard data inside the encrypted transport.
 //!
 //! ## Reading the offsets in here
 //!
@@ -212,7 +211,7 @@ pub fn viewer_info() -> [u8; 66] {
 }
 
 /// Ask for an ordinary controlling session. ServerInit already establishes this,
-/// but native Standard sends the explicit message before enabling pasteboard
+/// but Apple's native clients send the explicit message before enabling pasteboard
 /// monitoring and the order affects which status notifications the Mac emits.
 pub fn set_mode_control() -> [u8; 4] {
     [0x0a, 0, 0, 1]

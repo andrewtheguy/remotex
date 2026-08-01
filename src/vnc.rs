@@ -803,19 +803,21 @@ async fn apple_preface(
         )
     })?;
 
-    // Both written back to back and before anything is read. The server emits the
-    // rekey the moment it sees the first of them, so anything that waited for a
-    // reply in between would be writing cleartext into a server that had already
-    // switched.
-    //
-    // `ViewerInfo` is deliberately absent, and its absence was measured: macOS 26
-    // reads *more* bytes for it than its own length field declares — the
-    // "version strings" the reference names but never frames — so sending one
-    // swallows whatever follows and the server then waits forever for the rest of
-    // a message that has already been sent. With it the rekey never arrives; with
-    // only these two it arrives immediately. Nothing is lost: the one bit the
-    // server is known to read out of it gates observe-only mode, which this
-    // client does not use.
+    // With clipboard enabled, the native control prelude is written back to back
+    // before encryption. The server emits the rekey as soon as encryption starts,
+    // so anything that waited for a reply in between would risk writing cleartext
+    // to a server that had already switched. ViewerInfo's body is the measured
+    // fixed numeric form, not the mis-sized string form in the reverse-engineered
+    // reference.
+    // ViewerInfo + SetMode are required for automatic pasteboard notifications on
+    // the live High Performance server, just as they are in Standard mode. The
+    // AutoPasteboard enable itself must also be cleartext: sending it as the first
+    // encrypted record is accepted without error but produces no status or data.
+    if config.clipboard {
+        sock.write_all(&vnc_apple::viewer_info()).await?;
+        sock.write_all(&vnc_apple::set_mode_control()).await?;
+        sock.write_all(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
+    }
     sock.write_all(&vnc_apple::set_encryption_start()).await?;
     sock.write_all(&vnc_apple::set_encryption_stop()).await?;
 
@@ -1290,7 +1292,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let mut resized = false;
                 let mut full_repaint_owed = false;
                 for _ in 0..rects {
-                    let effect = read_rect(&mut reader, &shared, &mut apple, &sink).await?;
+                    let effect =
+                        read_rect(&mut reader, &shared, &mut apple, clipboard_enabled, &sink)
+                            .await?;
                     resized |= effect.resized;
                     full_repaint_owed |= effect.full_repaint_owed;
                     if let (Some(repaint), Some(rect)) = (&mut full_repaint, effect.pixels) {
@@ -1877,6 +1881,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
     apple: &mut Option<Apple>,
+    clipboard_enabled: bool,
     sink: &TileSink,
 ) -> anyhow::Result<RectEffect> {
     let Shared { uplink, desktop, cursor, shadow, .. } = shared;
@@ -1931,7 +1936,15 @@ async fn read_rect<R: AsyncRead + Unpin>(
             if let Some(a) = apple.as_mut() {
                 a.asked_for_zlib = true;
             }
-            read_display_layout(reader, shared, first, virtual_display, sink).await?;
+            read_display_layout(
+                reader,
+                shared,
+                first,
+                virtual_display,
+                clipboard_enabled && virtual_display,
+                sink,
+            )
+            .await?;
             // Finish consuming this FramebufferUpdate before asking for the full
             // repaint. If the layout handler asks here, the poll loop queues its
             // normal incremental request directly behind it. macOS keeps only the
@@ -2266,6 +2279,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     shared: &Shared,
     ask_for_zlib: bool,
     virtual_display: bool,
+    rearm_pasteboard: bool,
     sink: &TileSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, .. } = shared;
@@ -2340,6 +2354,12 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     if ask_for_zlib {
         debug!("vnc: display layout received, asking for zlib");
         uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
+    }
+    // The initial virtual-display layout can arrive after the cleartext enable.
+    // Repeat it here, after the Mac has answered that setup, and on later layouts
+    // just as cursor arming is repeated. The command is idempotent.
+    if rearm_pasteboard {
+        uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
     // Re-arm, on every layout and not only on a change of geometry.
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
@@ -4343,7 +4363,7 @@ mod tests {
             Some(11),
             &[(11, (1920, 1080), (3840, 2160), 0x01), (22, (1600, 1000), (1600, 1000), 0x00)],
         );
-        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, false, &sink)
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, true, false, false, &sink)
             .await
             .unwrap();
         assert!(resized);
@@ -4408,20 +4428,20 @@ mod tests {
 
         // A session opens on the combined view, which is what the Mac sends when
         // nothing has asked otherwise.
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         // Then a screen, then back again. Each move is a layout, never a request.
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, 22);
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, false, &sink)
             .await
             .unwrap();
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
