@@ -34,7 +34,7 @@ export const MISSING_ENV = Object.entries(REQUIRED_ENV)
 /// browser-side equivalent of `#[ignore]` on the Rust e2e tests that need a
 /// container.
 ///
-///     REMOTEX_PLAYWRIGHT_AGENT=192.168.64.14:52381 npx playwright test
+///     REMOTEX_PLAYWRIGHT_AGENT=... npx playwright test
 export const AGENT_ENDPOINT = process.env.REMOTEX_PLAYWRIGHT_AGENT;
 
 /// Whether something is listening at [`AGENT_ENDPOINT`].
