@@ -5,9 +5,20 @@
 //! raw WebSocket client. Browser automation deliberately does not validate
 //! canvas paint timing or pixels (see CLAUDE.md). Xtigervnc
 //! serves its root window with no session behind it, so the first
-//! non-incremental update request drives real raw-encoded pixels through the
-//! whole pipeline: RFB handshake + DES auth -> `ServerMsg::Tile` -> the same
+//! non-incremental update request drives real pixels through the whole
+//! pipeline: RFB handshake + DES auth -> `ServerMsg::Tile` -> the same
 //! binary WS frames the RDP engine emits (tests/rdp_tiles_e2e.rs).
+//!
+//! This is also the ZRLE test of record — but only because the container paints a
+//! pattern on its root window (`tests/vnc-dummy/Containerfile`). TigerVNC sends a
+//! solid rectangle as RRE whatever the client preferred, so against a blank desktop
+//! this test never reaches the ZRLE encoder at all. With the pattern it does, and a
+//! decoder bug fails here rather than going unnoticed. `remotex::vnc_encodings` logs
+//! which encoding a server actually chose, which is the way to check.
+//!
+//! None of the assertions below depend on the encoding: the first update is
+//! non-incremental against an empty shadow, so nothing is suppressed and the whole
+//! framebuffer arrives however it was encoded.
 
 mod common;
 

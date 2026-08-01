@@ -250,8 +250,10 @@ negotiates the static and dynamic MS-RDPEA transports described above.
 
 The built-in client speaks two dialects, chosen by the target's `subtype`, that
 share everything below the handshake — one read loop, one input path, one tile
-path. Both request raw 32-bit true-color pixels in the same forced BGRX format and
-use the same shadow and encoder path as RDP.
+path. Both force the same 32-bit true-color BGRX pixel format rather than
+negotiating one, and use the same shadow and encoder path as RDP. `src/vnc_encodings.rs`
+decodes whichever encoding a server picks into the packed RGB888 the tile path
+takes, so nothing above it knows which was chosen.
 
 **RFB 3.8** is used by generic `vnc` and Apple Screen Sharing Standard mode
 (`subtype = "ard"`). It supports None,
@@ -260,7 +262,18 @@ pseudo-encoding. `ard` selects Apple's authentication and physical-display
 metadata and requires the macOS account username and password; plain VNC uses
 `vnc_password`. The explicit
 subtype prevents an anonymous macOS Screen Sharing connection from landing at a
-separate login-window session rather than the user's screen. With `resize = true`,
+separate login-window session rather than the user's screen.
+
+Generic `vnc` advertises the standard lossless encodings in preference order —
+CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first it
+supports, so a modern one settles on ZRLE and uses CopyRect for scrolls and window
+moves. Tight, TightPNG, JPEG and H.264 are deliberately absent: vendor or lossy,
+and this gateway re-encodes every tile for the browser anyway. CopyRect names a
+source region rather than carrying pixels; the clients cannot blit, so the pixels
+are read back out of the shadow, and a source the shadow does not know costs one
+non-incremental repaint rather than an invented picture.
+
+With `resize = true`,
 the client advertises DesktopSize and ExtendedDesktopSize against servers that
 accept them. Generic VNC clipboard support uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. The Apple subtype
