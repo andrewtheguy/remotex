@@ -1455,19 +1455,19 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let mut raw = [0u8; 15];
                 reader.read_exact(&mut raw).await?;
                 let header = vnc_apple_clipboard::header(&raw);
-                let requested = {
-                    let mut state = clipboard.lock().unwrap();
-                    state.apple_session_id = header.session_id;
-                    let requested = state.apple_requests > 0;
-                    state.apple_requests = state.apple_requests.saturating_sub(1);
-                    requested
-                };
+                clipboard.lock().unwrap().apple_session_id = header.session_id;
                 let compressed = u64::from(header.compressed);
                 if compressed > vnc_apple_clipboard::MAX_COMPRESSED_BYTES {
                     discard(&mut reader, compressed).await?;
                     if !clipboard_enabled {
                         continue;
                     }
+                    let requested = {
+                        let mut state = clipboard.lock().unwrap();
+                        let requested = state.apple_requests > 0;
+                        state.apple_requests = state.apple_requests.saturating_sub(1);
+                        requested
+                    };
                     let snapshot = {
                         let mut state = clipboard.lock().unwrap();
                         let snapshot = ClipboardSnapshot::oversized(
@@ -1487,6 +1487,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 if !clipboard_enabled {
                     continue;
                 }
+                let requested = {
+                    let mut state = clipboard.lock().unwrap();
+                    let requested = state.apple_requests > 0;
+                    state.apple_requests = state.apple_requests.saturating_sub(1);
+                    requested
+                };
                 match vnc_apple_clipboard::parse(header, &bytes) {
                     Ok(vnc_apple_clipboard::Incoming::Text(text)) => {
                         debug!("vnc: remote Apple clipboard updated, {} bytes", text.len());
@@ -4129,6 +4135,46 @@ mod tests {
                 ..
             }) if text == "cached"
         ));
+    }
+
+    #[tokio::test]
+    async fn disabled_apple_pasteboards_do_not_consume_browser_requests() {
+        let ordinary = vnc_apple_clipboard::send(7, "ignored").unwrap();
+        let oversized_len =
+            u32::try_from(vnc_apple_clipboard::MAX_COMPRESSED_BYTES + 1).unwrap();
+        let mut oversized = vec![0x1f, 0, 0, 0];
+        oversized.extend_from_slice(&9u32.to_be_bytes());
+        oversized.extend_from_slice(&oversized_len.to_be_bytes());
+        oversized.extend_from_slice(&oversized_len.to_be_bytes());
+        oversized.extend(std::iter::repeat_n(0, oversized_len as usize));
+
+        for (wire, session_id) in [(ordinary, 7), (oversized, 9)] {
+            let (uplink, _sent) = test_uplink();
+            let (sink, _rx) = test_sink();
+            let shared = test_shared(
+                uplink,
+                shared_desktop((2, 2), None, None),
+                test_shadow((2, 2)),
+            );
+            {
+                let mut clipboard = shared.clipboard.lock().unwrap();
+                clipboard.apple_requests = 2;
+            }
+            let clipboard = shared.clipboard.clone();
+
+            let _ = read_loop(
+                std::io::Cursor::new(wire),
+                shared,
+                ReadFlags { clipboard: false, poll: false },
+                Some(Apple::default()),
+                sink,
+            )
+            .await;
+
+            let clipboard = clipboard.lock().unwrap();
+            assert_eq!(clipboard.apple_session_id, session_id);
+            assert_eq!(clipboard.apple_requests, 2);
+        }
     }
 
     /// Under `AutoFrameBufferUpdate` the server drives, so a request per update
