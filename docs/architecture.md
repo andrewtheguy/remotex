@@ -179,11 +179,11 @@ density travels back as the `scale` on `resize`, and clients present the
 framebuffer at `pixels / scale`. Other engines ignore the message.
 
 A client shows the display picker exactly when the target sends it a
-`ServerMsg::Displays`, and hides it otherwise. One engine sends one: the VNC engine's
-Apple dialect, which parses an `AppleDisplayLayout` into a `displays` message and
-acts on a `selectDisplay` by binding that screen. RDP and plain VNC each expose a
-single framebuffer spanning every remote screen and have nothing to enumerate, so
-they never send the message and the picker stays hidden on those targets.
+`ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one for both
+Apple subtypes: it parses an `AppleDisplayLayout` into a `displays` message and
+acts on a `selectDisplay` by binding that screen. RDP and generic VNC expose a
+single framebuffer spanning every remote screen and have nothing to enumerate,
+so they never send the message and the picker stays hidden on those targets.
 
 Where the list is sent, the engine prepends an *All Displays* entry of its own so a
 client that picks a screen can get back, and it moves the checkmark only when a
@@ -198,7 +198,8 @@ layer injects it after attaching to an existing engine.
 Clipboard support is a per-target opt-in available on all engines. The backend
 holds the latest remote value and its observed change time:
 
-- VNC forwards and buffers `ServerCutText` or Extended Clipboard data;
+- generic VNC forwards and buffers `ServerCutText` or Extended Clipboard data;
+- Apple Standard VNC reads and writes the Mac's native compressed pasteboard;
 - RDP requests `CF_UNICODETEXT` after a remote format announcement.
 
 Clients may request the current value after attaching, since they may have
@@ -257,8 +258,10 @@ macOS account username and password; plain VNC uses `vnc_password`. The explicit
 subtype prevents an anonymous macOS Screen Sharing connection from landing at a
 separate login-window session rather than the user's screen. With `resize = true`,
 the client advertises DesktopSize and ExtendedDesktopSize against servers that
-accept them. Clipboard support uses Extended Clipboard when the server advertises
-it and falls back to Latin-1 `ServerCutText` otherwise.
+accept them. Generic VNC clipboard support uses Extended Clipboard when the server
+advertises it and falls back to Latin-1 `ServerCutText` otherwise. The Apple subtype
+also negotiates Apple's display metadata, display picker and native pasteboard on
+the ordinary byte stream; it deliberately leaves pixels raw.
 
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
 revision. It authenticates identically — the same security type 30 — and then
@@ -269,14 +272,12 @@ server delivers, of all places, inside a framebuffer rectangle. `src/vnc_record.
 is that transport, exposed to the rest of the engine as an ordinary `AsyncRead` and
 a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it.
 
-**What the subtype buys is compression**: zlib rectangles instead of raw pixels,
-around fifty times fewer bytes on a static desktop.
-
-It also does the thing standard RFB cannot express at all: **picking one of the
-Mac's screens**, and with it learning each screen's pixel density, so a Retina
-desktop is drawn at 100% rather than twice its size. Picking is what makes the
-density exact — a framebuffer spanning screens at different densities has no single
-scale factor and is shown at its pixel size.
+**What the high-performance subtype buys is compression**: zlib rectangles instead
+of raw pixels, around fifty times fewer bytes on a static desktop. Both Apple
+subtypes pick one of the Mac's screens and learn each screen's pixel density, so a
+Retina desktop is drawn at 100% rather than twice its size. Picking is what makes
+the density exact — a framebuffer spanning screens at different densities has no
+single scale factor and is shown at its pixel size.
 
 There is one trap, and this gateway fell into it for a release: macOS 26 synthesizes
 a single display and removes the Mac's real ones for the session's duration — **if**

@@ -1,5 +1,6 @@
-//! Apple's RFB 003.889 messages and encodings — what the `ard-high-performance`
-//! subtype speaks on top of the record layer in [`crate::vnc_record`].
+//! Apple's Screen Sharing messages and encodings. Both Apple subtypes use the
+//! display and cursor pieces; `ard-high-performance` adds zlib and carries them
+//! on the record layer in [`crate::vnc_record`].
 //!
 //! Everything here is either a message this client builds or a rectangle payload
 //! it parses. The transport is [`crate::vnc_record`]'s and the session loop is
@@ -37,10 +38,12 @@
 //!
 //! ## What is otherwise absent
 //!
-//! No dynamic resolution, so `resize` is refused for this subtype at config load.
-//! No Adaptive media path (HEVC/AAC over SRTP), so `RFBMediaStreamMessage1` is
-//! never advertised. No pasteboard: on this wire the Mac carries the clipboard over
-//! messages of its own rather than RFB's, so `clipboard` is refused too.
+//! No dynamic resolution, so `resize` is refused for both Apple subtypes at config
+//! load. No Adaptive media path (HEVC/AAC over SRTP), so
+//! `RFBMediaStreamMessage1` is never advertised. On the 003.889 transport the Mac
+//! carries the clipboard over messages of its own rather than RFB's, so
+//! `clipboard` is refused there; plain `ard` uses Apple's pasteboard messages on
+//! the unencrypted RFB stream.
 //!
 //! ## Reading the offsets in here
 //!
@@ -103,7 +106,8 @@ pub const ENCODING_USER_INFO: i32 = 0x44e;
 /// [`ENCODING_DISPLAY_LAYOUT`] at all** — no display list, no per-screen density,
 /// nothing to pick — while this sequence produced one every time. Sixteen variants,
 /// one connection each, no exceptions. Why the daemon reads the list this way is
-/// unresolved; that it does is not.
+/// unresolved; that it does is not. The same exact list was also measured to
+/// produce `AppleDisplayLayout` after downgrading the Mac to RFB 3.8.
 ///
 /// One caveat, recorded because the alternative is a comment that reads stricter than
 /// the evidence: the bisected list also carried `ENCODING_USER_INFO`, which this one
@@ -139,9 +143,9 @@ pub const ENCODINGS: &[i32] = &[
 /// so compression is asked for in a second `SetEncodings` after the Mac has already
 /// reported its screens. It keeps that state and simply switches encoder: measured
 /// at 398 KB for a 3200x1800 frame against 23 MB of raw pixels, with display
-/// selection still working afterwards. Sending only the first list would leave the
-/// subtype slower than plain `ard`; sending only a list with zlib in it would leave
-/// it with nothing to pick.
+/// selection still working afterwards. Sending only the first list would leave
+/// either Apple subtype on raw pixels; sending only a list with zlib in it would
+/// leave it with nothing to pick.
 pub const ENCODINGS_WITH_ZLIB: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
@@ -179,6 +183,34 @@ const MAX_CURSOR_DIM: u16 = 256;
 /// bounds check against the announced desktop; this only stops a wildly bogus
 /// geometry from turning into an allocation.
 const MAX_INFLATED: usize = 8192 * 8192 * 4;
+
+/// Identify this client to Screen Sharing before enabling its optional control
+/// messages. The 62-byte body is the native numeric-version form measured on
+/// macOS 26; there are no counted strings in it.
+pub fn viewer_info() -> [u8; 66] {
+    let mut msg = [0u8; 66];
+    msg[0] = 0x21;
+    msg[2..4].copy_from_slice(&62u16.to_be_bytes());
+    msg[4..6].copy_from_slice(&1u16.to_be_bytes()); // generic viewer
+    msg[6..10].copy_from_slice(&2u32.to_be_bytes()); // Screen Sharing
+    msg[10..14].copy_from_slice(&6u32.to_be_bytes());
+    msg[14..18].copy_from_slice(&1u32.to_be_bytes());
+    // App patch, then OS major/minor/patch. Zero is an honest unknown OS here.
+    // The final 32 bytes are the command-support bitmap native sends.
+    msg[34] = 0xb0;
+    msg[36] = 0x0c;
+    msg[37] = 0x03;
+    msg[38] = 0x90;
+    msg[44] = 0x40;
+    msg
+}
+
+/// Ask for an ordinary controlling session. ServerInit already establishes this,
+/// but native Standard sends the explicit message before enabling pasteboard
+/// monitoring and the order affects which status notifications the Mac emits.
+pub fn set_mode_control() -> [u8; 4] {
+    [0x0a, 0, 0, 1]
+}
 
 /// `SetEncryption(command = 1)`: turn the record layer on, AES-128 the only
 /// method there is.
@@ -717,6 +749,22 @@ fn be32(bytes: &[u8], at: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standard_control_prelude_matches_the_apple_wire() {
+        let info = viewer_info();
+        assert_eq!(&info[..10], &[0x21, 0, 0, 62, 0, 1, 0, 0, 0, 2]);
+        assert_eq!(&info[10..22], &[0, 0, 0, 6, 0, 0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(&info[22..34], &[0; 12]);
+        let mut bitmap = [0u8; 32];
+        bitmap[0] = 0xb0;
+        bitmap[2] = 0x0c;
+        bitmap[3] = 0x03;
+        bitmap[4] = 0x90;
+        bitmap[10] = 0x40;
+        assert_eq!(info[34..], bitmap);
+        assert_eq!(set_mode_control(), [0x0a, 0, 0, 1]);
+    }
 
     #[test]
     fn set_encryption_is_the_observed_bytes() {

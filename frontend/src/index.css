@@ -19,9 +19,9 @@ body {
   color: #e6edf3;
 }
 
-/* Phase 3: the screen IS the viewport. The framebuffer renders at 1:1 device
-   pixels; when the remote desktop is larger than the viewport this container
-   scrolls natively in both axes — no letterboxing, no scaling. */
+/* Phase 3: the screen IS the viewport. The framebuffer uses at most the host's
+   pixel density; when the remote desktop is larger than the viewport this
+   container scrolls natively in both axes — no fit-to-window scaling. */
 .screen {
   width: 100%;
   height: 100%;

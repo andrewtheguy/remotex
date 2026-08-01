@@ -38,10 +38,12 @@ design and its salvage point are recorded in
 
 ### Apple Screen Sharing: picking a display
 
-**Done.** `subtype = "ard-high-performance"` lists the Mac's screens with an *All
-Displays* entry, binds one with `SetDisplayMessage`, and reports each screen's pixel
-density — so a Retina Mac finally draws at 100% instead of twice its size. The
-checkmark follows the Mac's answering layout rather than the click.
+**Done.** Both `subtype = "ard"` and `subtype = "ard-high-performance"` list the
+Mac's screens with an *All Displays* entry, bind one with `SetDisplayMessage`, and
+report each screen's pixel density — so a Retina Mac finally draws at 100% instead
+of twice its size. The Standard subtype carries those Apple extensions on RFB 3.8
+and keeps pixels raw; high performance carries them over the record layer and adds
+zlib. The checkmark follows the Mac's answering layout rather than the click.
 
 The earlier conclusion here — that a 003.889 session replaces the Mac's screens with
 one synthesized display and there is nothing to pick — was wrong, and wrong in an
@@ -70,10 +72,10 @@ What remains on that wire, each for its own reason:
   gateway sends no descriptor and `resize` is refused for the subtype at
   configuration time. Note that none of this is ever a reason to scale on the client:
   see the 100% rule in `CLAUDE.md`.
-- **The pasteboard.** Apple carries it over messages of its own — an announcement,
-  a fetch, then a zlib'd multi-flavour archive — not over RFB's Extended Clipboard,
-  which is all `src/vnc_clipboard.rs` implements. `clipboard` is refused for the
-  subtype rather than accepted and left inert.
+- **The high-performance pasteboard.** Apple carries it over messages of its own —
+  an announcement, a fetch, then a zlib'd multi-flavour archive. Standard `ard`
+  implements that protocol on its plain stream; `clipboard` remains refused on
+  003.889 until the same messages are enabled on its record transport.
 - **Apple's still-image codecs** (`0x3ea` and the per-tile `0x3f3`), which would
   compress far better than zlib. Blocked, not deferred: the reference this was
   written from marks `0x3ea`'s rectangle body and `0x3f3`'s command-code table as

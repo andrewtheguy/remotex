@@ -1,24 +1,23 @@
 //! VNC client, in two dialects that share everything below the handshake.
 //!
 //! **RFB 3.8**, which is every VNC server including a Mac's under `subtype =
-//! "ard"`: Raw framebuffer updates, the cursor and resize pseudo-encodings,
-//! classic or Apple DH authentication, baseline or Extended Clipboard.
+//! "ard"`: classic or Apple DH authentication. A Mac also accepts Apple's
+//! metadata and pasteboard messages on this transport, exposing the same display
+//! list, selection and density as its own revision while pixels stay raw.
 //!
 //! **RFB 003.889**, Apple's own revision, under `subtype =
 //! "ard-high-performance"`: the same RFB messages carried inside an AES-128-CBC
 //! record layer ([`crate::vnc_record`]), alongside Apple's control messages
-//! ([`crate::vnc_apple`]). What that buys is **zlib instead of raw pixels**, the
-//! Mac's screens listed so one of them can be picked, and each screen's **pixel
-//! density**, which is what lets a Retina desktop be drawn at 100% instead of twice
-//! its size. See docs/apple-vnc-889.md, which records the several places the
-//! protocol reference is wrong — including the message this gateway used to send
-//! that made the Mac hide its real screens.
+//! ([`crate::vnc_apple`]). It exposes the same screens and pixel density, but its
+//! pasteboard is a separate Apple protocol rather than RFB Extended Clipboard.
+//! See docs/apple-vnc-889.md, which records the several places the protocol
+//! reference is wrong — including the message this gateway used to send that made
+//! the Mac hide its real screens.
 //!
-//! The difference is contained in three places and nowhere else: [`Dialect`]
-//! (which banner, which ClientInit byte), the two preface functions after
-//! ServerInit, and the encodings [`read_rect`] then has to handle. One read loop,
-//! one input path, one tile path — decoded damage joins the common ordered tile
-//! path either way.
+//! The transport difference is contained in three places and nowhere else:
+//! [`Dialect`] (which banner and ClientInit byte), the two preface functions after
+//! ServerInit, and the optional record wrapper. One read loop, one input path, one
+//! Apple metadata path and one tile path serve both.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,6 +44,7 @@ use crate::protocol::{
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache, FramebufferZlib};
+use crate::vnc_apple_clipboard;
 use crate::vnc_clipboard;
 use crate::vnc_record::{self, Keys, RecordReader, RecordWriter};
 
@@ -250,7 +250,7 @@ struct DesktopState {
     /// Pixels per point: how large `size` should be *shown*, as opposed to how
     /// many pixels it has.
     ///
-    /// Always [`UNSCALED`] on plain RFB, where a framebuffer is just its pixels
+    /// Always [`UNSCALED`] on non-Apple RFB, where a framebuffer is just its pixels
     /// and no server says otherwise. Apple's display layout does say otherwise —
     /// a Retina screen renders at twice its logical size — and reporting only the
     /// pixel count there would give the browser a canvas at half the size the Mac
@@ -278,8 +278,8 @@ impl DesktopState {
 
 type SharedDesktop = Arc<std::sync::Mutex<DesktopState>>;
 
-/// The Mac's screens and which one is being shared. Empty on plain RFB, where
-/// there is nothing to choose between, and until the first layout arrives.
+/// The Mac's screens and which one is being shared. Empty on non-Apple RFB and
+/// until the first layout arrives.
 #[derive(Debug, Default)]
 struct DisplayState {
     displays: Vec<DisplayInfo>,
@@ -317,7 +317,7 @@ impl DisplayState {
 
 type SharedDisplay = Arc<std::sync::Mutex<DisplayState>>;
 
-/// The 003.889 dialect's decoding state, owned by the read loop.
+/// Apple's display/cursor decoding state, owned by the read loop.
 ///
 /// Not in [`Shared`]: the zlib stream and the cursor cache are touched by nothing
 /// else, and a lock on the pixel path to say so would be a lock that never
@@ -366,12 +366,10 @@ type SharedCursor = Arc<std::sync::Mutex<CursorState>>;
 /// fills `remote` and learns the server's capabilities) and the input side
 /// (which answers a Fetch from `remote` and records `local`).
 ///
-/// RFB has no "read the clipboard" request — the server pushes whenever the
-/// remote clipboard changes — so `remote` keeps the latest text to answer
-/// [`ClientMsg::ClipboardRequest`]. Forwarding the push live is not enough on
-/// its own: a browser that attaches mid-session, or reattaches after a drop,
-/// has missed every push so far and would see an empty panel with no way to
-/// ask.
+/// Standard RFB has no "read the clipboard" request — the server pushes whenever
+/// the remote clipboard changes — so `remote` keeps the latest text to answer
+/// [`ClientMsg::ClipboardRequest`]. Apple's pasteboard does have a fetch; a
+/// request is forwarded there and its reply refreshes this same cache.
 #[derive(Debug, Default)]
 struct ClipboardState {
     /// What the remote last sent. `None` means nothing has been copied there
@@ -385,6 +383,13 @@ struct ClipboardState {
     /// `None` until caps arrive, which is also how "the server does not speak
     /// the extension, use latin-1" is spelled — see [`crate::vnc_clipboard`].
     server: Option<vnc_clipboard::Caps>,
+    /// Opaque value echoed by Apple's pasteboard messages. Zero until the Mac
+    /// supplies one, which is also the value its first fetch uses.
+    apple_session_id: u32,
+    /// Browser reads waiting for the next native Apple pasteboard response.
+    /// The panel issues only one at a time, but count them so the wire remains
+    /// correct if another client does not make that UI guarantee.
+    apple_requests: usize,
 }
 
 type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
@@ -429,7 +434,7 @@ async fn session(
         return;
     };
 
-    let Connected { downlink, uplink, width, height, macos, poll } = connected;
+    let Connected { downlink, uplink, width, height, macos, apple, poll } = connected;
     info!("vnc: connected, desktop {width}x{height} (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
@@ -455,7 +460,8 @@ async fn session(
             resize: config.resize,
             clipboard: config.clipboard,
             default_size: (config.width, config.height),
-            apple: Dialect::of(config.subtype) == Dialect::Apple889,
+            apple,
+            apple_zlib: Dialect::of(config.subtype) == Dialect::Apple889,
             poll,
         },
         input_rx,
@@ -490,9 +496,13 @@ struct Flags {
     /// asks — and it is what lets an operator say what a phone should get
     /// without a second constant existing anywhere.
     default_size: (u16, u16),
-    /// Whether this is the RFB 003.889 dialect, which is what gives the read loop
-    /// its zlib stream, its cursor cache and a display list to report.
+    /// Whether Apple's metadata encodings were negotiated, giving the read loop
+    /// its zlib stream, cursor cache and display list to report. Both Apple
+    /// subtypes negotiate them; only one uses the 003.889 record transport.
     apple: bool,
+    /// Whether zlib must wait for the first Apple layout. Plain `ard` deliberately
+    /// stays raw; this is only the 003.889 subtype's compression upgrade.
+    apple_zlib: bool,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
 }
@@ -515,6 +525,8 @@ struct Connected {
     height: u16,
     /// Whether the server is macOS Screen Sharing — see [`is_macos_server`].
     macos: bool,
+    /// Whether the preface negotiated Apple's display/cursor encodings.
+    apple: bool,
     /// Whether the client drives the update cycle: one request, one update, repeat.
     ///
     /// True on both dialects, and on the 003.889 one that is a measurement rather
@@ -709,23 +721,25 @@ async fn rfb38_preface(
     config: &TargetConfig,
 ) -> anyhow::Result<Connected> {
     let mut uplink = Uplink::plain(sock);
+    let apple = config.subtype == Some(Subtype::Ard);
+    if apple {
+        // Native Standard announces itself and its control mode before enabling
+        // pasteboard monitoring. Without this prelude the Mac accepts writes and
+        // explicit fetches but does not emit clipboard-change status messages.
+        uplink.send(&vnc_apple::viewer_info()).await?;
+        uplink.send(&vnc_apple::set_mode_control()).await?;
+    }
     uplink.send(&set_pixel_format()).await?;
-    // Cursor is unconditional (the browser can always draw a pointer). The
-    // resize pseudo-encodings are advertised only when the target opts in
-    // (`resize = true`); without them the server never announces support and
-    // the desktop keeps its connect-time size.
-    let mut encodings = vec![ENCODING_RAW, ENCODING_CURSOR];
-    if config.resize {
-        encodings.push(ENCODING_EXTENDED_DESKTOP_SIZE);
-        encodings.push(ENCODING_DESKTOP_SIZE);
+    uplink
+        .send(&set_encodings(&rfb38_encoding_list(
+            apple,
+            config.resize,
+            config.clipboard,
+        )))
+        .await?;
+    if apple && config.clipboard {
+        uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
-    if config.clipboard {
-        // Extended Clipboard, which is the only way RFB carries anything
-        // outside latin-1. Advertised on opt-in only; a server that ignores it
-        // simply never sends caps and the latin-1 path stays in use.
-        encodings.push(vnc_clipboard::ENCODING);
-    }
-    uplink.send(&set_encodings(&encodings)).await?;
 
     Ok(Connected {
         downlink: Downlink::Plain(reader),
@@ -733,8 +747,35 @@ async fn rfb38_preface(
         width: server.width,
         height: server.height,
         macos,
+        apple,
         poll: true,
     })
+}
+
+fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
+    if apple {
+        // A Mac sends the same display layout and accepts the same display picker
+        // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free:
+        // plain `ard` is the uncompressed alternative to 003.889, and its native
+        // pasteboard is negotiated by `AutoPasteboard`, not an RFB encoding.
+        return vnc_apple::ENCODINGS.to_vec();
+    }
+
+    // Cursor is unconditional (the browser can always draw a pointer). The resize
+    // pseudo-encodings are advertised only when the target opts in; without them
+    // the server never announces support and keeps its connect-time size.
+    let mut encodings = vec![ENCODING_RAW, ENCODING_CURSOR];
+    if resize {
+        encodings.push(ENCODING_EXTENDED_DESKTOP_SIZE);
+        encodings.push(ENCODING_DESKTOP_SIZE);
+    }
+    if clipboard {
+        // Extended Clipboard is the only way generic RFB carries anything outside
+        // latin-1. A server that ignores it never sends caps and the fallback stays
+        // in use.
+        encodings.push(vnc_clipboard::ENCODING);
+    }
+    encodings
 }
 
 /// The RFB 003.889 tail: Apple's cleartext prelude, the wait for the rekey, then
@@ -806,6 +847,7 @@ async fn apple_preface(
         width: server.width,
         height: server.height,
         macos,
+        apple: true,
         poll: true,
     })
 }
@@ -877,6 +919,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         clipboard: clipboard_enabled,
         default_size,
         apple,
+        apple_zlib,
         poll,
     } = flags;
     // The uplink is shared: the read loop answers the server (update requests,
@@ -913,7 +956,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             clipboard: clipboard_enabled,
             poll,
         },
-        apple.then(Apple::default),
+        apple.then(|| Apple {
+            asked_for_zlib: !apple_zlib,
+            ..Apple::default()
+        }),
         sink.clone(),
     ));
 
@@ -1001,11 +1047,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     send(&uplink, &update_request(false, size)).await
                 } else if matches!(input, ClientMsg::ClipboardRequest) {
-                    // Answered from the buffer the read loop fills: RFB has no
-                    // way to *ask* the server for its clipboard. Empty until
-                    // the remote copies something, which reads in the panel as
-                    // "nothing has been copied over there yet".
-                    if clipboard_enabled {
+                    if clipboard_enabled && apple {
+                        // Unlike standard RFB, Apple's pasteboard can be read on
+                        // demand. Answer from the cache first so a silent Mac
+                        // cannot strand the browser's read, then fetch so a later
+                        // response refreshes that cache and the open panel.
+                        request_apple_clipboard(&clipboard, &uplink, &sink).await
+                    } else if clipboard_enabled {
+                        // Standard RFB can only answer from the buffer the read
+                        // loop fills. Empty means nothing has been copied there
+                        // yet during this session.
                         let snapshot = clipboard
                             .lock()
                             .unwrap()
@@ -1023,8 +1074,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         {
                             break Err(e);
                         }
+                        Ok(())
+                    } else {
+                        Ok(())
                     }
-                    Ok(())
                 } else if let ClientMsg::Clipboard { text } = &input {
                     if clipboard_enabled && !clipboard_fits(text) {
                         // Refused, as the RDP engine does: the remote
@@ -1037,6 +1090,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             text.len()
                         );
                         Ok(())
+                    } else if clipboard_enabled && apple {
+                        let session_id = {
+                            let mut state = clipboard.lock().unwrap();
+                            state.local = Some(text.to_owned());
+                            state.apple_session_id
+                        };
+                        match vnc_apple_clipboard::send(session_id, text) {
+                            Ok(msg) => send(&uplink, &msg).await,
+                            Err(e) => Err(e),
+                        }
                     } else if clipboard_enabled {
                         // Extended when the server offered it, which is the
                         // only path that carries anything outside latin-1.
@@ -1066,8 +1129,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 } else if let ClientMsg::SelectDisplay { id } = input {
                     // Handled here rather than in `translate_input`, which is a
                     // pure function of the input and has no way to record what was
-                    // asked for. Only the Apple dialect can act on it: standard RFB
-                    // exposes one framebuffer and has no message for this.
+                    // asked for. Only an Apple target can act on it: generic RFB
+                    // exposes one framebuffer, while a Mac accepts this extension
+                    // on both supported transports.
                     if apple {
                         let known =
                             display.lock().unwrap().displays.iter().any(|d| d.id == id);
@@ -1167,8 +1231,8 @@ struct Shared {
 
 /// Read server messages forever, forwarding framebuffer updates as tiles.
 ///
-/// `apple` is `Some` on the RFB 003.889 dialect and carries the decoding state
-/// only that dialect's encodings need.
+/// `apple` is `Some` when either Apple subtype negotiated the Mac's metadata
+/// encodings. The transport may be plain RFB 3.8 or 003.889 records.
 async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: R,
     shared: Shared,
@@ -1347,6 +1411,142 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     return Ok(()); // browser link gone; the session layer handles it
                 }
             }
+            // Apple's pasteboard status. `cmd = 2` says the remote clipboard
+            // changed and must be fetched; `cmd = 3` asks for the browser's last
+            // clipboard again. Other status values are session/heartbeat notices
+            // with no clipboard action.
+            0x14 if apple.is_some() => {
+                reader.read_u8().await?; // padding
+                let len = reader.read_u16().await?;
+                let mut body = vec![0u8; usize::from(len)];
+                reader.read_exact(&mut body).await?;
+                if body.len() < 4 {
+                    warn!("vnc: ignoring an Apple status with a {len}-byte body");
+                    continue;
+                }
+                let command = u16::from_be_bytes([body[2], body[3]]);
+                match command {
+                    2 if clipboard_enabled => {
+                        let session_id = clipboard.lock().unwrap().apple_session_id;
+                        send(uplink, &vnc_apple_clipboard::fetch(session_id)).await?;
+                    }
+                    3 if clipboard_enabled => {
+                        let local = {
+                            let state = clipboard.lock().unwrap();
+                            state
+                                .local
+                                .as_ref()
+                                .map(|text| (state.apple_session_id, text.clone()))
+                        };
+                        if let Some((session_id, text)) = local {
+                            match vnc_apple_clipboard::send(session_id, &text) {
+                                Ok(msg) => send(uplink, &msg).await?,
+                                Err(e) => warn!("vnc: could not answer Apple pasteboard request: {e:#}"),
+                            }
+                        }
+                    }
+                    _ => debug!("vnc: Apple status command {command}"),
+                }
+            }
+            // Apple's compressed pasteboard archive, fetched after the status
+            // above. The record layer is a byte stream here, so a payload split
+            // across records is reassembled by `read_exact` without special cases.
+            0x1f if apple.is_some() => {
+                let mut raw = [0u8; 15];
+                reader.read_exact(&mut raw).await?;
+                let header = vnc_apple_clipboard::header(&raw);
+                clipboard.lock().unwrap().apple_session_id = header.session_id;
+                let compressed = u64::from(header.compressed);
+                if compressed > vnc_apple_clipboard::MAX_COMPRESSED_BYTES {
+                    discard(&mut reader, compressed).await?;
+                    if !clipboard_enabled {
+                        continue;
+                    }
+                    let requested = {
+                        let mut state = clipboard.lock().unwrap();
+                        let requested = state.apple_requests > 0;
+                        state.apple_requests = state.apple_requests.saturating_sub(1);
+                        requested
+                    };
+                    let snapshot = {
+                        let mut state = clipboard.lock().unwrap();
+                        let snapshot = ClipboardSnapshot::oversized(
+                            u64::from(header.uncompressed),
+                            state.remote.as_ref(),
+                        );
+                        state.remote = Some(snapshot.clone());
+                        snapshot
+                    };
+                    if emit_clipboard(&sink, snapshot, requested).await {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                let mut bytes = vec![0u8; compressed as usize];
+                reader.read_exact(&mut bytes).await?;
+                if !clipboard_enabled {
+                    continue;
+                }
+                let requested = {
+                    let mut state = clipboard.lock().unwrap();
+                    let requested = state.apple_requests > 0;
+                    state.apple_requests = state.apple_requests.saturating_sub(1);
+                    requested
+                };
+                match vnc_apple_clipboard::parse(header, &bytes) {
+                    Ok(vnc_apple_clipboard::Incoming::Text(text)) => {
+                        debug!("vnc: remote Apple clipboard updated, {} bytes", text.len());
+                        let snapshot = {
+                            let mut state = clipboard.lock().unwrap();
+                            let snapshot = ClipboardSnapshot::changed(text, state.remote.as_ref());
+                            state.remote = Some(snapshot.clone());
+                            snapshot
+                        };
+                        if emit_clipboard(&sink, snapshot, requested).await {
+                            return Ok(());
+                        }
+                    }
+                    Ok(vnc_apple_clipboard::Incoming::Oversized(bytes)) => {
+                        let snapshot = {
+                            let mut state = clipboard.lock().unwrap();
+                            let snapshot = ClipboardSnapshot::oversized(bytes, state.remote.as_ref());
+                            state.remote = Some(snapshot.clone());
+                            snapshot
+                        };
+                        if emit_clipboard(&sink, snapshot, requested).await {
+                            return Ok(());
+                        }
+                    }
+                    Ok(vnc_apple_clipboard::Incoming::NoText) => {
+                        debug!("vnc: Apple pasteboard carries no text flavor");
+                        if requested {
+                            let snapshot = clipboard
+                                .lock()
+                                .unwrap()
+                                .remote
+                                .clone()
+                                .unwrap_or_else(ClipboardSnapshot::unobserved);
+                            if emit_clipboard(&sink, snapshot, true).await {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("vnc: unreadable Apple pasteboard: {e:#}");
+                        if requested {
+                            let snapshot = clipboard
+                                .lock()
+                                .unwrap()
+                                .remote
+                                .clone()
+                                .unwrap_or_else(ClipboardSnapshot::unobserved);
+                            if emit_clipboard(&sink, snapshot, true).await {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
             // Apple's own server messages, which arrive alongside the rectangles on
             // the 003.889 wire and end the session if they are not stepped over.
             //
@@ -1366,6 +1566,48 @@ async fn read_loop<R: AsyncRead + Unpin>(
             other => anyhow::bail!("unknown server message type {other}"),
         }
     }
+}
+
+/// Forward one already-recorded remote clipboard snapshot. Returns whether the
+/// browser link is gone, matching the read loop's other sink helpers.
+async fn emit_clipboard(sink: &TileSink, snapshot: ClipboardSnapshot, requested: bool) -> bool {
+    sink.msg(ServerMsg::Clipboard {
+        text: snapshot.text,
+        changed_at_ms: snapshot.changed_at_ms,
+        requested,
+        oversized_bytes: snapshot.oversized_bytes,
+    })
+    .await
+    .is_err()
+}
+
+/// Answer an Apple clipboard read immediately, then refresh it asynchronously
+/// from the Mac. The cache reply is the browser request's guaranteed response;
+/// the fetch may be ignored by a server or arrive later as a second update.
+async fn request_apple_clipboard(
+    clipboard: &SharedClipboard,
+    uplink: &SharedUplink,
+    sink: &TileSink,
+) -> anyhow::Result<()> {
+    let (session_id, snapshot) = {
+        let mut state = clipboard.lock().unwrap();
+        state.apple_requests = state.apple_requests.saturating_add(1);
+        (
+            state.apple_session_id,
+            state
+                .remote
+                .clone()
+                .unwrap_or_else(ClipboardSnapshot::unobserved),
+        )
+    };
+    sink.msg(ServerMsg::Clipboard {
+        text: snapshot.text,
+        changed_at_ms: snapshot.changed_at_ms,
+        requested: true,
+        oversized_bytes: snapshot.oversized_bytes,
+    })
+    .await?;
+    send(uplink, &vnc_apple_clipboard::fetch(session_id)).await
 }
 
 /// Handle one Extended Clipboard message from the server.
@@ -1657,8 +1899,8 @@ async fn read_rect<R: AsyncRead + Unpin>(
         ENCODING_LAST_RECT => return Ok(RectEffect::LAST),
         // DesktopSize: the rect itself is the announcement; no payload.
         //
-        // Plain-RFB only, and the guard is not decoration: it carries no density, so
-        // applying one on the Apple dialect would overwrite a scale learned from a
+        // Non-Apple RFB only, and the guard is not decoration: it carries no density,
+        // so applying one with Apple metadata would overwrite a scale learned from a
         // display layout with `UNSCALED` and double the desktop's apparent size. It
         // *is* advertised there — [`vnc_apple::ENCODINGS`] must contain it or no
         // layout arrives at all — so this arm is reached in practice, and dropping
@@ -1931,10 +2173,10 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
 /// Apply a server-announced framebuffer size: update the shared geometry and
 /// forward it to the browser. Returns whether anything actually changed.
 ///
-/// `scale` is how large those pixels should look — [`UNSCALED`] on plain RFB,
-/// which has no way to say otherwise, and the Mac's own ratio on the Apple
-/// dialect. A scale change with no size change still counts: the same pixels shown
-/// at a different size is a different canvas.
+/// `scale` is how large those pixels should look — [`UNSCALED`] on generic RFB,
+/// which has no way to say otherwise, and the Mac's own ratio when Apple metadata
+/// was negotiated. A scale change with no size change still counts: the same pixels
+/// shown at a different size is a different canvas.
 async fn apply_resize(
     desktop: &SharedDesktop,
     shadow: &SharedShadow,
@@ -2085,7 +2327,8 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // Now that the Mac has said what it has, ask for compression. This has to wait
     // for a layout: zlib in the *first* `SetEncodings` costs the layout entirely, and
     // asking again here keeps the display state and merely changes encoder. Sent
-    // before the re-arm so the update that follows is the compressed one.
+    // before the re-arm so the update that follows is the compressed one. Plain
+    // `ard` already set `asked_for_zlib`: it stays raw and never enters this branch.
     if ask_for_zlib {
         debug!("vnc: display layout received, asking for zlib");
         uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
@@ -2211,10 +2454,9 @@ fn translate_input(
         | ClientMsg::CacheReset
         | ClientMsg::Audio { .. } => Vec::new(),
         // Intercepted by the input loop, which is where the requested screen is
-        // recorded — see the `SelectDisplay` branch there. Standard RFB has nothing
-        // for it in any case: one framebuffer spans every screen, and the
-        // ExtendedDesktopSize list describes how they are laid out inside it rather
-        // than offering a set to choose between.
+        // checked — see the `SelectDisplay` branch there. Generic RFB has nothing
+        // for it; the Apple extension supplies the selectable list on either
+        // transport.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
         // Nothing to act on: RFB has no backing scale, and a VNC server's
         // framebuffer is already the pixels it has. Clients send this
@@ -3012,6 +3254,15 @@ mod tests {
         assert_eq!(&msg[16..20], &(-223i32).to_be_bytes());
     }
 
+    #[test]
+    fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
+        let encodings = rfb38_encoding_list(true, false, true);
+        assert_eq!(encodings, vnc_apple::ENCODINGS);
+        assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
+        assert!(!encodings.contains(&vnc_apple::ENCODING_ZLIB));
+        assert!(!encodings.contains(&vnc_clipboard::ENCODING));
+    }
+
     // ── Cursor pseudo-encoding ──────────────────────────────────────────────
 
     #[test]
@@ -3782,6 +4033,147 @@ mod tests {
         match msg {
             ServerMsg::Tile(tile) => assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 2, 2)),
             other => panic!("expected a tile, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apple_pasteboard_change_is_fetched_and_forwarded() {
+        let mut wire = vec![0x14, 0, 0, 4, 0, 1, 0, 2];
+        wire.extend_from_slice(&vnc_apple_clipboard::send(7, "copied on the Mac ✓").unwrap());
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: true, poll: false },
+            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            sink.clone(),
+        )
+        .await;
+
+        assert_eq!(written(&sent), vnc_apple_clipboard::fetch(0));
+        sink.flush().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::Clipboard {
+                text,
+                requested: false,
+                oversized_bytes: None,
+                ..
+            }) if text == "copied on the Mac ✓"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_apple_clipboard_read_answers_before_its_fetch_returns() {
+        let (uplink, sent) = test_uplink();
+        let clipboard = Arc::new(std::sync::Mutex::new(ClipboardState {
+            remote: Some(ClipboardSnapshot::changed("cached".to_owned(), None)),
+            apple_session_id: 7,
+            ..ClipboardState::default()
+        }));
+        let (sink, mut rx) = test_sink();
+
+        request_apple_clipboard(&clipboard, &uplink, &sink).await.unwrap();
+
+        assert_eq!(clipboard.lock().unwrap().apple_requests, 1);
+        assert_eq!(written(&sent), vnc_apple_clipboard::fetch(7));
+        sink.flush().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::Clipboard {
+                text,
+                requested: true,
+                oversized_bytes: None,
+                ..
+            }) if text == "cached"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_requested_bad_apple_pasteboard_still_answers_from_cache() {
+        let mut wire = vec![0x1f, 0, 0, 0];
+        wire.extend_from_slice(&7u32.to_be_bytes());
+        wire.extend_from_slice(&10u32.to_be_bytes());
+        wire.extend_from_slice(&4u32.to_be_bytes());
+        wire.extend_from_slice(&[0, 0, 0, 0]);
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let shared = test_shared(
+            uplink,
+            shared_desktop((2, 2), None, None),
+            test_shadow((2, 2)),
+        );
+        {
+            let mut clipboard = shared.clipboard.lock().unwrap();
+            clipboard.remote = Some(ClipboardSnapshot::changed("cached".to_owned(), None));
+            clipboard.apple_requests = 1;
+        }
+
+        let _ = read_loop(
+            std::io::Cursor::new(wire),
+            shared,
+            ReadFlags { clipboard: true, poll: false },
+            Some(Apple { asked_for_zlib: true, ..Apple::default() }),
+            sink.clone(),
+        )
+        .await;
+
+        sink.flush().await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::Clipboard {
+                text,
+                requested: true,
+                oversized_bytes: None,
+                ..
+            }) if text == "cached"
+        ));
+    }
+
+    #[tokio::test]
+    async fn disabled_apple_pasteboards_do_not_consume_browser_requests() {
+        let ordinary = vnc_apple_clipboard::send(7, "ignored").unwrap();
+        let oversized_len =
+            u32::try_from(vnc_apple_clipboard::MAX_COMPRESSED_BYTES + 1).unwrap();
+        let mut oversized = vec![0x1f, 0, 0, 0];
+        oversized.extend_from_slice(&9u32.to_be_bytes());
+        oversized.extend_from_slice(&oversized_len.to_be_bytes());
+        oversized.extend_from_slice(&oversized_len.to_be_bytes());
+        oversized.extend(std::iter::repeat_n(0, oversized_len as usize));
+
+        for (wire, session_id) in [(ordinary, 7), (oversized, 9)] {
+            let (uplink, _sent) = test_uplink();
+            let (sink, _rx) = test_sink();
+            let shared = test_shared(
+                uplink,
+                shared_desktop((2, 2), None, None),
+                test_shadow((2, 2)),
+            );
+            {
+                let mut clipboard = shared.clipboard.lock().unwrap();
+                clipboard.apple_requests = 2;
+            }
+            let clipboard = shared.clipboard.clone();
+
+            let _ = read_loop(
+                std::io::Cursor::new(wire),
+                shared,
+                ReadFlags { clipboard: false, poll: false },
+                Some(Apple::default()),
+                sink,
+            )
+            .await;
+
+            let clipboard = clipboard.lock().unwrap();
+            assert_eq!(clipboard.apple_session_id, session_id);
+            assert_eq!(clipboard.apple_requests, 2);
         }
     }
 
