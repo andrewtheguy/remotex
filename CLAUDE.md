@@ -1,6 +1,6 @@
 ## General
 
-- This personal project has no backward-compatibility or legacy paths.
+- Strict no backward-compatibility or legacy paths since it is a personal project.
 - Do not run `cargo fmt`.
 - After Rust changes, run `cargo clippy -- -D warnings` and `cargo test`.
 - After frontend JS/TS changes, run Biome checks in `frontend/`.
