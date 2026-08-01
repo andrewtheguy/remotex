@@ -81,6 +81,10 @@ const ENCODING_COPY_RECT: i32 = 1;
 const ENCODING_RRE: i32 = 2;
 /// Hextile: RRE applied to each 16x16 tile of the rectangle in turn.
 const ENCODING_HEXTILE: i32 = 5;
+/// ZRLE: 64x64 tiles, run-length encoded or palettised, inside a deflate stream.
+/// The best of the lossless standard encodings and the one RFC 6143 defines for the
+/// job.
+const ENCODING_ZRLE: i32 = 16;
 /// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
 /// shared by every rectangle on the connection. Not a vendor encoding and not
 /// Apple's alone, though Apple's High Performance mode is where it arrived here
@@ -1932,6 +1936,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         ENCODING_COPY_RECT => payload = Payload::CopyRect,
         ENCODING_RRE => payload = Payload::Rre,
         ENCODING_HEXTILE => payload = Payload::Hextile,
+        ENCODING_ZRLE => payload = Payload::Zrle,
         // Cursor: the rect header carries the hotspot (x, y) and the shape
         // size, never a framebuffer position — so it skips the bounds check
         // and tile path below entirely.
@@ -4034,16 +4039,18 @@ mod tests {
         (x, y, w, h): (u16, u16, u16, u16),
         pixels: &[u8],
     ) -> Vec<u8> {
-        let mut chunk = Vec::with_capacity(pixels.len() + 64);
+        // Runs until a call produces nothing new: consuming the input is not the end
+        // of it, since the sync flush that closes the rectangle has bytes of its own.
+        let mut chunk = Vec::new();
         let mut fed = 0;
         loop {
-            let before = deflate.total_in();
+            let before = (deflate.total_in(), deflate.total_out());
             chunk.reserve(pixels.len() + 64);
             deflate
                 .compress_vec(&pixels[fed..], &mut chunk, flate2::FlushCompress::Sync)
                 .unwrap();
-            fed += (deflate.total_in() - before) as usize;
-            if fed == pixels.len() {
+            fed += (deflate.total_in() - before.0) as usize;
+            if fed == pixels.len() && deflate.total_out() == before.1 {
                 break;
             }
         }

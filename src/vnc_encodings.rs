@@ -55,6 +55,18 @@ const HEXTILE_SUBRECTS: u8 = 0x08;
 /// Each sub-rectangle carries its own colour rather than using the foreground.
 const HEXTILE_SUBRECTS_COLOURED: u8 = 0x10;
 
+/// ZRLE's tile edge, four times Hextile's.
+const ZRLE: usize = 64;
+/// The largest palette a ZRLE tile can name: subencoding 255 means 127 entries.
+const ZRLE_MAX_PALETTE: usize = 127;
+/// Absolute cap on a compressed payload read off the wire, independent of the
+/// geometry that justified it.
+///
+/// A 4K desktop makes [`zrle_ceiling`] about 34 MB, which a hostile server could
+/// then claim for every rectangle. The geometric bound is the meaningful one; this
+/// is the one that does not scale with the desktop.
+const MAX_COMPRESSED: usize = 64 << 20;
+
 /// How a rectangle's pixels arrive.
 ///
 /// Decided from the encoding number before the bounds check, and acted on after it,
@@ -76,6 +88,9 @@ pub enum Payload {
     /// 16x16 tiles, each raw or painted from colours an earlier tile may have set
     /// (encoding 5).
     Hextile,
+    /// A `u32` length, then that much of a *second* zlib stream, holding 64x64
+    /// tiles that are run-length encoded, palettised, or both (encoding 16).
+    Zrle,
 }
 
 impl Payload {
@@ -87,6 +102,7 @@ impl Payload {
             Payload::CopyRect => "copyrect",
             Payload::Rre => "rre",
             Payload::Hextile => "hextile",
+            Payload::Zrle => "zrle",
         }
     }
 }
@@ -100,6 +116,14 @@ pub struct Decoders {
     /// The connection's encoding-6 inflate stream. Created on the first zlib
     /// rectangle and never reset — see [`Inflater`].
     zlib: Option<Inflater>,
+    /// ZRLE's stream, which is a *different* one.
+    ///
+    /// Two streams, not one: encoding 6 and ZRLE each deflate across the whole
+    /// connection and their chunks interleave on the one socket, so an inflater
+    /// shared between them would read the other encoding's chunk as a stream with no
+    /// header. This is the same rule that already forbids a fresh context per
+    /// rectangle, applied across encodings instead of across rectangles.
+    zrle: Option<Inflater>,
     /// The colours a Hextile tile may omit.
     hextile: HextileColours,
     /// Which encodings have already been announced in the log.
@@ -146,7 +170,39 @@ impl Decoders {
             Payload::CopyRect => copy_rect(reader, shadow, w, h).await,
             Payload::Rre => rre(reader, w, h).await.map(Some),
             Payload::Hextile => self.hextile(reader, w, h).await.map(Some),
+            Payload::Zrle => self.zrle(reader, w, h).await.map(Some),
         }
+    }
+
+    /// Encoding 16: 64x64 tiles inside a deflate stream, each tile run-length
+    /// encoded, palettised, both, or neither.
+    ///
+    /// The tiling is what makes this beat plain zlib on interface content: the
+    /// redundancy is taken out per tile *before* deflate ever sees the bytes.
+    async fn zrle<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+        w: u16,
+        h: u16,
+    ) -> anyhow::Result<Vec<u8>> {
+        let cap = zrle_ceiling(w, h);
+        let len = reader.read_u32().await?;
+        // As for encoding 6: deflate expands a small payload, so the compressed
+        // bound has to be generous. What keeps it honest is that the *inflated*
+        // bytes are bounded by geometry and then spent exactly, tile by tile.
+        let ceiling = (cap + cap / 64 + 1024).min(MAX_COMPRESSED);
+        anyhow::ensure!(
+            u64::from(len) <= ceiling as u64,
+            "a zrle rect claims {len} compressed bytes for {w}x{h}, past the {ceiling} \
+             its tiles could need even uncompressed"
+        );
+        let mut chunk = vec![0u8; len as usize];
+        reader.read_exact(&mut chunk).await?;
+        let inflated = self
+            .zrle
+            .get_or_insert_with(|| Inflater::new("zrle"))
+            .capped(&chunk, cap)?;
+        zrle_tiles(&inflated, w, h)
     }
 
     /// Encoding 5: 16x16 tiles, left to right and top to bottom, each either raw
@@ -259,6 +315,192 @@ impl Decoders {
             .get_or_insert_with(|| Inflater::new("zlib"))
             .exact(&chunk, expect)?;
         Ok(bgrx_to_rgb(&inflated))
+    }
+}
+
+/// Most inflated bytes a ZRLE rectangle's geometry can justify.
+///
+/// The tiles partition the rectangle, so `Σ tw*th` is exactly `w*h` and the
+/// per-pixel worst case can be counted over the whole of it: plain RLE, where a run
+/// of one pixel costs a three-byte CPIXEL and a one-byte length. Raw and palette
+/// tiles are strictly cheaper. Only the fixed cost — a subencoding byte and the
+/// largest palette a tile may carry — has to be counted per tile.
+fn zrle_ceiling(w: u16, h: u16) -> usize {
+    let tiles = usize::from(w).div_ceil(ZRLE) * usize::from(h).div_ceil(ZRLE);
+    tiles * (1 + ZRLE_MAX_PALETTE * 3) + usize::from(w) * usize::from(h) * 4
+}
+
+/// Paint a ZRLE rectangle's tiles out of its inflated bytes.
+///
+/// Sync and pure: everything the wire decides has already happened by the time this
+/// runs, which is what lets the whole subencoding table be tested against
+/// handwritten bytes with no socket and no compressor in the way.
+fn zrle_tiles(data: &[u8], w: u16, h: u16) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Bytes { data, at: 0 };
+    let mut out = vec![0u8; usize::from(w) * usize::from(h) * 3];
+    let mut tile = vec![0u8; ZRLE * ZRLE * 3];
+    for ty in (0..h).step_by(ZRLE) {
+        let th = ZRLE.min(usize::from(h - ty)) as u16;
+        for tx in (0..w).step_by(ZRLE) {
+            let tw = ZRLE.min(usize::from(w - tx)) as u16;
+            let pixels = usize::from(tw) * usize::from(th);
+            match bytes.u8()? {
+                // Raw: the tile's pixels, in order, with no compaction left.
+                0 => {
+                    for px in tile[..pixels * 3].chunks_exact_mut(3) {
+                        px.copy_from_slice(&cpixel(&mut bytes)?);
+                    }
+                }
+                // Solid: one colour for the whole tile.
+                1 => {
+                    let rgb = cpixel(&mut bytes)?;
+                    fill(&mut tile, tw, (0, 0), (tw, th), rgb);
+                }
+                // A palette, then one index per pixel packed into 1, 2 or 4 bits.
+                n @ 2..=16 => {
+                    let palette = read_palette(&mut bytes, usize::from(n))?;
+                    let bits = palette_bits(palette.len());
+                    // Rows are padded to whole bytes, so the whole block can be
+                    // taken at once and indexed rather than walked with a running
+                    // shift.
+                    let row_bytes = (usize::from(tw) * bits).div_ceil(8);
+                    let packed = bytes.take(row_bytes * usize::from(th))?;
+                    let mask = (1u8 << bits) - 1;
+                    for y in 0..usize::from(th) {
+                        let row = &packed[y * row_bytes..(y + 1) * row_bytes];
+                        for x in 0..usize::from(tw) {
+                            let shift = 8 - bits - (x * bits) % 8;
+                            let index = usize::from((row[x * bits / 8] >> shift) & mask);
+                            let rgb = *palette
+                                .get(index)
+                                .with_context(|| format!("a zrle palette index of {index}"))?;
+                            let at = (y * usize::from(tw) + x) * 3;
+                            tile[at..at + 3].copy_from_slice(&rgb);
+                        }
+                    }
+                }
+                // Runs of full colours, laid down left to right and wrapping rows.
+                128 => {
+                    let mut done = 0usize;
+                    while done < pixels {
+                        let rgb = cpixel(&mut bytes)?;
+                        let run = rle_len(&mut bytes)?;
+                        anyhow::ensure!(
+                            run <= pixels - done,
+                            "a zrle run of {run} overruns the {pixels} pixels its tile has left"
+                        );
+                        for px in tile[done * 3..(done + run) * 3].chunks_exact_mut(3) {
+                            px.copy_from_slice(&rgb);
+                        }
+                        done += run;
+                    }
+                }
+                // The same, but the runs name palette entries.
+                n @ 130..=255 => {
+                    let palette = read_palette(&mut bytes, usize::from(n) - 128)?;
+                    let mut done = 0usize;
+                    while done < pixels {
+                        let byte = bytes.u8()?;
+                        // The top bit says a run follows; without it the entry is
+                        // one pixel and the index is the whole of it.
+                        let (index, run) = if byte >= 128 {
+                            (usize::from(byte - 128), rle_len(&mut bytes)?)
+                        } else {
+                            (usize::from(byte), 1)
+                        };
+                        let rgb = *palette
+                            .get(index)
+                            .with_context(|| format!("a zrle palette index of {index}"))?;
+                        anyhow::ensure!(
+                            run <= pixels - done,
+                            "a zrle run of {run} overruns the {pixels} pixels its tile has left"
+                        );
+                        for px in tile[done * 3..(done + run) * 3].chunks_exact_mut(3) {
+                            px.copy_from_slice(&rgb);
+                        }
+                        done += run;
+                    }
+                }
+                other => anyhow::bail!("a zrle tile has subencoding {other}, which RFB does not define"),
+            }
+            blit(&mut out, w, (tx, ty), (tw, th), &tile);
+        }
+    }
+    // A server sync-flushes its stream at the end of a rectangle, so bytes left over
+    // mean the tiles and the geometry disagree about what was sent. Named with a
+    // count, because that is what identifies a server batching rectangles instead.
+    anyhow::ensure!(
+        bytes.done(),
+        "a zrle rectangle left {} inflated byte(s) unread",
+        bytes.data.len() - bytes.at
+    );
+    Ok(out)
+}
+
+/// `n` CPIXELs, which is how both palette subencodings begin.
+fn read_palette(bytes: &mut Bytes, n: usize) -> anyhow::Result<Vec<[u8; 3]>> {
+    (0..n).map(|_| cpixel(bytes)).collect()
+}
+
+/// Bits per index for a palette of `n`: as few as will address it.
+fn palette_bits(n: usize) -> usize {
+    match n {
+        0..=2 => 1,
+        3..=4 => 2,
+        _ => 4,
+    }
+}
+
+/// A ZRLE CPIXEL: three bytes rather than four.
+///
+/// The forced format puts all 24 colour bits in the low three bytes of a
+/// little-endian pixel, which is exactly the case RFB lets ZRLE drop the fourth for
+/// — and which makes them `B, G, R`.
+fn cpixel(bytes: &mut Bytes) -> anyhow::Result<[u8; 3]> {
+    let px = bytes.take(3)?;
+    Ok([px[2], px[1], px[0]])
+}
+
+/// A run length: bytes of 255 continue it, and the total counts from one.
+///
+/// Cannot run away — every byte comes out of the capped inflate buffer, and the
+/// caller bounds the result by the pixels its tile has left.
+fn rle_len(bytes: &mut Bytes) -> anyhow::Result<usize> {
+    let mut len = 1usize;
+    loop {
+        let byte = bytes.u8()?;
+        len += usize::from(byte);
+        if byte != 255 {
+            return Ok(len);
+        }
+    }
+}
+
+/// A checked cursor over inflated bytes.
+struct Bytes<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Bytes<'a> {
+    fn u8(&mut self) -> anyhow::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn take(&mut self, n: usize) -> anyhow::Result<&'a [u8]> {
+        let end = self.at + n;
+        anyhow::ensure!(
+            end <= self.data.len(),
+            "a zrle rectangle wants {n} more inflated byte(s) than the {} it was sent",
+            self.data.len()
+        );
+        let taken = &self.data[self.at..end];
+        self.at = end;
+        Ok(taken)
+    }
+
+    fn done(&self) -> bool {
+        self.at == self.data.len()
     }
 }
 
@@ -449,6 +691,56 @@ impl Inflater {
         );
         Ok(out)
     }
+
+    /// Inflate all of `chunk`, growing the output as the stream asks for it, up to
+    /// `cap`.
+    ///
+    /// ZRLE's inflated size is not implied by its rectangle the way encoding 6's is
+    /// — a tile's byte count depends on the subencoding it chose — so the geometry
+    /// gives a ceiling rather than an answer, and the tile parser is what proves the
+    /// bytes were the right ones.
+    fn capped(&mut self, chunk: &[u8], cap: usize) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(
+            cap <= MAX_INFLATED,
+            "a {} rectangle allows {cap} inflated bytes, past the {MAX_INFLATED} ceiling",
+            self.what
+        );
+        let mut out = Vec::new();
+        let mut fed = 0;
+        loop {
+            if out.len() == out.capacity() {
+                // `decompress_vec` writes into spare capacity and never grows the
+                // Vec itself, so a loop that does not reserve here spins forever
+                // making no progress.
+                let want = (out.capacity().max(4096) * 2).min(cap);
+                anyhow::ensure!(
+                    want > out.len(),
+                    "a {} rectangle inflated past the {cap} bytes its geometry allows",
+                    self.what
+                );
+                out.reserve_exact(want - out.len());
+            }
+            let before = (self.inflate.total_in(), self.inflate.total_out());
+            self.inflate
+                .decompress_vec(&chunk[fed..], &mut out, flate2::FlushDecompress::Sync)
+                .with_context(|| format!("inflating a {} rectangle", self.what))?;
+            fed += (self.inflate.total_in() - before.0) as usize;
+            if (self.inflate.total_in(), self.inflate.total_out()) == before {
+                // Neither side moved. With output space left, the only thing that
+                // can stop the stream is running out of input — so anything unread
+                // here is a chunk that ended mid-symbol. `exact` catches that with
+                // its size check; this has no size to check against.
+                anyhow::ensure!(
+                    fed == chunk.len(),
+                    "a {} rectangle's stream stalled with {} of {} compressed bytes unread",
+                    self.what,
+                    chunk.len() - fed,
+                    chunk.len()
+                );
+                return Ok(out);
+            }
+        }
+    }
 }
 
 /// Inflate a payload that carries its own complete deflate stream.
@@ -466,18 +758,24 @@ mod tests {
 
     /// Deflate `raw` into one chunk of a continuing stream, the way a server emits
     /// one rectangle's worth.
+    ///
+    /// Consuming the input is not the end of it: the sync flush that closes the
+    /// rectangle has bytes of its own, and stopping at the last input byte truncates
+    /// them. So this runs until a call produces nothing new.
     fn chunk(deflate: &mut flate2::Compress, raw: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(raw.len());
+        let mut out = Vec::new();
         let mut fed = 0;
-        while fed < raw.len() {
-            let before = deflate.total_in();
-            out.reserve(raw.len());
+        loop {
+            let before = (deflate.total_in(), deflate.total_out());
+            out.reserve(raw.len() + 64);
             deflate
                 .compress_vec(&raw[fed..], &mut out, flate2::FlushCompress::Sync)
                 .unwrap();
-            fed += (deflate.total_in() - before) as usize;
+            fed += (deflate.total_in() - before.0) as usize;
+            if fed == raw.len() && deflate.total_out() == before.1 {
+                return out;
+            }
         }
-        out
     }
 
     /// A zlib rectangle as it arrives: the `u32` length, then the chunk.
@@ -737,6 +1035,206 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("bits RFB does not define"), "{err:#}");
+    }
+
+    /// A CPIXEL as a server writes one: three bytes, blue first.
+    fn cp(rgb: [u8; 3]) -> [u8; 3] {
+        [rgb[2], rgb[1], rgb[0]]
+    }
+
+    /// Repeat one colour across a whole tile's worth of expected RGB.
+    fn solid_rgb(rgb: [u8; 3], pixels: usize) -> Vec<u8> {
+        std::iter::repeat_n(rgb, pixels).flatten().collect()
+    }
+
+    const RED_RGB: [u8; 3] = [0xf0, 0x00, 0x00];
+
+    #[test]
+    fn a_raw_zrle_tile_is_cpixels_in_order() {
+        let mut data = vec![0u8];
+        data.extend(cp(RED_RGB));
+        data.extend(cp(GREEN_RGB));
+        assert_eq!(
+            zrle_tiles(&data, 2, 1).unwrap(),
+            [RED_RGB, GREEN_RGB].concat()
+        );
+    }
+
+    #[test]
+    fn a_solid_zrle_tile_is_one_cpixel() {
+        let mut data = vec![1u8];
+        data.extend(cp(BLUE_RGB));
+        assert_eq!(zrle_tiles(&data, 3, 2).unwrap(), solid_rgb(BLUE_RGB, 6));
+    }
+
+    /// Palette rows are padded to whole bytes. A three-wide tile at two bits an
+    /// index uses six of the eight, and the two left over must be stepped over
+    /// rather than read as the next row's first pixel.
+    #[test]
+    fn a_palette_zrle_tile_pads_each_row_to_a_whole_byte() {
+        let mut data = vec![3u8]; // three entries, so two bits an index
+        for rgb in [RED_RGB, GREEN_RGB, BLUE_RGB] {
+            data.extend(cp(rgb));
+        }
+        // Row 0: red, green, blue. Row 1: blue, green, red. Two bits spare in each.
+        data.push(0b00_01_10_00);
+        data.push(0b10_01_00_00);
+        assert_eq!(
+            zrle_tiles(&data, 3, 2).unwrap(),
+            [RED_RGB, GREEN_RGB, BLUE_RGB, BLUE_RGB, GREEN_RGB, RED_RGB].concat()
+        );
+    }
+
+    /// One bit an index for a palette of two, four bits for anything up to sixteen.
+    #[test]
+    fn palette_indices_are_as_narrow_as_the_palette_allows() {
+        assert_eq!(palette_bits(2), 1);
+        assert_eq!(palette_bits(3), 2);
+        assert_eq!(palette_bits(4), 2);
+        assert_eq!(palette_bits(5), 4);
+        assert_eq!(palette_bits(16), 4);
+    }
+
+    /// Runs are laid down in pixel order and wrap rows, so a run can span the end of
+    /// one and the start of the next.
+    #[test]
+    fn a_plain_rle_run_crosses_a_row_boundary() {
+        let mut data = vec![128u8];
+        data.extend(cp(RED_RGB));
+        data.push(3); // 1 + 3 = a run of four, over a 3x2 tile's first two rows
+        data.extend(cp(BLUE_RGB));
+        data.push(1); // and two more
+
+        let mut expected = solid_rgb(RED_RGB, 4);
+        expected.extend(solid_rgb(BLUE_RGB, 2));
+        assert_eq!(zrle_tiles(&data, 3, 2).unwrap(), expected);
+    }
+
+    /// A length is a sum of bytes, with 255 meaning "and more", so a run past 255
+    /// takes more than one byte to say.
+    #[test]
+    fn a_palette_rle_run_longer_than_255_is_summed() {
+        let mut data = vec![130u8]; // 130 - 128 = two palette entries
+        data.extend(cp(RED_RGB));
+        data.extend(cp(BLUE_RGB));
+        data.push(0x80); // entry 0, with a run following
+        data.extend([255, 44]); // 1 + 255 + 44 = 300
+        data.push(0x81); // entry 1, with a run following
+        data.extend([255, 43]); // 1 + 255 + 43 = 299
+        data.push(0x00); // and one last single pixel of entry 0
+
+        let mut expected = solid_rgb(RED_RGB, 300);
+        expected.extend(solid_rgb(BLUE_RGB, 299));
+        expected.extend(solid_rgb(RED_RGB, 1));
+        assert_eq!(zrle_tiles(&data, 60, 10).unwrap(), expected);
+    }
+
+    /// Tiles are 64 square and run left to right, so a 65-wide rectangle has two of
+    /// them and the second is one pixel wide.
+    #[test]
+    fn zrle_tiles_are_64_square_and_laid_out_in_reading_order() {
+        let mut data = vec![1u8];
+        data.extend(cp(RED_RGB));
+        data.push(1);
+        data.extend(cp(BLUE_RGB));
+
+        let rgb = zrle_tiles(&data, 65, 1).unwrap();
+        assert_eq!(&rgb[..3], &RED_RGB);
+        assert_eq!(&rgb[63 * 3..64 * 3], &RED_RGB);
+        assert_eq!(&rgb[64 * 3..], &BLUE_RGB);
+    }
+
+    #[test]
+    fn undefined_zrle_subencodings_are_refused() {
+        for sub in [17u8, 127, 129] {
+            let err = zrle_tiles(&[sub], 1, 1).unwrap_err();
+            assert!(format!("{err:#}").contains("RFB does not define"), "{sub}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn a_zrle_run_past_the_end_of_its_tile_is_refused() {
+        let mut data = vec![128u8];
+        data.extend(cp(RED_RGB));
+        data.push(9); // a run of ten, over a tile of four
+        let err = zrle_tiles(&data, 2, 2).unwrap_err();
+        assert!(format!("{err:#}").contains("overruns the 4 pixels"), "{err:#}");
+    }
+
+    #[test]
+    fn a_zrle_palette_index_past_the_palette_is_refused() {
+        let mut data = vec![130u8]; // two entries, so 0 and 1 are the only ones
+        data.extend(cp(RED_RGB));
+        data.extend(cp(BLUE_RGB));
+        data.push(0x02);
+        let err = zrle_tiles(&data, 1, 1).unwrap_err();
+        assert!(format!("{err:#}").contains("palette index of 2"), "{err:#}");
+    }
+
+    /// A server sync-flushes at the end of a rectangle, so leftover bytes mean the
+    /// tiles and the geometry disagree about what was sent.
+    #[test]
+    fn inflated_bytes_the_tiles_did_not_want_are_refused() {
+        let mut data = vec![1u8];
+        data.extend(cp(RED_RGB));
+        data.push(0xff);
+        let err = zrle_tiles(&data, 1, 1).unwrap_err();
+        assert!(format!("{err:#}").contains("left 1 inflated byte"), "{err:#}");
+    }
+
+    #[test]
+    fn a_truncated_zrle_tile_is_refused() {
+        let err = zrle_tiles(&[0u8, 0x10], 1, 1).unwrap_err();
+        assert!(format!("{err:#}").contains("more inflated byte"), "{err:#}");
+    }
+
+    /// Encoding 6 and ZRLE each deflate across the whole connection, and their
+    /// chunks interleave on one socket. One inflater between them would read the
+    /// other's chunk as a stream with no header.
+    #[tokio::test]
+    async fn zrle_and_zlib_do_not_share_a_stream() {
+        let shadow = unused_shadow();
+
+        // Two independent streams, as a server keeps them.
+        let mut zlib_stream = flate2::Compress::new(flate2::Compression::default(), true);
+        let mut zrle_stream = flate2::Compress::new(flate2::Compression::default(), true);
+
+        let pixels = bgrx(64);
+        let mut solid = vec![1u8];
+        solid.extend(cp(RED_RGB));
+
+        let mut decoders = Decoders::default();
+        // Alternate them, twice each, so a shared stream would fail on the second
+        // rectangle of whichever came second.
+        for _ in 0..2 {
+            let zlib = zlib_payload(&chunk(&mut zlib_stream, &pixels));
+            assert_eq!(
+                decoders.decode(&mut zlib.as_slice(), Payload::Zlib, &shadow, 8, 8).await.unwrap(),
+                Some(bgrx_to_rgb(&pixels))
+            );
+            let zrle = zlib_payload(&chunk(&mut zrle_stream, &solid));
+            assert_eq!(
+                decoders.decode(&mut zrle.as_slice(), Payload::Zrle, &shadow, 8, 8).await.unwrap(),
+                Some(solid_rgb(RED_RGB, 64))
+            );
+        }
+
+        // And the negative: a ZRLE chunk offered to the zlib stream, which has a
+        // window and a history of its own.
+        let zrle = zlib_payload(&chunk(&mut zrle_stream, &solid));
+        assert!(
+            decoders.decode(&mut zrle.as_slice(), Payload::Zlib, &shadow, 8, 8).await.is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zrle_rect_claiming_more_compressed_bytes_than_its_tiles_could_need_is_refused() {
+        let wire = u32::MAX.to_be_bytes();
+        let err = Decoders::default()
+            .decode(&mut wire.as_slice(), Payload::Zrle, &unused_shadow(), 2, 2)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("even uncompressed"), "{err:#}");
     }
 
     /// The source is read out before the destination is written, so a copy that
