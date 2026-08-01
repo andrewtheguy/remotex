@@ -2446,16 +2446,15 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 /// thing standard RFB can say, which is why every standard client — RealVNC
 /// included — crawls against a Mac until it sends enough of them.
 struct Wheel {
-    /// What one line of scrolling is worth here, in pulses.
-    pulses_per_line: f32,
+    /// Pixels of scroll intent one pulse buys on this server.
+    px_per_pulse: f32,
     /// Intent not yet worth a whole pulse, per axis, in pulses.
     pending: (f32, f32),
 }
 
 impl Wheel {
-    /// The line height pixel deltas are measured against. Trackpads and
-    /// pixel-precise wheels report a distance rather than notches, and lines are
-    /// the unit both server kinds actually scroll in.
+    /// The line height a `line` delta is worth. Trackpads report distance and
+    /// notched wheels report lines, and pixels are the common unit.
     const LINE_PX: f32 = 16.0;
     /// A `page` delta, in lines: a screenful, which is what the DOM means by it.
     const PAGE_LINES: f32 = 20.0;
@@ -2463,25 +2462,45 @@ impl Wheel {
     /// client that reports a whole document — must not turn into thousands of
     /// pointer events queued ahead of everything else on the uplink.
     const MAX_PULSES: f32 = 16.0;
+    /// A pulse on macOS Screen Sharing, which spends it as one line.
+    const MACOS_PX_PER_PULSE: f32 = Self::LINE_PX;
+    /// A pulse anywhere else, where a toolkit spends it as a notch — three lines
+    /// by the usual convention.
+    const GENERIC_PX_PER_PULSE: f32 = 3.0 * Self::LINE_PX;
 
     fn new(macos: bool) -> Self {
+        let default = if macos {
+            Self::MACOS_PX_PER_PULSE
+        } else {
+            Self::GENERIC_PX_PER_PULSE
+        };
+        // A QA override while the Mac's real pulse size is still being measured
+        // against a live target: how far one pulse actually scrolls is the one
+        // number in here that cannot be derived, only observed. Remove once it
+        // has been pinned down.
+        let px_per_pulse = std::env::var("REMOTEX_VNC_WHEEL_PX")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(default);
+        info!("vnc: one wheel pulse is worth {px_per_pulse}px of scrolling (macos={macos})");
         Self {
-            pulses_per_line: if macos { 1.0 } else { 1.0 / 3.0 },
+            px_per_pulse,
             pending: (0.0, 0.0),
         }
     }
 
     /// Whole pulses to send for one wheel event, as (horizontal, vertical).
     fn pulses(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
-        let lines = |delta: f32| match unit {
-            WheelUnit::Pixel => delta / Self::LINE_PX,
-            WheelUnit::Line => delta,
-            WheelUnit::Page => delta * Self::PAGE_LINES,
+        let px = |delta: f32| match unit {
+            WheelUnit::Pixel => delta,
+            WheelUnit::Line => delta * Self::LINE_PX,
+            WheelUnit::Page => delta * Self::PAGE_LINES * Self::LINE_PX,
         };
-        let scale = self.pulses_per_line;
+        let step = self.px_per_pulse;
         (
-            Self::spend(&mut self.pending.0, lines(dx) * scale),
-            Self::spend(&mut self.pending.1, lines(dy) * scale),
+            Self::spend(&mut self.pending.0, px(dx) / step),
+            Self::spend(&mut self.pending.1, px(dy) / step),
         )
     }
 
@@ -2556,6 +2575,10 @@ fn translate_input(
             // is worth is [`Wheel`]'s business — the magnitude has nowhere else
             // to go on this wire.
             let (px, py) = wheel.pulses(dx, dy, unit);
+            // Debug rather than trace: what a client actually reports per notch
+            // is the input to every constant above, and it varies by browser,
+            // by pointing device and by platform.
+            debug!("vnc: wheel dx={dx} dy={dy} {unit:?} -> {px} + {py} pulses");
             let mut out = Vec::new();
             for (pulses, negative_bit, positive_bit) in [(py, 0x08, 0x10), (px, 0x20, 0x40)] {
                 let bit = if pulses > 0 { positive_bit } else { negative_bit };
