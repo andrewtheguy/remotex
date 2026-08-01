@@ -17,7 +17,9 @@
 
 `ServerMsg::Resize { w, h, scale }` is **not** a fit factor — `scale` is the remote's pixel density, and `applyCanvasCss` lays the canvas out at `w / scale` by `h / scale` CSS pixels. So a 3840×2160 framebuffer with `scale: 2.0` is 1920×1080 CSS px, which is 100% of what the remote thinks its desktop is, at full pixel fidelity on a Retina host. `Density` in `src/rdp.rs` and the Apple display layout's backing-over-logical ratio (`src/vnc_apple.rs`) are the two producers, and neither knows the viewport exists.
 
-The way a desktop is *made* to fit a window is to ask the remote to render at that size — `resize = true`, `ClientMsg::Viewport`, RDP's Display Control channel. **Dynamic resolution is the Apple name for exactly that**: `resize` on a VNC target, `resize` on an RDP target, and Apple's dynamic-resolution descriptor are the same feature under three names, and any of them being unimplemented is never a reason to scale on the client instead.
+The way a desktop is *made* to fit a window is to ask the remote to render at that size — `resize = true`, `ClientMsg::Viewport`, and the protocol-specific resize mechanism. An unimplemented resize mechanism is never a reason to scale on the client instead.
+
+The two Apple subtypes are different display modes. `ard` shares the Mac's physical displays. `ard-high-performance` requests one virtual display at the target's configured `width` and `height`; the name is retained in config, but its meaning here is virtual-display Screen Sharing. Apple also has undocumented controls for choosing one or two virtual displays, resolution presets, and dynamic resolution in High Performance mode. This project implements none of those controls: it sends one display configuration during setup and never changes it in response to a viewport, so `resize` remains refused for both Apple subtypes.
 
 ## Browser tests
 

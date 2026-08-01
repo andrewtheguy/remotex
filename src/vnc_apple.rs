@@ -1,6 +1,7 @@
-//! Apple's Screen Sharing messages and encodings. Both Apple subtypes use the
-//! display and cursor pieces; `ard-high-performance` adds zlib and carries them
-//! on the record layer in [`crate::vnc_record`].
+//! Apple's Screen Sharing messages and encodings. Standard `ard` uses the display,
+//! cursor and pasteboard pieces for the Mac's physical displays. The
+//! `ard-high-performance` subtype uses Apple's record layer in
+//! [`crate::vnc_record`], adds zlib, and requests a virtual display.
 //!
 //! Everything here is either a message this client builds or a rectangle payload
 //! it parses. The transport is [`crate::vnc_record`]'s and the session loop is
@@ -15,9 +16,10 @@
 //! reference this was written from, and a client must not advertise an encoding it
 //! cannot decode.
 //!
-//! **Picking a screen**: [`ENCODING_DISPLAY_LAYOUT`] carries the Mac's real
-//! displays and [`set_display_message`] binds one of them, narrowing the
-//! framebuffer to that screen's own pixels.
+//! **Picking a physical screen in Standard mode**:
+//! [`ENCODING_DISPLAY_LAYOUT`] carries the Mac's displays and
+//! [`set_display_message`] binds one of them, narrowing the framebuffer to that
+//! screen's own pixels.
 //!
 //! **The pixel density**, which comes with it. Each screen states its own scale,
 //! so a 2x display arrives at 3200x1800 and is reported as 1600x900 points — the
@@ -26,20 +28,15 @@
 //! [`Layout::scale`]), which makes picking a screen the thing that makes the
 //! geometry exact rather than a convenience.
 //!
-//! ## `SetDisplayConfiguration` is deliberately not sent
-//!
-//! Sending it is what made this wire look like it could do none of the above. A
-//! `0x1d` descriptor — even the bare static one, which the reference presents as
-//! asking for the Mac's real screens — makes macOS 26 **create a virtual display**
-//! sized to the union of the real ones, deactivate them, and report a one-screen
-//! layout with a fresh `CGDirectDisplayID` each session and a flat density of 1.
-//! Omitting the message entirely is what gets the real screens. Measured both
-//! ways, repeatedly; docs/apple-vnc-889.md has the transcripts.
+//! **A virtual display in High Performance mode**:
+//! [`set_display_configuration`] asks for one virtual display at the configured
+//! mode. The message is sent once during setup; this gateway does not implement
+//! Apple's undocumented dynamic-resolution controls or its one/two-display picker.
 //!
 //! ## What is otherwise absent
 //!
-//! No dynamic resolution, so `resize` is refused for both Apple subtypes at config
-//! load. No Adaptive media path (HEVC/AAC over SRTP), so
+//! No Apple dynamic resolution, so `resize` is refused for both Apple subtypes at
+//! config load. No Adaptive media path (HEVC/AAC over SRTP), so
 //! `RFBMediaStreamMessage1` is never advertised. On the 003.889 transport the Mac
 //! carries the clipboard over messages of its own rather than RFB's, so
 //! `clipboard` is refused there; plain `ard` uses Apple's pasteboard messages on
@@ -99,12 +96,12 @@ pub const ENCODING_USER_INFO: i32 = 0x44e;
 /// anything about its displays.
 ///
 /// **Do not add to, remove from, or reorder this list.** It is not a preference
-/// order, it is the list that makes macOS 26 report its displays at all, and it was
+/// order, it is the list that makes macOS 26 report a display layout, and it was
 /// arrived at by measurement rather than by reasoning. Every single-entry addition
 /// tried (zlib, `DeviceInfo`), every single-entry removal, and even reversing the
 /// order while keeping the set produced a session with **no
-/// [`ENCODING_DISPLAY_LAYOUT`] at all** — no display list, no per-screen density,
-/// nothing to pick — while this sequence produced one every time. Sixteen variants,
+/// [`ENCODING_DISPLAY_LAYOUT`] at all** — while this sequence produced one every
+/// time. Sixteen variants,
 /// one connection each, no exceptions. Why the daemon reads the list this way is
 /// unresolved; that it does is not. The same exact list was also measured to
 /// produce `AppleDisplayLayout` after downgrading the Mac to RFB 3.8.
@@ -112,8 +109,9 @@ pub const ENCODING_USER_INFO: i32 = 0x44e;
 /// One caveat, recorded because the alternative is a comment that reads stricter than
 /// the evidence: the bisected list also carried `ENCODING_USER_INFO`, which this one
 /// does not, and that particular removal was never among the variants tried. It was
-/// checked the other way instead — this exact list, against the same Mac, produced a
-/// layout and a working selection. See docs/apple-vnc-889.md.
+/// checked the other way instead — this exact list produced a layout, and Standard
+/// mode's physical-display selection was verified through the gateway. See
+/// docs/apple-vnc-889.md.
 ///
 /// The order is noVNC-ARD's relative order, which is the only other client known to
 /// receive a layout from a real Mac.
@@ -141,11 +139,10 @@ pub const ENCODINGS: &[i32] = &[
 ///
 /// The list above cannot carry zlib — adding it anywhere costs the display layout —
 /// so compression is asked for in a second `SetEncodings` after the Mac has already
-/// reported its screens. It keeps that state and simply switches encoder: measured
-/// at 398 KB for a 3200x1800 frame against 23 MB of raw pixels, with display
-/// selection still working afterwards. Sending only the first list would leave
-/// either Apple subtype on raw pixels; sending only a list with zlib in it would
-/// leave it with nothing to pick.
+/// reported a layout. It keeps that state and simply switches encoder: measured at
+/// 398 KB for a 3200x1800 frame against 23 MB of raw pixels. Sending only the first
+/// list would leave High Performance mode on raw pixels; sending only a list with
+/// zlib in it would lose the layout metadata.
 pub const ENCODINGS_WITH_ZLIB: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
@@ -160,6 +157,15 @@ pub const ENCODINGS_WITH_ZLIB: &[i32] = &[
     ENCODING_ZLIB,
 ];
 
+/// Bytes of one entry in a display configuration's mode table.
+const MODE_ENTRY: usize = 0x1c;
+/// Bytes of a display descriptor before its mode table.
+const DESCRIPTOR_HEAD: usize = 0x9c;
+/// Bytes of a display configuration before its first descriptor.
+const CONFIG_HEAD: usize = 0x0c;
+/// Dots per inch used to derive the descriptor's physical dimensions. This is the
+/// value that reproduces the dimensions in the reverse-engineered reference.
+const NOMINAL_DPI: f32 = 132.0;
 /// Bytes of one display record in a layout payload.
 const LAYOUT_RECORD: usize = 0x38;
 /// Bytes of a display record this parser actually reads. The rest is a pixel format
@@ -271,6 +277,68 @@ pub fn set_display_message(id: Option<u32>) -> Vec<u8> {
     msg
 }
 
+/// `SetDisplayConfiguration`: request one virtual display whose only advertised
+/// mode is `(w, h)`.
+///
+/// This is sent once while establishing an `ard-high-performance` session. It is
+/// not reused for viewport reports: Apple's dynamic-resolution behavior and its
+/// native one/two-virtual-display controls are undocumented and are not implemented
+/// here.
+///
+/// The descriptor layout follows the reverse-engineered wire specification. The
+/// mode and scaled-mode dimensions are equal, so the requested mode is 1x.
+pub fn set_display_configuration((w, h): (u16, u16)) -> Vec<u8> {
+    let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
+    let mut body = Vec::with_capacity(CONFIG_HEAD - 4 + descriptor);
+    body.extend_from_slice(&1u16.to_be_bytes()); // version
+    body.extend_from_slice(&1u16.to_be_bytes()); // display_count
+    body.extend_from_slice(&0u32.to_be_bytes()); // flags
+
+    let mut display = Vec::with_capacity(descriptor);
+    display.extend_from_slice(
+        &u16::try_from(descriptor)
+            .expect("descriptor within u16")
+            .to_be_bytes(),
+    );
+    display.resize(0x7a, 0); // opaque 120-byte region
+    display.extend_from_slice(&1u32.to_be_bytes()); // display_flags
+    display.extend_from_slice(&4u32.to_be_bytes()); // display_type: virtual
+    let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
+    display.extend_from_slice(&mm(w));
+    display.extend_from_slice(&mm(h));
+    display.extend_from_slice(&u32::from(w).to_be_bytes()); // max_width
+    display.extend_from_slice(&u32::from(h).to_be_bytes()); // max_height
+    display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
+    display.extend_from_slice(&0u16.to_be_bytes()); // preferred_mode_index
+    display.extend_from_slice(&0u32.to_be_bytes()); // rotations: upright
+    display.extend_from_slice(&1u16.to_be_bytes()); // mode_count
+    debug_assert_eq!(display.len(), DESCRIPTOR_HEAD);
+    for value in [w, h, w, h] {
+        display.extend_from_slice(&u32::from(value).to_be_bytes());
+    }
+    display.extend_from_slice(&60.0f64.to_be_bytes()); // refresh_rate_hz
+    display.extend_from_slice(&0u32.to_be_bytes()); // mode flags
+    debug_assert_eq!(display.len(), descriptor);
+
+    body.extend_from_slice(&display);
+    message(0x1d, &body)
+}
+
+/// An Apple control message: type, a reserved byte, then the body's length and
+/// the body. The length counts the body alone.
+fn message(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(4 + body.len());
+    msg.push(kind);
+    msg.push(0);
+    msg.extend_from_slice(
+        &u16::try_from(body.len())
+            .expect("body within u16")
+            .to_be_bytes(),
+    );
+    msg.extend_from_slice(body);
+    msg
+}
+
 /// One screen out of a display layout: what a client is offered, plus the two
 /// facts the gateway needs about it that a client never sees.
 #[derive(Debug, Clone, PartialEq)]
@@ -372,6 +440,17 @@ impl Layout {
 /// encoding nobody sent. Measured against macOS 26 twice over, once for a
 /// two-screen layout and once for a one-screen one.
 pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
+    parse_layout_kind(payload, false)
+}
+
+/// Parse a layout returned for the virtual display requested by
+/// [`set_display_configuration`]. The payload does not identify the display as
+/// virtual, so that fact comes from the subtype that requested it.
+pub fn parse_virtual_display_layout(payload: &[u8]) -> anyhow::Result<Layout> {
+    parse_layout_kind(payload, true)
+}
+
+fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<Layout> {
     anyhow::ensure!(
         payload.len() >= LAYOUT_HEAD,
         "a display layout carried {} bytes, too few for a header",
@@ -479,14 +558,14 @@ pub fn parse_layout(payload: &[u8]) -> anyhow::Result<Layout> {
         displays.push(Display {
             info: DisplayInfo {
                 id: be32(record, 0x12),
-                label: format!("Display {}", index + 1),
+                label: if virtual_display {
+                    "Virtual display".to_owned()
+                } else {
+                    format!("Display {}", index + 1)
+                },
                 detail: format!("{}×{}{suffix}", logical.0, logical.1),
                 main: flags & 0x01 != 0,
-                // Never: this client asks for the Mac's own screens and does not
-                // ask it to make one. Asking is precisely what
-                // `SetDisplayConfiguration` did, which is why it is no longer sent
-                // — see [`crate::vnc`].
-                virtual_display: false,
+                virtual_display,
             },
             density,
             backing,
@@ -779,6 +858,33 @@ mod tests {
     }
 
     #[test]
+    fn a_virtual_display_configuration_has_one_configured_mode() {
+        let msg = set_display_configuration((1600, 1000));
+        assert_eq!(msg[0], 0x1d);
+        assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
+        assert_eq!(msg.len(), CONFIG_HEAD + DESCRIPTOR_HEAD + MODE_ENTRY);
+        assert_eq!(be16(&msg, 4), 1); // version
+        assert_eq!(be16(&msg, 6), 1); // display_count
+
+        let display = &msg[CONFIG_HEAD..];
+        assert_eq!(usize::from(be16(display, 0)), DESCRIPTOR_HEAD + MODE_ENTRY);
+        assert_eq!(be32(display, 0x7a), 1, "display_flags");
+        assert_eq!(be32(display, 0x7e), 4, "virtual display_type");
+        assert_eq!(be32(display, 0x8a), 1600, "maximum width");
+        assert_eq!(be32(display, 0x8e), 1000, "maximum height");
+        assert_eq!(be16(display, 0x92), 0, "current mode");
+        assert_eq!(be16(display, 0x94), 0, "preferred mode");
+        assert_eq!(be32(display, 0x96), 0, "upright rotation");
+        assert_eq!(be16(display, 0x9a), 1, "one mode");
+        assert_eq!(be32(display, 0x9c), 1600);
+        assert_eq!(be32(display, 0xa0), 1000);
+        assert_eq!(be32(display, 0xa4), 1600, "1x scaled width");
+        assert_eq!(be32(display, 0xa8), 1000, "1x scaled height");
+        assert_eq!(&display[0xac..0xb4], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(be32(display, 0xb4), 0, "mode flags");
+    }
+
+    #[test]
     fn arming_and_display_selection_are_fixed_shapes() {
         let arm = auto_framebuffer_update((3840, 2160));
         assert_eq!(arm.len(), 16);
@@ -932,6 +1038,15 @@ mod tests {
         // pixel-format tail that nothing here reads. Equal in every field the parser
         // does read, which is the claim that matters.
         assert_eq!(parse_layout(&built).unwrap(), parse_layout(TWO_REAL_SCREENS).unwrap());
+    }
+
+    #[test]
+    fn a_high_performance_layout_is_reported_as_virtual() {
+        let payload = layout(Some(9), &[(9, (1600, 1000), (1600, 1000), 0x01)]);
+        let parsed = parse_virtual_display_layout(&payload).unwrap();
+        assert_eq!(parsed.displays.len(), 1);
+        assert_eq!(parsed.displays[0].info.label, "Virtual display");
+        assert!(parsed.displays[0].info.virtual_display);
     }
 
     #[test]

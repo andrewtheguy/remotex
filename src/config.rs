@@ -73,13 +73,15 @@ pub enum Subtype {
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
     /// control messages (see [`crate::vnc_apple`]).
     ///
-    /// It carries the same screen list, selection and density as [`Subtype::Ard`],
-    /// adds zlib pixels, and uses Apple's encrypted record transport.
+    /// High Performance Screen Sharing uses a virtual display rather than the
+    /// Mac's physical displays. This gateway requests one virtual display at the
+    /// target's [`TargetConfig::width`] and [`TargetConfig::height`], adds zlib
+    /// pixels, and uses Apple's encrypted record transport.
     ///
-    /// What it costs is `clipboard` and `resize`, both refused below: Apple carries
-    /// the pasteboard over messages of its own rather than RFB's on this transport,
-    /// and dynamic resolution needs the very message that makes the Mac hide its
-    /// real screens. See docs/apple-vnc-889.md.
+    /// `clipboard` is refused below because Apple carries the pasteboard over
+    /// messages of its own rather than RFB's on this transport. `resize` is also
+    /// refused: Apple's undocumented dynamic-resolution controls are not
+    /// implemented. See docs/apple-vnc-889.md.
     ArdHighPerformance,
 }
 
@@ -234,10 +236,10 @@ pub struct TargetConfig {
     /// Read by RDP at connect, where it is genuinely the size asked for, and by
     /// both RDP and VNC as the answer to [`crate::protocol::ClientMsg::DefaultSize`]
     /// — a client with no desktop-shaped window of its own asking for whatever
-    /// size this end considers right. A VNC server keeps its own size at connect
-    /// and this is only ever consulted for a client that asks, so setting it costs
-    /// a VNC target nothing and gives an operator somewhere to say what a phone
-    /// should get.
+    /// size this end considers right. A generic or Standard-mode VNC server keeps
+    /// its own size at connect and this is only ever consulted for a client that
+    /// asks. For `ard-high-performance`, it is the virtual display's requested
+    /// mode.
     ///
     /// On an RDP target with [`Self::resize`] this is a size in *points*: the
     /// connect happens at 1x, but a Retina client then asks for twice the pixels,
@@ -540,19 +542,24 @@ impl ConfigFile {
                          account credentials above instead",
                         target.name
                     );
-                    // Refused on *both* Apple subtypes, for the same reason each
-                    // time: what the gateway asks the Mac for is a fixed-size
-                    // session, so the resolution is the one set on the Mac. Screen
-                    // Sharing does have a resizable path — it asks for a virtual
-                    // display with the dynamic-resolution flag set, and then keeps
-                    // renegotiating — and that is not implemented on either subtype
-                    // (see docs/roadmap.md).
+                    anyhow::ensure!(
+                        subtype != Subtype::ArdHighPerformance
+                            || (target.width != 0 && target.height != 0),
+                        "target {:?} is subtype {name:?} and requests a virtual display at \
+                         {}×{}, but width and height must both be greater than zero",
+                        target.name,
+                        target.width,
+                        target.height
+                    );
+                    // Standard mode shares the Mac's physical displays; High
+                    // Performance requests one configured virtual-display mode.
+                    // Apple's undocumented dynamic-resolution controls are not
+                    // implemented for either subtype.
                     anyhow::ensure!(
                         !target.resize,
                         "target {:?} is subtype {name:?} and sets resize, which this gateway \
-                         does not support yet: it asks the Mac for a fixed-size session, so \
-                         the resolution is the one set on the Mac. Dynamic resize means asking \
-                         for a resizable virtual display instead, which is not implemented",
+                         does not support: Apple dynamic resolution is undocumented and is not \
+                         implemented",
                         target.name
                     );
                     // Refused on the high-performance subtype alone: plain `ard`
@@ -1422,11 +1429,10 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
 
-        // Resize is rejected: the gateway asks the Mac for a fixed-size session,
-        // and asking for a resizable virtual display instead is not implemented.
+        // Apple dynamic resolution is not implemented.
         let err =
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
-        assert!(format!("{err:#}").contains("does not support yet"), "{err:#}");
+        assert!(format!("{err:#}").contains("does not support"), "{err:#}");
 
         // Clipboard is *not* rejected here: plain `ard` uses Apple's native
         // pasteboard messages. Only the high-performance subtype refuses it.
@@ -1454,7 +1460,8 @@ mod tests {
     }
 
     /// The high-performance subtype carries the same account credentials as plain
-    /// `ard` and refuses one key more: the pasteboard is Apple's own on that wire.
+    /// `ard`, requests a virtual display at width/height, and refuses one key more:
+    /// the pasteboard is Apple's own on that wire.
     #[test]
     fn the_high_performance_subtype_refuses_clipboard_as_well_as_resize() {
         let hp = |extra: &str| {
@@ -1463,8 +1470,9 @@ mod tests {
             )))
         };
 
-        let target = &hp("").unwrap().targets[0];
+        let target = &hp("width = 1600\nheight = 1000").unwrap().targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
+        assert_eq!((target.width, target.height), (1600, 1000));
         // The name is what a config file writes, hyphens and all — the enum is
         // kebab-case, not lowercase, and this is what pins that.
         assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
@@ -1473,7 +1481,7 @@ mod tests {
         assert!(format!("{err:#}").contains("Apple's own protocol revision"), "{err:#}");
 
         let err = hp("resize = true").unwrap_err();
-        assert!(format!("{err:#}").contains("does not support yet"), "{err:#}");
+        assert!(format!("{err:#}").contains("does not support"), "{err:#}");
 
         // The credential rules are the ones `ard` has, shared rather than restated.
         let err = ConfigFile::parse(&vnc_toml(
@@ -1481,6 +1489,20 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
+    }
+
+    #[test]
+    fn the_high_performance_virtual_display_requires_nonzero_dimensions() {
+        for dimensions in ["width = 0\nheight = 1000", "width = 1600\nheight = 0"] {
+            let err = ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{dimensions}"
+            )))
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("width and height must both be greater than zero"),
+                "{err:#}"
+            );
+        }
     }
 
     #[test]

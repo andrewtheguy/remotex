@@ -77,10 +77,12 @@ password = "change-me"
 
 # Initial desktop size to request.
 #
-# RDP connects at this size. A VNC server keeps its own instead and consults these
-# only to answer a client that has no desktop-shaped window of its own — a phone
-# asking for whatever this end considers right — which needs `resize = true` below
-# before anything can be applied.
+# RDP connects at this size. A generic VNC server and `subtype = "ard"` keep the
+# remote's own size and consult these only to answer a client that has no
+# desktop-shaped window of its own — a phone asking for whatever this end considers
+# right — which needs `resize = true` below before anything can be applied.
+# `subtype = "ard-high-performance"` instead requests its virtual display at this
+# configured mode during setup.
 #
 # On an RDP target with `resize` these are *points*, not pixels: the connect
 # happens at 1x and a Retina client then asks for twice the pixels.
@@ -98,8 +100,9 @@ password = "change-me"
 # choice made per session and never remembered.
 #
 # One narrowing that is not the client's to make: on VNC it works only on servers
-# that accept SetDesktopSize — the TigerVNC family. Both Mac subtypes refuse it, so
-# a Mac keeps the resolution set on the Mac (see the two Mac targets below).
+# that accept SetDesktopSize — the TigerVNC family. Both Mac subtypes refuse it.
+# Apple's undocumented High Performance dynamic-resolution controls are not
+# implemented; its configured virtual-display mode stays fixed for the session.
 #
 # Without it — and by default — the desktop keeps its connect-time size, no client
 # offers either control, and the ones that ask anyway are ignored.
@@ -153,8 +156,8 @@ password = "change-me"
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
 # new login window on a virtual display instead of sharing its screen. So both
 # subtypes require username and password (that account's), take no vnc_password,
-# and reject resize, which macOS accepts and then ignores. A third-party VNC server
-# that happens to run on a Mac is not this: it is a plain "vnc" target.
+# and reject resize. A third-party VNC server that happens to run on a Mac is not
+# this: it is a plain "vnc" target.
 #
 # `subtype = "ard"` is standard screen sharing on the ordinary RFB wire. Raw pixels,
 # Extended Clipboard where the Mac offers it, and one framebuffer holding every
@@ -167,28 +170,24 @@ password = "change-me"
 # username = "andrew"
 # password = "the-account-password"
 
-# `subtype = "ard-high-performance"` is the same Mac and the same credentials over
-# Apple's own protocol revision, and adds three things:
+# `subtype = "ard-high-performance"` requests one virtual display instead of the
+# Mac's physical displays. `width` and `height` select the mode requested during
+# setup, and zlib compresses the pixels over Apple's own protocol revision. The mode
+# remains fixed for the session: Apple's undocumented dynamic-resolution and
+# one/two-virtual-display controls are not implemented.
 #
-#   * **compression** — zlib instead of raw pixels, around fifty times fewer bytes on
-#     a static desktop;
-#   * **the Mac's screens, listed** — pick one from the client's Display menu, or
-#     "All Displays" for every screen in one framebuffer the way plain "ard" does;
-#   * **each screen's pixel density** — so a Retina Mac is drawn at 100% instead of at
-#     twice the size. Picking a single screen is what makes this exact: a framebuffer
-#     spanning screens of different densities has no one scale factor.
-#
-# It refuses two keys rather than accepting them and doing nothing: `clipboard`,
-# because Apple carries the pasteboard over its own messages here; and `resize`, for
-# the same reason plain "ard" refuses it. Everything else is identical, so switching
-# between the two subtypes is one line. See docs/apple-vnc-889.md.
+# It refuses `clipboard`, because Apple carries the pasteboard over messages of its
+# own here, and `resize`, because the undocumented dynamic controls are out of scope.
+# See docs/apple-vnc-889.md.
 # [[targets]]
-# name = "mac-compressed"
+# name = "mac-virtual-display"
 # protocol = "vnc"
 # subtype = "ard-high-performance"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"
+# width = 1600
+# height = 1000
 
 # How this target's pixels are compressed on their way to the browser. Two keys and
 # a dial, and they apply to every protocol.

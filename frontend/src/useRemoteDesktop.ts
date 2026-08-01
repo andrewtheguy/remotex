@@ -1231,10 +1231,9 @@ export function useRemoteDesktop(
       }
     };
 
-    // The remote's display list, and the one follow-up a change of display
-    // needs: this screen's density again. No engine sends `displays` yet —
-    // display picking over macOS Screen Sharing (ARD) is phase 2 — but the
-    // handler is kept so the wire is ready for it.
+    // The remote's display list, and the one follow-up a change of display needs:
+    // this screen's density again. Standard macOS Screen Sharing sends its physical
+    // displays here; High Performance mode reports its single virtual display.
     const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);

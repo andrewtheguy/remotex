@@ -8,11 +8,9 @@
 // panel agreeing with what is actually on the canvas rather than with what was
 // clicked.
 //
-// One engine populates the list: a VNC target with subtype
-// "ard-high-performance", which speaks Apple's own protocol revision. It sends the
-// Mac's screens plus an "All Displays" entry. RDP and plain VNC each deliver one
-// framebuffer spanning every remote screen, so they send nothing and the FAB shows
-// no Display section at all.
+// Standard Apple Screen Sharing (`subtype = "ard"`) sends the Mac's physical
+// screens plus an "All Displays" entry. High Performance mode sends one virtual
+// display, leaving nothing to choose; RDP and generic VNC likewise expose no list.
 
 import { useRef } from "react";
 import type { DisplayInfo } from "./protocol.ts";

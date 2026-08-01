@@ -205,32 +205,35 @@ const DH_PRIME: &[u8] = &[
 /// The account the target below carries and the fake Mac expects back.
 const MAC_USER: &str = "andrew";
 const MAC_PASSWORD: &str = "s3cr3t-should-not-leak";
-/// The two screens the fake Mac reports, so a display list has something in it.
-const MAC_MAIN_DISPLAY: u32 = 0x2b00_4501;
-const MAC_SECOND_DISPLAY: u32 = 0x2b00_4502;
-/// ServerInit's size, and the logical size of both screens. The first screen is 1x,
-/// so this is its backing size too.
+/// The id assigned to the fake virtual display.
+const MAC_VIRTUAL_DISPLAY: u32 = 0x2b00_45ff;
+/// ServerInit's size, before the display configuration is applied.
 const MAC_DESKTOP: u16 = 32;
-/// The second screen's backing size: twice its logical one, which is what a Retina
-/// screen looks like on the wire and what the browser must be told to halve.
-const MAC_RETINA: u16 = MAC_DESKTOP * 2;
+const MAC_VIRTUAL_WIDTH: u16 = 40;
+const MAC_VIRTUAL_HEIGHT: u16 = 30;
 
-/// A scripted macOS Screen Sharing server. Returns the port, and a channel
-/// reporting each `SetDisplayMessage` the gateway sends — which is how the test
-/// sees a display selection reach the wire.
-async fn spawn_fake_mac() -> (u16, mpsc::UnboundedReceiver<u32>) {
+#[derive(Debug, PartialEq, Eq)]
+enum MacRequest {
+    Configuration((u16, u16)),
+    Display(u32),
+}
+
+/// A scripted High Performance Screen Sharing server. Returns the port, a channel
+/// reporting display-control requests in wire order, and the task that records
+/// every display configuration.
+async fn spawn_fake_mac() -> (
+    u16,
+    mpsc::UnboundedReceiver<MacRequest>,
+    tokio::task::JoinHandle<std::io::Result<Vec<(u16, u16)>>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let _ = serve_fake_mac(stream, tx).await;
-            });
-        }
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        serve_fake_mac(stream, tx).await
     });
-    (port, rx)
+    (port, rx, task)
 }
 
 /// The server half of Apple's DH authentication: offer the group, then recover the
@@ -290,89 +293,100 @@ async fn fake_mac_authenticate(stream: &mut TcpStream) -> std::io::Result<[u8; 1
     Ok(key)
 }
 
-/// The `AppleDisplayLayout` payload for this Mac's two screens, with `current` the
-/// one it is sending — `None` for the combined view of both.
+/// The `AppleDisplayLayout` payload for the configured virtual display.
 ///
 /// Built here from the wire format rather than by calling the gateway, which only
 /// parses this, so the offsets are asserted from both ends. They are the *measured*
 /// offsets: every record field two bytes later than the reference document says, a
 /// scale factor as a big-endian `f64`, and both bounds rects as
 /// `(top, left, bottom, right)` rather than `(x, y, w, h)`.
-///
-/// The second screen is Retina, which is what makes this exercise the density: a
-/// layout naming it must reach the browser as a `scale` of 2, and the combined view
-/// of a 1x screen beside a 2x one has no single scale at all.
-fn fake_mac_layout(current: Option<u32>) -> Vec<u8> {
+fn fake_mac_layout((w, h): (u16, u16)) -> Vec<u8> {
     const RECORD: usize = 0x38;
     const HEAD: usize = 0x14;
-    // id, flags, logical size, backing size.
-    let screens = [
-        (MAC_MAIN_DISPLAY, 0x01u32, MAC_DESKTOP, MAC_DESKTOP),
-        (MAC_SECOND_DISPLAY, 0x00, MAC_DESKTOP, MAC_RETINA),
-    ];
 
     let mut p = vec![0u8; HEAD];
-    p[..2].copy_from_slice(&((HEAD + screens.len() * RECORD) as u16).to_be_bytes());
+    p[..2].copy_from_slice(&((HEAD + RECORD) as u16).to_be_bytes());
     p[2..4].copy_from_slice(&5u16.to_be_bytes()); // version
-    // The header's logical geometry spans every screen and does not move; its
-    // backing is the framebuffer, which narrows to one screen when one is picked.
-    let framebuffer = match current.and_then(|id| screens.iter().find(|s| s.0 == id)) {
-        Some(&(.., backing)) => (backing, backing),
-        None => (MAC_DESKTOP + MAC_RETINA, MAC_RETINA),
-    };
-    p[4..6].copy_from_slice(&(MAC_DESKTOP * 2).to_be_bytes());
-    p[6..8].copy_from_slice(&MAC_DESKTOP.to_be_bytes());
-    p[8..10].copy_from_slice(&framebuffer.0.to_be_bytes());
-    p[10..12].copy_from_slice(&framebuffer.1.to_be_bytes());
-    p[12..16].copy_from_slice(&current.unwrap_or(u32::MAX).to_be_bytes());
-
-    let mut left = 0u16;
-    for (id, flags, logical, backing) in screens {
-        let mut r = vec![0u8; RECORD];
-        let density = f64::from(backing) / f64::from(logical);
-        r[0x02..0x0a].copy_from_slice(&density.to_be_bytes());
-        r[0x0a..0x12].copy_from_slice(&1.0f64.to_be_bytes()); // viewer scale
-        r[0x12..0x16].copy_from_slice(&id.to_be_bytes());
-        let mut edges = |at: usize, size: u16| {
-            r[at + 2..at + 4].copy_from_slice(&left.to_be_bytes());
-            r[at + 4..at + 6].copy_from_slice(&size.to_be_bytes());
-            r[at + 6..at + 8].copy_from_slice(&(left + size).to_be_bytes());
-        };
-        edges(0x16, logical);
-        edges(0x1e, backing);
-        r[0x26..0x2a].copy_from_slice(&flags.to_be_bytes());
-        p.extend_from_slice(&r);
-        left += logical;
+    for at in [4, 8] {
+        p[at..at + 2].copy_from_slice(&w.to_be_bytes());
+        p[at + 2..at + 4].copy_from_slice(&h.to_be_bytes());
     }
-    // And two bytes short of the last record, which is where a real Mac stops even
-    // though the length prefix counts them. Reading the declared count instead eats
-    // the first two bytes of the next message and the session dies several messages
-    // later blaming an encoding nobody sent, so it is worth a fake Mac reproducing.
+    p[12..16].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
+
+    let mut record = vec![0u8; RECORD];
+    record[0x02..0x0a].copy_from_slice(&1.0f64.to_be_bytes());
+    record[0x0a..0x12].copy_from_slice(&1.0f64.to_be_bytes());
+    record[0x12..0x16].copy_from_slice(&MAC_VIRTUAL_DISPLAY.to_be_bytes());
+    for at in [0x16, 0x1e] {
+        record[at + 4..at + 6].copy_from_slice(&h.to_be_bytes());
+        record[at + 6..at + 8].copy_from_slice(&w.to_be_bytes());
+    }
+    record[0x26..0x2a].copy_from_slice(&1u32.to_be_bytes()); // main
+    p.extend_from_slice(&record);
+    // A live Mac omits the final record's two trailing padding bytes while counting
+    // them in the declared length.
     p.truncate(p.len() - 2);
     p
 }
 
+/// Parse `SetDisplayConfiguration` independently of the implementation that wrote
+/// it, asserting the descriptor and mode-table fields consumed by the server.
+fn fake_mac_read_configuration(body: &[u8]) -> (u16, u16) {
+    const D: usize = 8;
+    const DESCRIPTOR_HEAD: usize = 0x9c;
+    const MODE_ENTRY: usize = 0x1c;
+    assert_eq!(body.len(), D + DESCRIPTOR_HEAD + MODE_ENTRY);
+
+    let be16 = |at: usize| u16::from_be_bytes([body[at], body[at + 1]]);
+    let be32 = |at: usize| {
+        u32::from_be_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]])
+    };
+    assert_eq!(be16(0), 1, "display configuration version");
+    assert_eq!(be16(2), 1, "one display descriptor");
+    assert_eq!(be32(4), 0, "configuration flags");
+
+    let modes = usize::from(be16(D + 0x9a));
+    assert_eq!(modes, 1);
+    assert_eq!(usize::from(be16(D)), DESCRIPTOR_HEAD + MODE_ENTRY);
+    assert_eq!(be32(D + 0x7a), 1, "display_flags");
+    assert_eq!(be32(D + 0x7e), 4, "virtual display_type");
+    assert_eq!(be16(D + 0x92), 0, "current mode");
+    assert_eq!(be16(D + 0x94), 0, "preferred mode");
+    assert_eq!(be32(D + 0x96), 0, "upright rotation");
+
+    let mode = D + DESCRIPTOR_HEAD;
+    let size = (
+        u16::try_from(be32(mode)).expect("width within u16"),
+        u16::try_from(be32(mode + 4)).expect("height within u16"),
+    );
+    assert_eq!(be32(mode + 8), u32::from(size.0), "scaled width");
+    assert_eq!(be32(mode + 12), u32::from(size.1), "scaled height");
+    assert_eq!(&body[mode + 16..mode + 24], &[0x40, 0x4e, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(be32(mode + 24), 0, "mode flags");
+    size
+}
+
 /// One raw framebuffer update covering the whole desktop, in a colour derived from
 /// `shade` so two of them are never mistaken for one repeat.
-fn fake_mac_update(shade: u8) -> Vec<u8> {
+fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
     let mut update = vec![0u8, 0];
     update.extend_from_slice(&1u16.to_be_bytes()); // one rect
     update.extend_from_slice(&0u16.to_be_bytes()); // x
     update.extend_from_slice(&0u16.to_be_bytes()); // y
-    update.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
-    update.extend_from_slice(&MAC_DESKTOP.to_be_bytes());
+    update.extend_from_slice(&w.to_be_bytes());
+    update.extend_from_slice(&h.to_be_bytes());
     update.extend_from_slice(&0i32.to_be_bytes()); // raw
     update.extend_from_slice(&vec![
         shade;
-        usize::from(MAC_DESKTOP) * usize::from(MAC_DESKTOP) * 4
+        usize::from(w) * usize::from(h) * 4
     ]);
     update
 }
 
 async fn serve_fake_mac(
     mut stream: TcpStream,
-    selected: mpsc::UnboundedSender<u32>,
-) -> std::io::Result<()> {
+    requests: mpsc::UnboundedSender<MacRequest>,
+) -> std::io::Result<Vec<(u16, u16)>> {
     use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
     use tokio::io::AsyncReadExt as _;
 
@@ -446,17 +460,17 @@ async fn serve_fake_mac(
     let mut writer = RecordWriter::new(keys);
     let mut shade = 0x40u8;
     let mut sent_layout = false;
-    // A real Mac accepts a full-frame request queued directly behind a display
-    // selection and applies it to the framebuffer the selection produces. Model
-    // that dependency explicitly: the layout and its first full frame are emitted
-    // together when the request arrives. A gateway that waits for the layout before
-    // asking deadlocks here, standing in for the real failure where the late request
-    // earns only incremental damage and the freshly resized client stays black.
-    let mut pending_display = None;
+    let mut configurations = Vec::new();
 
     loop {
         let mut kind = [0u8; 1];
-        records.read_exact(&mut kind).await?;
+        match records.read_exact(&mut kind).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(configurations);
+            }
+            Err(err) => return Err(err),
+        }
         match kind[0] {
             // SetPixelFormat
             0 => {
@@ -478,27 +492,21 @@ async fn serve_fake_mac(
                 if req[0] != 0 {
                     continue;
                 }
+                let size = configurations
+                    .last()
+                    .copied()
+                    .expect("the display configuration precedes updates");
                 if !std::mem::replace(&mut sent_layout, true) {
                     let mut rect = vec![0u8, 0];
                     rect.extend_from_slice(&1u16.to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout(None));
-                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
-                }
-                if let Some(id) = pending_display.take() {
-                    let mut rect = vec![0u8, 0];
-                    rect.extend_from_slice(&1u16.to_be_bytes());
-                    rect.extend_from_slice(&[0u8; 8]);
-                    rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout(
-                        (id != u32::MAX).then_some(id),
-                    ));
+                    rect.extend_from_slice(&fake_mac_layout(size));
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
                 shade = shade.wrapping_add(0x10);
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, size)).unwrap())
                     .await?;
             }
             // KeyEvent
@@ -514,11 +522,8 @@ async fn serve_fake_mac(
             0x09 => {
                 records.read_exact(&mut [0u8; 15]).await?;
             }
-            // SetDisplayMessage: the whole point of the subtype. Reported to the
-            // test, then held until the full-frame request queued behind it. The
-            // resulting layout names what was asked for, which is how a real Mac
-            // confirms it acted — and the only thing that moves a client's
-            // checkmark.
+            // SetDisplayMessage, reported so a later request can order assertions
+            // without relying on a timeout.
             0x0d => {
                 let mut body = [0u8; 7];
                 records.read_exact(&mut body).await?;
@@ -528,19 +533,20 @@ async fn serve_fake_mac(
                     assert_eq!(id, 0, "a combining request names no screen");
                 }
                 let wanted = if combine_all { u32::MAX } else { id };
-                let _ = selected.send(wanted);
-                pending_display = Some(wanted);
+                let _ = requests.send(MacRequest::Display(wanted));
             }
-            // SetDisplayConfiguration, which must never arrive. Sending one makes a
-            // real macOS 26 build create a virtual display spanning the real screens
-            // and turn them off for the session, so there is nothing left to
-            // enumerate or pick and the density flattens to 1. That is what this
-            // subtype used to do; nothing but a Mac would notice it coming back, so
-            // this assertion is the stand-in.
-            0x1d => panic!(
-                "the gateway sent SetDisplayConfiguration, which makes a Mac \
-                 synthesize a virtual display and hide its real screens"
-            ),
+            // SetDisplayConfiguration: the High Performance subtype's one virtual
+            // display request. It must occur once during setup.
+            0x1d => {
+                let mut head = [0u8; 3];
+                records.read_exact(&mut head).await?;
+                let size = usize::from(u16::from_be_bytes([head[1], head[2]]));
+                let mut body = vec![0u8; size];
+                records.read_exact(&mut body).await?;
+                let requested = fake_mac_read_configuration(&body);
+                let _ = requests.send(MacRequest::Configuration(requested));
+                configurations.push(requested);
+            }
             other => panic!("fake Mac got unexpected message type {other:#x}"),
         }
     }
@@ -619,8 +625,17 @@ fn mac_target(port: u16) -> TargetConfig {
         subtype: Some(remotex::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
+        width: MAC_VIRTUAL_WIDTH,
+        height: MAC_VIRTUAL_HEIGHT,
         ..target(Protocol::Vnc, port)
     }
+}
+
+async fn next_mac_request(rx: &mut mpsc::UnboundedReceiver<MacRequest>) -> MacRequest {
+    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timed out waiting for a display-control request")
+        .expect("the display-control channel closed")
 }
 
 /// Start the app against the connection-dropping RDP endpoint.
@@ -1194,130 +1209,60 @@ async fn expect_resize_msg(ws: &mut Ws) -> serde_json::Value {
     expect_control(ws, "resize").await
 }
 
-/// The whole `ard-high-performance` wire, end to end: Apple's version banner and
-/// DH authentication, the `0xC1` ClientInit, the cleartext prelude, the rekey, and
-/// then a display layout, a framebuffer update and a display selection all inside
-/// the AES-128-CBC record layer.
-///
-/// The assertions on the gateway's side of it live in the fake Mac (which panics on
-/// a wrong banner, security type, ClientInit byte, prelude shape or display
-/// descriptor); what is asserted here is what a *browser* gets out the far end,
-/// which is the thing the subtype exists for.
+/// The whole `ard-high-performance` wire, end to end: authentication, record setup,
+/// one virtual-display configuration, the answering layout, and pixels.
 #[tokio::test]
-async fn apple_screen_sharing_reports_its_displays_and_binds_to_one() {
-    let (mac_port, mut selected) = spawn_fake_mac().await;
+async fn high_performance_requests_one_configured_virtual_display() {
+    let (mac_port, mut requests, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
 
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::Configuration((MAC_VIRTUAL_WIDTH, MAC_VIRTUAL_HEIGHT))
+    );
+
+    // ServerInit precedes the encrypted display request, then the answering layout
+    // replaces that provisional geometry with the configured virtual mode.
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
-
-    // The display list, which is what standard RFB cannot express at all. Read
-    // before the tile because that is the order the Mac sends them in — the layout
-    // opens its metadata burst — and `expect_tile` skips text messages on its way
-    // past, so asking for the tile first would consume this and then time out.
-    let msg = expect_displays(&mut ws).await;
-    // A session opens on the combined view, which is what the Mac reports when
-    // nothing has asked otherwise, and which is listed so there is a way back to it.
-    assert_eq!(msg["active"], u32::MAX, "{msg}");
-    let displays = msg["displays"].as_array().expect("a display array");
-    assert_eq!(displays.len(), 3, "{msg}");
-    assert_eq!(displays[0]["id"], u32::MAX);
-    assert_eq!(displays[0]["label"], "All Displays");
-    assert_eq!(displays[1]["id"], MAC_MAIN_DISPLAY);
-    assert_eq!(displays[1]["label"], "Display 1");
-    assert_eq!(displays[1]["main"], true);
-    assert_eq!(displays[1]["detail"], format!("{MAC_DESKTOP}×{MAC_DESKTOP}"));
-    assert_eq!(displays[2]["id"], MAC_SECOND_DISPLAY);
-    assert_eq!(displays[2]["main"], false);
-    assert_eq!(displays[2]["detail"], format!("{MAC_DESKTOP}×{MAC_DESKTOP} at 2x"));
-    // Never a virtual display: this subtype asks the Mac for its own screens.
-    assert_eq!(displays[1]["virtual"], false);
-
-    // And the desktop paints, which means every step above it went through: the
-    // record layer is up in both directions and RFB is running inside it.
-    expect_tile(&mut ws).await;
-
-    // Picking the second screen reaches the Mac as a SetDisplayMessage…
-    ws.send(Message::text(format!(
-        r#"{{"type":"selectDisplay","id":{MAC_SECOND_DISPLAY}}}"#
-    )))
-    .await
-    .unwrap();
-    let asked = tokio::time::timeout(Duration::from_secs(10), selected.recv())
-        .await
-        .expect("timed out waiting for the Mac to be asked")
-        .expect("the selection channel closed");
-    assert_eq!(asked, MAC_SECOND_DISPLAY);
-
-    // …the framebuffer narrows to that screen and, because it is Retina, the
-    // browser is told to draw its pixels at half size. This is the assertion the
-    // whole change exists for: without it the desktop paints at twice the size the
-    // Mac thinks it is.
     let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], MAC_RETINA, "{resize}");
-    assert_eq!(resize["h"], MAC_RETINA, "{resize}");
-    assert_eq!(resize["scale"], 2.0, "{resize}");
-
-    // …and the checkmark follows the Mac's answering layout, not the click.
-    let msg = expect_displays(&mut ws).await;
-    assert_eq!(msg["active"], MAC_SECOND_DISPLAY, "{msg}");
-
-    // Back to every screen at once, which is the gateway's own list entry rather
-    // than an id the Mac named, and reaches it as the combining byte instead.
-    ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{}}}"#, u32::MAX)))
-        .await
-        .unwrap();
-    let asked = tokio::time::timeout(Duration::from_secs(10), selected.recv())
-        .await
-        .expect("timed out waiting for the combining request")
-        .expect("the selection channel closed");
-    assert_eq!(asked, u32::MAX, "combine_all_displays, not an id");
-
-    // The framebuffer widens back to the union of both screens — and the scale drops
-    // to 1, because a 1x screen beside a 2x one has no single density and the desktop
-    // is shown at its pixel size. The other half of the density story: it is *picking
-    // a screen* that makes the geometry exact.
-    let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], MAC_DESKTOP + MAC_RETINA, "{resize}");
-    assert_eq!(resize["h"], MAC_RETINA, "{resize}");
+    assert_eq!(resize["w"], MAC_VIRTUAL_WIDTH, "{resize}");
+    assert_eq!(resize["h"], MAC_VIRTUAL_HEIGHT, "{resize}");
     assert_eq!(resize["scale"], 1.0, "{resize}");
 
     let msg = expect_displays(&mut ws).await;
-    assert_eq!(msg["active"], u32::MAX, "{msg}");
-}
+    let displays = msg["displays"].as_array().expect("a display array");
+    assert_eq!(displays.len(), 1, "{msg}");
+    assert_eq!(displays[0]["id"], MAC_VIRTUAL_DISPLAY, "{msg}");
+    assert_eq!(displays[0]["label"], "Virtual display", "{msg}");
+    assert_eq!(displays[0]["virtual"], true, "{msg}");
+    assert_eq!(msg["active"], MAC_VIRTUAL_DISPLAY, "{msg}");
+    expect_tile(&mut ws).await;
 
-/// A selection of a screen the Mac never listed is dropped rather than forwarded.
-///
-/// The one case where the gateway is the only thing standing between a client and a
-/// Mac being told to bind to something that does not exist — a screen unplugged
-/// between the list being sent and the click arriving.
-#[tokio::test]
-async fn a_display_the_mac_never_listed_is_not_forwarded_to_it() {
-    let (mac_port, mut selected) = spawn_fake_mac().await;
-    let addr = spawn_app(mac_target(mac_port)).await;
-    let cookie = common::login(addr).await;
-    let token = common::claim_session(addr, &cookie).await;
-    let mut ws = connect_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
-    expect_displays(&mut ws).await;
-
-    ws.send(Message::text(r#"{"type":"selectDisplay","id":9999}"#))
+    // A viewport report must not become a second configuration. The display request
+    // after it gives the fake server a deterministic later message to report.
+    ws.send(Message::text(r#"{"type":"viewport","w":24,"h":18}"#))
         .await
         .unwrap();
-    // A real selection after it, which the Mac *does* answer: if the bogus one had
-    // been forwarded it would arrive first and this assertion would read it.
     ws.send(Message::text(format!(
-        r#"{{"type":"selectDisplay","id":{MAC_SECOND_DISPLAY}}}"#
+        r#"{{"type":"selectDisplay","id":{MAC_VIRTUAL_DISPLAY}}}"#
     )))
     .await
     .unwrap();
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::Display(MAC_VIRTUAL_DISPLAY),
+        "the viewport produced another display configuration"
+    );
 
-    let asked = tokio::time::timeout(Duration::from_secs(10), selected.recv())
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
         .await
-        .expect("timed out waiting for the Mac to be asked")
-        .expect("the selection channel closed");
-    assert_eq!(asked, MAC_SECOND_DISPLAY, "the unknown display was forwarded");
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert_eq!(configurations.len(), 1, "unexpected display configurations: {configurations:?}");
 }
