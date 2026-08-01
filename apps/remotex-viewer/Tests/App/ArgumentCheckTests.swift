@@ -2,11 +2,10 @@ import Testing
 @testable import RemotexViewer
 
 struct ArgumentCheckTests {
-    /// The failure that motivated this: a removed flag, silently ignored, sent a
-    /// QA run at the real instance. Now it is named.
-    @Test func aRemovedFlagIsReported() {
+    @Test func anUnknownOptionIsReported() {
         #expect(
-            ArgumentCheck.unknownOptions(in: ["remotex-viewer", "--settings", "qa"]) == ["--settings"]
+            ArgumentCheck.unknownOptions(in: ["remotex-viewer", "--unknown-option", "value"])
+                == ["--unknown-option"]
         )
     }
 
@@ -36,8 +35,9 @@ struct ArgumentCheckTests {
     /// More than one unknown option is reported together, in order.
     @Test func severalUnknownOptionsAreAllReported() {
         #expect(
-            ArgumentCheck.unknownOptions(in: ["remotex-viewer", "--gateway", "x", "--settings", "y"])
-                == ["--gateway", "--settings"]
+            ArgumentCheck.unknownOptions(in: [
+                "remotex-viewer", "--first-unknown", "x", "--second-unknown", "y",
+            ]) == ["--first-unknown", "--second-unknown"]
         )
     }
 }
