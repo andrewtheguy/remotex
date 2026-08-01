@@ -93,21 +93,18 @@ docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
 
 ## Development
 
-Run the backend and frontend separately; Vite proxies `/api` and `/ws` to the
-backend.
+Install the frontend dependencies once, then use Cargo for local development.
+`cargo run` rebuilds the frontend when its sources change and serves the generated
+bundle with the gateway.
 
 ```sh
-# terminal 1
+bun install --cwd frontend
 cargo run -- serve -c remotex.toml
-
-# terminal 2
-cd frontend
-bun install
-bun run dev
 ```
 
-Open <http://localhost:5173>. Use `RUST_LOG=info` or `RUST_LOG=debug` for
-backend logs.
+Open <http://localhost:52380>. Use `RUST_LOG=info` or `RUST_LOG=debug` for backend
+logs. Use `cargo build` when you only need to compile without starting the
+gateway.
 
 The main directories are:
 
@@ -187,11 +184,12 @@ resolved for the tests' direct RDP and VNC connections.
 ## Build
 
 ```sh
-cd frontend && bun install && bun run build && cd ..
+bun install --cwd frontend
 cargo build --release
 bash packaging/build-tarball.sh
 ```
 
-The tarball contains the gateway binary and built frontend. `remotex.app` is
-built by `packaging/macos-viewer/build-viewer-app.sh`, which bundles the gateway
-binary into the app rather than shipping the frontend.
+Local Cargo builds automatically rebuild the frontend when its sources change.
+The tarball contains the gateway binary and built frontend. `remotex.app` is built
+by `packaging/macos-viewer/build-viewer-app.sh`, which bundles the gateway binary
+into the app rather than shipping the frontend.
