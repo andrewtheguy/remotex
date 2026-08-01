@@ -1,9 +1,10 @@
 # remotex.app
 
-`remotex.app` is a native macOS 26 client that **carries** its own gateway and can
-also be pointed at one. It owns target selection, session recovery, tile decoding,
-Metal rendering, input, clipboard synchronization, and audio playback; it contains no
-`WKWebView` and shares protocol behavior, not implementation, with the browser client.
+`remotex.app` is a native macOS 26 client. It can start its bundled gateway or
+connect to a remote one. It contains no `WKWebView`; it shares the browser
+client's protocol, not its implementation. It owns target selection, session
+recovery, tile decoding, Metal rendering, input, clipboard synchronization, and
+audio playback.
 
 The two gateways are the app's first question, asked on the `home` screen at every
 launch with the last answer preselected:
@@ -12,19 +13,16 @@ launch with the last answer preselected:
 |---|---|---|
 | where it runs | in this bundle, started at launch | wherever it was installed |
 | address | an ephemeral loopback port it picks | typed, and remembered once it answers |
-| credential | a bearer token nobody types | a username and password, once per session |
+| credential | a bearer token nobody types | a persisted login cookie obtained from a username and password |
 | who reaches the target | this Mac | that gateway |
 | **Configuration…** | edits this instance's config | not shown — it is that gateway's |
 
-Neither is a default the app can pick for somebody. The embedded gateway is the right
-answer for targets this Mac can reach directly — nothing to install, nothing to sign
-in to. It is the wrong one when the link to the target is slow, because then every
-tile crosses that link and the gateway belongs at the far end with this app talking to
-*it*. Only the user knows which case they are in.
+Use the embedded gateway when this Mac directly reaches the targets. Across a
+slow link, run the gateway near the targets and choose the remote gateway.
 
-Below the choice, the two are the same program: `/api/config`, `/api/targets`,
-`/api/session` and `/ws` are one route table with one set of shapes. The single
-difference is which header carries the credential — see `GatewayCredential`.
+Both choices use the same `/api/config`, `/api/targets`, `/api/session`, and `/ws`
+contracts. Only the credential header differs; see `GatewayCredential`. Any
+other behavioral difference between them is a bug.
 
 The client has no RDP or VNC implementation. Engine-specific behavior is
 reported by the gateway, with resize policy as the only client-side branch.
@@ -38,15 +36,13 @@ The bundle holds two executables:
 | `Contents/MacOS/remotex-viewer` | the Swift app (`CFBundleExecutable`) |
 | `Contents/MacOS/remotex-gateway` | a copy of the `remotex` gateway binary |
 
-Two files in one directory cannot share a name, and the suffix also makes it obvious
-which process is which in Activity Monitor and to `pgrep`. `CFBundleIdentifier` stays
-`dev.remotex.viewer`, because TCC grants and saved window state are keyed on it.
+`CFBundleIdentifier` remains `dev.remotex.viewer`; TCC grants and saved window
+state are keyed to it.
 
 ## The embedded gateway
 
-`remotex serve-embedded --instance-dir <dir>` is not a deployment: it serves the one
-client that started it and dies with it. Everything a deployment would configure is
-therefore decided in code — see `src/embedded.rs` and `config::Audience`:
+`remotex serve-embedded --instance-dir <dir>` serves only its parent app and dies
+with it. `src/embedded.rs` and `config::Audience` fix its server settings:
 
 | | |
 |---|---|
@@ -54,37 +50,30 @@ therefore decided in code — see `src/embedded.rs` and `config::Audience`:
 | port | `0`, read back off the socket after binding |
 | web UI | none. No `ServeDir`, no index handler; `/` is a 404 |
 | login | refused. `/api/auth/*` answers 403 |
-| credential | one bearer token, minted per launch, held only in memory |
+| credential | a random bearer token minted per launch, held only by the app and gateway in memory |
 
-### The two pipes
+### Process pipes
 
-Opposite directions, unrelated jobs.
-
-**The child's stdout → the app, once.** One JSON line, printed after the socket is
-bound so the port in it is a fact rather than an intention:
+After binding, the gateway writes exactly one JSON line to stdout:
 
 ```json
 {"port":49213,"token":"…"}
 ```
 
-That is how the app learns both the port and the token. stdout carries nothing else
-(logging goes to stderr), and the pipe's read end belongs to the app alone — so the
-token is not in `argv`, where `ps` would show it to every process, not in the
-environment, inherited by anything either side spawns, and not in a file, which would
-outlive the process that made it.
+The app is the token's only client-side holder. Logging goes to stderr. The
+private stdout pipe keeps the token out of `argv`, the environment, and
+persistent files.
 
-**The app → the child's stdin, never.** Nothing is written on it in either direction.
-The app holds the write end for as long as it lives; when it ends, the kernel closes
-that end, the gateway's blocking read returns end-of-file, and the gateway exits.
+The app keeps the write end of the gateway's stdin open without writing. When the
+app exits, the kernel closes it; the gateway reads EOF and exits.
 
 ### Shutdown, in three layers
 
-1. **The liveness pipe** is what the guarantee rests on. It fires whether the app
-   quit cleanly, crashed, was Force Quit or took a `kill -9`, because no code of ours
-   has to run for the kernel to close a descriptor. macOS has no `PR_SET_PDEATHSIG`,
-   and unlike a `getppid` poll this leaves no window in which an orphan is still
-   listening. `aGatewayIgnoringSignalsStillDiesWithThePipe` asserts it against a
-   child that traps `SIGTERM`.
+1. **The liveness pipe** handles clean quit, crash, Force Quit, and `kill -9`
+   without requiring app cleanup code. `aGatewayIgnoringSignalsStillDiesWithThePipe`
+   proves this with a child that traps `SIGTERM`. macOS has no
+   `PR_SET_PDEATHSIG`; unlike `getppid` polling, the pipe leaves no interval in
+   which an orphan still listens.
 2. `SIGTERM`, the ordinary graceful stop.
 3. `applicationWillTerminate` closes the pipe and terminates the child, then kills it
    after a grace period. Synchronous, because the process may be gone the moment it
@@ -92,12 +81,10 @@ that end, the gateway's blocking read returns end-of-file, and the gateway exits
 
 ### The instance directory
 
-`--instance-dir <path>`, or `~/Library/Application Support/<CFBundleName>` (mode
-`0700`) — `remotex` for the shipped bundle, and its own name for a variant stamped out
-by `make-instance-bundle.sh`, which is what lets a second bundle be a second
-installation with no argument to pass. Everything this launch reads or writes is under
-it, and **nothing under `/opt/remotex` is ever consulted** — a Mac can run the server
-install and this app at once without either changing what the other does.
+The instance directory is `--instance-dir <path>` when supplied, otherwise
+`~/Library/Application Support/<CFBundleName>` (mode `0700`). The shipped bundle
+uses `remotex`; variants use their bundle name. All app state is beneath this
+directory; `/opt/remotex` is never consulted.
 
 | file | |
 |---|---|
@@ -105,48 +92,34 @@ install and this app at once without either changing what the other does.
 | `gateway.log` | the gateway's stderr, appended across launches |
 | `viewer.json` | client preferences |
 
-Preferences live here rather than in a `UserDefaults` suite because the directory is
-the unit of isolation: a suite lives in the user's own `Preferences` whatever the rest
-of the app was told, which is the trap the old `--settings` flag existed to work
-around.
+Preferences use `viewer.json`, not `UserDefaults`, so `--instance-dir` isolates
+them during QA. A `UserDefaults` suite remains in the user's Preferences directory
+regardless of the supplied instance directory.
 
-A first launch writes a commented template with no targets, which is a valid
-configuration for this app — the picker simply says there is nothing to connect to
-yet.
+A first launch writes a commented zero-target template, which is valid; the picker
+states that there is nothing to connect to.
 
 ### Configuration
 
-**Remote › Configuration…** edits `remotex.toml` in a sheet: the TOML in a monospaced
-editor, Reveal in Finder, Cancel, and Save.
+**Remote › Configuration…** edits `remotex.toml` and can reveal it in Finder.
 
-### About
-
-**remotex › About remotex** — named after the instance's `branding`, so a second
-instance's item says its own name — states the three things that identify a running
-app, none of which is visible anywhere else:
-
-- **the version**, from `CFBundleShortVersionString`, plus the wire protocol number
-  the gateway is checked against;
-- **the instance directory**, with Reveal in Finder.
-
-It exists as an explicit item because `commandsReplaced` takes the standard
-application menu down whole (see `RemoteCommands`): About is not restored unless it is
-put back, and until it was, a running app could not say which build it was.
-
-Save validates first, by running the bundled gateway's `check-config --embedded` on
-the candidate text. So what the editor accepts is by construction what the gateway
-starts on, and there is no second idea of what a config means: a refusal keeps the
-sheet open with the text intact, shows the gateway's own complaint verbatim, and
-writes **nothing**. A clean save writes atomically and restarts the gateway, so a new
-target is in the picker by the time the sheet closes.
+Save runs the bundled gateway's `check-config --embedded`. Failure preserves the
+editor text, displays the gateway error, and writes nothing. Success writes
+atomically and restarts the gateway.
 
 `[server]` is refused in this file, and having no targets at all is not an error — it
 is what a first launch has, and the picker says so in words.
 
-A top-level `branding` names the instance: the heading above the target list, the
-window title and the launch screen. It is the one key this file shares with a served
-gateway's, and the only place either sets it — `[server].branding` no longer exists,
-because a key in that block could not name an app whose config has no such block.
+A top-level `branding` sets the target-list heading, window title, and launch
+screen. It is the one shared spelling for embedded and served gateways;
+`[server].branding` does not exist.
+
+### About
+
+Because `commandsReplaced` removes the standard app menu, `RemoteCommands`
+restores **About** explicitly. It uses the configured branding and shows
+`CFBundleShortVersionString`, the wire protocol version, and the instance
+directory, with Reveal in Finder.
 
 ## Running more than one instance
 
@@ -156,46 +129,28 @@ because a key in that block could not name an app whose config has no such block
 packaging/macos-viewer/make-instance-bundle.sh remotex-work ~/Pictures/work.png
 ```
 
-That writes `~/Applications/remotex-work.app` — a copy of `remotex.app` with its own
-`CFBundleIdentifier`, its own `CFBundleName` and its own icon, ad-hoc re-signed. Double
--click it. There is no flag to pass, no launcher to keep, and nothing to remember.
+This creates `~/Applications/remotex-work.app`, an ad-hoc-signed copy with its
+own bundle identifier, name, icon, and default instance directory.
 
-### Why a whole bundle, and not a launcher
+### Why a separate bundle
 
-Because the argument has nowhere to come from. LaunchServices hands a double-clicked
-app no arguments, and `open` without `-n` reactivates the running copy and *silently
-discards* `--args` — so `--instance-dir` can only arrive via a wrapper that shells out,
-and then the thing in the Dock is remotex rather than the instance. That is the trap the
-Chrome `--user-data-dir` launchers hit.
-
-So the instance directory is read from the bundle instead:
-`~/Library/Application Support/<CFBundleName>` (`InstanceDirectory.defaultURL`). The
-shipped bundle is named `remotex`, so its instance is exactly where it always was, and a
-variant named `remotex-work` gets its own with nothing passed to it.
-
-This is what Chrome's **Create Shortcut** does — a separate bundle per profile, with its
-own identifier and icon, in `~/Applications` — except that Chrome ships a few-KB
-`app_mode_loader` shim that talks to the one installed browser, because duplicating 200
-MB per shortcut would be absurd. remotex.app is 13 MB, so a plain copy is cheaper than
-the machinery to avoid one.
-
-`--instance-dir` remains, and is now what it should always have been: the override a QA
-run uses to point the *stock* bundle at a throwaway directory.
+LaunchServices supplies no arguments on double-click, and `open` without `-n`
+discards `--args` when reactivating an app. Reading the instance directory from
+`CFBundleName` (`InstanceDirectory.defaultURL`) therefore makes each variant
+independently launchable. A wrapper
+could carry `--instance-dir`, but the Dock would show the base app rather than the
+instance. Keep `--instance-dir` only as a QA override.
 
 ### What a variant costs
 
-- **13 MB, and it goes stale.** The copy carries its own client and gateway binaries, so
-  it keeps running the build it was stamped from. Re-run the script after updating
-  `remotex.app`; it replaces the bundle, keeps the name and icon, and never touches the
-  instance directory.
+- **13 MB, and it goes stale.** Re-run the script after updating `remotex.app`;
+  it replaces the bundle without touching its instance directory.
 - **Nothing else.** No entitlements, no notarization, no TCC. The shipped bundle is
   ad-hoc signed itself (`codesign -dv` → `Signature=adhoc`), and the viewer holds no TCC
   grants for a change of code identity to break: it captures keys with a *local*
   `NSEvent` monitor, which needs no Accessibility permission.
 
-What you must still **not** do is edit `remotex.app` in place. The script copies first
-and re-signs the copy, which is a different operation from breaking the seal on the one
-Apple's installer put there.
+Do not edit `remotex.app` in place; use the script so the copy is re-signed.
 
 ### Naming the window too
 
@@ -206,24 +161,16 @@ config:
 branding = "Work"
 ```
 
-That reaches the window title, the picker heading and the launch screen. Worth setting
-as well — one names the app, the other names what is on screen.
+The bundle name identifies the app; `branding` identifies its content.
 
-### What a new instance costs
-
-- **Its own configuration.** A fresh directory starts with an empty targets list, so
-  each instance is configured independently — one instance being set up says nothing
-  about another.
-- **Nothing else.** The gateways pick their own ports, and neither instance can see
-  the other's config, log or preferences.
+Each instance starts with an independent empty configuration and an isolated
+port, log, and preference file.
 
 ## Protocol compatibility
 
-The check survives even though both halves now ship in one bundle, and it means
-something different: a mismatch is a broken build rather than an old server, which is
-exactly the kind of thing that must not present as a hang. Before opening a session
-the client requests `GET /api/config` and requires its `protocolVersion` to match
-`PROTOCOL_VERSION` in `src/protocol.rs`; a mismatch is reported on the launch screen.
+Before opening a session, the client requires `GET /api/config`'s
+`protocolVersion` to match `PROTOCOL_VERSION` in `src/protocol.rs`. A mismatch is
+reported on the launch screen. For an embedded gateway it indicates a broken build.
 
 The version covers client messages, control messages, and binary frame layouts.
 Unknown additive control messages are ignored, but a change that makes an older
@@ -239,40 +186,30 @@ Contract tests protect both sides:
 
 ## Entry and session lifecycle
 
-`ViewerScreen` is `home`, `login`, `launching`, `picker`, `desktop`. The first is the
-gateway choice above; the branches meet again at `picker`.
+`ViewerScreen` has `home`, `login`, `launching`, `picker`, and `desktop` states.
 
-**The embedded branch** goes `home` → `launching` → `picker`. `launching` asks for
-nothing: it shows a spinner, or the reason the gateway did not start with the
-gateway's own stderr beneath it and **Configuration…** / **Change Gateway…** /
-**Try Again** to act on it. A gateway that exits while the app is using it lands on
-the same screen — deliberately not restarted automatically, since one that died on a
-config it accepted will die again, and a silent retry loop would hide the output that
-explains why.
+The embedded branch is `home` → `launching` → `picker`. `launching` shows a
+spinner or gateway stderr with **Configuration…**, **Change Gateway…**, and
+**Try Again**. An unexpected gateway exit returns there without an automatic
+restart loop.
 
-**The remote branch** goes `home` → `login` → `picker`, and skips `login` when the
-stored session cookie is still one the gateway knows. The address is validated on
-`home` — reachable, and speaking a protocol version this build can — so a failure on
-`login` can only be about the credentials. A gateway that answers `403` from
-`/api/auth/status` is an embedded one somebody typed the address of; it is refused by
-name rather than shown a login form that could never succeed.
+The remote branch is `home` → `login` → `picker`, skipping `login` for a valid
+stored cookie. `home` verifies reachability and protocol compatibility. A `403`
+from `/api/auth/status` identifies an embedded gateway and is rejected instead
+of presenting an unusable login form.
 
-**Change Gateway…** is the way back to `home` from anywhere, and it is also the log
-out: a remote gateway is told, so its login and its session slot are released rather
-than left for the reattach grace period.
+**Change Gateway…** returns to `home`; for a remote gateway it also logs out and
+releases the session slot.
 
 Authentication and session ownership stay separate, as before:
 
 - the credential authorizes this client to the gateway;
 - the claim token owns the program's one active session slot.
 
-What a `401` means is the one thing that differs between the branches after a session
-has started. On a remote gateway the login has expired or been ended elsewhere, so the
-`login` screen comes back and the stored cookie is dropped. On the embedded one there
-is no login to offer: the token is good for as long as the process that minted it
-lives, so a `401` means the gateway behind that port is not the one that issued it, and
-the app restarts the gateway instead — once, then it shows the launch screen rather
-than looping.
+A remote `401` drops the stored cookie and returns to `login`. An embedded token
+is valid for the lifetime of the process that minted it, so an embedded `401`
+means the process no longer recognizes its launch token; the app restarts it once,
+then returns to `launching` rather than looping.
 
 `SessionStateMachine` implements claim, attach, reconnect and takeover as a pure state
 machine. Network reconnects use capped exponential backoff up to 15 seconds. A busy
@@ -317,9 +254,8 @@ framebuffer to the window.
 
 ## Display and resize behavior
 
-`ViewportPolicy` separates two questions: whether this session may resize the
-remote, which the gateway answers, and whether the window drives it, which this
-viewer does.
+`ViewportPolicy` separates gateway-granted resize permission from whether the
+viewer actively reports window changes.
 
 Permission comes from the `connected` message:
 
@@ -330,14 +266,10 @@ Permission comes from the `connected` message:
 
 The three View menu items are one decision:
 
-- **Auto Resize** hands the remote's size to the window, which then follows every
-  change, debounced and deduplicated. Off until set, and then **remembered**: it
-  is one value with two editors — this menu item and the picker's *Auto-resize the
-  remote to the window, if compatible* — so a choice made mid-session is the one
-  the next connection starts from. It is applied to a new connection only where the
-  target allows resize; where it does not, the remembered default silently does
-  nothing, which is the picker caption's "if compatible". See
-  `ViewerPreferences.autoResizeByDefault`.
+- **Auto Resize** sends debounced, deduplicated window changes. Its remembered
+  value is shared with the picker's *Auto-resize the remote to the window, if
+  compatible* toggle. It defaults off until chosen and is ignored for targets
+  without resize permission. See `ViewerPreferences.autoResizeByDefault`.
 
   > **Known limitation on RDP.** When the default is on, the client reports its
   > window from the `connected` handshake — before RDP's Display Control channel
@@ -357,23 +289,19 @@ one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-**Standard Apple VNC fills the Display menu.** `subtype = "ard"` lists the Mac's
-physical screens plus an *All Displays* entry, and picking one narrows the session
-to that screen's own pixels. `subtype = "ard-high-performance"` requests one virtual
-display at the configured size. Once connected, it disables the remote Mac's
-physical displays and places all of the remote Mac's windows on that virtual
-display. Apple's official macOS Screen Sharing client can choose up to two virtual
-displays, but Remotex always requests one, so there is still nothing to pick. With
-`resize = true`, it supports **Resize to Window** like RDP, using Apple's dynamic
-resolution feature to replace that display's mode from viewport reports. RDP and
-generic VNC expose a single framebuffer spanning every remote screen and send no
-list, so the menu holds one disabled item reading *No Displays to Choose From*.
+Apple Screen Sharing Standard mode (`subtype = "ard"`, RFB 3.8) fills the Display
+menu with physical screens and *All Displays*; choosing one narrows the framebuffer
+to that screen's own pixels.
+`subtype = "ard-high-performance"` instead requests one virtual display at the
+configured size. It disables the remote physical displays and moves the Mac's
+windows to that virtual display. With `resize = true`, viewport reports replace
+its mode through Apple dynamic resolution. Apple's client supports up to two
+virtual displays; Remotex always requests one. RDP and generic VNC expose one
+combined framebuffer, so the menu reads *No Displays to Choose From*.
 
-The checkmark follows the Mac, not the click: it moves when the Mac answers with a
-display layout naming the screen it is now sending, so a selection it declines leaves
-the menu agreeing with what is on screen. Picking a single screen is also what makes
-a Retina Mac render at 100% — a combined framebuffer of screens at different
-densities has no single scale factor, so it is shown at its pixel size. See
+The checkmark moves only when the Mac confirms the selection in a display layout.
+A mixed-density combined framebuffer has no valid scale and is shown at its pixel
+size; a selected Retina display uses its reported scale and renders at 100%. See
 [`apple-vnc-889.md`](apple-vnc-889.md).
 
 ### Viewport measurement
@@ -447,7 +375,7 @@ Clipboard values are capped at 64 KiB in either direction and refused rather
 than truncated. Command-V queues the current local pasteboard value before
 sending the translated remote paste chord. Programmatic reads follow macOS's
 **Paste from Other Apps** permission, while `clipboard = true` remains the
-boundary — set per target in the app's own configuration.
+boundary — set per target on the gateway currently in use.
 
 ## Audio
 
@@ -489,19 +417,16 @@ log carries that diagnosis.
 
 ## Networking
 
-The embedded gateway is reached over plain HTTP on loopback, and a remote one may be
-plain HTTP too; ATS treats `ws://` as `http://`, so the bundle uses
+The embedded gateway uses plain HTTP on loopback, and remote gateways may also use
+HTTP. Because ATS treats `ws://` as `http://`, the bundle sets
 `NSAllowsArbitraryLoads`.
 
-Every request carries this client's credential, including `/api/config`, which needs
-none: a client that authenticates only the routes it believes are guarded is one route
-away from a 401 nobody expected. The WebSocket upgrade carries it too — `require_auth`
-runs before the upgrade, so omitting it is a bare 401 rather than a socket that closes
-with a reason.
+Every request, including `/api/config` and the WebSocket upgrade, carries the
+credential. `/api/config` is public, but sending the credential uniformly avoids
+route-specific authentication assumptions. `require_auth` runs before the upgrade,
+so a missing credential produces HTTP 401 before a socket exists.
 
-Which header depends on the gateway, and they are not interchangeable — `require_auth`
-reads the cookie on a login gateway and the bearer on a token one, and neither looks at
-the other:
+The headers are not interchangeable:
 
 | gateway | header |
 |---|---|
@@ -509,19 +434,14 @@ the other:
 | remote, signed in | `Cookie: remotex_session=<token>` |
 | remote, not yet | none. The public routes are what the `home` screen asks |
 
-`httpShouldHandleCookies` is off everywhere, on both. The session cookie is held by
-the client and set by hand, never by `HTTPCookieStorage`, for two reasons: that storage
-matches a `Secure` cookie only against an `https` scheme, and behind a TLS-terminating
-proxy the gateway does set `Secure` while the socket's scheme is `wss` — so the cookie
-would be dropped for a 401 with nothing to explain it; and it matches by host while
-**ignoring the port**, so two instances against two gateways on one host would share
-one login and each would log the other out. The cookie is stored in the instance's
-`viewer.json` (mode `0600`), which is what makes quitting the app not mean typing the
-password again.
+`httpShouldHandleCookies` is always off. The client manually stores the session
+cookie in `viewer.json` (mode `0600`) because `HTTPCookieStorage` drops a `Secure`
+cookie when matching it against `wss` rather than `https` behind a TLS-terminating
+proxy, and matches hosts without considering the port, which would mix same-host
+gateway logins. Manual persistence also keeps the login across app restarts.
 
-Two different tokens meet on the upgrade and are not interchangeable: the query's
-`session` is the claim, deciding whose turn it is, and the header's is this client's
-credential, deciding whether it may ask at all.
+On upgrade, the query `session` token owns the slot; the header credential
+authorizes the client. They are independent.
 
 `URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
 limit ends the socket rather than dropping one frame.
@@ -536,16 +456,11 @@ packaging/macos-viewer/build-viewer-app.sh --no-dmg
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 
-`--instance-dir` is the only argument the app takes, and it is the whole of the
-isolation: config, log and preferences are all under the directory it names, so a QA
-run cannot touch what a real one keeps in
-`~/Library/Application Support/remotex`. Clear the slate by deleting the directory.
-
-`--instance-dir` remains the only argument the app takes. Pointing it at another
-gateway is a UI decision, not a command-line one: type the address on the `home`
-screen. There is deliberately no `--gateway` flag — an address that a launcher can
-pass is one an instance can be silently launched with, and the instance directory is
-what isolation is built on here.
+`--instance-dir` is the only GUI-launch argument and is the whole of the isolation:
+config, log, and preferences are all under the directory it names, so QA cannot
+touch `~/Library/Application Support/remotex`. Delete the QA directory for a clean
+run. Gateway selection belongs to the `home` screen, so a launcher can isolate an
+instance but cannot choose its gateway.
 
 Always validate the packaged `.app`; `swift run`, standalone `swift build`, and
 the executable under `.build` bypass bundle menus, `Info.plist` behavior, and the
@@ -575,13 +490,12 @@ Automated tests cover message decoding, frame parsing, tile ordering, geometry,
 audio framing, schedule arithmetic, and Opus fixtures produced by the gateway.
 Audio playback still requires manual QA.
 
-The in-process tone harness (`cargo test --lib serve_a_test_tone -- --ignored`) is no
-longer reachable from this app: it serves a *login* gateway on a fixed port, and the
-app can only talk to the one it started for itself. Verify the harness in a browser;
-for the app, configure an `audio = true` RDP target in its own configuration and use
-that. Enable audio during a quiet phase and verify that the tone starts, stops, and
-returns without another action. Use a source that announces its left and right
-channels when checking stereo order.
+The in-process tone harness (`cargo test --lib serve_a_test_tone -- --ignored`)
+serves a login gateway. Test it in the app by choosing **Somewhere Else**, entering
+the printed loopback address, and signing in with the printed credentials. It
+checks the client playback path with a scripted engine. To include RDP negotiation,
+configure an `audio = true` RDP target; verify start/stop/resume, and use a source
+that announces left and right channels when checking stereo order.
 
 See
 [`packaging/macos-viewer/README.md`](../packaging/macos-viewer/README.md)

@@ -38,8 +38,8 @@ impl Security {
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via IronRDP
-/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is
-/// reached as a `vnc` target with `subtype = "ard"` — macOS Screen Sharing.
+/// (src/rdp.rs), `vnc` via the built-in RFB client (src/vnc.rs). A Mac is reached
+/// with `subtype = "ard"`, Apple Screen Sharing Standard mode over RFB 3.8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
@@ -191,8 +191,8 @@ pub struct TargetConfig {
     /// say what it speaks.
     pub protocol: Protocol,
     /// Which flavour of [`Self::protocol`] the far end is, when the protocol has
-    /// more than one: `subtype = "ard"` on a `vnc` target is macOS Screen
-    /// Sharing. Unset means the protocol's ordinary form.
+    /// more than one: `subtype = "ard"` on a `vnc` target is Apple Screen
+    /// Sharing Standard mode. Unset means the protocol's ordinary form.
     ///
     /// Declared rather than sniffed from the credentials, because the two
     /// dialects want different ones and guessing which was meant is how a
@@ -1536,8 +1536,7 @@ mod tests {
         .unwrap();
         assert!(config.targets[0].clipboard);
 
-        // RDP was the last engine to gain a clipboard (MS-RDPECLIP) and used to
-        // be refused here; the flag is now accepted for both engines.
+        // Clipboard is accepted for both engines, including RDP via MS-RDPECLIP.
         let config = ConfigFile::parse(&format!(
             r#"
             [server]

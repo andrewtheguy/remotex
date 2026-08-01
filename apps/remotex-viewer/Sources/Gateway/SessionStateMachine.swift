@@ -2,8 +2,7 @@ import Foundation
 
 /// The claim/attach/reconnect lifecycle, as a pure value.
 ///
-/// Transcribed from `frontend/src/useRemoteDesktop.ts` (the diagram at its top,
-/// plus its `onclose` handling):
+/// Matches the browser lifecycle in `frontend/src/useRemoteDesktop.ts`:
 ///
 /// ```text
 ///   connecting ──► connected ──(drop)──► reconnecting ──► connected …
@@ -13,26 +12,18 @@ import Foundation
 ///     start(force:)  start(force:)
 /// ```
 ///
-/// Reconnects are automatic; `busy` and `takenOver` wait for the user, because
-/// both mean somebody else is using the one session slot and resolving it evicts
-/// them. A fatal engine error is deliberately *not* a state here — the socket
-/// stays up and the session returns to the picker with the error shown there.
-///
-/// Kept separate from the actor that drives it so the whole table is testable
-/// synchronously, with no socket and no clock.
+/// Reconnects are automatic. `busy` and `takenOver` require user action because
+/// recovery evicts the slot holder. Engine errors stay on the open socket and
+/// return to the picker, so they are not states here. This value is synchronous
+/// and independently testable.
 struct SessionStateMachine {
     /// Close code sent when another client force-claimed the slot (`CLOSE_EVICTED`
     /// in src/ws.rs).
     static let evictedCloseCode = 4001
 
-    /// How many transport failures in a row are reported as nothing but
-    /// "reconnecting" before the reason is put in front of the user as well.
-    ///
-    /// Four, because [`ReconnectPolicy`] reaches its 15-second cap at the fourth
-    /// attempt: by then about half a minute has passed, which is long enough that a
-    /// gateway coming up would have come up, and short enough that nobody has gone to
-    /// read DNS records yet. The budget refills on anything that proves the link
-    /// works — a control message — and on a user-driven `start`.
+    /// Failures before the reason is shown. The fourth attempt reaches the
+    /// 15-second backoff cap after roughly 30 seconds; a control message or user
+    /// start resets the count.
     static let attemptsBeforeReporting = 4
 
     private(set) var status: ViewerConnectionStatus = .connecting
@@ -51,15 +42,9 @@ struct SessionStateMachine {
         /// Any endpoint answered 401. The gateway's auth sessions are in memory,
         /// so a restart produces this mid-session.
         case claimUnauthorized
-        /// The attempt failed at the transport, which could pass: nothing answered
-        /// yet, the route is down, it timed out. Retried — but see
-        /// [`attemptsBeforeReporting`], because "could pass" is not "will".
+        /// A retryable transport failure.
         case claimFailed(reason: String)
-        /// The attempt failed for a reason that will not pass — the address, the
-        /// gateway's build, an answer that could not be read. Reported as itself and
-        /// never retried: waiting changes none of those, so retrying is how a
-        /// definite failure became "Reconnecting…" forever with the reason nowhere
-        /// the user could see it.
+        /// A non-retryable address, compatibility, or response failure.
         case claimRejected(reason: String)
         case socketOpened
         /// Any control message, including one whose type this build does not know.
@@ -72,17 +57,13 @@ struct SessionStateMachine {
         case claim(force: Bool)
         case openSocket(token: String)
         case scheduleRetry(after: Duration)
-        /// Say why the session did not open, where the user is looking. No retry
-        /// follows: this is the end of the attempt, not a step in one.
+        /// Report a terminal failure in the UI.
         case report(reason: String)
-        /// Show no stale pixels across an interruption. Cheap to obey: the
-        /// gateway always repaints in full on (re)attach.
+        /// Remove stale pixels across an interruption; reattach repaints in full.
         case clearFramebuffer
-        /// Release every held key and button. The single path for it, so that
-        /// nothing on the remote can stay pressed after an interruption.
+        /// Release all held keys and buttons after an interruption.
         case releaseInput
-        /// Nothing is left to answer a clipboard fetch, so fail it now instead of
-        /// leaving the button reading "Fetching…" until its own deadline.
+        /// Fail a clipboard fetch that can no longer receive a reply.
         case failPendingClipboardFetch
         case toLogin
     }
@@ -106,16 +87,7 @@ struct SessionStateMachine {
 
         case .claimFailed(let reason):
             status = .reconnecting
-            // The retries carry on past the budget; what changes is that the user is
-            // told what has been going wrong. Retrying forever is worth keeping — a
-            // laptop that was asleep for ten minutes recovers by itself — and it was
-            // never the complaint. The complaint was that "Reconnecting…" was the only
-            // thing anybody was ever told, whatever the reason, so a definite failure
-            // and a slow network looked identical for as long as you cared to watch.
-            //
-            // A budget rather than a list of error codes decides when to say it,
-            // because at the first attempt those two *are* identical, and by the
-            // fourth they are not.
+            // Keep retrying indefinitely, but expose the reason after the budget.
             var actions: [Action] = attempts < Self.attemptsBeforeReporting
                 ? []
                 : [.report(reason: reason)]
@@ -127,9 +99,8 @@ struct SessionStateMachine {
 
         case .socketOpened:
             status = .connected
-            // Deliberately no `attempts = 0`. A slot that accepts the socket and
-            // drops it immediately would otherwise retry at full speed forever;
-            // proof of a *working* attachment is a control message, below.
+            // Opening alone is not proof of a working attachment. Resetting here
+            // would let a socket that immediately drops retry at full speed forever.
             return []
 
         case .controlReceived:
@@ -137,8 +108,7 @@ struct SessionStateMachine {
             return []
 
         case .socketClosed(let code):
-            // After an eviction or a 409 the socket is already gone and the user
-            // has to act, so a late close is not a reason to start retrying.
+            // Ignore a late close after entering a user-action state.
             guard status != .takenOver, status != .busy else {
                 return []
             }
@@ -146,9 +116,8 @@ struct SessionStateMachine {
                 status = .takenOver
                 return [.failPendingClipboardFetch, .clearFramebuffer, .releaseInput]
             }
-            // Code 4000 (token invalid or superseded) takes this same path: the
-            // answer to both a stale token and a dropped connection is to claim
-            // again, which is unconditional anyway.
+            // Close code 4000 (stale/superseded token) and an ordinary drop both
+            // require a fresh claim.
             status = .reconnecting
             return [
                 .failPendingClipboardFetch,

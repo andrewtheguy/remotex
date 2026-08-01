@@ -3,10 +3,8 @@ import Foundation
 /// The command-line options this app understands, and a refusal for anything
 /// else.
 ///
-/// The whole reason this exists: `--settings qa` (a flag removed long ago) was
-/// silently ignored, so the launch fell through to the *real* instance instead
-/// of a throwaway one — a QA run pointed at live data with no warning. An
-/// unrecognised `--option` is now refused out loud rather than dropped.
+/// Silently ignoring an unknown option can make an intended throwaway QA launch
+/// fall through to the real instance. Refuse unrecognised `--option`s instead.
 enum ArgumentCheck {
     /// Every double-dash option the app accepts. Value-taking flags
     /// (`--instance-dir <dir>`, `--probe-target <name>`, `--probe-seconds <n>`)

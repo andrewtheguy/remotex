@@ -107,8 +107,8 @@ type Reader = BufReader<OwnedReadHalf>;
 /// decided by which preface function ran, not by re-asking this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Dialect {
-    /// RFB 3.8, as every VNC server speaks it — including a Mac under plain
-    /// `subtype = "ard"`, which changes only the authentication.
+    /// RFB 3.8, used by generic VNC and Apple Screen Sharing Standard mode
+    /// (`subtype = "ard"`). Apple authentication and metadata are layered above.
     Rfb38,
     /// Apple's RFB 003.889 and the record layer that goes up after ServerInit.
     Apple889,

@@ -1,5 +1,6 @@
-//! Apple's Screen Sharing messages and encodings. Standard `ard` uses the display,
-//! cursor and pasteboard pieces for the Mac's physical displays. The
+//! Apple's Screen Sharing messages and encodings. `ard` is Standard mode over
+//! RFB 3.8 and uses the display, cursor, and pasteboard pieces for the Mac's
+//! physical displays. The
 //! `ard-high-performance` subtype uses Apple's record layer in
 //! [`crate::vnc_record`], adds zlib, and requests a virtual display.
 //!
@@ -184,11 +185,10 @@ const MAX_CURSOR_DIM: u16 = 256;
 /// answered with unbounded memory.
 ///
 /// An 8192x8192 framebuffer at four bytes a pixel, which is past any real Mac and
-/// comfortably past the 4480x1800 (31 MiB) a two-display session synthesizes. It
-/// used to be 64 MiB, which is *tighter than the raw path*: a rectangle the raw
-/// branch in [`crate::vnc`] happily allocates would be refused here for no reason
-/// but the codec it arrived under. The real bound on either path is the rectangle's
-/// bounds check against the announced desktop; this only stops a wildly bogus
+/// comfortably past the 4480x1800 (31 MiB) a two-display session synthesizes. A
+/// 64 MiB cap would be tighter than the raw path and reject a rectangle solely
+/// because it arrived compressed. The real bound on either path is the rectangle's
+/// bounds check against the announced desktop; this stops only wildly bogus
 /// geometry from turning into an allocation.
 const MAX_INFLATED: usize = 8192 * 8192 * 4;
 
@@ -426,10 +426,10 @@ impl Layout {
 /// That is not a guess: the tell is the `f64` `3ff0000000000000` (1.0), which the
 /// reference puts at `+0x00` and `+0x08` and a live Mac puts at `+0x02` and
 /// `+0x0a`. Reading the reference's offsets yields `display_id = 0` for every
-/// screen and denormal garbage for the scales, which is what this parser used to
-/// do. The shifted offsets reproduce the measured VM exactly — ids 1 and 4, a
-/// 1280x800 at (0,0) and a 1600x900 at (1280,0), main on the first — so they are
-/// the ones implemented. See docs/apple-vnc-889.md.
+/// screen and denormal garbage for the scales. The shifted offsets reproduce the
+/// measured VM exactly — ids 1 and 4, a 1280x800 at (0,0) and a 1600x900 at
+/// (1280,0), main on the first — so they are implemented. See
+/// docs/apple-vnc-889.md.
 ///
 /// Both rects are `(top, left, bottom, right)`, not the `(x, y, w, h)` the
 /// reference models; a size is a difference of edges here.
@@ -1076,9 +1076,8 @@ mod tests {
         // Short of a header.
         assert!(parse_layout(&[0, 4, 0, 5]).is_err());
 
-        // A payload as long as its own prefix claims — which is a *shorter* payload
-        // than the Mac sends, and exactly the mistake this parser used to make. Named
-        // here because reading it silently was what desynced the session.
+        // A payload as long as its own prefix claims is shorter than the Mac sends.
+        // Accepting it would silently desync the session.
         let mut payload = one(0x01);
         let exact = payload.len();
         payload[..2].copy_from_slice(&u16::try_from(exact).unwrap().to_be_bytes());
