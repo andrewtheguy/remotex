@@ -1579,7 +1579,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             0x04 | 0x07 if apple.is_some() => {}
             0x51 | 0x53 | 0x55 | 0x56 if apple.is_some() => {
                 let len = reader.read_u16().await?;
-                debug!("vnc: Apple message type {msg_type:#02x}, {len} bytes");
+                debug!("vnc: Apple message type {msg_type:#04x}, {len} bytes");
                 discard(&mut reader, u64::from(len)).await?;
             }
             other => anyhow::bail!("unknown server message type {other}"),
