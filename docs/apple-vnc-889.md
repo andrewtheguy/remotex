@@ -37,7 +37,7 @@ full display configuration; the next `AppleDisplayLayout` confirms its size.
 name = "macvirtualdisplay"
 protocol = "vnc"
 subtype = "ard-high-performance"
-host = "192.168.64.16"
+host = "..."
 username = "sandbox2"
 password = "qwertasdfg"
 width = 1600
