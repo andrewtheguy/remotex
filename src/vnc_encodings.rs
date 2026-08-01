@@ -56,6 +56,9 @@ pub enum Payload {
     /// to read back out of the shadow, because a client here is sent tiles rather
     /// than draw commands (encoding 1).
     CopyRect,
+    /// A background colour and a run of coloured sub-rectangles over it
+    /// (encoding 2).
+    Rre,
 }
 
 impl Payload {
@@ -65,6 +68,7 @@ impl Payload {
             Payload::Raw => "raw",
             Payload::Zlib => "zlib",
             Payload::CopyRect => "copyrect",
+            Payload::Rre => "rre",
         }
     }
 }
@@ -108,6 +112,7 @@ impl Decoders {
             Payload::Raw => raw(reader, w, h).await.map(Some),
             Payload::Zlib => self.zlib(reader, w, h).await.map(Some),
             Payload::CopyRect => copy_rect(reader, shadow, w, h).await,
+            Payload::Rre => rre(reader, w, h).await.map(Some),
         }
     }
 
@@ -154,6 +159,42 @@ impl Decoders {
     }
 }
 
+/// Encoding 2: one background colour, then a run of coloured sub-rectangles laid
+/// over it.
+///
+/// RFC 6143 calls this obsolete and it is: a rectangle of any complexity costs more
+/// than Hextile's tiling of the same picture. It is here because it is trivial once
+/// the shared fill exists, and because it is the only compressed encoding some very
+/// old servers have.
+async fn rre<R: AsyncRead + Unpin>(reader: &mut R, w: u16, h: u16) -> anyhow::Result<Vec<u8>> {
+    let count = reader.read_u32().await?;
+    let pixels = usize::from(w) * usize::from(h);
+    // One subrectangle per pixel is the point at which raw would have been smaller,
+    // so anything past it is a bogus length rather than a picture — and this runs
+    // before the loop allocates or reads anything on its behalf.
+    anyhow::ensure!(
+        count as usize <= pixels,
+        "an rre rect claims {count} subrectangles for {pixels} pixels, past the point \
+         where raw would have been smaller"
+    );
+    let mut out = vec![0u8; pixels * 3];
+    fill(&mut out, w, (0, 0), (w, h), colour(read_pixel(reader).await?));
+    for _ in 0..count {
+        let rgb = colour(read_pixel(reader).await?);
+        let sx = reader.read_u16().await?;
+        let sy = reader.read_u16().await?;
+        let sw = reader.read_u16().await?;
+        let sh = reader.read_u16().await?;
+        anyhow::ensure!(
+            u32::from(sx) + u32::from(sw) <= u32::from(w)
+                && u32::from(sy) + u32::from(sh) <= u32::from(h),
+            "an rre subrect {sw}x{sh}+{sx}+{sy} leaves its {w}x{h} rectangle"
+        );
+        fill(&mut out, w, (sx, sy), (sw, sh), rgb);
+    }
+    Ok(out)
+}
+
 /// Encoding 1: two `u16`s naming where in the framebuffer these pixels already
 /// are.
 ///
@@ -192,6 +233,35 @@ async fn raw<R: AsyncRead + Unpin>(reader: &mut R, w: u16, h: u16) -> anyhow::Re
     let mut pixels = vec![0u8; usize::from(w) * usize::from(h) * BPP];
     reader.read_exact(&mut pixels).await?;
     Ok(bgrx_to_rgb(&pixels))
+}
+
+/// One pixel in the forced wire format.
+async fn read_pixel<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<[u8; BPP]> {
+    let mut px = [0u8; BPP];
+    reader.read_exact(&mut px).await?;
+    Ok(px)
+}
+
+/// A wire pixel as RGB. See the module header: the wire order is `B, G, R, X`.
+fn colour(px: [u8; BPP]) -> [u8; 3] {
+    [px[2], px[1], px[0]]
+}
+
+/// Paint `size` at `at` in an RGB888 buffer `stride` pixels wide.
+///
+/// Shared by every encoding that paints areas rather than pixels, which is all of
+/// them but raw. A `size` of no pixels is a no-op rather than an error: RFB lets a
+/// server send one and it means the same thing either way.
+fn fill(out: &mut [u8], stride: u16, at: (u16, u16), size: (u16, u16), rgb: [u8; 3]) {
+    let stride = usize::from(stride);
+    let (x, y) = (usize::from(at.0), usize::from(at.1));
+    let (w, h) = (usize::from(size.0), usize::from(size.1));
+    for row in y..y + h {
+        let start = (row * stride + x) * 3;
+        for px in out[start..start + w * 3].chunks_exact_mut(3) {
+            px.copy_from_slice(&rgb);
+        }
+    }
 }
 
 /// Repack BGRX pixels (our forced format on the wire) into packed RGB888.
@@ -384,6 +454,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("even an incompressible one"), "{err:#}");
+    }
+
+    /// An RRE payload: the subrect count, the background, then the subrects.
+    fn rre_payload(bgrx_background: [u8; 4], subrects: &[([u8; 4], u16, u16, u16, u16)]) -> Vec<u8> {
+        let mut wire = (subrects.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(&bgrx_background);
+        for (px, x, y, w, h) in subrects {
+            wire.extend_from_slice(px);
+            for value in [x, y, w, h] {
+                wire.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        wire
+    }
+
+    #[tokio::test]
+    async fn rre_paints_the_background_then_the_subrects_over_it() {
+        // A 3x2 rectangle: blue background, one green pixel-column in the middle.
+        let wire = rre_payload([0xf0, 0x00, 0x00, 0], &[([0x00, 0xf0, 0x00, 0], 1, 0, 1, 2)]);
+        let rgb = rre(&mut wire.as_slice(), 3, 2).await.unwrap();
+
+        let blue = [0x00, 0x00, 0xf0];
+        let green = [0x00, 0xf0, 0x00];
+        let expected: Vec<u8> = [blue, green, blue, blue, green, blue]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(rgb, expected);
+    }
+
+    #[tokio::test]
+    async fn an_rre_subrect_outside_its_rectangle_is_refused() {
+        let wire = rre_payload([0, 0, 0, 0], &[([0xff, 0xff, 0xff, 0], 2, 0, 2, 1)]);
+        let err = rre(&mut wire.as_slice(), 3, 2).await.unwrap_err();
+        assert!(format!("{err:#}").contains("leaves its 3x2 rectangle"), "{err:#}");
+    }
+
+    /// One subrectangle per pixel is where raw would have been smaller, so a count
+    /// past it is a bogus length — and it is refused before anything is allocated
+    /// or read on its behalf.
+    #[tokio::test]
+    async fn an_rre_rect_claiming_more_subrects_than_pixels_is_refused() {
+        let wire = 7u32.to_be_bytes();
+        let err = rre(&mut wire.as_slice(), 2, 3).await.unwrap_err();
+        assert!(format!("{err:#}").contains("raw would have been smaller"), "{err:#}");
     }
 
     /// The source is read out before the destination is written, so a copy that
