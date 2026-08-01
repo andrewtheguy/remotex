@@ -5,10 +5,8 @@ import Observation
 struct NativeClipboardSnapshot: Equatable {
     let text: String
     let changedAtMs: Int64?
-    /// Set when the remote's clipboard was refused for exceeding
-    /// ``ClipboardSynchronizer/maximumBytes``, to the size it actually is.
-    /// `text` is empty then — which on its own would read as "the remote has
-    /// copied nothing", the very thing this tells apart.
+    /// Actual size when an oversized remote clipboard was refused. In that case
+    /// `text` is empty, distinguishing refusal from an empty clipboard.
     let oversizedBytes: Int64?
 }
 
@@ -17,9 +15,7 @@ struct NativeClipboardSnapshot: Equatable {
 final class ClipboardSynchronizer {
     static let maximumBytes = 65_536
 
-    /// Where a clipboard message goes. Typed rather than a dictionary, so this
-    /// speaks the same `ClientMessage` the socket does and cannot invent a shape
-    /// the gateway would drop.
+    /// Typed to keep this component on the socket's `ClientMessage` contract.
     var send: ((ClientMessage) -> Void)?
 
     private(set) var isEnabled = false
@@ -132,8 +128,7 @@ final class ClipboardSynchronizer {
         }
     }
 
-    /// Only unsolicited remote activity reaches this path. A requested fetch
-    /// is panel state and must never cross the NSPasteboard consent boundary.
+    /// Mirrors unsolicited pushes only; requested fetches remain in the panel.
     func receiveRemotePush(_ text: String) {
         guard isEnabled, !text.isEmpty else {
             return
@@ -145,9 +140,7 @@ final class ClipboardSynchronizer {
             return
         }
 
-        // A local owner changed the pasteboard after our last observation.
-        // Push that newer value and leave it intact instead of allowing an
-        // older remote notification to overwrite it.
+        // Preserve and send a newer local value instead of overwriting it.
         guard pasteboard.changeCount == observedChangeCount else {
             pollPasteboard()
             return
@@ -162,16 +155,12 @@ final class ClipboardSynchronizer {
         observedChangeCount = pasteboard.changeCount
     }
 
-    /// The remote copied more than can be transferred. Nothing reaches the
-    /// pasteboard — there is nothing to put on it — but an open panel showing
-    /// the previous value would now be describing a clipboard that has moved on,
-    /// so it is updated to say what happened.
+    /// Records a refused remote clipboard without replacing local pasteboard data.
     func noteRemoteOversized(bytes: Int64) {
         guard isEnabled else {
             return
         }
-        // Cleared so the echo guard cannot mistake the next arrival of the old
-        // text for something already mirrored.
+        // The next arrival of the old text is new after this refusal.
         lastFromRemote = nil
         guard isPresented, !isEditing else {
             return
@@ -183,15 +172,11 @@ final class ClipboardSynchronizer {
         )
     }
 
-    /// An oversized pasteboard is skipped rather than sent for the gateway to
-    /// truncate. Nothing here is user-initiated — polling and the Command-V hook
-    /// both land in this path — and the whole string would ride the socket
-    /// first, which past 64 MiB drops the session outright. The remote keeps
-    /// whatever it had; `sendDraft` is the path that reports the limit, because
-    /// it has the card to report it on.
-    ///
-    /// `receiveRemotePush` needs no such check: the gateway has already clamped
-    /// everything arriving on that link.
+    /// Sends nonempty local text within the limit. Polling and Command-V use this
+    /// silent path: oversized values are skipped, not truncated, and the remote
+    /// keeps its previous clipboard. `sendDraft` reports the limit for explicit
+    /// sends. Without this guard, a value past the gateway's 64 MiB socket ceiling
+    /// would end the session. Incoming pushes are already bounded by the gateway.
     func pushLocalClipboard(force: Bool) {
         guard isEnabled,
               let text = pasteboard.string(forType: .string),
@@ -228,10 +213,7 @@ final class ClipboardSynchronizer {
             return
         }
         resetPanelContent()
-        // The request id is this object's own, not the wire's — `clipboardRequest`
-        // carries none, and the gateway answers with a single `clipboard` reply
-        // marked `requested`. Keeping the id means an answer that arrives after a
-        // close or a second Fetch still cannot land in the wrong panel.
+        // The wire has no request id; this local id rejects stale replies.
         let requestID = makeRequestID()
         pendingRequestID = requestID
         isFetching = true
@@ -280,9 +262,7 @@ final class ClipboardSynchronizer {
         return true
     }
 
-    /// The gateway's answer to a `clipboardRequest` — a `clipboard` message with
-    /// `requested` set. Correlated against the fetch in flight, since the wire
-    /// carries no request id of its own.
+    /// Accepts the gateway's `requested` clipboard reply for the fetch in flight.
     @discardableResult
     func receiveFetchReply(
         text: String,
@@ -300,9 +280,7 @@ final class ClipboardSynchronizer {
         )
     }
 
-    /// Give up on the fetch in flight, if there is one. Called when the socket
-    /// goes away or the session returns to the picker: nothing is left to answer,
-    /// so the button should not sit on "Fetching…" until its own deadline.
+    /// Fails an in-flight fetch immediately when nothing can still answer it.
     func failPendingFetch() {
         guard let pendingRequestID else {
             return
@@ -310,9 +288,7 @@ final class ClipboardSynchronizer {
         fetchUnavailable(requestID: pendingRequestID)
     }
 
-    /// Either the local deadline expired or there is nothing left that could
-    /// answer. Both leave the panel open on an empty editor, so the draft is
-    /// still sendable.
+    /// Leaves a timed-out or abandoned fetch open as a sendable empty editor.
     func fetchUnavailable(requestID: String) {
         guard isEnabled, isFetching, requestID == pendingRequestID else {
             return
@@ -333,9 +309,7 @@ final class ClipboardSynchronizer {
         guard let snapshot else {
             return
         }
-        // Nothing was transferred, so there is nothing to reveal. Still opens
-        // the editor: it is the only way on from here, and Send is then usable
-        // for text typed in by hand.
+        // Oversized content cannot be revealed; keep the editor usable for input.
         guard snapshot.oversizedBytes == nil else {
             self.snapshot = nil
             draft = ""
@@ -353,11 +327,7 @@ final class ClipboardSynchronizer {
     @discardableResult
     func copy() -> Bool {
         let text = isEditing ? draft : (snapshot?.text ?? "")
-        // Copying nothing would still clear the local pasteboard, which is a
-        // destructive answer to a button the panel offers in every state —
-        // including the unavailable editor, whose draft starts empty. The two
-        // reasons there is nothing read the same from here, so they are named
-        // apart: one of them means the remote copied nothing.
+        // Refuse empty copies instead of clearing the local pasteboard.
         guard !text.isEmpty else {
             showNotice(
                 oversizedBytes == nil
@@ -375,10 +345,7 @@ final class ClipboardSynchronizer {
 
     @discardableResult
     func sendDraft() -> Bool {
-        // An empty draft is not a way to clear the remote clipboard: the remote
-        // takes ownership of whatever arrives, so sending nothing would wipe it
-        // while reporting success. `pushLocalClipboard` skips empty text for the
-        // same reason.
+        // Empty sends would silently clear the remote clipboard.
         guard isEnabled, isPresented, isEditing, !draft.isEmpty else {
             showNotice("Reveal or enter clipboard text first")
             return false

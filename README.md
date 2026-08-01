@@ -1,9 +1,9 @@
 # remotex
 
-A single-user, browser-based remote desktop gateway for RDP and VNC targets,
-including Macs using the built-in Screen Sharing service. The Rust backend owns
-each protocol session and streams image tiles to a React/TypeScript frontend
-over a common WebSocket protocol.
+A single-user remote desktop gateway for RDP and VNC targets, including Macs
+using the built-in Screen Sharing service. The Rust backend owns each protocol
+session and streams image tiles over one WebSocket protocol to the browser SPA
+or native macOS client.
 
 One reason the RDP path exists: Microsoft Remote Desktop on macOS handles
 resize-to-window badly, and fonts can come out blurry after a resize. Here a
@@ -11,13 +11,13 @@ resize renegotiates the desktop with the server, so the framebuffer is the size
 that was asked for rather than a resampling of the size it used to be.
 
 - RDP uses [IronRDP](https://crates.io/crates/ironrdp).
-- VNC uses a built-in RFB 3.8 client and can connect directly to macOS Screen
-  Sharing. A Mac is a `vnc` target with `subtype = "ard"` for Apple Remote
-  Desktop authentication.
-- The optional macOS 26 `remotex.app` is a self-contained native client: it
-  carries its own gateway, starts it on a loopback port at launch, and needs no
-  server, address, or login. Metal rendering, AppKit input, menus, clipboard
-  access, and audio playback.
+- VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
+  `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
+  with Apple Remote Desktop authentication.
+- The optional macOS 26 `remotex.app` is a self-contained native client with
+  Metal rendering, AppKit input, menus, clipboard access, and audio playback.
+  Choose its bundled loopback gateway with no login, or enter the address and
+  login for a remote gateway.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/macos-viewer.md`](docs/macos-viewer.md) for the app.
@@ -56,14 +56,16 @@ account's username and password; that selects Apple Remote Desktop authenticatio
 so the connection lands at the user's own screen rather than a login-window
 session.
 
-Standard `ard` lists the Mac's physical screens, can show one screen or all of them,
-reports each screen's pixel density, keeps pixels raw, and supports the native Apple
-pasteboard. `ard-high-performance` takes the same credentials, requests one virtual
-display at the target's configured `width` and `height`, disables the remote Mac's
-physical displays once connected, and puts all of the remote Mac's windows on that
-virtual display. It also adds zlib compression over Apple's record-layer revision
-(around fifty times fewer bytes on a static desktop). Apple's official macOS Screen
-Sharing client can instead choose up to two virtual displays. Both Apple subtypes
+Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
+show one screen or all of them, reports each screen's pixel density, keeps pixels
+raw, and supports the native Apple pasteboard. Apple Screen Sharing High
+Performance mode (`ard-high-performance`) takes the same credentials, requests
+one virtual display at the target's configured `width` and `height`, disables the
+remote Mac's physical displays once connected, and puts all of the remote Mac's
+windows on that virtual display. It also adds zlib compression over Apple's
+record-layer revision (around fifty times fewer bytes on a static desktop).
+Apple's official macOS Screen Sharing client can instead choose up to two virtual
+displays. Both Apple subtypes
 support the native Apple pasteboard when `clipboard = true`. With `resize = true`,
 High Performance supports **Resize to Window** like RDP, using Apple's dynamic
 resolution feature to replace the virtual display's mode from client viewport
@@ -135,7 +137,8 @@ password = "change-me"
 ```
 
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
-target with `subtype = "ard"` for its physical displays, or
+target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
+physical displays, or
 `"ard-high-performance"` for one configured virtual display containing all of its
 windows, with its physical displays disabled for the connection, and the Mac
 account's username and password. Keep the config mode `0600`; target

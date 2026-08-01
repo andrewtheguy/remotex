@@ -821,9 +821,8 @@ mod tests {
         println!("  Press it during a quiet phase and then close the drawer: the tone");
         println!("  must arrive on its own, go away, and come back, untouched.");
         println!("  A line under the button instead means this browser has no Opus decoder.");
-        // remotex.app cannot be pointed here: it only ever talks to the gateway it
-        // starts for itself, and this one wants a login. Its audio is tested against a
-        // real `audio = true` target in its own configuration.
+        // remotex.app can use this login gateway through Somewhere Else. A real
+        // `audio = true` RDP target separately covers server negotiation.
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;

@@ -2,29 +2,14 @@ import Foundation
 
 /// `remotex-viewer --probe`: attach to a gateway, print what arrives, exit.
 ///
-/// This exists to settle two assumptions the rest of the client is built on,
-/// both of which live inside `URLSessionWebSocketTask` where no unit test can
-/// reach them:
-///
-/// 1. **Does URLSession answer the gateway's pings?** The gateway sends a
-///    protocol Ping every 5s and kills the engine after 60s without a Pong
-///    (`HEARTBEAT_INTERVAL` and the grace period in src/ws.rs). It uses protocol
-///    pings precisely because a browser answers them in its network stack, and
-///    `URLSessionWebSocketTask` is expected to do the same — but if it does not,
-///    `sendPing` would not help either, since the gateway counts Pongs to *its*
-///    pings. Idling here past 60s is the answer.
-/// 2. **How large do strips actually get?** `maximumMessageSize` defaults to
-///    1 MiB, and going past it fails the whole socket rather than dropping the
-///    frame. The largest payload seen is printed, so the headroom is a measured
-///    number rather than a guess.
-///
-/// Deliberately built on `GatewayClient` and the raw transport rather than on
-/// `GatewayConnection`: both questions are about the socket, and a diagnostic
-/// that reports frame sizes needs the bytes before anything decodes them.
-///
-/// It probes **this app's own gateway**, started the same way the app starts it, since
-/// there is no other gateway for this build to talk to. So there is no address and no
-/// credentials to pass: only which target to open and for how long.
+/// Measures whether `URLSessionWebSocketTask` answers the gateway's protocol
+/// pings, sent every 5 seconds, past its 60-second deadline. `sendPing` cannot
+/// substitute: the gateway counts pongs answering its own pings
+/// (`HEARTBEAT_INTERVAL` and its grace period are in `src/ws.rs`). It also
+/// measures binary frame size because URLSession's 1 MiB default fails the socket
+/// when exceeded. The probe uses the raw transport, not `GatewayConnection`, so
+/// measurements precede decoding. It starts this app's embedded gateway; callers
+/// provide only a target and duration.
 @MainActor
 enum ProbeCommand {
     static let flag = "--probe"
@@ -39,9 +24,7 @@ enum ProbeCommand {
             let ok = await run()
             Foundation.exit(ok ? EXIT_SUCCESS : EXIT_FAILURE)
         }
-        // The probe's own work is asynchronous, and URLSession delivers on its
-        // own queues; running the main loop keeps the process alive until the
-        // task above exits it.
+        // Keep the process alive for the asynchronous probe and URLSession.
         RunLoop.main.run()
     }
 
@@ -61,8 +44,7 @@ enum ProbeCommand {
             print(gateway.log())
             return false
         }
-        // Stopped explicitly as well as by the pipe, so a probe that ends by
-        // `Foundation.exit` below does not depend on the EOF racing the exit.
+        // Do not rely on pipe EOF racing `Foundation.exit`.
         defer { gateway.terminateNow() }
 
         let location = GatewayLocation.loopback(port: handshake.port)
@@ -84,14 +66,12 @@ enum ProbeCommand {
                 print("probe: could not claim the session slot")
                 return false
             }
-            // Not the token itself: this prints to a terminal and gets pasted into
-            // bug reports, and it is a live credential for the session slot.
+            // Never print the live session credential.
             print("probe: claimed the session slot")
 
             let transport = try await client.openSocket(sessionToken: token)
             if let target = argument("--probe-target") {
-                // An empty frame is one the gateway drops, and the probe would
-                // then idle against the picker while reporting it was connecting.
+                // Fail instead of idling at the picker after an encoding failure.
                 guard let connect = ClientMessage.connect(target: target).jsonText() else {
                     print("probe: could not encode a connect for \(target)")
                     return false
@@ -108,20 +88,17 @@ enum ProbeCommand {
 
     /// What arrived on the socket.
     ///
-    /// Deliberately shaped like the gateway's own `Totals` line (`src/ws.rs`) so
-    /// the two can be read against each other: that side reports what it sent,
-    /// this side what a real client received. Bytes as well as counts, because a
-    /// transport change can move one without the other.
+    /// Mirrors the gateway's `Totals` fields for sender/receiver comparison.
+    /// Counts and bytes are both retained because a transport change can move
+    /// either independently.
     private struct Counts {
         var control = 0
         var controlBytes = 0
         var binary = 0
         var binaryBytes = 0
-        /// Tile records across every batch, which is the number that used to equal
-        /// `binary` one-for-one. Seeing the two apart is the whole point.
+        /// Tile records across all batches.
         var records = 0
-        /// References among them: records the gateway sent as a slot and a position
-        /// because this client already had the pixels.
+        /// Records sent as cache slot references.
         var references = 0
         var largestBinary = 0
         var largestTile = "none"
@@ -138,9 +115,7 @@ enum ProbeCommand {
             references += batch?.count { record in
                 if case .reference = record { true } else { false }
             } ?? 0
-            // Both halves have to come from the *same* frame, or the summary pairs
-            // the largest frame with whatever happened to arrive last — which is
-            // the number this probe exists to report.
+            // Keep the largest frame and its tile summary paired.
             if data.count > largestBinary {
                 largestBinary = data.count
                 largestTile = batch.map { records in
@@ -175,8 +150,7 @@ enum ProbeCommand {
             } catch {
                 let elapsed = ContinuousClock.now - started
                 print("probe: socket ended after \(elapsed) — closeCode=\(transport.closeCode.map(String.init) ?? "none")")
-                // Surviving past the gateway's 60s heartbeat deadline is the
-                // answer to question 1; ending before it is a failure.
+                // Survival past 60 seconds proves heartbeat handling.
                 let survived = elapsed > .seconds(60)
                 summarize(counts, survivedHeartbeat: survived)
                 return survived

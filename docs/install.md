@@ -31,10 +31,10 @@ config readable only by the service user because it contains credentials.
 
 For a Mac target, the gateway connects directly to its built-in Screen Sharing
 over VNC; no companion software is required. Configure it as a `vnc` target with
-`subtype = "ard"` and the Mac account's username and password. That subtype
-selects macOS Screen Sharing's Apple Remote Desktop authentication, so the
-connection lands at the user's own screen rather than a separate login-window
-session.
+`subtype = "ard"` and the Mac account's username and password. That subtype is
+Apple Screen Sharing's Standard mode over RFB 3.8. It selects Apple Remote
+Desktop authentication and the Mac's physical displays, so the connection lands
+at the user's own screen rather than a separate login-window session.
 
 ## Installer options
 

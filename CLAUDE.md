@@ -1,64 +1,155 @@
 ## General
 
-- strict no backward compatibility or legacy code path since it is a personal project
-- no cargo fmt
-- run cargo clippy with `-- -D warnings` to treat warnings as errors and cargo test after rust code changes
-- run biome checks on frontend/ after JS/TS code changes
-- **always `bun run build` in frontend/ before asking anyone to QA a frontend change in a browser, and say that you did.** `remotex serve` serves the SPA from `frontend/dist` on disk (`ServeDir`, `src/server.rs`) — nothing is embedded in the binary — and `dist` is gitignored, so a stale bundle is invisible and is what the browser gets. No check catches it: biome, `tsc -b` and `bun test` read `src/`, `cargo test` never loads the page, and neither does a script driving the WebSocket directly. The symptom is a feature that looks broken while the server side is provably right. To iterate without rebuilding, use `REMOTEX_DEV_BACKEND=<port> bun run dev`, which serves from source
-- use tmp/ for temporary files and test config
-- for local (not github actions) one-off scripts that are more efficient with python, always run with `uv`.
-- error handling: `anyhow` for application errors, `thiserror` for typed API errors
-- keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
-- multi session is always out of scope (never planned, not merely deferred): no concurrent sessions, session sharing, or session broker. It means **one active session per gateway instance, forever** — a new browser force-claims it and evicts the previous holder (`src/session.rs`), which a client offers with a Take over button, the same shape as the browser prompt and as Windows Remote Desktop. A reconnect, a target switch and a browser takeover are all the same session coming back, so none of them costs a prompt
+- This personal project has no backward-compatibility or legacy paths.
+- Do not run `cargo fmt`.
+- After Rust changes, run `cargo clippy -- -D warnings` and `cargo test`.
+- After frontend JS/TS changes, run Biome checks in `frontend/`.
+- Before browser QA of a frontend change, run `bun run build` in `frontend/`
+  and say so. `remotex serve` serves the gitignored `frontend/dist` from disk
+  (`ServeDir` in `src/server.rs`); Biome, `tsc -b`, `bun test`, and backend tests
+  do not detect a stale bundle. For source-based iteration, use
+  `REMOTEX_DEV_BACKEND=<port> bun run dev`.
+- Put temporary files and test config under `tmp/`. Run efficient local Python
+  one-offs with `uv` (GitHub Actions excluded).
+- Use `anyhow` for application errors and `thiserror` for typed API errors.
+- Keep e2e tests under `tests/`. Dummy RDP/VNC servers may use Docker or Podman.
+- Multi-session support is permanently out of scope. Each gateway has one active
+  session. A force-claim evicts the current holder (`src/session.rs`) through the
+  clients' **Take over** flow. Reconnects, target switches, and browser takeovers
+  resume that same session without another prompt.
 
-## SSH and tmux environment
+## SSH and tmux
 
-Do not infer a shell's permissions from the way a client attached to tmux. A
-pre-existing tmux server started locally keeps its local environment and user
-access even when a later client attaches over SSH.
+Do not infer shell permissions from how a client attached to tmux. An existing
+tmux server retains the environment and access of the user that started it.
 
-## The desktop is always shown at 100%
+## Display geometry
 
-**Never add fit-to-window, zoom-to-fit, or scale-to-viewport logic to a pointer client.** A desktop that does not fit the window is scrolled, not shrunk. Mobile is the single exception: `CAN_PINCH_ZOOM` in `frontend/src/useRemoteDesktop.ts` gates a fit-to-width base scale with pinch zoom on top, and that branch is the only place a scale factor may come from the *viewport*.
+Pointer clients always show desktops at 100%. Oversized desktops scroll; never
+add fit-to-window, zoom-to-fit, or viewport-derived scaling. Mobile is the sole
+exception: `CAN_PINCH_ZOOM` in `frontend/src/useRemoteDesktop.ts` gates its
+fit-to-width base scale and pinch zoom.
 
-`ServerMsg::Resize { w, h, scale }` is **not** a fit factor — `scale` is the remote's pixel density, and `applyCanvasCss` lays the canvas out at `w / scale` by `h / scale` CSS pixels. So a 3840×2160 framebuffer with `scale: 2.0` is 1920×1080 CSS px, which is 100% of what the remote thinks its desktop is, at full pixel fidelity on a Retina host. `Density` in `src/rdp.rs` and the Apple display layout's backing-over-logical ratio (`src/vnc_apple.rs`) are the two producers, and neither knows the viewport exists.
+`ServerMsg::Resize { w, h, scale }` uses remote pixel density, not a fit factor.
+`applyCanvasCss` presents the framebuffer at `w / scale` by `h / scale` CSS
+pixels. Thus 3840×2160 at `scale: 2.0` is a 1920×1080 desktop at full pixel
+fidelity. Producers are RDP `Density` (`src/rdp.rs`) and Apple layout's
+backing/logical ratio (`src/vnc_apple.rs`); neither depends on the viewport.
 
-The way a desktop is *made* to fit a window is to ask the remote to render at that size — `resize = true`, `ClientMsg::Viewport`, and the protocol-specific resize mechanism. An unimplemented resize mechanism is never a reason to scale on the client instead.
+To fit the window, ask the remote to render at that size via `resize = true`,
+`ClientMsg::Viewport`, and the engine's resize mechanism. Lack of resize support
+never permits client scaling.
 
-The two Apple subtypes are different display modes. `ard` shares the Mac's physical displays and refuses `resize`. `ard-high-performance` requests one virtual display at the target's configured `width` and `height`; once connected, it disables the remote Mac's physical displays and places all of the remote Mac's windows on that virtual display. The name is retained in config, but its meaning here is virtual-display Screen Sharing. With `resize = true`, it supports **Resize to Window** like RDP, using Apple's dynamic-resolution feature to replace the virtual display's configuration from viewport reports; the setup descriptor enables dynamic resolution on every connection regardless of that permission. Apple's official macOS Screen Sharing client can choose up to two virtual displays and offers fixed resolution presets. This project implements neither the display-count nor resolution-preset control.
+Apple display modes:
+
+- `ard` is Apple Screen Sharing's **Standard mode** over RFB 3.8. It uses Apple
+  DH authentication, shares the Mac's physical displays, and refuses `resize`.
+- `ard-high-performance` is Apple Screen Sharing's **High Performance mode** over
+  RFB 003.889. It requests one virtual display at configured `width` and `height`,
+  disables physical displays, and moves all remote windows onto it.
+  Its setup descriptor always enables dynamic resolution. With `resize = true`,
+  viewport reports replace the virtual display configuration. Apple's client can
+  choose up to two virtual displays and fixed resolution presets; remotex
+  implements neither control.
 
 ## Browser tests
 
-Headless Playwright, in `tests/playwright/`.
+Headless Playwright tests live in `tests/playwright/`. Assert system decisions,
+never machine timing. A valid assertion should not change if the machine is twice
+as slow.
 
-### What may be asserted
+Deterministic and in scope: DOM/accessibility state, control-plane JSON, HTTP
+responses, WebSocket bytes and ordering, and `framereceived` transport events.
+Out of scope: canvas pixels or `toDataURL`, paint occurrence/counts, frame rate,
+latency or deadlines, cursor rendering, screenshots, and synthetic pointer input
+or gestures whose coordinates depend on settled layout. Cover those through raw
+WebSocket, protocol, or container e2e tests with controlled clocks.
 
-- **assert on things the system decides, never on things a machine's timing decides.** That one rule settles what belongs here; judge a new spec by **what it observes**, not by whether it appears on a list. The existing specs are examples of the rule, not the definition of it
-- in scope, because these are deterministic: DOM state and accessible roles, control-plane JSON, HTTP responses, and WebSocket frame *bytes* — header fields, record counts, payload lengths, message ordering. `framereceived` qualifies because it is a transport event carrying a fixed payload
-- out of scope, because these are races: reading canvas pixels or `toDataURL`; asserting a paint happened, or how many did; timing anything (frame rate, latency, "within N ms"); cursor rendering; synthetic pointer input or gestures, whose coordinate mapping depends on layout having settled; screenshot comparison. Test those through the raw WebSocket, protocol, and container e2e tests, which control their own clock
-- the test for a borderline case: would the assertion change answer if this machine were twice as slow? Then it does not belong here
-- also avoid the quieter shapes, which pass locally and fail in a year: fixed sleeps, CSS/nth-child selectors, assertions on transient states a fast machine skips through, and counting events over a wall-clock window. Prefer accessible locators, web-first assertions and `expect.poll`; where a count is the point, assert a relationship that holds for any sample (`records > frames`) rather than a number that depends on how long the run happened to watch
+Avoid fixed sleeps, CSS/nth-child selectors, transient states, and wall-clock
+event counts. Prefer accessible locators, web-first assertions, and `expect.poll`.
+For counts, assert invariant relationships such as `records > frames`.
 
-### Writing and running them
+- Run headless with one worker. Shared login/target and SSH pasteboard helpers
+  are in `tests/playwright/support.ts`.
+- Every spec must call `returnToPicker`; otherwise the live target session can
+  leak into the next spec. `logInAndConnect` tolerates either initial landing.
+- After Playwright changes, run `npm run typecheck` in `tests/playwright/`.
+- Keep accepted specs there, not in `tmp/`, and run new specs repeatedly.
+- A wire-format spec must use its own parser, not the SPA's. Rust e2e drives a raw
+  WebSocket, while Swift and TS unit tests parse self-built frames; this is the
+  independent check that both wire ends agree.
 
-- run headless and single-worker. Shared login/target and SSH pasteboard helpers live in `tests/playwright/support.ts`
-- every spec must hand the session back to the picker before it ends (`returnToPicker`): the server keeps a target session alive when its browser goes away, so a spec that stops on the desktop leaves the next run reattached to it. `logInAndConnect` tolerates either landing, so one abandoned run cannot break every run after it
-- the setup is TypeScript and Playwright only transpiles it, so type errors never surface at runtime — run `npm run typecheck` in `tests/playwright/` after changing anything there
-- keep approved specs in `tests/playwright/` rather than leaving one-off copies in `tmp/`, and run a new one several times before relying on it
-- a spec that parses a wire format should implement its own parser rather than importing the SPA's, or a wrong parser agrees with itself. This is the only place the wire is checked as the real SPA uses it: the Rust e2e tests drive a raw WebSocket client, and the Swift and TypeScript unit tests parse frames they built themselves, so both ends can otherwise agree with their own fixtures and disagree with each other
+## remotex.app
 
-## remotex.app (the macOS client)
+The first screen always asks which gateway to use, with the last choice
+preselected:
 
-- **the app carries its own gateway *and* can be pointed at one — the choice is the first screen.** `dist/remotex.app` holds two executables: the Swift client at `Contents/MacOS/remotex-viewer` and the gateway binary at `Contents/MacOS/remotex-gateway`. Choose **On This Mac** and the client spawns `remotex-gateway serve-embedded --instance-dir <dir>`, which binds an ephemeral port on `127.0.0.1`, serves no web UI, and prints one line of JSON on its stdout — the port and a bearer token — which is the whole of the authentication. Choose **Somewhere Else** and it asks for an address and a login instead. Neither is a default the app may pick: the embedded gateway is right when this Mac can reach the targets directly and wrong over a slow link, where the gateway belongs at the far end and this app should be talking to it. The home screen is shown at every launch with the last answer preselected, so repeating it is one keypress; **Change Gateway…** in the Remote menu is the way back
-- **below that choice the two gateways are one program.** `/api/config`, `/api/targets`, `/api/session` and `/ws` are the same routes with the same shapes; the only difference is which header carries the credential (`GatewayCredential` in `apps/remotex-viewer/Sources/Gateway/GatewayClient.swift`) — `Authorization: Bearer` for the embedded gateway, `Cookie: remotex_session` for a remote one, and the two are not interchangeable, since `require_auth` in `src/server.rs` reads one or the other and never both. So a difference that is not the credential is almost certainly a bug. The session cookie is held by the client and set by hand rather than by `HTTPCookieStorage`, which drops a `Secure` cookie on a `wss` URL and matches by host while ignoring the port; it is stored `0600` in the instance's `viewer.json` so quitting does not mean typing the password again
-- **what is *not* shown against a remote gateway: this instance's `remotex.toml`.** It describes the gateway in *this* bundle, and when a remote gateway is in use it is that gateway which connects to the target — this app's config file is not where that gateway's targets are edited. `AppModel.canEditConfiguration` and `usesEmbeddedGateway` gate it: **Configuration…** and **Restart Local Gateway**. `--gateway` and `--settings` remain gone — an address is typed on the home screen, and `--instance-dir` is still the only argument the app takes
-- **the gateway always dies with the app, and the layer that guarantees it is a pipe.** The client holds the write end of the gateway's stdin and nothing is ever sent on it; the kernel closes that end however the app ends — clean quit, crash, Force Quit, `kill -9` — so the gateway reads EOF and exits with no code of ours having to run. `SIGTERM` and the terminate-on-quit path are conveniences on top. When touching any of it, keep `aGatewayIgnoringSignalsStillDiesWithThePipe` honest: it proves the pipe alone does the work by trapping `SIGTERM` in the child
-- after Swift changes under `apps/remotex-viewer/`, run `swift test --package-path apps/remotex-viewer`, then run `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and launch the packaged app. That script also builds the gateway binary, so a Rust change reaches the app only through it
-- launch a QA run with its own instance, never bare: `open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"`. `--instance-dir` is the only argument the app takes and it is the whole of the isolation — the config, the gateway log and the client's preferences all live under it, so a QA run cannot touch the real instance in `~/Library/Application Support/remotex`. Wipe the slate by deleting the directory. Preferences are a JSON file in there rather than a `UserDefaults` suite for exactly this reason: a suite lives in the user's own `Preferences` whatever the app was told
-- the app's *embedded* config is `<instance>/remotex.toml`, a top-level `branding` and `[[targets]]` only — a `[server]` block is refused, since the app decides the port, the web root and the credential. Zero targets is a valid first launch. Edit it in the app (**Remote › Configuration…**), which validates through `remotex-gateway check-config --embedded` and writes nothing on a refusal; that call is why there is no TOML parser in Swift, and there must not be one
-- **more than one instance is a second *app*, not a launcher.** `packaging/macos-viewer/make-instance-bundle.sh <name> [icon.png]` stamps out a copy of the bundle with its own `CFBundleIdentifier`, `CFBundleName` and icon, ad-hoc re-signed into `~/Applications`. It is double-clickable with no arguments because the instance directory is read from the bundle — `~/Library/Application Support/<CFBundleName>` — and the shipped bundle is named `remotex`, so its own instance never moves. This exists because LaunchServices passes a double-clicked app no arguments and `open` without `-n` discards `--args`, so no wrapper can carry `--instance-dir` without putting itself in the Dock instead of the instance. The variant is a copy, so **re-run the script after updating remotex.app** or it keeps running the build it was stamped from; it never touches the instance directory. `--instance-dir` is now only the QA override. See docs/macos-viewer.md, "Running more than one instance"
-- **remote audio links `opus-prebuilt`, so there is no libopus C build and no cmake anywhere.** It is a fork of the `opus` 0.3.1 crate (lib name still `opus`, so `use opus::…` is unchanged) that links a prebuilt static libopus archive its sys crate downloads. This deleted the `LIBOPUS_STATIC`/`LIBOPUS_NO_PKG`/`CMAKE_POLICY_VERSION_MINIMUM` env vars that `packaging/build-tarball.sh` and `packaging/macos-viewer/build-viewer-app.sh` used to carry — do not reintroduce them, and do not swap back to a cmake-building opus crate
-- never validate the client with `swift run`, a standalone `swift build`, or the executable under `.build`; those bypass the `.app` bundle and behave differently — missing menus, no `Info.plist` metadata, and no bundled gateway at all, so the app comes up saying the copy is incomplete
-- for routine development, the disk-image layer is out of scope: use `packaging/macos-viewer/build-viewer-app.sh --no-dmg` and work exclusively with `dist/remotex.app`
-- use the script's default DMG build only for production/release validation, changes to its DMG packaging, or when the user explicitly asks for it. The image's file name keeps the `remotex-viewer-<version>` prefix; the app inside it is `remotex.app`
-- no intrusive QA automation for the macOS GUI; manual QA only
+- **On This Mac:** the bundle starts `remotex-gateway serve-embedded
+  --instance-dir <dir>` on an ephemeral `127.0.0.1` port with no web UI. Each
+  launch mints a random bearer token, sends it only to the app in one stdout JSON
+  line, and keeps it in memory. The app is the only client that knows it.
+- **Somewhere Else:** the user enters a gateway address and login. This is the
+  correct placement across a slow link, where the gateway should be near targets.
+
+The home screen appears on every launch; **Change Gateway…** returns to it.
+
+`dist/remotex.app` contains Swift client `Contents/MacOS/remotex-viewer` and
+gateway `Contents/MacOS/remotex-gateway`. Both gateway choices expose identical
+`/api/config`, `/api/targets`, `/api/session`, and `/ws` contracts. Only their
+credential header differs: embedded uses `Authorization: Bearer`; remote uses
+`Cookie: remotex_session`. `require_auth` accepts only the configured kind; any
+other behavioral difference is a bug. See `GatewayCredential` in
+`apps/remotex-viewer/Sources/Gateway/GatewayClient.swift`. The client manually
+stores the remote cookie in `viewer.json` (mode `0600`), so login survives app
+restarts, because `HTTPCookieStorage` mishandles `Secure` cookies on `wss` and
+ignores ports.
+
+Against a remote gateway, hide this bundle's **Configuration…** and **Restart
+Local Gateway** (`AppModel.canEditConfiguration` and `usesEmbeddedGateway`): its
+`remotex.toml` cannot configure remote targets. `--instance-dir` is the only
+GUI-launch argument; gateway selection belongs to the home screen. Diagnostic
+CLI paths additionally accept `--version` and the `--probe*` options.
+
+The embedded gateway's lifetime is guaranteed by its stdin pipe. The app holds
+the write end and sends nothing; clean quit, crash, Force Quit, or `kill -9`
+closes it in the kernel, causing gateway EOF and exit. `SIGTERM` and explicit
+termination are supplemental. Preserve
+`aGatewayIgnoringSignalsStillDiesWithThePipe`, which proves the pipe alone works.
+
+The embedded `<instance>/remotex.toml` permits top-level `branding` and
+`[[targets]]`, refuses `[server]`, and permits zero targets. **Remote ›
+Configuration…** validates through `remotex-gateway check-config --embedded`
+and writes nothing on failure; do not add a Swift TOML parser.
+
+Each instance is a separate app. `packaging/macos-viewer/make-instance-bundle.sh
+<name> [icon.png]` copies and ad-hoc re-signs the bundle into `~/Applications`
+with its own `CFBundleName`, `CFBundleIdentifier`, icon, and `~/Library/Application
+Support/<CFBundleName>` directory. Re-run it after rebuilding `remotex.app`; it
+never changes instance data. LaunchServices supplies no double-click arguments,
+and a wrapper would put the base app rather than the instance in the Dock;
+`--instance-dir` is only a QA override.
+
+Remote audio uses `opus-prebuilt`, an `opus` 0.3.1 fork whose sys crate downloads
+a prebuilt static libopus archive. Its library name remains `opus`, so
+`use opus::…` does not change. Do not restore a CMake libopus build, `LIBOPUS_STATIC`,
+`LIBOPUS_NO_PKG`, or `CMAKE_POLICY_VERSION_MINIMUM` in
+`packaging/build-tarball.sh` or `packaging/macos-viewer/build-viewer-app.sh`.
+
+After Swift changes:
+
+1. Run `swift test --package-path apps/remotex-viewer`.
+2. Run `packaging/macos-viewer/build-viewer-app.sh --no-dmg`; this also rebuilds
+   the bundled gateway.
+3. Manually launch `open -n dist/remotex.app --args --instance-dir
+   "$PWD/tmp/app-instance"`. All QA state remains under that directory; delete it
+   for a clean run. Never launch QA bare: the real instance is
+   `~/Library/Application Support/remotex`.
+
+Preferences must remain in the instance's JSON file, not `UserDefaults`: a defaults
+suite lives in the user's Preferences directory regardless of `--instance-dir`.
+
+Never validate with `swift run`, standalone `swift build`, or `.build` binaries;
+they lack the bundle menus, `Info.plist` metadata, and gateway. Use `--no-dmg` for routine
+development. Build a DMG only for releases, DMG changes, or an explicit request;
+its filename remains `remotex-viewer-<version>` while the contained app is
+`remotex.app`. macOS GUI QA is manual only.

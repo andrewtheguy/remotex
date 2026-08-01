@@ -1,29 +1,35 @@
 # remotex.app for macOS
 
-`remotex.app` is the foreground macOS 26 client, and it carries the gateway it
-talks to. There is no server to install and no address to enter: the app starts
-`Contents/MacOS/remotex-gateway` on an ephemeral loopback port at launch,
-authenticates to it with a token printed on a pipe, and stops it when the app quits.
-There is no embedded web view either. It owns:
+`remotex.app` is the foreground macOS 26 client. Its first screen chooses between:
 
-- starting, supervising and stopping its own gateway;
-- editing that gateway's configuration, validated before it is written;
+- **On This Mac:** start `Contents/MacOS/remotex-gateway` on an ephemeral
+  loopback port, authenticate with a random bearer token delivered through a
+  private pipe, and stop the gateway when the app quits.
+- **Somewhere Else:** connect to a deployed gateway using its address and login.
+
+Both choices use the same config, target, session, and WebSocket APIs and differ
+only in the credential header on protected requests. There is no embedded web
+view. The client owns:
+
+- starting, supervising, and stopping the embedded gateway;
+- editing embedded-gateway configuration, validated before it is written;
 - target selection;
 - the session socket, including reconnects, takeover, and the single-slot claim;
-- Metal framebuffer rendering at one texel per device pixel;
+- Metal framebuffer rendering at the remote point size (`pixels / remote scale`),
+  without fit-to-window scaling;
 - pointer and keyboard input, plus the remote pointer shape;
 - application-level keyboard capture ahead of menu shortcuts;
 - Command translation that follows the remote (Control shortcuts for a non-Mac,
   unchanged Command shortcuts for a Mac);
 - native `NSPasteboard` synchronization;
 - Remote menu commands for refresh, resize, clipboard, target switching,
-  takeover, configuration, and restarting the gateway.
+  takeover and, for the embedded gateway, configuration and restart.
 
-Both halves ship in one bundle, so the `protocolVersion` in `GET /api/config` is
-still checked but now catches a broken build rather than an old server; a mismatch is
-reported on the launch screen. See
-[`../../docs/macos-viewer.md`](../../docs/macos-viewer.md) for the embedded gateway's
-contract, the two pipes, and the instance directory.
+The client checks `protocolVersion` from `GET /api/config` before either gateway
+opens a session. An embedded mismatch means a broken bundle; a remote mismatch
+means incompatible deployments. Both are reported before login or target selection.
+See [`../../docs/macos-viewer.md`](../../docs/macos-viewer.md) for both gateway
+paths, the embedded process contract, and the instance directory.
 
 Nothing to configure per target beyond the target itself: the gateway's engine
 discovers whether the remote is a Mac while connecting and sends the one bit that
@@ -53,11 +59,10 @@ packaging/macos-viewer/build-viewer-app.sh --no-dmg
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 
-`--instance-dir` is the only argument the app takes and it isolates everything —
-config, gateway log, preferences — from the real instance in
-`~/Library/Application Support/remotex`. Delete the directory to start over. There is
-deliberately no way to point the app at another gateway, on the command line or in the
-UI.
+`--instance-dir` is the only GUI-launch argument and isolates config, gateway log,
+and preferences from the real instance in
+`~/Library/Application Support/remotex`. Delete the directory to start over.
+Gateway choice remains on the app's home screen.
 
 To run a second instance *without* a flag, stamp out a bundle of its own:
 
@@ -70,10 +75,11 @@ It copies the app, gives it its own identifier, name and icon, and re-signs it i
 double-clickable with nothing to pass — see docs/macos-viewer.md, "Running more than
 one instance". It is a copy, so re-run it after each update.
 
-Getting in is one step and it is automatic: the app starts its gateway and lands on
-the target picker, or on a launch screen carrying the gateway's own explanation.
-Targets are added in **Remote › Configuration…**, which checks the file before saving
-it. There is no Settings window.
+The home screen appears on every launch with the previous gateway choice selected.
+The embedded branch starts its gateway and reaches the picker or a launch screen
+carrying the gateway's explanation. Add embedded targets through **Remote ›
+Configuration…**, which validates before saving. Remote targets are configured on
+their gateway, so the local configuration command is hidden on that branch.
 
 Always launch the packaged `.app` during development. `swift run`, a standalone
 `swift build`, and directly launching the executable under `.build` bypass the
@@ -99,8 +105,8 @@ across launches.
 Programmatic reads of the general pasteboard can produce the macOS
 **Paste from Other Apps** prompt. Choose Allow and, if desired, change the
 per-app behavior later in **System Settings → Privacy & Security**. Clipboard
-synchronization is still gated by the selected target's `clipboard = true`, set in the
-app's own configuration.
+synchronization is still gated by the selected target's `clipboard = true`, set on
+the gateway currently in use.
 
 Keyboard capture uses an AppKit local event monitor and only sees events sent
 to the viewer's own window. It does not require Accessibility or Input

@@ -3,13 +3,14 @@
 remotex is a single-user gateway for RDP and VNC targets, including Macs reached
 through their built-in Screen Sharing service. A Rust backend owns the remote
 protocol session and exposes one common HTTP/WebSocket interface to the React SPA
-and to `remotex.app`, the native macOS client — which runs a gateway of its own
-rather than reaching a deployed one (see [`macos-viewer.md`](macos-viewer.md)).
+and to `remotex.app`, the native macOS client. The app either starts its bundled
+gateway on loopback or connects to a deployed gateway (see
+[`macos-viewer.md`](macos-viewer.md)).
 
 ## Data path
 
 ```text
-browser SPA, or remotex.app over loopback
+browser SPA, or remotex.app over loopback or the network
    │  /api: authentication, targets, session claim
    │  /ws: JSON control/input, binary image batches, Opus audio
    ▼
@@ -19,8 +20,8 @@ axum server ── single session slot ── protocol engine
 ```
 
 RDP and VNC frames are decoded in the gateway and encoded as PNG tiles. A Mac is
-reached as a VNC target with `subtype = "ard"`, which selects macOS Screen
-Sharing's Apple Remote Desktop authentication. RDP audio is converted from PCM to
+reached with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8
+with Apple Remote Desktop authentication. RDP audio is converted from PCM to
 Opus and sent on the same WebSocket independently of the tile encoder and batching
 queue.
 
@@ -252,10 +253,12 @@ share everything below the handshake — one read loop, one input path, one tile
 path. Both request raw 32-bit true-color pixels in the same forced BGRX format and
 use the same shadow and encoder path as RDP.
 
-**RFB 3.8** (`vnc`, and `subtype = "ard"`) is every VNC server. It supports None,
+**RFB 3.8** is used by generic `vnc` and Apple Screen Sharing Standard mode
+(`subtype = "ard"`). It supports None,
 classic VNC authentication, and Apple's Diffie-Hellman security, plus the Cursor
-pseudo-encoding. `subtype = "ard"` selects Apple's authentication and requires the
-macOS account username and password; plain VNC uses `vnc_password`. The explicit
+pseudo-encoding. `ard` selects Apple's authentication and physical-display
+metadata and requires the macOS account username and password; plain VNC uses
+`vnc_password`. The explicit
 subtype prevents an anonymous macOS Screen Sharing connection from landing at a
 separate login-window session rather than the user's screen. With `resize = true`,
 the client advertises DesktopSize and ExtendedDesktopSize against servers that
@@ -326,13 +329,16 @@ reclaim actions.
 with its own session state machine, Metal rendering, AppKit input, pasteboard
 synchronization, and Opus playback.
 
-It is also its own deployment. The bundle carries the gateway binary and starts it —
-`serve-embedded`, an ephemeral loopback port, no web UI, a bearer token instead of a
-login — so the app needs no server, address or credentials, and the gateway dies with
-it. Two things follow for this document: such a gateway has a second authentication
-mode (`GatewayAuth`, in `src/auth.rs`, of which exactly one is alive per process), and
-its config is held to different rules (`config::Audience`) because the app has already
-decided everything `[server]` would say.
+The first screen chooses its gateway. **On This Mac** starts the bundled binary via
+`serve-embedded`: an ephemeral loopback port, no web UI, and a random bearer token
+instead of a login. The gateway dies with the app. **Somewhere Else** connects to a
+deployed gateway with its address and login. Both expose the same config, target,
+session, and WebSocket APIs; only the credential header on protected requests
+differs.
+
+The embedded path adds a second authentication mode (`GatewayAuth`, in
+`src/auth.rs`, of which exactly one is active per process) and different config
+rules (`config::Audience`) because the app decides everything `[server]` would say.
 
 See [`macos-viewer.md`](macos-viewer.md) for the handshake, the shutdown contract, the
 instance directory, compatibility, resize behavior, and QA.

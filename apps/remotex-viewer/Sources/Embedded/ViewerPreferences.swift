@@ -6,8 +6,7 @@ import Foundation
 /// A JSON file rather than `UserDefaults`, because the instance directory is now the
 /// unit of isolation and a defaults suite is not part of it: `--instance-dir /tmp/qa`
 /// has to mean *everything* about that run is over there, and a suite lives in the
-/// user's own `Preferences` whatever the rest of the app was told. That is the same
-/// trap `--settings` existed to work around, one layer down.
+/// user's own `Preferences` whatever the rest of the app was told.
 ///
 /// It holds a live credential (`remoteSessionToken`), so the file is written
 /// owner-only inside a directory that already is — see `InstanceDirectory.create`.

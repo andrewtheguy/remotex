@@ -1,49 +1,36 @@
 # Apple RFB 003.889, as measured
 
-Corrections and confirmations for the reverse-engineered specification this
-gateway's `ard-high-performance` subtype was written from, gathered by speaking the
-protocol by hand against **macOS 26.5.2** (an Apple Virtualization guest) in
-July and August 2026.
-
-Read this *with* that document, not instead of it: the framing, offsets and
-key derivations there are mostly right, and what follows is only the places where a
-live Mac disagrees — plus the ones worth knowing are confirmed, because a
-reverse-engineered document gives no way to tell a measured field from an inferred
-one.
+Measured corrections and confirmations for the reverse-engineered Apple RFB
+specification, captured against a macOS 26.5.2 Apple Virtualization guest in July
+and August 2026. Read this alongside the source specification: it records live-Mac
+disagreements and confirms its highest-risk inferred fields.
 
 The implementation is `src/vnc_record.rs` (the 003.889 transport),
 `src/vnc_apple.rs` (Apple messages and encodings), and the two Apple paths in
 `src/vnc.rs`.
 
-The display behavior in earlier revisions of this document mixed Standard and High
-Performance Screen Sharing and drew conclusions from confounded sessions. Those
-conclusions have been removed. The protocol-level measurements remain below.
+Display observations below are separated by Standard and High Performance mode;
+no conclusions combine state from the two session types.
 
 ## Summary
 
 | | |
 |---|---|
-| Confirmed | `subtype = "ard"` is Standard mode and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
+| Confirmed | `subtype = "ard"` is Apple Screen Sharing Standard mode over RFB 3.8 and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode over RFB 003.889 and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
 | Protocol corrections | `AutoFrameBufferUpdate` does not make the tested server stream. A display record's fields are two bytes later than documented. A layout payload is two bytes shorter than its own length prefix says. `ViewerInfo`'s body carries numeric version triples rather than strings. |
 | Not implemented | Apple's High Performance controls for choosing one or two virtual displays and choosing among fixed resolution presets. |
 
 ## Confirmed display modes
 
-`subtype = "ard"` is Standard Screen Sharing over RFB 3.8. It shares the Mac's
-physical displays. `subtype = "ard-high-performance"` is Apple's High Performance
-mode over RFB 003.889. It uses virtual displays rather than the Mac's physical
-displays.
+`subtype = "ard"` is Apple Screen Sharing's Standard mode over RFB 3.8 and shares
+the Mac's physical displays. `subtype = "ard-high-performance"` is Apple Screen
+Sharing's High Performance mode over RFB 003.889 and uses virtual displays.
 
-Once the High Performance session connects, it disables the remote Mac's physical
-displays and places all of the remote Mac's windows on the virtual display. Apple's
-official macOS Screen Sharing client can choose up to two virtual displays in High
-Performance mode. It can dynamically change them to arbitrary sizes; without
-dynamic resolution it offers resolution presets. Remotex requests one virtual
-display during setup at the target's configured `width` and `height`. With
-`resize = true`, Remotex supports **Resize to Window** like RDP, using Apple's
-dynamic-resolution feature: a client viewport report sends another full display
-configuration on the same session, and the Mac confirms the effective size with
-its next `AppleDisplayLayout`.
+High Performance disables physical displays and moves all remote windows to the
+virtual display. Apple's client supports up to two, arbitrary dynamic sizes, and
+fixed presets when dynamic resolution is off. Remotex requests one at configured
+`width` and `height`. With `resize = true`, a viewport report sends a replacement
+full display configuration; the next `AppleDisplayLayout` confirms its size.
 
 ```toml
 [[targets]]
@@ -82,32 +69,26 @@ The descriptor is `0x9c` bytes before its `0x1c`-byte mode table:
 +0x9a u16      mode count = 1
 ```
 
-The one mode entry is `u32 width`, `u32 height`, `u32 scaled_width`, `u32
+The `0x1c`-byte mode is `u32 width`, `u32 height`, `u32 scaled_width`, `u32
 scaled_height`, `f64 refresh_rate_hz = 60`, and `u32 flags = 0`. Width equals
-scaled width and height equals scaled height. Bit 0 of `display_flags` enables
-dynamic geometry, and the rest of this full descriptor is repeated with a
-replacement mode for each accepted viewport change. The `+0x96` field is passed
-through as rotations by the server; `7` is the value captured in Apple's full
-dynamic descriptor, whose private bit meanings are not inferred here.
+scaled width; height equals scaled height. `display_flags` bit 0 enables dynamic
+geometry. Each viewport change resends the full descriptor with a replacement
+mode. The server calls `+0x96` rotations; `7` is Apple's captured full-dynamic
+value, but its private bits remain unknown.
 
-The initial descriptor always uses this dynamic shape, even when the target does not
-grant clients `resize` permission. Consequently, disconnecting and reconnecting
-turns the Mac's **Dynamic resolution** checkbox back on if it was switched off in
-System Settings. This is deliberate. The target's `resize` key only controls whether
-remotex acts on later viewport reports.
+The initial descriptor is always dynamic, even when `resize` is false. A reconnect
+therefore re-enables the Mac's **Dynamic resolution** setting. `resize` controls
+only whether remotex acts on later viewport reports.
 
-The Standard-mode result was remeasured separately on July 31, 2026: after Apple
-DH authentication, replying `RFB 003.008` and sending the same ten-entry metadata
-encoding list produced `AppleDisplayLayout` unsolicited. Selecting ids 4 and 1
-then produced 3200×1800 at 2x and 1280×800 at 1x respectively. Standard mode
-therefore uses the same display protocol without the 003.889 record layer; remotex
-keeps its pixels raw as the uncompressed alternative.
+Standard mode was independently remeasured July 31, 2026. After Apple DH auth,
+`RFB 003.008` plus the same ten metadata encodings produced an unsolicited
+`AppleDisplayLayout`. Selecting ids 4 and 1 produced 3200×1800 at 2× and
+1280×800 at 1×. It uses the same display protocol without the 003.889 record
+layer; remotex keeps its pixels raw.
 
-Its native pasteboard also works on that stream, but only after the Standard
-client prelude: `ViewerInfo`, `SetMode(control)`, then `AutoPasteboard(start)`.
-Without the first two messages the Mac accepts browser-to-Mac writes and explicit
-fetches but does not emit the `MiscStatus(cmd=2)` notification needed for automatic
-Mac-to-client synchronization.
+Standard native pasteboard monitoring requires `ViewerInfo`, `SetMode(control)`,
+then `AutoPasteboard(start)`. Without the first two, writes and explicit fetches
+work but the Mac does not emit the `MiscStatus(cmd=2)` change notification.
 
 With `clipboard = true`, the High Performance subtype uses the same native Apple
 pasteboard messages in both directions. It sends the native cleartext `ViewerInfo`,
@@ -130,8 +111,7 @@ echoing its choice in the next layout's `current_display`:
 | `display_id = 4` | `4` | 3200×1800 — that screen's own pixels |
 | `display_id = 1` | `1` | 1280×800 |
 
-So a client never has to assume a selection took: the layout is the answer, and
-`src/vnc.rs` moves the checkmark only when one arrives.
+The layout is authoritative; `src/vnc.rs` moves the checkmark only on confirmation.
 
 ### The density, and why picking a screen is what fixes it
 
@@ -139,20 +119,16 @@ Each display record carries **its own scale factor** as a big-endian `f64`: 1.0 
 the 1280×800 screen, 2.0 for the Retina one. It agrees exactly with the ratio of
 that record's two bounds rects (3200/1600), so the two can be cross-checked.
 
-The consequence is that **a combined framebuffer has no single density.** 4480×1800
-is a 1× 1280×800 beside a 2× 3200×1800, spanning 2880×900 points; no one scale
-describes it, and the header's own backing-pixels-to-logical-points ratio
-(4480/2880 = 1.56) is a meaningless number that happens to look plausible — it is
-neither screen's density and not an average of anything. `Layout::scale` therefore
-reports `UNSCALED` for the combined view and the selected screen's own density
-otherwise — which makes picking a screen the thing that makes the geometry exact,
-rather than a convenience.
+**A combined framebuffer has no single density.** Here 4480×1800 combines a 1×
+1280×800 display and a 2× 3200×1800 display across 2880×900 points. The header
+ratio, 4480/2880 = 1.56, represents neither display. `Layout::scale` therefore
+returns `UNSCALED` for the combined view and the display's scale after selection.
 
 ## The other corrections
 
 ### The first `SetEncodings` decides whether displays are reported at all
 
-This is the strangest thing measured here and it is unexplained. The list in
+The behavior is unexplained. The list in
 `vnc_apple::ENCODINGS` — Raw, `0x44c`, `0x44d`, `0x44f`, `0x450`, `0x451`, `0x453`,
 `0x455`, `DesktopSize`, `LastRect`, in that order — produces an
 `AppleDisplayLayout` on every connection. **Every** variant tried produces none at
@@ -168,10 +144,9 @@ all:
 | the same set, reversed | 0 |
 | the same set, with Raw duplicated | 0 |
 
-Reversal failing while the set is unchanged rules out set membership; a duplicate
-failing rules out a simple capability test. Sixteen variants, one fresh connection
-each, no exceptions in either direction. What `screensharingd` is doing with this
-list is a **revision gap**; that it does something is not.
+Reversal and duplication failures rule out simple set-membership and capability
+tests. Sixteen variants used fresh connections, with no exceptions in either
+direction. The server's interpretation is a revision gap.
 
 Two consequences for an implementer:
 
@@ -188,14 +163,11 @@ Two consequences for an implementer:
   the same grounds as `DeviceInfo`: tolerating an encoding that turns up unasked
   costs nothing, and desyncing on it costs the session.)
 
-**One honest qualification to all of the above.** The list the probe measured had
-eleven entries; `vnc_apple::ENCODINGS` ships ten, `UserInfo` having been dropped
-between the two. That single-entry removal was *not* among the sixteen variants tried,
-and the shipped ten-entry list was afterwards verified against the same Mac to
-produce a layout — twice, through the gateway rather than the probe. So "any single
-removal costs the layout" is what the bisection
-measured, and it has one known exception. Which entries actually matter is therefore
-still unresolved, and the safe reading is the one in the code: leave the list alone.
+Qualification: the probe used eleven entries, while the shipped list has ten and
+omits `UserInfo`. That difference was not among the sixteen probe variants. The
+shipped list produced layouts twice through the gateway, so "any single removal
+fails" has one known exception and the required subset remains unknown. Leave the
+shipped order and contents unchanged.
 
 ### A layout payload is two bytes shorter than it declares
 
@@ -204,19 +176,17 @@ The `u16` prefix counts the whole payload including itself — `0x14 + displays 
 sent**. The final display record stops after its last field and omits its two
 trailing pad bytes.
 
-Consuming the declared count therefore eats the first two bytes of the message
-behind it, and the failure is about as far from the cause as it could be: the next
-read is a framebuffer update whose rectangle count is really a screen width
-(`0x0c80` = 3200), and the session dies several messages later complaining about an
-encoding nobody sent (`0xdaffdada`, which is pixels). Both the probe and the gateway
-hit it, which is how it was found — it appears on the *second* layout of a session,
-so it needs a display switch to reproduce.
+Consuming the declared count steals two bytes from the next message. The following
+framebuffer update then reads width `0x0c80` (3200) as its rectangle count and later
+reports pixel bytes `0xdaffdada` as an encoding. This appears on the second layout,
+so reproduction requires a display switch. Both the independent probe and gateway
+reproduced it.
 
 ### A display record's fields are two bytes later than documented
 
-The tell is the `f64` `3ff0000000000000` (1.0), which §8.4 places at `+0x00` and
-`+0x08` and a live Mac places at `+0x02` and `+0x0a`. Reading the documented offsets
-yields `display_id = 0` for every screen and denormal garbage for the scales.
+The `f64` `3ff0000000000000` (1.0) appears at `+0x02` and `+0x0a`, not the
+offsets `+0x00` and `+0x08` documented in §8.4. Those offsets yield
+`display_id = 0` for every screen and invalid scales.
 
 Both bounds rects are **`(top, left, bottom, right)`**, not the `(x, y, w, h)` the
 document models; a size is a difference of edges. The measured record:
@@ -325,8 +295,8 @@ type is the encoding's low byte, with the same `u16`-length framing. A live sess
 sends both forms of the same content. There are also two zero-payload message types,
 `0x04` (ServerAck) and `0x07` (NOP).
 
-A client that does not tolerate these ends the session on the first one, which for
-this gateway used to be "unknown server message type 4" a few seconds in.
+A client that does not tolerate these ends the session on the first bare message,
+typically `0x04` a few seconds after connection.
 
 ## Confirmed
 
