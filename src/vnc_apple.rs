@@ -144,8 +144,11 @@ pub const ENCODINGS: &[i32] = &[
 /// so compression is asked for in a second `SetEncodings` after the Mac has already
 /// reported a layout. It keeps that state and simply switches encoder: measured at
 /// 398 KB for a 3200x1800 frame against 23 MB of raw pixels. Sending only the first
-/// list would leave High Performance mode on raw pixels; sending only a list with
+/// list would leave both Apple subtypes on raw pixels; sending only a list with
 /// zlib in it would lose the layout metadata.
+///
+/// Both subtypes use it. A layout is what the upgrade waits on, and plain `ard`
+/// reports one too, so it compresses on the same terms High Performance does.
 pub const ENCODINGS_WITH_ZLIB: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,

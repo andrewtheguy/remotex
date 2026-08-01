@@ -278,7 +278,8 @@ the client advertises DesktopSize and ExtendedDesktopSize against servers that
 accept them. Generic VNC clipboard support uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. The Apple subtype
 also negotiates Apple's display metadata, display picker and native pasteboard on
-the ordinary byte stream; it deliberately leaves pixels raw.
+the ordinary byte stream, and asks for zlib in the second `SetEncodings` exactly as
+High Performance does — the upgrade waits on a display layout, not on a dialect.
 
 **RFB 003.889** (`subtype = "ard-high-performance"`) is Apple's own protocol
 revision. It authenticates identically — the same security type 30 — and then
@@ -303,7 +304,8 @@ over the 003.889 record transport, with zlib rectangles instead of raw pixels.
 Apple's virtual-display-count and resolution-preset controls remain unimplemented.
 
 The wire constraints remain load-bearing: the *first* `SetEncodings` must be the
-measured exact list, so zlib is requested in a second one after a layout has arrived;
+measured exact list, so zlib is requested in a second one after a layout has arrived
+— for both Apple subtypes;
 and a layout payload is two bytes shorter than its own length prefix claims. The
 byte layouts and measured protocol corrections are in
 [`apple-vnc-889.md`](apple-vnc-889.md) — read that before touching this path.

@@ -350,7 +350,24 @@ struct Apple {
     /// [`vnc_apple::ENCODINGS_WITH_ZLIB`] — so it is asked for in a second one, once
     /// the Mac has reported its displays and there is nothing left to lose by it.
     /// Once, hence the flag: a layout arrives at every login and lock.
+    ///
+    /// Both subtypes do this. The upgrade rides on the display layout, which plain
+    /// `ard` reports just as High Performance does, so gating it by subtype only cost
+    /// bandwidth — measured at 6.19 MB of raw against 3.38 MB of zlib for the same
+    /// 800x600 desktop, on a mode whose framebuffer is a physical screen and can be
+    /// far larger than that.
     asked_for_zlib: bool,
+}
+
+impl Apple {
+    /// The read loop's starting state for either Apple subtype.
+    ///
+    /// `high_performance` settles one thing only — whether a virtual display was
+    /// asked for. It must not reach [`Apple::asked_for_zlib`]: presetting that flag
+    /// is how a subtype opts *out* of compression, and neither should.
+    fn new(high_performance: bool) -> Self {
+        Self { virtual_display: high_performance, ..Self::default() }
+    }
 }
 
 /// The pixels the browser has already been sent, so an update carrying none of
@@ -770,9 +787,10 @@ async fn rfb38_preface(
 fn rfb38_encoding_list(apple: bool, resize: bool, clipboard: bool) -> Vec<i32> {
     if apple {
         // A Mac sends the same display layout and accepts the same display picker
-        // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free:
-        // plain `ard` is the uncompressed alternative to 003.889, and its native
-        // pasteboard is negotiated by `AutoPasteboard`, not an RFB encoding.
+        // on its downgraded 3.8 wire. Keep this measured list exact and zlib-free —
+        // zlib here costs the layout, so both subtypes ask for it in the second
+        // `SetEncodings` a layout triggers — and note that the native pasteboard is
+        // negotiated by `AutoPasteboard`, not an RFB encoding.
         return vnc_apple::ENCODINGS.to_vec();
     }
 
@@ -999,11 +1017,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             clipboard: clipboard_enabled,
             poll,
         },
-        apple.then(|| Apple {
-            asked_for_zlib: !high_performance,
-            virtual_display: high_performance,
-            ..Apple::default()
-        }),
+        apple.then(|| Apple::new(high_performance)),
         sink.clone(),
     ));
 
@@ -2394,8 +2408,8 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // Now that the Mac has said what it has, ask for compression. This has to wait
     // for a layout: zlib in the *first* `SetEncodings` costs the layout entirely, and
     // asking again here keeps the display state and merely changes encoder. Sent
-    // before the re-arm so the update that follows is the compressed one. Plain
-    // `ard` already set `asked_for_zlib`: it stays raw and never enters this branch.
+    // before the re-arm so the update that follows is the compressed one. Both
+    // subtypes reach here — a layout is what the upgrade waits on, not a dialect.
     if ask_for_zlib {
         debug!("vnc: display layout received, asking for zlib");
         uplink.send(&set_encodings(vnc_apple::ENCODINGS_WITH_ZLIB)).await?;
@@ -3368,6 +3382,26 @@ mod tests {
         }
     }
 
+    /// Compression is not a High Performance feature. The upgrade waits on a display
+    /// layout, and plain `ard` reports one, so the only thing the subtype settles is
+    /// the virtual display. Gating zlib by subtype cost 6.19 MB of raw where zlib
+    /// sent 3.38 MB of the same 800x600 desktop, and Standard mode's framebuffer is
+    /// a physical screen — 3200x1800 on the Mac this was measured against.
+    #[test]
+    fn both_apple_subtypes_start_out_wanting_zlib() {
+        for high_performance in [false, true] {
+            let apple = Apple::new(high_performance);
+            assert!(
+                !apple.asked_for_zlib,
+                "high_performance={high_performance} skipped the zlib upgrade"
+            );
+            assert_eq!(apple.virtual_display, high_performance);
+        }
+    }
+
+    /// The *first* `SetEncodings` only. zlib in this list costs the display layout,
+    /// which is why it is absent here and asked for again once a layout has arrived —
+    /// see [`both_apple_subtypes_start_out_wanting_zlib`].
     #[test]
     fn standard_ard_uses_the_apple_metadata_list_without_zlib() {
         let encodings = rfb38_encoding_list(true, false, true);
