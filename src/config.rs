@@ -79,9 +79,9 @@ pub enum Subtype {
     /// pixels, and uses Apple's encrypted record transport.
     ///
     /// Apple's native pasteboard payloads are carried inside the encrypted record
-    /// transport when `clipboard` is enabled. `resize` is refused: Apple's
-    /// undocumented dynamic-resolution controls are not implemented. See
-    /// docs/apple-vnc-889.md.
+    /// transport when `clipboard` is enabled. With `resize`, viewport reports
+    /// replace the virtual display's one advertised mode and the Mac answers with
+    /// its new layout. See docs/apple-vnc-889.md.
     ArdHighPerformance,
 }
 
@@ -263,6 +263,12 @@ pub struct TargetConfig {
     /// a live session to render at 200%, so a Retina client gets twice the pixels
     /// and a UI drawn twice as large. Off, an RDP target ignores the client's
     /// density entirely.
+    ///
+    /// On `ard-high-performance`, this lets viewport reports replace the virtual
+    /// display's one-mode dynamic configuration. The setup descriptor itself
+    /// always enables the Mac's dynamic geometry; this flag remains the operator's
+    /// permission for clients to change it after connect. Standard `ard` refuses
+    /// the option because it exposes physical displays.
     #[serde(default)]
     pub resize: bool,
     /// Clipboard bridge: let the browser read and write this target's
@@ -551,15 +557,14 @@ impl ConfigFile {
                         target.width,
                         target.height
                     );
-                    // Standard mode shares the Mac's physical displays; High
-                    // Performance requests one configured virtual-display mode.
-                    // Apple's undocumented dynamic-resolution controls are not
-                    // implemented for either subtype.
+                    // Standard mode shares the Mac's physical displays and has no
+                    // virtual display for a viewport to resize. High Performance
+                    // owns one, and may replace its configured mode dynamically.
                     anyhow::ensure!(
-                        !target.resize,
+                        subtype != Subtype::Ard || !target.resize,
                         "target {:?} is subtype {name:?} and sets resize, which this gateway \
-                         does not support: Apple dynamic resolution is undocumented and is not \
-                         implemented",
+                         does not support: Standard Screen Sharing exposes the Mac's physical \
+                         displays, whose resolution this gateway does not change",
                         target.name
                     );
                 }
@@ -1418,7 +1423,7 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
 
-        // Apple dynamic resolution is not implemented.
+        // Standard mode exposes physical displays, which this gateway never resizes.
         let err =
             ard("username = \"andrew\"\npassword = \"h\"\nresize = true").unwrap_err();
         assert!(format!("{err:#}").contains("does not support"), "{err:#}");
@@ -1451,25 +1456,23 @@ mod tests {
     /// Apple pasteboard as plain `ard`, and requests a virtual display at
     /// width/height.
     #[test]
-    fn the_high_performance_subtype_accepts_clipboard_and_refuses_resize() {
+    fn the_high_performance_subtype_accepts_clipboard_and_resize() {
         let hp = |extra: &str| {
             ConfigFile::parse(&vnc_toml(&format!(
                 "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
             )))
         };
 
-        let target = &hp("width = 1600\nheight = 1000\nclipboard = true")
+        let target = &hp("width = 1600\nheight = 1000\nresize = true\nclipboard = true")
             .unwrap()
             .targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
         assert_eq!((target.width, target.height), (1600, 1000));
+        assert!(target.resize);
         assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
         // kebab-case, not lowercase, and this is what pins that.
         assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
-
-        let err = hp("resize = true").unwrap_err();
-        assert!(format!("{err:#}").contains("does not support"), "{err:#}");
 
         // The credential rules are the ones `ard` has, shared rather than restated.
         let err = ConfigFile::parse(&vnc_toml(

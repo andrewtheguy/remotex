@@ -170,7 +170,8 @@ What is engine-specific is the shape of the permission:
 
 | Engine | With `resize` |
 |---|---|
-| VNC | applies a requested size, on servers accepting SetDesktopSize |
+| Generic VNC | applies a requested size, on servers accepting SetDesktopSize |
+| Apple High Performance VNC | replaces its virtual display's dynamic configuration |
 | RDP | applies a requested size, and the client's reported display density |
 
 `hostScale` reports the density of the screen the client's window is on. RDP with
@@ -272,13 +273,14 @@ server delivers, of all places, inside a framebuffer rectangle. `src/vnc_record.
 is that transport, exposed to the rest of the engine as an ordinary `AsyncRead` and
 a per-message sink; `src/vnc_apple.rs` is the message and payload layer above it.
 
-**High Performance mode is a virtual-display mode.** The gateway sends one
+**High Performance mode is a virtual-display mode.** The gateway sends
 `SetDisplayConfiguration` (`0x1d`) during setup, with one 1x mode built from the
-target's `width` and `height`. The Mac then supplies the virtual display over the
-003.889 record transport, with zlib rectangles instead of raw pixels. Apple's own
-client has undocumented controls for choosing one or two virtual displays,
-resolution presets, and dynamic resolution in this mode; this gateway implements
-none of them and does not resend the descriptor after setup.
+target's `width` and `height`. The full descriptor enables dynamic resolution on
+every fresh session. With `resize = true`, later viewport reports resend the same
+full descriptor with the requested mode, and the Mac's answering display layout
+sets the actual framebuffer geometry. The Mac supplies that virtual display over
+the 003.889 record transport, with zlib rectangles instead of raw pixels. Apple's
+one/two-virtual-display and resolution-preset controls remain unimplemented.
 
 The wire constraints remain load-bearing: the *first* `SetEncodings` must be the
 measured exact list, so zlib is requested in a second one after a layout has arrived;
@@ -288,10 +290,9 @@ byte layouts and measured protocol corrections are in
 
 Deliberately absent: Apple's own still-image codecs and the Adaptive HEVC media
 transport (the reference leaves their payload formats unresolved, and a client must
-not advertise an encoding it cannot decode); and Apple's undocumented dynamic
-resolution, so `resize` is refused there. The native Apple pasteboard works on both
-subtypes; 003.889 enables monitoring before the rekey and carries the fetch and data
-messages inside its encrypted record layer. See
+not advertise an encoding it cannot decode). The native Apple pasteboard works on
+both subtypes; 003.889 enables monitoring before the rekey and carries the fetch and
+data messages inside its encrypted record layer. See
 [`roadmap.md`](roadmap.md).
 
 ## Clients

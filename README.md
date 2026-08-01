@@ -62,9 +62,10 @@ pasteboard. `ard-high-performance` takes the same credentials, requests one virt
 display at the target's configured `width` and `height`, and adds zlib compression
 over Apple's record-layer revision (around fifty times fewer bytes on a static
 desktop). Both Apple subtypes support the native Apple pasteboard when
-`clipboard = true`. Apple's undocumented dynamic resolution and
-one/two-virtual-display controls are not implemented; neither subtype supports
-`resize`. See
+`clipboard = true`. High Performance also supports `resize = true`: it replaces
+the virtual display's mode from client viewport reports. Every fresh connection
+turns the Mac's Dynamic resolution setting back on. Standard `ard` still refuses
+resize, and the one/two-virtual-display control is not implemented. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 ## Container

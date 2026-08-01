@@ -45,10 +45,12 @@ the Mac's answering layout rather than the click.
 
 `subtype = "ard-high-performance"` is High Performance Screen Sharing and requests
 one virtual display at the target's configured `width` and `height`. It uses Apple's
-003.889 record transport and adds zlib. Apple's own client exposes undocumented
-one/two-virtual-display, resolution-preset, and dynamic-resolution controls in this
-mode; they are intentionally not roadmap items here. The gateway sends one display
-configuration during setup and never changes it from a viewport report.
+003.889 record transport and adds zlib. With `resize = true`, each client viewport
+report replaces that display's full dynamic descriptor and the Mac's answering
+layout is authoritative. The setup descriptor carries the dynamic flag regardless
+of that permission, so every new connection restores the Mac's Dynamic resolution
+checkbox to on. Apple's one/two-virtual-display picker and fixed resolution presets
+remain intentionally absent.
 
 The 003.889 wire constraints remain load-bearing: the first `SetEncodings` is the
 measured exact list, zlib is asked for only after the first layout, and a layout
