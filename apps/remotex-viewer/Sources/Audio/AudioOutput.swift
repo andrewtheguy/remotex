@@ -10,6 +10,15 @@ import OSLog
 @MainActor
 @Observable
 final class AudioOutput {
+    struct Device {
+        let engine: AVAudioEngine
+        let player: AVAudioPlayerNode
+    }
+
+    /// Returns `nil` for a deliberate silent sink. Tests use that to exercise stream
+    /// setup without asking the machine for an output device.
+    private let startDevice: @MainActor (AVAudioFormat) throws -> Device?
+
     /// Whether the user has asked for sound — intent, not whether any is arriving.
     ///
     /// Nothing here reports the latter, for the same reason the SPA does not: from this
@@ -41,6 +50,12 @@ final class AudioOutput {
     private var configurationObserver: (any NSObjectProtocol)?
     @ObservationIgnored
     private let log = Logger(subsystem: "dev.remotex.viewer", category: "audio")
+
+    init(
+        startDevice: @escaping @MainActor (AVAudioFormat) throws -> Device? = AudioOutput.startSystemDevice
+    ) {
+        self.startDevice = startDevice
+    }
 
     /// `isolated` so it can reach main-actor state, as `ClipboardSynchronizer`'s does.
     isolated deinit {
@@ -169,6 +184,21 @@ final class AudioOutput {
     // MARK: - The engine
 
     private func startEngine(format: AVAudioFormat) throws {
+        guard let device = try startDevice(format) else {
+            // A decoder and stream still exist; only their destination is a test sink.
+            nextAt = 0
+            return
+        }
+        let engine = device.engine
+        let player = device.player
+        self.engine = engine
+        self.player = player
+        nextAt = 0
+
+        installConfigurationObserver(for: engine, format: format)
+    }
+
+    private static func startSystemDevice(format: AVAudioFormat) throws -> Device {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
@@ -176,10 +206,10 @@ final class AudioOutput {
         engine.prepare()
         try engine.start()
         player.play()
-        self.engine = engine
-        self.player = player
-        nextAt = 0
+        return Device(engine: engine, player: player)
+    }
 
+    private func installConfigurationObserver(for engine: AVAudioEngine, format: AVAudioFormat) {
         // The default output device changing under the engine — headphones, a display's
         // speakers, a Bluetooth link going away. The engine stops itself, and the old
         // timeline means nothing on the new device.

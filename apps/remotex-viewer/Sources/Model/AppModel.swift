@@ -98,7 +98,7 @@ final class AppModel: GatewaySessionSink {
     private(set) var remoteCursor: ServerMessage.Cursor?
 
     let clipboard: ClipboardSynchronizer
-    let audio = AudioOutput()
+    let audio: AudioOutput
 
     /// The gateway this app can run, and the config it would run on. Held rather
     /// than created per launch: `stop()` has to reach the same process `start()`
@@ -204,12 +204,14 @@ final class AppModel: GatewaySessionSink {
         gateway: EmbeddedGateway? = nil,
         config: GatewayConfigStore? = nil,
         clipboard: ClipboardSynchronizer = ClipboardSynchronizer(),
+        audio: AudioOutput = AudioOutput(),
         urlSession: URLSession = GatewayClient.defaultSession
     ) {
         self.preferences = preferences
         self.gateway = gateway
         self.config = config
         self.clipboard = clipboard
+        self.audio = audio
         self.urlSession = urlSession
         macOSKeyboardOverridesEnabled = preferences.macOSKeyboardOverridesEnabled
         autoResizeByDefault = preferences.autoResizeByDefault

@@ -35,11 +35,7 @@ struct ConfigurationPanel: View {
                     .foregroundStyle(.secondary)
             }
 
-            TextEditor(text: $text)
-                .font(.body.monospaced())
-                .textEditorStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .padding(8)
+            PlainTextEditor(text: $text)
                 .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
                 .frame(minHeight: 320)
                 .accessibilityLabel("Configuration file")
