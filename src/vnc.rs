@@ -79,6 +79,8 @@ const ENCODING_RAW: i32 = 0;
 const ENCODING_COPY_RECT: i32 = 1;
 /// RRE: a background colour and a run of coloured sub-rectangles over it.
 const ENCODING_RRE: i32 = 2;
+/// Hextile: RRE applied to each 16x16 tile of the rectangle in turn.
+const ENCODING_HEXTILE: i32 = 5;
 /// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
 /// shared by every rectangle on the connection. Not a vendor encoding and not
 /// Apple's alone, though Apple's High Performance mode is where it arrived here
@@ -1929,6 +1931,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         ENCODING_RAW => payload = Payload::Raw,
         ENCODING_COPY_RECT => payload = Payload::CopyRect,
         ENCODING_RRE => payload = Payload::Rre,
+        ENCODING_HEXTILE => payload = Payload::Hextile,
         // Cursor: the rect header carries the hotspot (x, y) and the shape
         // size, never a framebuffer position — so it skips the bounds check
         // and tile path below entirely.

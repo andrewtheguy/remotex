@@ -41,6 +41,20 @@ use crate::vnc::BPP;
 /// wildly bogus geometry from turning into an allocation.
 pub const MAX_INFLATED: usize = 8192 * 8192 * 4;
 
+/// Hextile's tile edge. Every rectangle is cut into these, the right and bottom
+/// ones shrinking to whatever is left.
+const HEXTILE: usize = 16;
+/// The tile carries its own pixels, and the other bits mean nothing.
+const HEXTILE_RAW: u8 = 0x01;
+/// The tile sets the background colour the tiles after it may omit.
+const HEXTILE_BACKGROUND: u8 = 0x02;
+/// The same for the foreground its uncoloured sub-rectangles use.
+const HEXTILE_FOREGROUND: u8 = 0x04;
+/// The tile has sub-rectangles, counted by the byte after the colours.
+const HEXTILE_SUBRECTS: u8 = 0x08;
+/// Each sub-rectangle carries its own colour rather than using the foreground.
+const HEXTILE_SUBRECTS_COLOURED: u8 = 0x10;
+
 /// How a rectangle's pixels arrive.
 ///
 /// Decided from the encoding number before the bounds check, and acted on after it,
@@ -59,6 +73,9 @@ pub enum Payload {
     /// A background colour and a run of coloured sub-rectangles over it
     /// (encoding 2).
     Rre,
+    /// 16x16 tiles, each raw or painted from colours an earlier tile may have set
+    /// (encoding 5).
+    Hextile,
 }
 
 impl Payload {
@@ -69,6 +86,7 @@ impl Payload {
             Payload::Zlib => "zlib",
             Payload::CopyRect => "copyrect",
             Payload::Rre => "rre",
+            Payload::Hextile => "hextile",
         }
     }
 }
@@ -82,8 +100,22 @@ pub struct Decoders {
     /// The connection's encoding-6 inflate stream. Created on the first zlib
     /// rectangle and never reset — see [`Inflater`].
     zlib: Option<Inflater>,
+    /// The colours a Hextile tile may omit.
+    hextile: HextileColours,
     /// Which encodings have already been announced in the log.
     seen: Vec<Payload>,
+}
+
+/// The background and foreground a Hextile tile may omit because an earlier tile
+/// set them.
+///
+/// Black until a tile says otherwise, rather than an error: refusing a session over
+/// a colour no tile has needed yet would trade a wrong pixel for a dead connection,
+/// and a conforming server sets both in its first tile anyway.
+#[derive(Default)]
+struct HextileColours {
+    background: [u8; 3],
+    foreground: [u8; 3],
 }
 
 impl Decoders {
@@ -113,7 +145,78 @@ impl Decoders {
             Payload::Zlib => self.zlib(reader, w, h).await.map(Some),
             Payload::CopyRect => copy_rect(reader, shadow, w, h).await,
             Payload::Rre => rre(reader, w, h).await.map(Some),
+            Payload::Hextile => self.hextile(reader, w, h).await.map(Some),
         }
+    }
+
+    /// Encoding 5: 16x16 tiles, left to right and top to bottom, each either raw
+    /// pixels or an area fill plus sub-rectangles.
+    ///
+    /// A tile may omit its background or foreground, meaning the one an earlier tile
+    /// set. That state is [`Decoders::hextile`] rather than a local, so it carries
+    /// across rectangles as it does in noVNC: a conforming server sets both in the
+    /// first tile of every rectangle, which makes the choice invisible to it, and
+    /// this is the reading our only reference implements.
+    async fn hextile<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+        w: u16,
+        h: u16,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut out = vec![0u8; usize::from(w) * usize::from(h) * 3];
+        // One tile's worth of scratch, reused: the biggest is 16x16.
+        let mut tile = vec![0u8; HEXTILE * HEXTILE * 3];
+        for ty in (0..h).step_by(HEXTILE) {
+            let th = HEXTILE.min(usize::from(h - ty)) as u16;
+            for tx in (0..w).step_by(HEXTILE) {
+                let tw = HEXTILE.min(usize::from(w - tx)) as u16;
+                let sub = reader.read_u8().await?;
+                anyhow::ensure!(
+                    sub & 0xe0 == 0,
+                    "a hextile tile has subencoding {sub}, which sets bits RFB does not define"
+                );
+                if sub & HEXTILE_RAW != 0 {
+                    // Raw wins outright: RFC 6143 says the other bits are ignored,
+                    // and the carried colours are neither read nor changed.
+                    let mut pixels = vec![0u8; usize::from(tw) * usize::from(th) * BPP];
+                    reader.read_exact(&mut pixels).await?;
+                    blit(&mut out, w, (tx, ty), (tw, th), &bgrx_to_rgb(&pixels));
+                    continue;
+                }
+                if sub & HEXTILE_BACKGROUND != 0 {
+                    self.hextile.background = colour(read_pixel(reader).await?);
+                }
+                if sub & HEXTILE_FOREGROUND != 0 {
+                    self.hextile.foreground = colour(read_pixel(reader).await?);
+                }
+                fill(&mut tile, tw, (0, 0), (tw, th), self.hextile.background);
+                if sub & HEXTILE_SUBRECTS != 0 {
+                    let count = reader.read_u8().await?;
+                    for _ in 0..count {
+                        let rgb = if sub & HEXTILE_SUBRECTS_COLOURED != 0 {
+                            colour(read_pixel(reader).await?)
+                        } else {
+                            self.hextile.foreground
+                        };
+                        // Two nibbles each: a position, then a size that counts from
+                        // one. So a size nibble of 15 means 16, and 15 + 16 is past
+                        // the largest tile there is — which is why this is checked
+                        // rather than trusted.
+                        let xy = reader.read_u8().await?;
+                        let wh = reader.read_u8().await?;
+                        let (sx, sy) = (u16::from(xy >> 4), u16::from(xy & 0x0f));
+                        let (sw, sh) = (u16::from(wh >> 4) + 1, u16::from(wh & 0x0f) + 1);
+                        anyhow::ensure!(
+                            sx + sw <= tw && sy + sh <= th,
+                            "a hextile subrect {sw}x{sh}+{sx}+{sy} leaves its {tw}x{th} tile"
+                        );
+                        fill(&mut tile, tw, (sx, sy), (sw, sh), rgb);
+                    }
+                }
+                blit(&mut out, w, (tx, ty), (tw, th), &tile);
+            }
+        }
+        Ok(out)
     }
 
     /// Say once per connection which encodings the server actually chose.
@@ -245,6 +348,22 @@ async fn read_pixel<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<[u8;
 /// A wire pixel as RGB. See the module header: the wire order is `B, G, R, X`.
 fn colour(px: [u8; BPP]) -> [u8; 3] {
     [px[2], px[1], px[0]]
+}
+
+/// Copy a `size` block of packed RGB888 into `out` at `at`, where `out`'s rows are
+/// `stride` pixels wide and `src`'s are `size.0` pixels wide.
+///
+/// `src` may be a reused scratch buffer longer than the block, so only what the
+/// block claims is read.
+fn blit(out: &mut [u8], stride: u16, at: (u16, u16), size: (u16, u16), src: &[u8]) {
+    let stride = usize::from(stride);
+    let (x, y) = (usize::from(at.0), usize::from(at.1));
+    let (w, h) = (usize::from(size.0), usize::from(size.1));
+    for row in 0..h {
+        let to = ((y + row) * stride + x) * 3;
+        let from = row * w * 3;
+        out[to..to + w * 3].copy_from_slice(&src[from..from + w * 3]);
+    }
 }
 
 /// Paint `size` at `at` in an RGB888 buffer `stride` pixels wide.
@@ -499,6 +618,125 @@ mod tests {
         let wire = 7u32.to_be_bytes();
         let err = rre(&mut wire.as_slice(), 2, 3).await.unwrap_err();
         assert!(format!("{err:#}").contains("raw would have been smaller"), "{err:#}");
+    }
+
+    /// A Hextile sub-rectangle as a test writes one: an optional colour, then the
+    /// position and size that go into the two nibble bytes.
+    type Subrect = (Option<[u8; 4]>, u8, u8, u8, u8);
+
+    /// One Hextile tile: the subencoding byte, then whatever it says follows.
+    struct Tile(Vec<u8>);
+
+    impl Tile {
+        fn new(sub: u8) -> Self {
+            Self(vec![sub])
+        }
+        fn colour(mut self, bgrx: [u8; 4]) -> Self {
+            self.0.extend_from_slice(&bgrx);
+            self
+        }
+        fn subrects(mut self, subrects: &[Subrect]) -> Self {
+            self.0.push(subrects.len() as u8);
+            for (px, x, y, w, h) in subrects {
+                if let Some(px) = px {
+                    self.0.extend_from_slice(px);
+                }
+                self.0.push((x << 4) | y);
+                self.0.push(((w - 1) << 4) | (h - 1));
+            }
+            self
+        }
+        fn pixels(mut self, bgrx: &[u8]) -> Self {
+            self.0.extend_from_slice(bgrx);
+            self
+        }
+    }
+
+    fn hextile_payload(tiles: Vec<Tile>) -> Vec<u8> {
+        tiles.into_iter().flat_map(|t| t.0).collect()
+    }
+
+    const BLUE: [u8; 4] = [0xf0, 0x00, 0x00, 0];
+    const BLUE_RGB: [u8; 3] = [0x00, 0x00, 0xf0];
+    const GREEN: [u8; 4] = [0x00, 0xf0, 0x00, 0];
+    const GREEN_RGB: [u8; 3] = [0x00, 0xf0, 0x00];
+
+    /// The colours are the tile's own only when it says so; otherwise they are
+    /// whatever the last tile that did say left behind — across rectangles, not just
+    /// across tiles.
+    #[tokio::test]
+    async fn hextile_carries_its_colours_between_tiles_and_between_rectangles() {
+        let mut decoders = Decoders::default();
+
+        // A 32x1 rectangle, so two tiles. The first sets both colours and paints a
+        // foreground subrect; the second omits both and must reuse them.
+        let wire = hextile_payload(vec![
+            Tile::new(HEXTILE_BACKGROUND | HEXTILE_FOREGROUND | HEXTILE_SUBRECTS)
+                .colour(BLUE)
+                .colour(GREEN)
+                .subrects(&[(None, 0, 0, 1, 1)]),
+            Tile::new(HEXTILE_SUBRECTS).subrects(&[(None, 0, 0, 1, 1)]),
+        ]);
+        let rgb = decoders.hextile(&mut wire.as_slice(), 32, 1).await.unwrap();
+        assert_eq!(&rgb[..3], &GREEN_RGB, "the first tile's subrect");
+        assert_eq!(&rgb[3..6], &BLUE_RGB, "and its background");
+        assert_eq!(&rgb[16 * 3..16 * 3 + 3], &GREEN_RGB, "the second tile reused both");
+        assert_eq!(&rgb[17 * 3..17 * 3 + 3], &BLUE_RGB);
+
+        // A whole new rectangle, still omitting both.
+        let wire = hextile_payload(vec![Tile::new(HEXTILE_SUBRECTS).subrects(&[(None, 0, 0, 1, 1)])]);
+        let rgb = decoders.hextile(&mut wire.as_slice(), 16, 1).await.unwrap();
+        assert_eq!(&rgb[..3], &GREEN_RGB);
+        assert_eq!(&rgb[3..6], &BLUE_RGB);
+    }
+
+    /// noVNC skips a blank tile that follows a raw one, calling it a server quirk
+    /// (`hextile.js:80-86`). We deliberately do not: RFC 6143 gives subencoding 0
+    /// one meaning, and skipping would leave a hole in a buffer this side is filling
+    /// from scratch — which the shadow would then record as pixels the browser has
+    /// and suppress forever after.
+    #[tokio::test]
+    async fn a_blank_tile_after_a_raw_one_is_still_the_background() {
+        // A 33x1 rectangle, so three tiles: 16 wide, 16 wide, then the 1 left over.
+        let raw_tile: Vec<u8> = std::iter::repeat_n(GREEN, 16).flatten().collect();
+        let wire = hextile_payload(vec![
+            Tile::new(HEXTILE_BACKGROUND).colour(BLUE),
+            Tile::new(HEXTILE_RAW).pixels(&raw_tile),
+            Tile::new(0),
+        ]);
+        let rgb = Decoders::default()
+            .hextile(&mut wire.as_slice(), 33, 1)
+            .await
+            .unwrap();
+        assert_eq!(&rgb[..3], &BLUE_RGB);
+        assert_eq!(&rgb[16 * 3..16 * 3 + 3], &GREEN_RGB, "the raw tile");
+        assert_eq!(&rgb[32 * 3..], &BLUE_RGB, "and the blank one after it");
+    }
+
+    /// The right and bottom tiles are whatever is left over, and a subrect is
+    /// measured against that rather than against a full 16x16.
+    #[tokio::test]
+    async fn a_hextile_subrect_outside_its_edge_tile_is_refused() {
+        // A 17x1 rectangle: a full tile, then a 1-pixel one.
+        let wire = hextile_payload(vec![
+            Tile::new(HEXTILE_BACKGROUND).colour(BLUE),
+            Tile::new(HEXTILE_SUBRECTS).subrects(&[(None, 0, 0, 2, 1)]),
+        ]);
+        let err = Decoders::default()
+            .hextile(&mut wire.as_slice(), 17, 1)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("leaves its 1x1 tile"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_hextile_tile_setting_undefined_bits_is_refused() {
+        let wire = hextile_payload(vec![Tile::new(0x20)]);
+        let err = Decoders::default()
+            .hextile(&mut wire.as_slice(), 1, 1)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("bits RFB does not define"), "{err:#}");
     }
 
     /// The source is read out before the destination is written, so a copy that
