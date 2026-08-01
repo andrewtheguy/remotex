@@ -11,6 +11,12 @@
 - keep e2e tests under tests/*; dummy RDP or VNC servers may run with docker or podman when needed
 - multi session is always out of scope (never planned, not merely deferred): no concurrent sessions, session sharing, or session broker. It means **one active session per gateway instance, forever** — a new browser force-claims it and evicts the previous holder (`src/session.rs`), which a client offers with a Take over button, the same shape as the browser prompt and as Windows Remote Desktop. A reconnect, a target switch and a browser takeover are all the same session coming back, so none of them costs a prompt
 
+## SSH and tmux environment
+
+Do not infer a shell's permissions from the way a client attached to tmux. A
+pre-existing tmux server started locally keeps its local environment and user
+access even when a later client attaches over SSH.
+
 ## The desktop is always shown at 100%
 
 **Never add fit-to-window, zoom-to-fit, or scale-to-viewport logic to a pointer client.** A desktop that does not fit the window is scrolled, not shrunk. Mobile is the single exception: `CAN_PINCH_ZOOM` in `frontend/src/useRemoteDesktop.ts` gates a fit-to-width base scale with pinch zoom on top, and that branch is the only place a scale factor may come from the *viewport*.
