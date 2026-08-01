@@ -2,18 +2,52 @@
 #
 # Xtigervnc is an X server with a built-in RFB server: with no window manager
 # or session it still serves a paintable root window, so a client's first
-# non-incremental FramebufferUpdateRequest gets a real full-screen raw update
+# non-incremental FramebufferUpdateRequest gets a real full-screen update
 # through the whole pipeline. Classic VncAuth is enabled (password below) so
 # the DES challenge path is exercised too. tigervnc-tools ships tigervncpasswd;
-# xfonts-base is needed for the X server's builtin 'fixed' font at startup.
+# xfonts-base is needed for the X server's builtin 'fixed' font at startup, and
+# x11-xserver-utils for xsetroot.
+#
+# The root window is deliberately not left at its default flat colour. TigerVNC
+# sends a solid rectangle as RRE with zero subrectangles whatever encoding the
+# client preferred, because that is the cheapest way to say "all one colour" —
+# so a blank desktop exercises RRE and never reaches the ZRLE encoder at all.
+# A two-colour pattern makes the rectangles real, and ZRLE is then what a client
+# advertising it actually receives.
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tigervnc-standalone-server tigervnc-tools xfonts-base \
+        tigervnc-standalone-server tigervnc-tools xfonts-base x11-xserver-utils \
     && rm -rf /var/lib/apt/lists/*
 # The e2e test authenticates with this password (VncAuth ignores bytes past 8).
 RUN printf 'secret42\n' | tigervncpasswd -f > /etc/vncpasswd
+# Start the server, then keep trying to paint until the display answers. xsetroot
+# is the wait as well as the paint: it fails until the X server is listening.
+#
+# The wait is bounded twice over — the server having died, and a deadline — because
+# an unbounded `until` turns any startup failure into a container that sits there
+# healthy-looking until the test's own timeout fires, reported as whatever the test
+# was really asserting. Failing here names the actual cause.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'Xtigervnc :1 -rfbport 5900 -interface 0.0.0.0 \' \
+    '  -SecurityTypes VncAuth -PasswordFile /etc/vncpasswd \' \
+    '  -geometry 1024x768 -depth 24 &' \
+    'xvnc=$!' \
+    'waited=0' \
+    'until xsetroot -display :1 -mod 16 16 -fg red -bg blue 2>/dev/null; do' \
+    '  if ! kill -0 "$xvnc" 2>/dev/null; then' \
+    '    echo "dummy-vnc: Xtigervnc exited before it accepted a connection" >&2' \
+    '    exit 1' \
+    '  fi' \
+    '  waited=$((waited + 1))' \
+    '  if [ "$waited" -ge 300 ]; then' \
+    '    echo "dummy-vnc: Xtigervnc was not ready after 30s" >&2' \
+    '    exit 1' \
+    '  fi' \
+    '  sleep 0.1' \
+    'done' \
+    'wait "$xvnc"' \
+    > /usr/local/bin/dummy-vnc && chmod +x /usr/local/bin/dummy-vnc
 EXPOSE 5900
-CMD ["Xtigervnc", ":1", "-rfbport", "5900", "-interface", "0.0.0.0", \
-     "-SecurityTypes", "VncAuth", "-PasswordFile", "/etc/vncpasswd", \
-     "-geometry", "1024x768", "-depth", "24"]
+CMD ["/usr/local/bin/dummy-vnc"]

@@ -11,11 +11,11 @@
 //!
 //! ## What the extension is for, here
 //!
-//! **Compression**: standard zlib ([`ENCODING_ZLIB`]) instead of raw pixels, which
-//! is around fifty times fewer bytes on a static desktop. Apple's own still-image
-//! codecs would do better still, but their payload formats are unresolved in the
-//! reference this was written from, and a client must not advertise an encoding it
-//! cannot decode.
+//! **Compression**: standard zlib ([`ENCODING_ZLIB`], decoded in
+//! [`crate::vnc_encodings`]) instead of raw pixels, which is around fifty times
+//! fewer bytes on a static desktop. Apple's own still-image codecs would do better
+//! still, but their payload formats are unresolved in the reference this was
+//! written from, and a client must not advertise an encoding it cannot decode.
 //!
 //! **Picking a physical screen in Standard mode**:
 //! [`ENCODING_DISPLAY_LAYOUT`] carries the Mac's displays and
@@ -55,10 +55,11 @@
 
 use std::collections::HashMap;
 
-use anyhow::Context as _;
 use log::{debug, warn};
 
 use crate::protocol::{CursorShape, DisplayInfo};
+use crate::vnc::ENCODING_ZLIB;
+use crate::vnc_encodings::inflate_independent;
 
 /// Raw pixels, the standard RFB encoding, still the fallback here.
 const ENCODING_RAW: i32 = 0;
@@ -66,9 +67,8 @@ const ENCODING_RAW: i32 = 0;
 /// [`ENCODINGS`] and so are named here rather than reached for across modules.
 const ENCODING_DESKTOP_SIZE: i32 = -223;
 const ENCODING_LAST_RECT: i32 = -224;
-/// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
-/// shared by every rectangle on the connection.
-pub const ENCODING_ZLIB: i32 = 0x06;
+// Standard RFB zlib lives in [`crate::vnc`] as `ENCODING_ZLIB`, imported above: it
+// is not Apple's alone, since every generic target is offered it too.
 /// The record layer's key, delivered as a rectangle before the record layer
 /// exists. See [`crate::vnc_record`].
 pub const ENCODING_REKEY: i32 = 0x44f;
@@ -144,8 +144,11 @@ pub const ENCODINGS: &[i32] = &[
 /// so compression is asked for in a second `SetEncodings` after the Mac has already
 /// reported a layout. It keeps that state and simply switches encoder: measured at
 /// 398 KB for a 3200x1800 frame against 23 MB of raw pixels. Sending only the first
-/// list would leave High Performance mode on raw pixels; sending only a list with
+/// list would leave both Apple subtypes on raw pixels; sending only a list with
 /// zlib in it would lose the layout metadata.
+///
+/// Both subtypes use it. A layout is what the upgrade waits on, and plain `ard`
+/// reports one too, so it compresses on the same terms High Performance does.
 pub const ENCODINGS_WITH_ZLIB: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
@@ -181,17 +184,6 @@ const LAYOUT_HEAD: usize = 0x14;
 /// Largest cursor edge accepted, matching the plain RFB path. Real pointers are
 /// 32x32 or 64x64.
 const MAX_CURSOR_DIM: u16 = 256;
-/// Ceiling on one inflated payload, so a hostile or broken stream cannot be
-/// answered with unbounded memory.
-///
-/// An 8192x8192 framebuffer at four bytes a pixel, which is past any real Mac and
-/// comfortably past the 4480x1800 (31 MiB) a two-display session synthesizes. A
-/// 64 MiB cap would be tighter than the raw path and reject a rectangle solely
-/// because it arrived compressed. The real bound on either path is the rectangle's
-/// bounds check against the announced desktop; this stops only wildly bogus
-/// geometry from turning into an allocation.
-const MAX_INFLATED: usize = 8192 * 8192 * 4;
-
 /// Identify this client to Screen Sharing before enabling its optional control
 /// messages. The 62-byte body is the native numeric-version form measured on
 /// macOS 26; there are no counted strings in it.
@@ -588,91 +580,6 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         backing.1
     );
     Ok(Layout { backing, current, displays })
-}
-
-/// The connection's framebuffer-zlib inflate stream.
-///
-/// One deflate stream for the life of the connection, chunked across rectangles:
-/// the sliding window carries over, so this context is created once and never
-/// reset. A fresh one per rectangle decodes the first rectangle and then fails —
-/// or, worse, succeeds with the wrong pixels.
-pub struct FramebufferZlib {
-    inflater: Inflater,
-}
-
-impl Default for FramebufferZlib {
-    fn default() -> Self {
-        Self { inflater: Inflater::new("zlib") }
-    }
-}
-
-impl FramebufferZlib {
-    pub fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
-        self.inflater.inflate(chunk, expect)
-    }
-}
-
-/// An inflater whose lifetime is chosen by the encoding that owns it.
-///
-/// Keep this private: framebuffer zlib owns one through [`FramebufferZlib`],
-/// while self-contained Apple payloads call [`inflate_independent`] and cannot
-/// accidentally inherit connection-wide state.
-struct Inflater {
-    inflate: flate2::Decompress,
-    what: &'static str,
-}
-
-impl Inflater {
-    fn new(what: &'static str) -> Self {
-        Self {
-            inflate: flate2::Decompress::new(true),
-            what,
-        }
-    }
-
-    /// Inflate one chunk to exactly `expect` bytes.
-    ///
-    /// `expect` is known from the geometry the rectangle already declared, so a
-    /// payload that wants to expand past it is a protocol violation rather than a
-    /// buffer to grow — which is also what keeps a compression bomb from being
-    /// answered with memory.
-    fn inflate(&mut self, chunk: &[u8], expect: usize) -> anyhow::Result<Vec<u8>> {
-        anyhow::ensure!(
-            expect <= MAX_INFLATED,
-            "a {} rectangle wants {expect} inflated bytes, past the {MAX_INFLATED} ceiling",
-            self.what
-        );
-        let mut out = Vec::with_capacity(expect);
-        let mut fed = 0;
-        while fed < chunk.len() && out.len() < expect {
-            let before = (self.inflate.total_in(), self.inflate.total_out());
-            self.inflate
-                .decompress_vec(&chunk[fed..], &mut out, flate2::FlushDecompress::Sync)
-                .with_context(|| format!("inflating a {} rectangle", self.what))?;
-            fed += (self.inflate.total_in() - before.0) as usize;
-            if (self.inflate.total_in(), self.inflate.total_out()) == before {
-                // Neither side moved, so feeding more of the same chunk cannot
-                // help: either the stream wants output space this rectangle does
-                // not claim, or it is truncated.
-                break;
-            }
-        }
-        anyhow::ensure!(
-            out.len() == expect,
-            "a {} rectangle inflated to {} bytes, not the {expect} its geometry claims",
-            self.what,
-            out.len()
-        );
-        Ok(out)
-    }
-}
-
-fn inflate_independent(
-    what: &'static str,
-    chunk: &[u8],
-    expect: usize,
-) -> anyhow::Result<Vec<u8>> {
-    Inflater::new(what).inflate(chunk, expect)
 }
 
 /// Apple's cursor shapes, which arrive as a cache rather than as pixels.
@@ -1137,47 +1044,6 @@ mod tests {
         let parsed = parse_layout(&payload).unwrap();
         assert_eq!(parsed.displays.len(), 2);
         assert!(parsed.displays.iter().all(|d| d.info.id != 22));
-    }
-
-    /// One stream across rectangles, which is the rule that makes zlib usable at
-    /// all here. Two chunks of one deflate stream inflate in sequence and fail
-    /// separately.
-    #[test]
-    fn framebuffer_zlib_inflates_across_rectangles_but_not_out_of_order() {
-        use flate2::{Compress, Compression, FlushCompress};
-
-        let first = vec![0xabu8; 4096];
-        let second = vec![0xcdu8; 4096];
-        let mut deflate = Compress::new(Compression::default(), true);
-        let chunk = |deflate: &mut Compress, raw: &[u8]| {
-            let mut out = Vec::with_capacity(raw.len());
-            let mut fed = 0;
-            while fed < raw.len() {
-                let before = deflate.total_in();
-                out.reserve(raw.len());
-                deflate
-                    .compress_vec(&raw[fed..], &mut out, FlushCompress::Sync)
-                    .unwrap();
-                fed += (deflate.total_in() - before) as usize;
-            }
-            out
-        };
-        let a = chunk(&mut deflate, &first);
-        let b = chunk(&mut deflate, &second);
-
-        let mut stream = FramebufferZlib::default();
-        assert_eq!(stream.inflate(&a, first.len()).unwrap(), first);
-        assert_eq!(stream.inflate(&b, second.len()).unwrap(), second);
-
-        // The second chunk alone, through a stream that never saw the first: no
-        // zlib header, no window, nothing.
-        let mut fresh = FramebufferZlib::default();
-        assert!(fresh.inflate(&b, second.len()).is_err());
-
-        // A chunk that does not inflate to the size its geometry claims.
-        let mut stream = FramebufferZlib::default();
-        let err = stream.inflate(&a, first.len() + 1).unwrap_err();
-        assert!(format!("{err:#}").contains("its geometry claims"), "{err:#}");
     }
 
     /// Store once, then select by id — which is nearly every cursor change in a

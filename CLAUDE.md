@@ -44,6 +44,8 @@ Apple display modes:
 
 - `ard` is Apple Screen Sharing's **Standard mode** over RFB 3.8. It uses Apple
   DH authentication, shares the Mac's physical displays, and refuses `resize`.
+  Like High Performance it asks for zlib in the second `SetEncodings`, the one a
+  display layout triggers; the first list must stay zlib-free or the layout is lost.
 - `ard-high-performance` is Apple Screen Sharing's **High Performance mode** over
   RFB 003.889. It requests one virtual display at configured `width` and `height`,
   disables physical displays, and moves all remote windows onto it.

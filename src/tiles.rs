@@ -215,6 +215,36 @@ impl Shadow {
         Some(changed)
     }
 
+    /// The pixels of `rect` as packed RGB888, or `None` when any of them is
+    /// unknown.
+    ///
+    /// CopyRect names a region of the framebuffer instead of carrying pixels, and a
+    /// client here is sent tiles rather than draw commands, so the source has to be
+    /// read back out of the only copy this side keeps. A region the shadow never
+    /// learned cannot be reproduced, and inventing one would leave wrong pixels on
+    /// screen for as long as nothing else changed there — suppressed by this very
+    /// shadow on every later update. So the caller is told to ask for a repaint
+    /// rather than handed a guess.
+    ///
+    /// The pixels are copied out before the caller writes the destination, so a
+    /// source overlapping its destination still copies the original.
+    pub fn copy_out(&self, rect: Rect) -> Option<Vec<u8>> {
+        if rect.right >= self.w || rect.bottom >= self.h {
+            return None;
+        }
+        let w = usize::from(rect.w());
+        let mut out = Vec::with_capacity(w * usize::from(rect.h()) * 3);
+        for y in rect.top..=rect.bottom {
+            let at = usize::from(y) * usize::from(self.w) + usize::from(rect.left);
+            // The `memchr` the `known` field is a `[bool]` for.
+            if self.known[at..at + w].contains(&false) {
+                return None;
+            }
+            out.extend_from_slice(self.row(rect.left, y, w * 3));
+        }
+        Some(out)
+    }
+
     /// Log what comparing against the client's own pixels has saved, if anything.
     pub fn report(&self) {
         if self.examined > 0 {
@@ -323,6 +353,32 @@ mod tests {
         assert_eq!(Rect::from_size(4, 4, 0, 10), None);
         assert_eq!(Rect::from_size(4, 4, 10, 0), None);
         assert_eq!(Rect::from_size(4, 4, 1, 1), Some(rect(4, 4, 4, 4)));
+    }
+
+    /// What CopyRect reads back, and the one thing it must refuse.
+    #[test]
+    fn copy_out_returns_known_pixels_and_nothing_else() {
+        let mut shadow = Shadow::new("test", 8, 4);
+        let painted = rect(2, 1, 5, 2);
+        shadow.accept(painted, &solid(painted, 9));
+
+        assert_eq!(shadow.copy_out(painted), Some(solid(painted, 9)));
+        // One row up is a region nothing has painted, so it cannot be reproduced.
+        assert_eq!(shadow.copy_out(rect(2, 0, 5, 1)), None);
+        // Neither can one that leaves the framebuffer.
+        assert_eq!(shadow.copy_out(rect(6, 1, 9, 2)), None);
+    }
+
+    /// `forget` drops the claim to know the pixels, so a CopyRect right after a
+    /// browser refresh has nothing to read and asks for a repaint instead.
+    #[test]
+    fn copy_out_refuses_everything_a_forget_has_disclaimed() {
+        let mut shadow = Shadow::new("test", 8, 4);
+        let r = rect(0, 0, 7, 3);
+        shadow.accept(r, &solid(r, 9));
+        assert!(shadow.copy_out(r).is_some());
+        shadow.forget();
+        assert_eq!(shadow.copy_out(r), None);
     }
 
     #[test]

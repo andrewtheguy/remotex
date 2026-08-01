@@ -84,7 +84,15 @@ Standard mode was independently remeasured July 31, 2026. After Apple DH auth,
 `RFB 003.008` plus the same ten metadata encodings produced an unsolicited
 `AppleDisplayLayout`. Selecting ids 4 and 1 produced 3200×1800 at 2× and
 1280×800 at 1×. It uses the same display protocol without the 003.889 record
-layer; remotex keeps its pixels raw.
+layer.
+
+Standard mode compresses on the same terms as High Performance, remeasured
+August 1, 2026. The second `SetEncodings` a layout triggers is honoured on the
+plain 3.8 wire too: the Mac answered with another identical layout — so no display
+state is lost — and switched to zlib rectangles. Over one identical 800×600
+session it sent 3,380,550 bytes against 6,190,318 raw, with the decoded
+framebuffer pixel-identical to a full repaint. remotex asks for zlib in both
+subtypes; the gate that kept `ard` on raw pixels was removed.
 
 Standard native pasteboard monitoring requires `ViewerInfo`, `SetMode(control)`,
 then `AutoPasteboard(start)`. Without the first two, writes and explicit fetches
