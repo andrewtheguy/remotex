@@ -625,16 +625,22 @@ fn encode_tile(rect: Rect, rgb: &[u8], codec: TileCodec) -> anyhow::Result<Tile>
 /// Re-send cells that have stopped moving at the base encode, so a paused screen
 /// sharpens on its own. `false` means the browser is gone.
 ///
-/// A cleanup that fails to encode is put back rather than ending the session, which
+/// A cleanup that fails to encode is dropped rather than ending the session, which
 /// is the one place this path differs from an ordinary tile: a tile that never
 /// arrives leaves the shadow claiming the client has pixels it never got, while a
 /// cleanup that never arrives leaves the client with pixels that are correct and
 /// merely coarser.
 ///
-/// Put back rather than dropped, though. The shadow recorded the source pixels as
-/// delivered when the cell was first sent, so a discarded debt is a region the
-/// client holds a lossy copy of that nothing will ever re-send. Keeping it means the
-/// next tick tries again.
+/// Dropped rather than put back, because by then the pixels may be stale. The
+/// encode runs across an `await`, and the engine's read loop stashes and settles
+/// without passing through this task, so the cell can have moved on — and
+/// [`Motion::take_due`] has already forgotten the old debt, so neither a new
+/// [`Motion::stash`] nor a [`Motion::settle`] in that window leaves anything here
+/// could test. Putting the old pixels back would let a later cleanup paint them
+/// over newer ones the shadow already counts as delivered, which is wrong content
+/// rather than coarse content, and wrong until that region happens to change again.
+/// Dropping leaves the region at the motion encode until it next changes, which is
+/// the same state the stash cap already produces and is accepted there.
 async fn flush_cleanups(
     engine: &'static str,
     shared: &Arc<Shared>,
@@ -648,40 +654,24 @@ async fn flush_cleanups(
         .unwrap()
         .take_due(tokio::time::Instant::now(), MAX_CLEANUPS_PER_TICK);
     for stashed in due {
-        let Stashed { rect, rgb, sent_at } = stashed;
+        // `sent_at` has done its work in `take_due`; nothing past this point cares
+        // how old the debt was, only that it is being discharged now.
+        let Stashed { rect, rgb, sent_at: _ } = stashed;
         // On a worker like any other encode: a cleanup arrives when the screen is
         // quiet, but the order task is not the thread to find that out on.
-        // The mark goes on the copy handed to the encoder, so `owed` — the pixels
-        // put back if this encode fails — stays the true ones.
-        let owed = Arc::clone(&rgb);
         let rgb = if plan.debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
         let joined = tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)).await;
         let tile = match joined {
             Ok(Ok(tile)) => tile,
             Ok(Err(e)) => {
-                // Back into the stash at its original age, so it is due again on the
-                // next tick rather than waiting out another idle period. It can be
-                // refused — the cell may have taken a fresh debt while this encode
-                // ran — and then this region keeps the motion encode until it next
-                // changes, which is worth a word rather than a silent discard.
-                let put_back = shared
-                    .motion
-                    .lock()
-                    .unwrap()
-                    .stash(rect.cell_key(), rect, owed, sent_at);
-                if put_back {
-                    warn!("{engine}: re-queueing a cleanup tile that would not encode: {e:#}");
-                } else {
-                    warn!(
-                        "{engine}: dropping a cleanup for {}x{} at ({},{}) that would not \
-                         encode and cannot be re-queued; it stays at the motion encode \
-                         until it changes again: {e:#}",
-                        rect.w(),
-                        rect.h(),
-                        rect.left,
-                        rect.top
-                    );
-                }
+                warn!(
+                    "{engine}: dropping a cleanup for {}x{} at ({},{}) that would not encode; \
+                     it stays at the motion encode until it changes again: {e:#}",
+                    rect.w(),
+                    rect.h(),
+                    rect.left,
+                    rect.top
+                );
                 continue;
             }
             Err(e) => {
