@@ -106,6 +106,16 @@ Open <http://localhost:52380>. Use `RUST_LOG=info` or `RUST_LOG=debug` for backe
 logs. Use `cargo build` when you only need to compile without starting the
 gateway.
 
+The gateway serves `frontend/dist` from disk, and `build.rs` declares only the
+frontend *sources* as Cargo inputs, so Cargo cannot notice that the bundle itself
+is missing. Build it explicitly whenever `frontend/dist` may be absent or stale
+without a source change — after deleting it, after `CI=true` builds, which skip
+the frontend step entirely, or when a prebuilt `target/` came from elsewhere:
+
+```sh
+(cd frontend && bun run build) && cargo run -- serve -c remotex.toml
+```
+
 The main directories are:
 
 | Path | Contents |
