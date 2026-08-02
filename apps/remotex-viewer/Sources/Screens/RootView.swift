@@ -1,7 +1,12 @@
 import SwiftUI
 
 /// Which screen is showing, plus the chrome that outlives all of them: the
-/// clipboard card and its toolbar button, the window title, and the alert.
+/// clipboard card, the window title, and the alert.
+///
+/// No toolbar. The window's title bar carries nothing but the title: every
+/// action it could hold already lives in a menu — the clipboard card is opened
+/// from **Remote › Clipboard…** — and a button duplicated into the title bar is
+/// one more thing to keep in step with the state that enables it.
 struct RootView: View {
     let model: AppModel
 
@@ -66,32 +71,6 @@ struct RootView: View {
             }
         }
         .navigationTitle(model.windowTitle)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.clipboard.togglePanel()
-                } label: {
-                    HStack(spacing: 6) {
-                        if model.clipboard.isFetching {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "doc.on.clipboard")
-                        }
-                        Text("Clipboard")
-                    }
-                }
-                .disabled(
-                    !model.clipboard.isEnabled
-                        || model.clipboard.isFetching
-                )
-                .help(clipboardHelp)
-                .accessibilityLabel("Clipboard")
-                .accessibilityValue(
-                    model.clipboard.isFetching ? "Fetching" : ""
-                )
-            }
-        }
         .alert(
             "remotex",
             isPresented: Binding(
@@ -113,13 +92,5 @@ struct RootView: View {
         )
         // No launch `.task` here: the gateway is started by the scene
         // (`RemotexViewerApp`), which is where the model's lifetime is.
-    }
-
-    private var clipboardHelp: String {
-        if model.clipboard.isEnabled {
-            "Read and write the remote clipboard"
-        } else {
-            "Clipboard integration is not connected"
-        }
     }
 }
