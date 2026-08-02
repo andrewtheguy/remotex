@@ -165,9 +165,12 @@ password = "change-me"
 # the Screen Sharing password. Apple's DH authentication is the only way to tell a
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
 # new login window on a virtual display instead of sharing its screen. So both
-# subtypes require username and password (that account's), take no vnc_password,
-# and reject resize. A third-party VNC server that happens to run on a Mac is not
-# this: it is a plain "vnc" target.
+# subtypes require username and password (that account's) and take no
+# vnc_password. Resize is where they part: `ard` is refused outright — a config
+# setting it does not load — because it shares the Mac's physical displays, while
+# `ard-high-performance` takes it for the one virtual display it makes, as the
+# second example below does. A third-party VNC server that happens to run on a
+# Mac is not this: it is a plain "vnc" target.
 #
 # `subtype = "ard"` is standard screen sharing on the ordinary RFB wire. Raw pixels,
 # Extended Clipboard where the Mac offers it, and one framebuffer holding every

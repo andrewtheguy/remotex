@@ -907,9 +907,12 @@ struct AppModelTests {
         #expect(restored.audioByDefault, "the Remote menu's choice is remembered")
     }
 
-    /// `autoResize` defaults to `resize`, which is what the gateway sends for the
-    /// plain `vnc` these cases connect to; the ones about the second permission
-    /// name it.
+    /// `autoResize` defaults to what the gateway would actually send for this
+    /// protocol — plain `vnc` may be driven by the window and RDP may not — the way
+    /// `ResizeMenuTargetTests` does it, so a case that is about something else is
+    /// never in a state the real gateway cannot produce. Defaulting it to `resize`
+    /// alone put the one RDP case here in exactly that state. The cases that are
+    /// about the permission name it.
     private func connected(
         protocolName: String,
         resize: Bool = false,
@@ -921,7 +924,7 @@ struct AppModelTests {
             name: "mac",
             protocolName: protocolName,
             resize: resize,
-            autoResize: autoResize ?? resize,
+            autoResize: resize && (autoResize ?? (protocolName == "vnc")),
             clipboard: clipboard,
             audio: audio
         )
