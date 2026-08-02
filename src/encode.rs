@@ -653,15 +653,25 @@ async fn flush_cleanups(
         .lock()
         .unwrap()
         .take_due(tokio::time::Instant::now(), MAX_CLEANUPS_PER_TICK);
-    for stashed in due {
-        // `sent_at` has done its work in `take_due`; nothing past this point cares
-        // how old the debt was, only that it is being discharged now.
-        let Stashed { rect, rgb, sent_at: _ } = stashed;
-        // On a worker like any other encode: a cleanup arrives when the screen is
-        // quiet, but the order task is not the thread to find that out on.
-        let rgb = if plan.debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
-        let joined = tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)).await;
-        let tile = match joined {
+    // Started together and collected in order, which is how the ordinary tile path
+    // already works and for the same reason: this is the one task everything else
+    // is forwarded through, so awaiting a tickful of encodes one after another
+    // holds up whatever is still moving elsewhere on the screen for the sum of them
+    // rather than for the longest. A cleanup usually arrives on a quiet screen, but
+    // `CLEANUP_IDLE` is per cell — one region settles while another is still going.
+    //
+    // `sent_at` has done its work in `take_due`; nothing past here cares how old the
+    // debt was, only that it is being discharged now.
+    let started: Vec<(Rect, JoinHandle<anyhow::Result<Tile>>)> = due
+        .into_iter()
+        .map(|Stashed { rect, rgb, sent_at: _ }| {
+            let rgb = if plan.debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
+            (rect, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)))
+        })
+        .collect();
+
+    for (rect, handle) in started {
+        let tile = match handle.await {
             Ok(Ok(tile)) => tile,
             Ok(Err(e)) => {
                 warn!(
