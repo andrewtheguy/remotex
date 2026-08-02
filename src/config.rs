@@ -164,6 +164,22 @@ pub enum RenderType {
     /// screen returns to full quality on its own: the base is the truth, motion is
     /// a temporary discount on cells too busy to notice.
     Motion,
+    /// The whole desktop as one H.264 stream, at a fixed quality
+    /// ([`TargetConfig::render_quality`]).
+    ///
+    /// Not a codec on the [`RenderSubtype`] axis, and deliberately not: the other
+    /// three are *per-tile* codecs, where every tile is independent, reorderable,
+    /// cacheable and droppable once something covers it. An H.264 access unit is none
+    /// of those — it is one link in a chain, and losing any link corrupts every frame
+    /// after it until the next keyframe. So this axis is where it goes, and it
+    /// refuses the subtype axis outright rather than pretending to be a fourth value
+    /// on it.
+    ///
+    /// It follows that this is a different *transport*, not a different compressor:
+    /// no tiles, no cell grid, no per-region decisions, one access unit per remote
+    /// frame. See [`crate::h264`], and note that only the browser decodes it —
+    /// `remotex.app` refuses a video target by name.
+    Video,
 }
 
 /// The codec a target's **base** tiles are encoded with — the second render axis,
@@ -220,23 +236,37 @@ pub enum TileCodec {
     Webp(u8),
 }
 
-/// The whole render dial as an engine sees it: what a tile is normally encoded
-/// as, and — only for [`RenderType::Motion`] — what a cell in motion is encoded
-/// as instead.
+/// The whole render dial as an engine sees it, and the one place the two ways this
+/// gateway can put a desktop on a wire are told apart.
 ///
-/// `motion` being `None` is the switch that keeps the entire motion path off. It
-/// is `None` for every configuration but `motion`, so a target that does not ask
-/// for the feature does not pay for it and is byte-identical to what it sent
-/// before the feature existed.
+/// An enum rather than a struct with a flag, because the difference is not a setting:
+/// [`Self::Tiles`] cuts damage into independent images, and [`Self::Video`] feeds one
+/// stateful stream. Nothing sensible is shared between those two paths, and making it
+/// an enum is what stops a consumer from quietly handling only the first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RenderPlan {
-    /// What a settled cell is sent as, and what a cleanup pass restores a cell to.
-    pub base: TileCodec,
-    /// What a cell changing fast is sent as instead, while it keeps changing.
-    pub motion: Option<TileCodec>,
-    /// Draw the motion strategy's decisions into the pixels. QA only, and only
-    /// meaningful when `motion` is `Some`.
-    pub debug: bool,
+pub enum RenderPlan {
+    /// One encoded image per changed region — every configuration that predates
+    /// [`RenderPlan::Video`], and still the default.
+    Tiles {
+        /// What a settled cell is sent as, and what a cleanup pass restores a cell to.
+        base: TileCodec,
+        /// What a cell changing fast is sent as instead, while it keeps changing.
+        ///
+        /// `None` is the switch that keeps the entire motion path off, and it is
+        /// `None` for every configuration but `motion` — so a target that does not
+        /// ask for the feature does not pay for it and is byte-identical to what it
+        /// sent before the feature existed.
+        motion: Option<TileCodec>,
+        /// Draw the motion strategy's decisions into the pixels. QA only, and only
+        /// meaningful when `motion` is `Some`.
+        debug: bool,
+    },
+    /// The whole framebuffer as one H.264 stream at a fixed quantizer.
+    ///
+    /// The quality is the 1–100 dial rather than a quantizer: turning that into one
+    /// is [`crate::h264`]'s business, and it is the only module that should know what
+    /// a quantizer is.
+    Video { quality: u8 },
 }
 
 /// One `[[targets]]` profile: a remote machine plus its credentials.
@@ -401,6 +431,9 @@ impl TargetConfig {
     /// the safe answer — lossless PNG for the base, no motion encode at all —
     /// rather than trusting that here.
     pub fn render_plan(&self) -> RenderPlan {
+        if let (RenderType::Video, Some(quality)) = (self.render_type, self.render_quality) {
+            return RenderPlan::Video { quality };
+        }
         let base = match (self.render_subtype, self.render_quality) {
             (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
             (RenderSubtype::Webp, Some(q)) => TileCodec::Webp(q),
@@ -414,7 +447,7 @@ impl TargetConfig {
             },
             _ => None,
         };
-        RenderPlan { base, motion, debug: self.render_motion_debug }
+        RenderPlan::Tiles { base, motion, debug: self.render_motion_debug }
     }
 
     /// The motion codec this target asked for, falling back to the base codec when
@@ -819,6 +852,38 @@ impl ConfigFile {
                         target.name
                     );
                 }
+                // `video` is the one strategy with nothing on the subtype axis to
+                // pair with. The other three cut damage into independent images and
+                // choose which codec to encode them with; this one is a single
+                // stateful H.264 stream carrying the whole framebuffer, so there is
+                // no per-tile codec left to name.
+                (RenderType::Video, RenderSubtype::Png) => {
+                    let q = target.render_quality.with_context(|| format!(
+                        "target {:?} is render_type \"video\" but sets no render_quality — it \
+                         needs one, an integer 1–100. It is the quality the stream holds on a \
+                         link that can carry it; a link that cannot will fall below it",
+                        target.name
+                    ))?;
+                    anyhow::ensure!(
+                        (1..=100).contains(&q),
+                        "target {:?} sets render_quality = {q}, which is out of range — it \
+                         must be 1–100",
+                        target.name
+                    );
+                }
+                (RenderType::Video, RenderSubtype::Jpeg | RenderSubtype::Webp) => anyhow::bail!(
+                    "target {:?} sets render_type \"video\" with render_subtype {:?}. \
+                     render_subtype names a codec for each changed region separately, and \
+                     \"video\" does not send regions at all — it sends the whole desktop as one \
+                     H.264 stream, where every frame depends on the one before it. Drop \
+                     render_subtype to keep \"video\", or set render_type = \"fixed-quality\" \
+                     to keep the codec",
+                    target.name,
+                    match target.render_subtype {
+                        RenderSubtype::Jpeg => "jpeg",
+                        _ => "webp",
+                    }
+                ),
             }
             // Both `motion` pairings need this, and neither of the arms above is
             // the place for it: the moving encode is the whole point of the
@@ -1016,6 +1081,16 @@ pub fn default_static_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The moving encode a plan resolves, for the tests that are about that and not
+    /// about which arm of [`RenderPlan`] they landed in. `video` has none by
+    /// construction — there are no cells to find in motion.
+    fn motion_of(plan: RenderPlan) -> Option<TileCodec> {
+        match plan {
+            RenderPlan::Tiles { motion, .. } => motion,
+            RenderPlan::Video { .. } => None,
+        }
+    }
 
     /// A valid `site_passwd = "…"` line (admin/hunter2 at bcrypt's minimum
     /// cost) for configs that get resolved — resolve requires the credential.
@@ -1348,7 +1423,7 @@ mod tests {
         assert_eq!(t.render_quality, None);
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Png, motion: None, debug: false }
+            RenderPlan::Tiles { base: TileCodec::Png, motion: None, debug: false }
         );
     }
 
@@ -1372,7 +1447,7 @@ mod tests {
         assert_eq!(t.render_quality, Some(60));
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Jpeg(60), motion: None, debug: false }
+            RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false }
         );
     }
 
@@ -1394,7 +1469,7 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Webp);
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Webp(50), motion: None, debug: false }
+            RenderPlan::Tiles { base: TileCodec::Webp(50), motion: None, debug: false }
         );
     }
 
@@ -1446,6 +1521,101 @@ mod tests {
             let err = ConfigFile::parse(&toml).unwrap_err();
             assert!(format!("{err:#}").contains("1–100"), "q={q}: {err:#}");
         }
+    }
+
+    #[test]
+    fn video_is_accepted_with_a_quality() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "video"
+            render_quality = 60
+            "#,
+        )
+        .expect("video with a quality");
+        assert_eq!(cfg.targets[0].render_plan(), RenderPlan::Video { quality: 60 });
+    }
+
+    #[test]
+    fn video_without_a_quality_is_rejected() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "video"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_quality"), "{err:#}");
+    }
+
+    #[test]
+    fn a_video_quality_out_of_range_is_rejected() {
+        for q in ["0", "101"] {
+            let toml = format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "video"
+                render_quality = {q}
+                "#
+            );
+            let err = ConfigFile::parse(&toml).unwrap_err();
+            assert!(format!("{err:#}").contains("1–100"), "q={q}: {err:#}");
+        }
+    }
+
+    /// The refusal that says what `video` is: a codec per changed region is a
+    /// different idea from one stream for the whole desktop, and naming one on a
+    /// video target means somebody expected the wrong thing to happen.
+    #[test]
+    fn video_refuses_a_render_subtype() {
+        for subtype in ["jpeg", "webp"] {
+            let toml = format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "video"
+                render_subtype = "{subtype}"
+                render_quality = 60
+                "#
+            );
+            let err = ConfigFile::parse(&toml).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(subtype), "the message should name the subtype: {msg}");
+            assert!(msg.contains("H.264"), "the message should say what video is: {msg}");
+            assert!(msg.contains("fixed-quality"), "the message should say the way out: {msg}");
+        }
+    }
+
+    /// The motion keys belong to `motion`, and `video` is not a second place to put
+    /// them — its stream has no cells to find in motion. Covered by the guard every
+    /// non-motion strategy shares, and asserted here because `video` is the newest
+    /// strategy and the one most likely to be tried with them.
+    #[test]
+    fn video_refuses_the_motion_keys() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "video"
+            render_quality = 60
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion_quality"), "{err:#}");
     }
 
     #[test]
@@ -1540,7 +1710,7 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Png);
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Png, motion: Some(TileCodec::Jpeg(10)), debug: false }
+            RenderPlan::Tiles { base: TileCodec::Png, motion: Some(TileCodec::Jpeg(10)), debug: false }
         );
     }
 
@@ -1564,7 +1734,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Webp(10)), debug: false }
+            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: Some(TileCodec::Webp(10)), debug: false }
         );
     }
 
@@ -1589,7 +1759,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Jpeg(10)), debug: false }
+            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: Some(TileCodec::Jpeg(10)), debug: false }
         );
     }
 
@@ -1685,7 +1855,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(cfg.targets[0].render_plan().debug);
+        assert!(matches!(cfg.targets[0].render_plan(), RenderPlan::Tiles { debug: true, .. }));
 
         let plain = ConfigFile::parse(
             r#"
@@ -1696,7 +1866,10 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(!plain.targets[0].render_plan().debug, "the overlay defaulted on");
+        assert!(
+            matches!(plain.targets[0].render_plan(), RenderPlan::Tiles { debug: false, .. }),
+            "the overlay defaulted on"
+        );
 
         let err = ConfigFile::parse(
             r#"
@@ -1809,7 +1982,7 @@ mod tests {
         // The other Apple subtype is untouched: this is one pairing, not a rule
         // about Macs.
         let cfg = ConfigFile::parse(&target("ard")).expect("motion belongs on plain ard");
-        assert_eq!(cfg.targets[0].render_plan().motion, Some(TileCodec::Jpeg(10)));
+        assert_eq!(motion_of(cfg.targets[0].render_plan()), Some(TileCodec::Jpeg(10)));
     }
 
     /// And the same target is fine on any other strategy — what is refused is the
@@ -1833,8 +2006,10 @@ mod tests {
             "#,
         )
         .expect("only the motion pairing is refused");
-        let plan = cfg.targets[0].render_plan();
-        assert_eq!((plan.base, plan.motion), (TileCodec::Webp(60), None));
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: None, debug: false }
+        );
     }
 
     /// The switch that keeps the whole motion path off: nothing but `motion`
@@ -1860,7 +2035,7 @@ mod tests {
         )
         .unwrap();
         for t in &cfg.targets {
-            assert_eq!(t.render_plan().motion, None, "target {:?}", t.name);
+            assert_eq!(motion_of(t.render_plan()), None, "target {:?}", t.name);
         }
     }
 

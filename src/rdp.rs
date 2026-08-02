@@ -660,7 +660,7 @@ async fn active_loop(
                     // The repaint that follows re-sends every pixel at the base
                     // encode, which settles every debt and makes every cell's
                     // history a single redraw rather than motion.
-                    sink.reset_motion();
+                    sink.reset_render();
                     sink
                         .msg(ServerMsg::Resize {
                             w: desktop.width,
@@ -681,6 +681,11 @@ async fn active_loop(
                         sink,
                     )
                     .await?;
+                    // A repaint is a frame, and this arm never reaches the one at the
+                    // end of the outputs loop — it `continue`s from here. Without
+                    // this, the whole repaint would sit in the video mirror unsent,
+                    // while the shadow already counts every pixel of it as delivered.
+                    sink.frame().await?;
                     continue;
                 }
                 // The density of the screen this client's window is on. Ignored
@@ -1002,6 +1007,10 @@ async fn active_loop(
                 }
                 ActiveStageOutput::Terminate(reason) => {
                     info!("rdp: session terminated by server: {reason:?}");
+                    // Best effort, and only for the pixels of this last batch: the
+                    // session is over either way, and the shadow's claim about them
+                    // dies with it.
+                    let _ = sink.frame().await;
                     return Ok(());
                 }
                 ActiveStageOutput::DeactivateAll => {
@@ -1025,7 +1034,7 @@ async fn active_loop(
                     shadow.resize(desktop.width, desktop.height);
                     // The cell grid is anchored at (0,0) in framebuffer pixels, so
                     // a new size makes every key name somewhere else.
-                    sink.reset_motion();
+                    sink.reset_render();
                     last_pos = (
                         last_pos.0.min(desktop.width.saturating_sub(1)),
                         last_pos.1.min(desktop.height.saturating_sub(1)),
@@ -1041,6 +1050,11 @@ async fn active_loop(
                 _ => {}
             }
         }
+        // The closest thing RDP offers to the end of a frame: one batch of outputs is
+        // everything one PDU produced, and a video stream needs to be told when to
+        // stop accumulating and encode. Most turns of this loop redraw nothing, which
+        // is why this is a no-op when nothing was blitted rather than a frame per PDU.
+        sink.frame().await?;
     }
 
     shadow.report();

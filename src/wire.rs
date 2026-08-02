@@ -56,7 +56,13 @@ enum Placed {
 
 impl Slots {
     fn place(&mut self, tile: &Tile) -> Placed {
-        if tile.data.len() > batch::MAX_CACHED_BYTES {
+        // A stateful payload is never cached, and so can never come back as a
+        // reference. A `TILE_REF` says "redraw what you have in slot N here", which is
+        // a claim about *pixels*; an H.264 access unit is a claim about the decoder's
+        // state, and replaying one out of sequence desynchronises every frame after
+        // it until the next keyframe. Two identical access units are also not a thing
+        // that happens — each describes a different moment — so this costs nothing.
+        if tile.stateful() || tile.data.len() > batch::MAX_CACHED_BYTES {
             return Placed::Plain;
         }
         // The dimensions and format are hashed with the payload: a reference
@@ -182,7 +188,18 @@ impl Wire {
     /// Sound only because every record in a frame is applied in order before
     /// anything is presented, so a covered paint is one nothing could have seen.
     /// A partial overlap is left alone: the uncovered part is still owed.
+    ///
+    /// A stateful tile is outside the coverage relation entirely — it neither
+    /// supersedes nor is superseded — because "nothing could have seen it" is true of
+    /// pixels and false of an inter-frame stream. A dropped access unit is one the
+    /// decoder needed, and everything after it decodes wrongly until the next
+    /// keyframe. That case is not hypothetical: under `render_type = "video"` every
+    /// record covers the whole framebuffer, so each one covers its predecessor
+    /// exactly.
     fn supersede(&mut self, tile: &Tile) {
+        if tile.stateful() {
+            return;
+        }
         let (right, bottom) = (
             u32::from(tile.x) + u32::from(tile.w),
             u32::from(tile.y) + u32::from(tile.h),
@@ -190,7 +207,8 @@ impl Wire {
         let mut dropped_bytes = 0usize;
         let mut dropped = 0u64;
         self.pending.retain(|old| {
-            let covered = old.x >= tile.x
+            let covered = !old.stateful()
+                && old.x >= tile.x
                 && old.y >= tile.y
                 && u32::from(old.x) + u32::from(old.w) <= right
                 && u32::from(old.y) + u32::from(old.h) <= bottom;
@@ -774,6 +792,53 @@ mod tests {
         })]);
         assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
         assert_eq!(wire.totals.refs, 0);
+    }
+
+    /// An access unit for the whole framebuffer, which is the only shape a video
+    /// target's records ever have.
+    fn access_unit(bytes: usize) -> ServerMsg {
+        ServerMsg::Tile(Tile {
+            format: Tile::FORMAT_H264,
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 800,
+            data: vec![4u8; bytes],
+        })
+    }
+
+    // Identical bytes are the cache's trigger, and two access units may be identical
+    // by accident where two frames of a still screen encode the same. A reference
+    // would tell the client to redraw a picture it does not have, from a payload
+    // whose meaning was "what changed since the one before it".
+    #[test]
+    fn an_access_unit_is_never_cached_or_referenced() {
+        let mut wire = Wire::default();
+        wire.encode(vec![access_unit(900)]);
+        let frames = wire.encode(vec![access_unit(900)]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records[0].0, batch::OP_TILE, "an access unit came back as a reference");
+        assert_eq!(records[0].1, batch::NO_SLOT, "an access unit was stored in a slot");
+        assert_eq!(wire.totals.refs, 0);
+    }
+
+    // The corruption case, stated as a test. Under video every record covers the
+    // whole framebuffer, so each covers its predecessor exactly — and coverage is
+    // sound reasoning about pixels nobody could have seen, not about a frame the
+    // decoder needs in order to make sense of the next one.
+    #[test]
+    fn an_access_unit_is_neither_dropped_nor_drops_anything() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![access_unit(900), access_unit(910)]);
+        assert_eq!(records(binary(&frames)[0]).len(), 2, "one access unit superseded another");
+        assert_eq!(wire.totals.superseded, 0);
+
+        // And in the other direction: a still tile covering the same rectangle must
+        // not take an access unit with it either.
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![access_unit(900), rect(0, 0, 1280, 800, 900)]);
+        assert_eq!(records(binary(&frames)[0]).len(), 2, "a still tile dropped an access unit");
+        assert_eq!(wire.totals.superseded, 0);
     }
 
     // A slot spent on one screen-sized payload is a slot not spent on the dozens of

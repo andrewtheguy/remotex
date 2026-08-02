@@ -17,6 +17,29 @@ use crate::{rdp, vnc};
 /// link backpressures the engine instead of buffering unboundedly.
 const FRAME_BUFFER: usize = 64;
 
+/// The same capacity for a target on `render_type = "video"`, where a message is not
+/// the same size of thing.
+///
+/// Sixty-four was chosen for *tiles*: [`crate::tiles::Rect::bands`] cuts damage by
+/// height alone, so a full 1080p repaint is around seventeen records and sixty-four
+/// of them is a few repaints' worth of slack. Under video one message is an entire
+/// frame, so the same number — and there are two of these queues in series — would be
+/// seconds of buffered picture before an engine felt anything at all. A session that
+/// far behind its remote is unusable however good the picture is, and the delay would
+/// also make the congestion signal in [`crate::encode`] arrive long after the fact.
+///
+/// Four rather than one: a little slack absorbs an ordinary encode landing while the
+/// socket is mid-write, without letting a backlog become latency.
+const VIDEO_FRAME_BUFFER: usize = 4;
+
+/// How deep this target's outbound queue should be. See [`VIDEO_FRAME_BUFFER`].
+fn frame_buffer(target: &TargetConfig) -> usize {
+    match target.render_plan() {
+        crate::config::RenderPlan::Video { .. } => VIDEO_FRAME_BUFFER,
+        crate::config::RenderPlan::Tiles { .. } => FRAME_BUFFER,
+    }
+}
+
 /// How long an engine remains available for a browser to reattach after its
 /// WebSocket disappears. Applies equally to RDP and VNC.
 pub const REATTACH_GRACE_PERIOD: std::time::Duration =
@@ -282,7 +305,11 @@ impl SessionManager {
         // Audio is per attachment and starts disabled until the client asks.
         st.stop_audio();
 
-        let (event_tx, events) = mpsc::channel(FRAME_BUFFER);
+        // Sized for whatever is selected, because both queues are in series between
+        // the engine and the socket: leaving this one deep would put the buffering
+        // back that the engine's own shallow queue was meant to remove.
+        let depth = st.selected.as_ref().map_or(FRAME_BUFFER, frame_buffer);
+        let (event_tx, events) = mpsc::channel(depth);
         st.next_attach_id += 1;
         let id = st.next_attach_id;
         st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
@@ -451,7 +478,7 @@ impl SessionManager {
 
         info!("session: connecting to target {:?}", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
-        let (frame_tx, frame_rx) = mpsc::channel(FRAME_BUFFER);
+        let (frame_tx, frame_rx) = mpsc::channel(frame_buffer(&target));
         st.next_generation += 1;
         let generation = st.next_generation;
         // Audio does not travel on `frame_tx`, even though it ends up on the same

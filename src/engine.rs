@@ -200,7 +200,7 @@ mod tests {
     /// own, so a test reads the channel only after [`TileSink::flush`].
     fn sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(4);
-        let plan = crate::config::RenderPlan {
+        let plan = crate::config::RenderPlan::Tiles {
             base: crate::config::TileCodec::Png,
             motion: None,
             debug: false,
