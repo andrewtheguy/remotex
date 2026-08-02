@@ -216,13 +216,14 @@ password = "change-me"
 # answer on a LAN. "fixed-quality" trades exactness for bytes at a constant quality,
 # which is what a slow or metered link wants.
 #
-# render_subtype picks the codec and only matters for "fixed-quality": "jpeg" is
-# decoded by everything, "webp" is roughly 30% smaller at a matched quality and is
-# decoded natively by both clients. With "full" the subtype must be "png".
+# render_subtype picks the codec: "jpeg" is decoded by everything, "webp" is roughly
+# 30% smaller at a matched quality and is decoded natively by both clients. With
+# "full" the subtype must be "png". Under "motion" it is the *base* codec — see the
+# block below, where it also decides which of the motion keys are required.
 #
-# render_quality is 1-100 and is *required* by "fixed-quality" and refused by
-# "full" — there is no default, because a quality nobody chose is not a quality.
-# Higher is larger and closer to exact.
+# render_quality is 1-100 and is *required* whenever the subtype is lossy, refused
+# when it is "png" — there is no default, because a quality nobody chose is not a
+# quality. Higher is larger and closer to exact.
 #render_type = "full"
 #render_subtype = "png"
 #render_quality = 75
@@ -232,8 +233,28 @@ password = "change-me"
 # settles. render_motion_subtype and render_motion_quality are that encode; the base
 # keys above are what a still cell keeps. The motion quality can be very low —
 # motion hides it, and it does not last.
+#
+# "motion" does not replace the base keys, it builds on them, so a base that is not
+# PNG is spelled the ordinary way — with render_subtype and render_quality. Which of
+# them are required follows from whether that base is lossless:
+#
+#   render_subtype = "png"  — render_quality refused (nothing to turn down), and
+#                             render_motion_subtype required, since PNG cannot name
+#                             the motion codec for it.
+#   "jpeg" or "webp"        — render_quality required, and render_motion_subtype
+#                             optional: omitted, the motion cells use the same codec
+#                             as the base at render_motion_quality.
+#
+# A lossless base with lossy motion — everything settled is exact:
 #render_type = "motion"
 #render_motion_subtype = "jpeg"
+#render_motion_quality = 10
+#
+# A lossy base with cheaper motion, for a link that cannot afford PNG at all. One
+# codec, two qualities, so render_motion_subtype is left out:
+#render_type = "motion"
+#render_subtype = "webp"
+#render_quality = 60
 #render_motion_quality = 10
 
 # QA aid for "motion", off unless asked for: outline every piece the strategy emits
