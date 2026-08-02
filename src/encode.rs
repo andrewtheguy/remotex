@@ -1,36 +1,81 @@
-//! Ordered PNG encoding outside the RDP and VNC protocol-read loops.
+//! Ordered tile encoding outside the RDP and VNC protocol-read loops.
 //!
 //! ```text
-//! read loop:  pack → Shadow::accept → bands()
-//!                                       │  one owned Vec<u8> per band
+//! read loop:  pack → Shadow::accept → TileSink::damage()
+//!                                       │  bands, cut at the cell grid where it matters
 //!                                       ▼
-//!             TileSink::tile() ── spawn_blocking(encode) ─┐
-//!                                                         │ handle pushed, in order
-//!             TileSink::msg()  ── ServerMsg ──────────────┤  mpsc, cap ENCODE_DEPTH
-//!                                                         ▼
+//!                        spawn_blocking(encode) ─────────┐
+//!                                                        │ handle pushed, in order
+//!             TileSink::msg()  ── ServerMsg ─────────────┤  mpsc, cap ENCODE_DEPTH
+//!                                                        ▼
 //!                                order task: await handles FIFO → frame_tx
+//!                                            ⤷ cleanup tick → base re-encode
 //! ```
 //!
 //! FIFO collection preserves source order even when encodes finish out of order.
 //! Control messages share the queue so a resize cannot overtake related tiles.
 //! A full queue backpressures the engine because its shadow has already recorded
 //! submitted pixels.
+//!
+//! This is also where the render dial's `motion` strategy lives, because it is the
+//! one place both engines already funnel their damage through. See [`Motion`].
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 
-use crate::config::TileCodec;
+use crate::config::{RenderPlan, TileCodec};
 use crate::protocol::{ServerMsg, Tile};
+use crate::tiles::Rect;
 
 /// Maximum queued encodes ahead of the handle currently collected. This covers
 /// roughly one 1280×800 repaint while bounding memory and worker pressure.
 const ENCODE_DEPTH: usize = 16;
+
+/// Frames of change history each cell keeps — the width of the `u8` shift
+/// register in [`ChurnCell`], so it may not exceed 8.
+const CHURN_WINDOW: u64 = 8;
+
+/// Churn — how many of a cell's last [`CHURN_WINDOW`] frames changed it — at
+/// which the cell is taken to be in motion and switches to the motion encode.
+///
+/// A hard switch rather than a ramp between the two encodes. Which of those is
+/// right is a question for measurement, and the switch is the one worth measuring
+/// first: it makes the detection legible in the totals, where a ramp would smear
+/// the answer across every quality in between.
+///
+/// Half the window, so one isolated change is never motion — a popup, an image
+/// that just finished loading, a cursor — and a cell has to keep changing before
+/// its quality drops. Anything less would only draw a pointless cleanup a moment
+/// later.
+const CHURN_MOVING: u32 = 4;
+
+/// How long a cell sent at the motion encode must sit unchanged before it is
+/// re-sent at the base one. Long enough that a brief pause in motion is not chased
+/// with a redundant re-encode, short enough that a settled region sharpens while
+/// the eye is still on it.
+const CLEANUP_IDLE: Duration = Duration::from_millis(500);
+
+/// How often the order task wakes to look for settled cells. It has to be its own
+/// timer rather than something the next frame does, because a screen that stops
+/// changing produces no next frame — which is exactly the case a cleanup is for.
+const CLEANUP_TICK: Duration = Duration::from_millis(250);
+
+/// Cleanups per tick, so a whole stopped video settles over a few ticks rather
+/// than in one burst competing with live motion for the socket.
+const MAX_CLEANUPS_PER_TICK: usize = 8;
+
+/// Cap on the source pixels held for cleanups at once. Past it a cell keeps the
+/// motion encode until it next changes — safe, just not as crisp — rather than the
+/// stash growing without bound under a full-screen video.
+const MAX_STASH_BYTES: usize = 8 * 1024 * 1024;
 
 /// One item in the ordered queue.
 ///
@@ -45,6 +90,141 @@ enum Pending {
     Flush(oneshot::Sender<()>),
 }
 
+/// One cell's recent history: bit 0 is the frame it was last seen changing,
+/// shifted left one place for every frame since. Its churn is the number of set
+/// bits — how many of the last [`CHURN_WINDOW`] frames it changed in.
+#[derive(Clone, Copy)]
+struct ChurnCell {
+    history: u8,
+    last_frame: u64,
+}
+
+/// A piece sent at the motion encode, held so it can be re-sent at the base one
+/// once its cell stops moving.
+///
+/// It keeps the *source* pixels, so the re-encode needs no fresh frame from the
+/// remote — which is the whole point, since a still screen produces none. `rgb` is
+/// shared with the encode worker rather than copied for it: the two want the same
+/// bytes and neither writes them.
+struct Stashed {
+    rect: Rect,
+    rgb: Arc<Vec<u8>>,
+    /// Tokio's clock rather than the standard library's, so that it is the same
+    /// clock [`CLEANUP_TICK`] runs on. That keeps the two from disagreeing under a
+    /// test that pauses time, which is the only way to assert the cleanup path
+    /// without asserting how fast the machine is.
+    sent_at: tokio::time::Instant,
+}
+
+/// Which cells are changing fast enough to take the cheap encode, and which of
+/// them are still owed a re-send at the base one.
+///
+/// Keyed by [`Rect::cell_key`], which is the reason the grid exists: RDP and VNC
+/// describe the same moving region with different rectangles from one frame to the
+/// next, and a key that moved with them would count no churn at all.
+///
+/// Guarded by a mutex on [`Shared`] because [`TileSink`] is `Clone` and VNC pushes
+/// from two tasks. Every critical section here is a hash lookup and some
+/// arithmetic; nothing holds the lock across an await.
+#[derive(Default)]
+struct Motion {
+    churn: HashMap<(u16, u16), ChurnCell>,
+    stash: HashMap<(u16, u16), Stashed>,
+    stash_bytes: usize,
+}
+
+impl Motion {
+    /// Record that `key` changed on `frame`, and return its churn.
+    ///
+    /// Aging is lazy: a cell that did not change is not touched, and its history is
+    /// shifted by the whole gap when it is next seen. That is also what keeps the
+    /// shift from overflowing — a gap of a full window empties the history instead.
+    fn observe(&mut self, key: (u16, u16), frame: u64) -> u32 {
+        let cell = self
+            .churn
+            .entry(key)
+            .or_insert(ChurnCell { history: 0, last_frame: frame });
+        let elapsed = frame.saturating_sub(cell.last_frame);
+        cell.history = if elapsed >= CHURN_WINDOW {
+            0
+        } else {
+            cell.history << elapsed
+        };
+        cell.history |= 1;
+        cell.last_frame = frame;
+        cell.history.count_ones()
+    }
+
+    /// Remember a piece sent at the motion encode, so a later tick can settle it.
+    ///
+    /// Over [`MAX_STASH_BYTES`] the *existing* entry is kept and the new one
+    /// dropped. Keeping the older one is the point: it is the one closer to coming
+    /// due, and a cell whose debt was dropped instead would never clean up at all
+    /// until it next moved.
+    fn stash(
+        &mut self,
+        key: (u16, u16),
+        rect: Rect,
+        rgb: Arc<Vec<u8>>,
+        now: tokio::time::Instant,
+    ) {
+        let replaced = self.stash.get(&key).map_or(0, |old| old.rgb.len());
+        let after = self.stash_bytes - replaced + rgb.len();
+        if after > MAX_STASH_BYTES {
+            return;
+        }
+        self.stash_bytes = after;
+        self.stash.insert(key, Stashed { rect, rgb, sent_at: now });
+    }
+
+    /// Forget the cleanup owed for `key` if `sent` — a rectangle just sent at the
+    /// base encode — covers all of what is owed.
+    ///
+    /// The containment test is the whole of it. Damage is sent as it is reported,
+    /// clipped to the cell rather than snapped out to it, so a cell can owe a
+    /// cleanup for a region wider than the piece that just went out crisp. Settling
+    /// on that would leave a sliver at the motion encode with nothing left to
+    /// remember it.
+    fn settle(&mut self, key: (u16, u16), sent: Rect) {
+        if self.stash.get(&key).is_some_and(|owed| sent.contains(&owed.rect)) {
+            let old = self.stash.remove(&key).expect("just found it");
+            self.stash_bytes -= old.rgb.len();
+        }
+    }
+
+    /// Take up to `max` of the cells that have sat unchanged for [`CLEANUP_IDLE`],
+    /// oldest first, for the caller to re-encode at the base quality.
+    ///
+    /// Oldest first so a backlog larger than one tick drains in the order it
+    /// accrued; picking arbitrarily lets a long-settled cell be starved by newer
+    /// ones for as long as the motion lasts.
+    fn take_due(&mut self, now: tokio::time::Instant, max: usize) -> Vec<Stashed> {
+        let mut due: Vec<((u16, u16), tokio::time::Instant)> = self
+            .stash
+            .iter()
+            .filter(|(_, s)| now.saturating_duration_since(s.sent_at) >= CLEANUP_IDLE)
+            .map(|(key, s)| (*key, s.sent_at))
+            .collect();
+        due.sort_unstable_by_key(|(_, sent_at)| *sent_at);
+        due.truncate(max);
+        due.into_iter()
+            .map(|(key, _)| {
+                let stashed = self.stash.remove(&key).expect("key came from the map");
+                self.stash_bytes -= stashed.rgb.len();
+                stashed
+            })
+            .collect()
+    }
+
+    /// Drop everything. A resize changes what every key means, and a repaint has
+    /// already re-sent every pixel the stash was holding.
+    fn clear(&mut self) {
+        self.churn.clear();
+        self.stash.clear();
+        self.stash_bytes = 0;
+    }
+}
+
 /// State the sink and its order task both touch.
 ///
 /// The counters live here rather than in the order task because the engine is what
@@ -55,8 +235,17 @@ struct Shared {
     /// Why the order task gave up, so the engine's next push can report it rather
     /// than a bare closed channel. See [`TileSink::closed`].
     failure: Mutex<Option<String>>,
+    /// What churn is counted against, advanced by the engine — see
+    /// [`TileSink::frame`]. Untouched, and so meaningless, without a motion plan.
+    frame: AtomicU64,
+    motion: Mutex<Motion>,
     tiles: AtomicU64,
     encoded_bytes: AtomicU64,
+    /// Of [`Self::tiles`], those sent at the motion encode rather than the base.
+    motion_tiles: AtomicU64,
+    /// Of [`Self::tiles`], those that are a settled cell being re-sent crisp.
+    cleanups: AtomicU64,
+    cleanup_bytes: AtomicU64,
     /// Summed across workers, so it may exceed the wall clock.
     encode_micros: AtomicU64,
     /// Wall time the order task spent waiting for encodes to finish.
@@ -75,41 +264,149 @@ pub struct TileSink {
     engine: &'static str,
     tx: mpsc::Sender<Pending>,
     shared: Arc<Shared>,
-    /// The codec this session encodes tiles with, resolved once from the target's
-    /// render dial in `rdp::run` / `vnc::run` (see [`crate::config::TargetConfig::tile_codec`]).
-    codec: TileCodec,
+    /// The resolved render dial, read once from the target in `rdp::run` /
+    /// `vnc::run` (see [`crate::config::TargetConfig::render_plan`]).
+    plan: RenderPlan,
 }
 
 impl TileSink {
-    /// Start an encoder for one engine. `engine` prefixes its log lines. `codec`
-    /// is the resolved render dial — [`TileCodec::Png`] for the lossless default,
-    /// or a lossy codec carrying its quality.
-    pub fn new(engine: &'static str, frame_tx: mpsc::Sender<ServerMsg>, codec: TileCodec) -> Self {
+    /// Start an encoder for one engine. `engine` prefixes its log lines. `plan` is
+    /// the resolved render dial — a base codec, and for the `motion` strategy the
+    /// cheaper one a cell in motion takes instead.
+    pub fn new(engine: &'static str, frame_tx: mpsc::Sender<ServerMsg>, plan: RenderPlan) -> Self {
         let (tx, rx) = mpsc::channel(ENCODE_DEPTH);
         let shared = Arc::new(Shared::default());
-        tokio::spawn(order_loop(engine, rx, frame_tx, Arc::clone(&shared)));
+        tokio::spawn(order_loop(engine, rx, frame_tx, Arc::clone(&shared), plan));
         Self {
             engine,
             tx,
             shared,
-            codec,
+            plan,
         }
     }
 
-    /// Queue a band of packed RGB888 for encoding.
+    /// Queue everything a changed rectangle owes the client.
+    ///
+    /// `pack` copies a sub-rectangle of the engine's framebuffer out as packed
+    /// RGB888. It is a callback rather than one buffer because the two engines hold
+    /// those pixels differently — RDP repacks out of the decoded image, VNC crops
+    /// out of the rectangle it just read — and because how a rectangle is *cut* is
+    /// the one thing both should agree on, which is what this method is.
+    ///
+    /// Without a motion plan the cut is [`Rect::bands`] and nothing else, which is
+    /// what the gateway has always sent. With one, a band whose cells are all quiet
+    /// is still sent whole and at the base encode — a target with nothing moving is
+    /// byte-for-byte what the same target sends today — and only a band containing a
+    /// moving cell is cut at the grid, so a video in a window costs its own cells
+    /// their quality and costs the text beside it nothing.
+    pub async fn damage<F>(&self, changed: Rect, pack: F) -> anyhow::Result<()>
+    where
+        F: Fn(Rect) -> Vec<u8>,
+    {
+        let Some(motion_codec) = self.plan.motion else {
+            for band in changed.bands() {
+                self.encode(band, Arc::new(pack(band)), self.plan.base).await?;
+            }
+            return Ok(());
+        };
+
+        let frame = self.shared.frame.load(Ordering::Relaxed);
+        for band in changed.bands() {
+            // Every cell this band touches is a cell that just changed, so this is
+            // where its churn is recorded — whether or not the band is then cut.
+            let cells: Vec<(Rect, bool)> = {
+                let mut motion = self.shared.motion.lock().unwrap();
+                band.cells()
+                    .map(|cell| {
+                        let churn = motion.observe(cell.cell_key(), frame);
+                        (cell, churn >= CHURN_MOVING)
+                    })
+                    .collect()
+            };
+
+            if !cells.iter().any(|(_, moving)| *moving) {
+                let rgb = Arc::new(pack(band));
+                {
+                    let mut motion = self.shared.motion.lock().unwrap();
+                    for (cell, _) in &cells {
+                        motion.settle(cell.cell_key(), band);
+                    }
+                }
+                self.encode(band, rgb, self.plan.base).await?;
+                continue;
+            }
+
+            for (cell, moving) in cells {
+                let rgb = Arc::new(pack(cell));
+                let codec = if moving {
+                    // Timed at dispatch rather than when the encode lands, which is
+                    // what keeps a cleanup from overtaking fresher pixels: a cell
+                    // with a tile still in the queue has just been touched, so it
+                    // cannot also be idle.
+                    self.shared.motion.lock().unwrap().stash(
+                        cell.cell_key(),
+                        cell,
+                        Arc::clone(&rgb),
+                        tokio::time::Instant::now(),
+                    );
+                    self.shared.motion_tiles.fetch_add(1, Ordering::Relaxed);
+                    motion_codec
+                } else {
+                    self.shared.motion.lock().unwrap().settle(cell.cell_key(), cell);
+                    self.plan.base
+                };
+                self.encode(cell, rgb, codec).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark the end of one frame from the remote: an RDP batch of outputs, or a
+    /// VNC `FramebufferUpdate`.
+    ///
+    /// Churn is counted in frames rather than in wall time because a frame is what
+    /// the remote actually decided to redraw. It costs the engines one call each
+    /// and means a slow link's cells are not read as still.
+    pub fn frame(&self) {
+        self.shared.frame.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Forget every cell's history and every cleanup owed.
+    ///
+    /// For a resize, where the keys no longer name the same pixels, and for a
+    /// repaint, where every pixel is about to be re-sent at the base encode anyway
+    /// — carrying churn across either would put cells in motion that are only
+    /// being redrawn once.
+    pub fn reset_motion(&self) {
+        self.shared.motion.lock().unwrap().clear();
+        self.shared.frame.store(0, Ordering::Relaxed);
+    }
+
+    /// Queue one rectangle of packed RGB888 at the base encode.
+    ///
+    /// The primitive under [`Self::damage`], and what a caller with a rectangle
+    /// already cut to its liking wants.
+    pub async fn tile(&self, x: u16, y: u16, w: u16, h: u16, rgb: Vec<u8>) -> anyhow::Result<()> {
+        let Some(rect) = Rect::from_size(x, y, w, h) else {
+            return Ok(());
+        };
+        self.encode(rect, Arc::new(rgb), self.plan.base).await
+    }
+
+    /// Start an encode and queue its place in the order.
     ///
     /// `rgb` is owned rather than borrowed because the engine's framebuffer is
     /// gone by the time a worker reads it — the read loop has moved on to the next
     /// PDU. The encode starts immediately; only its *place in the order* is queued.
-    pub async fn tile(&self, x: u16, y: u16, w: u16, h: u16, rgb: Vec<u8>) -> anyhow::Result<()> {
-        let codec = self.codec;
+    async fn encode(
+        &self,
+        rect: Rect,
+        rgb: Arc<Vec<u8>>,
+        codec: TileCodec,
+    ) -> anyhow::Result<()> {
         let handle = tokio::task::spawn_blocking(move || {
             let started = Instant::now();
-            let tile = match codec {
-                TileCodec::Png => Tile::from_rgb(x, y, w, h, &rgb)?,
-                TileCodec::Jpeg(q) => Tile::from_rgb_jpeg(x, y, w, h, &rgb, q)?,
-                TileCodec::Webp(q) => Tile::from_rgb_webp(x, y, w, h, &rgb, q)?,
-            };
+            let tile = encode_tile(rect, &rgb, codec)?;
             Ok((tile, micros(started)))
         });
         self.push(Pending::Tile(handle)).await
@@ -184,14 +481,102 @@ impl TileSink {
     }
 }
 
-/// Collect finished encodes in push order and forward them.
+/// Encode one rectangle of packed RGB888 with the given codec.
+fn encode_tile(rect: Rect, rgb: &[u8], codec: TileCodec) -> anyhow::Result<Tile> {
+    let (x, y, w, h) = (rect.left, rect.top, rect.w(), rect.h());
+    match codec {
+        TileCodec::Png => Tile::from_rgb(x, y, w, h, rgb),
+        TileCodec::Jpeg(q) => Tile::from_rgb_jpeg(x, y, w, h, rgb, q),
+        TileCodec::Webp(q) => Tile::from_rgb_webp(x, y, w, h, rgb, q),
+    }
+}
+
+/// Re-send cells that have stopped moving at the base encode, so a paused screen
+/// sharpens on its own. `false` means the browser is gone.
+///
+/// A cleanup that fails to encode is dropped with a warning rather than ending the
+/// session, which is the one place this path differs from an ordinary tile. A tile
+/// that never arrives leaves the shadow claiming the client has pixels it never
+/// got; a cleanup that never arrives leaves the client with the pixels it already
+/// had, which are correct and merely coarser.
+async fn flush_cleanups(
+    engine: &'static str,
+    shared: &Arc<Shared>,
+    base: TileCodec,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+) -> bool {
+    let due = shared
+        .motion
+        .lock()
+        .unwrap()
+        .take_due(tokio::time::Instant::now(), MAX_CLEANUPS_PER_TICK);
+    for stashed in due {
+        let Stashed { rect, rgb, .. } = stashed;
+        // On a worker like any other encode: a cleanup arrives when the screen is
+        // quiet, but the order task is not the thread to find that out on.
+        let joined = tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)).await;
+        let tile = match joined {
+            Ok(Ok(tile)) => tile,
+            Ok(Err(e)) => {
+                warn!("{engine}: dropping a cleanup tile: {e:#}");
+                continue;
+            }
+            Err(e) => {
+                give_up(engine, shared, format!("tile encoder stopped: {e}"));
+                return false;
+            }
+        };
+        debug!(
+            "{engine}: cleanup {}x{} at ({},{}): {} bytes",
+            tile.w,
+            tile.h,
+            tile.x,
+            tile.y,
+            tile.data.len()
+        );
+        let bytes = tile.data.len() as u64;
+        shared.tiles.fetch_add(1, Ordering::Relaxed);
+        shared.cleanups.fetch_add(1, Ordering::Relaxed);
+        shared.encoded_bytes.fetch_add(bytes, Ordering::Relaxed);
+        shared.cleanup_bytes.fetch_add(bytes, Ordering::Relaxed);
+        if frame_tx.send(ServerMsg::Tile(tile)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collect finished encodes in push order and forward them, and — for a target on
+/// the `motion` strategy — settle cells that have stopped moving.
+///
+/// The cleanup timer belongs here rather than anywhere the frames arrive, because
+/// the case it exists for is a screen that has stopped producing them.
 async fn order_loop(
     engine: &'static str,
     mut rx: mpsc::Receiver<Pending>,
     frame_tx: mpsc::Sender<ServerMsg>,
     shared: Arc<Shared>,
+    plan: RenderPlan,
 ) {
-    while let Some(item) = rx.recv().await {
+    let mut cleanup = tokio::time::interval(CLEANUP_TICK);
+    // Delay rather than Burst: a tick missed while the queue was busy is a tick
+    // whose cells are still there to settle, and firing the backlog at once would
+    // only stack re-encodes behind whatever made it late.
+    cleanup.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    loop {
+        let item = tokio::select! {
+            item = rx.recv() => match item {
+                Some(item) => item,
+                None => break,
+            },
+            _ = cleanup.tick(), if plan.motion.is_some() => {
+                if flush_cleanups(engine, &shared, plan.base, &frame_tx).await {
+                    continue;
+                }
+                break;
+            }
+        };
         let msg = match item {
             Pending::Msg(msg) => msg,
             Pending::Flush(ack) => {
@@ -272,9 +657,20 @@ fn micros(since: Instant) -> u64 {
 ///   for the encoder at all, which is the point of the whole module.
 /// - `bytes` cross-checks against the `ws: outbound totals` line, and must not move
 ///   when the depth does — the same pixels are encoded either way.
+/// - `motion` and `cleanup` are the whole measurement of the `motion` strategy, and
+///   they are read together. `motion` at zero on a target that has one configured
+///   is the claim that a still screen is untouched, and it is the number to check
+///   before believing any saving. `cleanup` against it is what the discount cost:
+///   every cleanup is a tile sent twice, so a scheme that pays more in re-sends than
+///   it saves in motion shows up here as a `cleanup` byte count rivalling the
+///   saving — and both are already inside `tiles` and `bytes`, which stay the
+///   totals for the link.
 struct Totals {
     tiles: u64,
     encoded_bytes: u64,
+    motion_tiles: u64,
+    cleanups: u64,
+    cleanup_bytes: u64,
     encode_micros: u64,
     waited_micros: u64,
     stalled_micros: u64,
@@ -287,6 +683,9 @@ impl Totals {
         Self {
             tiles: shared.tiles.load(Ordering::Relaxed),
             encoded_bytes: shared.encoded_bytes.load(Ordering::Relaxed),
+            motion_tiles: shared.motion_tiles.load(Ordering::Relaxed),
+            cleanups: shared.cleanups.load(Ordering::Relaxed),
+            cleanup_bytes: shared.cleanup_bytes.load(Ordering::Relaxed),
             encode_micros: shared.encode_micros.load(Ordering::Relaxed),
             waited_micros: shared.waited_micros.load(Ordering::Relaxed),
             stalled_micros: shared.stalled_micros.load(Ordering::Relaxed),
@@ -298,10 +697,13 @@ impl fmt::Display for Totals {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} tile(s) / {} bytes, {}µs encoding across workers in {}µs of waiting, \
-             engine stalled {}µs",
+            "{} tile(s) / {} bytes ({} in motion, {} cleanup / {} bytes), \
+             {}µs encoding across workers in {}µs of waiting, engine stalled {}µs",
             self.tiles,
             self.encoded_bytes,
+            self.motion_tiles,
+            self.cleanups,
+            self.cleanup_bytes,
             self.encode_micros,
             self.waited_micros,
             self.stalled_micros
@@ -313,6 +715,14 @@ impl fmt::Display for Totals {
 mod tests {
     use super::*;
     use crate::protocol::UNSCALED;
+
+    fn plan(base: TileCodec, motion: Option<TileCodec>) -> RenderPlan {
+        RenderPlan { base, motion }
+    }
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect::from_size(x, y, w, h).expect("a non-empty rectangle")
+    }
 
     /// Packed RGB888 for a `w`x`h` band, filled so no two bands share bytes.
     fn rgb(w: u16, h: u16, seed: u8) -> Vec<u8> {
@@ -336,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn tiles_reach_the_frame_channel_in_push_order() {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
-        let sink = TileSink::new("test", frame_tx, TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png, None));
 
         for i in 0..64u16 {
             let (w, h) = (320 - i * 4, 64);
@@ -359,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn a_jpeg_quality_makes_tiles_jpeg() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, TileCodec::Jpeg(60));
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Jpeg(60), None));
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 1)).await.unwrap();
         sink.flush().await;
@@ -374,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn a_webp_quality_makes_tiles_webp() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, TileCodec::Webp(60));
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Webp(60), None));
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 1)).await.unwrap();
         sink.flush().await;
@@ -390,7 +800,7 @@ mod tests {
     #[tokio::test]
     async fn a_control_message_cannot_overtake_the_tiles_before_it() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png, None));
 
         for i in 0..8u16 {
             sink.tile(0, i * 64, 320, 64, rgb(320, 64, i as u8)).await.unwrap();
@@ -416,7 +826,7 @@ mod tests {
     #[tokio::test]
     async fn flush_waits_for_everything_pushed_before_it() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png, None));
 
         for i in 0..16u16 {
             sink.tile(0, i * 64, 320, 64, rgb(320, 64, i as u8)).await.unwrap();
@@ -438,7 +848,7 @@ mod tests {
     #[tokio::test]
     async fn an_encode_failure_stops_the_sink_and_reports_itself() {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = TileSink::new("test", frame_tx, TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png, None));
 
         // A payload one byte short of the geometry: `Tile::from_rgb` rejects it on
         // its length check rather than handing a short buffer to the PNG encoder.
@@ -466,7 +876,7 @@ mod tests {
     #[tokio::test]
     async fn a_dropped_frame_channel_is_reported_as_a_closed_channel() {
         let (frame_tx, frame_rx) = mpsc::channel(1);
-        let sink = TileSink::new("test", frame_tx, TileCodec::Png);
+        let sink = TileSink::new("test", frame_tx, plan(TileCodec::Png, None));
         drop(frame_rx);
 
         sink.tile(0, 0, 320, 64, rgb(320, 64, 0)).await.unwrap();
@@ -478,5 +888,322 @@ mod tests {
         // No encode failed, so this is the plain closed-channel message the engines
         // reported before the sink existed.
         assert_eq!(format!("{error}"), "frame channel closed");
+    }
+
+    // ---- motion ----
+    //
+    // `Motion` is driven directly here, with the frame number and the clock passed
+    // in. Nothing sleeps and nothing counts wall-clock events, so no assertion below
+    // changes if the machine is twice as slow.
+
+    const MOTION: RenderPlan = RenderPlan {
+        base: TileCodec::Png,
+        motion: Some(TileCodec::Jpeg(10)),
+    };
+
+    /// Damage covering `cells` cells across, given to `sink` as `frames`
+    /// consecutive frames — what a video playing in a window looks like from here.
+    async fn drive(sink: &TileSink, area: Rect, frames: u64) {
+        for _ in 0..frames {
+            sink.damage(area, |piece| {
+                rgb(piece.w(), piece.h(), 7)
+            })
+            .await
+            .unwrap();
+            sink.frame();
+        }
+    }
+
+    fn formats(msgs: &[ServerMsg]) -> Vec<u8> {
+        msgs.iter()
+            .map(|m| match m {
+                ServerMsg::Tile(tile) => tile.format,
+                other => panic!("expected a tile, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn churn_counts_recent_frames_and_ages_out() {
+        let mut motion = Motion::default();
+        let key = (0, 0);
+        // Changing every frame ramps churn up one per frame, to the window width.
+        for frame in 1..=CHURN_WINDOW {
+            assert_eq!(u64::from(motion.observe(key, frame)), frame, "frame {frame}");
+        }
+        // It saturates at the window rather than overflowing the register.
+        assert_eq!(
+            u64::from(motion.observe(key, CHURN_WINDOW + 1)),
+            CHURN_WINDOW,
+            "churn should cap at the window"
+        );
+        // A gap longer than the window empties the history: one recent change only.
+        assert_eq!(motion.observe(key, CHURN_WINDOW * 3), 1, "a long-idle cell reset");
+    }
+
+    /// The claim the whole design rests on: a target with nothing moving sends
+    /// exactly what it would send without a motion plan at all — same rectangles,
+    /// same codec, same bytes. Asserted against a second sink rather than against a
+    /// written-down expectation, so it cannot drift.
+    #[tokio::test]
+    async fn a_still_screen_is_byte_identical_to_its_base_configuration() {
+        let area = rect(37, 41, 900, 200);
+        let mut out = Vec::new();
+        for plan in [plan(TileCodec::Png, None), MOTION] {
+            let (frame_tx, mut frame_rx) = mpsc::channel(256);
+            let sink = TileSink::new("test", frame_tx, plan);
+            // A screen that changes now and then rather than continuously: the same
+            // region redrawn four times, but with a full churn window of quiet
+            // frames between each, so no cell is ever in motion. Four redraws
+            // rather than one, so a plan that simply never split would not pass by
+            // never being asked to.
+            for _ in 0..4 {
+                sink.damage(area, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+                for _ in 0..CHURN_WINDOW {
+                    sink.frame();
+                }
+            }
+            sink.flush().await;
+
+            let mut tiles = Vec::new();
+            while let Ok(ServerMsg::Tile(tile)) = frame_rx.try_recv() {
+                tiles.push((tile.format, tile.x, tile.y, tile.w, tile.h, tile.data));
+            }
+            out.push(tiles);
+        }
+        assert_eq!(out[0], out[1], "a motion plan changed a still screen's output");
+        assert!(!out[0].is_empty(), "the test sent nothing");
+    }
+
+    /// A cell changing every frame switches to the motion encode once its churn
+    /// reaches the threshold, and not one frame before.
+    #[tokio::test]
+    async fn a_cell_changing_every_frame_switches_at_the_threshold() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = TileSink::new("test", frame_tx, MOTION);
+
+        // One cell, so one tile per frame and the tile index is the frame index.
+        let cell = rect(0, 0, 320, 64);
+        drive(&sink, cell, u64::from(CHURN_MOVING) + 2).await;
+        sink.flush().await;
+
+        let sent = formats(&drain(&mut frame_rx, usize::try_from(CHURN_MOVING).unwrap() + 2).await);
+        let (before, after) = sent.split_at(usize::try_from(CHURN_MOVING).unwrap() - 1);
+        assert!(
+            before.iter().all(|&f| f == Tile::FORMAT_PNG),
+            "a cell went to the motion encode before it had the churn for it: {sent:?}"
+        );
+        assert!(
+            after.iter().all(|&f| f == Tile::FORMAT_JPEG),
+            "a cell at the threshold stayed on the base encode: {sent:?}"
+        );
+    }
+
+    /// The payoff the grid buys: a video in a window costs its own cells their
+    /// quality and costs the text beside it nothing. The band spans four cells and
+    /// only the first keeps changing.
+    #[tokio::test]
+    async fn only_the_cells_in_motion_lose_their_quality() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = TileSink::new("test", frame_tx, MOTION);
+
+        let moving = rect(0, 0, 320, 64);
+        let band = rect(0, 0, 1280, 64);
+        // Enough frames of the small region alone to put its cell in motion.
+        drive(&sink, moving, u64::from(CHURN_MOVING)).await;
+        // Then one frame of the whole band, which now contains one moving cell and
+        // three quiet ones.
+        sink.damage(band, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+        sink.flush().await;
+
+        let all = drain(&mut frame_rx, usize::try_from(CHURN_MOVING).unwrap() + 4).await;
+        let split = &all[usize::try_from(CHURN_MOVING).unwrap()..];
+        assert_eq!(
+            formats(split),
+            vec![
+                Tile::FORMAT_JPEG,
+                Tile::FORMAT_PNG,
+                Tile::FORMAT_PNG,
+                Tile::FORMAT_PNG
+            ],
+            "the band was not cut at the cell the motion is in"
+        );
+        let ServerMsg::Tile(first) = &split[0] else { unreachable!() };
+        assert_eq!((first.x, first.w), (0, 320), "the moving piece is one cell wide");
+        let ServerMsg::Tile(last) = &split[3] else { unreachable!() };
+        assert_eq!((last.x, last.w), (960, 320), "the quiet pieces cover the rest");
+    }
+
+    #[test]
+    fn a_settled_cell_is_cleaned_up_once_then_forgotten() {
+        let mut motion = Motion::default();
+        let cell = rect(0, 0, 320, 64);
+        let base = tokio::time::Instant::now();
+        motion.stash((0, 0), cell, Arc::new(rgb(320, 64, 1)), base);
+
+        assert!(motion.take_due(base, 8).is_empty(), "settled before it was idle");
+        assert!(
+            motion.take_due(base + CLEANUP_IDLE - Duration::from_millis(1), 8).is_empty(),
+            "settled a millisecond early"
+        );
+        let due = motion.take_due(base + CLEANUP_IDLE, 8);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].rect, cell);
+        assert_eq!(motion.stash_bytes, 0, "the debt was not refunded");
+        assert!(
+            motion.take_due(base + CLEANUP_IDLE * 4, 8).is_empty(),
+            "a cell was cleaned up twice"
+        );
+    }
+
+    /// Damage is sent as reported, clipped to the cell rather than snapped out to
+    /// it, so a piece that goes out crisp may cover less than the cell owes. Only
+    /// full cover settles the debt; anything less would strand a sliver at the
+    /// motion encode with nothing left to remember it.
+    #[test]
+    fn only_full_cover_cancels_a_pending_cleanup() {
+        let mut motion = Motion::default();
+        let owed = rect(0, 0, 320, 64);
+        let stash = |m: &mut Motion| {
+            m.stash((0, 0), owed, Arc::new(rgb(320, 64, 1)), tokio::time::Instant::now())
+        };
+
+        stash(&mut motion);
+        motion.settle((0, 0), rect(0, 0, 160, 64));
+        assert_eq!(motion.stash.len(), 1, "a partial cover cancelled the whole debt");
+
+        motion.settle((0, 0), owed);
+        assert!(motion.stash.is_empty(), "an exact cover left the debt standing");
+        assert_eq!(motion.stash_bytes, 0);
+
+        stash(&mut motion);
+        motion.settle((0, 0), rect(0, 0, 1280, 64));
+        assert!(motion.stash.is_empty(), "a band covering the cell left the debt standing");
+    }
+
+    /// A whole stopped video settles over a few ticks rather than in one burst, and
+    /// in the order the debts accrued — otherwise a long-settled cell can be
+    /// starved by newer ones for as long as the motion lasts.
+    #[test]
+    fn cleanups_are_bounded_per_tick_and_drain_oldest_first() {
+        let mut motion = Motion::default();
+        let base = tokio::time::Instant::now();
+        let count = MAX_CLEANUPS_PER_TICK + 3;
+        for i in 0..count {
+            let key = (i as u16, 0);
+            let cell = rect(i as u16 * 320, 0, 320, 64);
+            // Staggered, so "oldest" is a fact about the data rather than about
+            // whichever order the map happens to iterate in.
+            let sent_at = base + Duration::from_millis(i as u64);
+            motion.stash(key, cell, Arc::new(rgb(320, 64, 1)), sent_at);
+        }
+
+        let now = base + Duration::from_millis(count as u64) + CLEANUP_IDLE;
+        let first = motion.take_due(now, MAX_CLEANUPS_PER_TICK);
+        assert_eq!(first.len(), MAX_CLEANUPS_PER_TICK);
+        assert_eq!(
+            first.iter().map(|s| s.rect.left).collect::<Vec<_>>(),
+            (0..MAX_CLEANUPS_PER_TICK).map(|i| i as u16 * 320).collect::<Vec<_>>(),
+            "the backlog did not drain oldest first"
+        );
+        let second = motion.take_due(now, MAX_CLEANUPS_PER_TICK);
+        assert_eq!(second.len(), 3, "the rest did not follow on the next tick");
+        assert_eq!(motion.stash_bytes, 0);
+    }
+
+    /// Past the cap a cell keeps the motion encode until it next changes — safe,
+    /// just not as crisp. The *existing* entry is what survives: it is the one
+    /// closer to coming due, and dropping it would leave that cell owed nothing.
+    #[test]
+    fn a_full_stash_keeps_the_debt_it_already_has() {
+        let mut motion = Motion::default();
+        let now = tokio::time::Instant::now();
+        let cell = |i: u16| rect(i * 320, 0, 320, 64);
+        // 320x64 RGB is 61,440 bytes, so this fills 8 MiB in 136 cells and change.
+        let per_cell = 320 * 64 * 3;
+        let fits = MAX_STASH_BYTES / per_cell;
+        for i in 0..fits {
+            motion.stash((i as u16, 0), cell(i as u16), Arc::new(rgb(320, 64, 1)), now);
+        }
+        let held = motion.stash_bytes;
+        assert!(held + per_cell > MAX_STASH_BYTES, "the stash did not fill");
+
+        // A new cell past the cap is dropped rather than admitted.
+        motion.stash((9000, 0), cell(0), Arc::new(rgb(320, 64, 1)), now);
+        assert_eq!(motion.stash.len(), fits, "the cap did not hold");
+        assert_eq!(motion.stash_bytes, held);
+
+        // And a cell that already owes one keeps the debt it has, rather than
+        // losing it to a replacement that will not fit either.
+        let older = now - Duration::from_secs(1);
+        motion.stash((0, 0), cell(0), Arc::new(rgb(320, 64, 2)), older);
+        assert_eq!(motion.stash.len(), fits);
+        assert_eq!(
+            motion.take_due(now + CLEANUP_IDLE, 1).len(),
+            1,
+            "the cell that was already owed a cleanup lost it"
+        );
+    }
+
+    /// The cleanup path end to end, through the order task's own timer: a cell
+    /// that stops moving is re-sent crisp with nothing to prompt it, because the
+    /// case it exists for is a remote that has stopped sending frames entirely.
+    ///
+    /// Time is paused, so the sleep costs nothing and the assertion is about
+    /// [`CLEANUP_IDLE`] rather than about how fast the machine is.
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_that_stops_moving_sharpens_on_its_own() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = TileSink::new("test", frame_tx, MOTION);
+
+        let cell = rect(0, 0, 320, 64);
+        drive(&sink, cell, u64::from(CHURN_MOVING)).await;
+        sink.flush().await;
+        let moving = drain(&mut frame_rx, usize::try_from(CHURN_MOVING).unwrap()).await;
+        assert_eq!(*formats(&moving).last().unwrap(), Tile::FORMAT_JPEG);
+
+        // Nothing is pushed from here on: the remote has gone quiet, and the tick
+        // is the only thing left that can act.
+        tokio::time::sleep(CLEANUP_IDLE + CLEANUP_TICK * 2).await;
+
+        let ServerMsg::Tile(settled) = &drain(&mut frame_rx, 1).await[0] else {
+            panic!("a settled cell was never re-sent");
+        };
+        assert_eq!(settled.format, Tile::FORMAT_PNG, "it settled to the wrong encode");
+        assert_eq!(
+            (settled.x, settled.y, settled.w, settled.h),
+            (cell.left, cell.top, cell.w(), cell.h()),
+            "the cleanup covered something other than the cell that settled"
+        );
+
+        // Once, and only once: the debt is discharged, not standing.
+        tokio::time::sleep(CLEANUP_IDLE * 4).await;
+        assert!(frame_rx.try_recv().is_err(), "a settled cell was cleaned up twice");
+    }
+
+    /// A resize makes every key name somewhere else, and a repaint re-sends every
+    /// pixel at the base encode. Either way nothing carries across.
+    #[tokio::test]
+    async fn a_reset_drops_every_history_and_every_debt() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = TileSink::new("test", frame_tx, MOTION);
+
+        let cell = rect(0, 0, 320, 64);
+        drive(&sink, cell, u64::from(CHURN_MOVING)).await;
+        sink.flush().await;
+        drain(&mut frame_rx, usize::try_from(CHURN_MOVING).unwrap()).await;
+        assert!(!sink.shared.motion.lock().unwrap().stash.is_empty(), "nothing was owed");
+
+        sink.reset_motion();
+        {
+            let motion = sink.shared.motion.lock().unwrap();
+            assert!(motion.churn.is_empty() && motion.stash.is_empty());
+            assert_eq!(motion.stash_bytes, 0);
+        }
+
+        // The next frame is a first change, not the continuation of a motion.
+        sink.damage(cell, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+        sink.flush().await;
+        assert_eq!(formats(&drain(&mut frame_rx, 1).await), vec![Tile::FORMAT_PNG]);
     }
 }

@@ -3,7 +3,7 @@
 //! The shadow is cleared before a repaint for a new attachment so it never
 //! claims that client has pixels it did not receive.
 
-use crate::protocol::CELL_H;
+use crate::protocol::{CELL_H, CELL_W};
 
 /// A rectangle of the framebuffer, in pixels, with **inclusive** edges.
 ///
@@ -63,6 +63,43 @@ impl Rect {
                 right: self.right,
                 bottom: self.bottom.min(top.saturating_add(CELL_H - 1)),
             })
+    }
+
+    /// This rectangle cut at the [`CELL_W`]×[`CELL_H`] grid lines, left to right
+    /// within each row of cells, top down. Clipped to itself, never snapped
+    /// outward — a piece covers only pixels this rectangle already covered.
+    ///
+    /// Both axes are cut, and the vertical one is not redundant with
+    /// [`Self::bands`]: bands are anchored to the rectangle's own `top`, so a
+    /// band starting at y=37 straddles the grid line at y=64 and has to be cut in
+    /// two here. The point of the cut is that no piece straddles a line, which is
+    /// what makes [`Self::cell_key`] answerable for every piece.
+    pub fn cells(&self) -> impl Iterator<Item = Rect> + '_ {
+        let start = |v: u16, step: u16| v - v % step;
+        (start(self.top, CELL_H)..=self.bottom)
+            .step_by(usize::from(CELL_H))
+            .flat_map(move |row| {
+                let top = self.top.max(row);
+                let bottom = self.bottom.min(row.saturating_add(CELL_H - 1));
+                (start(self.left, CELL_W)..=self.right)
+                    .step_by(usize::from(CELL_W))
+                    .map(move |col| Rect {
+                        left: self.left.max(col),
+                        top,
+                        right: self.right.min(col.saturating_add(CELL_W - 1)),
+                        bottom,
+                    })
+            })
+    }
+
+    /// The grid cell this rectangle lies in, as `(column, row)`.
+    ///
+    /// Meaningful for a piece [`Self::cells`] produced, which by construction lies
+    /// wholly inside one cell however far from its corner it starts. A rectangle
+    /// that straddles a grid line answers for the cell its top-left is in, which
+    /// is not wrong so much as not a question worth asking.
+    pub fn cell_key(&self) -> (u16, u16) {
+        (self.left / CELL_W, self.top / CELL_H)
     }
 }
 
@@ -575,5 +612,93 @@ mod tests {
         assert_eq!(bands[2], rect(0, CELL_H * 2, 99, CELL_H * 2));
         // No gaps, no overlap, and the whole rectangle is covered.
         assert_eq!(bands.iter().map(|b| usize::from(b.h())).sum::<usize>(), usize::from(tall.h()));
+    }
+
+    /// Every pixel of the source lands in exactly one piece, and in no piece
+    /// twice. Asserted by counting rather than by comparing rectangles, so it
+    /// holds for any shape rather than the one that happened to be written down.
+    #[test]
+    fn cells_cover_a_rectangle_exactly_once() {
+        for source in [
+            rect(0, 0, 0, 0),
+            rect(37, 41, 900, 200),
+            rect(319, 63, 320, 64),
+            rect(1000, 500, 1279, 799),
+            rect(0, 0, CELL_W * 3 - 1, CELL_H * 3 - 1),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for cell in source.cells() {
+                assert!(source.contains(&cell), "{cell:?} escaped {source:?}");
+                for y in cell.top..=cell.bottom {
+                    for x in cell.left..=cell.right {
+                        assert!(seen.insert((x, y)), "({x},{y}) covered twice in {source:?}");
+                    }
+                }
+            }
+            let area = usize::from(source.w()) * usize::from(source.h());
+            assert_eq!(seen.len(), area, "{source:?} was not fully covered");
+        }
+    }
+
+    /// The property `cell_key` rests on: a piece lies wholly within one cell, so
+    /// its every pixel answers to the same key its top-left does.
+    #[test]
+    fn no_cell_straddles_a_grid_line() {
+        let source = rect(37, 41, 900, 200);
+        for cell in source.cells() {
+            assert_eq!(
+                (cell.left / CELL_W, cell.top / CELL_H),
+                (cell.right / CELL_W, cell.bottom / CELL_H),
+                "{cell:?} spans two cells"
+            );
+            assert_eq!(cell.cell_key(), (cell.left / CELL_W, cell.top / CELL_H));
+        }
+    }
+
+    /// The identity the whole scheme wants: two protocols describing the same
+    /// region with different rectangles still name the same cell. A `bands` piece
+    /// anchored to its rectangle's top is the case that forces the vertical cut —
+    /// without it, the band below would carry the row above's key.
+    #[test]
+    fn differently_shaped_damage_lands_on_the_same_key() {
+        let wide = rect(600, 100, 700, 110);
+        let tall = rect(650, 70, 660, 120);
+        let keys = |r: Rect| r.cells().map(|c| c.cell_key()).collect::<Vec<_>>();
+        assert_eq!(keys(wide), vec![(1, 1), (2, 1)]);
+        assert_eq!(keys(tall), vec![(2, 1)]);
+
+        // A band that straddles y = CELL_H is cut into both rows.
+        let band = rect(0, CELL_H - 1, 99, CELL_H * 2 - 2);
+        assert_eq!(keys(band), vec![(0, 0), (0, 1)]);
+    }
+
+    /// A rectangle inside one cell is one piece, unchanged — the case a still
+    /// screen spends nearly all its time in.
+    #[test]
+    fn a_rectangle_inside_one_cell_is_left_alone() {
+        let small = rect(330, 70, 350, 90);
+        assert_eq!(small.cells().collect::<Vec<_>>(), vec![small]);
+        assert_eq!(small.cell_key(), (1, 1));
+    }
+
+    /// The pieces arrive in the order the engines emit tiles, so a client paints
+    /// a split band the way it paints an unsplit one.
+    #[test]
+    fn cells_arrive_left_to_right_then_top_down() {
+        let source = rect(300, 60, 650, 130);
+        assert_eq!(
+            source.cells().collect::<Vec<_>>(),
+            vec![
+                rect(300, 60, 319, 63),
+                rect(320, 60, 639, 63),
+                rect(640, 60, 650, 63),
+                rect(300, 64, 319, 127),
+                rect(320, 64, 639, 127),
+                rect(640, 64, 650, 127),
+                rect(300, 128, 319, 130),
+                rect(320, 128, 639, 130),
+                rect(640, 128, 650, 130),
+            ]
+        );
     }
 }

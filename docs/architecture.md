@@ -72,12 +72,13 @@ combinations that exist are:
 | `full` | `png` | lossless PNG. The default, and byte-identical to the PNG-only gateway that preceded the dial |
 | `fixed-quality` | `jpeg` | every tile JPEG at `render_quality` |
 | `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
+| `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
+| `motion` | `jpeg` / `webp` | base at `render_quality`; cells in motion cheaper still |
 
-No classifier runs in either lossy combination: `jpeg` sends *every* tile as JPEG,
-so flat UI and text soften along with photographic content. That is the honest
-trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer bytes
-for the same visible result. Content- and motion-sensitive strategies are the
-[roadmap](roadmap.md)'s business.
+No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
+JPEG, so flat UI and text soften along with photographic content. That is the
+honest trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer
+bytes for the same visible result.
 
 The dial costs no wire change. A tile record's first byte is already its format
 (`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and both clients decode all
@@ -85,15 +86,15 @@ three — the browser through `createImageBitmap` from a MIME type, the Swift vi
 through ImageIO from the container itself. WebP decode is why the app's deployment
 target is macOS 15.
 
-The engines never see the config enums. Both axes and the quality collapse to one
-`TileCodec` (`Png | Jpeg(q) | Webp(q)`) at the config boundary in
-`TargetConfig::tile_codec`, which reaches the per-tile encode call through the
-engine-agnostic `TileSink`:
+The engines never see the config enums. The axes and the qualities collapse to one
+`RenderPlan` — a base `TileCodec` (`Png | Jpeg(q) | Webp(q)`) and, for `motion`
+only, a second one — at the config boundary in `TargetConfig::render_plan`, which
+reaches the per-tile encode call through the engine-agnostic `TileSink`:
 
 ```text
-render_type / render_subtype / render_quality
-  → TargetConfig::tile_codec() → TileCodec → vnc::run / rdp::run
-  → TileSink::new(engine, frame_tx, codec)
+render_type / render_subtype / render_quality / render_motion_*
+  → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
+  → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
 ```
 
@@ -101,6 +102,71 @@ Because `TileSink` is shared, RDP and VNC get every codec from one implementatio
 and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
 `encode_webp` wraps the `webp` crate's `libwebp`, built by `cc` with the target's
 SIMD and no cmake, at `thread_level = 1` so one encode can use all cores.
+
+#### `motion`: a discount on what is too busy to notice
+
+`motion` is not a third way to encode every tile. It builds on the base encode a
+target already has and changes nothing about it — the base is read from
+`render_subtype` and `render_quality` rather than from `render_type`, which
+`motion` occupies — and adds a second, much cheaper encode used *only* for cells
+currently changing fast. A lossless base is the configuration the fixed dial cannot
+express at all, and the interesting one: text and flat UI stay perfect, and only
+what moves gets ugly.
+
+```toml
+[[targets]]
+render_type           = "motion"
+render_subtype        = "png"    # base: what a settled cell gets
+render_motion_subtype = "jpeg"   # moving cells: need not be the base codec
+render_motion_quality = 10       # moving cells: as cheap as it takes
+```
+
+The moving encode has its own codec axis (`MotionSubtype`, which admits no `png`),
+not just its own quality. A settled cell is sent once and can afford WebP's slower,
+smaller encode, while a moving cell is re-encoded every frame, where JPEG's faster
+encode may beat WebP's smaller output; cheapest and smallest are not the same
+question at quality 60 as at 10. `render_motion_subtype` defaults to
+`render_subtype`, and is required when the base is `png` — lossless has no dial to
+turn down.
+
+Detection is in `src/encode.rs`, owned by the sink both engines already funnel
+their damage through:
+
+- **Cell identity.** `Shadow` is pixel-exact and has no stable cell identity, so
+  churn is keyed to the fixed 320×64 grid (`CELL_W`/`CELL_H`). `Rect::cells` cuts a
+  rectangle at the grid lines on both axes, and `Rect::cell_key` names the piece.
+  Cutting rather than snapping outward matters: RDP and VNC describe the same
+  moving region with different rectangles from frame to frame, and a key that moved
+  with them would count no churn, but snapping outward would ship pixels that did
+  not change — and VNC could not reach them anyway, since it crops from the
+  rectangle it just read.
+- **Churn → encode.** Each cell keeps an 8-bit shift register of which of the last
+  `CHURN_WINDOW` frames changed it, advanced by `TileSink::frame` — one RDP batch
+  of outputs, one VNC `FramebufferUpdate`. At `CHURN_MOVING` set bits the cell is
+  in motion and takes the motion codec. A hard switch rather than a ramp, because
+  the switch is what a measurement can read.
+- **Splitting only where it matters.** A band whose cells are all quiet is sent
+  whole and at the base encode, so a target with nothing moving is byte-for-byte
+  what the same target sends without `motion` at all. Only a band containing a
+  moving cell is cut at the grid — which is what makes a video in a window cost its
+  own cells their quality and cost the text beside it nothing.
+- **Cleanup.** A piece sent at the motion encode keeps its source pixels, bounded
+  by `MAX_STASH_BYTES`. A `CLEANUP_TICK` interval in `order_loop` re-sends cells
+  idle past `CLEANUP_IDLE` at the *base* encode, `MAX_CLEANUPS_PER_TICK` at a time
+  and oldest first, so a paused screen sharpens on its own without a client
+  repaint. The timer has to be its own, because the case it exists for is a remote
+  that has stopped sending frames. The debt is timed at dispatch rather than when
+  the encode lands, which is what keeps a cleanup from overtaking fresher pixels: a
+  cell with a tile still in the queue cannot also be idle.
+- **Resets.** Motion state is cleared on resize, where the keys no longer name the
+  same pixels, and on reattach, where the repaint re-sends every pixel at the base
+  encode anyway.
+
+Cleanups ride the wire as ordinary tiles; nothing about the record changed. What it
+cost is in the `encode totals` line, where `motion` and `cleanup` are read together:
+every cleanup is a tile sent twice, so a scheme paying more in re-sends than it
+saves in motion shows up as a cleanup byte count rivalling the saving. Replacing the
+moving-cell encoder with H.264 is the [roadmap](roadmap.md)'s business.
 
 ## Session lifecycle
 

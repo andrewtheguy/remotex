@@ -330,10 +330,16 @@ pub mod audio {
     }
 }
 
-/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0). No
-/// engine snaps to it today — RDP and VNC damage is reported in its own
-/// rectangles — but the constants are retained for a future fixed-grid quality
-/// pass that would want stable change-detection and cache cells.
+/// Canonical 320×64 tile grid in framebuffer pixels, anchored at (0,0).
+///
+/// Damage is still reported by RDP and VNC in their own rectangles and is still
+/// *sent* in those rectangles — nothing snaps outward to the grid, which would
+/// mean shipping pixels that did not change. What the grid gives is a stable
+/// **identity**: [`crate::tiles::Rect::cells`] splits a rectangle at these lines
+/// so the same region of the screen always lands under the same
+/// [`crate::tiles::Rect::cell_key`], however differently the two protocols happen
+/// to describe it from one frame to the next. That identity is what the render
+/// dial's `motion` type counts churn against.
 pub const CELL_W: u16 = 320;
 /// See [`CELL_W`].
 pub const CELL_H: u16 = STRIP_ROWS;

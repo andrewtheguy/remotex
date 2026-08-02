@@ -440,7 +440,7 @@ pub async fn run(
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
 ) {
-    let sink = TileSink::new("vnc", frame_tx, config.tile_codec());
+    let sink = TileSink::new("vnc", frame_tx, config.render_plan());
     session(config, input_rx, &sink).await;
     sink.finish().await;
 }
@@ -1076,6 +1076,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // non-incremental update brings back is then new, which is
                     // the truth — a browser that just attached has nothing.
                     shadow.lock().unwrap().forget();
+                    // The repaint that follows re-sends every pixel at the base
+                    // encode, which settles every debt and makes every cell's
+                    // history a single redraw rather than motion.
+                    sink.reset_motion();
                     let (size, resize_msg) = {
                         let d = desktop.lock().unwrap();
                         (d.size, d.resize_msg())
@@ -1386,6 +1390,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         break;
                     }
                 }
+                // One FramebufferUpdate is one frame: RFB's own unit for "here is
+                // everything that changed since you last asked", however many
+                // rectangles it took.
+                sink.frame();
                 let size = desktop.lock().unwrap().size;
                 if full_repaint_owed {
                     // Layout metadata and empty updates can arrive before the
@@ -2129,15 +2137,15 @@ async fn read_rect<R: AsyncRead + Unpin>(
         return Ok(RectEffect::pixels(rect));
     };
 
-    for band in changed.bands() {
-        // Cropped out of the rect just read rather than out of the shadow: the
-        // bytes are the same and this needs no lock. Its own buffer per band, since
-        // the encoder reads it after this function has returned and `rgb` is gone.
+    // Cropped out of the rect just read rather than out of the shadow: the bytes
+    // are the same and this needs no lock. Its own buffer per piece, since the
+    // encoder reads it after this function has returned and `rgb` is gone.
+    sink.damage(changed, |piece| {
         let mut pixels = Vec::new();
-        tiles::crop(&rgb, rect, band, &mut pixels);
-        sink.tile(band.left, band.top, band.w(), band.h(), pixels)
-            .await?;
-    }
+        tiles::crop(&rgb, rect, piece, &mut pixels);
+        pixels
+    })
+    .await?;
     Ok(RectEffect::pixels(rect))
 }
 
@@ -2283,6 +2291,9 @@ async fn apply_resize(
     // The old pixels describe a framebuffer that no longer exists, and the
     // browser is about to reallocate its canvas.
     shadow.lock().unwrap().resize(new.0, new.1);
+    // The cell grid is anchored at (0,0) in framebuffer pixels, so a new size makes
+    // every key name somewhere else.
+    sink.reset_motion();
     info!("vnc: desktop resized to {}x{} at {scale}x", new.0, new.1);
     sink.msg(resize_msg).await?;
     Ok(true)
@@ -3957,7 +3968,11 @@ mod tests {
     /// A sink and the frame channel behind it.
     fn test_sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(8);
-        (TileSink::new("vnc", frame_tx, crate::config::TileCodec::Png), frame_rx)
+        let plan = crate::config::RenderPlan {
+            base: crate::config::TileCodec::Png,
+            motion: None,
+        };
+        (TileSink::new("vnc", frame_tx, plan), frame_rx)
     }
 
     /// What the sink has forwarded so far, or `None` for nothing.
