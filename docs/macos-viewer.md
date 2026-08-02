@@ -521,6 +521,27 @@ authorizes the client. They are independent.
 `URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
 limit ends the socket rather than dropping one frame.
 
+### Local network permission
+
+macOS 15 and later refuse an app's connections to anything off this machine until
+local network access is allowed, which covers the embedded gateway: the permission
+belongs to the responsible app bundle, and `remotex-gateway` is a child of
+`remotex.app`. A fresh install therefore fails on its first target, and the sheet
+that asks is the user's to answer.
+
+The refusal is `EHOSTUNREACH`, exactly what an address with no route gives, and
+nothing on the gateway side can tell the two apart — there is no API that returns
+the permission state, which TN3179 still says in as many words. So the gateway does
+not try to. `engine::tcp_connect` adds one clause to the error naming the
+permission, on macOS only, and leaves the address standing as the other
+possibility. It does not wait, retry, or conclude.
+
+Note for QA: `tccutil reset LocalNetwork` cannot undo a decision — local network
+privacy is a Network Extension filter, not TCC — and TN3179 records that macOS
+offers no reset. Toggling the app off and on under System Settings > Privacy &
+Security > Local Network and relaunching is the practical way back. The row is in
+the second, alphabetical group, between **Input Monitoring** and **Microphone**.
+
 ## Build and QA
 
 Run the tests, build the packaged app, and launch QA against a throwaway instance:
