@@ -161,62 +161,54 @@ struct RemoteCanvasHost: NSViewRepresentable {
         /// The arithmetic is `RemoteGeometry.windowFrame`, and all of it is
         /// there: what is left here is reading the measurements off AppKit.
         ///
-        /// Applied more than once, because one pass is only right if the chrome
-        /// around the web view is the same at the new size as it was at the old.
-        /// The fit works by measuring that chrome — `window.frame` minus the web
-        /// view's bounds — and adding it to the desktop; a window whose title bar
-        /// or safe area resolves differently once it has been resized leaves the
-        /// first answer short, and short by less than a scroll bar's width is a
-        /// window that keeps its scroll bars. Re-measuring after AppKit has laid
-        /// the new frame out costs nothing when the first pass was right: the
-        /// second computes the same frame and stops.
-        ///
-        /// What this cannot correct is the page's own idea of its usable area.
-        /// The bars take their width from the content box, and nothing on this
-        /// side can see that; if a desktop still will not sit flush, that is
-        /// where to look next.
+        /// One pass, and one is enough. `doc + (window - bounds)` is a fixed
+        /// point: applying it again measures the same chrome and computes the
+        /// same frame. A second pass was tried against a scroll-bar problem and
+        /// could only compound it, because the only thing that made the two
+        /// passes differ was a measurement taken before layout had settled.
         ///
         /// A full-screen window is left alone. Its size is the screen's and not
         /// this app's to set, and AppKit would either refuse the frame or take
         /// the window out of full screen to honour it; neither is what the menu
         /// item offers.
         func fitWindowToRemote() {
-            guard fitWindowOnce() else {
-                return
-            }
-            // Next turn of the run loop, so AppKit has laid the web view out
-            // inside the frame just set and the chrome measures true.
-            Task { @MainActor [weak self] in
-                _ = self?.fitWindowOnce()
-            }
-        }
-
-        /// One pass. Returns whether it moved the window, which is what tells the
-        /// caller another pass is worth making.
-        @discardableResult
-        private func fitWindowOnce() -> Bool {
             guard let webView, let remoteSize = model.session.remoteSize,
                   let window = webView.window,
                   !window.styleMask.contains(.fullScreen),
                   let screen = window.screen ?? NSScreen.main
             else {
-                return false
+                return
             }
+            // The web view's bounds, and deliberately *not* the page's content
+            // box. What this arithmetic wants is the window chrome —
+            // `window - room` — and the bounds give exactly that, scroll bars or
+            // no scroll bars. The content box subtracts whatever the bars are
+            // taking, which then gets added to the desktop as though it were
+            // chrome: fitting a 1280x800 desktop from a 1000x700 window with
+            // both bars up asked for 1295x847 instead of 1280x832, and a second
+            // pass on top of that reached 1590x855. Fitting to the bounds lands
+            // the view on the desktop's own size, where nothing overflows and
+            // the bars have no reason to be.
+            let room = webView.bounds.size
             let frame = RemoteGeometry.windowFrame(
                 fitting: RemoteGeometry.pointSize(
                     of: remoteSize,
                     guestScale: model.session.remoteScale
                 ),
-                room: webView.bounds.size,
+                room: room,
                 window: window.frame,
                 limit: screen.visibleFrame,
                 minimum: window.minSize
             )
+            model.trace(
+                "fit: room \(Int(room.width))x\(Int(room.height)) "
+                    + "window \(Int(window.frame.width))x\(Int(window.frame.height)) "
+                    + "-> \(Int(frame.width))x\(Int(frame.height))"
+            )
             guard frame != window.frame else {
-                return false
+                return
             }
             window.setFrame(frame, display: true)
-            return true
         }
 
         /// Reapply toolbar visibility because SwiftUI may replace the toolbar.

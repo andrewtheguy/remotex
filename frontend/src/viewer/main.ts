@@ -91,6 +91,9 @@ function resize(w: number, h: number, scale: number) {
   }
   size = next;
   paintCursor();
+  // The desktop's size just changed, so the room may have too — a bar that was
+  // needed a moment ago may not be now, or the other way round.
+  reportGeometry();
 }
 
 // Drop any retained framebuffer. The desktop is always rebuilt from a full
@@ -156,14 +159,46 @@ let queue: Promise<void> = Promise.resolve();
 const framesUrl =
   new URLSearchParams(location.search).get("frames") ?? "./frames";
 
+const screen = document.querySelector(".screen") as HTMLElement;
+
+/**
+ * Make the scroll bars decide again from nothing.
+ *
+ * They take their width out of the content box, so once both are up the box is
+ * 15px smaller each way and a desktop that would now fit exactly still
+ * overflows *that* — each bar is the reason the other is needed, and neither
+ * lets go. Resizing the window to the desktop's own size is precisely the case
+ * that lands there, so "Resize to Display" left the bars up and the desktop
+ * clipped, while the same size reached from a larger window was fine.
+ *
+ * Dropping to `overflow: hidden` and forcing a layout removes both bars, so the
+ * measurement that follows is of the full box; going back to the stylesheet's
+ * `auto` then asks the honest question — does the content fit in the box with
+ * no bars — and answers it correctly in both directions.
+ */
+function settleScrollbars() {
+  screen.style.overflow = "hidden";
+  void screen.offsetWidth; // forces the layout that drops the bars
+  screen.style.overflow = "";
+}
+
+// What the app cannot measure for itself: the room left for the desktop once
+// the scroll bars have taken their width, and what the desktop is actually
+// laid out at. Sent on every attachment and after every layout change, because
+// "Resize to Display" fits to the first and is wrong whenever the two differ.
+function reportGeometry() {
+  settleScrollbars();
+  postToApp({
+    type: "ready",
+    secureContext: window.isSecureContext,
+    audioDecoder: typeof AudioDecoder !== "undefined",
+    room: { w: screen.clientWidth, h: screen.clientHeight },
+    content: { w: screen.scrollWidth, h: screen.scrollHeight },
+  });
+}
+
 readStream(framesUrl, {
-  onOpen: () => {
-    postToApp({
-      type: "ready",
-      secureContext: window.isSecureContext,
-      audioDecoder: typeof AudioDecoder !== "undefined",
-    });
-  },
+  onOpen: reportGeometry,
   onEnvelope: (envelope) => {
     queue = queue
       .then(async () => {
@@ -195,5 +230,9 @@ readStream(framesUrl, {
 });
 
 // The desktop's on-screen scale changes with the window's display, and the
-// pointer is sized through it.
-window.addEventListener("resize", paintCursor);
+// pointer is sized through it. The app also wants the new room: it fits the
+// window to what is left for the desktop, which only this side can measure.
+window.addEventListener("resize", () => {
+  paintCursor();
+  reportGeometry();
+});

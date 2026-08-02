@@ -50,10 +50,23 @@ export type CanvasCommand =
 
 /** Page to app, over `window.webkit.messageHandlers.remotexCanvas`. */
 export type CanvasEvent =
-  // First message of every stream. The app checks both: without a secure
-  // context there is no WebCodecs, and silent muting is the failure this
-  // catches.
-  | { type: "ready"; secureContext: boolean; audioDecoder: boolean }
+  // First message of every stream, and after every layout change. The app
+  // checks the first two: without a secure context there is no WebCodecs, and
+  // silent muting is the failure that catches.
+  //
+  // `room` is the scroll container's *content box* — what is left for the
+  // desktop once any scroll bars have taken their width. The app cannot see it
+  // from its side (the web view's bounds include that width) and it is what
+  // "Resize to Display" has to fit, so the page is the only honest source.
+  // `content` is the desktop's own laid-out size, carried beside it because a
+  // fit that leaves them unequal is the bug, and the pair says which way.
+  | {
+      type: "ready";
+      secureContext: boolean;
+      audioDecoder: boolean;
+      room: { w: number; h: number };
+      content: { w: number; h: number };
+    }
   | { type: "pointer"; x: number; y: number }
   // Carries no position: a press is preceded by its own `pointer`, which is how
   // the native surface reported one too, and a release lands wherever the

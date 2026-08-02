@@ -94,8 +94,16 @@ struct CanvasCommandTests {
     @Test
     func everyEventThePageSendsIsRead() throws {
         #expect(
-            event(#"{"type":"ready","secureContext":true,"audioDecoder":false}"#)
-                == .ready(secureContext: true, audioDecoder: false)
+            event(
+                #"{"type":"ready","secureContext":true,"audioDecoder":false,"#
+                    + #""room":{"w":1265,"h":785},"content":{"w":1280,"h":800}}"#
+            )
+                == .ready(
+                    secureContext: true,
+                    audioDecoder: false,
+                    room: DisplayMode(w: 1265, h: 785),
+                    content: DisplayMode(w: 1280, h: 800)
+                )
         )
         #expect(
             event(#"{"type":"pointer","x":12,"y":-3}"#) == .pointer(x: 12, y: -3)
@@ -128,6 +136,27 @@ struct CanvasCommandTests {
     /// The page is ours and the only writer, so anything unreadable is a bug —
     /// but it is dropped rather than trapped, because this decodes on the main
     /// actor with a live session behind it.
+    /// The room is CSS pixels and may be fractional; the window it sizes is
+    /// whole points, so it is rounded rather than truncated — a room reported as
+    /// 1279.6 is a desktop that fits, and flooring it would take a point away
+    /// and put the scroll bars back.
+    @Test
+    func aFractionalRoomIsRoundedRatherThanTruncated() throws {
+        let decoded = event(
+            #"{"type":"ready","secureContext":true,"audioDecoder":true,"#
+                + #""room":{"w":1279.6,"h":799.5},"content":{"w":1280,"h":800}}"#
+        )
+        #expect(
+            decoded
+                == .ready(
+                    secureContext: true,
+                    audioDecoder: true,
+                    room: DisplayMode(w: 1280, h: 800),
+                    content: DisplayMode(w: 1280, h: 800)
+                )
+        )
+    }
+
     @Test
     func anythingElseIsDroppedRatherThanTrapped() {
         #expect(event(#"{"type":"nonsense"}"#) == nil)

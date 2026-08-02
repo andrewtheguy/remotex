@@ -76,8 +76,21 @@ enum CanvasCommand: Equatable, Encodable {
 /// Input only, plus the two things the app cannot see for itself: whether the
 /// page came up able to decode audio, and whether sound is actually playing.
 enum CanvasEvent: Equatable, Decodable {
-    /// The first message of every stream attachment.
-    case ready(secureContext: Bool, audioDecoder: Bool)
+    /// The first message of every stream attachment, and every layout change
+    /// after it.
+    ///
+    /// `room` is the page's *content box* — what is left for the desktop once
+    /// its scroll bars have taken their width. This side cannot measure it: the
+    /// web view's bounds include that width, so a window fitted to them is short
+    /// by a scroll bar whenever one is up, which leaves the bars in place and
+    /// sustaining each other. `content` is the desktop as laid out, so the two
+    /// together say whether it fits and by how much it does not.
+    case ready(
+        secureContext: Bool,
+        audioDecoder: Bool,
+        room: DisplayMode,
+        content: DisplayMode
+    )
     /// A position in remote framebuffer pixels, already mapped and clamped by
     /// the page, which is the only side that knows where the canvas is on
     /// screen.
@@ -92,8 +105,23 @@ enum CanvasEvent: Equatable, Decodable {
     case audioState(playing: Bool, error: String?)
 
     private enum CodingKeys: String, CodingKey {
-        case type, secureContext, audioDecoder, x, y, button, pressed, clicks
+        case type, secureContext, audioDecoder, room, content
+        case x, y, button, pressed, clicks
         case dx, dy, unit, playing, error
+    }
+
+    /// A `{w, h}` pair as the page sends it. CSS pixels, so fractional in
+    /// principle; rounded here because the window they size is whole points.
+    private struct Size: Decodable {
+        let w: Double
+        let h: Double
+
+        var mode: DisplayMode {
+            DisplayMode(
+                w: UInt16(clamping: Int(w.rounded())),
+                h: UInt16(clamping: Int(h.rounded()))
+            )
+        }
     }
 
     init(from decoder: any Decoder) throws {
@@ -103,7 +131,9 @@ enum CanvasEvent: Equatable, Decodable {
         case "ready":
             self = .ready(
                 secureContext: try container.decode(Bool.self, forKey: .secureContext),
-                audioDecoder: try container.decode(Bool.self, forKey: .audioDecoder)
+                audioDecoder: try container.decode(Bool.self, forKey: .audioDecoder),
+                room: try container.decode(Size.self, forKey: .room).mode,
+                content: try container.decode(Size.self, forKey: .content).mode
             )
         case "pointer":
             self = .pointer(

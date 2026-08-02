@@ -46,7 +46,8 @@ extension CanvasBridge: WKScriptMessageHandler {
 
     private func apply(_ event: CanvasEvent) {
         switch event {
-        case .ready(let secureContext, let audioDecoder):
+        case .ready(let secureContext, let audioDecoder, let room, let content):
+            model.noteCanvasRoom(room, content: content)
             noteReady(secureContext: secureContext, audioDecoder: audioDecoder)
         case .pointer(let x, let y):
             model.sendPointer(x: x, y: y)

@@ -1009,6 +1009,32 @@ final class AppModel: GatewaySessionSink {
         canvasAttached()
     }
 
+    /// The page measured the room it has for the desktop, and what the desktop
+    /// is laid out at.
+    ///
+    /// Traced rather than acted on, and that is the point of it. The fit is
+    /// computed from the web view's bounds, which is the *window* chrome and
+    /// nothing else; this pair is the only way to see what the page made of the
+    /// result. Equal means the desktop sits flush with no scroll bars, and the
+    /// two differing by a bar's width is what a latched scroll bar looks like
+    /// from here — which is a bug that cost a long evening precisely because
+    /// neither side could see it alone.
+    func noteCanvasRoom(_ room: DisplayMode, content: DisplayMode) {
+        trace("canvas room \(room.w)x\(room.h), content \(content.w)x\(content.h)")
+    }
+
+    /// A line for `REMOTEX_VIEWER_TRACE=1`, on stderr.
+    ///
+    /// The app is launched by Launch Services, whose `os_log` output is not
+    /// something a terminal can read back; a QA run started from a shell can
+    /// read stderr. Off unless asked for, so a normal launch is silent.
+    func trace(_ message: @autoclosure () -> String) {
+        guard ProcessInfo.processInfo.environment["REMOTEX_VIEWER_TRACE"] != nil else {
+            return
+        }
+        FileHandle.standardError.write(Data("viewer: \(message())\n".utf8))
+    }
+
     /// Tell the page whether to report input, when the answer has changed.
     ///
     /// Deduped because it is called after every session event and the answer
