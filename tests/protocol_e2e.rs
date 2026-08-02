@@ -768,6 +768,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         render_quality: None,
         render_motion_subtype: None,
         render_motion_quality: None,
+        render_motion_debug: false,
     }
 }
 

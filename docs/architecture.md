@@ -181,6 +181,17 @@ their damage through:
 - **Resets.** Motion state is cleared on resize, where the keys no longer name the
   same pixels, and on reattach, where the repaint re-sends every pixel at the base
   encode anyway.
+- **`render_motion_debug`.** A QA aid, off unless asked for, that outlines every
+  piece a split region emits in the pixels themselves: magenta for the motion
+  encode, cyan for a quiet cell beside it, green for a cleanup. It exists because
+  the alternative is inferring the decision from how blurry something looks, and
+  the two failures that produces look alike from a screenshot: motion armed on
+  something that is not moving, and a stale lossy region nothing is going to
+  replace. Under the overlay they are distinct — the first is magenta, the second
+  carries no mark at all, since an unmarked region was sent whole at the base
+  encode. The mark goes on the copy handed to the encoder, never on the pixels the
+  shadow recorded or the stash owes, so a cleanup erases the outline it replaces
+  rather than restoring it.
 
 Cleanups ride the wire as ordinary tiles; nothing about the record changed. What it
 cost is in the `encode totals` line, where `motion` and `cleanup` are read together:

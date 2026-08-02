@@ -87,6 +87,21 @@ const CLEANUP_TICK: Duration = Duration::from_millis(250);
 /// than in one burst competing with live motion for the socket.
 const MAX_CLEANUPS_PER_TICK: usize = 8;
 
+/// Colour of a `render_motion_debug` outline on a piece sent at the motion encode.
+///
+/// Magenta, cyan and green rather than anything subtler: these survive a JPEG at
+/// quality 10, which is the encode whose extent they are drawn to show, and none of
+/// them is a colour a desktop produces in a straight line by accident.
+const MARK_MOTION: [u8; 3] = [255, 0, 255];
+/// Colour of a `render_motion_debug` outline on a piece sent at the base encode
+/// from inside a split band — the quiet side of the split.
+const MARK_CRISP: [u8; 3] = [0, 255, 255];
+/// Colour of a `render_motion_debug` outline on a cleanup tile.
+const MARK_CLEANUP: [u8; 3] = [0, 255, 0];
+/// Thickness of a `render_motion_debug` outline. Two pixels, because one does not
+/// reliably survive chroma subsampling at the quality a moving cell is sent at.
+const MARK_PX: u16 = 2;
+
 /// Cap on the source pixels held for cleanups at once. Past it a cell keeps the
 /// motion encode until it next changes — safe, just not as crisp — rather than the
 /// stash growing without bound under a full-screen video.
@@ -266,6 +281,38 @@ impl Motion {
     }
 }
 
+/// `rgb` with the border of `rect` painted `colour`, for `render_motion_debug`.
+///
+/// A copy, and the copy is what goes to the encoder: the original is what
+/// [`crate::tiles::Shadow`] has already recorded as delivered and what the stash
+/// owes, so painting it in place would make the outline permanent — the cleanup
+/// would faithfully restore the mark along with the pixels, and nothing after that
+/// would ever take it off again.
+fn marked(rgb: &Arc<Vec<u8>>, rect: Rect, colour: [u8; 3]) -> Arc<Vec<u8>> {
+    let (w, h) = (usize::from(rect.w()), usize::from(rect.h()));
+    if rgb.len() != w * h * 3 {
+        // Not the pixels this rectangle describes. A debug aid is never the thing
+        // that corrupts a frame, so it declines rather than indexes on a guess.
+        return Arc::clone(rgb);
+    }
+    let t = usize::from(MARK_PX);
+    let mut out = rgb.as_ref().clone();
+    let mut paint = |row: usize, from: usize, to: usize| {
+        for x in from..to {
+            out[(row * w + x) * 3..][..3].copy_from_slice(&colour);
+        }
+    };
+    for y in 0..h {
+        if y < t || y + t >= h {
+            paint(y, 0, w);
+        } else {
+            paint(y, 0, t.min(w));
+            paint(y, w.saturating_sub(t), w);
+        }
+    }
+    Arc::new(out)
+}
+
 /// State the sink and its order task both touch.
 ///
 /// The counters live here rather than in the order task because the engine is what
@@ -337,6 +384,21 @@ impl TileSink {
     /// byte-for-byte what the same target sends today — and only a band containing a
     /// moving cell is cut at the grid, so a video in a window costs its own cells
     /// their quality and costs the text beside it nothing.
+    ///
+    /// Under `render_motion_debug` every piece a *split* band produces is outlined
+    /// in the pixels sent, so which cells the detection put in motion is something
+    /// QA reads off the screen rather than infers from how blurry a region looks:
+    ///
+    /// - [`MARK_MOTION`] (magenta) — sent at the motion encode. Magenta over
+    ///   something that is not moving is the detection reaching too far.
+    /// - [`MARK_CRISP`] (cyan) — sent at the base encode from inside a split band:
+    ///   a quiet cell beside a moving one. This is the boundary of the split.
+    /// - [`MARK_CLEANUP`] (green), drawn by [`flush_cleanups`] — a settled cell
+    ///   restored to the base encode.
+    ///
+    /// An unmarked region was sent whole at the base encode, which is the quiet
+    /// path and the great majority of a still screen. So blur with no mark on it is
+    /// not a live decision at all: it is a stale one nothing has replaced.
     pub async fn damage<F>(&self, changed: Rect, pack: F) -> anyhow::Result<()>
     where
         F: Fn(Rect) -> Vec<u8>,
@@ -403,6 +465,16 @@ impl TileSink {
                     // is quiet or only crisp because the stash is full.
                     self.shared.motion.lock().unwrap().settle(cell.cell_key(), cell);
                     self.plan.base
+                };
+                // Only a *split* band is marked. A quiet band goes out whole and
+                // untouched, which is the byte-identity claim the strategy rests
+                // on, and marking it would flood a still screen with outlines that
+                // say nothing.
+                let rgb = if self.plan.debug {
+                    let colour = if took_the_discount { MARK_MOTION } else { MARK_CRISP };
+                    marked(&rgb, cell, colour)
+                } else {
+                    rgb
                 };
                 self.encode(cell, rgb, codec).await?;
             }
@@ -545,9 +617,10 @@ fn encode_tile(rect: Rect, rgb: &[u8], codec: TileCodec) -> anyhow::Result<Tile>
 async fn flush_cleanups(
     engine: &'static str,
     shared: &Arc<Shared>,
-    base: TileCodec,
+    plan: RenderPlan,
     frame_tx: &mpsc::Sender<ServerMsg>,
 ) -> bool {
+    let base = plan.base;
     let due = shared
         .motion
         .lock()
@@ -557,7 +630,10 @@ async fn flush_cleanups(
         let Stashed { rect, rgb, sent_at } = stashed;
         // On a worker like any other encode: a cleanup arrives when the screen is
         // quiet, but the order task is not the thread to find that out on.
+        // The mark goes on the copy handed to the encoder, so `owed` — the pixels
+        // put back if this encode fails — stays the true ones.
         let owed = Arc::clone(&rgb);
+        let rgb = if plan.debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
         let joined = tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)).await;
         let tile = match joined {
             Ok(Ok(tile)) => tile,
@@ -622,7 +698,7 @@ async fn order_loop(
                 None => break,
             },
             _ = cleanup.tick(), if plan.motion.is_some() => {
-                if flush_cleanups(engine, &shared, plan.base, &frame_tx).await {
+                if flush_cleanups(engine, &shared, plan, &frame_tx).await {
                     continue;
                 }
                 break;
@@ -768,7 +844,7 @@ mod tests {
     use crate::protocol::UNSCALED;
 
     fn plan(base: TileCodec, motion: Option<TileCodec>) -> RenderPlan {
-        RenderPlan { base, motion }
+        RenderPlan { base, motion, debug: false }
     }
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
@@ -951,7 +1027,10 @@ mod tests {
     const MOTION: RenderPlan = RenderPlan {
         base: TileCodec::Png,
         motion: Some(TileCodec::Jpeg(10)),
+        debug: false,
     };
+
+    const MOTION_DEBUG: RenderPlan = RenderPlan { debug: true, ..MOTION };
 
     /// Damage given to `sink` once per churn slot for `slots` slots — what a video
     /// playing in a window looks like from here. Requires a paused clock.
@@ -1300,6 +1379,52 @@ mod tests {
         // Once, and only once: the debt is discharged, not standing.
         tokio::time::sleep(CLEANUP_IDLE * 4).await;
         assert!(frame_rx.try_recv().is_err(), "a settled cell was cleaned up twice");
+    }
+
+    /// The debug outline is a border and nothing else: the pixels inside it are
+    /// what the encoder would have been given anyway, so a marked region is still
+    /// legible and QA is reading the real screen with a frame drawn round it.
+    #[test]
+    fn a_debug_mark_borders_a_piece_and_leaves_its_middle_alone() {
+        let piece = rect(320, 64, 320, 64);
+        let source = Arc::new(rgb(320, 64, 7));
+        let out = marked(&source, piece, MARK_MOTION);
+
+        assert_eq!(**source, rgb(320, 64, 7), "the source pixels were painted over");
+        let px = |buf: &[u8], x: usize, y: usize| buf[(y * 320 + x) * 3..][..3].to_vec();
+        for (x, y) in [(0, 0), (319, 0), (0, 63), (319, 63), (160, 1), (1, 32), (318, 32)] {
+            assert_eq!(px(&out, x, y), MARK_MOTION, "({x},{y}) is on the border");
+        }
+        for (x, y) in [(2, 2), (160, 32), (317, 61)] {
+            assert_eq!(px(&out, x, y), px(&source, x, y), "({x},{y}) is inside it");
+        }
+    }
+
+    /// The mark goes on the copy handed to the encoder and never on the pixels the
+    /// stash owes. Otherwise the cleanup would restore the outline along with the
+    /// pixels and the region would keep a magenta frame round it for the rest of
+    /// the session, with nothing left that could take it off.
+    #[tokio::test(start_paused = true)]
+    async fn a_debug_mark_never_reaches_the_pixels_a_cleanup_owes() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = TileSink::new("test", frame_tx, MOTION_DEBUG);
+
+        let cell = rect(0, 0, 320, 64);
+        drive(&sink, cell, u64::from(CHURN_MOVING)).await;
+        sink.flush().await;
+        assert_eq!(
+            *formats(&drain(&mut frame_rx, usize::try_from(CHURN_MOVING).unwrap()).await)
+                .last()
+                .unwrap(),
+            Tile::FORMAT_JPEG,
+            "the marking changed which encode the cell took"
+        );
+
+        let owed = {
+            let motion = sink.shared.motion.lock().unwrap();
+            Arc::clone(&motion.stash.get(&cell.cell_key()).expect("a cleanup is owed").rgb)
+        };
+        assert_eq!(*owed, rgb(320, 64, 7), "the stash is holding marked pixels");
     }
 
     /// A resize makes every key name somewhere else, and a repaint re-sends every

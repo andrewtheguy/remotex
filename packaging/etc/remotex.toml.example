@@ -226,3 +226,27 @@ password = "change-me"
 #render_type = "full"
 #render_subtype = "png"
 #render_quality = 75
+
+# render_type = "motion" adds a second, cheaper encode used only for the cells that
+# are currently changing fast, re-sending each one at the base encode once it
+# settles. render_motion_subtype and render_motion_quality are that encode; the base
+# keys above are what a still cell keeps. The motion quality can be very low —
+# motion hides it, and it does not last.
+#render_type = "motion"
+#render_motion_subtype = "jpeg"
+#render_motion_quality = 10
+
+# QA aid for "motion", off unless asked for: outline every piece the strategy emits
+# in the pixels themselves, so which cells it put in motion is something you read
+# off the screen rather than infer from how blurry a region looks.
+#
+#   magenta — sent at the motion encode. Magenta over something that is not moving
+#             is the detection reaching further than the movement.
+#   cyan    — sent at the base encode from inside a split region: a quiet cell
+#             beside a moving one, and so the edge of the split.
+#   green   — a cleanup: a settled cell restored to the base encode.
+#
+# An unmarked region was sent whole at the base encode, which is the quiet path and
+# most of a still screen. So a blurry region with no outline on it is not a live
+# decision at all — it is a stale one that nothing has replaced.
+#render_motion_debug = false

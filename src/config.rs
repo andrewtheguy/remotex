@@ -234,6 +234,9 @@ pub struct RenderPlan {
     pub base: TileCodec,
     /// What a cell changing fast is sent as instead, while it keeps changing.
     pub motion: Option<TileCodec>,
+    /// Draw the motion strategy's decisions into the pixels. QA only, and only
+    /// meaningful when `motion` is `Some`.
+    pub debug: bool,
 }
 
 /// One `[[targets]]` profile: a remote machine plus its credentials.
@@ -376,6 +379,16 @@ pub struct TargetConfig {
     /// render type.
     #[serde(default)]
     pub render_motion_quality: Option<u8>,
+    /// Outline every piece the motion strategy emits, in the pixels themselves, so
+    /// what the detection decided is visible on the screen instead of inferred from
+    /// how blurry something looks. A QA aid for [`RenderType::Motion`] and refused
+    /// for any other render type; off unless asked for.
+    ///
+    /// See [`crate::encode::TileSink::damage`] for what the colours mean. The marks
+    /// go on the *copy* handed to the encoder, so the shadow and the stash keep the
+    /// true pixels and a cleanup erases the outline it replaces.
+    #[serde(default)]
+    pub render_motion_debug: bool,
 }
 
 impl TargetConfig {
@@ -401,7 +414,7 @@ impl TargetConfig {
             },
             _ => None,
         };
-        RenderPlan { base, motion }
+        RenderPlan { base, motion, debug: self.render_motion_debug }
     }
 
     /// The motion codec this target asked for, falling back to the base codec when
@@ -700,11 +713,12 @@ impl ConfigFile {
             if target.render_type != RenderType::Motion {
                 anyhow::ensure!(
                     target.render_motion_subtype.is_none()
-                        && target.render_motion_quality.is_none(),
-                    "target {:?} sets render_motion_subtype or render_motion_quality without \
-                     render_type = \"motion\" — those keys describe the cheaper encode \
-                     \"motion\" gives the cells that are changing fastest, and no other \
-                     strategy has one",
+                        && target.render_motion_quality.is_none()
+                        && !target.render_motion_debug,
+                    "target {:?} sets render_motion_subtype, render_motion_quality or \
+                     render_motion_debug without render_type = \"motion\" — those keys \
+                     describe the cheaper encode \"motion\" gives the cells that are changing \
+                     fastest, and no other strategy has one",
                     target.name
                 );
             }
@@ -1334,7 +1348,7 @@ mod tests {
         assert_eq!(t.render_quality, None);
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Png, motion: None }
+            RenderPlan { base: TileCodec::Png, motion: None, debug: false }
         );
     }
 
@@ -1358,7 +1372,7 @@ mod tests {
         assert_eq!(t.render_quality, Some(60));
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Jpeg(60), motion: None }
+            RenderPlan { base: TileCodec::Jpeg(60), motion: None, debug: false }
         );
     }
 
@@ -1380,7 +1394,7 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Webp);
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Webp(50), motion: None }
+            RenderPlan { base: TileCodec::Webp(50), motion: None, debug: false }
         );
     }
 
@@ -1526,7 +1540,7 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Png);
         assert_eq!(
             t.render_plan(),
-            RenderPlan { base: TileCodec::Png, motion: Some(TileCodec::Jpeg(10)) }
+            RenderPlan { base: TileCodec::Png, motion: Some(TileCodec::Jpeg(10)), debug: false }
         );
     }
 
@@ -1550,7 +1564,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Webp(10)) }
+            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Webp(10)), debug: false }
         );
     }
 
@@ -1575,7 +1589,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Jpeg(10)) }
+            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Jpeg(10)), debug: false }
         );
     }
 
@@ -1652,6 +1666,49 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("render_quality"), "{err:#}");
+    }
+
+    /// The QA overlay rides on the motion strategy and is off unless asked for, so
+    /// a target that never turns it on cannot be paying for it by accident.
+    #[test]
+    fn the_motion_debug_overlay_is_opt_in_and_belongs_to_motion() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "jpeg"
+            render_motion_quality = 10
+            render_motion_debug = true
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.targets[0].render_plan().debug);
+
+        let plain = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            "#,
+        )
+        .unwrap();
+        assert!(!plain.targets[0].render_plan().debug, "the overlay defaulted on");
+
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_motion_debug = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
     }
 
     /// A lossless base takes no quality, exactly as under `full`.

@@ -318,6 +318,7 @@ mod tests {
             render_quality: None,
             render_motion_subtype: None,
             render_motion_quality: None,
+            render_motion_debug: false,
         };
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(

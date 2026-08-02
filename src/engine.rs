@@ -203,6 +203,7 @@ mod tests {
         let plan = crate::config::RenderPlan {
             base: crate::config::TileCodec::Png,
             motion: None,
+            debug: false,
         };
         (TileSink::new("test", frame_tx, plan), frame_rx)
     }
