@@ -26,8 +26,17 @@
 
 ## SSH and tmux
 
-Do not infer shell permissions from how a client attached to tmux. An existing
-tmux server retains the environment and access of the user that started it.
+Do not infer what this shell can do from how a client attached to it. An
+existing tmux server keeps the environment and access of the user that started
+it, so arriving over SSH does not mean the session is headless or restricted.
+
+In particular this Mac has a **logged-in GUI session**, and the shell can use
+it: launching `.app` bundles, `screencapture`, `osascript`, `codesign`, and
+driving the UI all work. macOS GUI QA is therefore something to *do* here, not
+something to hand back — see the QA steps in
+[`docs/macos-viewer.md`](docs/macos-viewer.md). If a capability looks
+unavailable, test it with one command and read the error; do not assume it from
+the shape of the session.
 
 ## Display geometry
 

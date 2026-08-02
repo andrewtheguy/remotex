@@ -28,17 +28,13 @@ struct RemoteCanvasHost: NSViewRepresentable {
         // No gesture requirement, unlike a browser tab: the Remote menu's toggle
         // is the consent, and it was given before any of this loaded.
         configuration.mediaTypesRequiringUserActionForPlayback = []
-        let controller = WKUserContentController()
-        configuration.userContentController = controller
-
         let webView = CanvasWebView(frame: .zero, configuration: configuration)
         webView.allowsMagnification = false
         webView.allowsBackForwardNavigationGestures = false
-        webView.setValue(false, forKey: "drawsBackground")
         #if DEBUG
         webView.isInspectable = true
         #endif
-        context.coordinator.attach(webView: webView, controller: controller)
+        context.coordinator.attach(webView: webView)
         return webView
     }
 
@@ -54,7 +50,6 @@ struct RemoteCanvasHost: NSViewRepresentable {
     final class Coordinator {
         private let model: AppModel
         private weak var webView: CanvasWebView?
-        private weak var controller: WKUserContentController?
         private var server: CanvasServer?
         private var bridge: CanvasBridge?
         private var keyboard: KeyboardCapture?
@@ -63,9 +58,8 @@ struct RemoteCanvasHost: NSViewRepresentable {
             self.model = model
         }
 
-        func attach(webView: CanvasWebView, controller: WKUserContentController) {
+        func attach(webView: CanvasWebView) {
             self.webView = webView
-            self.controller = controller
             // A local event monitor rather than letting WebKit see keys: menu key
             // equivalents are consumed by the menu bar before any responder, and
             // Command chords have to reach the remote. The web view never
@@ -116,9 +110,17 @@ struct RemoteCanvasHost: NSViewRepresentable {
         }
 
         private func load(server: CanvasServer, address: CanvasServer.Address) {
-            guard let webView, let controller else {
+            guard let webView else {
+                // The surface went away while the listener was binding. Nothing
+                // to report: `detach` has already stopped the server.
                 return
             }
+            // Read off the web view rather than held from `makeNSView`.
+            // `WKWebView` *copies* the configuration it is initialised with, so
+            // the controller built there is released with the original — holding
+            // a weak reference to it meant this method found nil and returned
+            // before loading anything, which looks exactly like a blank desktop.
+            let controller = webView.configuration.userContentController
             // Source iteration: point the web view at `bun run dev` and keep the
             // stream, which is what the page reads either way. The same shape as
             // `REMOTEX_DEV_BACKEND` for the SPA.
@@ -202,8 +204,8 @@ struct RemoteCanvasHost: NSViewRepresentable {
             apply(hidesToolbar: false)
             webView?.onFrameChange = nil
             webView?.navigationDelegate = nil
-            controller?.removeScriptMessageHandler(forName: CanvasBridge.handlerName)
-            controller = nil
+            webView?.configuration.userContentController
+                .removeScriptMessageHandler(forName: CanvasBridge.handlerName)
             model.fitWindowToRemote = nil
             model.hostScaleReader = nil
             keyboard?.invalidate()

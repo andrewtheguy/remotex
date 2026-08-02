@@ -111,6 +111,16 @@ canvas="frontend/dist-viewer"
   echo "canvas page missing at $canvas/viewer.html" >&2
   exit 1
 }
+# The app serves this page under a per-launch random path, so every reference in
+# it has to be relative. An absolute `/assets/…` resolves a token away from where
+# it was served, 404s, and leaves a document with no script and no stylesheet —
+# which on screen is an unexplained blank desktop rather than an error. Checked
+# here because `vite build` succeeds either way and nothing downstream can tell.
+if grep -Eq '(src|href)="/' "$canvas/viewer.html"; then
+  echo "::error::the canvas page references absolute paths; vite base must stay './'" >&2
+  grep -Eo '(src|href)="/[^"]*"' "$canvas/viewer.html" >&2
+  exit 1
+fi
 
 app="dist/remotex.app"
 echo ">> assembling $app"
