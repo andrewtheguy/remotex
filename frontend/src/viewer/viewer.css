@@ -9,11 +9,22 @@ html,
 body {
   margin: 0;
   height: 100%;
-  /* The page IS the viewport. The framebuffer bitmap keeps every remote pixel
-     while its CSS box uses the remote's own logical size; when that desktop is
-     larger than the window this scrolls, which is the whole reason the surface
-     is a web page — AppKit's overlay scrollers never drew, because the native
-     surface forwarded every wheel event to the remote. */
+}
+
+/* The scroll container, and it is its own element on purpose: `overflow` on
+   `html`/`body` does not give a reliable one — the viewport takes `html`'s over
+   and `body` is left clipping rather than scrolling, which looks identical until
+   you try to reach the far edge of an oversized desktop. This is the shape the
+   browser client uses (`.screen` in index.css) and it is the one that works.
+
+   The framebuffer bitmap keeps every remote pixel while its CSS box uses the
+   remote's own logical size; when that desktop is larger than the window this
+   scrolls. That is the whole reason the surface is a web page — the native
+   surface forwarded every wheel event to the remote, so AppKit's overlay
+   scrollers never drew and had to be hand-rolled. */
+.screen {
+  width: 100%;
+  height: 100%;
   overflow: auto;
   background: #000;
 }
