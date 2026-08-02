@@ -337,15 +337,23 @@ function AudioSection({
 //
 // Both controls in one section because they are one decision. Auto hands the size
 // to the window continuously; manual — the default, and what every connect starts
-// at — sends nothing until the button is pressed. Neither is the protocol's
-// business, so this section looks the same on RDP and VNC.
+// at — sends nothing until the button is pressed.
+//
+// Manual is offered on every protocol that allows resize at all. Auto is not: it
+// is the gateway's second permission (`autoResize`), held by plain VNC alone, and
+// where it is missing the button stays visible and inactive rather than
+// disappearing — the same choice `MacKeyboardSection` makes, because it is the
+// same situation. The feature exists and this remote cannot take it, which is
+// worth saying; an absent control would read as one the operator forgot.
 function ResizeSection({
   available,
+  autoAvailable,
   auto,
   onAutoChange,
   onResizeToWindow,
 }: {
   available: boolean;
+  autoAvailable: boolean;
   auto: boolean;
   onAutoChange: (auto: boolean) => void;
   onResizeToWindow: () => void;
@@ -361,9 +369,18 @@ function ResizeSection({
         className="toolbar-btn"
         onClick={() => onAutoChange(!auto)}
         aria-pressed={auto}
-        title="Hand the remote's size to this window, so it follows every resize"
+        disabled={!autoAvailable}
+        title={
+          autoAvailable
+            ? "Hand the remote's size to this window, so it follows every resize"
+            : "This remote is resized only when you ask. Use Resize to window."
+        }
       >
-        {auto ? "Auto resize: on" : "Auto resize: off"}
+        {autoAvailable
+          ? auto
+            ? "Auto resize: on"
+            : "Auto resize: off"
+          : "Auto resize: n/a"}
       </button>
       <button
         type="button"
@@ -434,6 +451,7 @@ export default function FloatingMenu({
   onLogout,
   onSwitchTarget,
   canResize,
+  canAutoResize,
   autoResize,
   onAutoResizeChange,
   onResizeToWindow,
@@ -471,6 +489,10 @@ export default function FloatingMenu({
   // window is not a shape to hand a desktop, which is the whole of what mobile
   // decides differently about size. See useRemoteDesktop.
   canResize: boolean;
+  // Whether this remote may be handed the window's size unasked — the gateway's
+  // second permission, plain VNC only. False leaves the mode inactive while manual
+  // resize stays on offer. See ResizeSection.
+  canAutoResize: boolean;
   // Whether the remote is following this window continuously. The client's choice,
   // per session, and manual is where every connect starts. See ResizeSection.
   autoResize: boolean;
@@ -848,6 +870,7 @@ export default function FloatingMenu({
               shape the remote is in. */}
           <ResizeSection
             available={canResize}
+            autoAvailable={canAutoResize}
             auto={autoResize}
             onAutoChange={onAutoResizeChange}
             onResizeToWindow={onResize}

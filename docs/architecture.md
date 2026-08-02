@@ -346,8 +346,8 @@ version so the independently shipped viewer can reject an incompatible gateway.
 Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
 audio format, and errors. The `connected` message includes `resize`,
-`clipboard`, and `audio` capability flags so clients expose only supported
-controls.
+`autoResize`, `clipboard`, and `audio` capability flags so clients expose only
+supported controls.
 
 ### Image batches
 
@@ -417,18 +417,35 @@ motion is coalesced while the socket has queued bytes; any non-motion input
 flushes the latest held position first.
 
 A target's `resize` is permission, not behavior: an engine that has it applies
-every `viewport` it is sent and an engine without it drops them all. Whether a
-client sends one per window change or only when the user asks is the client's own
-choice, made per session and defaulting to on request — see
-[`macos-viewer.md`](macos-viewer.md) and `useRemoteDesktop.ts`.
+every `viewport` it is sent and an engine without it drops them all.
+
+*How often* a client sends one is governed by a second permission, `autoResize`
+on the `connected` message. Both clients offer two ways to drive a size: a manual
+"Resize to Window", and a mode that hands the size to the window so every change
+reports one. The manual control follows `resize`. The mode follows `autoResize`,
+which the gateway grants to plain `vnc` alone — its DesktopSize renegotiation
+costs a new framebuffer and nothing else, where RDP's costs a
+Deactivation-Reactivation Sequence and High Performance's replaces a virtual
+display, and both of those have a fault in [`known-issues.md`](known-issues.md)
+that a window drag reaches far more often than a button press does. Where the
+mode is refused the clients grey it and label it inapplicable rather than hiding
+it, since the manual control beside it plainly works. Neither client decides any
+of this: `TargetConfig::auto_resize` does, and it is not a config key — the
+operator has no way to know which engines survive a stream of resizes.
+
+Within the mode, the client's own choice is remembered across connections and
+applied "if compatible" — which covers both a target that refuses resize and one
+that resizes only when asked.
+See [`macos-viewer.md`](macos-viewer.md) and `useRemoteDesktop.ts`.
 
 What is engine-specific is the shape of the permission:
 
-| Engine | With `resize` |
-|---|---|
-| Generic VNC | applies a requested size, on servers accepting SetDesktopSize |
-| Apple High Performance VNC | supports Resize to Window through Apple dynamic resolution |
-| RDP | applies a requested size, and the client's reported display density |
+| Engine | With `resize` | Window may drive it |
+|---|---|---|
+| Generic VNC | applies a requested size, on servers accepting SetDesktopSize | yes |
+| Apple Standard VNC | refuses `resize`: it shares physical displays | — |
+| Apple High Performance VNC | supports Resize to Window through Apple dynamic resolution | no |
+| RDP | applies a requested size, and the client's reported display density | no |
 
 `hostScale` reports the density of the screen the client's window is on. RDP with
 resize acts on it, quantizing to 1x or 2x at the same midpoint; the resulting

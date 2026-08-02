@@ -323,29 +323,34 @@ the SPA.
 `ViewportPolicy` separates gateway-granted resize permission from whether the
 viewer actively reports window changes.
 
-Permission comes from the `connected` message:
+Both permissions come from the `connected` message, and they are two:
 
-| Target | May resize |
-|---|---|
-| RDP or VNC with `resize` | yes |
-| Any other case | no — no viewport request is ever sent |
+| Target | May resize | Window may drive it |
+|---|---|---|
+| Plain `vnc` with `resize` | yes | yes |
+| RDP or an Apple subtype with `resize` | yes | no |
+| Any other case | no — no viewport request is ever sent | no |
+
+The second column is `autoResize`, and the gateway decides it: RDP renegotiates
+with a Deactivation-Reactivation Sequence and Apple High Performance replaces a
+virtual display, and both have a fault in [`known-issues.md`](known-issues.md)
+that a window drag reaches far more often than a menu item does. The client
+argues with neither — `ViewportPolicy.setAutoFollows` refuses the mode rather
+than the menu merely hiding it, so a remembered default cannot turn it on behind
+the item's back.
 
 The three View menu items are one decision:
 
 - **Auto Resize** sends debounced, deduplicated window changes. Its remembered
   value is shared with the picker's *Auto-resize the remote to the window, if
-  compatible* toggle. It defaults off until chosen and is ignored for targets
-  without resize permission. See `ViewerPreferences.autoResizeByDefault`.
+  compatible* toggle. It defaults off until chosen, and *if compatible* covers
+  both permissions: a target with no resize at all, and one that resizes only
+  when asked. See `ViewerPreferences.autoResizeByDefault`.
 
-  > **Known limitation on RDP.** When the default is on, the client reports its
-  > window from the `connected` handshake — before RDP's Display Control channel
-  > has finished opening. The gateway drops a size request that arrives that early
-  > (`Asked::NotReady`) and, unlike a density change, does not retry it, so on an
-  > RDP target the desktop stays at its connect size until the next window change
-  > lands after the channel is up. Turning **Auto Resize** off and on, or nudging
-  > the window, applies it. VNC is unaffected. This is a server-side gap
-  > documented at the `Viewport` arm in `src/rdp.rs`; the browser client has the
-  > same symptom for the same reason.
+  Where the mode is refused but resizing is not, the item reads **Auto Resize
+  (Not Applicable)** and greys, with **Resize to Window** live beneath it —
+  greying alone would read as "this session cannot resize", which the item below
+  disproves.
 - **Resize to Window** asks the remote to adopt the viewer's available size, once.
 - **Resize to Display** changes the local window so the current remote desktop
   fits at its point size; it sends nothing to the gateway.

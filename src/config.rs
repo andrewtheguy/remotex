@@ -347,8 +347,9 @@ pub struct TargetConfig {
     #[serde(default)]
     pub security: Security,
     /// Allow client-driven resize: permission for a client to set this target's
-    /// desktop size, and only permission — whether a client then follows its window
-    /// continuously or resizes when asked is that client's own choice.
+    /// desktop size when the user asks for one. Whether the window may *also* drive
+    /// it unasked is a second question, and not this one: see
+    /// [`Self::auto_resize`].
     ///
     /// On RDP this also turns on density matching, because there a density *is* a
     /// resize: the Display Control channel this negotiates is the only way to tell
@@ -422,6 +423,30 @@ pub struct TargetConfig {
 }
 
 impl TargetConfig {
+    /// Whether a client may let its window drive this target's size *unasked* —
+    /// the "auto resize" both clients offer — as opposed to resizing when the user
+    /// asks for it, which is [`Self::resize`] and nothing more.
+    ///
+    /// Plain `vnc` only, and deliberately not a config key: it is a statement about
+    /// which engines survive a stream of resizes, which the operator has no way to
+    /// know and no way to change. DesktopSize/ExtendedDesktopSize renegotiation is
+    /// the one resize path here that costs nothing but a new framebuffer.
+    ///
+    /// The two that are excluded each have a fault in
+    /// [`docs/known-issues.md`](../docs/known-issues.md), and both are reached far
+    /// more often by a window that reports continuously than by a person pressing a
+    /// button: RDP answers a real size change with a Deactivation-Reactivation
+    /// Sequence that sometimes ends the session, and `ard-high-performance`
+    /// renegotiates a virtual display that can be left wrong for the rest of the
+    /// session. Standard `ard` refuses `resize` outright and so never reaches here
+    /// with it set.
+    ///
+    /// Manual resize stays available on all of them. A fault the user provoked, once,
+    /// with a visible cause is a different thing from one a window drag walks into.
+    pub fn auto_resize(&self) -> bool {
+        self.resize && self.protocol == Protocol::Vnc && self.subtype.is_none()
+    }
+
     /// The tile encoders to use for this target. This is the whole of the render
     /// dial as the engines see it: the axes and the qualities collapse to one
     /// [`RenderPlan`], so `rdp::run` / `vnc::run` need not know the config enums.
@@ -2216,6 +2241,50 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
+    }
+
+    /// `resize` is permission to resize when asked; letting the window drive it is
+    /// a second permission the gateway decides, and only plain `vnc` has it. Each
+    /// engine that is refused it is named here, so removing one from the rule has
+    /// to be a deliberate edit to this list.
+    #[test]
+    fn only_plain_vnc_may_be_resized_by_the_window() {
+        let plain = &ConfigFile::parse(&vnc_toml("resize = true")).unwrap().targets[0];
+        assert!(plain.resize && plain.auto_resize());
+
+        // High Performance may be resized when asked and never by the window: a
+        // viewport report replaces the virtual display's mode, and doing that on
+        // every drag is how the desktop is left wrong (docs/known-issues.md).
+        let hp = &ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n\
+             width = 1600\nheight = 1000\nresize = true",
+        ))
+        .unwrap()
+        .targets[0];
+        assert!(hp.resize && !hp.auto_resize());
+
+        // RDP the same, for the reactivation a real size change costs.
+        let rdp = &ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "pc"
+            protocol = "rdp"
+            host = "192.0.2.10"
+            resize = true
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .targets[0];
+        assert!(rdp.resize && !rdp.auto_resize());
+
+        // And neither permission without the operator's, which is what keeps this
+        // from becoming "plain vnc always follows the window".
+        let off = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        assert!(!off.resize && !off.auto_resize());
     }
 
     #[test]

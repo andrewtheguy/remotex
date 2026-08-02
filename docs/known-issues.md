@@ -42,6 +42,12 @@ One thing that makes it look intermittent from a browser: only a size change tha
 is *real* reactivates at all. Asking twice for the same size triggers it once, and
 a request equal to the current size never triggers it.
 
+**How often it can be reached is bounded.** Clients may resize an RDP target only
+when the user asks; the window is never allowed to drive the size continuously,
+which is a permission the gateway withholds (`TargetConfig::auto_resize`). That is
+containment, not a fix — one "Resize to window" can still land on this — but a
+drag that used to walk into it repeatedly now cannot.
+
 What would move it: a packet capture of a failing sequence, to say what actually
 arrived where the expected PDU should have been.
 
@@ -71,6 +77,11 @@ revision, so every field in it is measurement rather than specification, and two
 are known unknowns: the `+0x96` rotation value, whose private bits are unread,
 and a layout payload two bytes shorter than its own length prefix claims — see
 [`apple-vnc-889.md`](apple-vnc-889.md).
+
+**How often it can be reached is bounded**, the same way the RDP fault above is:
+the window is never allowed to drive this target's size, so a resize is something
+the user asks for once and can connect to what follows. Again containment rather
+than a fix.
 
 What would move it: the descriptor sent and the layout the Mac answers with,
 captured across a resize that goes wrong, to say whether the Mac declined the

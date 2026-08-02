@@ -26,7 +26,7 @@ struct ServerMessageTests {
         let message = try ServerMessage.decode(
             #"""
             {"type":"connected","name":"mac","protocol":"vnc","resize":false,\#
-            "clipboard":true,"audio":false}
+            "autoResize":false,"clipboard":true,"audio":false}
             """#
         )
         #expect(
@@ -35,6 +35,7 @@ struct ServerMessageTests {
                     name: "mac",
                     protocolName: "vnc",
                     resize: false,
+                    autoResize: false,
                     clipboard: true,
                     audio: false
                 )

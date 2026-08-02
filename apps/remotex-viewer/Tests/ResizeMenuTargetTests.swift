@@ -59,6 +59,38 @@ struct ResizeMenuTargetTests {
         #expect(auto.state == .off)
     }
 
+    /// The state this item exists in on RDP and Apple Screen Sharing: greyed while
+    /// the two one-shots stay live, and saying so in its title — greying alone
+    /// would read as "this session cannot resize", which is exactly what the item
+    /// below it disproves.
+    @Test
+    func theAutoResizeItemIsGreyedAndLabelledWhereOnlyAskingIsAllowed() {
+        let model = makeModel()
+        model.apply(.status(.connected))
+        model.apply(
+            .control(.connected(connected(protocolName: "rdp", resize: true, autoResize: false)))
+        )
+        model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
+        model.reportViewport(DisplayMode(w: 1600, h: 900))
+        let target = ResizeMenuTarget(model: model)
+        let auto = item(ViewerMenus.autoResizeAction)
+
+        #expect(!target.validateMenuItem(auto))
+        #expect(auto.title == "Auto Resize (Not Applicable)")
+        #expect(
+            target.validateMenuItem(item(ViewerMenus.resizeToWindowAction)),
+            "asking for one resize still works"
+        )
+
+        // And clicking it anyway — a menu item cannot be, but the action can be
+        // sent — leaves the session manual rather than silently following, and does
+        // not rewrite the remembered default on the strength of a change that never
+        // happened.
+        target.perform(ViewerMenus.autoResizeAction, with: nil)
+        #expect(!model.autoResizes)
+        #expect(!model.autoResizeByDefault)
+    }
+
     /// And it is dead where a resize is not allowed at all, with the other two.
     @Test
     func theAutoResizeItemIsDeadWithoutThePermission() {
@@ -187,14 +219,18 @@ struct ResizeMenuTargetTests {
         )
     }
 
+    /// `autoResize` defaults to `resize`, since most of these cases are about the
+    /// items rather than the permission that splits them; the ones that are name it.
     private func connected(
         protocolName: String,
-        resize: Bool = false
+        resize: Bool = false,
+        autoResize: Bool? = nil
     ) -> ServerMessage.Connected {
         ServerMessage.Connected(
             name: "mac",
             protocolName: protocolName,
             resize: resize,
+            autoResize: autoResize ?? resize,
             clipboard: false,
             audio: false
         )

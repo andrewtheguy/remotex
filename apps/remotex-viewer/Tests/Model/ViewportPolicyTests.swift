@@ -8,7 +8,7 @@ struct ViewportPolicyTests {
     /// manual.
     @Test
     func anOptedInTargetStartsAllowedAndManual() {
-        let policy = ViewportPolicy(resize: true)
+        let policy = ViewportPolicy(resize: true, autoResize: true)
         #expect(policy.allowed)
         #expect(!policy.autoFollows)
     }
@@ -18,18 +18,52 @@ struct ViewportPolicyTests {
     /// neither client offers a control that would make one.
     @Test
     func aTargetWithoutResizeSendsNothingEitherWay() {
-        var policy = ViewportPolicy(resize: false)
+        var policy = ViewportPolicy(resize: false, autoResize: false)
         #expect(!policy.allowed)
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil)
         #expect(
             policy.report(DisplayMode(w: 1280, h: 800), manual: true) == nil,
             "not even on request"
         )
-        policy.autoFollows = true
+        let tookWithoutResize = policy.setAutoFollows(true)
+        #expect(!tookWithoutResize, "and the mode cannot grant what the operator withheld")
+        #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil)
+    }
+
+    /// The second permission, which is the gateway's too. A target the operator
+    /// opted in may still be one the window must not drive — RDP and Apple Screen
+    /// Sharing are exactly that. "Resize to Window" keeps working there; auto is
+    /// refused, and refused at the policy rather than only in the menu, so a
+    /// remembered default cannot turn it on behind the item's back.
+    @Test
+    func aTargetWithoutAutoResizeStillResizesWhenAsked() {
+        var policy = ViewportPolicy(resize: true, autoResize: false)
+        #expect(policy.allowed)
+        #expect(!policy.autoAllowed)
+        let took = policy.setAutoFollows(true)
+        #expect(!took)
+        #expect(!policy.autoFollows)
         #expect(
             policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil,
-            "and the mode cannot grant what the operator withheld"
+            "the window never drives this one"
         )
+        #expect(
+            policy.report(DisplayMode(w: 1280, h: 800), manual: true)
+                == .viewport(w: 1280, h: 800),
+            "and asking still works"
+        )
+    }
+
+    /// Turning the mode off is never refused: a session already following the
+    /// window has to be able to stop, whatever the permissions say now.
+    @Test
+    func theModeCanAlwaysBeTurnedOff() {
+        var policy = ViewportPolicy(resize: true, autoResize: true)
+        let on = policy.setAutoFollows(true)
+        let off = policy.setAutoFollows(false)
+        #expect(on)
+        #expect(off)
+        #expect(!policy.autoFollows)
     }
 
     /// Manual is the default and it means exactly one thing: measuring sends
@@ -37,7 +71,7 @@ struct ViewportPolicyTests {
     /// target's starting point.
     @Test
     func manualReportsOnlyWhatWasAskedFor() {
-        var policy = ViewportPolicy(resize: true)
+        var policy = ViewportPolicy(resize: true, autoResize: true)
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil)
         #expect(
             policy.report(DisplayMode(w: 1280, h: 800), manual: true)
@@ -49,8 +83,8 @@ struct ViewportPolicyTests {
     /// silent — the difference is the client's choice and nothing else.
     @Test
     func autoReportsWhatTheWindowMeasured() {
-        var policy = ViewportPolicy(resize: true)
-        policy.autoFollows = true
+        var policy = ViewportPolicy(resize: true, autoResize: true)
+        policy.setAutoFollows(true)
         #expect(
             policy.report(DisplayMode(w: 1280, h: 800), manual: false)
                 == .viewport(w: 1280, h: 800)
@@ -61,8 +95,8 @@ struct ViewportPolicyTests {
     /// auto-following remote would be told to resize on each one.
     @Test
     func anUnchangedSizeIsNotReportedTwice() {
-        var policy = ViewportPolicy(resize: true)
-        policy.autoFollows = true
+        var policy = ViewportPolicy(resize: true, autoResize: true)
+        policy.setAutoFollows(true)
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) != nil)
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: false) == nil)
         #expect(policy.report(DisplayMode(w: 1281, h: 800), manual: false) != nil)
@@ -73,7 +107,7 @@ struct ViewportPolicyTests {
     /// first report on a new one has to go out even when it has not changed.
     @Test
     func aNewConnectionReportsEvenTheSameSizeAgain() {
-        var policy = ViewportPolicy(resize: true)
+        var policy = ViewportPolicy(resize: true, autoResize: true)
         let size = DisplayMode(w: 1280, h: 800)
         #expect(policy.report(size, manual: true) != nil)
         #expect(policy.report(size, manual: true) == nil)
@@ -87,7 +121,7 @@ struct ViewportPolicyTests {
     /// Window" twice at the same size is one message.
     @Test
     func aRepeatedManualRequestIsAlsoDeduped() {
-        var policy = ViewportPolicy(resize: true)
+        var policy = ViewportPolicy(resize: true, autoResize: true)
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: true) != nil)
         #expect(policy.report(DisplayMode(w: 1280, h: 800), manual: true) == nil)
     }

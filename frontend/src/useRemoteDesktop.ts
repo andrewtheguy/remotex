@@ -372,13 +372,20 @@ export function useRemoteDesktop(
   // target allows, where the window this would resize to is not one to hand a
   // remote desktop (see CAN_PINCH_ZOOM).
   //
-  // Permission only. *How* the size is driven — on request or continuously — is
-  // `autoResize` below, and this gates both the controls that decide it.
+  // Permission only, and it is what puts the Resize section on the menu at all —
+  // "Resize to window" is offered exactly here. Whether the *mode* beside it is
+  // offered is a second permission, `canAutoResize` below.
   const [canResize, setCanResize] = useState(false);
-  // Whether the remote follows this window continuously, or only when asked.
+  // Whether this session may hand the size to the window at all — the gateway's
+  // `autoResize`, and a second permission rather than a shade of the first. Plain
+  // VNC has it; RDP and both Apple subtypes are resized only when the user asks,
+  // because what they do with a size change is what docs/known-issues.md is about
+  // and a window drag reports far more often than a person presses a button.
   //
-  // The client's choice, and the same choice on every protocol: an engine that
-  // acts on one viewport report acts on all of them. Not remembered either — every
+  // Never true where `canResize` is false, so the controls stay one decision.
+  const [canAutoResize, setCanAutoResize] = useState(false);
+  // Whether the remote follows this window continuously, or only when asked. The
+  // client's choice, within what the above allows, and not remembered — every
   // `connected` starts manual, so connecting to a target never reshapes its
   // desktop on the strength of something chosen for another one.
   const [autoResize, setAutoResizeState] = useState(false);
@@ -546,12 +553,13 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
-  // The two halves of the resize decision as the viewport sender reads them:
-  // whether this session may resize the remote at all (`canResize` above), and
-  // whether the window drives it unasked (`autoResize` above). Refs because the
-  // sender lives inside the connection effect and must not re-subscribe when
-  // either changes.
+  // The resize decision as the viewport sender reads it: whether this session may
+  // resize the remote at all (`canResize` above), whether it may be handed to the
+  // window (`canAutoResize`), and whether it currently is (`autoResize`). Refs
+  // because the sender lives inside the connection effect and must not
+  // re-subscribe when any of them changes.
   const resizeAllowedRef = useRef(false);
+  const autoAllowedRef = useRef(false);
   const autoResizeRef = useRef(false);
   // Set by the connection effect so a report the user asked for — the menu's
   // "Resize to window", and switching auto on — can push the current viewport.
@@ -569,21 +577,35 @@ export function useRemoteDesktop(
   // The session-only half: set the mode this connection runs in. The internal
   // resets (a fresh `connected`, a return to the picker) and the connect-time seed
   // all come through here, so none of them touches the remembered default.
+  //
+  // Switching *on* takes the target's permission, and this is the one gate: the
+  // toolbar's toggle, the remembered default and the connect-time seed all arrive
+  // here, so a target that may not follow the window cannot be put in that mode by
+  // any of them. Switching off is never refused — a session left following one
+  // must be able to stop.
   const applyAutoResize = useCallback((enabled: boolean) => {
+    if (enabled && !autoAllowedRef.current) {
+      return false;
+    }
     autoResizeRef.current = enabled;
     setAutoResizeState(enabled);
     if (enabled) {
       resizeToWindowRef.current?.();
     }
+    return true;
   }, []);
 
   // The desktop menu's "Auto resize" toggle: the same live effect, and it also
   // writes the remembered default, so a value set mid-session is the one the next
-  // connection starts from. Only the user's toggle persists — never a reset.
+  // connection starts from. Only the user's toggle persists — never a reset, and
+  // never a change the target refused: that button is greyed on a target that
+  // resizes only when asked, and a click that got through anyway must not rewrite
+  // a preference it could not act on.
   const setAutoResize = useCallback(
     (enabled: boolean) => {
-      setAutoResizeByDefault(enabled);
-      applyAutoResize(enabled);
+      if (applyAutoResize(enabled)) {
+        setAutoResizeByDefault(enabled);
+      }
     },
     [applyAutoResize],
   );
@@ -1102,18 +1124,24 @@ export function useRemoteDesktop(
         // The one-shot is still gated on the target's `resize`, because there is
         // nothing to say otherwise: an engine drops the request without it.
         resizeAllowedRef.current = false;
+        autoAllowedRef.current = false;
         setCanResize(false);
+        setCanAutoResize(false);
         mobileSizePending = msg.resize;
       } else {
-        // Permission, and permission only — what the operator allowed. Whether the
-        // window then drives the remote is the user's, above, and identical for
-        // every protocol: an engine that takes one viewport report takes them all.
+        // Two permissions, both the gateway's: whether this session may resize the
+        // remote when asked, and whether it may hand the size to this window. The
+        // second is the narrower one — plain VNC — so the menu can offer "Resize to
+        // window" on a target where the mode is not on offer at all.
         const allowed = msg.resize;
         resizeAllowedRef.current = allowed;
+        autoAllowedRef.current = msg.autoResize;
         setCanResize(allowed);
-        // Apply the remembered default now. Where the target allows no resize at
-        // all, it silently does nothing — "… if compatible".
-        if (wantAutoResize && allowed) {
+        setCanAutoResize(msg.autoResize);
+        // Apply the remembered default now. Where the target does not take the
+        // mode — no resize at all, or resize only when asked — it silently does
+        // nothing, which is the "… if compatible" the picker's toggle promises.
+        if (wantAutoResize) {
           applyAutoResize(true);
         }
       }
@@ -1225,10 +1253,12 @@ export function useRemoteDesktop(
           // No engine to resize, and the mode goes with the session: the next
           // target is asked about separately.
           resizeAllowedRef.current = false;
+          autoAllowedRef.current = false;
           // Session-only, not the persisting setter: returning to the picker must
           // not wipe the remembered default the next connect will apply.
           applyAutoResize(false);
           setCanResize(false);
+          setCanAutoResize(false);
           setCanClipboard(false);
           // No engine, so no queue to subscribe to: the row goes away rather than
           // offering a control that would be answered with a warning in the log.
@@ -1758,8 +1788,10 @@ export function useRemoteDesktop(
     pendingTarget,
     size,
     hostScale,
-    // Permission, and the client's per-session choice of how to use it.
+    // The two permissions, and the client's per-session choice of how to use
+    // them.
     canResize,
+    canAutoResize,
     autoResize,
     canClipboard,
     canAudio,
