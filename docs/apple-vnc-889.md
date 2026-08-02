@@ -18,8 +18,8 @@ no conclusions combine state from the two session types.
 measurement, not specification: Apple documents none of RFB 003.889, and the
 confirmations here hold for the Macs and the macOS version named above rather
 than for the protocol. A macOS update is free to invalidate any row. The
-dynamic-resolution path behind `resize = true` is the least settled part —
-a resize can leave the screen wrong until the session is reconnected. Prefer
+dynamic-resolution path behind `resize = true` is the least settled part, and
+what a resize can leave behind is in [`known-issues.md`](known-issues.md). Prefer
 `subtype = "ard"`, which rides the standard RFB 3.8 wire, where it will do.
 
 | | |

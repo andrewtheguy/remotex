@@ -107,10 +107,15 @@ struct ViewerSessionState: Equatable {
     /// items in the View menu are dead without it, and none of them is decided by
     /// it alone.
     var canResize = false
+    /// Whether this session may be handed the window's size unasked: the gateway's
+    /// second permission, held by plain `vnc` alone. False leaves "Auto Resize"
+    /// disabled while the two one-shots below stay live — a protocol that takes a
+    /// resize the user asked for need not take one per drag frame.
+    var canAutoResize = false
     /// Whether the remote follows this window's size unasked. The client's choice
-    /// rather than a fact about the protocol, and not remembered: every connection
-    /// starts manual. Mirrored off `ViewportPolicy` for the same reason as
-    /// `canResize` — the policy is not observed, and three menu items read this.
+    /// within that permission, and not remembered: every connection starts manual.
+    /// Mirrored off `ViewportPolicy` for the same reason as `canResize` — the
+    /// policy is not observed, and three menu items read this.
     var autoResize = false
     var canClipboard = false
     /// Whether this target carries sound at all — an RDP target configured for it. Not

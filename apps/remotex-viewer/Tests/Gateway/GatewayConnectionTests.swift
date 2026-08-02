@@ -7,7 +7,7 @@ import Testing
 /// noise in a test about ordering.
 private let connectedJSON = #"""
 {"type":"connected","name":"mac","protocol":"vnc","resize":false,\#
-"clipboard":true,"audio":true}
+"autoResize":false,"clipboard":true,"audio":true}
 """#
 
 /// A real `audioFormat`, `head` included: the base64 is the gateway's own 19-byte

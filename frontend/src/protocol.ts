@@ -135,17 +135,21 @@ export type ControlMsg =
     }
   | { type: "error"; message: string }
   | { type: "picker" }
-  // `resize` is the operator's permission to change the remote's size at all, and
-  // it is all this says: whether the size then follows the window or moves only
-  // when asked is the client's own choice, the same choice on every protocol (see
-  // useRemoteDesktop's `autoResize`). `protocol` ("rdp"/"vnc") is carried for the
-  // status line. `clipboard` is whether this target opted into the clipboard
-  // bridge. `audio` advertises capability, not current activity.
+  // `resize` is the operator's permission to change the remote's size when the
+  // user asks for it. `autoResize` is the separate permission to hand the size to
+  // this window and let every drag report one, which the gateway grants to plain
+  // `vnc` alone — RDP and Apple Screen Sharing renegotiate in ways that a stream
+  // of reports walks into (docs/known-issues.md), so on those the client offers
+  // the manual control and not the mode. Never true without `resize`.
+  // `protocol` ("rdp"/"vnc") is carried for the status line. `clipboard` is
+  // whether this target opted into the clipboard bridge. `audio` advertises
+  // capability, not current activity.
   | {
       type: "connected";
       name: string;
       protocol: string;
       resize: boolean;
+      autoResize: boolean;
       clipboard: boolean;
       audio: boolean;
     }

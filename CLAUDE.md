@@ -55,6 +55,13 @@ To fit the window, ask the remote to render at that size via `resize = true`,
 `ClientMsg::Viewport`, and the engine's resize mechanism. Lack of resize support
 never permits client scaling.
 
+`resize` is permission to resize **when the user asks**. Letting the window drive
+the size unasked is a second permission — `TargetConfig::auto_resize`, carried as
+`autoResize` on `connected` — and plain `vnc` alone has it. RDP and both Apple
+subtypes offer the manual control only, because of the faults in
+[`docs/known-issues.md`](docs/known-issues.md); it is not a config key, since the
+operator cannot know which engines survive a stream of resizes.
+
 Apple display modes:
 
 - `ard` is Apple Screen Sharing's **Standard mode** over RFB 3.8. It uses Apple

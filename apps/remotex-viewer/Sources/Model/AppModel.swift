@@ -313,10 +313,21 @@ final class AppModel: GatewaySessionSink {
     /// The three resize items are one decision in three parts: the mode, and the
     /// two one-shots that only mean something in manual mode.
     ///
-    /// "Auto Resize" needs nothing but the permission — it is the item that says
-    /// which way this session works.
+    /// "Auto Resize" needs the *second* permission: the gateway allows the mode on
+    /// plain VNC alone, so on RDP and Apple Screen Sharing this item is disabled
+    /// while the two one-shots below stay live.
     var canAutoResize: Bool {
-        session.canResize
+        session.canAutoResize
+    }
+
+    /// What that item is called, which says why it is greyed in the one case where
+    /// a reader would wonder: the other two items are live, so the session plainly
+    /// resizes — it is this mode, not the permission, that this remote refuses.
+    /// Named the way `macOSKeyboardOverridesLabel` is, for the same reason.
+    var autoResizeLabel: String {
+        session.canResize && !session.canAutoResize
+            ? "Auto Resize (Not Applicable)"
+            : "Auto Resize"
     }
 
     /// Whether it is ticked.
@@ -809,6 +820,7 @@ final class AppModel: GatewaySessionSink {
             // any resize has arrived.
             session.remoteScale = 1
             session.canResize = false
+            session.canAutoResize = false
             // The mode goes with the session that was left, like the audio answer
             // below: the next target is asked about separately.
             session.autoResize = false
@@ -845,11 +857,13 @@ final class AppModel: GatewaySessionSink {
             let userInitiated = session.pendingTarget != nil
             session.pendingTarget = nil
             setConnectError(nil)
-            // The operator's permission, settled here for every protocol. A fresh
-            // policy also puts the mode back to manual, which is what makes a
-            // reattach, a target switch and a takeover all leave the remote's own
-            // size alone.
-            viewportPolicy = ViewportPolicy(resize: payload.resize)
+            // Both permissions, settled here for every protocol. A fresh policy
+            // also puts the mode back to manual, which is what makes a reattach, a
+            // target switch and a takeover all leave the remote's own size alone.
+            viewportPolicy = ViewportPolicy(
+                resize: payload.resize,
+                autoResize: payload.autoResize
+            )
             publishViewportPolicy()
             session.canClipboard = payload.clipboard
             updateClipboardEnablement()
@@ -885,11 +899,11 @@ final class AppModel: GatewaySessionSink {
             connection?.resetViewportMemo()
             // Seed the remembered auto-resize default now that the dedupes are
             // clear — its first act is a viewport report, and reporting before the
-            // reset above would have it swallowed. Permission is settled at connect
-            // for every protocol, so the default takes or does not take effect here;
-            // where the target allows no resize, this does not fire and the default
-            // silently does nothing.
-            if autoResizeByDefault, session.canResize {
+            // reset above would have it swallowed. Both permissions are settled at
+            // connect, and `applyAutoResize` is where they are checked: on a target
+            // that takes no resize, or takes one only when asked, the default
+            // silently does nothing rather than being asked about again.
+            if autoResizeByDefault {
                 applyAutoResize(true)
             }
             // And this window's screen density, so a display the agent made comes
@@ -1135,6 +1149,7 @@ final class AppModel: GatewaySessionSink {
     /// Publish ignored policy state so Observation invalidates menu enablement.
     private func publishViewportPolicy() {
         session.canResize = viewportPolicy.allowed
+        session.canAutoResize = viewportPolicy.autoAllowed
         session.autoResize = viewportPolicy.autoFollows
     }
 
@@ -1254,23 +1269,31 @@ final class AppModel: GatewaySessionSink {
     func setAutoResize(_ enabled: Bool) {
         // The View menu's toggle also writes the remembered default, so the value
         // set mid-session is the one the next connect starts from — the same single
-        // value the picker's toggle edits.
+        // value the picker's toggle edits. Only when the change took, though: on a
+        // target that refuses the mode this item is greyed, and an action sent to
+        // it anyway must not rewrite a preference it could not act on.
+        guard applyAutoResize(enabled) else {
+            return
+        }
         autoResizeByDefault = enabled
-        applyAutoResize(enabled)
     }
 
     /// The session-only half of `setAutoResize`: set the mode this connection runs
     /// in without touching the remembered default. The connect-time seed uses this,
     /// so applying a remembered default never rewrites it.
-    private func applyAutoResize(_ enabled: Bool) {
-        guard session.canResize else {
-            return
+    @discardableResult
+    private func applyAutoResize(_ enabled: Bool) -> Bool {
+        guard viewportPolicy.setAutoFollows(enabled) else {
+            // The gateway does not allow the mode on this target. Nothing changes,
+            // and nothing is reported — the remembered default reaching a remote
+            // that resizes only when asked is the ordinary case, not an error.
+            return false
         }
-        viewportPolicy.autoFollows = enabled
         publishViewportPolicy()
         if enabled {
             sendViewport(manual: true)
         }
+        return true
     }
 
     /// The Remote menu's "Enable Audio" toggle. Like `setAutoResize` it also writes
