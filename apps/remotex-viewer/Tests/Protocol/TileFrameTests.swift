@@ -105,15 +105,29 @@ struct TileFrameTests {
         }
     }
 
-    /// Only 1 (PNG), 2 (JPEG) and 3 (WebP) are codecs this build knows; any other
-    /// byte is a gateway this build cannot render. Rejecting the frame is the
-    /// intended outcome — `GatewayClient`'s `protocolVersion` check turns that into
-    /// a legible refusal before a session even opens.
+    /// Only 1 (PNG), 2 (JPEG), 3 (WebP) and 4 (H.264) are formats this build knows;
+    /// any other byte is a gateway this build cannot render. Rejecting the frame is
+    /// the intended outcome — `GatewayClient`'s `protocolVersion` check turns that
+    /// into a legible refusal before a session even opens.
     @Test
     func anUnknownFormatIsRejected() {
-        for format: UInt8 in [0x00, 0x04, 0x05, 0xFF] {
+        for format: UInt8 in [0x00, 0x05, 0x06, 0xFF] {
             #expect(BatchFrame.decode(batch(tile(format: format, w: 8, h: 8))) == nil)
         }
+    }
+
+    /// H.264 is the one format this build parses but cannot *decode*, and parsing it
+    /// is the entire point: an unrecognised byte fails the whole batch, so a video
+    /// target would show a frozen desktop and say nothing. Recognising it is what
+    /// lets `GatewayConnection` refuse the session by name.
+    @Test
+    func anH264RecordParsesEvenThoughItCannotBeDecoded() throws {
+        let frame = batch(tile(format: TileFormat.h264.rawValue, w: 8, h: 8, payload: [0x01]))
+        let records = try #require(BatchFrame.decode(frame))
+        #expect(records.count == 1, "a batch carrying an access unit was dropped whole")
+        #expect(records[0].isVideo)
+        let tiles = try #require(tileRecords(frame))
+        #expect(tiles[0].format == .h264)
     }
 
     /// The other side of that gate: 2 (JPEG) and 3 (WebP) are codecs this build

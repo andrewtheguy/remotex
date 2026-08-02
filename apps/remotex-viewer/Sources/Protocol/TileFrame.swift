@@ -15,6 +15,18 @@ enum TileFormat: UInt8, Sendable, Equatable {
     case png = 1
     case jpeg = 2
     case webp = 3
+    /// One H.264 access unit, from a target on `render_type = "video"`.
+    ///
+    /// **This viewer cannot decode it.** It is a case here anyway, and that is the
+    /// whole point of it: an unrecognised format byte makes `BatchFrame.decode`
+    /// return nil, and the caller drops the *entire batch* — so without this a video
+    /// target would show a frozen desktop and say nothing about why. Recognising it
+    /// is what lets `GatewayConnection` refuse the session by name instead.
+    ///
+    /// Decoding it is planned; see docs/roadmap.md, which records what it would take
+    /// (VideoToolbox, and a checked-in fixture because macOS cannot encode H.264
+    /// through ImageIO). The browser decodes it today.
+    case h264 = 4
 }
 
 /// One dirty rectangle of the framebuffer, as one `TILE` record inside a batch
@@ -73,6 +85,17 @@ enum BatchFrame {
     enum Record: Sendable, Equatable {
         case tile(TileFrame)
         case reference(slot: UInt16, x: UInt16, y: UInt16)
+
+        /// Whether this record carries a video frame rather than a picture.
+        ///
+        /// Only a tile can: an access unit is never cached into a slot, so a
+        /// reference can never name one (`Slots::place` in `src/wire.rs`).
+        var isVideo: Bool {
+            switch self {
+            case .tile(let frame): frame.format == .h264
+            case .reference: false
+            }
+        }
     }
 
     /// Parse a binary frame into its tile records, or nil for anything malformed

@@ -30,10 +30,19 @@ actor TileDecoder {
     /// to hand back either. Drawing into a context of a known layout normalizes
     /// both, and it is the only place the row order can be fixed.
     ///
-    /// This never reads `frame.format`, even though there are two codecs: ImageIO
-    /// identifies a payload from its own container. So the format byte is checked
-    /// at `BatchFrame.decode` and used for nothing here.
+    /// The format byte is read for exactly one thing: telling a picture from a video
+    /// frame. Among the three still codecs it stays unread, because ImageIO
+    /// identifies a payload from its own container — so which of PNG, JPEG and WebP
+    /// arrived makes no difference here, and `BatchFrame.decode` has already refused
+    /// anything that is none of them.
+    ///
+    /// `.h264` is not a picture and has no ImageIO path at all. It returns nil here,
+    /// and `GatewayConnection` refuses the session by name rather than letting a
+    /// video target look like a desktop that stopped repainting.
     func decode(_ frame: TileFrame) -> DecodedTile? {
+        guard frame.format != .h264 else {
+            return nil
+        }
         let w = Int(frame.w)
         let h = Int(frame.h)
         guard w > 0, h > 0 else {

@@ -214,7 +214,8 @@ password = "change-me"
 #
 # render_type = "full" (the default) is lossless PNG: exact pixels, and the right
 # answer on a LAN. "fixed-quality" trades exactness for bytes at a constant quality,
-# which is what a slow or metered link wants.
+# which is what a slow or metered link wants. "motion" and "video" are described in
+# their own blocks below.
 #
 # render_subtype picks the codec: "jpeg" is decoded by everything, "webp" is roughly
 # 30% smaller at a matched quality and is decoded natively by both clients. With
@@ -256,6 +257,33 @@ password = "change-me"
 #render_subtype = "webp"
 #render_quality = 60
 #render_motion_quality = 10
+
+# render_type = "video" is not a fourth codec, it is a different transport: the whole
+# desktop as one H.264 stream instead of one encoded image per changed region. Every
+# frame says what changed since the one before it, so nothing is cut into per-region
+# tiles and the cell grid does not apply — which is why it takes no render_subtype and
+# refuses one. (The frames still travel in the same records the still codecs use, each
+# carrying the desktop rectangle a client crops to; what goes away is the segmentation,
+# not the framing.)
+#
+# render_quality is the dial, 1-100 as everywhere else, and it is a *ceiling*: on a
+# link that can carry it you get exactly that quality, and a link that cannot makes
+# the picture coarser until it can. Nothing ever goes finer than what is set here.
+#
+# Two things to know before choosing it:
+#
+#   - Only the browser decodes it. remotex.app refuses a video target by name and
+#     tells you to use a browser or another render_type.
+#   - The browser decodes it with WebCodecs, which is **secure-context only** — the
+#     same limit remote audio already has. A gateway reached over plain HTTP on a LAN
+#     address shows a banner saying so instead of a desktop, until it is behind TLS
+#     (localhost is exempt).
+#
+# Worth measuring rather than assuming: it is a large win on anything that moves and
+# it costs CPU on the gateway for every frame, including on a screen that is barely
+# changing. The `encode totals` log line is what settles it for a given target.
+#render_type = "video"
+#render_quality = 60
 
 # QA aid for "motion", off unless asked for: outline every piece the strategy emits
 # in the pixels themselves, so which cells it put in motion is something you read

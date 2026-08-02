@@ -182,12 +182,18 @@ export interface TileMsg {
   h: number;
   // Where the server wants this remembered, or NO_SLOT for "do not".
   slot: number;
-  // An encoded image stream, in `mime`.
+  // An encoded picture, or one H.264 access unit, per `codec`.
   data: Uint8Array;
-  // What `data` is, for the Blob handed to createImageBitmap. The gateway sends
-  // lossless PNG by default; a target on the fixed-quality render dial sends JPEG
-  // or WebP instead, so the codec travels with the tile.
-  mime: "image/png" | "image/jpeg" | "image/webp";
+  // What `data` is. The three MIME types are pictures, handed to createImageBitmap
+  // as a Blob of that type: the gateway sends lossless PNG by default, and a target
+  // on the fixed-quality render dial sends JPEG or WebP instead.
+  //
+  // "h264" is not a MIME type and not a picture. A target on `render_type = "video"`
+  // sends the whole desktop as one inter-frame stream, so `data` is one access unit
+  // whose meaning is "what changed since the last one" — it goes to a VideoDecoder,
+  // it is never cached, and it cannot be decoded out of order. See
+  // `Tile::FORMAT_H264` in src/protocol.rs for the whole contract.
+  codec: "image/png" | "image/jpeg" | "image/webp" | "h264";
 }
 
 // "Draw what you have in `slot` at (x, y)" — seven bytes instead of a payload.
@@ -210,14 +216,15 @@ const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
-// The format byte, as the MIME type `createImageBitmap` needs for its Blob:
-// `Tile::FORMAT_PNG`, `Tile::FORMAT_JPEG`, `Tile::FORMAT_WEBP`. A byte outside this map (a stale
+// The format byte, as what the payload is: `Tile::FORMAT_PNG`, `Tile::FORMAT_JPEG`,
+// `Tile::FORMAT_WEBP`, `Tile::FORMAT_H264`. A byte outside this map (a stale
 // gateway's, or a corrupt frame) yields `undefined`, and `decodeTile` drops the
 // record rather than handing unknown bytes to a decoder.
-const MIME_BY_FORMAT: Record<number, TileMsg["mime"] | undefined> = {
+const CODEC_BY_FORMAT: Record<number, TileMsg["codec"] | undefined> = {
   1: "image/png",
   2: "image/jpeg",
   3: "image/webp",
+  4: "h264",
 };
 export const NO_SLOT = 0xffff;
 // How many tiles the server may ask this client to remember. Part of the wire
@@ -301,8 +308,8 @@ function decodeTile(
   if (slot !== NO_SLOT && slot >= SLOT_COUNT) {
     return null;
   }
-  const mime = MIME_BY_FORMAT[view.getUint8(at + 1)];
-  if (!mime) {
+  const codec = CODEC_BY_FORMAT[view.getUint8(at + 1)];
+  if (!codec) {
     return null;
   }
   const len = view.getUint32(at + 12, true);
@@ -319,7 +326,7 @@ function decodeTile(
       w: view.getUint16(at + 8, true),
       h: view.getUint16(at + 10, true),
       data: new Uint8Array(buf, start, len),
-      mime,
+      codec,
     },
     next: start + len,
   };

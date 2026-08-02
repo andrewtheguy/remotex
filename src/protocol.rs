@@ -15,7 +15,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// viewer requires an exact match. Bump it when an older peer would otherwise
 /// fail without a useful compatibility error; clients ignore additive control
 /// tags they do not know.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -357,7 +357,8 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// format travels with the tile instead of being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
-    /// Payload codec: [`Tile::FORMAT_PNG`], [`Tile::FORMAT_JPEG`] or [`Tile::FORMAT_WEBP`].
+    /// Payload codec: [`Tile::FORMAT_PNG`], [`Tile::FORMAT_JPEG`], [`Tile::FORMAT_WEBP`]
+    /// or [`Tile::FORMAT_H264`].
     pub format: u8,
     pub x: u16,
     pub y: u16,
@@ -371,6 +372,37 @@ impl Tile {
     pub const FORMAT_PNG: u8 = 1;
     pub const FORMAT_JPEG: u8 = 2;
     pub const FORMAT_WEBP: u8 = 3;
+    /// One complete H.264 access unit, for a target on `render_type = "video"`.
+    ///
+    /// The odd one out, and every client has to know how: the other three formats are
+    /// self-contained pictures, and this is one link in a chain. The contract is:
+    ///
+    /// - The payload is **one whole access unit** — every NAL unit of exactly one
+    ///   frame, Annex-B, delimited by start codes. Never a partial one, never two.
+    /// - SPS and PPS accompany every keyframe, so a client can build its decoder from
+    ///   any keyframe it sees and needs nothing out of band. The stream begins with
+    ///   one, and a repaint, a resize or a client coming back produces another.
+    /// - `(x, y, w, h)` is the **true desktop rectangle**, always the whole
+    ///   framebuffer at the origin. The decoded picture may be one pixel wider and/or
+    ///   taller, because H.264 needs even sides and a desktop need not have them: a
+    ///   client draws the top-left `w`×`h` of what it decodes and ignores the rest.
+    /// - Every access unit matters and their order matters. A client that drops one
+    ///   decodes wrongly until the next keyframe, so unlike a still tile this is
+    ///   never cached into a slot, never referenced, and never superseded by a later
+    ///   record that happens to cover it — see [`crate::wire`].
+    pub const FORMAT_H264: u8 = 4;
+
+    /// Whether this tile's payload only means anything in sequence.
+    ///
+    /// True for H.264 and false for every still, and it is what [`crate::wire`] reads
+    /// before deciding whether a tile may be cached, referenced, or dropped because
+    /// something covers it. All three are sound reasoning about *pixels* — a paint
+    /// nobody could have seen, a payload identical to one already held — and all
+    /// three are wrong about a frame whose meaning is "what changed since the last
+    /// one".
+    pub fn stateful(&self) -> bool {
+        self.format == Self::FORMAT_H264
+    }
 
     /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
     pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
@@ -444,9 +476,13 @@ impl Tile {
         })
     }
 
-    /// Wrap an already-encoded image stream — the pass-through path for a source
-    /// that encodes elsewhere, so the gateway never decodes and re-encodes a
-    /// pixel. No current engine takes this path.
+    /// Wrap an already-encoded payload, for a caller that did the encoding itself.
+    ///
+    /// The H.264 path takes this: [`crate::h264`] owns one stream for the whole
+    /// session and produces access units rather than pictures, so there is nothing
+    /// here for it to compress. It also remains the pass-through for a source that
+    /// hands over frames already encoded, so the gateway never decodes and
+    /// re-encodes a pixel.
     pub fn encoded(format: u8, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> Self {
         Self {
             format,

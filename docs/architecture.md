@@ -60,7 +60,7 @@ updates in source order even when individual tile encodes finish concurrently.
 
 ### The render dial
 
-How a target's tiles are encoded is a per-target choice on two flat axes, plus a
+How a target's pixels reach a client is a per-target choice on two flat axes, plus a
 quality: `render_type` is the quality strategy, `render_subtype` the codec, and
 `render_quality` (1–100) the fixed quality a lossy strategy uses. Two axes rather
 than one flat mode list because strategy and codec vary independently. The legal
@@ -74,6 +74,11 @@ combinations that exist are:
 | `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
 | `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
 | `motion` | `jpeg` / `webp` | base at `render_quality`; cells in motion cheaper still |
+| `video` | *(refused)* | the whole desktop as one H.264 stream at `render_quality` |
+
+`video` is the one row where `render_subtype` is empty, and that is what it is
+saying: the first four rows all send **one encoded image per changed region**, and
+it does not send regions at all. There is no per-tile codec left to name.
 
 No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
@@ -87,9 +92,11 @@ through ImageIO from the container itself. WebP decode is why the app's deployme
 target is macOS 15.
 
 The engines never see the config enums. The axes and the qualities collapse to one
-`RenderPlan` — a base `TileCodec` (`Png | Jpeg(q) | Webp(q)`) and, for `motion`
-only, a second one — at the config boundary in `TargetConfig::render_plan`, which
-reaches the per-tile encode call through the engine-agnostic `TileSink`:
+`RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
+the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
+one arm per transport — `Tiles { base, motion, debug }` and `Video { quality }` —
+rather than a struct with a flag, because the two share no code path worth sharing
+and the compiler is what stops a consumer handling only the first:
 
 ```text
 render_type / render_subtype / render_quality / render_motion_*
@@ -221,7 +228,67 @@ Cleanups ride the wire as ordinary tiles; nothing about the record changed. What
 cost is in the `encode totals` line, where `motion` and `cleanup` are read together:
 every cleanup is a tile sent twice, so a scheme paying more in re-sends than it
 saves in motion shows up as a cleanup byte count rivalling the saving. Replacing the
-moving-cell encoder with H.264 is the [roadmap](roadmap.md)'s business.
+moving-cell encoder with H.264 — a stream per coalesced moving region, rather than
+the whole-screen stream `video` is — is the [roadmap](roadmap.md)'s business.
+
+#### `video`: a different transport, not a fourth codec
+
+`render_type = "video"` sends the whole framebuffer as one inter-frame H.264 stream
+for the session (`src/h264.rs`, encoding with openh264). It is on the `render_type`
+axis and refuses `render_subtype` because an access unit is not the same kind of
+thing as a tile: a tile is an independent picture — reorderable, cacheable,
+droppable once something covers it — and an access unit is one link in a chain,
+where losing any link decodes wrongly until the next keyframe. `RenderPlan` being an
+enum is that distinction made structural.
+
+Four consequences, each of which is a rule somewhere:
+
+- **`Shadow::accept` is a promise.** It records source pixels as delivered the
+  moment it accepts them, and nothing re-sends them, so the encoder may never drop a
+  frame (`skip_frames(false)`) and an encode that yields no bitstream leaves the
+  mirror dirty for the next frame to carry rather than clearing it.
+- **The stream is fed rectangles, not frames.** `damage` is called once per damage
+  *rectangle*, and VNC's pixels can only be cropped out of the rect just decoded, so
+  the stream keeps its own whole-framebuffer RGB copy — the mirror — to blit into.
+  `TileSink::frame` encodes it, called at RDP's outputs-loop end (and its `Refresh`
+  arm, which `continue`s past that) and at VNC's `FramebufferUpdate` end. It is a
+  no-op when nothing was blitted, because RDP's loop turns once per PDU and most
+  redraw nothing.
+- **`src/wire.rs` must leave an access unit alone.** Never cached into a slot, never
+  a `TILE_REF`, and outside the coverage relation in both directions. Coverage is
+  sound reasoning about pixels nobody could have seen; under `video` every record
+  covers the whole framebuffer, so each covers its predecessor exactly.
+- **The picture may be a pixel larger than the desktop.** H.264 needs even sides, so
+  the mirror is padded up with its edge repeated (black would be a seam the encoder
+  paid for every frame). The tile header carries the *true* desktop size and the
+  client crops — reporting the padded size would push a tile past the framebuffer,
+  which the viewer's renderer drops outright rather than clamps.
+
+`render_quality` maps to a constant quantizer (1 → 51, 100 → 12; the floor is
+openh264's own `GOM_MIN_QP_MODE`, and mapping past it would give a dial whose top
+third did nothing). A constant quantizer *is* variable bitrate — bits go where the
+picture needs them, so a motionless desktop costs almost nothing.
+
+The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
+`Congestion` in `src/encode.rs` watches one local signal — how long queueing an
+access unit blocked — and walks the quantizer up towards 51 when the link is behind,
+back down towards the dial when it is not; never below it. What TCP hides is
+*headroom*, and this never needs headroom, because exceeding the operator's setting
+was never a goal. "Am I behind?" is the whole question, and the outbound queue
+answers it. Quality moves through `Stream::set_qp`, which re-tunes the running
+encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
+spending a few hundred KB exactly when bytes are scarce.
+
+That signal only works because those queues are shallow. `FRAME_BUFFER` is 64, sized
+for tiles — a 1080p repaint is ~17 bands — but under `video` one message is a whole
+frame, and 64 of them in each of two queues in series is seconds of buffered
+picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
+
+**Only the browser decodes it.** It uses WebCodecs `VideoDecoder`, which is
+secure-context only — the same limit remote audio already has, but a worse one to
+hit, since no audio decoder means silence beside a working desktop and no video
+decoder means no desktop. So the SPA says so in a banner that stays up. `remotex.app`
+refuses a video target by name; decoding it there is on the [roadmap](roadmap.md).
 
 ## Session lifecycle
 
@@ -411,6 +478,36 @@ reactivation. RDP reports no scale factor back, so the density here is declared
 rather than measured. With `clipboard = true`, MS-RDPECLIP carries
 `CF_UNICODETEXT` with CRLF/LF conversion. With `audio = true`, the engine
 negotiates the static and dynamic MS-RDPEA transports described above.
+
+**A slow host can fail the reactivation a size change triggers.** When a resize
+actually changes the desktop size, the server answers `DeactivateAll` and
+`reactivate` runs the Deactivation-Reactivation Sequence. On one old machine that
+sequence usually fails at the first PDU it reads, ending the session with
+
+```text
+RDP session ended: reactivation: … invalid `pdu_type`: invalid pdu type
+```
+
+decoding a `ShareControlHeader`, or occasionally `read frame: cannot decrypt peer's
+message`. Both are stream-level: what arrives is not the PDU the sequence expects.
+
+**It looks like old hardware rather than a protocol fault**, which is why this is
+recorded here and not planned work. Forcing a real size change:
+
+| host | result |
+|---|---|
+| 2013 MacBook Pro running Windows | 12 failures in ~18 attempts |
+| a current Windows desktop | 5 reactivations, 0 failures |
+
+So the working assumption is that the old machine is too slow to complete the
+sequence in time and something else reaches the socket first — not that the sequence
+is written wrongly. Two further measurements support that: it reproduces identically
+on `fixed-quality`/`webp` and on `video`, so neither encoder is implicated, and it
+predates the render dial entirely. Both VNC resize paths are unaffected.
+
+One thing that makes it look intermittent from a browser: only a size change that is
+*real* reactivates at all. Asking twice for the same size triggers it once, and a
+request equal to the current size never triggers it.
 
 ### VNC
 

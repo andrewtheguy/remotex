@@ -1079,7 +1079,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // The repaint that follows re-sends every pixel at the base
                     // encode, which settles every debt and makes every cell's
                     // history a single redraw rather than motion.
-                    sink.reset_motion();
+                    sink.reset_render();
                     let (size, resize_msg) = {
                         let d = desktop.lock().unwrap();
                         (d.size, d.resize_msg())
@@ -1390,6 +1390,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         break;
                     }
                 }
+                // One FramebufferUpdate is one frame's worth of damage, however many
+                // rectangles it was described in — the cleanest frame boundary either
+                // protocol offers, and where a video stream is told to encode what it
+                // has. After the loop rather than inside it, so a `LastRect` breaking
+                // out still reaches it.
+                sink.frame().await?;
                 let size = desktop.lock().unwrap().size;
                 if full_repaint_owed {
                     // Layout metadata and empty updates can arrive before the
@@ -2290,7 +2296,7 @@ async fn apply_resize(
     shadow.lock().unwrap().resize(new.0, new.1);
     // The cell grid is anchored at (0,0) in framebuffer pixels, so a new size makes
     // every key name somewhere else.
-    sink.reset_motion();
+    sink.reset_render();
     info!(
         "vnc: desktop resized from {}x{} at {}x to {}x{} at {scale}x",
         was.0.0, was.0.1, was.1, new.0, new.1
@@ -3973,7 +3979,7 @@ mod tests {
     /// A sink and the frame channel behind it.
     fn test_sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(8);
-        let plan = crate::config::RenderPlan {
+        let plan = crate::config::RenderPlan::Tiles {
             base: crate::config::TileCodec::Png,
             motion: None,
             debug: false,

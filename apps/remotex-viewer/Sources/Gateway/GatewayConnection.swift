@@ -74,6 +74,10 @@ protocol GatewaySessionSink: AnyObject, Sendable {
 actor GatewayConnection {
     private let gateway: any SessionGateway
     private let decoder = TileDecoder()
+    /// Whether this connection has already said it cannot decode a video target.
+    /// Latched, so one unusable target produces one message rather than one per
+    /// batch, and so a reconnect to the same target does not shout again.
+    private var refusedVideo = false
     /// The tiles the gateway has told this client to remember, by slot.
     ///
     /// Encoded payloads rather than decoded pixels: a decoded 320x64 tile is 80 KB
@@ -397,6 +401,30 @@ actor GatewayConnection {
     private func deliver(tile data: Data) async {
         guard let records = BatchFrame.decode(data) else {
             log.warning("malformed batch frame of \(data.count, privacy: .public) bytes")
+            return
+        }
+        if !refusedVideo, records.contains(where: \.isVideo) {
+            // Said once, and then the target is left rather than watched. Dropping
+            // these records one by one would be the honest thing to do with an
+            // undecodable *tile*, but a video target sends nothing else — so the
+            // desktop would simply never paint, which is the outcome worth spending
+            // code to avoid.
+            refusedVideo = true
+            log.error("this target sends H.264 video, which this viewer cannot decode")
+            // Queued before the hop to the sink, not after. `publish` suspends on
+            // `MainActor.run`, and what runs there is free to tear this connection
+            // down — `stop` finishes the outbound queue, and an enqueue after that is
+            // silently dropped. Enqueueing first costs nothing and does not depend on
+            // what the sink decides to do about the message.
+            send(.disconnect)
+            await publish(.rejected(reason: """
+                This target sends its desktop as one H.264 video stream, which this \
+                viewer cannot decode yet. Open it in a browser, or give the target a \
+                different render_type.
+                """))
+            return
+        }
+        guard !refusedVideo else {
             return
         }
         // At most one reset per batch: a hundred references into a cache this
