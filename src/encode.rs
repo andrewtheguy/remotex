@@ -184,26 +184,37 @@ impl Motion {
         cell.history.count_ones()
     }
 
-    /// Remember a piece sent at the motion encode, so a later tick can settle it.
+    /// Remember a piece about to be sent at the motion encode, so a later tick can
+    /// settle it. Reports whether the debt was recorded.
+    ///
+    /// A `false` return has to be honoured by the caller, which is why this is
+    /// `#[must_use]`: `Shadow` records the *source* pixels as delivered the moment a
+    /// rectangle is accepted, so a cell sent at the motion encode with no debt
+    /// recorded is one the client holds a lossy copy of while the gateway believes
+    /// it holds the exact pixels — and nothing will ever re-send it, because nothing
+    /// knows it is owed. That is permanent, not merely coarse. Sending such a cell
+    /// at the base encode instead is the only safe reading of a full stash.
     ///
     /// Over [`MAX_STASH_BYTES`] the *existing* entry is kept and the new one
     /// dropped. Keeping the older one is the point: it is the one closer to coming
     /// due, and a cell whose debt was dropped instead would never clean up at all
     /// until it next moved.
+    #[must_use]
     fn stash(
         &mut self,
         key: (u16, u16),
         rect: Rect,
         rgb: Arc<Vec<u8>>,
         now: tokio::time::Instant,
-    ) {
+    ) -> bool {
         let replaced = self.stash.get(&key).map_or(0, |old| old.rgb.len());
         let after = self.stash_bytes - replaced + rgb.len();
         if after > MAX_STASH_BYTES {
-            return;
+            return false;
         }
         self.stash_bytes = after;
         self.stash.insert(key, Stashed { rect, rgb, sent_at: now });
+        true
     }
 
     /// Forget the cleanup owed for `key` if `sent` — a rectangle just sent at the
@@ -368,7 +379,12 @@ impl TileSink {
 
             for (cell, moving) in cells {
                 let rgb = Arc::new(pack(cell));
-                let codec = if moving {
+                // A cell takes the motion encode only if its cleanup was recorded.
+                // Past the stash cap it stays crisp instead: the alternative is a
+                // client left holding a lossy copy that nothing is owed and so
+                // nothing will ever replace. Costing bytes is recoverable; that is
+                // not.
+                let took_the_discount = moving && {
                     // Timed at dispatch rather than when the encode lands, which is
                     // what keeps a cleanup from overtaking fresher pixels: a cell
                     // with a tile still in the queue has just been touched, so it
@@ -377,10 +393,14 @@ impl TileSink {
                         .motion
                         .lock()
                         .unwrap()
-                        .stash(cell.cell_key(), cell, Arc::clone(&rgb), now);
+                        .stash(cell.cell_key(), cell, Arc::clone(&rgb), now)
+                };
+                let codec = if took_the_discount {
                     self.shared.motion_tiles.fetch_add(1, Ordering::Relaxed);
                     motion_codec
                 } else {
+                    // Crisp pixels discharge whatever this cell was owed, whether it
+                    // is quiet or only crisp because the stash is full.
                     self.shared.motion.lock().unwrap().settle(cell.cell_key(), cell);
                     self.plan.base
                 };
@@ -512,11 +532,16 @@ fn encode_tile(rect: Rect, rgb: &[u8], codec: TileCodec) -> anyhow::Result<Tile>
 /// Re-send cells that have stopped moving at the base encode, so a paused screen
 /// sharpens on its own. `false` means the browser is gone.
 ///
-/// A cleanup that fails to encode is dropped with a warning rather than ending the
-/// session, which is the one place this path differs from an ordinary tile. A tile
-/// that never arrives leaves the shadow claiming the client has pixels it never
-/// got; a cleanup that never arrives leaves the client with the pixels it already
-/// had, which are correct and merely coarser.
+/// A cleanup that fails to encode is put back rather than ending the session, which
+/// is the one place this path differs from an ordinary tile: a tile that never
+/// arrives leaves the shadow claiming the client has pixels it never got, while a
+/// cleanup that never arrives leaves the client with pixels that are correct and
+/// merely coarser.
+///
+/// Put back rather than dropped, though. The shadow recorded the source pixels as
+/// delivered when the cell was first sent, so a discarded debt is a region the
+/// client holds a lossy copy of that nothing will ever re-send. Keeping it means the
+/// next tick tries again.
 async fn flush_cleanups(
     engine: &'static str,
     shared: &Arc<Shared>,
@@ -529,14 +554,22 @@ async fn flush_cleanups(
         .unwrap()
         .take_due(tokio::time::Instant::now(), MAX_CLEANUPS_PER_TICK);
     for stashed in due {
-        let Stashed { rect, rgb, .. } = stashed;
+        let Stashed { rect, rgb, sent_at } = stashed;
         // On a worker like any other encode: a cleanup arrives when the screen is
         // quiet, but the order task is not the thread to find that out on.
+        let owed = Arc::clone(&rgb);
         let joined = tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)).await;
         let tile = match joined {
             Ok(Ok(tile)) => tile,
             Ok(Err(e)) => {
-                warn!("{engine}: dropping a cleanup tile: {e:#}");
+                warn!("{engine}: re-queueing a cleanup tile that would not encode: {e:#}");
+                // Back into the stash at its original age, so it is due again on the
+                // next tick rather than waiting out another idle period.
+                let _ = shared
+                    .motion
+                    .lock()
+                    .unwrap()
+                    .stash(rect.cell_key(), rect, owed, sent_at);
                 continue;
             }
             Err(e) => {
@@ -1082,7 +1115,7 @@ mod tests {
         let mut motion = Motion::default();
         let cell = rect(0, 0, 320, 64);
         let base = tokio::time::Instant::now();
-        motion.stash((0, 0), cell, Arc::new(rgb(320, 64, 1)), base);
+        assert!(motion.stash((0, 0), cell, Arc::new(rgb(320, 64, 1)), base));
 
         assert!(motion.take_due(base, 8).is_empty(), "settled before it was idle");
         assert!(
@@ -1108,7 +1141,7 @@ mod tests {
         let mut motion = Motion::default();
         let owed = rect(0, 0, 320, 64);
         let stash = |m: &mut Motion| {
-            m.stash((0, 0), owed, Arc::new(rgb(320, 64, 1)), tokio::time::Instant::now())
+            assert!(m.stash((0, 0), owed, Arc::new(rgb(320, 64, 1)), tokio::time::Instant::now()))
         };
 
         stash(&mut motion);
@@ -1138,7 +1171,7 @@ mod tests {
             // Staggered, so "oldest" is a fact about the data rather than about
             // whichever order the map happens to iterate in.
             let sent_at = base + Duration::from_millis(i as u64);
-            motion.stash(key, cell, Arc::new(rgb(320, 64, 1)), sent_at);
+            assert!(motion.stash(key, cell, Arc::new(rgb(320, 64, 1)), sent_at));
         }
 
         let now = base + Duration::from_millis(count as u64) + CLEANUP_IDLE;
@@ -1166,25 +1199,70 @@ mod tests {
         let per_cell = 320 * 64 * 3;
         let fits = MAX_STASH_BYTES / per_cell;
         for i in 0..fits {
-            motion.stash((i as u16, 0), cell(i as u16), Arc::new(rgb(320, 64, 1)), now);
+            assert!(motion.stash((i as u16, 0), cell(i as u16), Arc::new(rgb(320, 64, 1)), now));
         }
         let held = motion.stash_bytes;
         assert!(held + per_cell > MAX_STASH_BYTES, "the stash did not fill");
 
         // A new cell past the cap is dropped rather than admitted.
-        motion.stash((9000, 0), cell(0), Arc::new(rgb(320, 64, 1)), now);
+        assert!(
+            !motion.stash((9000, 0), cell(0), Arc::new(rgb(320, 64, 1)), now),
+            "a stash past the cap must report that it recorded nothing"
+        );
         assert_eq!(motion.stash.len(), fits, "the cap did not hold");
         assert_eq!(motion.stash_bytes, held);
 
-        // And a cell that already owes one keeps the debt it has, rather than
-        // losing it to a replacement that will not fit either.
+        // A cell that already owes one is still admitted at the cap, because what it
+        // replaces is its own entry: the bytes come back before the new ones are
+        // counted, so a same-sized redraw of a cell already in the stash always
+        // fits. It has to be admitted, too — a refusal here would send that cell
+        // crisp for no reason, since the debt is unchanged either way.
         let older = now - Duration::from_secs(1);
-        motion.stash((0, 0), cell(0), Arc::new(rgb(320, 64, 2)), older);
+        assert!(motion.stash((0, 0), cell(0), Arc::new(rgb(320, 64, 2)), older));
         assert_eq!(motion.stash.len(), fits);
         assert_eq!(
             motion.take_due(now + CLEANUP_IDLE, 1).len(),
             1,
             "the cell that was already owed a cleanup lost it"
+        );
+    }
+
+    /// Past the stash cap a cell stays on the base encode rather than taking a
+    /// discount nothing is owed for.
+    ///
+    /// `Shadow` records the *source* pixels as delivered the moment a rectangle is
+    /// accepted, so a cell sent lossy with no debt recorded is one the client holds
+    /// a worse copy of than the gateway believes, with nothing left that would ever
+    /// re-send it. An HP virtual display is big enough to reach this: 8 MiB holds
+    /// 136 cells, and 2560×1600 is 200 of them.
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_past_the_stash_cap_stays_on_the_base_encode() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(4096);
+        let sink = TileSink::new("test", frame_tx, MOTION);
+
+        // 61,440 bytes a cell, so the stash holds 136 and this asks for 140.
+        let (across, down) = (10u16, 14u16);
+        let fits = MAX_STASH_BYTES / (320 * 64 * 3);
+        let total = usize::from(across) * usize::from(down);
+        assert!(total > fits, "the area has to outgrow the stash for this to test it");
+
+        let area = rect(0, 0, across * 320, down * 64);
+        drive(&sink, area, u64::from(CHURN_MOVING)).await;
+        sink.flush().await;
+
+        // Every slot before the last is under the threshold and goes out as whole
+        // bands; the last one splits into cells.
+        let bands = usize::from(down) * (usize::try_from(CHURN_MOVING).unwrap() - 1);
+        let sent = formats(&drain(&mut frame_rx, bands + total).await);
+        let cells = &sent[bands..];
+        assert_eq!(
+            cells.iter().filter(|&&f| f == Tile::FORMAT_JPEG).count(),
+            fits,
+            "the discount was handed out to more cells than the stash could record"
+        );
+        assert!(
+            cells[fits..].iter().all(|&f| f == Tile::FORMAT_PNG),
+            "a cell went out lossy with no cleanup recorded for it"
         );
     }
 

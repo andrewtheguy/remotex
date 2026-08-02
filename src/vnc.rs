@@ -2275,14 +2275,15 @@ async fn apply_resize(
         new.0,
         new.1
     );
-    let resize_msg = {
+    let (was, resize_msg) = {
         let mut d = desktop.lock().unwrap();
         if d.size == new && d.scale == scale {
             return Ok(false);
         }
+        let was = (d.size, d.scale);
         d.size = new;
         d.scale = scale;
-        d.resize_msg()
+        (was, d.resize_msg())
     };
     // The old pixels describe a framebuffer that no longer exists, and the
     // browser is about to reallocate its canvas.
@@ -2290,7 +2291,10 @@ async fn apply_resize(
     // The cell grid is anchored at (0,0) in framebuffer pixels, so a new size makes
     // every key name somewhere else.
     sink.reset_motion();
-    info!("vnc: desktop resized to {}x{} at {scale}x", new.0, new.1);
+    info!(
+        "vnc: desktop resized from {}x{} at {}x to {}x{} at {scale}x",
+        was.0.0, was.0.1, was.1, new.0, new.1
+    );
     sink.msg(resize_msg).await?;
     Ok(true)
 }
@@ -2434,6 +2438,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
     // Re-arm, on every layout and not only on a change of geometry.
+    //
+    // Logged with the geometry it arms for: this is the one message that tells the
+    // Mac what to stream, so an arming that disagrees with the desktop the gateway
+    // just adopted is what a resize going wrong looks like from here.
+    debug!("vnc: arming auto framebuffer updates for {}x{}", size.0, size.1);
     uplink.send(&vnc_apple::auto_framebuffer_update(size)).await?;
     Ok(resized)
 }
