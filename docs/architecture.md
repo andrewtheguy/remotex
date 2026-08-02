@@ -79,8 +79,9 @@ combinations that exist are:
 | `video` | *(refused)* | the whole desktop as one H.264 stream at `render_quality` |
 
 `video` is the one row where `render_subtype` is empty, and that is what it is
-saying: it does not send regions at all, so there is no per-tile codec left to name.
-The `h264` motion row still has one, because the base encode is still a still image —
+saying: it sends no per-region streams and no tiles at all — one fixed region, the
+whole desktop, for the whole session — so there is no per-tile codec left to name.
+The `h264` motion row still has one, because the base encode is still a still image:
 only what is moving becomes a stream.
 
 No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as

@@ -138,6 +138,14 @@ const ADJUST_COOLDOWN: Duration = Duration::from_secs(1);
 /// same reason [`CLEAR_FRAMES`] is bigger than [`BEHIND_FRAMES`].
 const QP_STEP: u8 = 4;
 
+/// The quality a plan that produces no access units is given.
+///
+/// It is never read: nothing blits into that target's mirror, so no stream is ever
+/// built from it. Named rather than written as a bare `1` at the one place it is
+/// used, because a quality *is* a meaningful number everywhere else in this module
+/// and a reader should not have to work out that this one is not.
+const NO_STREAM_QUALITY: u8 = 1;
+
 /// The shortest gap between two access units.
 ///
 /// The engines' frame boundaries are not a frame *rate*: RDP's is one `outputs`
@@ -615,7 +623,7 @@ impl Shared {
                 quality,
                 debug.then_some(h264::Mark { colour: MARK_MOTION, px: MARK_PX }),
             ),
-            RenderPlan::Tiles { .. } => (Policy::Whole, 1, None),
+            RenderPlan::Tiles { .. } => (Policy::Whole, NO_STREAM_QUALITY, None),
         };
         Self {
             failure: Mutex::default(),

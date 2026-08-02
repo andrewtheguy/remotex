@@ -99,8 +99,22 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
       }
       if (!held) {
         let stream: VideoStream;
+        // Bound to this id, so a decoder that gives up takes its own region down and
+        // no others: under `render_motion_subtype = "h264"` the rest of the desktop
+        // is still arriving as still tiles and still painting, and the other regions
+        // have chains of their own that this one says nothing about. Under
+        // `render_type = "video"` there is only ever one, so it is the same outcome.
+        const failed = (reason: string) => {
+          // Only if this entry is still the live one: a region that restarted on a
+          // new size has already replaced it, and dropping the newer decoder because
+          // the older one errored would lose a chain that is decoding fine.
+          if (live.get(id) === held) {
+            live.delete(id);
+          }
+          handlers.onError(reason);
+        };
         try {
-          stream = createVideoStream(handlers);
+          stream = createVideoStream({ onError: failed });
         } catch (e) {
           // Unreachable once the table exists — it refused to be built without a
           // decoder — but a throw from here would escape into the paint loop and
@@ -137,8 +151,15 @@ const VIDEO_FRAME_US = 33_333;
 
 export interface VideoHandlers {
   /**
-   * The decoder gave up. There is no fallback to switch to — a video target sends
-   * nothing but access units — so this is reported rather than worked around.
+   * A decoder gave up, and the stream it was decoding is over: every frame after
+   * the one it failed on is expressed against history it no longer has.
+   *
+   * Reported rather than worked around, because there is no fallback to switch to.
+   * How much of the desktop that costs depends on the dial — under
+   * `render_type = "video"` it is all of it, and under
+   * `render_motion_subtype = "h264"` it is one region, with the still codecs
+   * carrying everything around it — so this says what happened and lets the caller
+   * decide how loudly to say it.
    */
   onError: (reason: string) => void;
 }

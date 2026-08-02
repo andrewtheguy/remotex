@@ -171,11 +171,12 @@ export function createTilePainter(options: {
   const decodeAccessUnit = async (job: PaintJob & { kind: "video" }) => {
     if (!video) {
       try {
+        // The failed stream has already dropped itself from the table; the others
+        // are chains of their own and keep decoding. Rebuilding one is not this
+        // client's decision either way — a stream begins again when the gateway
+        // sends a keyframe, which a repaint, a resize or a region restarting does.
         video = createVideoStreams({
-          onError: (reason) => {
-            options.onVideoError(reason);
-            releaseVideo();
-          },
+          onError: (reason) => options.onVideoError(reason),
         });
       } catch (e) {
         options.onVideoError(

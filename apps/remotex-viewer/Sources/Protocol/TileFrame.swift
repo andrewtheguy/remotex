@@ -74,6 +74,11 @@ enum BatchFrame {
     /// than a reason to grow an array, which keeps this client's memory a function
     /// of the protocol instead of of what a gateway chooses to send.
     static let slotCount: UInt16 = 256
+    /// How many H.264 streams one session may run at once (`batch::MAX_STREAMS`).
+    /// The same kind of bound as `slotCount`, and read the same way: a stream id at
+    /// or above it is a malformed record. The gateway's own cap on concurrent
+    /// regions is smaller.
+    static let maxStreams: UInt8 = 16
 
     /// One record of a batch: pixels to draw and keep, a position to redraw
     /// something already kept at, or one H.264 access unit for one region.
@@ -209,6 +214,10 @@ enum BatchFrame {
         guard at + videoHeaderLength <= raw.count else {
             return nil
         }
+        let stream = raw[at + 1]
+        guard stream < maxStreams else {
+            return nil
+        }
         let length = Int(
             UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: at + 10, as: UInt32.self))
         )
@@ -218,7 +227,7 @@ enum BatchFrame {
         }
         return (
             .video(
-                stream: raw[at + 1],
+                stream: stream,
                 x: u16(raw, at + 2),
                 y: u16(raw, at + 4),
                 w: u16(raw, at + 6),

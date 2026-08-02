@@ -18,13 +18,16 @@ measurements are what should settle them:
 - **`MAX_STREAMS` is four**, and the merge that keeps the count under it is judged by
   one ratio (`MERGE_WASTE`). A desktop with five genuinely independent moving regions
   is not obviously a desktop where merging beats dropping the smallest to stills.
-- **`RETUNE` and `STREAM_IDLE` are both 500 ms**, so a region that keeps changing
-  shape pays for a keyframe every time it does. One measurement exists — 25 s of a
-  pointer swept in a circle on a 1280×800 RDP desktop, which makes the region's shape
-  churn about as fast as anything real would: 12 keyframes costing 38 KB of the
-  140 KB the streams sent, so **27% of the stream went on restarts**. Whether a
-  longer `RETUNE` recovers that or only makes the regions fit worse is the question,
-  and it wants more than one kind of content behind it.
+- **`RETUNE` and `STREAM_IDLE` are both 500 ms**, and a retune costs a keyframe only
+  when the region it wants no longer fits inside the rectangle its stream already
+  has. Shrinking is free and so is any change of shape that stays inside it; what
+  pays is growing, and a region that ended and came back. One measurement exists —
+  25 s of a pointer swept in a circle on a 1280×800 RDP desktop, which grows and
+  moves the wanted rectangle about as often as anything real would: 12 keyframes
+  costing 38 KB of the 140 KB the streams sent, so **27% of the stream went on
+  rectangles that had to be replaced**. Whether a longer `RETUNE`, or a rectangle
+  deliberately grown past what is moving, recovers that is the question, and it wants
+  more than one kind of content behind it.
 - **A component's own bounding box is not checked against `MERGE_WASTE`.** Only
   merges are. A single diagonal streak of moving cells therefore streams a box mostly
   full of still ones — safe, since every cell inside is owed a cleanup, but wasteful

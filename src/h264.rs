@@ -282,12 +282,25 @@ impl Stream {
     /// refusal — only the remote knows its own size, and it may change mid-session —
     /// so the message has to carry the whole explanation to wherever it surfaces.
     pub fn new(rect: Rect, mirror: (u16, u16), quality: u8) -> anyhow::Result<Self> {
-        let coded = Rect {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right + rect.w() % 2,
-            bottom: rect.bottom + rect.h() % 2,
-        };
+        // Checked rather than plain arithmetic, though a rectangle ending at the last
+        // representable pixel needs a desktop wider than `u16` can describe: this
+        // binary aborts on an arithmetic overflow, and the point of this constructor
+        // is that nothing invalid gets as far as an abort.
+        let (right, bottom) = rect
+            .right
+            .checked_add(rect.w() % 2)
+            .zip(rect.bottom.checked_add(rect.h() % 2))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "an h264 stream over {}x{} at ({},{}) cannot be grown to even sides \
+                     without leaving the framebuffer's coordinate space",
+                    rect.w(),
+                    rect.h(),
+                    rect.left,
+                    rect.top
+                )
+            })?;
+        let coded = Rect { left: rect.left, top: rect.top, right, bottom };
         anyhow::ensure!(
             coded.right < mirror.0 && coded.bottom < mirror.1,
             "an h264 stream over {}x{} at ({},{}) needs even sides, and growing it to \
@@ -718,8 +731,10 @@ mod tests {
         let inside = Rect { left: 320, top: 64, right: 959, bottom: 191 };
         assert_eq!((inside.w() % 2, inside.h() % 2), (0, 0));
         assert!(Stream::new(inside, mirror.coded(), 60).is_ok());
-        // And a rectangle that is not a union of cells — odd sided in the middle of
-        // the desktop — is refused rather than reaching an openh264 assertion.
+        // The rule from both sides, at the very edge: a single-pixel-wide rectangle
+        // one column short of the mirror's width grows into the padding and is fine,
+        // and the same rectangle one column further right has nowhere to grow and is
+        // refused rather than reaching an openh264 assertion.
         let ragged = Rect { left: 1918, top: 0, right: 1918, bottom: 63 };
         assert!(
             Stream::new(ragged, (1920, 1080), 60).is_ok(),

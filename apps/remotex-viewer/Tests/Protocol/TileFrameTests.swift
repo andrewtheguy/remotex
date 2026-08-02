@@ -143,6 +143,16 @@ struct TileFrameTests {
         )
     }
 
+    /// The same bound the slot table has, for the same reason: what a client may be
+    /// asked to hold is a function of the protocol, not of what a gateway sends.
+    @Test
+    func aStreamIdTheWireDoesNotAllowIsRejected() {
+        let frame = batch(video(stream: 16, x: 0, y: 0, w: 8, h: 8, payload: [0x01]))
+        #expect(BatchFrame.decode(frame) == nil)
+        let legal = batch(video(stream: 15, x: 0, y: 0, w: 8, h: 8, payload: [0x01]))
+        #expect(BatchFrame.decode(legal)?.count == 1, "the last legal id was refused")
+    }
+
     /// Half an access unit is not a smaller one: it has to fail the batch, exactly
     /// as a truncated tile does.
     @Test

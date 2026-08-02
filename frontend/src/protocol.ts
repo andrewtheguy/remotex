@@ -249,6 +249,12 @@ const CODEC_BY_FORMAT: Record<number, TileMsg["codec"] | undefined> = {
   3: "image/webp",
 };
 export const NO_SLOT = 0xffff;
+// How many H.264 streams one session may run at once. Part of the wire contract
+// (`batch::MAX_STREAMS`), and the same kind of bound as SLOT_COUNT: a stream id at
+// or above it is a malformed record rather than a reason to hold another decoder,
+// which keeps this client's memory a function of the protocol instead of of what a
+// gateway chooses to send. The gateway's own cap on concurrent regions is smaller.
+export const MAX_STREAMS = 16;
 // How many tiles the server may ask this client to remember. Part of the wire
 // contract (`batch::SLOT_COUNT`), which is what makes the cache a fixed array
 // rather than something a server could grow without limit.
@@ -376,6 +382,10 @@ function decodeVideo(
   if (at + VIDEO_HEADER_LEN > buf.byteLength) {
     return null;
   }
+  const stream = view.getUint8(at + 1);
+  if (stream >= MAX_STREAMS) {
+    return null;
+  }
   const len = view.getUint32(at + 10, true);
   const start = at + VIDEO_HEADER_LEN;
   if (start + len > buf.byteLength) {
@@ -384,7 +394,7 @@ function decodeVideo(
   return {
     record: {
       kind: "video",
-      stream: view.getUint8(at + 1),
+      stream,
       x: view.getUint16(at + 2, true),
       y: view.getUint16(at + 4, true),
       w: view.getUint16(at + 6, true),

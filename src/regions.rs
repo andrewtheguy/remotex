@@ -228,7 +228,15 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
                 if merged.area() > MERGE_WASTE * moving {
                     continue;
                 }
-                let cost = merged.area() - components[i].bbox.area() - components[j].bbox.area();
+                // Saturating, because two components' *boxes* may overlap even
+                // though their cells cannot: an L and a cell tucked into its corner
+                // are separate regions whose bounding boxes are nested, and the
+                // merged box is then no larger than the parts. That merge costs
+                // nothing, which is exactly what a zero says.
+                let cost = merged
+                    .area()
+                    .saturating_sub(components[i].bbox.area())
+                    .saturating_sub(components[j].bbox.area());
                 if best.is_none_or(|(_, _, at)| cost < at) {
                     best = Some((i, j, cost));
                 }
@@ -257,6 +265,18 @@ fn coalesce(cells: &[(u16, u16)], max: usize) -> Vec<CellBox> {
         }
     }
     components.into_iter().map(|c| c.bbox).collect()
+}
+
+/// The lowest stream id none of `taken` is using, or `None` when the wire has none
+/// left.
+///
+/// The range is the *wire's* [`batch::MAX_STREAMS`] rather than the policy's
+/// [`MAX_STREAMS`], and the difference is what makes a retune safe: a stream being
+/// replaced keeps its id until the moment it is dropped, so a retune can have both
+/// the outgoing and the incoming set in hand at once — more ids in play than there
+/// are streams alive at the end of it.
+fn free_id(taken: &[u8]) -> Option<u8> {
+    (0..batch::MAX_STREAMS).find(|id| !taken.contains(id))
 }
 
 /// The mirror, the live streams, and the cells they owe.
@@ -435,7 +455,14 @@ impl Regions {
                 // keeps live rectangles disjoint: the new one is built from the
                 // mirror, so nothing it swallows is lost.
                 old.retain(|live| live.rect.intersect(&rect).is_none());
-                next.push(self.build(rect, now)?);
+                // Every id that could still be live when this retune ends: the ones
+                // already kept or built, and every survivor of `old`. Avoiding the
+                // survivors too is what lets a carried stream keep its own id — and
+                // it must keep it, because a client would read a new id as a new
+                // region and start a decoder with no history to decode from.
+                let taken: Vec<u8> =
+                    next.iter().chain(old.iter()).map(|live| live.id).collect();
+                next.push(self.build(rect, now, &taken)?);
             }
         }
         // A region that has stopped moving keeps its stream for a moment — a video
@@ -445,6 +472,10 @@ impl Regions {
             let idle = now.saturating_duration_since(live.moving_at) >= STREAM_IDLE;
             let overlaps = next.iter().any(|kept| kept.rect.intersect(&live.rect).is_some());
             if !idle && !overlaps && next.len() < MAX_STREAMS {
+                debug_assert!(
+                    !next.iter().any(|kept| kept.id == live.id),
+                    "a carried stream kept an id a new one had taken"
+                );
                 next.push(live);
             }
         }
@@ -494,13 +525,32 @@ impl Regions {
 
     /// Start a stream over `rect` and record what it will owe.
     fn start(&mut self, rect: Rect, now: Instant) -> anyhow::Result<()> {
-        let live = self.build(rect, now)?;
+        let taken: Vec<u8> = self.live.iter().map(|live| live.id).collect();
+        let live = self.build(rect, now, &taken)?;
         self.covered.extend(live.cells.iter().copied());
         self.live.push(live);
         Ok(())
     }
 
-    fn build(&mut self, rect: Rect, now: Instant) -> anyhow::Result<Live> {
+    /// Build a stream over `rect`, with an id none of `taken` is using.
+    ///
+    /// The ids in use are passed in rather than read off `self.live`, because the
+    /// caller that matters — [`Self::retune`] — has taken the live table *out* of
+    /// `self` for the duration, so a stream built from what is left there would
+    /// always be handed id 0. Two live regions sharing an id is not a cosmetic
+    /// fault: a client keys its decoders by it, so both chains would be fed to one
+    /// decoder and neither would decode.
+    fn build(&mut self, rect: Rect, now: Instant, taken: &[u8]) -> anyhow::Result<Live> {
+        let id = free_id(taken).ok_or_else(|| {
+            anyhow::anyhow!(
+                "h264 regions: no stream id left for a {}x{} region; {} are in use and \
+                 the wire allows {}",
+                rect.w(),
+                rect.h(),
+                taken.len(),
+                batch::MAX_STREAMS
+            )
+        })?;
         let mirror = self.mirror_mut()?.coded();
         let mut stream = Stream::new(rect, mirror, self.quality)?;
         // A region that appears while the link is behind starts where the link left
@@ -516,7 +566,7 @@ impl Regions {
             }
         }
         Ok(Live {
-            id: self.free_id(),
+            id,
             rect,
             cells,
             stream,
@@ -526,13 +576,6 @@ impl Regions {
             carried: false,
             moving_at: now,
         })
-    }
-
-    /// The lowest stream id nothing is using.
-    fn free_id(&self) -> u8 {
-        (0..u8::try_from(MAX_STREAMS).expect("a small cap"))
-            .find(|id| !self.live.iter().any(|live| live.id == *id))
-            .unwrap_or(0)
     }
 
     /// A crisp copy of `sent` has gone out, so nothing is owed for any cell it covers
@@ -810,6 +853,25 @@ mod tests {
         assert!(coalesce(&[], MAX_STREAMS).is_empty());
     }
 
+    /// Two components' *cells* cannot overlap, but their bounding boxes can: a cell
+    /// tucked into an L's corner is its own region inside the L's box. The merged box
+    /// is then no bigger than the parts, so the cost of that merge is negative if it
+    /// is worked out by subtraction — which on `u32` is a panic in a debug build and
+    /// a wrapped-around worst-candidate in a release one.
+    #[test]
+    fn components_whose_boxes_overlap_can_still_be_merged() {
+        let mut cells = vec![(0, 0), (1, 0), (2, 0), (0, 1), (0, 2)];
+        // Diagonally opposite the L's corner, so 4-connected to none of it, and
+        // inside its bounding box.
+        cells.push((2, 2));
+        assert_eq!(coalesce(&cells, 2).len(), 2, "the two should stay apart at max 2");
+        assert_eq!(
+            coalesce(&cells, 1),
+            vec![boxed(0, 0, 2, 2)],
+            "the cheapest merge is the one that adds no cells at all"
+        );
+    }
+
     // ---- the live table ------------------------------------------------------
     //
     // Every instant below is made up rather than waited for, so nothing here changes
@@ -818,10 +880,18 @@ mod tests {
     /// A 640×128 desktop — two cells across, two down — with its mirror already
     /// built, which is what a first blit does.
     async fn regions() -> Regions {
+        sized(640, 128).await
+    }
+
+    /// The same, at whatever size a test needs cells for. A cell is 320×64, so a
+    /// test about two *separate* regions needs a desktop at least three cells wide:
+    /// neighbouring cells coalesce into one.
+    async fn sized(w: u16, h: u16) -> Regions {
         let mut regions = Regions::new(Policy::Moving, 60, None);
-        regions.want(640, 128);
+        regions.want(w, h);
+        let bytes = usize::from(w) * usize::from(h) * 3;
         regions
-            .blit(Rect { left: 0, top: 0, right: 639, bottom: 127 }, &vec![0; 640 * 128 * 3])
+            .blit(Rect { left: 0, top: 0, right: w - 1, bottom: h - 1 }, &vec![0; bytes])
             .expect("a full-desktop blit");
         regions
     }
@@ -871,6 +941,39 @@ mod tests {
         let grown = only_rect(&regions);
         assert_eq!(grown.w(), 640, "the stream kept a rectangle its region outgrew");
         assert!(regions.live[0].keyframe_owed, "a client cannot start on the new picture");
+    }
+
+    /// Every live stream needs an id of its own, because a client keys its decoders
+    /// by it: two regions sharing one would feed two chains to one decoder and
+    /// neither would decode. The trap is that a retune holds the live table outside
+    /// `self`, so an allocator reading `self.live` sees nothing in use.
+    #[tokio::test]
+    async fn two_regions_born_in_one_retune_get_different_ids() {
+        let mut regions = sized(1600, 128).await;
+        // Two blocks with a gap between them, so they coalesce as two regions.
+        regions.retune(&[(0, 0), (0, 1), (3, 0), (3, 1)], Instant::now()).expect("two streams");
+        let ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
+        assert_eq!(regions.live.len(), 2, "expected two regions, got {ids:?}");
+        assert_ne!(ids[0], ids[1], "both regions were sent as the same stream");
+    }
+
+    /// And a stream that survives a retune keeps the id it had, whatever is built
+    /// alongside it: a new id would read as a new region, and the client would start
+    /// a decoder with none of the history the next frame is expressed against.
+    #[tokio::test]
+    async fn a_carried_stream_keeps_its_id_when_another_is_built_beside_it() {
+        let mut regions = sized(1600, 128).await;
+        let t0 = Instant::now();
+        regions.retune(&[(0, 0)], t0).expect("one stream");
+        let first = regions.live[0].id;
+
+        // The first region keeps moving and its rectangle still fits; the second is
+        // new, and must not be handed the id the first is still using.
+        regions.retune(&[(0, 0), (3, 1)], t0 + RETUNE).expect("a second stream");
+        let ids: Vec<u8> = regions.live.iter().map(|live| live.id).collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids.contains(&first), "the surviving region was renumbered");
+        assert_ne!(ids[0], ids[1]);
     }
 
     /// The roadmap's third question, answered: the stream ends, and every cell it

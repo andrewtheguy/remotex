@@ -92,6 +92,8 @@ interface FakeBitmap {
 let drawn: { tag: number; x: number; y: number }[] = [];
 /** Nine-argument draws: the source rectangle is what crops a padded frame. */
 let cropped: {
+  sx: number;
+  sy: number;
   sw: number;
   sh: number;
   dx: number;
@@ -109,6 +111,8 @@ const context = {
   drawImage(bitmap: FakeBitmap, ...args: number[]) {
     if (args.length === 8) {
       cropped.push({
+        sx: args[0],
+        sy: args[1],
         sw: args[2],
         sh: args[3],
         dx: args[4],
@@ -129,13 +133,22 @@ let videoClosed = false;
 let chunkTypes: string[] = [];
 /** How many decoders were built — one per live stream, replaced on a resize. */
 let decoders = 0;
+/** How many were closed, so "the other one survived" is checkable. */
+let closes = 0;
+/** A payload whose first byte is this makes its decoder give up. */
+let poison: number | null = null;
 
 class FakeVideoDecoder {
   private readonly output: (frame: unknown) => void;
+  private readonly fail: (error: Error) => void;
   state = "unconfigured";
 
-  constructor(init: { output: (frame: unknown) => void }) {
+  constructor(init: {
+    output: (frame: unknown) => void;
+    error: (error: Error) => void;
+  }) {
     this.output = init.output;
+    this.fail = init.error;
     decoders += 1;
   }
 
@@ -143,7 +156,11 @@ class FakeVideoDecoder {
     this.state = "configured";
   }
 
-  decode(chunk: { type: string }) {
+  decode(chunk: { type: string; data?: Uint8Array }) {
+    if (poison !== null && chunk.data?.[chunk.data.length - 1] === poison) {
+      this.fail(new Error("this decoder gave up"));
+      return;
+    }
     chunkTypes.push(chunk.type);
     const frame: FakeBitmap = { tag: 0xf7, closed: false };
     decoded.push(frame);
@@ -159,6 +176,7 @@ class FakeVideoDecoder {
 
   close() {
     videoClosed = true;
+    closes += 1;
     this.state = "closed";
   }
 }
@@ -186,12 +204,16 @@ beforeEach(() => {
   videoClosed = false;
   chunkTypes = [];
   decoders = 0;
+  closes = 0;
+  poison = null;
   undecodable = new Set();
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
     type: string;
-    constructor(init: { type: string }) {
+    data: Uint8Array;
+    constructor(init: { type: string; data: Uint8Array }) {
       this.type = init.type;
+      this.data = init.data;
     }
   };
   globals.createImageBitmap = async (blob: Blob) => {
@@ -348,6 +370,22 @@ test("a malformed frame is dropped whole", async () => {
   assert.equal(resets, 0);
 });
 
+test("a stream id the wire does not allow drops the batch", async () => {
+  // The same bound as the slot table's, for the same reason: a client's decoder
+  // table is a function of the protocol, not of what a gateway chooses to send.
+  await painter().draw(
+    batchFrame([
+      { op: "video", stream: 16, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.deepEqual(cropped, []);
+  assert.equal(
+    decoders,
+    0,
+    "a decoder was built for a stream that cannot exist",
+  );
+});
+
 test("a truncated access unit drops the batch rather than decoding half of it", async () => {
   // Half an access unit is not a smaller access unit: submitting one would leave
   // the decoder's state wrong for every frame after it.
@@ -376,8 +414,11 @@ test("a video frame is cropped to its region and drawn where it belongs", async 
       },
     ]),
   );
+  // sx/sy are 0 and the destination is the record's own rectangle: the padding a
+  // stream may carry is at its right and bottom edges, so the crop starts at the
+  // picture's origin and not at the region's position on the desktop.
   assert.deepEqual(cropped, [
-    { sw: 1599, sh: 1015, dx: 320, dy: 64, dw: 1599, dh: 1015 },
+    { sx: 0, sy: 0, sw: 1599, sh: 1015, dx: 320, dy: 64, dw: 1599, dh: 1015 },
   ]);
   assert.deepEqual(drawn, [], "a padded frame was drawn at its own size");
   assert.deepEqual(chunkTypes, ["key"], "an IDR was submitted as a delta");
@@ -435,6 +476,68 @@ test("a region that restarts on a new size replaces its decoder", async () => {
     "the grown region kept a decoder built for the old size",
   );
   assert.ok(videoClosed, "the replaced decoder was left holding memory");
+});
+
+test("one region's decoder giving up does not take the others down", async () => {
+  // Under `render_motion_subtype = "h264"` the rest of the desktop is arriving as
+  // still tiles and the other regions are chains of their own, so a decoder that
+  // fails is one region that stops — not the session.
+  poison = 0xbd;
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: [...KEYFRAME, 0xbd],
+      },
+      {
+        op: "video",
+        stream: 1,
+        x: 640,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: KEYFRAME,
+      },
+    ]),
+  );
+  assert.equal(
+    videoErrors.filter(Boolean).length,
+    1,
+    "the failure was not reported",
+  );
+  assert.equal(
+    closes,
+    0,
+    "a working decoder was closed because another failed",
+  );
+
+  // The surviving region keeps decoding on the decoder it already had.
+  const before = decoders;
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 1,
+        x: 640,
+        y: 0,
+        w: 320,
+        h: 64,
+        payload: KEYFRAME,
+      },
+    ]),
+  );
+  assert.equal(
+    decoders,
+    before,
+    "the surviving region was handed a new decoder",
+  );
+  assert.equal(cropped.length, 2, "the surviving region stopped painting");
 });
 
 test("clear() ends the video decoders, not only the slot table", async () => {
