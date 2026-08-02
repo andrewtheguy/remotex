@@ -172,7 +172,7 @@ pub async fn run(
     frame_tx: mpsc::Sender<ServerMsg>,
     audio: Option<Arc<AudioBridge>>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx, config.tile_codec());
+    let sink = TileSink::new("rdp", frame_tx, config.render_plan());
     session(config, input_rx, &sink, audio).await;
     sink.finish().await;
 }
@@ -657,6 +657,10 @@ async fn active_loop(
                     // frame dropping while nobody is attached from turning into
                     // a permanently blank region.
                     shadow.forget();
+                    // The repaint that follows re-sends every pixel at the base
+                    // encode, which settles every debt and makes every cell's
+                    // history a single redraw rather than motion.
+                    sink.reset_motion();
                     sink
                         .msg(ServerMsg::Resize {
                             w: desktop.width,
@@ -1019,6 +1023,9 @@ async fn active_loop(
                         .await?;
                     image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
                     shadow.resize(desktop.width, desktop.height);
+                    // The cell grid is anchored at (0,0) in framebuffer pixels, so
+                    // a new size makes every key name somewhere else.
+                    sink.reset_motion();
                     last_pos = (
                         last_pos.0.min(desktop.width.saturating_sub(1)),
                         last_pos.1.min(desktop.height.saturating_sub(1)),
@@ -1394,7 +1401,8 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
 }
 
 /// Send whatever part of `rect` the client does not already have, as tiles of at
-/// most [`crate::protocol::CELL_H`] rows each.
+/// most [`crate::protocol::CELL_H`] rows each. How that region is cut, and what
+/// each piece is encoded as, is [`TileSink::damage`]'s business.
 ///
 /// Comparing against `shadow` earns its keep on this engine in particular. The RDP
 /// pointer is composited into the framebuffer (`pointer_software_rendering:
@@ -1434,18 +1442,16 @@ async fn send_tiles(
         return Ok(());
     };
 
-    for band in changed.bands() {
-        // Its own buffer, not the one above: the encoder reads these pixels after
-        // this loop has moved on, and `image` is overwritten by the next PDU.
-        // Repacked rather than sliced, because a band of the *trimmed* rectangle is
-        // narrower than the reported one, so its rows are not contiguous in `buf`.
+    // Its own buffer per piece, not the one above: the encoder reads those pixels
+    // after this call has returned, and `image` is overwritten by the next PDU.
+    // Repacked rather than sliced, because a piece of the *trimmed* rectangle is
+    // narrower than the reported one, so its rows are not contiguous in `buf`.
+    sink.damage(&changed, |piece| {
         let mut pixels = Vec::new();
-        pack_rgb(image, band, &mut pixels);
-        sink.tile(band.left, band.top, band.w(), band.h(), pixels)
-            .await?;
-    }
-
-    Ok(())
+        pack_rgb(image, piece, &mut pixels);
+        pixels
+    })
+    .await
 }
 
 /// Pack `rect` out of the framebuffer into `buf` as RGB888.
@@ -1710,6 +1716,9 @@ mod tests {
             render_type: crate::config::RenderType::Full,
             render_subtype: crate::config::RenderSubtype::Png,
             render_quality: None,
+            render_motion_subtype: None,
+            render_motion_quality: None,
+            render_motion_debug: false,
         };
         assert!(!build_connector_config(&target).enable_audio_playback);
         target.audio = true;
@@ -1752,6 +1761,9 @@ mod tests {
                 render_type: crate::config::RenderType::Full,
                 render_subtype: crate::config::RenderSubtype::Png,
                 render_quality: None,
+                render_motion_subtype: None,
+                render_motion_quality: None,
+                render_motion_debug: false,
             };
             let (clip_tx, _clip_rx) = mpsc::unbounded_channel();
             let bridge = audio.then(|| Arc::new(AudioBridge::new()));

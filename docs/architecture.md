@@ -72,12 +72,13 @@ combinations that exist are:
 | `full` | `png` | lossless PNG. The default, and byte-identical to the PNG-only gateway that preceded the dial |
 | `fixed-quality` | `jpeg` | every tile JPEG at `render_quality` |
 | `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
+| `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
+| `motion` | `jpeg` / `webp` | base at `render_quality`; cells in motion cheaper still |
 
-No classifier runs in either lossy combination: `jpeg` sends *every* tile as JPEG,
-so flat UI and text soften along with photographic content. That is the honest
-trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer bytes
-for the same visible result. Content- and motion-sensitive strategies are the
-[roadmap](roadmap.md)'s business.
+No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
+JPEG, so flat UI and text soften along with photographic content. That is the
+honest trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer
+bytes for the same visible result.
 
 The dial costs no wire change. A tile record's first byte is already its format
 (`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and both clients decode all
@@ -85,15 +86,15 @@ three — the browser through `createImageBitmap` from a MIME type, the Swift vi
 through ImageIO from the container itself. WebP decode is why the app's deployment
 target is macOS 15.
 
-The engines never see the config enums. Both axes and the quality collapse to one
-`TileCodec` (`Png | Jpeg(q) | Webp(q)`) at the config boundary in
-`TargetConfig::tile_codec`, which reaches the per-tile encode call through the
-engine-agnostic `TileSink`:
+The engines never see the config enums. The axes and the qualities collapse to one
+`RenderPlan` — a base `TileCodec` (`Png | Jpeg(q) | Webp(q)`) and, for `motion`
+only, a second one — at the config boundary in `TargetConfig::render_plan`, which
+reaches the per-tile encode call through the engine-agnostic `TileSink`:
 
 ```text
-render_type / render_subtype / render_quality
-  → TargetConfig::tile_codec() → TileCodec → vnc::run / rdp::run
-  → TileSink::new(engine, frame_tx, codec)
+render_type / render_subtype / render_quality / render_motion_*
+  → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
+  → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
 ```
 
@@ -101,6 +102,119 @@ Because `TileSink` is shared, RDP and VNC get every codec from one implementatio
 and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
 `encode_webp` wraps the `webp` crate's `libwebp`, built by `cc` with the target's
 SIMD and no cmake, at `thread_level = 1` so one encode can use all cores.
+
+#### `motion`: a discount on what is too busy to notice
+
+`motion` is not a third way to encode every tile. It builds on the base encode a
+target already has and changes nothing about it — the base is read from
+`render_subtype` and `render_quality` rather than from `render_type`, which
+`motion` occupies — and adds a second, much cheaper encode used *only* for cells
+currently changing fast. A lossless base is the configuration the fixed dial cannot
+express at all, and the interesting one: text and flat UI stay perfect, and only
+what moves gets ugly.
+
+```toml
+[[targets]]
+render_type           = "motion"
+render_subtype        = "png"    # base: what a settled cell gets
+render_motion_subtype = "jpeg"   # moving cells: need not be the base codec
+render_motion_quality = 10       # moving cells: as cheap as it takes
+```
+
+The moving encode has its own codec axis (`MotionSubtype`, which admits no `png`),
+not just its own quality. A settled cell is sent once and can afford WebP's slower,
+smaller encode, while a moving cell is re-encoded every frame, where JPEG's faster
+encode may beat WebP's smaller output; cheapest and smallest are not the same
+question at quality 60 as at 10. `render_motion_subtype` defaults to
+`render_subtype`, and is required when the base is `png` — lossless has no dial to
+turn down.
+
+**`motion` is refused on `subtype = "ard-high-performance"`.** A resize under both
+corrupts the desktop until the whole gateway is restarted — a reconnect does not
+clear it, and both clients see it, so it is engine state rather than anything the
+render dial owns. Neither half is proven at fault: High Performance is reverse
+engineered with no specification behind it (see [apple-vnc-889.md](apple-vnc-889.md)),
+and `motion` is the newer code. The pairing waits until one of them is understood
+well enough to say which. Every other subtype may use `motion`, and a High
+Performance target may use every other strategy.
+
+Detection is in `src/encode.rs`, owned by the sink both engines already funnel
+their damage through:
+
+- **Cell identity.** `Shadow` is pixel-exact and has no stable cell identity, so
+  churn is keyed to the fixed 320×64 grid (`CELL_W`/`CELL_H`). `Rect::cells` cuts a
+  rectangle at the grid lines on both axes, and `Rect::cell_key` names the piece.
+  Cutting rather than snapping outward matters: RDP and VNC describe the same
+  moving region with different rectangles from frame to frame, and a key that moved
+  with them would count no churn, but snapping outward would ship pixels that did
+  not change — and VNC could not reach them anyway, since it crops from the
+  rectangle it just read.
+- **What counts as change.** `Shadow::accept` returns a `Changed`: one bounding box
+  round everything that differs, *and* the grid cells that actually differ. The two
+  are not the same, and conflating them was a real fault — a video at one end of the
+  screen and an animated banner at the other put every cell between them inside one
+  box, and four reports like that inside the churn window read as the whole screen in
+  motion, which is how a still sidebar, a menu bar and a Windows taskbar ended up at
+  quality 10. The box still decides what is *sent*, because those pixels are correct
+  and only redundant; the cell list decides what is *counted*. A cell only along for
+  the ride is left at the base encode and settled — its pixels are going out anyway,
+  so exact costs only bytes, and exact is what discharges a debt.
+- **Churn → encode.** Each cell keeps an 8-bit shift register of which of the last
+  `CHURN_WINDOW` slots of `CHURN_SLOT` wall time changed it — 4 of the last 8
+  hundred-millisecond slots at `CHURN_MOVING`, at which the cell is in motion and
+  takes the motion codec. A hard switch rather than a ramp, because the switch is
+  what a measurement can read.
+
+  Slots of time rather than frames, because neither engine has a frame worth
+  counting. RDP's outer loop turns once per PDU received, most of which redraw
+  nothing, so a counter driven by it races ahead of the repaints and a cell's
+  history ages out between its own changes. VNC's turns once per
+  `FramebufferUpdate`, which is damage-driven and so much closer, but its rate is
+  set by the update-request loop rather than by the remote: a cell changing in every
+  update reads the same whether that is sixty times a second or twice. Several
+  changes inside one slot count once, so an engine that reports one change as ten
+  rectangles does not read as ten times as busy, and "in motion" stays one statement
+  about the remote rather than two about the transports.
+- **Splitting only where it matters.** A band whose cells are all quiet is sent
+  whole and at the base encode, so a target with nothing moving is byte-for-byte
+  what the same target sends without `motion` at all. Only a band containing a
+  moving cell is cut at the grid — which is what makes a video in a window cost its
+  own cells their quality and cost the text beside it nothing.
+- **Cleanup.** A piece sent at the motion encode keeps its source pixels, bounded
+  by `MAX_STASH_BYTES`. A cell holds *one* debt, so a debt already standing may only
+  be replaced by a rectangle covering it; anything else takes the base encode
+  instead. Damage is clipped to the cell rather than snapped out to it, so two sends
+  can be two different slivers of one cell, and overwriting the first debt with the
+  second left the first sliver lossy with nothing that knew it was owed. That is the
+  pointer trail on RDP — the cursor is composited into the framebuffer, so crossing a
+  cell leaves a run of small rectangles of which only the last would ever have been
+  cleaned up. A `CLEANUP_TICK` interval in `order_loop` re-sends cells
+  idle past `CLEANUP_IDLE` at the *base* encode, `MAX_CLEANUPS_PER_TICK` at a time
+  and oldest first, so a paused screen sharpens on its own without a client
+  repaint. The timer has to be its own, because the case it exists for is a remote
+  that has stopped sending frames. The debt is timed at dispatch rather than when
+  the encode lands, which is what keeps a cleanup from overtaking fresher pixels: a
+  cell with a tile still in the queue cannot also be idle.
+- **Resets.** Motion state is cleared on resize, where the keys no longer name the
+  same pixels, and on reattach, where the repaint re-sends every pixel at the base
+  encode anyway.
+- **`render_motion_debug`.** A QA aid, off unless asked for, that outlines every
+  piece a split region emits in the pixels themselves: magenta for the motion
+  encode, cyan for a quiet cell beside it, green for a cleanup. It exists because
+  the alternative is inferring the decision from how blurry something looks, and
+  the two failures that produces look alike from a screenshot: motion armed on
+  something that is not moving, and a stale lossy region nothing is going to
+  replace. Under the overlay they are distinct — the first is magenta, the second
+  carries no mark at all, since an unmarked region was sent whole at the base
+  encode. The mark goes on the copy handed to the encoder, never on the pixels the
+  shadow recorded or the stash owes, so a cleanup erases the outline it replaces
+  rather than restoring it.
+
+Cleanups ride the wire as ordinary tiles; nothing about the record changed. What it
+cost is in the `encode totals` line, where `motion` and `cleanup` are read together:
+every cleanup is a tile sent twice, so a scheme paying more in re-sends than it
+saves in motion shows up as a cleanup byte count rivalling the saving. Replacing the
+moving-cell encoder with H.264 is the [roadmap](roadmap.md)'s business.
 
 ## Session lifecycle
 

@@ -200,7 +200,12 @@ mod tests {
     /// own, so a test reads the channel only after [`TileSink::flush`].
     fn sink() -> (TileSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(4);
-        (TileSink::new("test", frame_tx, crate::config::TileCodec::Png), frame_rx)
+        let plan = crate::config::RenderPlan {
+            base: crate::config::TileCodec::Png,
+            motion: None,
+            debug: false,
+        };
+        (TileSink::new("test", frame_tx, plan), frame_rx)
     }
 
     // The detection itself is not testable here, and the reason is the same one

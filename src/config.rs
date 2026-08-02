@@ -134,11 +134,8 @@ impl Protocol {
 /// strategy also reads [`TargetConfig::render_quality`]). Two flat sibling keys
 /// rather than a nested table, matching the rest of the target schema.
 ///
-/// Only the two implemented strategies are variants; a config naming the planned
-/// one (`motion`, which keeps the base encode and sends only the cells changing
-/// fastest at a cheaper one) is refused by serde with the list of what is
-/// accepted. See docs/architecture.md for the shipped dial and docs/roadmap.md
-/// for `motion`.
+/// Only implemented strategies are variants; anything else is refused by serde
+/// with the list of what is accepted. See docs/architecture.md for the dial.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderType {
@@ -151,15 +148,29 @@ pub enum RenderType {
     /// and never varied. Pairs with a lossy codec ([`RenderSubtype::Jpeg`] or
     /// [`RenderSubtype::Webp`]).
     FixedQuality,
+    /// The base encode, plus a second and much cheaper one for the cells changing
+    /// fastest right now.
+    ///
+    /// Not a third way to encode every tile: it *builds on* the base a target
+    /// would otherwise have, which is still what a settled cell is sent as. The
+    /// base is read from [`RenderSubtype`] and [`TargetConfig::render_quality`]
+    /// rather than from this axis, which `motion` occupies — `png` with no quality
+    /// is a lossless base, a lossy subtype with a quality is a fixed-quality one.
+    /// The moving encode has its own two keys,
+    /// [`TargetConfig::render_motion_subtype`] and
+    /// [`TargetConfig::render_motion_quality`].
+    ///
+    /// A cell that stops changing is re-sent once at the base encode, so a paused
+    /// screen returns to full quality on its own: the base is the truth, motion is
+    /// a temporary discount on cells too busy to notice.
+    Motion,
 }
 
-/// The codec a target's tiles are encoded with — the second render axis, paired
-/// with [`RenderType`]. This is the codec for *every* tile, and keeps that meaning
-/// under the planned `motion` type: `motion` does not replace the base encode but
-/// layers a cheaper one over the cells in motion, named by its own key rather than
-/// by this one. All implemented codecs are variants; serde refuses anything else,
-/// including the planned `h264`, which would be legal only as a motion codec. See
-/// docs/roadmap.md.
+/// The codec a target's **base** tiles are encoded with — the second render axis,
+/// paired with [`RenderType`]. Under `full` and `fixed-quality` that is every
+/// tile; under [`RenderType::Motion`] it is every tile except the ones currently
+/// in motion, which [`MotionSubtype`] names instead. All implemented codecs are
+/// variants; serde refuses anything else.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderSubtype {
@@ -176,10 +187,29 @@ pub enum RenderSubtype {
     Webp,
 }
 
+/// The codec for the cells [`RenderType::Motion`] finds in motion — an axis of
+/// its own rather than a reuse of [`RenderSubtype`], for two reasons.
+///
+/// The base is sent once when a cell settles and can afford WebP's slower, smaller
+/// encode, while a moving cell is re-encoded every frame, where JPEG's faster
+/// encode may beat WebP's smaller output; cheapest and smallest are not the same
+/// question at quality 60 as at 10. And this is the axis `h264` will appear on
+/// when the moving encode stops being a still image, which it can only do if it is
+/// nameable apart from the base. `png` is not a variant and never will be: a
+/// moving cell needs a quality to turn down, and lossless has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MotionSubtype {
+    /// Baseline JPEG at [`TargetConfig::render_motion_quality`].
+    Jpeg,
+    /// WebP at [`TargetConfig::render_motion_quality`].
+    Webp,
+}
+
 /// The tile encoder an engine uses, resolved from a target's render dial by
-/// [`TargetConfig::tile_codec`]. The two axes and the quality collapse to this,
-/// so `rdp::run` / `vnc::run` and [`crate::encode::TileSink`] match on one value
-/// and never touch the config enums.
+/// [`TargetConfig::render_plan`]. The axes and the qualities collapse to this, so
+/// `rdp::run` / `vnc::run` and [`crate::encode::TileSink`] match on one value and
+/// never touch the config enums.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TileCodec {
     /// Lossless PNG — the default path.
@@ -188,6 +218,25 @@ pub enum TileCodec {
     Jpeg(u8),
     /// WebP at the given quality (1–100).
     Webp(u8),
+}
+
+/// The whole render dial as an engine sees it: what a tile is normally encoded
+/// as, and — only for [`RenderType::Motion`] — what a cell in motion is encoded
+/// as instead.
+///
+/// `motion` being `None` is the switch that keeps the entire motion path off. It
+/// is `None` for every configuration but `motion`, so a target that does not ask
+/// for the feature does not pay for it and is byte-identical to what it sent
+/// before the feature existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderPlan {
+    /// What a settled cell is sent as, and what a cleanup pass restores a cell to.
+    pub base: TileCodec,
+    /// What a cell changing fast is sent as instead, while it keeps changing.
+    pub motion: Option<TileCodec>,
+    /// Draw the motion strategy's decisions into the pixels. QA only, and only
+    /// meaningful when `motion` is `Some`.
+    pub debug: bool,
 }
 
 /// One `[[targets]]` profile: a remote machine plus its credentials.
@@ -314,24 +363,69 @@ pub struct TargetConfig {
     /// [`RenderSubtype::Webp`]). Required for that strategy and refused for
     /// [`RenderType::Full`], which is lossless and has no dial. `None` (unset) is
     /// the default.
+    ///
+    /// Under [`RenderType::Motion`] this is the *base* quality — what a settled
+    /// cell gets — and it is omitted when the base is lossless PNG.
     #[serde(default)]
     pub render_quality: Option<u8>,
+    /// Codec for the cells [`RenderType::Motion`] finds in motion. Defaults to
+    /// whatever [`Self::render_subtype`] is, and is *required* when that is `png`,
+    /// which has no quality to turn down. Refused for any other render type.
+    #[serde(default)]
+    pub render_motion_subtype: Option<MotionSubtype>,
+    /// Quality (1–100) for a cell in motion — as cheap as it takes, since motion
+    /// hides the artifacts and a cell that stops moving is re-sent at the base
+    /// encode anyway. Required by [`RenderType::Motion`] and refused for any other
+    /// render type.
+    #[serde(default)]
+    pub render_motion_quality: Option<u8>,
+    /// Outline every piece the motion strategy emits, in the pixels themselves, so
+    /// what the detection decided is visible on the screen instead of inferred from
+    /// how blurry something looks. A QA aid for [`RenderType::Motion`] and refused
+    /// for any other render type; off unless asked for.
+    ///
+    /// See [`crate::encode::TileSink::damage`] for what the colours mean. The marks
+    /// go on the *copy* handed to the encoder, so the shadow and the stash keep the
+    /// true pixels and a cleanup erases the outline it replaces.
+    #[serde(default)]
+    pub render_motion_debug: bool,
 }
 
 impl TargetConfig {
-    /// The tile encoder to use for this target. This is the whole of the render
-    /// dial as the engines see it: the two axes and the quality collapse to one
-    /// [`TileCodec`], so `rdp::run` / `vnc::run` need not know the config enums.
+    /// The tile encoders to use for this target. This is the whole of the render
+    /// dial as the engines see it: the axes and the qualities collapse to one
+    /// [`RenderPlan`], so `rdp::run` / `vnc::run` need not know the config enums.
     ///
     /// A lossy codec carries its quality, which [`ConfigFile::parse_with`] has
-    /// already guaranteed is present and in range for a `fixed-quality` target;
-    /// the `None` arm falls back to lossless PNG rather than trusting that here.
-    pub fn tile_codec(&self) -> TileCodec {
-        match (self.render_type, self.render_subtype, self.render_quality) {
-            (RenderType::FixedQuality, RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
-            (RenderType::FixedQuality, RenderSubtype::Webp, Some(q)) => TileCodec::Webp(q),
+    /// already guaranteed is present and in range; each `None` arm falls back to
+    /// the safe answer — lossless PNG for the base, no motion encode at all —
+    /// rather than trusting that here.
+    pub fn render_plan(&self) -> RenderPlan {
+        let base = match (self.render_subtype, self.render_quality) {
+            (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
+            (RenderSubtype::Webp, Some(q)) => TileCodec::Webp(q),
             _ => TileCodec::Png,
-        }
+        };
+        let motion = match (self.render_type, self.render_motion_quality) {
+            (RenderType::Motion, Some(q)) => match self.motion_subtype() {
+                Some(MotionSubtype::Jpeg) => Some(TileCodec::Jpeg(q)),
+                Some(MotionSubtype::Webp) => Some(TileCodec::Webp(q)),
+                None => None,
+            },
+            _ => None,
+        };
+        RenderPlan { base, motion, debug: self.render_motion_debug }
+    }
+
+    /// The motion codec this target asked for, falling back to the base codec when
+    /// the key is omitted. `None` only for the pairing parse rejects — a `png` base
+    /// with no motion subtype named.
+    fn motion_subtype(&self) -> Option<MotionSubtype> {
+        self.render_motion_subtype.or(match self.render_subtype {
+            RenderSubtype::Jpeg => Some(MotionSubtype::Jpeg),
+            RenderSubtype::Webp => Some(MotionSubtype::Webp),
+            RenderSubtype::Png => None,
+        })
     }
 }
 
@@ -612,6 +706,40 @@ impl ConfigFile {
                     target.protocol.name()
                 );
             }
+            // The motion keys belong to one strategy, and a config that sets them
+            // anywhere else has misunderstood which dial it is turning — more
+            // likely a `render_type` that was never changed than a deliberate
+            // choice, so it is worth saying so rather than silently ignoring them.
+            if target.render_type != RenderType::Motion {
+                anyhow::ensure!(
+                    target.render_motion_subtype.is_none()
+                        && target.render_motion_quality.is_none()
+                        && !target.render_motion_debug,
+                    "target {:?} sets render_motion_subtype, render_motion_quality or \
+                     render_motion_debug without render_type = \"motion\" — those keys \
+                     describe the cheaper encode \"motion\" gives the cells that are changing \
+                     fastest, and no other strategy has one",
+                    target.name
+                );
+            }
+            // Refused rather than merely discouraged, because the failure is not
+            // one a person recovers from by looking at the screen: a resize under
+            // both leaves the desktop wrong until the whole gateway is restarted,
+            // and a reconnect does not clear it. Neither half is proven at fault —
+            // `ard-high-performance` is reverse engineered with no specification
+            // behind it (docs/apple-vnc-889.md), and `motion` is the newer code —
+            // so the pairing waits until one of them is understood well enough to
+            // say which. Every other subtype may use `motion`, and this target may
+            // use every other strategy.
+            anyhow::ensure!(
+                target.render_type != RenderType::Motion
+                    || target.subtype != Some(Subtype::ArdHighPerformance),
+                "target {:?} pairs render_type = \"motion\" with subtype = \
+                 \"ard-high-performance\", which this gateway refuses: a resize under both \
+                 corrupts the desktop until the gateway is restarted. Use subtype = \"ard\" \
+                 to keep \"motion\", or another render_type to keep the virtual display",
+                target.name
+            );
             // The render dial has two axes and they are validated together,
             // because only some pairings mean anything and `render_quality`
             // belongs to exactly one of them. The match is exhaustive so a future
@@ -651,6 +779,65 @@ impl ConfigFile {
                      \"jpeg\" or \"webp\", or render_type = \"full\" to stay lossless",
                     target.name
                 ),
+                // `motion` reads the base off the subtype and the quality rather
+                // than off `render_type`, which it occupies itself: a `png` base
+                // is lossless and takes no quality, a lossy base needs one. This
+                // is the only strategy that can express a lossless base with a
+                // lossy discount, which is the interesting one — text and flat UI
+                // stay perfect and only what moves gets ugly.
+                (RenderType::Motion, RenderSubtype::Png) => {
+                    anyhow::ensure!(
+                        target.render_quality.is_none(),
+                        "target {:?} pairs render_type \"motion\" with render_subtype \"png\" \
+                         and sets render_quality, which the lossless base has no use for. \
+                         render_motion_quality is the dial for the cells in motion; drop \
+                         render_quality, or set a lossy render_subtype to give the base a \
+                         quality too",
+                        target.name
+                    );
+                    anyhow::ensure!(
+                        target.render_motion_subtype.is_some(),
+                        "target {:?} pairs render_type \"motion\" with render_subtype \"png\" \
+                         but names no render_motion_subtype. The motion codec defaults to the \
+                         base codec, and PNG is lossless — it has no quality to turn down — so \
+                         a PNG base must name its own: \"jpeg\" or \"webp\"",
+                        target.name
+                    );
+                }
+                (RenderType::Motion, RenderSubtype::Jpeg | RenderSubtype::Webp) => {
+                    let q = target.render_quality.with_context(|| format!(
+                        "target {:?} is render_type \"motion\" with a lossy render_subtype, \
+                         which makes that subtype the *base* encode — the one a settled cell \
+                         gets — so it needs a render_quality, an integer 1–100. Use \
+                         render_subtype = \"png\" for a lossless base",
+                        target.name
+                    ))?;
+                    anyhow::ensure!(
+                        (1..=100).contains(&q),
+                        "target {:?} sets render_quality = {q}, which is out of range — it \
+                         must be 1–100",
+                        target.name
+                    );
+                }
+            }
+            // Both `motion` pairings need this, and neither of the arms above is
+            // the place for it: the moving encode is the whole point of the
+            // strategy, and it is the one key that has no default to fall back on.
+            if target.render_type == RenderType::Motion {
+                let q = target.render_motion_quality.with_context(|| format!(
+                    "target {:?} is render_type \"motion\" but sets no \
+                     render_motion_quality — it needs one, an integer 1–100. It is what the \
+                     cells in motion are encoded at, and can go as low as it takes: motion \
+                     hides the artifacts, and a cell that stops moving is re-sent at the base \
+                     encode",
+                    target.name
+                ))?;
+                anyhow::ensure!(
+                    (1..=100).contains(&q),
+                    "target {:?} sets render_motion_quality = {q}, which is out of range — \
+                     it must be 1–100",
+                    target.name
+                );
             }
         }
         Ok(config)
@@ -1159,6 +1346,10 @@ mod tests {
         assert_eq!(t.render_type, RenderType::Full);
         assert_eq!(t.render_subtype, RenderSubtype::Png);
         assert_eq!(t.render_quality, None);
+        assert_eq!(
+            t.render_plan(),
+            RenderPlan { base: TileCodec::Png, motion: None, debug: false }
+        );
     }
 
     #[test]
@@ -1179,7 +1370,10 @@ mod tests {
         assert_eq!(t.render_type, RenderType::FixedQuality);
         assert_eq!(t.render_subtype, RenderSubtype::Jpeg);
         assert_eq!(t.render_quality, Some(60));
-        assert_eq!(t.tile_codec(), TileCodec::Jpeg(60));
+        assert_eq!(
+            t.render_plan(),
+            RenderPlan { base: TileCodec::Jpeg(60), motion: None, debug: false }
+        );
     }
 
     #[test]
@@ -1198,7 +1392,10 @@ mod tests {
         .unwrap();
         let t = &cfg.targets[0];
         assert_eq!(t.render_subtype, RenderSubtype::Webp);
-        assert_eq!(t.tile_codec(), TileCodec::Webp(50));
+        assert_eq!(
+            t.render_plan(),
+            RenderPlan { base: TileCodec::Webp(50), motion: None, debug: false }
+        );
     }
 
     #[test]
@@ -1313,7 +1510,358 @@ mod tests {
         )
         .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("full") && msg.contains("fixed-quality"), "{msg}");
+        assert!(
+            msg.contains("full") && msg.contains("fixed-quality") && msg.contains("motion"),
+            "{msg}"
+        );
+    }
+
+    // ---- the motion strategy ----
+
+    /// The configuration the fixed dial cannot express at all, and the one the
+    /// whole scheme is for: text and flat UI stay perfect, and only what moves
+    /// gets ugly.
+    #[test]
+    fn motion_over_a_lossless_base_is_accepted() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "jpeg"
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap();
+        let t = &cfg.targets[0];
+        assert_eq!(t.render_type, RenderType::Motion);
+        assert_eq!(t.render_subtype, RenderSubtype::Png);
+        assert_eq!(
+            t.render_plan(),
+            RenderPlan { base: TileCodec::Png, motion: Some(TileCodec::Jpeg(10)), debug: false }
+        );
+    }
+
+    /// A lossy base keeps its own meaning — `render_subtype` and `render_quality`
+    /// are what a settled cell gets — and the motion codec defaults to it, so only
+    /// the quality has to be named twice.
+    #[test]
+    fn motion_over_a_lossy_base_defaults_its_codec_to_the_base() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_subtype = "webp"
+            render_quality = 60
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Webp(10)), debug: false }
+        );
+    }
+
+    /// The reason the motion codec is an axis of its own: a moving cell is
+    /// re-encoded every frame, where JPEG's faster encode may beat WebP's smaller
+    /// output, so it need not be the codec a settled cell gets.
+    #[test]
+    fn the_motion_codec_need_not_be_the_base_codec() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_subtype = "webp"
+            render_quality = 60
+            render_motion_subtype = "jpeg"
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan { base: TileCodec::Webp(60), motion: Some(TileCodec::Jpeg(10)), debug: false }
+        );
+    }
+
+    /// PNG has no quality to turn down, so the default the lossy bases enjoy is
+    /// not available and the key has to be named.
+    #[test]
+    fn a_lossless_base_must_name_its_motion_codec() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion_subtype"), "{err:#}");
+    }
+
+    /// The moving encode is the whole point of the strategy and has no default.
+    #[test]
+    fn motion_without_a_motion_quality_is_rejected() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "jpeg"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion_quality"), "{err:#}");
+    }
+
+    #[test]
+    fn a_motion_quality_out_of_range_is_rejected() {
+        for q in ["0", "101"] {
+            let toml = format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "motion"
+                render_motion_subtype = "jpeg"
+                render_motion_quality = {q}
+                "#
+            );
+            let err = ConfigFile::parse(&toml).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("render_motion_quality"), "q={q}: {msg}");
+            assert!(msg.contains("1–100"), "q={q}: {msg}");
+        }
+    }
+
+    /// A lossy base under `motion` still needs its own quality: the subtype names
+    /// what a *settled* cell is encoded as, and that is not the motion quality.
+    #[test]
+    fn a_lossy_motion_base_still_needs_its_own_quality() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_subtype = "jpeg"
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_quality"), "{err:#}");
+    }
+
+    /// The QA overlay rides on the motion strategy and is off unless asked for, so
+    /// a target that never turns it on cannot be paying for it by accident.
+    #[test]
+    fn the_motion_debug_overlay_is_opt_in_and_belongs_to_motion() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "jpeg"
+            render_motion_quality = 10
+            render_motion_debug = true
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.targets[0].render_plan().debug);
+
+        let plain = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            "#,
+        )
+        .unwrap();
+        assert!(!plain.targets[0].render_plan().debug, "the overlay defaulted on");
+
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_motion_debug = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
+    }
+
+    /// A lossless base takes no quality, exactly as under `full`.
+    #[test]
+    fn render_quality_on_a_lossless_motion_base_is_rejected() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_quality = 60
+            render_motion_subtype = "jpeg"
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("lossless base"), "{err:#}");
+    }
+
+    /// More likely a `render_type` that was never changed than a deliberate
+    /// choice, so it is worth saying so rather than ignoring the keys.
+    #[test]
+    fn the_motion_keys_are_refused_by_every_other_strategy() {
+        for extra in [
+            "render_motion_subtype = \"jpeg\"",
+            "render_motion_quality = 10",
+        ] {
+            let toml = format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "rdp"
+                host = "h"
+                render_type = "fixed-quality"
+                render_subtype = "jpeg"
+                render_quality = 60
+                {extra}
+                "#
+            );
+            let err = ConfigFile::parse(&toml).unwrap_err();
+            assert!(format!("{err:#}").contains("\"motion\""), "{extra}: {err:#}");
+        }
+    }
+
+    /// `png` is not a motion codec and never will be — a moving cell needs a
+    /// quality to turn down, and lossless has none. The error says what is legal
+    /// on the axis rather than pointing back at the base codecs.
+    #[test]
+    fn png_is_not_a_motion_codec() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "png"
+            render_motion_quality = 10
+            "#,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("jpeg") && msg.contains("webp"), "{msg}");
+    }
+
+    /// A resize under both corrupts the desktop until the gateway is restarted,
+    /// which a person cannot recover from by looking at the screen — so the pairing
+    /// is refused at load rather than left to be discovered. The error names both
+    /// ways out, because either half alone is fine.
+    #[test]
+    fn motion_is_refused_on_apple_high_performance() {
+        let target = |subtype: &str| {
+            format!(
+                r#"
+                [[targets]]
+                name = "a"
+                protocol = "vnc"
+                subtype = "{subtype}"
+                host = "h"
+                username = "u"
+                password = "p"
+                width = 1600
+                height = 1000
+                render_type = "motion"
+                render_motion_subtype = "jpeg"
+                render_motion_quality = 10
+                "#
+            )
+        };
+
+        let err = ConfigFile::parse(&target("ard-high-performance")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ard-high-performance") && msg.contains("motion"), "{msg}");
+        assert!(msg.contains("restarted"), "the error should say what goes wrong: {msg}");
+
+        // The other Apple subtype is untouched: this is one pairing, not a rule
+        // about Macs.
+        let cfg = ConfigFile::parse(&target("ard")).expect("motion belongs on plain ard");
+        assert_eq!(cfg.targets[0].render_plan().motion, Some(TileCodec::Jpeg(10)));
+    }
+
+    /// And the same target is fine on any other strategy — what is refused is the
+    /// pairing, not the subtype.
+    #[test]
+    fn apple_high_performance_keeps_every_other_render_type() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "vnc"
+            subtype = "ard-high-performance"
+            host = "h"
+            username = "u"
+            password = "p"
+            width = 1600
+            height = 1000
+            render_type = "fixed-quality"
+            render_subtype = "webp"
+            render_quality = 60
+            "#,
+        )
+        .expect("only the motion pairing is refused");
+        let plan = cfg.targets[0].render_plan();
+        assert_eq!((plan.base, plan.motion), (TileCodec::Webp(60), None));
+    }
+
+    /// The switch that keeps the whole motion path off: nothing but `motion`
+    /// resolves a moving encode, so every configuration that shipped before it
+    /// existed still encodes every tile the one way.
+    #[test]
+    fn no_other_strategy_resolves_a_motion_encode() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+
+            [[targets]]
+            name = "b"
+            protocol = "rdp"
+            host = "h"
+            render_type = "fixed-quality"
+            render_subtype = "jpeg"
+            render_quality = 60
+            "#,
+        )
+        .unwrap();
+        for t in &cfg.targets {
+            assert_eq!(t.render_plan().motion, None, "target {:?}", t.name);
+        }
     }
 
     // Nothing in a target says what the remote runs. The engines discover it
