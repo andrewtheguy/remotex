@@ -253,20 +253,30 @@ private final class RawClient: @unchecked Sendable {
         }
     }
 
+    /// How long one whole read waits, however many socket reads it takes.
+    ///
+    /// The budget belongs to the operation rather than to each `fill`: a peer
+    /// that dribbles empty reads would otherwise re-arm the timeout every time
+    /// and spin here forever, which is the one failure a bounded read exists to
+    /// rule out.
+    private static let readBudget: TimeInterval = 5
+
     /// Everything up to the blank line, as text.
     func readHead() async throws -> String {
+        let deadline = Date().addingTimeInterval(Self.readBudget)
         while true {
             if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
                 let head = String(decoding: buffer[..<end.lowerBound], as: UTF8.self)
                 buffer = Data(buffer[end.upperBound...])
                 return head
             }
-            try await fill()
+            try await fill(by: deadline)
         }
     }
 
     /// One HTTP chunk's payload — which is one envelope, minus its length prefix.
     func readChunk() async throws -> Data {
+        let deadline = Date().addingTimeInterval(Self.readBudget)
         while true {
             if let end = buffer.range(of: Data("\r\n".utf8)),
                let size = Int(String(decoding: buffer[..<end.lowerBound], as: UTF8.self), radix: 16),
@@ -282,7 +292,7 @@ private final class RawClient: @unchecked Sendable {
                 #expect(declared == chunk.count - 4, "the length names the rest of the envelope")
                 return Data(chunk.dropFirst(4))
             }
-            try await fill()
+            try await fill(by: deadline)
         }
     }
 
@@ -292,17 +302,22 @@ private final class RawClient: @unchecked Sendable {
     /// wrong reason.
     func readsNothingMore() async throws -> Bool {
         do {
-            try await fill()
+            try await fill(by: Date().addingTimeInterval(Self.readBudget))
             return false
         } catch RawClientError.ended {
             return true
         }
     }
 
-    /// One read, bounded. `NWConnection.receive` waits for as long as the peer
-    /// stays silent, so an unbounded one turns "the server did not write what it
-    /// should have" into a test that never finishes and says nothing.
-    private func fill() async throws {
+    /// One read, bounded by the caller's deadline. `NWConnection.receive` waits
+    /// for as long as the peer stays silent, so an unbounded one turns "the
+    /// server did not write what it should have" into a test that never finishes
+    /// and says nothing.
+    private func fill(by deadline: Date) async throws {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else {
+            throw RawClientError.timedOut
+        }
         let more: Data = try await withCheckedThrowingContinuation { continuation in
             let settled = Mutex(false)
             let finish: @Sendable (Result<Data, any Error>) -> Void = { result in
@@ -314,7 +329,7 @@ private final class RawClient: @unchecked Sendable {
                     continuation.resume(with: result)
                 }
             }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+            DispatchQueue.global().asyncAfter(deadline: .now() + remaining) {
                 finish(.failure(RawClientError.timedOut))
             }
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {

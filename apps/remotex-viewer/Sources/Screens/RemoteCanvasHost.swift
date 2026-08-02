@@ -131,7 +131,7 @@ struct RemoteCanvasHost: NSViewRepresentable {
             self.bridge = bridge
             controller.add(bridge, name: CanvasBridge.handlerName)
             webView.navigationDelegate = bridge
-            model.attach(canvas: server)
+            model.attach(canvas: server, owner: ObjectIdentifier(self))
             webView.load(URLRequest(url: url))
             reportViewport()
         }
@@ -228,11 +228,18 @@ struct RemoteCanvasHost: NSViewRepresentable {
             webView?.navigationDelegate = nil
             webView?.configuration.userContentController
                 .removeScriptMessageHandler(forName: CanvasBridge.handlerName)
-            model.fitWindowToRemote = nil
-            model.hostScaleReader = nil
             keyboard?.invalidate()
             keyboard = nil
-            model.attach(canvas: nil)
+            // The model's side, and only while it is still this coordinator's.
+            // SwiftUI can build the replacement surface before dismantling this
+            // one, in which case all three of these have already been reinstalled
+            // by a coordinator that is on screen — clearing them here would leave
+            // a live desktop with nothing to draw into and a dead "Resize to
+            // Display", with no second dismantle to put them back.
+            if model.releaseCanvas(owner: ObjectIdentifier(self)) {
+                model.fitWindowToRemote = nil
+                model.hostScaleReader = nil
+            }
             server?.stop()
             server = nil
             bridge = nil

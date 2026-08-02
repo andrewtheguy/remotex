@@ -1329,6 +1329,10 @@ export function useRemoteDesktop(
       dprQuery?.removeEventListener("change", onDprChange);
       clearTimeout(resizeTimer);
       ws?.close();
+      // The painter belongs to this effect, and under `render_type = "video"` it
+      // holds a `VideoDecoder` — hardware, not just memory. `clearDesktop` frees
+      // it on every path *through* the session; this is the one that leaves.
+      painter.clear();
       releaseAudio();
     };
   }, [

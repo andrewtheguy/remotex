@@ -246,7 +246,21 @@ readStream(framesUrl, {
 // The desktop's on-screen scale changes with the window's display, and the
 // pointer is sized through it. The app also wants the new room: it fits the
 // window to what is left for the desktop, which only this side can measure.
+//
+// Coalesced to one animation frame. A window drag fires this on every frame the
+// compositor produces, and both halves are expensive in the same way:
+// `settleScrollbars` forces a synchronous layout, and every report crosses the
+// bridge to a debounce on the app's side. One callback per frame, always with
+// the final measurement, because it is read when it runs rather than when it was
+// scheduled.
+let geometryFrame = 0;
 window.addEventListener("resize", () => {
-  paintCursor();
-  reportGeometry();
+  if (geometryFrame !== 0) {
+    return;
+  }
+  geometryFrame = requestAnimationFrame(() => {
+    geometryFrame = 0;
+    paintCursor();
+    reportGeometry();
+  });
 });

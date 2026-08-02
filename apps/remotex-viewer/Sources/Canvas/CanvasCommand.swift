@@ -123,10 +123,20 @@ enum CanvasEvent: Equatable, Decodable {
         let h: Double
 
         var mode: DisplayMode {
-            DisplayMode(
-                w: UInt16(clamping: Int(w.rounded())),
-                h: UInt16(clamping: Int(h.rounded()))
-            )
+            DisplayMode(w: Self.whole(w), h: Self.whole(h))
+        }
+
+        /// Rounded, then clamped *in `Double` space* before the conversion.
+        /// `Int(_:)` traps rather than saturating on anything outside its range,
+        /// and `1e300` is as legal in JSON as `1280` — so clamping after the
+        /// conversion, as this did, is a clamp that never runs.
+        private static func whole(_ value: Double) -> UInt16 {
+            let rounded = value.rounded()
+            guard rounded > 0 else {
+                // Also the NaN answer: every comparison against one is false.
+                return 0
+            }
+            return UInt16(clamping: Int(min(rounded, Double(UInt16.max))))
         }
     }
 

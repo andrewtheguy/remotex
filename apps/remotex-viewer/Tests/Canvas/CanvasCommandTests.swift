@@ -149,9 +149,6 @@ struct CanvasCommandTests {
         )
     }
 
-    /// The page is ours and the only writer, so anything unreadable is a bug —
-    /// but it is dropped rather than trapped, because this decodes on the main
-    /// actor with a live session behind it.
     /// The room is CSS pixels and may be fractional; the window it sizes is
     /// whole points, so it is rounded rather than truncated — a room reported as
     /// 1279.6 is a desktop that fits, and flooring it would take a point away
@@ -173,6 +170,29 @@ struct CanvasCommandTests {
         )
     }
 
+    /// A number too large to be a room is clamped rather than converted. `Int(_:)`
+    /// traps on anything outside its range, and JSON has no trouble carrying one —
+    /// so this is the difference between a nonsense size and a dead app.
+    @Test
+    func aRoomTooLargeToBeOneIsClampedRatherThanTrapping() throws {
+        let decoded = event(
+            #"{"type":"ready","secureContext":true,"audioDecoder":true,"#
+                + #""room":{"w":1e300,"h":-1e300},"content":{"w":1280,"h":800}}"#
+        )
+        #expect(
+            decoded
+                == .ready(
+                    secureContext: true,
+                    audioDecoder: true,
+                    room: DisplayMode(w: .max, h: 0),
+                    content: DisplayMode(w: 1280, h: 800)
+                )
+        )
+    }
+
+    /// The page is ours and the only writer, so anything unreadable is a bug —
+    /// but it is dropped rather than trapped, because this decodes on the main
+    /// actor with a live session behind it.
     @Test
     func anythingElseIsDroppedRatherThanTrapped() {
         #expect(event(#"{"type":"nonsense"}"#) == nil)

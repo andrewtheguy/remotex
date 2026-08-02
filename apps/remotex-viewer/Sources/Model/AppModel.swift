@@ -1011,9 +1011,32 @@ final class AppModel: GatewaySessionSink {
 
     // MARK: - The remote surface
 
-    func attach(canvas: (any RemoteCanvas)?) {
+    /// Which surface's canvas this is, when one named itself.
+    ///
+    /// SwiftUI may build the replacement `RemoteCanvasHost` *before* dismantling
+    /// the one it replaces, so a coordinator's teardown can run after a newer one
+    /// has already installed its own canvas here. Detaching by identity rather
+    /// than unconditionally is what keeps that teardown from taking the live
+    /// surface with it.
+    @ObservationIgnored
+    private var canvasOwner: ObjectIdentifier?
+
+    func attach(canvas: (any RemoteCanvas)?, owner: ObjectIdentifier? = nil) {
         self.canvas = canvas
+        canvasOwner = canvas == nil ? nil : owner
         canvasAttached()
+    }
+
+    /// Give up the canvas, if it is still this owner's — and say whether it was,
+    /// because the callbacks installed beside it live on the caller and have to
+    /// be released on exactly the same answer.
+    @discardableResult
+    func releaseCanvas(owner: ObjectIdentifier) -> Bool {
+        guard canvasOwner == owner else {
+            return false
+        }
+        attach(canvas: nil)
+        return true
     }
 
     /// The page measured the room it has for the desktop, and what the desktop
@@ -1035,11 +1058,16 @@ final class AppModel: GatewaySessionSink {
     /// The app is launched by Launch Services, whose `os_log` output is not
     /// something a terminal can read back; a QA run started from a shell can
     /// read stderr. Off unless asked for, so a normal launch is silent.
+    ///
+    /// The throwing write, and the discarded error with it: `write(_:)` raises an
+    /// Objective-C exception that Swift cannot catch, so a shell that closed its
+    /// end — quitting the terminal a QA launch was started from — would take the
+    /// app down through its logging.
     func trace(_ message: @autoclosure () -> String) {
         guard ProcessInfo.processInfo.environment["REMOTEX_VIEWER_TRACE"] != nil else {
             return
         }
-        FileHandle.standardError.write(Data("viewer: \(message())\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("viewer: \(message())\n".utf8))
     }
 
     /// Tell the page whether to report input, when the answer has changed.

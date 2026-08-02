@@ -132,9 +132,15 @@ const globals = globalThis as unknown as {
   createImageBitmap: (blob: Blob) => Promise<unknown>;
   VideoDecoder: unknown;
   EncodedVideoChunk: unknown;
-  window: unknown;
+  /** Optional because this runtime has none, which is the point of the test. */
+  window?: unknown;
 };
 const realCreateImageBitmap = globals.createImageBitmap;
+// Usually absent — this runtime is not a browser — but restored rather than
+// deleted, so the one test that needs a `window` cannot leave a half-built
+// global behind for whatever runs next.
+const realWindow = globals.window;
+const hadWindow = "window" in globals;
 
 beforeEach(() => {
   drawn = [];
@@ -176,6 +182,11 @@ afterEach(() => {
   globals.createImageBitmap = realCreateImageBitmap;
   globals.VideoDecoder = undefined;
   globals.EncodedVideoChunk = undefined;
+  if (hadWindow) {
+    globals.window = realWindow;
+  } else {
+    delete globals.window;
+  }
 });
 
 function painter(ctx: CanvasRenderingContext2D | null = context) {

@@ -294,7 +294,7 @@ final class CanvasServer: Sendable {
                 content: chunk,
                 completion: isFrame
                     ? .contentProcessed { [weak self] _ in
-                        self?.frameWritten(chunk.count)
+                        self?.frameWritten(chunk.count, on: stream)
                     }
                     : .idempotent
             )
@@ -305,8 +305,17 @@ final class CanvasServer: Sendable {
     /// dropped, ask for the desktop again: tiles carry no delta state and the
     /// gateway believes it has already sent what it sent, so nothing else would
     /// ever repaint what went missing.
-    private func frameWritten(_ bytes: Int) {
+    ///
+    /// Ignored when it comes from a superseded connection: the counter belongs to
+    /// whichever stream is live, `attachStream` zeroes it for the new one, and a
+    /// late completion from the old one would otherwise subtract the new stream's
+    /// backlog down — the ceiling below it, and eventually a re-prime for a drop
+    /// that never happened.
+    private func frameWritten(_ bytes: Int, on connection: NWConnection) {
         let reprime = state.withLock { state -> Bool in
+            guard state.stream === connection else {
+                return false
+            }
             state.pendingFrameBytes = max(0, state.pendingFrameBytes - bytes)
             guard state.pendingFrameBytes == 0, state.droppedFrames else {
                 return false
@@ -487,7 +496,17 @@ final class CanvasServer: Sendable {
             """.utf8
         )
         let previous = state.withLock { state -> NWConnection? in
-            defer { state.stream = connection }
+            defer {
+                state.stream = connection
+                // The backlog belonged to the connection being replaced, and
+                // this one starts with nothing outstanding. Left as it was, a
+                // page that wedged and reloaded would come back already at the
+                // ceiling and drop the repaint it reloaded for.
+                state.pendingFrameBytes = 0
+                // Nothing to recover either: `onAttach` below asks for the whole
+                // desktop, which is what a re-prime would have asked for.
+                state.droppedFrames = false
+            }
             return state.stream
         }
         previous?.cancel()

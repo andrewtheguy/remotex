@@ -89,6 +89,26 @@ test("a payload is a copy, so the reader's buffer can be reused", () => {
   assert.deepEqual(envelope.payload, new Uint8Array([1, 2, 3]));
 });
 
+test("the limit itself is a length, not an overrun", () => {
+  // The boundary is a `>`, and an off-by-one here would refuse the largest
+  // message the transport can actually deliver — a full-screen tile that no
+  // batch would fit, which is exactly when it would be hit.
+  const reader = createEnvelopeReader();
+  const atLimit = MAX_ENVELOPE_BYTES;
+  assert.deepEqual(
+    reader.push(
+      new Uint8Array([
+        (atLimit >>> 24) & 0xff,
+        (atLimit >>> 16) & 0xff,
+        (atLimit >>> 8) & 0xff,
+        atLimit & 0xff,
+      ]),
+    ),
+    [],
+    "the header alone is not a message yet, and must not allocate for one",
+  );
+});
+
 test("a length that cannot be one ends the stream rather than allocating", () => {
   const reader = createEnvelopeReader();
   assert.throws(() => reader.push(new Uint8Array([0, 0, 0, 0])), EnvelopeError);

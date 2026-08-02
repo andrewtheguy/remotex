@@ -93,4 +93,15 @@ test("non-finite geometry reports the origin rather than NaN", () => {
     ),
     { x: 0, y: 0 },
   );
+  // And from the other side: the point is a real one and the *rect* is what came
+  // back unmeasured, which is the case that actually happens — a pointer event
+  // over a canvas whose layout has not settled.
+  assert.deepEqual(
+    remotePoint(
+      { x: 40, y: 70 },
+      rect(Number.NaN, Number.POSITIVE_INFINITY, Number.NaN, 0),
+      remote,
+    ),
+    { x: 0, y: 0 },
+  );
 });

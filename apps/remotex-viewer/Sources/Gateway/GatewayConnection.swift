@@ -12,12 +12,18 @@ enum SessionEvent: Sendable {
     /// One binary frame, exactly as it came off the socket — a tile batch
     /// (`0x02`) or a wave buffer of Opus packets (`0x03`), kind byte included.
     ///
-    /// Undecoded, deliberately, and not even told apart. The canvas page owns the
-    /// slot table, the image decode and the audio decoder, so anything this actor
+    /// Undecoded, deliberately. The canvas page owns the slot table, the image
+    /// decode, the H.264 stream and the audio decoder, so anything this actor
     /// parsed would be a second implementation of a format the page has to read
-    /// anyway — and a new record type (H.264, see docs/roadmap.md) would have to
-    /// land in both. What is preserved here is the only thing this layer is owed:
+    /// anyway — which is why a video target needed nothing here beyond the
+    /// version bump. What is preserved is the only thing this layer is owed:
     /// arrival order.
+    ///
+    /// The *kind* byte is still read, and only that: `receiveLoop` passes the two
+    /// this build knows and logs anything else rather than putting bytes with no
+    /// reader on the bridge. The tradeoff is accepted rather than overlooked — a
+    /// third frame kind has to be added to that allowlist as well as to the page,
+    /// and an unlisted one is silently invisible until it is.
     case frame(Data)
     case clearFramebuffer
     case releaseInput
