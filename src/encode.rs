@@ -33,7 +33,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::{RenderPlan, TileCodec};
 use crate::protocol::{ServerMsg, Tile};
-use crate::tiles::Rect;
+use crate::tiles::{Changed, Rect};
 
 /// Maximum queued encodes ahead of the handle currently collected. This covers
 /// roughly one 1280×800 repaint while bounding memory and worker pressure.
@@ -214,6 +214,14 @@ impl Motion {
     /// dropped. Keeping the older one is the point: it is the one closer to coming
     /// due, and a cell whose debt was dropped instead would never clean up at all
     /// until it next moved.
+    ///
+    /// A cell holds one debt, so a debt already there may only be *replaced by a
+    /// rectangle covering it*. That is the same rule for the same reason: damage is
+    /// sent as it is reported and clipped to the cell, so two sends can be two
+    /// different slivers of one cell, and overwriting the first debt with the
+    /// second would leave the first sliver lossy with nothing left that knows it is
+    /// owed. It is the trail a pointer drags across a cell — a run of small
+    /// rectangles, of which only the last would ever be cleaned up.
     #[must_use]
     fn stash(
         &mut self,
@@ -222,7 +230,11 @@ impl Motion {
         rgb: Arc<Vec<u8>>,
         now: tokio::time::Instant,
     ) -> bool {
-        let replaced = self.stash.get(&key).map_or(0, |old| old.rgb.len());
+        let replaced = match self.stash.get(&key) {
+            Some(owed) if !rect.contains(&owed.rect) => return false,
+            Some(owed) => owed.rgb.len(),
+            None => 0,
+        };
         let after = self.stash_bytes - replaced + rgb.len();
         if after > MAX_STASH_BYTES {
             return false;
@@ -399,12 +411,12 @@ impl TileSink {
     /// An unmarked region was sent whole at the base encode, which is the quiet
     /// path and the great majority of a still screen. So blur with no mark on it is
     /// not a live decision at all: it is a stale one nothing has replaced.
-    pub async fn damage<F>(&self, changed: Rect, pack: F) -> anyhow::Result<()>
+    pub async fn damage<F>(&self, changed: &Changed, pack: F) -> anyhow::Result<()>
     where
         F: Fn(Rect) -> Vec<u8>,
     {
         let Some(motion_codec) = self.plan.motion else {
-            for band in changed.bands() {
+            for band in changed.rect.bands() {
                 self.encode(band, Arc::new(pack(band)), self.plan.base).await?;
             }
             return Ok(());
@@ -414,15 +426,24 @@ impl TileSink {
         // arrived together and belong in the same slot, however long the cutting
         // and encoding below take.
         let now = tokio::time::Instant::now();
-        for band in changed.bands() {
-            // Every cell this band touches is a cell that just changed, so this is
-            // where its churn is recorded — whether or not the band is then cut.
+        for band in changed.rect.bands() {
+            // Churn is recorded for the cells that *changed*, not for every cell the
+            // band covers. `Changed::rect` is one box round everything that
+            // differed, so a video and a banner ad at opposite ends of the screen
+            // put every cell between them inside it — and arming those was what put
+            // a still sidebar, a menu bar and a taskbar into motion because
+            // something else was moving on the same screen.
+            //
+            // A cell only along for the ride is left at the base encode and settled.
+            // Its pixels are being re-sent anyway, so crisp costs only bytes; and
+            // crisp is what discharges whatever it was owed.
             let cells: Vec<(Rect, bool)> = {
                 let mut motion = self.shared.motion.lock().unwrap();
                 band.cells()
                     .map(|cell| {
-                        let churn = motion.observe(cell.cell_key(), now);
-                        (cell, churn >= CHURN_MOVING)
+                        let key = cell.cell_key();
+                        let moving = changed.has(key) && motion.observe(key, now) >= CHURN_MOVING;
+                        (cell, moving)
                     })
                     .collect()
             };
@@ -638,14 +659,29 @@ async fn flush_cleanups(
         let tile = match joined {
             Ok(Ok(tile)) => tile,
             Ok(Err(e)) => {
-                warn!("{engine}: re-queueing a cleanup tile that would not encode: {e:#}");
                 // Back into the stash at its original age, so it is due again on the
-                // next tick rather than waiting out another idle period.
-                let _ = shared
+                // next tick rather than waiting out another idle period. It can be
+                // refused — the cell may have taken a fresh debt while this encode
+                // ran — and then this region keeps the motion encode until it next
+                // changes, which is worth a word rather than a silent discard.
+                let put_back = shared
                     .motion
                     .lock()
                     .unwrap()
                     .stash(rect.cell_key(), rect, owed, sent_at);
+                if put_back {
+                    warn!("{engine}: re-queueing a cleanup tile that would not encode: {e:#}");
+                } else {
+                    warn!(
+                        "{engine}: dropping a cleanup for {}x{} at ({},{}) that would not \
+                         encode and cannot be re-queued; it stays at the motion encode \
+                         until it changes again: {e:#}",
+                        rect.w(),
+                        rect.h(),
+                        rect.left,
+                        rect.top
+                    );
+                }
                 continue;
             }
             Err(e) => {
@@ -1032,11 +1068,20 @@ mod tests {
 
     const MOTION_DEBUG: RenderPlan = RenderPlan { debug: true, ..MOTION };
 
+    /// A report that every cell of `rect` really did change — damage whose bounding
+    /// box is hiding nothing, which is what most tests here mean by a rectangle.
+    fn all_of(rect: Rect) -> Changed {
+        let mut cells: Vec<(u16, u16)> = rect.cells().map(|c| c.cell_key()).collect();
+        cells.sort_unstable();
+        cells.dedup();
+        Changed { rect, cells }
+    }
+
     /// Damage given to `sink` once per churn slot for `slots` slots — what a video
     /// playing in a window looks like from here. Requires a paused clock.
     async fn drive(sink: &TileSink, area: Rect, slots: u64) {
         for _ in 0..slots {
-            sink.damage(area, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+            sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
             tokio::time::advance(CHURN_SLOT).await;
         }
     }
@@ -1115,7 +1160,7 @@ mod tests {
             // one, so a plan that simply never split would not pass by never being
             // asked to.
             for _ in 0..4 {
-                sink.damage(area, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+                sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
                 tokio::time::advance(CHURN_SLOT * u32::try_from(CHURN_WINDOW).unwrap()).await;
             }
             sink.flush().await;
@@ -1168,7 +1213,7 @@ mod tests {
         drive(&sink, moving, u64::from(CHURN_MOVING)).await;
         // Then one report of the whole band, which now contains one moving cell and
         // three quiet ones.
-        sink.damage(band, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+        sink.damage(&all_of(band), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
         sink.flush().await;
 
         let all = drain(&mut frame_rx, usize::try_from(CHURN_MOVING).unwrap() + 4).await;
@@ -1381,6 +1426,107 @@ mod tests {
         assert!(frame_rx.try_recv().is_err(), "a settled cell was cleaned up twice");
     }
 
+    /// A cell the bounding box merely reached over is not a cell that changed, and
+    /// must not accrue churn.
+    ///
+    /// This is what put a still sidebar, a menu bar and a taskbar at quality 10
+    /// because a video was playing elsewhere on the same screen: `Shadow::accept`
+    /// returns one box round everything that differs, so a video at one end and an
+    /// animated banner at the other swept up every cell between them, and four
+    /// reports like that in 800ms was the whole screen in motion.
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_the_bounding_box_only_reached_over_never_goes_into_motion() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(4096);
+        let sink = TileSink::new("test", frame_tx, MOTION);
+
+        // One band, four cells. The video is at one end, the banner at the other,
+        // and the two quiet cells between them are only inside the box.
+        let band = rect(0, 0, 320 * 4 - 1, 63);
+        let report = Changed { rect: band, cells: vec![(0, 0), (3, 0)] };
+        for _ in 0..CHURN_WINDOW {
+            sink.damage(&report, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+            tokio::time::advance(CHURN_SLOT).await;
+        }
+        sink.flush().await;
+
+        {
+            let motion = sink.shared.motion.lock().unwrap();
+            let churn = |key| motion.churn.get(&key).map_or(0, |c| c.history.count_ones());
+            assert_eq!(churn((0, 0)), u32::try_from(CHURN_WINDOW).unwrap());
+            assert_eq!(churn((3, 0)), u32::try_from(CHURN_WINDOW).unwrap());
+            assert_eq!(churn((1, 0)), 0, "a cell inside the box accrued churn");
+            assert_eq!(churn((2, 0)), 0, "a cell inside the box accrued churn");
+        }
+
+        // And the split follows: the ends go lossy, the middle stays exact.
+        let quiet = usize::try_from(CHURN_MOVING).unwrap() - 1;
+        let sent = formats(&drain(&mut frame_rx, quiet + (usize::try_from(CHURN_WINDOW).unwrap() - quiet) * 4).await);
+        for (i, chunk) in sent[quiet..].chunks(4).enumerate() {
+            assert_eq!(
+                chunk,
+                [Tile::FORMAT_JPEG, Tile::FORMAT_PNG, Tile::FORMAT_PNG, Tile::FORMAT_JPEG],
+                "split {i} put the wrong cells in motion"
+            );
+        }
+    }
+
+    /// A cell holds one cleanup debt, so a second, differently-shaped piece of the
+    /// same cell may not quietly replace the first — it takes the base encode
+    /// instead.
+    ///
+    /// This is the pointer trail: a cursor crossing a cell leaves a run of small
+    /// rectangles, and overwriting each debt with the next left every one but the
+    /// last permanently lossy, with nothing that knew it was owed.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_piece_of_one_cell_cannot_overwrite_the_debt_of_the_first() {
+        let now = tokio::time::Instant::now();
+        let mut motion = Motion::default();
+        let key = (0, 0);
+
+        let left = rect(0, 0, 99, 63);
+        assert!(motion.stash(key, left, Arc::new(rgb(100, 64, 1)), now));
+
+        // A disjoint sliver of the same cell: admitting it would strand `left`.
+        let right = rect(200, 0, 299, 63);
+        assert!(!motion.stash(key, right, Arc::new(rgb(100, 64, 2)), now));
+        assert_eq!(motion.stash.get(&key).map(|s| s.rect), Some(left));
+
+        // One that covers what is owed may replace it: nothing is stranded, and the
+        // cleanup that follows restores strictly more.
+        let both = rect(0, 0, 299, 63);
+        assert!(motion.stash(key, both, Arc::new(rgb(300, 64, 3)), now));
+        assert_eq!(motion.stash.get(&key).map(|s| s.rect), Some(both));
+    }
+
+    /// The same rule through the sink: the second piece goes out crisp rather than
+    /// lossy-and-forgotten.
+    #[tokio::test(start_paused = true)]
+    async fn a_piece_with_no_debt_of_its_own_goes_out_at_the_base_encode() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = TileSink::new("test", frame_tx, MOTION);
+
+        // Put the cell in motion with one sliver of it.
+        let left = rect(0, 0, 99, 63);
+        drive(&sink, left, u64::from(CHURN_MOVING)).await;
+        sink.flush().await;
+        let seen = formats(&drain(&mut frame_rx, usize::try_from(CHURN_MOVING).unwrap()).await);
+        assert_eq!(*seen.last().unwrap(), Tile::FORMAT_JPEG);
+
+        // A different sliver of the same cell, which is now in motion. It cannot
+        // take the discount without stranding the first, so it stays exact.
+        let right = rect(200, 0, 299, 63);
+        sink.damage(&all_of(right), |piece| rgb(piece.w(), piece.h(), 9)).await.unwrap();
+        sink.flush().await;
+        assert_eq!(formats(&drain(&mut frame_rx, 1).await), vec![Tile::FORMAT_PNG]);
+
+        // And the first sliver is still owed its cleanup.
+        assert_eq!(
+            sink.shared.motion.lock().unwrap().stash.get(&(0, 0)).map(|s| s.rect),
+            Some(left),
+            "the debt for the first piece was lost"
+        );
+    }
+
     /// The debug outline is a border and nothing else: the pixels inside it are
     /// what the encoder would have been given anyway, so a marked region is still
     /// legible and QA is reading the real screen with a frame drawn round it.
@@ -1448,7 +1594,7 @@ mod tests {
         }
 
         // The next change is a first change, not the continuation of a motion.
-        sink.damage(cell, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+        sink.damage(&all_of(cell), |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
         sink.flush().await;
         assert_eq!(formats(&drain(&mut frame_rx, 1).await), vec![Tile::FORMAT_PNG]);
     }

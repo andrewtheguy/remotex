@@ -1446,7 +1446,7 @@ async fn send_tiles(
     // after this call has returned, and `image` is overwritten by the next PDU.
     // Repacked rather than sliced, because a piece of the *trimmed* rectangle is
     // narrower than the reported one, so its rows are not contiguous in `buf`.
-    sink.damage(changed, |piece| {
+    sink.damage(&changed, |piece| {
         let mut pixels = Vec::new();
         pack_rgb(image, piece, &mut pixels);
         pixels

@@ -103,6 +103,41 @@ impl Rect {
     }
 }
 
+/// What an accepted rectangle owes the client: one box round everything that
+/// differs, and which grid cells inside it actually differ.
+///
+/// The two are not the same thing, and the difference is the whole reason this is
+/// a struct. `rect` is a *bounding box*, so a change in two corners sweeps up
+/// everything between them. Sending those extra pixels is harmless — they are the
+/// right pixels, only redundant — but *counting* them as change is not, because
+/// that is what puts a still sidebar in motion because a video is playing beside
+/// it. Anything deciding how hard a region is working reads `cells`; anything
+/// deciding what to put on the wire reads `rect`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changed {
+    /// Bounding box of every differing pixel.
+    pub rect: Rect,
+    /// Grid cells ([`Rect::cell_key`]) holding at least one differing pixel,
+    /// sorted and deduplicated. Always a subset of the cells `rect` covers, and
+    /// never empty when `rect` is present.
+    pub cells: Vec<(u16, u16)>,
+}
+
+impl Changed {
+    /// Whether `key` is one of the cells that actually changed.
+    pub fn has(&self, key: (u16, u16)) -> bool {
+        self.cells.binary_search(&key).is_ok()
+    }
+}
+
+#[cfg(test)]
+impl Shadow {
+    /// [`Self::accept`]'s bounding box alone, for the tests that are about the box.
+    fn accept_rect(&mut self, rect: Rect, rgb: &[u8]) -> Option<Rect> {
+        self.accept(rect, rgb).map(|c| c.rect)
+    }
+}
+
 /// The pixels the client was last sent, as packed RGB888, and which of them are
 /// actually known.
 ///
@@ -186,12 +221,17 @@ impl Shadow {
     /// nowhere: sending a tile that did not need sending wastes bytes, where
     /// suppressing one that was needed leaves the client showing pixels the remote
     /// no longer has.
-    pub fn accept(&mut self, rect: Rect, rgb: &[u8]) -> Option<Rect> {
+    pub fn accept(&mut self, rect: Rect, rgb: &[u8]) -> Option<Changed> {
         self.examined += 1;
         let w = usize::from(rect.w());
         let h = usize::from(rect.h());
         if rect.right >= self.w || rect.bottom >= self.h || rgb.len() != w * h * 3 {
-            return Some(rect);
+            // Nothing here can be compared, so nothing can be ruled out: every cell
+            // it touches counts as changed.
+            let mut cells: Vec<(u16, u16)> = rect.cells().map(|c| c.cell_key()).collect();
+            cells.sort_unstable();
+            cells.dedup();
+            return Some(Changed { rect, cells });
         }
 
         let row_bytes = w * 3;
@@ -201,6 +241,7 @@ impl Shadow {
         let mut last_row = 0usize;
         let mut first_byte = usize::MAX;
         let mut last_byte = 0usize;
+        let mut cells: Vec<(u16, u16)> = Vec::new();
 
         for r in 0..h {
             let y = rect.top + r as u16;
@@ -224,6 +265,28 @@ impl Shadow {
             last_row = r;
             first_byte = first_byte.min(lo);
             last_byte = last_byte.max(hi);
+
+            // Which grid cells of this row actually hold a differing pixel, as
+            // against which ones the row's span merely reaches over. One `memcmp`
+            // per cell across a span already known to differ, so the extra work
+            // only happens on rows that changed at all — and it is what stops a
+            // change in two corners of a row from reading as a change everywhere
+            // between them.
+            let mine = self.row(rect.left, y, row_bytes);
+            let (row_cell, left, cw) = (y / CELL_H, u32::from(rect.left), u32::from(CELL_W));
+            let (span_lo, span_hi) = (left + (lo / 3) as u32, left + (hi / 3) as u32);
+            let mut col = span_lo / cw;
+            while col * cw <= span_hi {
+                let from = ((col * cw).max(span_lo) - left) as usize * 3;
+                let to = ((col * cw + cw - 1).min(span_hi) - left) as usize * 3 + 3;
+                // An unknown pixel differs whatever its bytes say, so a cell the
+                // unknown span reaches cannot be ruled out by comparison.
+                let blind = unknown.is_some_and(|(ulo, uhi)| from <= uhi && to > ulo);
+                if blind || src[from..to] != mine[from..to] {
+                    cells.push((col as u16, row_cell));
+                }
+                col += 1;
+            }
         }
 
         if first_row == usize::MAX {
@@ -249,7 +312,9 @@ impl Shadow {
         };
         self.trimmed += (usize::from(rect.w()) * usize::from(rect.h())
             - usize::from(changed.w()) * usize::from(changed.h())) as u64;
-        Some(changed)
+        cells.sort_unstable();
+        cells.dedup();
+        Some(Changed { rect: changed, cells })
     }
 
     /// The pixels of `rect` as packed RGB888, or `None` when any of them is
@@ -397,7 +462,7 @@ mod tests {
     fn copy_out_returns_known_pixels_and_nothing_else() {
         let mut shadow = Shadow::new("test", 8, 4);
         let painted = rect(2, 1, 5, 2);
-        shadow.accept(painted, &solid(painted, 9));
+        shadow.accept_rect(painted, &solid(painted, 9));
 
         assert_eq!(shadow.copy_out(painted), Some(solid(painted, 9)));
         // One row up is a region nothing has painted, so it cannot be reproduced.
@@ -412,7 +477,7 @@ mod tests {
     fn copy_out_refuses_everything_a_forget_has_disclaimed() {
         let mut shadow = Shadow::new("test", 8, 4);
         let r = rect(0, 0, 7, 3);
-        shadow.accept(r, &solid(r, 9));
+        shadow.accept_rect(r, &solid(r, 9));
         assert!(shadow.copy_out(r).is_some());
         shadow.forget();
         assert_eq!(shadow.copy_out(r), None);
@@ -422,7 +487,7 @@ mod tests {
     fn the_first_send_of_anything_but_black_is_new() {
         let mut shadow = Shadow::new("test", 64, 64);
         let r = rect(0, 0, 15, 15);
-        assert_eq!(shadow.accept(r, &solid(r, 9)), Some(r));
+        assert_eq!(shadow.accept_rect(r, &solid(r, 9)), Some(r));
     }
 
     /// Black on a fresh shadow *is* new. This is the case that makes `known`
@@ -434,8 +499,8 @@ mod tests {
     fn black_on_a_fresh_shadow_is_still_sent() {
         let mut shadow = Shadow::new("test", 64, 64);
         let r = rect(0, 0, 15, 15);
-        assert_eq!(shadow.accept(r, &solid(r, 0)), Some(r));
-        assert_eq!(shadow.accept(r, &solid(r, 0)), None, "but only once");
+        assert_eq!(shadow.accept_rect(r, &solid(r, 0)), Some(r));
+        assert_eq!(shadow.accept_rect(r, &solid(r, 0)), None, "but only once");
     }
 
     /// The same hazard through the front door: a region goes black while the shadow
@@ -444,11 +509,11 @@ mod tests {
     fn a_region_that_went_black_while_forgotten_is_sent() {
         let mut shadow = Shadow::new("test", 64, 64);
         let r = rect(0, 0, 31, 31);
-        shadow.accept(r, &solid(r, 200));
+        shadow.accept_rect(r, &solid(r, 200));
 
         shadow.forget();
 
-        assert_eq!(shadow.accept(r, &solid(r, 0)), Some(r));
+        assert_eq!(shadow.accept_rect(r, &solid(r, 0)), Some(r));
     }
 
     /// A rectangle partly covering a forgotten region: the unknown pixels widen the
@@ -457,22 +522,71 @@ mod tests {
     fn unknown_pixels_widen_the_trim() {
         let mut shadow = Shadow::new("test", 64, 64);
         let whole = rect(0, 0, 63, 63);
-        shadow.accept(whole, &solid(whole, 5));
-        assert_eq!(shadow.accept(whole, &solid(whole, 5)), None);
+        shadow.accept_rect(whole, &solid(whole, 5));
+        assert_eq!(shadow.accept_rect(whole, &solid(whole, 5)), None);
 
         shadow.forget();
 
         // Identical pixels, but nothing is known any more, so all of it is sent.
-        assert_eq!(shadow.accept(whole, &solid(whole, 5)), Some(whole));
+        assert_eq!(shadow.accept_rect(whole, &solid(whole, 5)), Some(whole));
+    }
+
+    /// The bounding box reaches across a change in two corners; the cell list does
+    /// not. This is the distinction the whole struct exists for: everything inside
+    /// the box gets *sent*, but only what actually differs gets *counted* as
+    /// change, and counting the rest is what puts a still sidebar into motion
+    /// because a video is playing at the other end of the same screen.
+    #[test]
+    fn changed_cells_do_not_span_a_bounding_box() {
+        let mut shadow = Shadow::new("test", CELL_W * 4, CELL_H * 2);
+        let whole = rect(0, 0, CELL_W * 4 - 1, CELL_H * 2 - 1);
+        shadow.accept_rect(whole, &solid(whole, 1));
+
+        // Two pixels change: one in the top-left cell, one in the bottom-right.
+        let mut pixels = solid(whole, 1);
+        let at = |x: usize, y: usize| (y * usize::from(CELL_W) * 4 + x) * 3;
+        pixels[at(4, 4)] = 2;
+        let far = at(usize::from(CELL_W) * 3 + 4, usize::from(CELL_H) + 4);
+        pixels[far] = 2;
+
+        let changed = shadow.accept(whole, &pixels).expect("something changed");
+        assert!(
+            changed.rect.contains(&rect(4, 4, CELL_W * 3 + 4, CELL_H + 4)),
+            "the box has to reach both, or the far pixel is never sent: {:?}",
+            changed.rect
+        );
+        assert_eq!(
+            changed.cells,
+            vec![(0, 0), (3, 1)],
+            "the cells in between were counted as changed"
+        );
+        assert!(changed.has((0, 0)) && changed.has((3, 1)) && !changed.has((1, 0)));
+    }
+
+    /// Every cell of a region genuinely repainted end to end is reported, so the
+    /// narrowing above cannot be hiding real change.
+    #[test]
+    fn a_wholly_repainted_region_reports_every_cell() {
+        let mut shadow = Shadow::new("test", CELL_W * 2, CELL_H * 2);
+        let whole = rect(0, 0, CELL_W * 2 - 1, CELL_H * 2 - 1);
+
+        // The first acceptance is all-unknown, which differs by definition.
+        let first = shadow.accept(whole, &solid(whole, 1)).expect("nothing was known");
+        assert_eq!(first.cells, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+
+        // And again by comparison, with everything known and everything different.
+        let second = shadow.accept(whole, &solid(whole, 2)).expect("every pixel changed");
+        assert_eq!(second.cells, first.cells);
+        assert_eq!(second.rect, whole);
     }
 
     #[test]
     fn an_unchanged_repeat_is_dropped_whole() {
         let mut shadow = Shadow::new("test", 64, 64);
         let r = rect(8, 8, 23, 23);
-        assert_eq!(shadow.accept(r, &solid(r, 5)), Some(r));
-        assert_eq!(shadow.accept(r, &solid(r, 5)), None);
-        assert_eq!(shadow.accept(r, &solid(r, 5)), None);
+        assert_eq!(shadow.accept_rect(r, &solid(r, 5)), Some(r));
+        assert_eq!(shadow.accept_rect(r, &solid(r, 5)), None);
+        assert_eq!(shadow.accept_rect(r, &solid(r, 5)), None);
     }
 
     /// The point of comparing pixels rather than hashing them: an over-reported
@@ -481,21 +595,21 @@ mod tests {
     fn an_over_reported_rectangle_is_trimmed_to_what_changed() {
         let mut shadow = Shadow::new("test", 200, 200);
         let whole = rect(0, 0, 199, 199);
-        shadow.accept(whole, &solid(whole, 1));
+        shadow.accept_rect(whole, &solid(whole, 1));
 
         // Change one pixel at (100, 50) inside a rectangle covering the screen.
         let mut pixels = solid(whole, 1);
         let at = (50 * 200 + 100) * 3;
         pixels[at..at + 3].copy_from_slice(&[9, 9, 9]);
 
-        assert_eq!(shadow.accept(whole, &pixels), Some(rect(100, 50, 100, 50)));
+        assert_eq!(shadow.accept_rect(whole, &pixels), Some(rect(100, 50, 100, 50)));
     }
 
     #[test]
     fn a_trim_keeps_every_changed_pixel_inside_it() {
         let mut shadow = Shadow::new("test", 100, 100);
         let whole = rect(0, 0, 99, 99);
-        shadow.accept(whole, &solid(whole, 1));
+        shadow.accept_rect(whole, &solid(whole, 1));
 
         let mut pixels = solid(whole, 1);
         for (x, y) in [(10u16, 20u16), (60, 25), (33, 70)] {
@@ -503,7 +617,7 @@ mod tests {
             pixels[at..at + 3].copy_from_slice(&[7, 7, 7]);
         }
 
-        let changed = shadow.accept(whole, &pixels).expect("something changed");
+        let changed = shadow.accept_rect(whole, &pixels).expect("something changed");
         assert_eq!(changed, rect(10, 20, 60, 70));
     }
 
@@ -515,18 +629,18 @@ mod tests {
     fn what_the_trim_sent_is_what_the_shadow_remembers() {
         let mut shadow = Shadow::new("test", 64, 64);
         let whole = rect(0, 0, 63, 63);
-        shadow.accept(whole, &solid(whole, 1));
+        shadow.accept_rect(whole, &solid(whole, 1));
 
         let mut pixels = solid(whole, 1);
         let at = (32 * 64 + 32) * 3;
         pixels[at..at + 3].copy_from_slice(&[4, 4, 4]);
-        assert_eq!(shadow.accept(whole, &pixels), Some(rect(32, 32, 32, 32)));
+        assert_eq!(shadow.accept_rect(whole, &pixels), Some(rect(32, 32, 32, 32)));
 
         // The same pixels again: nothing new, so the changed row was recorded.
-        assert_eq!(shadow.accept(whole, &pixels), None);
+        assert_eq!(shadow.accept_rect(whole, &pixels), None);
         // And back to the original: a change again, not a phantom match.
         assert_eq!(
-            shadow.accept(whole, &solid(whole, 1)),
+            shadow.accept_rect(whole, &solid(whole, 1)),
             Some(rect(32, 32, 32, 32))
         );
     }
@@ -538,29 +652,29 @@ mod tests {
         let mut shadow = Shadow::new("test", 64, 64);
         let big = rect(0, 0, 31, 31);
         let small = rect(4, 4, 7, 7);
-        shadow.accept(big, &solid(big, 1));
+        shadow.accept_rect(big, &solid(big, 1));
 
         // Paint the small rect a different colour.
-        assert_eq!(shadow.accept(small, &solid(small, 2)), Some(small));
+        assert_eq!(shadow.accept_rect(small, &solid(small, 2)), Some(small));
 
         // Now the big rect is reported again with its *original* pixels. A memo
         // keyed by rectangle would still hold the first hash and suppress this,
         // leaving the small patch on screen forever. The changed area is exactly
         // the small patch.
-        assert_eq!(shadow.accept(big, &solid(big, 1)), Some(small));
+        assert_eq!(shadow.accept_rect(big, &solid(big, 1)), Some(small));
     }
 
     #[test]
     fn forgetting_sends_everything_again() {
         let mut shadow = Shadow::new("test", 64, 64);
         let r = rect(0, 0, 31, 31);
-        assert_eq!(shadow.accept(r, &solid(r, 3)), Some(r));
-        assert_eq!(shadow.accept(r, &solid(r, 3)), None);
+        assert_eq!(shadow.accept_rect(r, &solid(r, 3)), Some(r));
+        assert_eq!(shadow.accept_rect(r, &solid(r, 3)), None);
 
         shadow.forget();
 
         assert_eq!(
-            shadow.accept(r, &solid(r, 3)),
+            shadow.accept_rect(r, &solid(r, 3)),
             Some(r),
             "a repaint must not be suppressed"
         );
@@ -570,14 +684,14 @@ mod tests {
     fn a_resize_forgets_and_regrids() {
         let mut shadow = Shadow::new("test", 64, 64);
         let r = rect(0, 0, 31, 31);
-        shadow.accept(r, &solid(r, 3));
+        shadow.accept_rect(r, &solid(r, 3));
 
         shadow.resize(128, 96);
 
         assert_eq!(shadow.size(), (128, 96));
-        assert_eq!(shadow.accept(r, &solid(r, 3)), Some(r));
+        assert_eq!(shadow.accept_rect(r, &solid(r, 3)), Some(r));
         let far = rect(96, 64, 127, 95);
-        assert_eq!(shadow.accept(far, &solid(far, 3)), Some(far));
+        assert_eq!(shadow.accept_rect(far, &solid(far, 3)), Some(far));
     }
 
     /// A rectangle the shadow does not cover is sent, not suppressed and not
@@ -586,8 +700,8 @@ mod tests {
     fn a_rectangle_outside_the_shadow_is_always_sent() {
         let mut shadow = Shadow::new("test", 32, 32);
         let outside = rect(16, 16, 47, 47);
-        assert_eq!(shadow.accept(outside, &solid(outside, 1)), Some(outside));
-        assert_eq!(shadow.accept(outside, &solid(outside, 1)), Some(outside));
+        assert_eq!(shadow.accept_rect(outside, &solid(outside, 1)), Some(outside));
+        assert_eq!(shadow.accept_rect(outside, &solid(outside, 1)), Some(outside));
     }
 
     /// A payload that does not match its rectangle is sent rather than trusted
@@ -596,7 +710,7 @@ mod tests {
     fn a_mismatched_payload_length_is_not_compared() {
         let mut shadow = Shadow::new("test", 32, 32);
         let r = rect(0, 0, 15, 15);
-        assert_eq!(shadow.accept(r, &[1, 2, 3]), Some(r));
+        assert_eq!(shadow.accept_rect(r, &[1, 2, 3]), Some(r));
     }
 
     #[test]

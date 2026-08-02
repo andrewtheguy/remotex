@@ -2136,7 +2136,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // Cropped out of the rect just read rather than out of the shadow: the bytes
     // are the same and this needs no lock. Its own buffer per piece, since the
     // encoder reads it after this function has returned and `rgb` is gone.
-    sink.damage(changed, |piece| {
+    sink.damage(&changed, |piece| {
         let mut pixels = Vec::new();
         tiles::crop(&rgb, rect, piece, &mut pixels);
         pixels

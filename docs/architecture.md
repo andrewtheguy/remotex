@@ -149,6 +149,16 @@ their damage through:
   with them would count no churn, but snapping outward would ship pixels that did
   not change — and VNC could not reach them anyway, since it crops from the
   rectangle it just read.
+- **What counts as change.** `Shadow::accept` returns a `Changed`: one bounding box
+  round everything that differs, *and* the grid cells that actually differ. The two
+  are not the same, and conflating them was a real fault — a video at one end of the
+  screen and an animated banner at the other put every cell between them inside one
+  box, and four reports like that inside the churn window read as the whole screen in
+  motion, which is how a still sidebar, a menu bar and a Windows taskbar ended up at
+  quality 10. The box still decides what is *sent*, because those pixels are correct
+  and only redundant; the cell list decides what is *counted*. A cell only along for
+  the ride is left at the base encode and settled — its pixels are going out anyway,
+  so exact costs only bytes, and exact is what discharges a debt.
 - **Churn → encode.** Each cell keeps an 8-bit shift register of which of the last
   `CHURN_WINDOW` slots of `CHURN_SLOT` wall time changed it — 4 of the last 8
   hundred-millisecond slots at `CHURN_MOVING`, at which the cell is in motion and
@@ -171,7 +181,14 @@ their damage through:
   moving cell is cut at the grid — which is what makes a video in a window cost its
   own cells their quality and cost the text beside it nothing.
 - **Cleanup.** A piece sent at the motion encode keeps its source pixels, bounded
-  by `MAX_STASH_BYTES`. A `CLEANUP_TICK` interval in `order_loop` re-sends cells
+  by `MAX_STASH_BYTES`. A cell holds *one* debt, so a debt already standing may only
+  be replaced by a rectangle covering it; anything else takes the base encode
+  instead. Damage is clipped to the cell rather than snapped out to it, so two sends
+  can be two different slivers of one cell, and overwriting the first debt with the
+  second left the first sliver lossy with nothing that knew it was owed. That is the
+  pointer trail on RDP — the cursor is composited into the framebuffer, so crossing a
+  cell leaves a run of small rectangles of which only the last would ever have been
+  cleaned up. A `CLEANUP_TICK` interval in `order_loop` re-sends cells
   idle past `CLEANUP_IDLE` at the *base* encode, `MAX_CLEANUPS_PER_TICK` at a time
   and oldest first, so a paused screen sharpens on its own without a client
   repaint. The timer has to be its own, because the case it exists for is a remote
