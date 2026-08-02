@@ -42,6 +42,7 @@ export default function RemoteDesktop({
     canAudio,
     audioEnabled,
     audioError,
+    videoError,
     autoResizeByDefault,
     audioByDefault,
     setAutoResizeByDefault,
@@ -161,6 +162,17 @@ export default function RemoteDesktop({
           onLogout={onLogout}
           onUnauthorized={onUnauthorized}
         />
+      )}
+
+      {/* A video target this browser cannot decode. Its own banner rather than a
+          line in the status overlay, because the overlay hides itself the moment the
+          session is up — and this is a session that *is* up, showing nothing. It is
+          also not `connectError`: nothing is wrong with the session or the gateway,
+          it is this browser that cannot decode what is arriving. */}
+      {videoError && mode === "desktop" && (
+        <div className="video-banner" role="alert">
+          {videoError}
+        </div>
       )}
 
       {showStatus && (

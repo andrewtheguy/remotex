@@ -34,6 +34,7 @@ import {
   MIN_ZOOM,
   type Point,
 } from "./touchGestures.ts";
+import { createVideoStream, type VideoStream } from "./videoDecoder.ts";
 
 // The WebSocket/claim connection-flow state machine (independent of the
 // picker-vs-desktop `mode` the attached socket carries):
@@ -160,6 +161,14 @@ function overClipboardLimit(text: string): boolean {
 }
 
 // Close code sent when another browser force-claims the slot.
+// The presentation timestamp one access unit advances by, in microseconds.
+//
+// A number rather than a measurement, and it does not have to be the truth: the wire
+// carries no timestamps, nothing here schedules by them, and a frame is painted when
+// it decodes. WebCodecs only requires that they increase, and a nominal 30 Hz keeps
+// them recognisable in a decoder's own diagnostics.
+const VIDEO_FRAME_US = 33_333;
+
 const CLOSE_EVICTED = 4001;
 const MAX_RETRY_DELAY_MS = 15_000;
 // How many failed attempts in a row are reported as nothing but "Reconnecting…"
@@ -495,6 +504,14 @@ export function useRemoteDesktop(
   // refusal rather than something to work around — there is no second
   // representation to fall back to (see audioPlayer.ts).
   const [audioError, setAudioError] = useState<string | null>(null);
+  // Why this browser is showing nothing for a video target, or null.
+  //
+  // Kept apart from `connectError` because the session is fine — it is this client
+  // that cannot decode what is arriving — and apart from `audioError` because of
+  // what it costs. No audio decoder means silence beside a working desktop; no video
+  // decoder means no desktop at all, so this needs a surface that stays up while
+  // `status` is "connected", which the status overlay does not.
+  const [videoError, setVideoError] = useState<string | null>(null);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -740,8 +757,23 @@ export function useRemoteDesktop(
     // cannot grow it — and the client never evicts: the server names the slot to
     // overwrite, which is what keeps the two ends in step without either
     // modelling the other's memory.
-    const tileCache: ({ data: Uint8Array; mime: TileMsg["mime"] } | null)[] =
+    const tileCache: ({ data: Uint8Array; codec: TileMsg["codec"] } | null)[] =
       new Array(SLOT_COUNT).fill(null);
+    // The video stream, for a target on `render_type = "video"`. Built on the first
+    // access unit rather than on connect, because most targets send none at all —
+    // and dropped by `clearDesktop`, since a stream belongs to one attachment and
+    // the next one starts again from a keyframe.
+    let video: VideoStream | null = null;
+    // Presentation timestamps for that stream, in microseconds. WebCodecs wants one
+    // per chunk and the wire carries none, so they are counted rather than measured:
+    // nothing here schedules by them — a frame is painted when it decodes — they only
+    // have to increase.
+    let videoTimestamp = 0;
+    const releaseVideo = () => {
+      video?.close();
+      video = null;
+      videoTimestamp = 0;
+    };
     // Whether a reset has already been asked for while handling this batch.
     let resetAsked = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -772,6 +804,7 @@ export function useRemoteDesktop(
       // reference always follows the tile that filled its slot on the same
       // socket.)
       tileCache.fill(null);
+      releaseVideo();
       // The socket carrying the audio is going away, and a subscription belongs to
       // one attachment: the gateway has already stopped this one, so holding a
       // decoder open would only be holding the audio hardware. The next `connected`
@@ -1130,7 +1163,7 @@ export function useRemoteDesktop(
       x: number;
       y: number;
       data: Uint8Array;
-      mime: TileMsg["mime"];
+      codec: TileMsg["codec"];
       /** True when the server believes this client is keeping these bytes. */
       cached: boolean;
     }
@@ -1145,7 +1178,7 @@ export function useRemoteDesktop(
         if (record.slot !== NO_SLOT) {
           tileCache[record.slot] = {
             data: new Uint8Array(record.data),
-            mime: record.mime,
+            codec: record.codec,
           };
         }
         return { ...record, cached: record.slot !== NO_SLOT };
@@ -1164,9 +1197,12 @@ export function useRemoteDesktop(
       if (!job) {
         return null;
       }
+      if (job.codec === "h264") {
+        return decodeAccessUnit(job.data);
+      }
       try {
         return await createImageBitmap(
-          new Blob([job.data as Uint8Array<ArrayBuffer>], { type: job.mime }),
+          new Blob([job.data as Uint8Array<ArrayBuffer>], { type: job.codec }),
         );
       } catch {
         // A tile that will not decode is one dropped tile — unless the server is
@@ -1177,6 +1213,36 @@ export function useRemoteDesktop(
         }
         return null;
       }
+    };
+
+    // One access unit of the video stream.
+    //
+    // Unlike a still tile this cannot simply be dropped when something goes wrong:
+    // every later frame is expressed relative to this one, and a video target sends
+    // no stills to recover with. So a failure here is *said* — the banner is the only
+    // honest answer to a desktop that is not going to paint — and the stream is torn
+    // down rather than left decoding from history it does not have.
+    const decodeAccessUnit = async (data: Uint8Array) => {
+      if (!video) {
+        try {
+          video = createVideoStream({
+            onError: (reason) => {
+              setVideoError(reason);
+              releaseVideo();
+            },
+          });
+        } catch (e) {
+          setVideoError(
+            e instanceof Error
+              ? e.message
+              : "This browser cannot decode video.",
+          );
+          return null;
+        }
+        setVideoError(null);
+      }
+      videoTimestamp += VIDEO_FRAME_US;
+      return video.decode(data, videoTimestamp);
     };
 
     const askForCacheReset = () => {
@@ -1191,17 +1257,26 @@ export function useRemoteDesktop(
     // into there is nothing to paint, but the decoded images still have to go.
     const paintBatch = (
       jobs: (PaintJob | null)[],
-      bitmaps: (ImageBitmap | null)[],
+      decoded: (ImageBitmap | VideoFrame | null)[],
     ) => {
       const ctx = ctxRef.current;
-      for (let i = 0; i < bitmaps.length; i += 1) {
-        const bitmap = bitmaps[i];
+      const size = sizeRef.current;
+      for (let i = 0; i < decoded.length; i += 1) {
+        const image = decoded[i];
         const job = jobs[i];
-        if (!bitmap || !job) {
+        if (!image || !job) {
           continue;
         }
-        ctx?.drawImage(bitmap, job.x, job.y);
-        bitmap.close();
+        if (job.codec === "h264" && size) {
+          // Cropped by the source rectangle rather than drawn whole: H.264 needs
+          // even sides and a desktop need not have them, so the decoded picture can
+          // be a pixel wider or taller than the framebuffer. The tile header carries
+          // the *desktop* size, which is what the canvas is.
+          ctx?.drawImage(image, 0, 0, size.w, size.h, 0, 0, size.w, size.h);
+        } else {
+          ctx?.drawImage(image, job.x, job.y);
+        }
+        image.close();
       }
     };
 
@@ -1426,6 +1501,10 @@ export function useRemoteDesktop(
           releaseAudio();
           setAudioEnabled(false);
           setAudioError(null);
+          // The stream belonged to that engine; a fresh one starts from a keyframe,
+          // and whatever this browser could not decode is no longer on the screen.
+          releaseVideo();
+          setVideoError(null);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
@@ -1946,6 +2025,7 @@ export function useRemoteDesktop(
     canAudio,
     audioEnabled,
     audioError,
+    videoError,
     // The two remembered "by default" preferences and their setters, for the
     // picker's "… if compatible" toggles.
     autoResizeByDefault,
