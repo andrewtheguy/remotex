@@ -56,7 +56,19 @@ enum ServerMessage: Sendable, Equatable {
         let name: String
         /// `"rdp"` or `"vnc"`. Named around the Swift keyword.
         let protocolName: String
+        /// Whether this session may resize the remote when the user asks.
         let resize: Bool
+        /// Whether it may also hand the size to the window and let every drag
+        /// report one. A second permission, not a shade of the first: the gateway
+        /// grants it to plain `vnc` alone, because RDP and Apple Screen Sharing
+        /// renegotiate in ways a stream of reports walks into. Never true without
+        /// `resize`, and where it is false "Resize to Window" still works.
+        ///
+        /// Required, not defaulted, for the reason `audio` below is: protocol
+        /// version 8 shipped `connected` without it, so a gateway that omits it is
+        /// one this build refuses by version — which is why the version moved to 9
+        /// for a field that is otherwise purely additive.
+        let autoResize: Bool
         let clipboard: Bool
         /// Audio capability, not current playback or remote channel activity.
         ///
@@ -70,6 +82,7 @@ enum ServerMessage: Sendable, Equatable {
             case name
             case protocolName = "protocol"
             case resize
+            case autoResize
             case clipboard
             case audio
         }

@@ -330,6 +330,10 @@ struct AttachedSession {
     func connect(
         protocolName: String,
         resize: Bool = true,
+        // Defaulted to what the gateway would actually send for this protocol —
+        // plain `vnc` may be driven by the window and RDP may not — so a harness
+        // session is never in a state the real one cannot reach.
+        autoResize: Bool? = nil,
         clipboard: Bool = false,
         audio: Bool = false
     ) {
@@ -340,6 +344,7 @@ struct AttachedSession {
                         name: "t",
                         protocolName: protocolName,
                         resize: resize,
+                        autoResize: resize && (autoResize ?? (protocolName == "vnc")),
                         clipboard: clipboard,
                         audio: audio
                     )

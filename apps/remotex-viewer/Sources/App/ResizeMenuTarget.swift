@@ -50,10 +50,13 @@ final class ResizeMenuTarget: NSObject, NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case ViewerMenus.autoResizeAction:
-            // The tick is set here rather than pushed on when the model changes,
-            // for the same reason enablement is: AppKit asks as the menu opens,
-            // which is exactly when the answer has to be right.
+            // The tick and the title are set here rather than pushed on when the
+            // model changes, for the same reason enablement is: AppKit asks as the
+            // menu opens, which is exactly when the answer has to be right. The
+            // title carries the one distinction greying cannot: this remote takes a
+            // resize, just not one per window drag.
             menuItem.state = model.autoResizes ? .on : .off
+            menuItem.title = model.autoResizeLabel
             return model.canAutoResize
         case ViewerMenus.resizeToWindowAction:
             return model.canResizeNow

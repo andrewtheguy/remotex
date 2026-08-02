@@ -16,7 +16,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// viewer requires an exact match. Bump it when an older peer would otherwise
 /// fail without a useful compatibility error; clients ignore additive control
 /// tags they do not know.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -736,10 +736,20 @@ pub enum ServerMsg {
     Picker,
     /// A live target and its client-visible capabilities. `audio` reports
     /// capability, not whether sound is arriving.
+    ///
+    /// `resize` and `auto_resize` are two permissions, not one with a shortcut:
+    /// the first is whether a client may resize the remote when the user asks, the
+    /// second whether it may hand the size to its window and let every drag report.
+    /// Only plain `vnc` gets the second — see [`crate::config::TargetConfig::auto_resize`].
+    /// `auto_resize` is required rather than defaulted, which is what moved
+    /// [`PROTOCOL_VERSION`] to 9: version 8 shipped this message without it, so a
+    /// gateway that omits it must be refused by version rather than decoded into a
+    /// target that silently cannot follow the window.
     Connected {
         name: String,
         protocol: &'static str,
         resize: bool,
+        auto_resize: bool,
         clipboard: bool,
         audio: bool,
     },
@@ -822,6 +832,10 @@ enum ControlMsg<'a> {
         name: &'a str,
         protocol: &'a str,
         resize: bool,
+        // `rename_all` on this enum renames the variants, not their fields, so
+        // every camelCase key on the wire is spelled here — see `changedAtMs`.
+        #[serde(rename = "autoResize")]
+        auto_resize: bool,
         clipboard: bool,
         audio: bool,
     },
@@ -898,12 +912,14 @@ impl ServerMsg {
                 name,
                 protocol,
                 resize,
+                auto_resize,
                 clipboard,
                 audio,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
                 resize: *resize,
+                auto_resize: *auto_resize,
                 clipboard: *clipboard,
                 audio: *audio,
             }),
@@ -1117,6 +1133,7 @@ mod tests {
             name: "mac".to_owned(),
             protocol: "vnc",
             resize: false,
+            auto_resize: false,
             clipboard: true,
             audio: false,
         })
@@ -1124,7 +1141,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"clipboard":true,"audio":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"autoResize":false,"clipboard":true,"audio":false}"#
             ),
             None => panic!("connected must be a text frame"),
         }

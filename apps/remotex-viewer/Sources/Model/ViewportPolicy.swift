@@ -5,11 +5,14 @@ import Foundation
 /// Two questions, and keeping them apart is the whole of this type.
 ///
 /// *May* this session resize the remote — the operator's `resize` on the target.
-/// That is the gateway's answer and this client cannot argue with it.
+/// That is the gateway's answer and this client cannot argue with it. It also
+/// answers a second one: whether the window may drive the size *unasked*, which is
+/// plain `vnc` alone. RDP and Apple Screen Sharing take a resize the user asked
+/// for and not a stream of them (see docs/known-issues.md), so on those the window
+/// never reports and "Resize to Window" still does.
 ///
 /// *How* — continuously as the window changes, or only when the user asks. That is
-/// this client's answer, and it is the same question on every protocol: an engine
-/// that acts on one viewport report acts on all of them. `autoFollows` starts false
+/// this client's answer, within what the above allows. `autoFollows` starts false
 /// and is asked again for every connection, so connecting never reshapes a remote's
 /// desktop unasked.
 struct ViewportPolicy: Equatable {
@@ -17,19 +20,42 @@ struct ViewportPolicy: Equatable {
     /// while false, asked for or not.
     private(set) var allowed = false
 
+    /// Whether this session may be put in auto mode at all. The gateway's, not the
+    /// user's, and the reason `autoFollows` is not simply settable.
+    private(set) var autoAllowed = false
+
     /// Whether the remote follows this window unasked. The user's choice, per
-    /// session; every connection starts manual.
-    var autoFollows = false
+    /// session; every connection starts manual, and it cannot be turned on where
+    /// the gateway did not allow the mode.
+    private(set) var autoFollows = false
 
     /// The last size sent on this connection, for the dedupe below.
     private var lastSent: DisplayMode?
 
     init() {}
 
-    /// Derive the permission: the target's `resize`, settled at connect for every
+    /// Derive both permissions from the connect status, settled there for every
     /// protocol.
-    init(resize: Bool) {
+    init(resize: Bool, autoResize: Bool) {
         allowed = resize
+        autoAllowed = resize && autoResize
+    }
+
+    /// Set the mode, and report whether it took. Turning it *on* is refused where
+    /// the gateway did not allow the mode — this is the single gate, so the menu
+    /// item, the remembered default and the connect-time seed cannot each need
+    /// their own. Turning it off is never refused.
+    @discardableResult
+    mutating func setAutoFollows(_ enabled: Bool) -> Bool {
+        guard enabled else {
+            autoFollows = false
+            return true
+        }
+        guard autoAllowed else {
+            return false
+        }
+        autoFollows = true
+        return true
     }
 
     /// The message to send for a measured window, or nil for none.

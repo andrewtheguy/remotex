@@ -42,17 +42,20 @@ struct AppModelTests {
         )
     }
 
-    /// What a `connected` alone settles, which is permission and not behaviour: the
-    /// operator's `resize`, the same answer for every protocol now that how a size is
-    /// driven is the client's own choice and there is no second condition to wait on.
+    /// What a `connected` alone settles, which is permission and not behaviour —
+    /// and there are two of them. `resize` is whether this session may resize the
+    /// remote when the user asks; `autoResize` is whether the window may drive it,
+    /// which the gateway grants to plain VNC alone. The client takes both verbatim:
+    /// it decides neither, and the row where they differ is the RDP one.
     @Test
-    func resizePermissionFollowsTheTarget() {
-        let expectations: [(protocolName: String, resize: Bool, canResize: Bool)] = [
-            ("rdp", true, true),
-            ("vnc", true, true),
-            ("rdp", false, false),
-            ("vnc", false, false),
-        ]
+    func bothResizePermissionsFollowTheTarget() {
+        let expectations:
+            [(protocolName: String, resize: Bool, autoResize: Bool)] = [
+                ("vnc", true, true),
+                ("rdp", true, false),
+                ("rdp", false, false),
+                ("vnc", false, false),
+            ]
         for expectation in expectations {
             let model = makeModel()
             model.apply(
@@ -62,6 +65,7 @@ struct AppModelTests {
                             name: "t",
                             protocolName: expectation.protocolName,
                             resize: expectation.resize,
+                            autoResize: expectation.autoResize,
                             clipboard: false,
                             audio: false
                         )
@@ -69,8 +73,12 @@ struct AppModelTests {
                 )
             )
             #expect(
-                model.session.canResize == expectation.canResize,
+                model.session.canResize == expectation.resize,
                 "\(expectation.protocolName) resize=\(expectation.resize)"
+            )
+            #expect(
+                model.session.canAutoResize == expectation.autoResize,
+                "\(expectation.protocolName) autoResize=\(expectation.autoResize)"
             )
         }
     }
@@ -825,6 +833,24 @@ struct AppModelTests {
         unwilling.apply(.status(.connected))
         unwilling.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
         #expect(!unwilling.autoResizes, "no permission, so the default does nothing")
+
+        // And the row that is the point of the second permission: a target that
+        // resizes when asked but must not be handed the window. The default is
+        // silently not applied — "if compatible" covers this too — and the session
+        // stays manual, where "Resize to Window" still works.
+        let manualOnly = makeModel()
+        manualOnly.autoResizeByDefault = true
+        manualOnly.apply(.status(.connected))
+        manualOnly.apply(
+            .control(
+                .connected(connected(protocolName: "rdp", resize: true, autoResize: false))
+            )
+        )
+        #expect(manualOnly.session.canResize)
+        #expect(!manualOnly.canAutoResize)
+        #expect(!manualOnly.autoResizes, "the mode is not on offer, so the default does nothing")
+        manualOnly.setAutoResize(true)
+        #expect(!manualOnly.autoResizes, "and asking for it anyway changes nothing")
     }
 
     /// The remembered audio default is adopted on a pick when the target carries
@@ -881,9 +907,16 @@ struct AppModelTests {
         #expect(restored.audioByDefault, "the Remote menu's choice is remembered")
     }
 
+    /// `autoResize` defaults to what the gateway would actually send for this
+    /// protocol — plain `vnc` may be driven by the window and RDP may not — the way
+    /// `ResizeMenuTargetTests` does it, so a case that is about something else is
+    /// never in a state the real gateway cannot produce. Defaulting it to `resize`
+    /// alone put the one RDP case here in exactly that state. The cases that are
+    /// about the permission name it.
     private func connected(
         protocolName: String,
         resize: Bool = false,
+        autoResize: Bool? = nil,
         clipboard: Bool = false,
         audio: Bool = false
     ) -> ServerMessage.Connected {
@@ -891,6 +924,7 @@ struct AppModelTests {
             name: "mac",
             protocolName: protocolName,
             resize: resize,
+            autoResize: resize && (autoResize ?? (protocolName == "vnc")),
             clipboard: clipboard,
             audio: audio
         )

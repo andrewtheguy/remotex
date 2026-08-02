@@ -37,6 +37,7 @@ export default function RemoteDesktop({
     size,
     hostScale,
     canResize,
+    canAutoResize,
     autoResize,
     canClipboard,
     canAudio,
@@ -120,6 +121,7 @@ export default function RemoteDesktop({
           onLogout={onLogout}
           onSwitchTarget={switchTarget}
           canResize={canResize}
+          canAutoResize={canAutoResize}
           autoResize={autoResize}
           onAutoResizeChange={setAutoResize}
           onResizeToWindow={resizeToWindow}
