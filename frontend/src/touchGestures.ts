@@ -333,8 +333,9 @@ export function attachTouchGestures(
   // One scroll step at the cursor, carrying the finger travel it stands for.
   //
   // Pixels, because that is what the deltas are: a step is a step's worth of
-  // finger movement, and the engines turn a distance into as many wheel pulses
-  // as the far side needs to scroll that far.
+  // finger movement. An Apple VNC target spends the distance as as many wheel
+  // pulses as it is worth there; every other target reads only the sign, so a
+  // step is a notch and this changes nothing for it.
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();
     deps.send({ type: "mouseMove", x: c.x, y: c.y });
