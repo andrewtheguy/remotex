@@ -2522,9 +2522,13 @@ impl Wheel {
         }
         *pending += add;
         let whole = pending.trunc();
-        if whole.abs() > max {
+        if whole.abs() >= max {
             // Capped: the surplus is dropped rather than kept, so a flick cannot
-            // leave pulses trickling out under the next few events.
+            // leave pulses trickling out under the next few events. At the cap
+            // exactly as much as beyond it — an event spending every pulse it is
+            // allowed has nothing left over by definition, and treating that one
+            // as uncapped would carry a fraction the next event could round up
+            // into a pulse the cap was there to refuse.
             *pending = 0.0;
             return (whole.signum() * max) as i32;
         }
@@ -3831,6 +3835,22 @@ mod tests {
         assert_eq!(scroll(&mut wheel, 0.0, 1.0, WheelUnit::Pixel).1, 0);
         // A delta a client should never send at all buys nothing.
         assert_eq!(scroll(&mut wheel, f32::NAN, f32::INFINITY, WheelUnit::Pixel), (0, 0));
+    }
+
+    #[test]
+    fn a_delta_barely_over_the_cap_leaves_no_fraction_behind() {
+        // One pulse past the cap: the whole pulses come to exactly the cap, and
+        // the fraction over it is surplus like any other. Keeping it would let
+        // the next event round up into a pulse the cap exists to refuse — the
+        // one window where "capped" and "spent everything" look alike.
+        let mut wheel = Wheel::new(true);
+        let cap = (Wheel::MAX_PX / Wheel::APPLE_PX_PER_PULSE) as i32;
+        let over = Wheel::MAX_PX + Wheel::APPLE_PX_PER_PULSE / 2.0;
+        assert!(over < Wheel::MAX_PX + Wheel::APPLE_PX_PER_PULSE);
+        assert_eq!(scroll(&mut wheel, 0.0, over, WheelUnit::Pixel).1, cap);
+        // Half a pulse on its own, with nothing carried in to round it up.
+        let half = Wheel::APPLE_PX_PER_PULSE / 2.0;
+        assert_eq!(scroll(&mut wheel, 0.0, half, WheelUnit::Pixel).1, 0);
     }
 
     #[test]
