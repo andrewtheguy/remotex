@@ -87,9 +87,9 @@ bytes for the same visible result.
 
 The dial costs no wire change. A tile record's first byte is already its format
 (`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and both clients decode all
-three — the browser through `createImageBitmap` from a MIME type, the Swift viewer
-through ImageIO from the container itself. WebP decode is why the app's deployment
-target is macOS 15.
+three through `createImageBitmap` from a MIME type — `remotex.app` draws on a web
+canvas too, so this is one implementation rather than two that could disagree
+about a format.
 
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
@@ -284,11 +284,20 @@ for tiles — a 1080p repaint is ~17 bands — but under `video` one message is 
 frame, and 64 of them in each of two queues in series is seconds of buffered
 picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 
-**Only the browser decodes it.** It uses WebCodecs `VideoDecoder`, which is
-secure-context only — the same limit remote audio already has, but a worse one to
-hit, since no audio decoder means silence beside a working desktop and no video
-decoder means no desktop. So the SPA says so in a banner that stays up. `remotex.app`
-refuses a video target by name; decoding it there is on the [roadmap](roadmap.md).
+**Both clients decode it, with one decoder between them.** It is WebCodecs
+`VideoDecoder`, reached through `frontend/src/videoDecoder.ts` and driven from
+`tilePainter.ts` — the shared batch loop, which is also where the rule that an access
+unit is never cached into a slot is enforced on the client side. `remotex.app` draws
+into a `WKWebView` running that same page, so video was not a second implementation
+there; it was the record type arriving in a module both clients already used.
+
+`VideoDecoder` is secure-context only — the same limit remote audio already has, but a
+worse one to hit, since no audio decoder means silence beside a working desktop and no
+video decoder means no desktop. So a failure is *said* rather than logged: the SPA
+raises a banner that stays up, and the canvas page reports `videoState` to the app,
+which raises it as an error. The app's page is served from `http://127.0.0.1`, which
+is a secure context whatever scheme its gateway is on, so in practice only the browser
+can land on the insecure-origin half of that.
 
 ## Session lifecycle
 
@@ -380,12 +389,12 @@ instead of accumulating latency, and no receiver means audio is discarded.
 Audio frames bypass a tile batch still being collected, although a batch already
 being written may delay them.
 
-Both clients own their playback schedule. They start with a 0.1-second cushion
-and discard backlog beyond a 0.3-second ceiling. The browser uses WebCodecs and
-therefore requires HTTPS or localhost; the native viewer uses
-`AVAudioConverter`. A quiet remote and one that never negotiates audio are
-indistinguishable to the client, so detailed negotiation status remains in the
-gateway log.
+Both clients own their playback schedule, and it is the same code: a 0.1-second
+cushion, and backlog beyond a 0.3-second ceiling discarded. WebCodecs requires a
+secure context, so the browser needs HTTPS or localhost; `remotex.app` serves its
+canvas page from `127.0.0.1` and therefore always has one. A quiet remote and one
+that never negotiates audio are indistinguishable to the client, so detailed
+negotiation status remains in the gateway log.
 
 ### Client input and display control
 
@@ -608,8 +617,23 @@ reclaim actions.
 ### remotex.app, the native macOS client
 
 `remotex.app` is a separate native client of the same HTTP and WebSocket protocol,
-with its own session state machine, Metal rendering, AppKit input, pasteboard
-synchronization, and Opus playback.
+with its own session state machine, menu bar, keyboard capture and pasteboard
+synchronization.
+
+Its *remote surface* is a `WKWebView`, and only that. The app serves it a small
+page from its own `127.0.0.1` listener and pushes wire frames down one held-open
+response; the page draws tiles, wears the cursor, plays Opus through WebCodecs and
+scrolls with the browser's own scrollbars, sharing `protocol.ts`, `tilePainter.ts`,
+`cursorCss.ts`, `videoDecoder.ts` and `audioPlayer.ts` with the SPA. So the wire
+format has one implementation per language rather than one per client — which is
+what made `render_type = "video"` a frontend change once for both clients rather
+than a `VideoToolbox` decoder written a second time in Swift. The page owns no
+session: no claim, no gateway socket, no keyboard.
+
+The loopback origin is the load-bearing part, not an implementation detail:
+`http://127.0.0.1` is a secure context, so WebCodecs is available against every
+gateway the app can reach, including a plain-HTTP remote one. See
+[`macos-viewer.md`](macos-viewer.md#the-canvas).
 
 The first screen chooses its gateway. **On This Mac** starts the bundled binary via
 `serve-embedded`: an ephemeral loopback port, no web UI, and a random bearer token

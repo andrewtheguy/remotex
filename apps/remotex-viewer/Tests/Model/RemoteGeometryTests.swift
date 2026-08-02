@@ -115,62 +115,6 @@ struct RemoteGeometryTests {
         )
     }
 
-    @Test
-    func aPointMapsToTheRemotePixelUnderIt() {
-        let remote = DisplayMode(w: 1000, h: 500)
-        let surface = CGSize(width: 500, height: 250)
-
-        #expect(RemoteGeometry.remotePoint(.zero, in: surface, remote: remote) == (0, 0))
-        #expect(
-            RemoteGeometry.remotePoint(
-                CGPoint(x: 250, y: 125),
-                in: surface,
-                remote: remote
-            ) == (500, 250)
-        )
-    }
-
-    /// The bottom-right pixel is `w-1, h-1`, not `w, h` — and this is what a drag
-    /// that runs off the edge lands on. Unclamped, those coordinates would be off
-    /// the framebuffer.
-    @Test
-    func theFarCornersClampInsideTheFramebuffer() {
-        let remote = DisplayMode(w: 800, h: 600)
-        let surface = CGSize(width: 800, height: 600)
-
-        #expect(
-            RemoteGeometry.remotePoint(
-                CGPoint(x: 800, y: 600),
-                in: surface,
-                remote: remote
-            ) == (799, 599)
-        )
-        #expect(
-            RemoteGeometry.remotePoint(
-                CGPoint(x: 5_000, y: 5_000),
-                in: surface,
-                remote: remote
-            ) == (799, 599)
-        )
-        // A drag that leaves the top-left has to keep reporting, too.
-        #expect(
-            RemoteGeometry.remotePoint(
-                CGPoint(x: -40, y: -40),
-                in: surface,
-                remote: remote
-            ) == (0, 0)
-        )
-    }
-
-    @Test
-    func aOnePixelRemoteHasExactlyOneAddressablePixel() {
-        let remote = DisplayMode(w: 1, h: 1)
-        let surface = CGSize(width: 100, height: 100)
-        for point in [CGPoint.zero, CGPoint(x: 50, y: 50), CGPoint(x: 100, y: 100)] {
-            #expect(RemoteGeometry.remotePoint(point, in: surface, remote: remote) == (0, 0))
-        }
-    }
-
     /// The room asked for is in the remote's pixels: a Retina Mac has to be given
     /// two per point to fill the same window, while a remote whose pixels are its
     /// points is asked for the points themselves — no matter how dense the display
@@ -220,24 +164,6 @@ struct RemoteGeometryTests {
                 clip: CGSize(width: CGFloat.nan, height: CGFloat.infinity),
                 guestScale: 2
             ) == DisplayMode(w: 1, h: 1)
-        )
-        let remote = DisplayMode(w: 100, h: 100)
-        #expect(
-            RemoteGeometry.remotePoint(
-                CGPoint(x: CGFloat.nan, y: CGFloat.infinity),
-                in: CGSize(width: 100, height: 100),
-                remote: remote
-            ) == (0, 0)
-        )
-    }
-
-    /// A surface that has not been laid out yet has no scale to divide by.
-    @Test
-    func anEmptySurfaceMapsToTheOrigin() {
-        let remote = DisplayMode(w: 640, h: 480)
-        #expect(
-            RemoteGeometry.remotePoint(CGPoint(x: 10, y: 10), in: .zero, remote: remote)
-                == (10, 10)
         )
     }
 }

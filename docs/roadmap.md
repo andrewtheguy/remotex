@@ -34,26 +34,6 @@ measurements say what a stream costs.
 now a statement about this rather than about the codec: the motion axis hands out a
 cheaper encode *per cell*, and a stream has no per-cell dial to turn down.
 
-### Video in the native viewer
-
-**`remotex.app` cannot decode a `video` target** and refuses one by name, saying to
-use a browser or another `render_type`. The browser is the use case video was built
-for, so it is the one that has a decoder.
-
-What it would take, recorded so the work starts from something: a
-`Sources/Render/H264Decoder.swift` turning Annex-B into SPS/PPS →
-`CMVideoFormatDescriptionCreateFromH264ParameterSets`, start codes → 4-byte AVCC
-lengths, and `VTDecompressionSession` → `CVPixelBuffer` → the top-down BGRA
-`DecodedTile` already documents, cropped to the tile header's size; the session
-rebuilt on a format-description change, which is what a resize is. Keep `DecodedTile`
-`Sendable, Equatable` over `[UInt8]` — `SessionEvent.tiles([DecodedTile])` requires
-`Sendable`, and a `CVPixelBuffer` would break both.
-
-One cost worth knowing in advance: macOS cannot *encode* H.264 through ImageIO, so
-unlike every other tile format this needs a checked-in `Tests/Fixtures/` payload. The
-precedent is the inline base64 WebP in `TileDecoderTests`, and `Package.swift`'s
-comment that "Tile payloads are encoded at runtime through ImageIO" stops being true.
-
 ### Raising quality above the dial
 
 `video`'s congestion loop can notice a backlog but never find headroom: it walks the

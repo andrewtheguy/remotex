@@ -116,16 +116,16 @@ struct TileFrameTests {
         }
     }
 
-    /// H.264 is the one format this build parses but cannot *decode*, and parsing it
-    /// is the entire point: an unrecognised byte fails the whole batch, so a video
-    /// target would show a frozen desktop and say nothing. Recognising it is what
-    /// lets `GatewayConnection` refuse the session by name.
+    /// A video target's access units arrive as ordinary tile records. Nothing in
+    /// this process draws them — the canvas page does — but `--probe` reads batches
+    /// here, and an unrecognised format byte fails the *whole batch*, so without
+    /// this the diagnostic that exists to say what a target sends would report
+    /// nothing at all for the one target whose framing is worth checking.
     @Test
-    func anH264RecordParsesEvenThoughItCannotBeDecoded() throws {
+    func anH264RecordParses() throws {
         let frame = batch(tile(format: TileFormat.h264.rawValue, w: 8, h: 8, payload: [0x01]))
         let records = try #require(BatchFrame.decode(frame))
         #expect(records.count == 1, "a batch carrying an access unit was dropped whole")
-        #expect(records[0].isVideo)
         let tiles = try #require(tileRecords(frame))
         #expect(tiles[0].format == .h264)
     }
@@ -179,7 +179,7 @@ struct TileFrameTests {
     }
 
     /// An empty payload is structurally a record; whether those bytes are an
-    /// image is `TileDecoder`'s question, not this one's.
+    /// image is the canvas page's question (`tilePainter.ts`), not this one's.
     @Test
     func aRecordWithNoPayloadDecodesToAnEmptyPayload() throws {
         let decoded = try #require(tileRecords(batch(tile(w: 8, h: 8))))

@@ -6,7 +6,8 @@ import Testing
 ///
 /// Hand-built on purpose: this is the layout in `src/protocol.rs` written out a second
 /// time, so a parser that drifted from it disagrees with these bytes instead of
-/// agreeing with a fixture the same drift produced. `OpusDecoderTests` is the other
+/// agreeing with a fixture the same drift produced. `audioSchedule.test.ts` and the
+/// canvas page's own decoder are the other
 /// half — real packets from the gateway's own encoder — and between them the wire is
 /// checked both for its framing and for its contents.
 struct AudioFrameTests {

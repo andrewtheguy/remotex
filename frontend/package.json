@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:viewer": "tsc -b && vite build --config vite.viewer.config.ts",
     "preview": "vite preview",
     "test": "bun test src",
     "lint": "biome lint .",

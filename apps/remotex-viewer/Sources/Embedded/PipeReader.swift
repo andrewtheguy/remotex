@@ -8,7 +8,7 @@ import Foundation
 /// against a timeout would hang on the way out rather than give up. Here the
 /// deadline is just a timer, because nothing is ever blocked.
 ///
-/// `@unchecked Sendable` around a lock, in the shape `OpusDecoder.Supply` uses: the
+/// `@unchecked Sendable` around a lock: the
 /// handler fires on a queue of Foundation's choosing while `tail` is read from the
 /// main actor, so every field is behind `lock` and none of them escapes.
 final class PipeReader: @unchecked Sendable {

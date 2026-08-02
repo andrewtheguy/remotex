@@ -9,6 +9,12 @@
   (`ServeDir` in `src/server.rs`); Biome, `tsc -b`, `bun test`, and backend tests
   do not detect a stale bundle. For source-based iteration, use
   `REMOTEX_DEV_BACKEND=<port> bun run dev`.
+- `frontend/src/viewer` is `remotex.app`'s remote surface, not part of the SPA.
+  It builds separately (`bun run build:viewer` → `dist-viewer/`) and is copied
+  into the bundle; `REMOTEX_VIEWER_DEV_URL` points the app's web view at
+  `bun run dev` instead. Shared modules (`protocol.ts`, `tilePainter.ts`,
+  `cursorCss.ts`, `audioPlayer.ts`) are used by both, so a change to one is a
+  change to both clients.
 - Put temporary files and test config under `tmp/`. Run efficient local Python
   one-offs with `uv` (GitHub Actions excluded).
 - Use `anyhow` for application errors and `thiserror` for typed API errors.
@@ -20,8 +26,17 @@
 
 ## SSH and tmux
 
-Do not infer shell permissions from how a client attached to tmux. An existing
-tmux server retains the environment and access of the user that started it.
+Do not infer what this shell can do from how a client attached to it. An
+existing tmux server keeps the environment and access of the user that started
+it, so arriving over SSH does not mean the session is headless or restricted.
+
+In particular this Mac has a **logged-in GUI session**, and the shell can use
+it: launching `.app` bundles, `screencapture`, `osascript`, `codesign`, and
+driving the UI all work. macOS GUI QA is therefore something to *do* here, not
+something to hand back — see the QA steps in
+[`docs/macos-viewer.md`](docs/macos-viewer.md). If a capability looks
+unavailable, test it with one command and read the error; do not assume it from
+the shape of the session.
 
 ## Display geometry
 
@@ -146,7 +161,9 @@ After Swift changes:
 
 1. Run `swift test --package-path apps/remotex-viewer`.
 2. Run `packaging/macos-viewer/build-viewer-app.sh --no-dmg`; this also rebuilds
-   the bundled gateway.
+   the bundled gateway **and the canvas page**, so `bun` is required. After a
+   change under `frontend/src/viewer`, run `bun run check` and `bun test src` in
+   `frontend/` too — the build only proves the page compiles.
 3. Manually launch `open -n dist/remotex.app --args --instance-dir
    "$PWD/tmp/app-instance"`. All QA state remains under that directory; delete it
    for a clean run. Never launch QA bare: the real instance is

@@ -4,11 +4,12 @@ import Testing
 
 /// The Remote menu's audio toggle and what it puts on the wire, over a scripted socket.
 ///
-/// Nothing here plays anything: an `AVAudioEngine` needs a device and a real stream, so
-/// what is testable is the *subscription* — when the item is live, what is sent, and what
-/// the session's own transitions do to the answer. The parts that cannot be tested here
-/// are covered where they can be: the arithmetic in `AudioScheduleTests`, the decoding in
-/// `OpusDecoderTests`, and the sound itself by ear against the tone harness.
+/// Nothing here plays anything, and nothing here could: playback is the canvas page's.
+/// What is testable on this side is the *subscription* — when the item is live, what is
+/// sent, and what the session's own transitions do to the answer. The parts that are not
+/// are covered where the code is: the arithmetic in `audioSchedule.test.ts`, the decoding
+/// in the canvas page's WebCodecs path, and the sound itself by ear against the tone
+/// harness.
 @MainActor
 struct AudioControlTests {
     /// Availability is the target's answer, not a preference: the item is greyed until a
@@ -107,58 +108,102 @@ struct AudioControlTests {
         #expect(session.model.audio.isEnabled, "the answer outlives the socket")
     }
 
-    /// A format naming a codec this build has no decoder for is reported rather than
-    /// played as silence. The gateway sends Opus and nothing else, so this is drift
-    /// rather than an expected branch — and reporting it is what keeps "no sound" from
-    /// looking like a quiet remote.
-    ///
-    /// Asserted through the model's alert rather than on a property of `AudioOutput`,
-    /// because that is the whole journey: a reason nothing displays is the same as no
-    /// reason at all, and this failed to be displayed at first.
+    /// The format is handed to the page whole, including the `OpusHead` a decoder
+    /// needs for the pre-skip. Nothing here reads the codec: this side has no
+    /// decoder to choose and would only be a second opinion about one.
     @Test
-    func aFormatThisBuildCannotDecodeReachesTheAlert() async throws {
+    func theFormatIsHandedToThePageVerbatim() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        session.model.audio.setEnabled(true)
+
+        // The gateway's own 19-byte OpusHead, as protocol.rs pins it. It reaches
+        // the page as base64 again, which is `JSONEncoder`'s own `Data` encoding
+        // and what `decodeAudioHead` reads.
+        let head = try #require(Data(base64Encoded: "T3B1c0hlYWQBAjgBRKwAAAAAAA=="))
+        let format = ServerMessage.AudioFormat(
+            codec: "opus",
+            sampleRate: 48_000,
+            channels: 2,
+            head: head
+        )
+        session.model.apply(.control(.audioFormat(format)))
+
+        #expect(session.canvas.commands.contains(.audioFormat(format)))
+        #expect(session.model.actionError == nil, "the ordinary path says nothing")
+    }
+
+    /// A page comes back — a reload, or a stream that dropped and reattached —
+    /// and has never heard an `audioFormat`, because the gateway sends one when
+    /// a subscription starts and never again. Without re-subscribing it would
+    /// receive packets it has no decoder for and be silent with nothing to say
+    /// why, which is the failure this whole path is shaped around.
+    @Test
+    func areattachedPageIsResubscribedSoTheFormatComesAgain() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        session.model.audio.setEnabled(true)
+        try await session.settle()
+        #expect(session.audioMessages == [true])
+
+        session.model.attach(canvas: FakeCanvas())
+        try await session.settle()
+        #expect(session.audioMessages == [true, true], "the reattached page gets a format")
+        #expect(session.model.audio.isEnabled, "and the answer it was playing under")
+    }
+
+    /// The same reattachment costs a silent session nothing. `reassert` is a
+    /// no-op when sound was never asked for, so a target with no audio — or one
+    /// the user muted — does not subscribe itself by reloading a page.
+    @Test
+    func areattachedPageDoesNotSubscribeSoundNobodyAskedFor() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        try await session.settle()
+
+        session.model.attach(canvas: FakeCanvas())
+        try await session.settle()
+        #expect(session.audioMessages.isEmpty)
+    }
+
+    /// A failure reported for a subscription that is already off is not the
+    /// user's problem: the decoder giving up on its way out is the ordinary end
+    /// of a stream, and an alert about sound nobody asked for any more describes
+    /// nothing that is wrong.
+    @Test
+    func aFailureAfterTheToggleWentOffIsNotAnAlert() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        #expect(!session.model.audio.isEnabled)
+
+        session.model.audio.playbackFailed("decoder closed")
+        try await session.settle()
+
+        #expect(session.model.actionError == nil)
+        #expect(session.audioMessages.isEmpty, "nothing to unsubscribe from")
+    }
+
+    /// A page that cannot play what arrived says so, and the alert is how that
+    /// reaches anyone: a reason nothing displays is the same as no reason at all.
+    /// The subscription goes with it, because packets decoded by nothing are bytes
+    /// spent on nothing — the same move `useRemoteDesktop.ts` makes on `onError`.
+    @Test
+    func aPageThatCannotPlayReportsItAndUnsubscribes() async throws {
         let session = try await AttachedSession.attached(suite: "AudioControlTests")
         session.connect(protocolName: "rdp", audio: true)
         session.model.audio.setEnabled(true)
         #expect(session.model.actionError == nil)
 
-        session.model.apply(
-            .control(
-                .audioFormat(
-                    .init(codec: "vorbis", sampleRate: 48_000, channels: 2, head: Data())
-                )
-            )
-        )
+        session.model.audio.playbackFailed("this browser cannot decode vorbis")
+        try await session.settle()
+
         let reported = try #require(session.model.actionError)
         #expect(reported.contains("vorbis"), "the alert should name what arrived: \(reported)")
-    }
-
-    /// An Opus format is *not* reported — the ordinary path must be silent in the alert
-    /// sense, or the interesting case above proves nothing.
-    @Test
-    func theOrdinaryFormatSaysNothing() async throws {
-        let audio = AudioOutput(startDevice: { _ in nil })
-        let session = try await AttachedSession.attached(
-            suite: "AudioControlTests",
-            audio: audio
+        #expect(!session.model.audio.isEnabled)
+        #expect(
+            session.sent(ofType: "audio").last?["enabled"] as? Bool == false,
+            "the gateway is told to stop sending what nothing will decode"
         )
-        session.connect(protocolName: "rdp", audio: true)
-        session.model.audio.setEnabled(true)
-
-        session.model.apply(
-            .control(
-                .audioFormat(
-                    .init(
-                        codec: "opus",
-                        sampleRate: 48_000,
-                        channels: 2,
-                        // The gateway's own 19-byte OpusHead, as protocol.rs pins it.
-                        head: Data(base64Encoded: "T3B1c0hlYWQBAjgBRKwAAAAAAA==")!
-                    )
-                )
-            )
-        )
-        #expect(session.model.actionError == nil)
     }
 }
 

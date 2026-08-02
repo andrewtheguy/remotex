@@ -15,15 +15,14 @@ let package = Package(
             name: "RemotexViewer",
             path: "Sources"
         ),
+        // No resources: the Opus fixtures went with the decoder that read them.
+        // Decoding is the canvas page's now (WebCodecs), so what this target can
+        // still check about audio is the *subscription* — `AudioControlTests` —
+        // and that needs no bytes.
         .testTarget(
             name: "RemotexViewerTests",
             dependencies: ["RemotexViewer"],
-            path: "Tests",
-            // Opus audio fixtures (`Fixtures/opus`), produced by the gateway's own
-            // encoder (`write_swift_opus_fixtures` in src/opus_stream.rs) because
-            // macOS can encode Opus but must not for these tests. Tile payloads are
-            // encoded at runtime through ImageIO, so they need no fixture.
-            resources: [.copy("Fixtures")]
+            path: "Tests"
         ),
     ]
 )

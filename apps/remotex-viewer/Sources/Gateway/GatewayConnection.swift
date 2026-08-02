@@ -9,17 +9,22 @@ import OSLog
 enum SessionEvent: Sendable {
     case status(ViewerConnectionStatus)
     case control(ServerMessage)
-    /// One binary frame's worth of tiles, in wire order. Delivered whole so the
-    /// renderer asks for one redraw per frame rather than one per tile.
-    case tiles([DecodedTile])
-    /// One wave buffer's worth of Opus packets, in wire order.
+    /// One binary frame, exactly as it came off the socket — a tile batch
+    /// (`0x02`) or a wave buffer of Opus packets (`0x03`), kind byte included.
     ///
-    /// Undecoded, deliberately: decoding needs the `audioFormat` that arrived as a
-    /// control message, and putting the decoder here would give this actor an audio
-    /// engine to own and the receive loop something to wait on. The packets go to the
-    /// sink as they came off the socket, which also keeps them in order with the
-    /// `audioFormat` that configures them.
-    case audio([Data])
+    /// Undecoded, deliberately. The canvas page owns the slot table, the image
+    /// decode, the H.264 stream and the audio decoder, so anything this actor
+    /// parsed would be a second implementation of a format the page has to read
+    /// anyway — which is why a video target needed nothing here beyond the
+    /// version bump. What is preserved is the only thing this layer is owed:
+    /// arrival order.
+    ///
+    /// The *kind* byte is still read, and only that: `receiveLoop` passes the two
+    /// this build knows and logs anything else rather than putting bytes with no
+    /// reader on the bridge. The tradeoff is accepted rather than overlooked — a
+    /// third frame kind has to be added to that allowlist as well as to the page,
+    /// and an unlisted one is silently invisible until it is.
+    case frame(Data)
     case clearFramebuffer
     case releaseInput
     case failPendingClipboardFetch
@@ -62,31 +67,16 @@ protocol GatewaySessionSink: AnyObject, Sendable {
 /// which this only feeds events to and executes actions for.
 ///
 /// **Inbound ordering.** There is deliberately no queue between the socket and
-/// the sink. One loop calls `receive()` and fully handles each frame — including
-/// awaiting the tile decode — before asking for the next. That is what preserves
-/// the gateway's arrival order across an async decode, which the SPA gets from
-/// chaining every message onto one promise. It matters because tiles carry no
-/// delta state and overwrite their rectangles: a `resize` that overtook the tiles
-/// queued ahead of it would blit stale pixels into a freshly allocated texture,
-/// and two reordered tiles leave the older one on screen. Not calling `receive()`
-/// while decoding is not a throughput problem either — it is backpressure, which
-/// the gateway's bounded frame channel already expects.
+/// the sink. One loop calls `receive()` and fully handles each frame before
+/// asking for the next, and everything it emits travels to the canvas page on one
+/// stream. That is what preserves the gateway's arrival order all the way to the
+/// draw, which the SPA gets from chaining every message onto one promise. It
+/// matters because tiles carry no delta state and overwrite their rectangles: a
+/// `resize` that overtook the tiles queued ahead of it would paint stale pixels
+/// into a freshly sized canvas, and two reordered tiles leave the older one on
+/// screen.
 actor GatewayConnection {
     private let gateway: any SessionGateway
-    private let decoder = TileDecoder()
-    /// Whether this connection has already said it cannot decode a video target.
-    /// Latched, so one unusable target produces one message rather than one per
-    /// batch, and so a reconnect to the same target does not shout again.
-    private var refusedVideo = false
-    /// The tiles the gateway has told this client to remember, by slot.
-    ///
-    /// Encoded payloads rather than decoded pixels: a decoded 320x64 tile is 80 KB
-    /// where its PNG is a few hundred bytes, and re-decoding on a reference is
-    /// cheaper than the transfer it replaced. Fixed length because the wire says
-    /// how many slots there are, so a gateway cannot grow it; and this client never
-    /// evicts — the gateway names the slot to overwrite, which keeps the two ends
-    /// in step without either modelling the other's memory.
-    private var tileCache = [TileFrame?](repeating: nil, count: Int(BatchFrame.slotCount))
     private let log = Logger(subsystem: "dev.remotex.viewer", category: "session")
 
     /// Nonisolated so `send` needs no `await`: see `OutboundQueue` for why that
@@ -350,15 +340,12 @@ actor GatewayConnection {
             case .text(let text):
                 await deliver(text: text)
             case .binary(let data):
-                // The kind byte is the whole of how the two binary frames are told
-                // apart, and both parsers check it again for themselves. Dispatching
-                // here rather than trying one parser and falling through to the other
-                // keeps a malformed batch from being reported as an unknown kind.
+                // The kind byte is checked only to keep a frame this build has no
+                // reader for off the bridge; the page tells the two it knows apart
+                // for itself, with the same code the browser SPA uses.
                 switch data.first {
-                case BatchFrame.frameKind:
-                    await deliver(tile: data)
-                case AudioFrame.frameKind:
-                    await deliver(audio: data)
+                case BatchFrame.frameKind, AudioFrame.frameKind:
+                    await publish(.frame(data))
                 default:
                     log.warning(
                         "binary frame of unknown kind \(data.first ?? 0, privacy: .public)"
@@ -382,142 +369,6 @@ actor GatewayConnection {
         // the socket really attached to the slot, which is what clears the backoff.
         await handle(.controlReceived)
         await publish(.control(message))
-    }
-
-    private func deliver(audio data: Data) async {
-        guard let packets = AudioFrame.decode(data) else {
-            log.warning("malformed audio frame of \(data.count, privacy: .public) bytes")
-            return
-        }
-        // An empty frame is well formed and means nothing to play. Not published, for
-        // the same reason an empty batch is not: it would only ask the player to do
-        // nothing.
-        guard !packets.isEmpty else {
-            return
-        }
-        await publish(.audio(packets))
-    }
-
-    private func deliver(tile data: Data) async {
-        guard let records = BatchFrame.decode(data) else {
-            log.warning("malformed batch frame of \(data.count, privacy: .public) bytes")
-            return
-        }
-        if !refusedVideo, records.contains(where: \.isVideo) {
-            // Said once, and then the target is left rather than watched. Dropping
-            // these records one by one would be the honest thing to do with an
-            // undecodable *tile*, but a video target sends nothing else — so the
-            // desktop would simply never paint, which is the outcome worth spending
-            // code to avoid.
-            refusedVideo = true
-            log.error("this target sends H.264 video, which this viewer cannot decode")
-            // Queued before the hop to the sink, not after. `publish` suspends on
-            // `MainActor.run`, and what runs there is free to tear this connection
-            // down — `stop` finishes the outbound queue, and an enqueue after that is
-            // silently dropped. Enqueueing first costs nothing and does not depend on
-            // what the sink decides to do about the message.
-            send(.disconnect)
-            await publish(.rejected(reason: """
-                This target sends its desktop as one H.264 video stream, which this \
-                viewer cannot decode yet. Open it in a browser, or give the target a \
-                different render_type.
-                """))
-            return
-        }
-        guard !refusedVideo else {
-            return
-        }
-        // At most one reset per batch: a hundred references into a cache this
-        // client lost are one disagreement, not a hundred.
-        var askedForReset = false
-
-        // In order, and each awaited: a later tile has to overwrite an earlier one
-        // that covers the same pixels.
-        //
-        // An undecodable record is dropped alone rather than taking its batch with
-        // it — the rest decoded, and the pixels they cover would otherwise stay
-        // stale until something repaints them.
-        var decoded = [DecodedTile]()
-        decoded.reserveCapacity(records.count)
-        for record in records {
-            guard let frame = resolve(record, askedForReset: &askedForReset) else {
-                continue
-            }
-            guard let tile = await decoder.decode(frame) else {
-                log.warning(
-                    """
-                    undecodable \(String(describing: frame.format), privacy: .public) tile \
-                    \(frame.w, privacy: .public)x\(frame.h, privacy: .public)
-                    """
-                )
-                // A tile that will not decode is one dropped tile — unless the
-                // gateway is keeping it as a slot, in which case every later
-                // reference to it would fail the same way.
-                if frame.slot != BatchFrame.noSlot {
-                    askForCacheReset(&askedForReset)
-                }
-                continue
-            }
-            decoded.append(tile)
-        }
-        // Emptied once, after the batch, rather than the moment a reference misses.
-        // Clearing mid-pass would throw away slots this batch's own earlier records
-        // filled, so a reference naming one of them — legal, and something the
-        // gateway emits within a single batch — would be dropped for company. By
-        // here nothing left reads the cache, and the next batch arrives holding
-        // nothing, which is what the server's own reset will agree with.
-        if askedForReset {
-            tileCache = Array(repeating: nil, count: Int(BatchFrame.slotCount))
-        }
-        // An empty batch is well formed and means nothing to paint, so it must not
-        // reach the renderer and ask for a redraw of nothing.
-        guard !decoded.isEmpty else {
-            return
-        }
-        await publish(.tiles(decoded))
-    }
-
-    /// The payload a record stands for: its own, or the one its slot holds.
-    ///
-    /// Storing happens here too, so the cache is written in wire order by the same
-    /// pass that reads it — a reference may legitimately name a slot filled earlier
-    /// in its own batch.
-    private func resolve(
-        _ record: BatchFrame.Record,
-        askedForReset: inout Bool
-    ) -> TileFrame? {
-        switch record {
-        case .tile(let frame):
-            if frame.slot != BatchFrame.noSlot {
-                tileCache[Int(frame.slot)] = frame
-            }
-            return frame
-        case .reference(let slot, let x, let y):
-            guard let held = tileCache[Int(slot)] else {
-                // The gateway believes this client holds a tile it does not.
-                // Nothing else will ever correct that.
-                log.warning("reference to empty tile slot \(slot, privacy: .public)")
-                askForCacheReset(&askedForReset)
-                return nil
-            }
-            return TileFrame(
-                format: held.format,
-                slot: held.slot,
-                x: x,
-                y: y,
-                w: held.w,
-                h: held.h,
-                payload: held.payload
-            )
-        }
-    }
-
-    private func askForCacheReset(_ askedForReset: inout Bool) {
-        guard !askedForReset else {
-            return
-        }
-        askedForReset = true
-        outbound.enqueue(.cacheReset)
     }
 
     // MARK: - Outbound

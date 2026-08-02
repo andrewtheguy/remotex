@@ -18,7 +18,14 @@ import {
 } from "./support";
 
 const LIMIT = 65_536;
-const OVERSIZED = 200_000;
+// Just over the limit, because the limit is the whole subject: a layer that
+// truncates at 64 KiB truncates any oversized value alike, so a bigger one
+// proves nothing extra. It costs something, though — Apple's pasteboard archive
+// of an n-character string measures about 4n, and `MAX_ARCHIVE_BYTES` in
+// src/vnc_apple_clipboard.rs refuses to inflate past 320 KiB, so past roughly
+// 82 000 characters the reader declines before any size is taken and the panel
+// shows `LEN 0B`. This asked for 200 000 until it met a Mac that said so.
+const OVERSIZED = 70_000;
 
 test("a remote clipboard over the limit is reported, not truncated", async ({
   page,

@@ -270,14 +270,13 @@ password = "change-me"
 # link that can carry it you get exactly that quality, and a link that cannot makes
 # the picture coarser until it can. Nothing ever goes finer than what is set here.
 #
-# Two things to know before choosing it:
+# One thing to know before choosing it:
 #
-#   - Only the browser decodes it. remotex.app refuses a video target by name and
-#     tells you to use a browser or another render_type.
-#   - The browser decodes it with WebCodecs, which is **secure-context only** — the
-#     same limit remote audio already has. A gateway reached over plain HTTP on a LAN
+#   - It is decoded with WebCodecs, which is **secure-context only** — the same limit
+#     remote audio already has. A browser pointed at a gateway on a plain-HTTP LAN
 #     address shows a banner saying so instead of a desktop, until it is behind TLS
-#     (localhost is exempt).
+#     (localhost is exempt). remotex.app is unaffected: it draws through a page it
+#     serves itself on 127.0.0.1, which is a secure context either way.
 #
 # Worth measuring rather than assuming: it is a large win on anything that moves and
 # it costs CPU on the gateway for every frame, including on a screen that is barely
