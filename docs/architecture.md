@@ -545,8 +545,9 @@ High Performance does — the upgrade waits on a display layout, not on a dialec
 revision, and is **experimental**: none of it is documented by Apple, so every
 claim in this section is measurement rather than specification, holding for the
 Macs in [apple-vnc-889.md](apple-vnc-889.md) rather than for the protocol. The
-dynamic-resolution path behind `resize = true` is the least settled part. It
-authenticates identically — the same security type 30 — and then
+dynamic-resolution path behind `resize = true` is the least settled part, and can
+leave the desktop wrong until the session is reconnected — see
+[`known-issues.md`](known-issues.md). It authenticates identically — the same security type 30 — and then
 differs in three places and nowhere else: the version banner, the `0xC1` ClientInit
 byte, and a cleartext `SetEncryption` prelude after which every byte in both
 directions rides inside an AES-128-CBC record layer keyed by a rekey message the

@@ -177,8 +177,8 @@ password = "change-me"
 # virtual display handling were all reverse engineered, and are only as correct as
 # the Macs they have been measured against. A macOS update is free to change any
 # of it, and the dynamic-resolution path behind `resize` is the least settled
-# part. Prefer "ard" unless you need a virtual display, and expect to have to
-# reconnect if a resize leaves the screen wrong.
+# part. Prefer "ard" unless you need a virtual display; docs/known-issues.md has
+# what a resize can leave behind.
 #
 # `subtype = "ard-high-performance"` requests one virtual display instead of the
 # Mac's physical displays. `width` and `height` select the mode requested during

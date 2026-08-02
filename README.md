@@ -82,9 +82,9 @@ entirely without a specification: Apple documents none of the protocol revision,
 its record layer, its control messages or its virtual display handling, so all of
 it is reverse engineered and only as correct as the Macs it has been measured
 against. A macOS update is free to change any of it. The dynamic-resolution path
-behind `resize = true` is the least settled part — a resize can leave the screen
-wrong until the session is reconnected. Prefer `ard` unless you need a virtual
-display.
+behind `resize = true` is the least settled part, and what a resize can leave
+behind is in [`docs/known-issues.md`](docs/known-issues.md). Prefer `ard` unless
+you need a virtual display.
 
 ## Container
 
