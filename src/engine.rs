@@ -85,7 +85,7 @@ pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
                 TCP_CONNECT_TIMEOUT.as_secs()
             )
         })?
-        .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}{}", local_network_hint(&e)))?;
     // Input events are tiny and latency-critical; never coalesce them.
     stream.set_nodelay(true).ok();
     if let Err(e) = arm_liveness_probes(&stream) {
@@ -151,6 +151,42 @@ where
             None
         }
     }
+}
+
+/// What to add to a connect error that a permission could be behind.
+///
+/// macOS 15 and later refuse an app's connections to anything off this machine
+/// until local network access is allowed, and the refusal is `EHOSTUNREACH` —
+/// exactly what an address with no route gives. Nothing on this side can tell the
+/// two apart, and there is no API that would: TN3179 says so, and it is still
+/// saying so.
+///
+/// So this does not decide; it *mentions*. The error keeps naming what happened
+/// and gains one clause naming the cause a user can act on, leaving the address as
+/// the other. That is worth the sentence because the permission is invisible from
+/// here: a fresh install refuses every target on this Mac, identically, with a
+/// message that would otherwise send the reader to check a network that is fine.
+///
+/// Empty everywhere else, where an unreachable address is simply unreachable.
+#[cfg(target_os = "macos")]
+fn local_network_hint(e: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    if matches!(
+        e.kind(),
+        ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable | ErrorKind::NetworkDown
+    ) {
+        ". If this is the app's own gateway, check that remotex is allowed under \
+         System Settings > Privacy & Security > Local Network — until it is, every \
+         connection off this Mac fails exactly like this"
+    } else {
+        ""
+    }
+}
+
+/// See the macOS half. No other platform gates a connection on a user decision.
+#[cfg(not(target_os = "macos"))]
+fn local_network_hint(_: &std::io::Error) -> &'static str {
+    ""
 }
 
 /// Ask the kernel to notice a peer that has stopped answering.
@@ -320,6 +356,52 @@ mod tests {
             !message.contains("handshake"),
             "a connect failure must not read as a handshake one: {message}"
         );
+    }
+
+    /// The hint is mentioned, never concluded — so it must appear for the refusal
+    /// the permission produces and for nothing else, or it becomes noise on every
+    /// unrelated failure.
+    #[test]
+    fn only_an_unreachable_network_earns_the_permission_hint() {
+        use std::io::ErrorKind;
+        for quiet in [ErrorKind::ConnectionRefused, ErrorKind::TimedOut, ErrorKind::ConnectionReset]
+        {
+            assert!(
+                local_network_hint(&std::io::Error::from(quiet)).is_empty(),
+                "{quiet:?} is a decided answer and needs no advice"
+            );
+        }
+        // The three the gate can produce — and only where the gate exists.
+        for kind in
+            [ErrorKind::HostUnreachable, ErrorKind::NetworkUnreachable, ErrorKind::NetworkDown]
+        {
+            let hint = local_network_hint(&std::io::Error::from(kind));
+            assert_eq!(
+                !hint.is_empty(),
+                cfg!(target_os = "macos"),
+                "{kind:?} gave {hint:?}"
+            );
+            if !hint.is_empty() {
+                assert!(hint.contains("Local Network"), "{hint}");
+            }
+        }
+    }
+
+    /// A refused port is the common failure, and the one an unasked-for sentence
+    /// about permissions would be wrong about.
+    #[tokio::test]
+    async fn a_refused_connection_is_reported_without_the_hint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        let Err(failed) = tcp_connect(&dest).await else {
+            panic!("a port with nothing behind it connected");
+        };
+
+        let message = format!("{failed:#}");
+        assert!(message.contains("TCP connect to"), "{message}");
+        assert!(!message.contains("Local Network"), "{message}");
     }
 
     #[test]

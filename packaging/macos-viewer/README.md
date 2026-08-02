@@ -42,13 +42,20 @@ decides the keyboard convention.
 ```sh
 (cd frontend && bun run check && bun test src)
 swift test --package-path apps/remotex-viewer
-packaging/macos-viewer/build-viewer-app.sh --no-dmg
+packaging/macos-viewer/build-viewer-app.sh
 ```
 
 The script builds both executables — the Swift app and the `remotex` gateway binary —
-plus the canvas page (so `bun` is required), and signs the nested executable first. Omit `--no-dmg` for the installable disk image, whose
-file name keeps the `remotex-viewer-<version>` prefix because
-`remotex-<version>-macos-arm64.tar.gz` is already the CLI gateway's release asset.
+plus the canvas page (so `bun` is required), and signs the nested executable first. It
+ends with the installable disk image, whose file name keeps the
+`remotex-viewer-<version>` prefix because `remotex-<version>-macos-arm64.tar.gz` is
+already the CLI gateway's release asset. Both land in `dist/`: the image no longer
+consumes the bundle it was made from.
+
+Run bare, that command is the one `release.yml` runs — no flags, no environment — so
+a local result and a release are not two commands apart. `--no-dmg` stops after the
+bundle for a fast loop; it produces the same bundle, since signing happens before the
+image.
 
 The build is ad-hoc signed by default, which is enough for a locally built personal
 app. Set `CODESIGN_IDENTITY` explicitly to use another identity. A build downloaded by
@@ -58,7 +65,7 @@ launch path.
 For development, give the run its own instance:
 
 ```sh
-packaging/macos-viewer/build-viewer-app.sh --no-dmg
+packaging/macos-viewer/build-viewer-app.sh
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 

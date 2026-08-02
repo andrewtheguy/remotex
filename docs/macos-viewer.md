@@ -154,10 +154,13 @@ instance. Keep `--instance-dir` only as a QA override.
 
 - **13 MB, and it goes stale.** Re-run the script after updating `remotex.app`;
   it replaces the bundle without touching its instance directory.
-- **Nothing else.** No entitlements, no notarization, no TCC. The shipped bundle is
-  ad-hoc signed itself (`codesign -dv` → `Signature=adhoc`), and the viewer holds no TCC
-  grants for a change of code identity to break: it captures keys with a *local*
-  `NSEvent` monitor, which needs no Accessibility permission.
+- **No entitlements, no notarization, no TCC.** The shipped bundle is ad-hoc signed
+  itself (`codesign -dv` → `Signature=adhoc`), and the viewer holds no TCC grants
+  for a change of code identity to break: it captures keys with a *local* `NSEvent`
+  monitor, which needs no Accessibility permission.
+- **One permission that is not TCC.** Local network access is asked for per app,
+  and a variant is a different app, so each one is asked once — see
+  [Local network permission](#local-network-permission).
 
 Do not edit `remotex.app` in place; use the script so the copy is re-signed.
 
@@ -521,6 +524,27 @@ authorizes the client. They are independent.
 `URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
 limit ends the socket rather than dropping one frame.
 
+### Local network permission
+
+macOS 15 and later refuse an app's connections to anything off this machine until
+local network access is allowed, which covers the embedded gateway: the permission
+belongs to the responsible app bundle, and `remotex-gateway` is a child of
+`remotex.app`. A fresh install therefore fails on its first target, and the sheet
+that asks is the user's to answer.
+
+The refusal is `EHOSTUNREACH`, exactly what an address with no route gives, and
+nothing on the gateway side can tell the two apart — there is no API that returns
+the permission state, which TN3179 still says in as many words. So the gateway does
+not try to. `engine::tcp_connect` adds one clause to the error naming the
+permission, on macOS only, and leaves the address standing as the other
+possibility. It does not wait, retry, or conclude.
+
+Note for QA: `tccutil reset LocalNetwork` cannot undo a decision — local network
+privacy is a Network Extension filter, not TCC — and TN3179 records that macOS
+offers no reset. Toggling the app off and on under System Settings > Privacy &
+Security > Local Network and relaunching is the practical way back. The row is in
+the second, alphabetical group, between **Input Monitoring** and **Microphone**.
+
 ## Build and QA
 
 Run the tests, build the packaged app, and launch QA against a throwaway instance:
@@ -528,7 +552,7 @@ Run the tests, build the packaged app, and launch QA against a throwaway instanc
 ```sh
 (cd frontend && bun run check && bun test src)
 swift test --package-path apps/remotex-viewer
-packaging/macos-viewer/build-viewer-app.sh --no-dmg
+packaging/macos-viewer/build-viewer-app.sh
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 
