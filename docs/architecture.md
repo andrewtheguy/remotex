@@ -19,7 +19,8 @@ axum server ── single session slot ── protocol engine
                                          └─ built-in RFB 3.8 client
 ```
 
-RDP and VNC frames are decoded in the gateway and encoded as PNG tiles. A Mac is
+RDP and VNC frames are decoded in the gateway and encoded as tiles — lossless PNG
+by default, or JPEG or WebP at a fixed quality when a target says so. A Mac is
 reached with `subtype = "ard"`, Apple Screen Sharing's Standard mode over RFB 3.8
 with Apple Remote Desktop authentication. RDP audio is converted from PCM to
 Opus and sent on the same WebSocket independently of the tile encoder and batching
@@ -44,7 +45,7 @@ queue.
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
 | `rdp.rs` | RDP connection, framebuffer, input, clipboard, audio, resize |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
-| `encode.rs`, `tiles.rs` | ordered PNG encoding and change detection |
+| `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
 | `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding, MS-RDPEA |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -56,6 +57,50 @@ Ordering is a correctness requirement throughout the frame path. Tiles replace
 rectangles without delta state, and a resize changes their coordinate space.
 The encoding and outbound queues therefore keep tiles, resizes, and cursor
 updates in source order even when individual tile encodes finish concurrently.
+
+### The render dial
+
+How a target's tiles are encoded is a per-target choice on two flat axes, plus a
+quality: `render_type` is the quality strategy, `render_subtype` the codec, and
+`render_quality` (1–100) the fixed quality a lossy strategy uses. Two axes rather
+than one flat mode list because strategy and codec vary independently. The legal
+pairings are validated at config-load time in `ConfigFile::parse_with`; the
+combinations that exist are:
+
+| `render_type` | `render_subtype` | behavior |
+|---|---|---|
+| `full` | `png` | lossless PNG. The default, and byte-identical to the PNG-only gateway that preceded the dial |
+| `fixed-quality` | `jpeg` | every tile JPEG at `render_quality` |
+| `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
+
+No classifier runs in either lossy combination: `jpeg` sends *every* tile as JPEG,
+so flat UI and text soften along with photographic content. That is the honest
+trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer bytes
+for the same visible result. Content- and motion-sensitive strategies are the
+[roadmap](roadmap.md)'s business.
+
+The dial costs no wire change. A tile record's first byte is already its format
+(`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and both clients decode all
+three — the browser through `createImageBitmap` from a MIME type, the Swift viewer
+through ImageIO from the container itself. WebP decode is why the app's deployment
+target is macOS 15.
+
+The engines never see the config enums. Both axes and the quality collapse to one
+`TileCodec` (`Png | Jpeg(q) | Webp(q)`) at the config boundary in
+`TargetConfig::tile_codec`, which reaches the per-tile encode call through the
+engine-agnostic `TileSink`:
+
+```text
+render_type / render_subtype / render_quality
+  → TargetConfig::tile_codec() → TileCodec → vnc::run / rdp::run
+  → TileSink::new(engine, frame_tx, codec)
+  → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
+```
+
+Because `TileSink` is shared, RDP and VNC get every codec from one implementation,
+and a `Png` codec calls `Tile::from_rgb` unchanged without touching lossy code.
+`encode_webp` wraps the `webp` crate's `libwebp`, built by `cc` with the target's
+SIMD and no cmake, at `thread_level = 1` so one encode can use all cores.
 
 ## Session lifecycle
 
@@ -106,7 +151,7 @@ TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 TILE_REF op 0x02: u16 slot | u16 x | u16 y
 ```
 
-Tile formats are PNG and JPEG. One frame carries multiple ready updates so a
+Tile formats are PNG, JPEG and WebP. One frame carries multiple ready updates so a
 repaint does not require one WebSocket event per tile. Receivers reject nonzero
 flags, unknown operations, truncated records, and unsupported formats.
 

@@ -127,9 +127,11 @@ impl Protocol {
 /// strategy also reads [`TargetConfig::render_quality`]). Two flat sibling keys
 /// rather than a nested table, matching the rest of the target schema.
 ///
-/// Only the two implemented strategies are variants; a config naming a planned
-/// one (`adaptive`, quality that follows motion or link speed) is refused by
-/// serde with the list of what is accepted. See docs/proposals/quality-dial.md.
+/// Only the two implemented strategies are variants; a config naming the planned
+/// one (`motion`, which keeps the base encode and sends only the cells changing
+/// fastest at a cheaper one) is refused by serde with the list of what is
+/// accepted. See docs/architecture.md for the shipped dial and docs/roadmap.md
+/// for `motion`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderType {
@@ -145,8 +147,12 @@ pub enum RenderType {
 }
 
 /// The codec a target's tiles are encoded with — the second render axis, paired
-/// with [`RenderType`]. Only implemented codecs are variants; a planned one
-/// (`adaptive-jpeg`, a per-tile PNG/JPEG classifier; `video`) is refused by serde.
+/// with [`RenderType`]. This is the codec for *every* tile, and keeps that meaning
+/// under the planned `motion` type: `motion` does not replace the base encode but
+/// layers a cheaper one over the cells in motion, named by its own key rather than
+/// by this one. All implemented codecs are variants; serde refuses anything else,
+/// including the planned `h264`, which would be legal only as a motion codec. See
+/// docs/roadmap.md.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderSubtype {
