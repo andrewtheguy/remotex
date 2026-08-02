@@ -96,7 +96,8 @@ password = "change-me"
 
 # Dynamic resize (opt-in): let a client drive the remote desktop size from its
 # window. This is permission to resize *when the user asks* — "Resize to window",
-# which every protocol below offers once this is on.
+# which every protocol that can resize at all offers once this is on. Which those
+# are is narrowed below: Standard Apple `ard` is not one of them.
 #
 # Whether the window may also drive the size unasked ("Auto resize") is a second
 # permission, and not a key: the gateway grants it to plain `vnc` alone. RDP

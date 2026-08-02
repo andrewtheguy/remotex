@@ -219,8 +219,11 @@ struct ResizeMenuTargetTests {
         )
     }
 
-    /// `autoResize` defaults to `resize`, since most of these cases are about the
-    /// items rather than the permission that splits them; the ones that are name it.
+    /// `autoResize` defaults to what the gateway would actually send for this
+    /// protocol — plain `vnc` may be driven by the window and RDP may not — so a
+    /// case that is about the items rather than the permission that splits them is
+    /// never in a state the real gateway cannot produce. The cases that are about
+    /// that permission name it.
     private func connected(
         protocolName: String,
         resize: Bool = false,
@@ -230,7 +233,7 @@ struct ResizeMenuTargetTests {
             name: "mac",
             protocolName: protocolName,
             resize: resize,
-            autoResize: autoResize ?? resize,
+            autoResize: resize && (autoResize ?? (protocolName == "vnc")),
             clipboard: false,
             audio: false
         )

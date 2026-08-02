@@ -331,10 +331,11 @@ Both permissions come from the `connected` message, and they are two:
 | RDP or an Apple subtype with `resize` | yes | no |
 | Any other case | no — no viewport request is ever sent | no |
 
-The second column is `autoResize`, and the gateway decides it: RDP renegotiates
-with a Deactivation-Reactivation Sequence and Apple High Performance replaces a
-virtual display, and both have a fault in [`known-issues.md`](known-issues.md)
-that a window drag reaches far more often than a menu item does. The client
+The second column is `resize`, the operator's. The third is `autoResize`, and the
+gateway decides that one on its own: RDP renegotiates with a
+Deactivation-Reactivation Sequence and Apple High Performance replaces a virtual
+display, and both have a fault in [`known-issues.md`](known-issues.md) that a
+window drag reaches far more often than a menu item does. The client
 argues with neither — `ViewportPolicy.setAutoFollows` refuses the mode rather
 than the menu merely hiding it, so a remembered default cannot turn it on behind
 the item's back.
