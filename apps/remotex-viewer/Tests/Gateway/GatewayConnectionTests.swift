@@ -190,6 +190,12 @@ struct GatewayConnectionTests {
                 .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
                 .binary(batch),
                 .binary(batch),
+                // A sentinel behind the second batch. Waiting on the rejection alone
+                // would be satisfied by the *first* batch, so "said once" would pass
+                // without the second batch having been looked at — which is the half
+                // of the latch worth testing. The receive loop is strictly ordered,
+                // so this control message arriving means both batches are done.
+                .text(#"{"type":"picker"}"#),
             ],
             closeCode: nil
         )
@@ -198,9 +204,7 @@ struct GatewayConnectionTests {
         let connection = GatewayConnection(gateway: gateway, sink: sink)
 
         await connection.start()
-        await sink.wait { events in
-            events.contains { if case .rejected = $0 { true } else { false } }
-        }
+        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
 
         let reasons = sink.events.compactMap { event -> String? in
             if case .rejected(let reason) = event { reason } else { nil }

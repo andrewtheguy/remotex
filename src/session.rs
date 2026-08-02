@@ -308,7 +308,18 @@ impl SessionManager {
         // Sized for whatever is selected, because both queues are in series between
         // the engine and the socket: leaving this one deep would put the buffering
         // back that the engine's own shallow queue was meant to remove.
-        let depth = st.selected.as_ref().map_or(FRAME_BUFFER, frame_buffer);
+        //
+        // With nothing selected, sized for the shallowest thing that *could* be picked
+        // next — which is the ordinary case, not an edge one: the first attach always
+        // lands on the picker, and `connect` builds a new engine channel but not a new
+        // attachment. Sizing this for tiles and then connecting to a video target
+        // would leave 64 whole frames of slack in front of the engine's 4, which is
+        // the backpressure `Congestion` reads to notice a link falling behind. A
+        // gateway with no video target keeps 64 exactly as before.
+        let depth = st.selected.as_ref().map_or_else(
+            || self.targets.iter().map(frame_buffer).min().unwrap_or(FRAME_BUFFER),
+            frame_buffer,
+        );
         let (event_tx, events) = mpsc::channel(depth);
         st.next_attach_id += 1;
         let id = st.next_attach_id;

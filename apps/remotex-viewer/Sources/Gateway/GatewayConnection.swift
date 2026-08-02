@@ -411,12 +411,17 @@ actor GatewayConnection {
             // code to avoid.
             refusedVideo = true
             log.error("this target sends H.264 video, which this viewer cannot decode")
+            // Queued before the hop to the sink, not after. `publish` suspends on
+            // `MainActor.run`, and what runs there is free to tear this connection
+            // down — `stop` finishes the outbound queue, and an enqueue after that is
+            // silently dropped. Enqueueing first costs nothing and does not depend on
+            // what the sink decides to do about the message.
+            send(.disconnect)
             await publish(.rejected(reason: """
                 This target sends its desktop as one H.264 video stream, which this \
                 viewer cannot decode yet. Open it in a browser, or give the target a \
                 different render_type.
                 """))
-            send(.disconnect)
             return
         }
         guard !refusedVideo else {

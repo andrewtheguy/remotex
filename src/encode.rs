@@ -248,8 +248,18 @@ impl Video {
     /// Taken by value because the encode happens on a blocking worker, which cannot
     /// borrow. [`Self::put_back`] is the other half, and the caller holds the mutex
     /// across both — so nothing else can find this empty.
-    fn take_dirty(&mut self) -> anyhow::Result<Option<h264::Stream>> {
-        Ok(self.stream()?.is_dirty().then(|| self.stream.take().expect("just built")))
+    ///
+    /// Deliberately does not *build* a stream, which is why this cannot fail: a stream
+    /// that does not exist yet has had nothing blitted into it and so has nothing to
+    /// encode, and one built here would be returned as not-dirty on the very next
+    /// line. Building is [`Self::stream`]'s job, on the path that has pixels — and
+    /// leaving it there keeps a frame boundary that arrives before any damage from
+    /// being able to end a session.
+    fn take_dirty(&mut self) -> Option<h264::Stream> {
+        self.stream
+            .as_ref()
+            .is_some_and(h264::Stream::is_dirty)
+            .then(|| self.stream.take().expect("just checked"))
     }
 
     fn put_back(&mut self, stream: h264::Stream) {
@@ -799,10 +809,11 @@ impl TileSink {
             return Ok(());
         }
         let mut video = self.shared.video.lock().await;
-        let Some(mut stream) = video.take_dirty()? else {
+        let Some(mut stream) = video.take_dirty() else {
             return Ok(());
         };
-        if self.shared.keyframe_owed.swap(false, Ordering::Relaxed) {
+        let forced = self.shared.keyframe_owed.swap(false, Ordering::Relaxed);
+        if forced {
             stream.force_keyframe();
         }
         let started = Instant::now();
@@ -829,6 +840,15 @@ impl TileSink {
             // next frame as an ordinary delta. `skip_frames(false)` should make this
             // unreachable; the counter is how we would find out that it is not.
             self.shared.skipped.fetch_add(1, Ordering::Relaxed);
+            // The encoder was asked for a keyframe and produced nothing, so the ask
+            // went with it — openh264 consumes a forced intra on the encode call,
+            // whether or not that call yields a bitstream. Re-arm it, or a repaint or
+            // reattach would leave a client waiting for a keyframe that nothing will
+            // send again. An extra keyframe is bytes; a missing one is a desktop that
+            // never appears.
+            if forced {
+                self.shared.keyframe_owed.store(true, Ordering::Relaxed);
+            }
             warn!("{}: an h264 frame encoded to nothing; its pixels wait for the next", self.engine);
             return Ok(());
         };

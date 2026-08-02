@@ -260,9 +260,11 @@ password = "change-me"
 
 # render_type = "video" is not a fourth codec, it is a different transport: the whole
 # desktop as one H.264 stream instead of one encoded image per changed region. Every
-# frame says what changed since the one before it, so there are no tiles, no cell
-# grid, and no per-region decisions — which is why it takes no render_subtype and
-# refuses one.
+# frame says what changed since the one before it, so nothing is cut into per-region
+# tiles and the cell grid does not apply — which is why it takes no render_subtype and
+# refuses one. (The frames still travel in the same records the still codecs use, each
+# carrying the desktop rectangle a client crops to; what goes away is the segmentation,
+# not the framing.)
 #
 # render_quality is the dial, 1-100 as everywhere else, and it is a *ceiling*: on a
 # link that can carry it you get exactly that quality, and a link that cannot makes
