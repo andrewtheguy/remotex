@@ -19,8 +19,10 @@ that was asked for rather than a resampling of the size it used to be.
   Choose its bundled loopback gateway with no login, or enter the address and
   login for a remote gateway.
 
-See [`docs/architecture.md`](docs/architecture.md) for the system design and
-[`docs/macos-viewer.md`](docs/macos-viewer.md) for the app.
+See [`docs/architecture.md`](docs/architecture.md) for the system design,
+[`docs/macos-viewer.md`](docs/macos-viewer.md) for the app, and
+[`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
+than re-investigating.
 
 ## Install
 

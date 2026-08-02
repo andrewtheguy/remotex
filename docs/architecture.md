@@ -488,38 +488,10 @@ rather than measured. With `clipboard = true`, MS-RDPECLIP carries
 `CF_UNICODETEXT` with CRLF/LF conversion. With `audio = true`, the engine
 negotiates the static and dynamic MS-RDPEA transports described above.
 
-**A host can fail the reactivation a size change triggers.** When a resize
-actually changes the desktop size, the server answers `DeactivateAll` and
-`reactivate` runs the Deactivation-Reactivation Sequence. That sequence sometimes
-fails at the first PDU it reads, ending the session with
-
-```text
-RDP session ended: reactivation: … invalid `pdu_type`: invalid pdu type
-```
-
-decoding a `ShareControlHeader`, or occasionally `read frame: cannot decrypt peer's
-message`. Both are stream-level: what arrives is not the PDU the sequence expects.
-
-**It is not tied to one machine.** Old and current hosts both fail it; what
-differs is how often. Forcing a real size change:
-
-| host | result |
-|---|---|
-| 2013 MacBook Pro running Windows | fails most attempts (12 in ~18) |
-| a current Windows desktop | fails occasionally |
-
-Speed plausibly explains that rate — a race the slow machine loses most of the
-time is one the fast machine loses sometimes — but not the failure itself, and the
-cause is open. Two measurements narrow it: it reproduces identically on
-`fixed-quality`/`webp` and on `video`, so neither encoder is implicated, and it
-predates the render dial entirely. Both VNC resize paths are unaffected.
-
-Recorded here rather than as planned work because nothing known about it says what
-to change.
-
-One thing that makes it look intermittent from a browser: only a size change that is
-*real* reactivates at all. Asking twice for the same size triggers it once, and a
-request equal to the current size never triggers it.
+A size change that is *real* costs a Deactivation-Reactivation Sequence; asking
+twice for the same size triggers it once, and a request equal to the current size
+never triggers it. That sequence can fail and end the session — see
+[`docs/known-issues.md`](known-issues.md).
 
 ### VNC
 
