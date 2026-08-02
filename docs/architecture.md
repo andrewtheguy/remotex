@@ -188,7 +188,14 @@ their damage through:
   second left the first sliver lossy with nothing that knew it was owed. That is the
   pointer trail on RDP — the cursor is composited into the framebuffer, so crossing a
   cell leaves a run of small rectangles of which only the last would ever have been
-  cleaned up. A `CLEANUP_TICK` interval in `order_loop` re-sends cells
+  cleaned up. A debt a crisp send only *partly* covers is not cancelled but brought
+  up to date, the newer pixels written over the ones it is holding. A debt holds the
+  frame it was recorded on, and the cleanup restores it faithfully — including
+  whatever has changed underneath it since and already gone out crisp. On RDP that is
+  the composited pointer painted back onto a spot it has left: wrong content rather
+  than coarse content, and permanent, since the shadow counts the newer pixels as
+  delivered and nothing sends them twice. A `CLEANUP_TICK` interval in `order_loop`
+  re-sends cells
   idle past `CLEANUP_IDLE` at the *base* encode, `MAX_CLEANUPS_PER_TICK` at a time
   and oldest first, so a paused screen sharpens on its own without a client
   repaint. The timer has to be its own, because the case it exists for is a remote
