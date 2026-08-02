@@ -46,7 +46,12 @@ Apple display modes:
   DH authentication, shares the Mac's physical displays, and refuses `resize`.
   Like High Performance it asks for zlib in the second `SetEncodings`, the one a
   display layout triggers; the first list must stay zlib-free or the layout is lost.
-- `ard-high-performance` is Apple Screen Sharing's **High Performance mode** over
+- `ard-high-performance` is **experimental** and the one path built with no
+  specification at all — the revision, record layer, control messages and virtual
+  display handling are reverse engineered, so treat `docs/apple-vnc-889.md` as
+  measurement, not contract. Its dynamic-resolution path is the least settled part.
+  Prefer widening `ard` over deepening this. It is Apple Screen Sharing's
+  **High Performance mode** over
   RFB 003.889. It requests one virtual display at configured `width` and `height`,
   disables physical displays, and moves all remote windows onto it.
   Its setup descriptor always enables dynamic resolution. With `resize = true`,
