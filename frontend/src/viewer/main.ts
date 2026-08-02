@@ -154,10 +154,17 @@ function apply(command: CanvasCommand) {
 // a garbled frame from stalling the chain.
 let queue: Promise<void> = Promise.resolve();
 
-// Where the app writes. Relative when this page is served by the app's own
-// listener; absolute via `?frames=` when it is served by Vite for layout work.
+// Where the app writes. Always relative to wherever this page was served from,
+// which under the app's own listener is the stream beside it.
+//
+// `?frames=` overrides it in a development build only. It exists for
+// `REMOTEX_VIEWER_DEV_URL`, where Vite serves the page and the stream is on
+// another origin, and a shipped page has no business taking the address it
+// reads frames from out of its own URL.
 const framesUrl =
-  new URLSearchParams(location.search).get("frames") ?? "./frames";
+  (import.meta.env.DEV
+    ? new URLSearchParams(location.search).get("frames")
+    : null) ?? "./frames";
 
 const screen = document.querySelector(".screen") as HTMLElement;
 

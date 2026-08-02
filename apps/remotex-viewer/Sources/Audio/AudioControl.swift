@@ -102,12 +102,18 @@ final class AudioControl {
     /// There is no fallback to switch to, so this unsubscribes rather than
     /// retrying: packets that arrive for a decoder that has gone are bytes spent
     /// on nothing. The same shape as `useRemoteDesktop.ts`'s `onError`.
+    /// The alert is raised only for a subscription that was live. A page can
+    /// report a failure after the toggle has already gone off — the decoder
+    /// giving up on its way out — and an alert about sound nobody asked for any
+    /// more is noise about a thing that is not wrong. The log takes every one of
+    /// them, because that is where a failure nobody was shown still has to be
+    /// findable.
     func playbackFailed(_ reason: String) {
         log.error("canvas audio: \(reason, privacy: .public)")
-        report?(reason)
         guard isEnabled else {
             return
         }
+        report?(reason)
         isEnabled = false
         send?(.audio(enabled: false))
     }

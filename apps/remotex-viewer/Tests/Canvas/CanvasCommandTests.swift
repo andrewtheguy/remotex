@@ -48,6 +48,7 @@ struct CanvasCommandTests {
         #expect(json["type"] as? String == "cursor")
         #expect(json["image"] as? String == "iVBORw0KGgo=")
         #expect(json["w"] as? Int == 24)
+        #expect(json["h"] as? Int == 24)
         #expect(json["hx"] as? Int == 4)
         #expect(json["hy"] as? Int == 6)
     }

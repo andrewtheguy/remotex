@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Synchronization
 import Testing
 @testable import RemotexViewer
 
@@ -141,7 +142,7 @@ struct CanvasServerTests {
 
         let client = RawClient(port: address.port)
         try await client.get("/\(address.token)/frames")
-        await attached.wait()
+        #expect(await attached.wait(), "the server never accepted the stream")
 
         server.send(.clear)
         server.send(frame: Data([0x02, 0x00, 0x00, 0x00]))
@@ -162,7 +163,7 @@ struct CanvasServerTests {
     /// A reload is the ordinary way a second stream appears, and there is one page:
     /// the newer attachment is the live one, and the app re-primes it from scratch.
     @Test
-    func asecondStreamSupersedesTheFirst() async throws {
+    func aSecondStreamSupersedesTheFirst() async throws {
         let scratch = try ScratchDirectory()
         let attached = Attached()
         let (server, address) = try await Self.started(scratch) { attached.signal() }
@@ -170,12 +171,12 @@ struct CanvasServerTests {
 
         let first = RawClient(port: address.port)
         try await first.get("/\(address.token)/frames")
-        await attached.wait()
+        #expect(await attached.wait(), "the server never accepted the first stream")
         _ = try await first.readHead()
 
         let second = RawClient(port: address.port)
         try await second.get("/\(address.token)/frames")
-        await attached.wait()
+        #expect(await attached.wait(), "the server never accepted the second stream")
         _ = try await second.readHead()
 
         server.send(.clear)
@@ -202,14 +203,23 @@ private final class Attached: @unchecked Sendable {
         semaphore.signal()
     }
 
-    func wait() async {
-        await withCheckedContinuation { continuation in
+    /// Whether the signal arrived before the deadline. Returned rather than
+    /// swallowed: a test that carried on from a timeout would fail later, on
+    /// some other assertion, describing the wrong thing.
+    func wait() async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             DispatchQueue.global().async {
-                _ = self.semaphore.wait(timeout: .now() + 5)
-                continuation.resume()
+                continuation.resume(returning: self.semaphore.wait(timeout: .now() + 5) == .success)
             }
         }
     }
+}
+
+private enum RawClientError: Error {
+    /// The peer stayed silent past the deadline.
+    case timedOut
+    /// The peer closed.
+    case ended
 }
 
 /// A socket that speaks just enough HTTP to read this server's stream.
@@ -276,28 +286,47 @@ private final class RawClient: @unchecked Sendable {
         }
     }
 
-    /// True when the peer closed without sending anything more.
+    /// True when the peer closed without sending anything more. A timeout is
+    /// *not* that: a socket nobody closed and nobody wrote to is a third
+    /// outcome, and reporting it as a clean close would pass this test for the
+    /// wrong reason.
     func readsNothingMore() async throws -> Bool {
         do {
             try await fill()
             return false
-        } catch {
+        } catch RawClientError.ended {
             return true
         }
     }
 
+    /// One read, bounded. `NWConnection.receive` waits for as long as the peer
+    /// stays silent, so an unbounded one turns "the server did not write what it
+    /// should have" into a test that never finishes and says nothing.
     private func fill() async throws {
         let more: Data = try await withCheckedThrowingContinuation { continuation in
+            let settled = Mutex(false)
+            let finish: @Sendable (Result<Data, any Error>) -> Void = { result in
+                let first = settled.withLock { done -> Bool in
+                    defer { done = true }
+                    return !done
+                }
+                if first {
+                    continuation.resume(with: result)
+                }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+                finish(.failure(RawClientError.timedOut))
+            }
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
                 chunk, _, isComplete, error in
                 if let error {
-                    continuation.resume(throwing: error)
+                    finish(.failure(error))
                 } else if let chunk, !chunk.isEmpty {
-                    continuation.resume(returning: chunk)
+                    finish(.success(chunk))
                 } else if isComplete {
-                    continuation.resume(throwing: CancellationError())
+                    finish(.failure(RawClientError.ended))
                 } else {
-                    continuation.resume(returning: Data())
+                    finish(.success(Data()))
                 }
             }
         }

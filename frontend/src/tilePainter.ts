@@ -52,14 +52,21 @@ export function createTilePainter(options: {
 }): TilePainter {
   const tileCache: ({ data: Uint8Array; mime: TileMsg["mime"] } | null)[] =
     new Array(SLOT_COUNT).fill(null);
-  // Whether a reset has already been asked for while handling this batch.
-  let resetAsked = false;
 
-  const askForCacheReset = () => {
-    if (resetAsked) {
+  // Whether this batch has already asked for a reset. One per batch rather than
+  // one per painter: `draw` is async, and nothing in the signature stops a
+  // caller starting a second one before the first has finished. Sharing the flag
+  // across two in flight would let one batch's miss swallow the other's — or
+  // worse, let the first clear the cache in the middle of the second.
+  interface Batch {
+    resetAsked: boolean;
+  }
+
+  const askForCacheReset = (batch: Batch) => {
+    if (batch.resetAsked) {
       return;
     }
-    resetAsked = true;
+    batch.resetAsked = true;
     options.onCacheReset();
   };
 
@@ -68,7 +75,10 @@ export function createTilePainter(options: {
   // The payload is copied out of the frame rather than held as a view of it: a
   // view would pin the whole batch — up to 256 KB — for the lifetime of one
   // slot.
-  const resolveRecord = (record: BatchRecord): PaintJob | null => {
+  const resolveRecord = (
+    record: BatchRecord,
+    batch: Batch,
+  ): PaintJob | null => {
     if (record.kind === "tile") {
       if (record.slot !== NO_SLOT) {
         tileCache[record.slot] = {
@@ -82,13 +92,13 @@ export function createTilePainter(options: {
     if (!held) {
       // The server thinks this client holds a tile it does not. Nothing else
       // will ever correct that, so say so and draw nothing here.
-      askForCacheReset();
+      askForCacheReset(batch);
       return null;
     }
     return { x: record.x, y: record.y, ...held, cached: true };
   };
 
-  const decodeJob = async (job: PaintJob | null) => {
+  const decodeJob = async (job: PaintJob | null, batch: Batch) => {
     if (!job) {
       return null;
     }
@@ -101,7 +111,7 @@ export function createTilePainter(options: {
       // keeping it as a slot, in which case every later reference to it would
       // fail the same way.
       if (job.cached) {
-        askForCacheReset();
+        askForCacheReset(batch);
       }
       return null;
     }
@@ -131,12 +141,15 @@ export function createTilePainter(options: {
       if (!records) {
         return;
       }
-      resetAsked = false;
-      const jobs = records.map(resolveRecord);
-      paintBatch(jobs, await Promise.all(jobs.map(decodeJob)));
+      const batch: Batch = { resetAsked: false };
+      const jobs = records.map((record) => resolveRecord(record, batch));
+      paintBatch(
+        jobs,
+        await Promise.all(jobs.map((job) => decodeJob(job, batch))),
+      );
       // Cleared after the pass so references may use slots filled earlier in
       // it, which the gateway does emit within a single batch.
-      if (resetAsked) {
+      if (batch.resetAsked) {
         tileCache.fill(null);
       }
     },

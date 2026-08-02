@@ -133,6 +133,56 @@ struct AudioControlTests {
         #expect(session.model.actionError == nil, "the ordinary path says nothing")
     }
 
+    /// A page comes back — a reload, or a stream that dropped and reattached —
+    /// and has never heard an `audioFormat`, because the gateway sends one when
+    /// a subscription starts and never again. Without re-subscribing it would
+    /// receive packets it has no decoder for and be silent with nothing to say
+    /// why, which is the failure this whole path is shaped around.
+    @Test
+    func areattachedPageIsResubscribedSoTheFormatComesAgain() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        session.model.audio.setEnabled(true)
+        try await session.settle()
+        #expect(session.audioMessages == [true])
+
+        session.model.attach(canvas: FakeCanvas())
+        try await session.settle()
+        #expect(session.audioMessages == [true, true], "the reattached page gets a format")
+        #expect(session.model.audio.isEnabled, "and the answer it was playing under")
+    }
+
+    /// The same reattachment costs a silent session nothing. `reassert` is a
+    /// no-op when sound was never asked for, so a target with no audio — or one
+    /// the user muted — does not subscribe itself by reloading a page.
+    @Test
+    func areattachedPageDoesNotSubscribeSoundNobodyAskedFor() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        try await session.settle()
+
+        session.model.attach(canvas: FakeCanvas())
+        try await session.settle()
+        #expect(session.audioMessages.isEmpty)
+    }
+
+    /// A failure reported for a subscription that is already off is not the
+    /// user's problem: the decoder giving up on its way out is the ordinary end
+    /// of a stream, and an alert about sound nobody asked for any more describes
+    /// nothing that is wrong.
+    @Test
+    func aFailureAfterTheToggleWentOffIsNotAnAlert() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+        #expect(!session.model.audio.isEnabled)
+
+        session.model.audio.playbackFailed("decoder closed")
+        try await session.settle()
+
+        #expect(session.model.actionError == nil)
+        #expect(session.audioMessages.isEmpty, "nothing to unsubscribe from")
+    }
+
     /// A page that cannot play what arrived says so, and the alert is how that
     /// reaches anyone: a reason nothing displays is the same as no reason at all.
     /// The subscription goes with it, because packets decoded by nothing are bytes

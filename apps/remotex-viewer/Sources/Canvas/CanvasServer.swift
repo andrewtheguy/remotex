@@ -71,6 +71,12 @@ final class CanvasServer: Sendable {
         var stream: NWConnection?
         var address: Address?
         var started: CheckedContinuation<Address, any Error>?
+        /// Frame bytes handed to the connection and not yet written out. See
+        /// `maxPendingFrameBytes`.
+        var pendingFrameBytes = 0
+        /// Whether the ceiling above has cost this stream any pixels, so the
+        /// desktop can be asked for again once the backlog clears.
+        var droppedFrames = false
     }
 
     private let state = Mutex(State())
@@ -144,8 +150,16 @@ final class CanvasServer: Sendable {
             case .ready:
                 let port = listener.port?.rawValue ?? 0
                 self.resume(.success(Address(port: port, token: self.token)))
-            case .failed(let error), .waiting(let error):
+            case .failed(let error):
                 self.resume(.failure(StartError.listener(error.localizedDescription)))
+            case .waiting(let error):
+                // Not terminal: a listener waits for a resource it expects to
+                // get, and reaches `.ready` when it does. Failing here reports a
+                // dead canvas over something transient — the deadline below is
+                // what answers a listener that never arrives.
+                self.log.warning(
+                    "canvas listener waiting: \(error.localizedDescription, privacy: .public)"
+                )
             default:
                 break
             }
@@ -163,9 +177,18 @@ final class CanvasServer: Sendable {
                 continuation.resume(returning: ready)
                 return
             }
+            // A bind of one loopback port either happens at once or is not going
+            // to. `resume` only settles the first caller, so a deadline that
+            // fires after `.ready` costs nothing.
+            queue.asyncAfter(deadline: .now() + Self.startDeadline) { [weak self] in
+                self?.resume(.failure(StartError.listener("the listener never became ready")))
+            }
             listener.start(queue: queue)
         }
     }
+
+    /// How long `start()` waits for `.ready` before giving up.
+    private static let startDeadline: DispatchTimeInterval = .seconds(10)
 
     private func resume(_ result: Result<Address, any Error>) {
         let continuation = state.withLock { state -> CheckedContinuation<Address, any Error>? in
@@ -186,11 +209,19 @@ final class CanvasServer: Sendable {
             }
             return (state.listener, state.stream)
         }
-        // The terminator, so a page that is still up reads a clean end of body
-        // and reconnects rather than reporting a truncated response.
-        stream?.send(content: Self.chunkTerminator, completion: .idempotent)
-        stream?.cancel()
         listener?.cancel()
+        guard let stream else {
+            return
+        }
+        // The terminator, so a page that is still up reads a clean end of body
+        // and reconnects rather than reporting a truncated response — and the
+        // cancel waits for it. Cancelling straight after the send tears the
+        // connection down with the write still queued, which is the truncated
+        // response this exists to avoid.
+        stream.send(
+            content: Self.chunkTerminator,
+            completion: .contentProcessed { _ in stream.cancel() }
+        )
     }
 
     // MARK: - Sending
@@ -213,13 +244,79 @@ final class CanvasServer: Sendable {
         send(kind: Envelope.frame, payload: frame)
     }
 
+    /// Most unwritten frame bytes to hold before dropping more.
+    ///
+    /// A wedged or very slow page stops draining the socket while the gateway
+    /// keeps producing, and `NWConnection` will queue whatever it is given: at a
+    /// 256 KB batch a frame that is nothing to spare a few of, this grows without
+    /// limit. Eight of them is far more backlog than a live page ever has and far
+    /// less than a leak.
+    private static let maxPendingFrameBytes = 8 * 256 * 1024
+
     private func send(kind: UInt8, payload: Data) {
-        guard let stream = state.withLock({ $0.stream }) else {
-            return
+        let chunk = Self.chunk(kind: kind, payload: payload)
+        // Control envelopes are never dropped. They are small, and each one is a
+        // fact the page cannot be told twice — a `resize` or a `clear` skipped
+        // here leaves it drawing into the wrong geometry with nothing to correct
+        // it.
+        let isFrame = kind == Envelope.frame
+
+        enum Outcome {
+            case send(NWConnection)
+            case drop
+            case none
         }
-        // `NWConnection` sends in call order, which is what keeps a `resize`
-        // from overtaking tiles drawn in the space it replaces.
-        stream.send(content: Self.chunk(kind: kind, payload: payload), completion: .idempotent)
+        let outcome = state.withLock { state -> Outcome in
+            guard let stream = state.stream else {
+                return .none
+            }
+            if isFrame, state.pendingFrameBytes > Self.maxPendingFrameBytes {
+                // Dropped pixels are only recoverable because something asks for
+                // them again; see the re-prime below.
+                state.droppedFrames = true
+                return .drop
+            }
+            if isFrame {
+                state.pendingFrameBytes += chunk.count
+            }
+            return .send(stream)
+        }
+        switch outcome {
+        case .none:
+            return
+        case .drop:
+            log.warning("canvas stream backed up; dropped a frame")
+            return
+        case .send(let stream):
+            // `NWConnection` sends in call order, which is what keeps a `resize`
+            // from overtaking tiles drawn in the space it replaces.
+            stream.send(
+                content: chunk,
+                completion: isFrame
+                    ? .contentProcessed { [weak self] _ in
+                        self?.frameWritten(chunk.count)
+                    }
+                    : .idempotent
+            )
+        }
+    }
+
+    /// One frame is off our hands. When the backlog has cleared and anything was
+    /// dropped, ask for the desktop again: tiles carry no delta state and the
+    /// gateway believes it has already sent what it sent, so nothing else would
+    /// ever repaint what went missing.
+    private func frameWritten(_ bytes: Int) {
+        let reprime = state.withLock { state -> Bool in
+            state.pendingFrameBytes = max(0, state.pendingFrameBytes - bytes)
+            guard state.pendingFrameBytes == 0, state.droppedFrames else {
+                return false
+            }
+            state.droppedFrames = false
+            return true
+        }
+        if reprime {
+            onAttach()
+        }
     }
 
     /// One HTTP chunk carrying one envelope.
@@ -354,16 +451,38 @@ final class CanvasServer: Sendable {
         )
     }
 
+    /// The one origin allowed to read the stream cross-origin, or nil.
+    ///
+    /// Nil is the shipped case and the point of it: the page is served by this
+    /// listener, so it reads the stream same-origin and needs no header at all.
+    /// `Access-Control-Allow-Origin: *` was letting anything else on this machine
+    /// read the desktop if it learned the token — a second lock left open beside
+    /// the one that matters. Only `REMOTEX_VIEWER_DEV_URL`, where Vite serves the
+    /// page from another origin, needs one, and then it names that origin exactly.
+    private static var devOrigin: String? {
+        guard let raw = ProcessInfo.processInfo.environment["REMOTEX_VIEWER_DEV_URL"],
+              let url = URL(string: raw),
+              let scheme = url.scheme,
+              let host = url.host
+        else {
+            return nil
+        }
+        guard let port = url.port else {
+            return "\(scheme)://\(host)"
+        }
+        return "\(scheme)://\(host):\(port)"
+    }
+
     /// Hold this response open and make it the stream.
     private func attachStream(_ connection: NWConnection) {
+        let allowOrigin = Self.devOrigin.map { "Access-Control-Allow-Origin: \($0)\r\n" } ?? ""
         let head = Data(
             """
             HTTP/1.1 200 OK\r
             Content-Type: application/octet-stream\r
             Transfer-Encoding: chunked\r
             Cache-Control: no-store\r
-            Access-Control-Allow-Origin: *\r
-            Connection: close\r
+            \(allowOrigin)Connection: close\r
             \r\n
             """.utf8
         )

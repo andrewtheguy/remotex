@@ -59,7 +59,11 @@ export function createViewerAudio(handlers: {
         return;
       }
       try {
-        const built = createAudioContext();
+        // Held here before the player is built, not in a local: if
+        // `createAudioPlayer` throws, `fail` -> `release` is the only thing that
+        // will ever close this context, and it can only close what it can see.
+        // A leaked one holds the audio hardware for the life of the page.
+        context = createAudioContext();
         player = createAudioPlayer(
           {
             codec: format.codec,
@@ -67,7 +71,7 @@ export function createViewerAudio(handlers: {
             channels: format.channels,
             head: decodeAudioHead(format.head),
           },
-          built,
+          context,
           {
             onError: (reason) => fail(reason),
             onLead: (lead, trimmed) => {

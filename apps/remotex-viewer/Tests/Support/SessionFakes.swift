@@ -385,23 +385,39 @@ struct AttachedSession {
 /// that the model told the page the right things in the right order, which is
 /// the whole of its part in rendering.
 final class FakeCanvas: RemoteCanvas, @unchecked Sendable {
-    private let recorded = Mutex<(commands: [CanvasCommand], frames: [Data])>(([], []))
+    /// One thing the model told the page.
+    ///
+    /// Commands and frames share a list because the order *between* them is the
+    /// property worth asserting: a `resize` has to precede the tiles drawn in the
+    /// space it names, and two separate arrays record each side faithfully while
+    /// losing the only relationship that could be wrong.
+    enum Event: Equatable {
+        case command(CanvasCommand)
+        case frame(Data)
+    }
+
+    private let recorded = Mutex<[Event]>([])
+
+    /// Everything, in the order it was sent.
+    var events: [Event] {
+        recorded.withLock { $0 }
+    }
 
     var commands: [CanvasCommand] {
-        recorded.withLock { $0.commands }
+        events.compactMap { if case .command(let command) = $0 { command } else { nil } }
     }
 
     /// The gateway binary frames forwarded, verbatim and in order.
     var frames: [Data] {
-        recorded.withLock { $0.frames }
+        events.compactMap { if case .frame(let data) = $0 { data } else { nil } }
     }
 
     func send(_ command: CanvasCommand) {
-        recorded.withLock { $0.commands.append(command) }
+        recorded.withLock { $0.append(.command(command)) }
     }
 
     func send(frame: Data) {
-        recorded.withLock { $0.frames.append(frame) }
+        recorded.withLock { $0.append(.frame(frame)) }
     }
 }
 

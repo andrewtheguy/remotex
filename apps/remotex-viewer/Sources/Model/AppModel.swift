@@ -902,11 +902,18 @@ final class AppModel: GatewaySessionSink {
         case .resize(let w, let h, let scale):
             let size = DisplayMode(w: w, h: h)
             session.remoteSize = size
-            session.remoteScale = scale > 0 ? CGFloat(scale) : 1
+            // Sanitized once and used for both. A gateway reporting a density of
+            // zero would otherwise leave the page dividing by whatever it made of
+            // the raw number while this side had already settled on 1 — and
+            // `canvasAttached` re-sends the sanitized one, so a page that
+            // reloaded would present the desktop at a different size than the
+            // page that did not.
+            let density = scale > 0 ? scale : 1
+            session.remoteScale = CGFloat(density)
             // The canvas bitmap is the remote's pixels and its CSS box is those
             // pixels divided by this density, so unlike the Metal texture this
             // replaced, the page needs both numbers — see `desktopCanvas.ts`.
-            canvas?.send(.resize(w: w, h: h, scale: scale))
+            canvas?.send(.resize(w: w, h: h, scale: density))
 
         case .displays(let active, let displays):
             let switched = session.activeDisplayID != active
@@ -1059,7 +1066,19 @@ final class AppModel: GatewaySessionSink {
     func canvasAttached() {
         lastInputEnabled = nil
         publishInputEnablement()
-        guard let canvas, let size = session.remoteSize else {
+        guard let canvas else {
+            return
+        }
+        // Sound belongs to the page that was playing it, and this one has never
+        // heard an `audioFormat`: the gateway sends one when a subscription
+        // starts and never again, so a reloaded page would sit there receiving
+        // packets it has no decoder for, silent with nothing to say why.
+        // Re-subscribing is what makes the gateway describe the stream again. A
+        // no-op unless sound was actually on, so it costs a target with none
+        // nothing — and it is above the size guard because a page that came back
+        // before the first `resize` still needs its decoder.
+        audio.reassert()
+        guard let size = session.remoteSize else {
             return
         }
         canvas.send(.resize(w: size.w, h: size.h, scale: Double(session.remoteScale)))
