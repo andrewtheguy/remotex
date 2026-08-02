@@ -182,18 +182,13 @@ export interface TileMsg {
   h: number;
   // Where the server wants this remembered, or NO_SLOT for "do not".
   slot: number;
-  // An encoded picture, or one H.264 access unit, per `codec`.
+  // The encoded picture, in `codec`.
   data: Uint8Array;
-  // What `data` is. The three MIME types are pictures, handed to createImageBitmap
-  // as a Blob of that type: the gateway sends lossless PNG by default, and a target
-  // on the fixed-quality render dial sends JPEG or WebP instead.
-  //
-  // "h264" is not a MIME type and not a picture. A target on `render_type = "video"`
-  // sends the whole desktop as one inter-frame stream, so `data` is one access unit
-  // whose meaning is "what changed since the last one" — it goes to a VideoDecoder,
-  // it is never cached, and it cannot be decoded out of order. See
-  // `Tile::FORMAT_H264` in src/protocol.rs for the whole contract.
-  codec: "image/png" | "image/jpeg" | "image/webp" | "h264";
+  // What `data` is, as a MIME type handed to createImageBitmap as a Blob: the
+  // gateway sends lossless PNG by default, and a target on the fixed-quality render
+  // dial sends JPEG or WebP instead. Every one of them is a self-contained picture;
+  // a frame that only means something in sequence is a VideoMsg, not a tile.
+  codec: "image/png" | "image/jpeg" | "image/webp";
 }
 
 // "Draw what you have in `slot` at (x, y)" — seven bytes instead of a payload.
@@ -203,9 +198,35 @@ export interface TileRefMsg {
   y: number;
 }
 
+// One H.264 access unit for one region of the framebuffer.
+//
+// Not a tile, and the separate record is the point: a tile is a self-contained
+// picture — reorderable, cacheable, droppable once something covers it — and this is
+// one link in a chain, where losing any link decodes wrongly until the next keyframe.
+//
+// `stream` says which decoder it belongs to. A session may run several at once — one
+// per moving region under `render_motion_subtype = "h264"`, exactly one under
+// `render_type = "video"` — and ids are reused as regions come and go, so a record
+// whose size differs from the last one on the same id means that decoder is starting
+// over on a differently sized picture.
+//
+// `(x, y, w, h)` is the true region rectangle. The decoded picture may be a pixel
+// wider or taller, because H.264 needs even sides and a region at the edge of an odd
+// desktop does not have them: draw the top-left w×h of it at (x, y). See
+// `VideoUnit` in src/protocol.rs for the whole contract.
+export interface VideoMsg {
+  stream: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  data: Uint8Array;
+}
+
 export type BatchRecord =
   | ({ kind: "tile" } & TileMsg)
-  | ({ kind: "ref" } & TileRefMsg);
+  | ({ kind: "ref" } & TileRefMsg)
+  | ({ kind: "video" } & VideoMsg);
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 4;
@@ -214,19 +235,26 @@ const AUDIO_HEADER_LEN = 4;
 const AUDIO_PACKET_HEADER_LEN = 2;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
+const OP_VIDEO = 0x03;
 const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
+const VIDEO_HEADER_LEN = 14;
 // The format byte, as what the payload is: `Tile::FORMAT_PNG`, `Tile::FORMAT_JPEG`,
-// `Tile::FORMAT_WEBP`, `Tile::FORMAT_H264`. A byte outside this map (a stale
-// gateway's, or a corrupt frame) yields `undefined`, and `decodeTile` drops the
-// record rather than handing unknown bytes to a decoder.
+// `Tile::FORMAT_WEBP`. A byte outside this map (a stale gateway's, or a corrupt
+// frame) yields `undefined`, and `decodeTile` drops the record rather than handing
+// unknown bytes to a decoder.
 const CODEC_BY_FORMAT: Record<number, TileMsg["codec"] | undefined> = {
   1: "image/png",
   2: "image/jpeg",
   3: "image/webp",
-  4: "h264",
 };
 export const NO_SLOT = 0xffff;
+// How many H.264 streams one session may run at once. Part of the wire contract
+// (`batch::MAX_STREAMS`), and the same kind of bound as SLOT_COUNT: a stream id at
+// or above it is a malformed record rather than a reason to hold another decoder,
+// which keeps this client's memory a function of the protocol instead of of what a
+// gateway chooses to send. The gateway's own cap on concurrent regions is smaller.
+export const MAX_STREAMS = 16;
 // How many tiles the server may ask this client to remember. Part of the wire
 // contract (`batch::SLOT_COUNT`), which is what makes the cache a fixed array
 // rather than something a server could grow without limit.
@@ -243,6 +271,8 @@ export const SLOT_COUNT = 256;
 //   TILE (op 0x01):     u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 //                       | u32 len | payload[len]
 //   TILE_REF (op 0x02):  u16 slot | u16 x | u16 y
+//   VIDEO (op 0x03):     u8 stream | u16 x | u16 y | u16 w | u16 h
+//                       | u32 len | payload[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
@@ -260,10 +290,7 @@ export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
   const records: BatchRecord[] = [];
   let at = BATCH_HEADER_LEN;
   while (at < buf.byteLength) {
-    const parsed =
-      view.getUint8(at) === OP_TILE_REF
-        ? decodeRef(view, buf.byteLength, at)
-        : decodeTile(view, buf, at);
+    const parsed = decodeRecord(view, buf, at);
     if (!parsed) {
       return null;
     }
@@ -271,6 +298,21 @@ export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
     at = parsed.next;
   }
   return records.length === count ? records : null;
+}
+
+function decodeRecord(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: BatchRecord; next: number } | null {
+  switch (view.getUint8(at)) {
+    case OP_TILE_REF:
+      return decodeRef(view, buf.byteLength, at);
+    case OP_VIDEO:
+      return decodeVideo(view, buf, at);
+    default:
+      return decodeTile(view, buf, at);
+  }
 }
 
 function decodeRef(
@@ -327,6 +369,37 @@ function decodeTile(
       h: view.getUint16(at + 10, true),
       data: new Uint8Array(buf, start, len),
       codec,
+    },
+    next: start + len,
+  };
+}
+
+function decodeVideo(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: BatchRecord; next: number } | null {
+  if (at + VIDEO_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const stream = view.getUint8(at + 1);
+  if (stream >= MAX_STREAMS) {
+    return null;
+  }
+  const len = view.getUint32(at + 10, true);
+  const start = at + VIDEO_HEADER_LEN;
+  if (start + len > buf.byteLength) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "video",
+      stream,
+      x: view.getUint16(at + 2, true),
+      y: view.getUint16(at + 4, true),
+      w: view.getUint16(at + 6, true),
+      h: view.getUint16(at + 8, true),
+      data: new Uint8Array(buf, start, len),
     },
     next: start + len,
   };

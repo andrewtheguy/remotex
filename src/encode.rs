@@ -20,7 +20,7 @@
 //! This is also where the render dial's `motion` strategy lives, because it is the
 //! one place both engines already funnel their damage through. See [`Motion`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,11 +31,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use anyhow::Context as _;
 
-use crate::config::{RenderPlan, TileCodec};
+use crate::config::{MotionEncode, RenderPlan, TileCodec};
 use crate::h264;
-use crate::protocol::{ServerMsg, Tile};
+use crate::protocol::{ServerMsg, Tile, VideoUnit};
+use crate::regions::{Policy, Regions};
 use crate::tiles::{Changed, Rect};
 
 /// Maximum queued encodes ahead of the handle currently collected. This covers
@@ -138,6 +138,14 @@ const ADJUST_COOLDOWN: Duration = Duration::from_secs(1);
 /// same reason [`CLEAR_FRAMES`] is bigger than [`BEHIND_FRAMES`].
 const QP_STEP: u8 = 4;
 
+/// The quality a plan that produces no access units is given.
+///
+/// It is never read: nothing blits into that target's mirror, so no stream is ever
+/// built from it. Named rather than written as a bare `1` at the one place it is
+/// used, because a quality *is* a meaningful number everywhere else in this module
+/// and a reader should not have to work out that this one is not.
+const NO_STREAM_QUALITY: u8 = 1;
+
 /// The shortest gap between two access units.
 ///
 /// The engines' frame boundaries are not a frame *rate*: RDP's is one `outputs`
@@ -220,95 +228,26 @@ impl Congestion {
     }
 }
 
-/// The video stream, the geometry it is owed, and what the link will bear.
+/// The streams, the mirror behind them, and what the link will bear.
+///
+/// One type for both dials that produce access units: [`crate::regions`] holds the
+/// difference between "the whole desktop, always" and "a region per thing that is
+/// moving", and everything here is the same either way.
 struct Video {
-    /// The 1–100 dial, straight from the config and never changed.
-    quality: u8,
-    /// The desktop the stream must be at, learned from [`ServerMsg::Resize`].
-    ///
-    /// `None` until the engine has announced one, which it always does before any
-    /// damage — every path that produces pixels sends a resize first.
-    size: Option<(u16, u16)>,
-    /// Built lazily rather than when the size arrives. See [`Self::stream`].
-    stream: Option<h264::Stream>,
+    regions: Regions,
     congestion: Congestion,
-    /// The earliest the next access unit may be encoded — see
-    /// [`VIDEO_FRAME_INTERVAL`]. `None` before the first one, so a freshly
-    /// connected desktop paints without waiting out an interval.
+    /// The earliest the next round may be encoded — see [`VIDEO_FRAME_INTERVAL`].
+    /// `None` before the first one, so a freshly connected desktop paints without
+    /// waiting out an interval.
     due_at: Option<tokio::time::Instant>,
 }
 
 impl Video {
-    fn new(quality: u8) -> Self {
+    fn new(policy: Policy, quality: u8, mark: Option<h264::Mark>) -> Self {
         Self {
-            quality,
-            size: None,
-            stream: None,
+            regions: Regions::new(policy, quality, mark),
             congestion: Congestion::new(h264::qp_for(quality)),
             due_at: None,
-        }
-    }
-
-    /// Whether the mirror holds pixels no access unit has carried yet.
-    ///
-    /// The question [`TileSink::due_at`] answers for the engines, and the reason a
-    /// deferred frame is safe: these pixels are already counted as delivered by the
-    /// shadow, so something has to come back for them.
-    fn dirty(&self) -> bool {
-        self.stream.as_ref().is_some_and(h264::Stream::is_dirty)
-    }
-
-    /// The stream, built if it is not there yet.
-    ///
-    /// Construction is deferred to here — rather than done where the size arrives —
-    /// because it can fail, and the size arrives inside [`TileSink::msg`], whose
-    /// error every caller reads as "the browser has gone" and answers by returning
-    /// without a word. A desktop too large for the encoder would end the session
-    /// silently on the picker. Every caller of *this* is on the engines' `?` path,
-    /// which ends the session with the message attached.
-    fn stream(&mut self) -> anyhow::Result<&mut h264::Stream> {
-        if self.stream.is_none() {
-            let (w, h) = self
-                .size
-                .context("the h264 stream was asked for pixels before a desktop size")?;
-            self.stream = Some(h264::Stream::new(w, h, self.quality)?);
-        }
-        Ok(self.stream.as_mut().expect("just built"))
-    }
-
-    /// Take the stream out for an encode, or `None` when there is nothing to encode.
-    ///
-    /// Taken by value because the encode happens on a blocking worker, which cannot
-    /// borrow. [`Self::put_back`] is the other half, and the caller holds the mutex
-    /// across both — so nothing else can find this empty.
-    ///
-    /// Deliberately does not *build* a stream, which is why this cannot fail: a stream
-    /// that does not exist yet has had nothing blitted into it and so has nothing to
-    /// encode, and one built here would be returned as not-dirty on the very next
-    /// line. Building is [`Self::stream`]'s job, on the path that has pixels — and
-    /// leaving it there keeps a frame boundary that arrives before any damage from
-    /// being able to end a session.
-    fn take_dirty(&mut self) -> Option<h264::Stream> {
-        self.stream
-            .as_ref()
-            .is_some_and(h264::Stream::is_dirty)
-            .then(|| self.stream.take().expect("just checked"))
-    }
-
-    fn put_back(&mut self, stream: h264::Stream) {
-        self.stream = Some(stream);
-    }
-
-    /// Adopt the desktop the client is about to be told about.
-    ///
-    /// Cannot fail, and is all that happens on the message path. A different size
-    /// drops the stream for [`Self::stream`] to rebuild — every key means somewhere
-    /// else on a new framebuffer, and the encoder cannot change picture size without
-    /// starting over anyway.
-    fn want(&mut self, w: u16, h: u16) {
-        if self.size != Some((w, h)) {
-            self.size = Some((w, h));
-            self.stream = None;
         }
     }
 }
@@ -321,15 +260,21 @@ impl Video {
 enum Pending {
     /// An encode in flight, yielding the tile and the microseconds it cost.
     Tile(JoinHandle<anyhow::Result<(Tile, u64)>>),
-    /// A tile that is already encoded, and what it cost.
+    /// One round of the video streams: every access unit produced at one frame
+    /// boundary, already encoded, and what the round cost.
     ///
-    /// The video stream's shape, and the one thing it cannot borrow from the still
-    /// path: its frames are links in a chain, each encoded from a mirror the read
-    /// loop is writing, so they cannot be raced across workers the way independent
-    /// stills can. It is encoded under a lock on the caller's own task and only its
-    /// *place in the order* is queued — the same contract [`Pending::Tile`] has,
-    /// minus the parallelism there is nothing here to overlap with.
-    Encoded { tile: Tile, encode_micros: u64, keyframe: bool },
+    /// The streams' shape, and the one thing they cannot borrow from the still path:
+    /// their frames are links in a chain, each encoded from a mirror the read loop is
+    /// writing, so they cannot be raced across workers the way independent stills can.
+    /// A round is encoded under a lock on the caller's own task and only its *place in
+    /// the order* is queued — the same contract [`Pending::Tile`] has, minus the
+    /// parallelism there is nothing here to overlap with.
+    ///
+    /// One queue slot per round rather than per unit, because a round is one frame of
+    /// the desktop however many regions it took: that is what [`ENCODE_DEPTH`] should
+    /// be counting, and it is what makes the congestion loop's one measurement of how
+    /// long a push blocked mean one thing.
+    Round { units: Vec<VideoUnit>, encode_micros: u64 },
     Msg(ServerMsg),
     /// A caller waiting for everything pushed before it to have reached `frame_tx`.
     Flush(oneshot::Sender<()>),
@@ -412,6 +357,38 @@ impl Motion {
         cell.history |= 1;
         cell.last_slot = slot;
         cell.history.count_ones()
+    }
+
+    /// The cells in motion as of `now`.
+    ///
+    /// [`Self::observe`] ages a cell's history only when it changes, which is what
+    /// keeps the hot path cheap; this is the other side of that bargain, and the one
+    /// caller who needs the answer for cells that are *not* changing. A cell whose
+    /// history has emptied is dropped outright, so the map stays the size of the
+    /// screen's recent activity rather than of the session.
+    ///
+    /// Only the region policy asks (`render_motion_subtype = "h264"`), and only once
+    /// per retune.
+    fn moving(&mut self, now: tokio::time::Instant) -> Vec<(u16, u16)> {
+        let Some(origin) = self.origin else {
+            return Vec::new();
+        };
+        let slot = u64::try_from(
+            now.saturating_duration_since(origin).as_millis() / CHURN_SLOT.as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        let mut moving = Vec::new();
+        self.churn.retain(|key, cell| {
+            let elapsed = slot.saturating_sub(cell.last_slot);
+            cell.history = if elapsed >= CHURN_WINDOW { 0 } else { cell.history << elapsed };
+            cell.last_slot = slot;
+            if cell.history.count_ones() >= CHURN_MOVING {
+                moving.push(*key);
+            }
+            cell.history != 0
+        });
+        moving.sort_unstable();
+        moving
     }
 
     /// Remember a piece about to be sent at the motion encode, so a later tick can
@@ -611,8 +588,12 @@ struct Shared {
     /// Of [`Self::tiles`], those that are a settled cell being re-sent crisp.
     cleanups: AtomicU64,
     cleanup_bytes: AtomicU64,
-    /// Of [`Self::tiles`], the access units a decoder could start from, and what they
-    /// cost. Video only, and read together: see [`Totals`].
+    /// Access units, counted apart from tiles because they are not one: a tile is a
+    /// picture and a unit is a link in a chain, and one number for both would compare
+    /// a repaint's bands with a video's frames.
+    units: AtomicU64,
+    /// Of [`Self::units`], those a decoder could start from, and what they cost. Read
+    /// together: see [`Totals`].
     keyframes: AtomicU64,
     keyframe_bytes: AtomicU64,
     /// Frames the encoder produced no bitstream for. Must stay zero.
@@ -631,23 +612,30 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan) -> Self {
-        let quality = match plan {
-            RenderPlan::Video { quality } => quality,
-            // Never read: a tiles plan never touches the stream. Built anyway rather
-            // than made an `Option`, so that `video` needs no unwrapping on a path
-            // that has already established which plan it is on.
-            RenderPlan::Tiles { .. } => 1,
+        // Which dial produces access units, and at what quality. A plan that produces
+        // none still builds a `Video` — never touched, and holding no mirror until
+        // something is blitted into it — so that the streaming paths need no
+        // unwrapping once they have established which plan they are on.
+        let (policy, quality, mark) = match plan {
+            RenderPlan::Video { quality } => (Policy::Whole, quality, None),
+            RenderPlan::Tiles { motion: Some(MotionEncode::Stream { quality }), debug, .. } => (
+                Policy::Moving,
+                quality,
+                debug.then_some(h264::Mark { colour: MARK_MOTION, px: MARK_PX }),
+            ),
+            RenderPlan::Tiles { .. } => (Policy::Whole, NO_STREAM_QUALITY, None),
         };
         Self {
             failure: Mutex::default(),
             motion: Mutex::default(),
-            video: tokio::sync::Mutex::new(Video::new(quality)),
+            video: tokio::sync::Mutex::new(Video::new(policy, quality, mark)),
             keyframe_owed: AtomicBool::new(false),
             tiles: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
             motion_tiles: AtomicU64::new(0),
             cleanups: AtomicU64::new(0),
             cleanup_bytes: AtomicU64::new(0),
+            units: AtomicU64::new(0),
             keyframes: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
@@ -731,16 +719,22 @@ impl TileSink {
         let (base, motion, debug) = match self.plan {
             RenderPlan::Video { .. } => {
                 let rgb = pack(changed.rect);
-                return self.shared.video.lock().await.stream()?.blit(changed.rect, &rgb);
+                return self.shared.video.lock().await.regions.blit(changed.rect, &rgb);
             }
             RenderPlan::Tiles { base, motion, debug } => (base, motion, debug),
         };
 
-        let Some(motion_codec) = motion else {
-            for band in changed.rect.bands() {
-                self.encode(band, Arc::new(pack(band)), base).await?;
+        let motion_codec = match motion {
+            None => {
+                for band in changed.rect.bands() {
+                    self.encode(band, Arc::new(pack(band)), base).await?;
+                }
+                return Ok(());
             }
-            return Ok(());
+            Some(MotionEncode::Stream { .. }) => {
+                return self.damage_streaming(changed, pack, base, debug).await;
+            }
+            Some(MotionEncode::Tile(codec)) => codec,
         };
 
         // One reading for the whole rectangle: the pieces of one report of damage
@@ -824,27 +818,119 @@ impl TileSink {
         Ok(())
     }
 
-    /// One remote frame has ended: encode everything [`Self::damage`] has blitted
-    /// since the last call, and queue the access unit.
+    /// [`Self::damage`] for a target whose moving encode is a stream per region.
     ///
-    /// A no-op under a tiles plan, where a rectangle is already a message. Under video
-    /// it is the only thing that sends anything, and it has to be driven by the
+    /// The same cut as the still motion path — bands, and cells only where it matters
+    /// — with one difference that decides everything: a cell a live stream covers is
+    /// **not sent at all**. Its pixels reach the client through that stream, and
+    /// sending them as a tile as well would discharge a debt the stream has not paid.
+    ///
+    /// Everything goes into the mirror first, moving or not. That copy is what a
+    /// stream starting later reads and what a cleanup crops, so it has to be the whole
+    /// truth rather than the parts that happened to be busy.
+    ///
+    /// Which cells are streamed is read once, here. A stream can only ever *end*
+    /// underneath this — the cleanup tick expires idle ones and never starts any, and
+    /// starting is [`Self::frame`]'s job on this same task. That direction is the safe
+    /// one: a cell whose stream ended after the reading is simply not sent this frame,
+    /// its debt still stands, and the cleanup carries it from the mirror. The other
+    /// direction would be a cell delivered twice, once crisp and once inside a
+    /// keyframe, with the crisp one discharging a debt the stream had not paid.
+    async fn damage_streaming<F>(
+        &self,
+        changed: &Changed,
+        pack: F,
+        base: TileCodec,
+        debug: bool,
+    ) -> anyhow::Result<()>
+    where
+        F: Fn(Rect) -> Vec<u8>,
+    {
+        let streamed: HashSet<(u16, u16)> = {
+            let mut video = self.shared.video.lock().await;
+            video.regions.blit(changed.rect, &pack(changed.rect))?;
+            changed
+                .rect
+                .cells()
+                .map(|cell| cell.cell_key())
+                .filter(|key| video.regions.covers(*key))
+                .collect()
+        };
+
+        // One reading for the whole rectangle: the pieces of one report of damage
+        // arrived together and belong in the same slot.
+        let now = tokio::time::Instant::now();
+        // What went out crisp, to discharge in one critical section at the end.
+        let mut crisp: Vec<Rect> = Vec::new();
+        for band in changed.rect.bands() {
+            let cells: Vec<Rect> = band.cells().collect();
+            {
+                // Churn is recorded for the cells that *changed*, not for every cell
+                // the band covers — `Changed::rect` is one box round everything that
+                // differed. Recorded whether or not a stream is already carrying the
+                // cell, because that is what keeps the stream alive.
+                let mut motion = self.shared.motion.lock().unwrap();
+                for cell in &cells {
+                    let key = cell.cell_key();
+                    if changed.has(key) {
+                        motion.observe(key, now);
+                    }
+                }
+            }
+
+            if !cells.iter().any(|cell| streamed.contains(&cell.cell_key())) {
+                // The quiet path, and the great majority of a screen: one whole band
+                // at the base encode, byte for byte what this target would send with
+                // no motion strategy at all.
+                crisp.push(band);
+                self.encode(band, Arc::new(pack(band)), base).await?;
+                continue;
+            }
+
+            for cell in cells {
+                if streamed.contains(&cell.cell_key()) {
+                    continue;
+                }
+                let rgb = Arc::new(pack(cell));
+                // Only a *split* band is marked, for the reason the still path gives.
+                // A region's own outline is drawn by its encoder, on the crop rather
+                // than on the mirror — see `h264::Mark`.
+                let rgb = if debug { marked(&rgb, cell, MARK_CRISP) } else { rgb };
+                crisp.push(cell);
+                self.encode(cell, rgb, base).await?;
+            }
+        }
+
+        if !crisp.is_empty() {
+            let mut video = self.shared.video.lock().await;
+            for sent in crisp {
+                video.regions.discharge(sent);
+            }
+        }
+        Ok(())
+    }
+
+    /// One remote frame has ended: choose the regions, encode everything
+    /// [`Self::damage`] has blitted since the last call, and queue the access units.
+    ///
+    /// A no-op for a target with no streams, where a rectangle is already a message.
+    /// Otherwise it is the only thing that sends one, and it has to be driven by the
     /// engines because neither protocol hands its damage over a frame at a time —
     /// `damage` is called once per *rectangle*, and RDP's loop turns once per PDU,
     /// most of which redraw nothing. So this is also a no-op when nothing was blitted:
-    /// without that, a still screen would encode a whole-framebuffer frame per PDU.
+    /// without that, a still screen would encode a frame per PDU.
     ///
-    /// The encode runs on a blocking worker with the stream's lock held across it —
+    /// The encode runs on a blocking worker with the streams' lock held across it —
     /// serial, which is what an inter-frame stream requires and what the still path
-    /// deliberately is not. Only the finished tile's place in the order is queued.
+    /// deliberately is not. Only the finished round's place in the order is queued.
     ///
-    /// **Calling it is a proposal, not an instruction.** At most one access unit is
-    /// produced per [`VIDEO_FRAME_INTERVAL`]; a call inside that window leaves the
-    /// mirror dirty and returns. So an engine may call this as often as its boundaries
-    /// occur, but must also call it when [`Self::due_at`] says to — see there for why
-    /// that second half is not optional.
+    /// **Calling it is a proposal, not an instruction.** At most one round is produced
+    /// per [`VIDEO_FRAME_INTERVAL`]; a call inside that window leaves the mirror dirty
+    /// and returns. So an engine may call this as often as its boundaries occur, but
+    /// must also call it when [`Self::due_at`] says to — see there for why that second
+    /// half is not optional.
     pub async fn frame(&self) -> anyhow::Result<()> {
-        if !matches!(self.plan, RenderPlan::Video { .. }) {
+        if !self.streaming() {
             return Ok(());
         }
         let mut video = self.shared.video.lock().await;
@@ -856,23 +942,34 @@ impl TileSink {
         let owed = self.shared.keyframe_owed.load(Ordering::Relaxed);
         let now = tokio::time::Instant::now();
         if !owed && video.due_at.is_some_and(|due| now < due) {
-            // Deliberately before `take_dirty`: the mirror keeps what was blitted into
-            // it and the next access unit carries it as an ordinary delta. Something
-            // must come back for it, which is what `due_at` tells the engines.
+            // Deliberately before the round is taken: the mirror keeps what was
+            // blitted into it and the next round carries it as an ordinary delta.
+            // Something must come back for it, which is what `due_at` tells the
+            // engines.
             return Ok(());
         }
-        let Some(mut stream) = video.take_dirty() else {
+        if self.shared.keyframe_owed.swap(false, Ordering::Relaxed) {
+            // Per stream, and it stays armed until that stream actually produces one
+            // — so an encode that yields no bitstream cannot lose the ask, and a
+            // client is never left waiting for a keyframe nothing will send again.
+            video.regions.force_keyframes();
+        }
+        // Geometry moves here, on the engine's own task, before anything is encoded:
+        // that is what makes the set of streamed cells `damage` reads a stable thing
+        // rather than a race.
+        if let RenderPlan::Tiles { .. } = self.plan {
+            let moving = self.shared.motion.lock().unwrap().moving(now);
+            video.regions.retune(&moving, now)?;
+        }
+        let Some(mut round) = video.regions.take_round() else {
             return Ok(());
         };
         video.due_at = Some(now + VIDEO_FRAME_INTERVAL);
-        let forced = self.shared.keyframe_owed.swap(false, Ordering::Relaxed);
-        if forced {
-            stream.force_keyframe();
-        }
+
         let started = Instant::now();
-        let (stream, unit) = tokio::task::spawn_blocking(move || {
-            let unit = stream.frame();
-            (stream, unit)
+        let (round, units) = tokio::task::spawn_blocking(move || {
+            let units = round.encode();
+            (round, units)
         })
         .await
         .map_err(|e| {
@@ -884,40 +981,45 @@ impl TileSink {
             anyhow::anyhow!(message)
         })?;
         let encode_micros = micros(started);
-        let (w, h) = stream.size();
-        let qp = stream.qp();
-        video.put_back(stream);
-
-        let Some(unit) = unit? else {
-            // The mirror is untouched and still dirty, so these pixels ride on the
-            // next frame as an ordinary delta. `skip_frames(false)` should make this
-            // unreachable; the counter is how we would find out that it is not.
-            self.shared.skipped.fetch_add(1, Ordering::Relaxed);
-            // The encoder was asked for a keyframe and produced nothing, so the ask
-            // went with it — openh264 consumes a forced intra on the encode call,
-            // whether or not that call yields a bitstream. Re-arm it, or a repaint or
-            // reattach would leave a client waiting for a keyframe that nothing will
-            // send again. An extra keyframe is bytes; a missing one is a desktop that
-            // never appears.
-            if forced {
-                self.shared.keyframe_owed.store(true, Ordering::Relaxed);
-            }
-            warn!("{}: an h264 frame encoded to nothing; its pixels wait for the next", self.engine);
+        let qp = video.regions.qp();
+        // Streams that produced nothing keep their dirty flag and their keyframe, so
+        // those pixels ride the next round. `skip_frames(false)` should make that
+        // unreachable; the counter is how we would find out that it is not.
+        if round.skipped() > 0 {
+            self.shared.skipped.fetch_add(round.skipped(), Ordering::Relaxed);
+            warn!(
+                "{}: {} h264 frame(s) encoded to nothing; their pixels wait for the next",
+                self.engine,
+                round.skipped()
+            );
+        }
+        video.regions.put_back(round, now);
+        let units = units?;
+        if units.is_empty() {
             return Ok(());
-        };
-        let keyframe = unit.keyframe;
-        let tile = Tile::encoded(Tile::FORMAT_H264, 0, 0, w, h, unit.data);
-        // Dropped before the push, which may block: holding the stream's lock while
+        }
+        // Dropped before the push, which may block: holding the streams' lock while
         // waiting on a full queue would make every later `damage` wait on the socket.
         drop(video);
 
         let queued = Instant::now();
-        let pushed = self.push(Pending::Encoded { tile, encode_micros, keyframe }).await;
+        let pushed = self.push(Pending::Round { units, encode_micros }).await;
         // How long that took is the congestion signal, and it is read whether or not
         // the push succeeded: a push that failed waited just as long, and the verdict
-        // is about the link rather than about this frame.
+        // is about the link rather than about this round.
         self.adjust(queued.elapsed(), qp).await;
         pushed
+    }
+
+    /// Whether this target's moving pixels go out as access units — either the whole
+    /// desktop (`render_type = "video"`) or a region at a time
+    /// (`render_motion_subtype = "h264"`).
+    fn streaming(&self) -> bool {
+        matches!(
+            self.plan,
+            RenderPlan::Video { .. }
+                | RenderPlan::Tiles { motion: Some(MotionEncode::Stream { .. }), .. }
+        )
     }
 
     /// When the engine must call [`Self::frame`] again, whatever its own boundaries
@@ -934,11 +1036,11 @@ impl TileSink {
     /// `None` while the mirror is clean, so an idle stream parks on
     /// [`std::future::pending`] instead of waking an engine to encode nothing.
     pub async fn due_at(&self) -> Option<tokio::time::Instant> {
-        if !matches!(self.plan, RenderPlan::Video { .. }) {
+        if !self.streaming() {
             return None;
         }
         let video = self.shared.video.lock().await;
-        if !video.dirty() {
+        if !video.regions.dirty() {
             return None;
         }
         // A dirty mirror with no deadline yet is one whose pixels arrived before any
@@ -962,15 +1064,10 @@ impl TileSink {
         let Some(wanted) = video.congestion.observe(blocked, tokio::time::Instant::now()) else {
             return;
         };
-        // The stream as it stands, never one built to be re-tuned: `Video::stream`
-        // would construct an encoder here, which is both wasted work and the wrong
-        // path for the failure it can produce. A stream that does not exist yet has
-        // encoded nothing to be behind on, and the one that replaces it starts at the
-        // dial anyway.
-        let Some(stream) = video.stream.as_mut() else {
-            return;
-        };
-        if let Err(e) = stream.set_qp(wanted) {
+        // Every live stream, and every one started afterwards: one link, one verdict.
+        // A region that appears while the link is behind has no more room than the
+        // ones already running.
+        if let Err(e) = video.regions.set_qp(wanted) {
             warn!("{}: could not move the h264 quantizer to {wanted}: {e:#}", self.engine);
         } else {
             debug!("{}: h264 quantizer now {wanted} (the dial asks for {dial})", self.engine);
@@ -1004,7 +1101,7 @@ impl TileSink {
         match self.plan {
             // Same reason as in `damage`: under video there is no such thing as one
             // rectangle's worth of message.
-            RenderPlan::Video { .. } => self.shared.video.lock().await.stream()?.blit(rect, &rgb),
+            RenderPlan::Video { .. } => self.shared.video.lock().await.regions.blit(rect, &rgb),
             RenderPlan::Tiles { base, .. } => self.encode(rect, Arc::new(rgb), base).await,
         }
     }
@@ -1030,21 +1127,23 @@ impl TileSink {
 
     /// Queue anything that is not a tile, keeping it behind the tiles it follows.
     ///
-    /// A resize is also how the video stream learns how big the desktop is. That is
-    /// one interception rather than a size threaded through every place a stream has
-    /// to be rebuilt, and it cannot be forgotten by a fifth such place added later:
-    /// telling the client its framebuffer changed and telling the encoder are the
-    /// same event, and the first already happens everywhere the second must.
+    /// A resize is also how the streams learn how big the desktop is. That is one
+    /// interception rather than a size threaded through every place a stream has to be
+    /// rebuilt, and it cannot be forgotten by a fifth such place added later: telling
+    /// the client its framebuffer changed and telling the encoder are the same event,
+    /// and the first already happens everywhere the second must.
     ///
     /// Bookkeeping only — nothing here can fail, deliberately. This method's error is
     /// read by every caller as "the browser has gone", answered by returning without
     /// a word (`rdp::run`, `vnc::run`), so a desktop the encoder cannot handle would
-    /// end the session silently on the picker. Building the stream waits for
-    /// [`Self::damage`] or [`Self::frame`], which are on the engines' `?` path and
-    /// end the session with the message attached.
+    /// end the session silently on the picker. Building the mirror and the streams
+    /// waits for [`Self::damage`] or [`Self::frame`], which are on the engines' `?`
+    /// path and end the session with the message attached.
     pub async fn msg(&self, msg: ServerMsg) -> anyhow::Result<()> {
-        if let (RenderPlan::Video { .. }, ServerMsg::Resize { w, h, .. }) = (self.plan, &msg) {
-            self.shared.video.lock().await.want(*w, *h);
+        if let ServerMsg::Resize { w, h, .. } = &msg
+            && self.streaming()
+        {
+            self.shared.video.lock().await.regions.want(*w, *h);
         }
         self.push(Pending::Msg(msg)).await
     }
@@ -1093,7 +1192,7 @@ impl TileSink {
     /// zeroes says nothing — though both current engines, RDP and VNC, do encode.
     fn report(&self) {
         let totals = Totals::of(&self.shared);
-        if totals.tiles > 0 {
+        if totals.tiles > 0 || totals.units > 0 {
             info!("{}: encode totals: {totals}", self.engine);
         }
     }
@@ -1210,8 +1309,91 @@ async fn flush_cleanups(
     true
 }
 
+/// [`flush_cleanups`] for a target whose moving encode is a stream per region.
+///
+/// The same job with a much shorter argument behind it. The still path has to
+/// remember the pixels it approximated, and everything hard about it follows from
+/// those pixels going stale: whether a debt may be replaced, what a partial cover
+/// does, what happens when the stash is full. Here the mirror already holds the exact
+/// current source for every pixel, so a cleanup is a crop of it and is the newest
+/// truth by construction. The debt is two words — which cell, and when a unit last
+/// carried it.
+///
+/// A cell a live stream still covers is never due, so nothing here can overtake a
+/// stream that is still running.
+async fn flush_stream_cleanups(
+    engine: &'static str,
+    shared: &Arc<Shared>,
+    base: TileCodec,
+    debug: bool,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+) -> bool {
+    let mut due: Vec<(Rect, Vec<u8>)> = Vec::new();
+    {
+        // One critical section for the whole tickful: `due` and the crops have to
+        // agree about the mirror, and holding the lock across the encodes below would
+        // make every `damage` wait on them.
+        let mut video = shared.video.lock().await;
+        let now = tokio::time::Instant::now();
+        // A screen that has stopped changing produces no frame boundary, so this is
+        // the only thing that will ever notice its streams have gone quiet — and a
+        // stream that never ends is a region that never comes due.
+        video.regions.expire(now);
+        let rects = video.regions.due(now, CLEANUP_IDLE, MAX_CLEANUPS_PER_TICK);
+        for rect in rects {
+            let mut rgb = Vec::new();
+            match video.regions.crop(rect, &mut rgb) {
+                Ok(()) => due.push((rect, rgb)),
+                // The debt is gone with the read that failed, and that is the safe
+                // direction: the cell keeps the stream's rendition until it changes
+                // again, which is the same state a dropped cleanup already leaves.
+                Err(e) => warn!("{engine}: dropping a cleanup that would not crop: {e:#}"),
+            }
+        }
+    }
+
+    let started: Vec<(Rect, JoinHandle<anyhow::Result<Tile>>)> = due
+        .into_iter()
+        .map(|(rect, rgb)| {
+            let rgb = Arc::new(rgb);
+            let rgb = if debug { marked(&rgb, rect, MARK_CLEANUP) } else { rgb };
+            (rect, tokio::task::spawn_blocking(move || encode_tile(rect, &rgb, base)))
+        })
+        .collect();
+
+    for (rect, handle) in started {
+        let tile = match handle.await {
+            Ok(Ok(tile)) => tile,
+            Ok(Err(e)) => {
+                warn!(
+                    "{engine}: dropping a cleanup for {}x{} at ({},{}) that would not encode; \
+                     it stays at the stream's quality until it changes again: {e:#}",
+                    rect.w(),
+                    rect.h(),
+                    rect.left,
+                    rect.top
+                );
+                continue;
+            }
+            Err(e) => {
+                give_up(engine, shared, format!("tile encoder stopped: {e}"));
+                return false;
+            }
+        };
+        let bytes = tile.data.len() as u64;
+        shared.tiles.fetch_add(1, Ordering::Relaxed);
+        shared.cleanups.fetch_add(1, Ordering::Relaxed);
+        shared.encoded_bytes.fetch_add(bytes, Ordering::Relaxed);
+        shared.cleanup_bytes.fetch_add(bytes, Ordering::Relaxed);
+        if frame_tx.send(ServerMsg::Tile(tile)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Collect finished encodes in push order and forward them, and — for a target on
-/// the `motion` strategy — settle cells that have stopped moving.
+/// the `motion` strategy — settle what has stopped moving.
 ///
 /// The cleanup timer belongs here rather than anywhere the frames arrive, because
 /// the case it exists for is a screen that has stopped producing them.
@@ -1222,11 +1404,13 @@ async fn order_loop(
     shared: Arc<Shared>,
     plan: RenderPlan,
 ) {
-    // Only the motion strategy has anything to settle. A video stream has no cells
-    // and no debts — its next frame carries whatever the last one approximated — and
-    // a plain tiles plan sends everything crisp the first time.
+    // Only the motion strategy has anything to settle, and its two encodes settle
+    // differently: a still remembers the pixels it approximated, a stream leaves the
+    // debt to the mirror. A whole-desktop video stream has no cells and no debts —
+    // its next frame carries whatever the last one approximated — and a plain tiles
+    // plan sends everything crisp the first time.
     let settling = match plan {
-        RenderPlan::Tiles { base, motion: Some(_), debug } => Some((base, debug)),
+        RenderPlan::Tiles { base, motion: Some(motion), debug } => Some((base, motion, debug)),
         _ => None,
     };
     let mut cleanup = tokio::time::interval(CLEANUP_TICK);
@@ -1242,8 +1426,16 @@ async fn order_loop(
                 None => break,
             },
             _ = cleanup.tick(), if settling.is_some() => {
-                let (base, debug) = settling.expect("the arm is guarded on it");
-                if flush_cleanups(engine, &shared, base, debug, &frame_tx).await {
+                let (base, motion, debug) = settling.expect("the arm is guarded on it");
+                let settled = match motion {
+                    MotionEncode::Tile(_) => {
+                        flush_cleanups(engine, &shared, base, debug, &frame_tx).await
+                    }
+                    MotionEncode::Stream { .. } => {
+                        flush_stream_cleanups(engine, &shared, base, debug, &frame_tx).await
+                    }
+                };
+                if settled {
                     continue;
                 }
                 break;
@@ -1257,28 +1449,41 @@ async fn order_loop(
                 let _ = ack.send(());
                 continue;
             }
-            Pending::Encoded { tile, encode_micros, keyframe } => {
-                shared.tiles.fetch_add(1, Ordering::Relaxed);
-                let bytes = tile.data.len() as u64;
-                shared.encoded_bytes.fetch_add(bytes, Ordering::Relaxed);
+            Pending::Round { units, encode_micros } => {
                 shared.encode_micros.fetch_add(encode_micros, Ordering::Relaxed);
-                // Counted as waiting too, and honestly so: this one was encoded on the
-                // engine's own task, so the read loop really did wait the whole of it.
-                // That keeps `encode` against `waiting` meaning what its doc says —
-                // and it reads 1.0 for a video session, which is the truth: an
-                // inter-frame stream has nothing to overlap with.
+                // Counted as waiting too, and honestly so: this round was encoded on
+                // the engine's own task, so the read loop really did wait the whole of
+                // it. That keeps `encode` against `waiting` meaning what its doc says
+                // — and it reads 1.0 for a session that is all stream, which is the
+                // truth: an inter-frame stream has nothing to overlap with.
                 shared.waited_micros.fetch_add(encode_micros, Ordering::Relaxed);
-                if keyframe {
-                    shared.keyframes.fetch_add(1, Ordering::Relaxed);
-                    shared.keyframe_bytes.fetch_add(bytes, Ordering::Relaxed);
+                let mut gone = false;
+                for unit in units {
+                    let bytes = unit.data.len() as u64;
+                    shared.units.fetch_add(1, Ordering::Relaxed);
+                    shared.encoded_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    if unit.keyframe {
+                        shared.keyframes.fetch_add(1, Ordering::Relaxed);
+                        shared.keyframe_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    }
+                    debug!(
+                        "{engine}: stream {} {} {}x{} at ({},{}): {bytes} bytes",
+                        unit.stream,
+                        if unit.keyframe { "keyframe" } else { "frame" },
+                        unit.w,
+                        unit.h,
+                        unit.x,
+                        unit.y
+                    );
+                    if frame_tx.send(ServerMsg::Video(unit)).await.is_err() {
+                        gone = true;
+                        break;
+                    }
                 }
-                debug!(
-                    "{engine}: {} {}x{}: {bytes} bytes",
-                    if keyframe { "keyframe" } else { "frame" },
-                    tile.w,
-                    tile.h
-                );
-                ServerMsg::Tile(tile)
+                if gone {
+                    break; // browser gone; the engine learns it from its own next push
+                }
+                continue;
             }
             Pending::Tile(handle) => {
                 let started = Instant::now();
@@ -1360,28 +1565,28 @@ fn micros(since: Instant) -> u64 {
 ///   it saves in motion shows up here as a `cleanup` byte count rivalling the
 ///   saving — and both are already inside `tiles` and `bytes`, which stay the
 ///   totals for the link.
-/// - `keyframe` and `coarsened` are the same job for the video transport, and the
-///   same warning applies to reading either alone. A keyframe count rivalling `tiles`
-///   means the stream is getting no inter-frame compression at all, which is the
-///   entire claim video makes; subtracting the keyframe bytes from `bytes` gives the
-///   average delta, which is the number that says whether it is winning. `coarsened`
-///   is how many frames went out below the configured quality because the link could
-///   not carry it, with the worst quantizer it reached — zero there means the dial
-///   was the only thing deciding, and the measurement is clean.
+/// - `unit`, `keyframe` and `coarsened` are the same job for the streams, and the
+///   same warning applies to reading any of them alone. A keyframe count rivalling
+///   `unit` means the streams are getting no inter-frame compression at all, which is
+///   the entire claim they make; subtracting the keyframe bytes from `bytes` gives the
+///   average delta, which is the number that says whether they are winning.
+///   `coarsened` is how many rounds went out below the configured quality because the
+///   link could not carry it, with the worst quantizer reached — zero there means the
+///   dial was the only thing deciding, and the measurement is clean.
 /// - `skipped` must be zero. It counts frames the encoder produced no bitstream for,
 ///   whose pixels are carried by the next frame instead. Non-zero means a hazard that
 ///   is supposed to be unreachable is not.
 ///
-/// One caveat on comparing a video session with a still one: under video `tiles`
-/// counts *frames*, one per remote frame rather than one per band, so bytes-per-tile
-/// is not comparable across the two. `bytes` is, and it is the comparison that
-/// matters.
+/// `tiles` counts still tiles and `unit` counts access units, so both are comparable
+/// across every dial: a `motion` session's tiles are the same kind of thing as a
+/// `motion` + `h264` session's, and only `bytes` compares the two transports.
 struct Totals {
     tiles: u64,
     encoded_bytes: u64,
     motion_tiles: u64,
     cleanups: u64,
     cleanup_bytes: u64,
+    units: u64,
     keyframes: u64,
     keyframe_bytes: u64,
     skipped: u64,
@@ -1402,6 +1607,7 @@ impl Totals {
             motion_tiles: shared.motion_tiles.load(Ordering::Relaxed),
             cleanups: shared.cleanups.load(Ordering::Relaxed),
             cleanup_bytes: shared.cleanup_bytes.load(Ordering::Relaxed),
+            units: shared.units.load(Ordering::Relaxed),
             keyframes: shared.keyframes.load(Ordering::Relaxed),
             keyframe_bytes: shared.keyframe_bytes.load(Ordering::Relaxed),
             skipped: shared.skipped.load(Ordering::Relaxed),
@@ -1419,13 +1625,15 @@ impl fmt::Display for Totals {
         write!(
             f,
             "{} tile(s) / {} bytes ({} in motion, {} cleanup / {} bytes), \
-             {} keyframe(s) / {} bytes, {} skipped, {} frame(s) coarsened (worst qp {}), \
+             {} access unit(s), {} keyframe(s) / {} bytes, {} skipped, \
+             {} round(s) coarsened (worst qp {}), \
              {}µs encoding across workers in {}µs of waiting, engine stalled {}µs",
             self.tiles,
             self.encoded_bytes,
             self.motion_tiles,
             self.cleanups,
             self.cleanup_bytes,
+            self.units,
             self.keyframes,
             self.keyframe_bytes,
             self.skipped,
@@ -1444,7 +1652,7 @@ mod tests {
     use crate::protocol::UNSCALED;
 
     fn plan(base: TileCodec, motion: Option<TileCodec>) -> RenderPlan {
-        RenderPlan::Tiles { base, motion, debug: false }
+        RenderPlan::Tiles { base, motion: motion.map(MotionEncode::Tile), debug: false }
     }
 
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
@@ -1626,13 +1834,13 @@ mod tests {
 
     const MOTION: RenderPlan = RenderPlan::Tiles {
         base: TileCodec::Png,
-        motion: Some(TileCodec::Jpeg(10)),
+        motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
         debug: false,
     };
 
     const MOTION_DEBUG: RenderPlan = RenderPlan::Tiles {
         base: TileCodec::Png,
-        motion: Some(TileCodec::Jpeg(10)),
+        motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
         debug: true,
     };
 
@@ -2254,10 +2462,10 @@ mod tests {
         sink.flush().await;
 
         let out = drain(&mut frame_rx, 1).await;
-        let ServerMsg::Tile(tile) = &out[0] else {
+        let ServerMsg::Video(unit) = &out[0] else {
             panic!("expected an access unit");
         };
-        assert_eq!(tile.format, Tile::FORMAT_H264);
+        assert_eq!(unit.stream, 0, "one desktop, one stream");
         assert!(frame_rx.try_recv().is_err(), "three rectangles produced more than one frame");
     }
 
@@ -2274,10 +2482,10 @@ mod tests {
         sink.flush().await;
 
         let out = drain(&mut frame_rx, 1).await;
-        let ServerMsg::Tile(tile) = &out[0] else {
+        let ServerMsg::Video(unit) = &out[0] else {
             panic!("expected an access unit");
         };
-        assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 1919, 1079));
+        assert_eq!((unit.x, unit.y, unit.w, unit.h), (0, 0, 1919, 1079));
     }
 
     /// RDP's loop turns once per PDU and most redraw nothing, so a frame boundary
@@ -2382,7 +2590,7 @@ mod tests {
         sink.flush().await;
 
         let out = drain(&mut frame_rx, 1).await;
-        assert!(matches!(out[0], ServerMsg::Tile(_)), "the repaint waited out the interval");
+        assert!(matches!(out[0], ServerMsg::Video(_)), "the repaint waited out the interval");
         assert_eq!(
             sink.shared.keyframes.load(Ordering::Relaxed),
             before + 1,
@@ -2431,10 +2639,10 @@ mod tests {
 
         let out = drain(&mut frame_rx, 2).await;
         assert!(matches!(out[0], ServerMsg::Resize { w: 640, .. }), "the resize lost its place");
-        let ServerMsg::Tile(tile) = &out[1] else {
+        let ServerMsg::Video(unit) = &out[1] else {
             panic!("expected an access unit after the resize");
         };
-        assert_eq!((tile.w, tile.h), (640, 480), "the stream kept the old picture size");
+        assert_eq!((unit.w, unit.h), (640, 480), "the stream kept the old picture size");
     }
 
     /// Where a desktop the encoder cannot handle has to surface. Learning the size
@@ -2456,6 +2664,153 @@ mod tests {
             .await
             .expect_err("a 5K desktop was accepted");
         assert!(format!("{refused:#}").contains("3840"), "{refused:#}");
+    }
+
+    // ---- a stream per moving region -----------------------------------------
+
+    const MOTION_STREAM: RenderPlan = RenderPlan::Tiles {
+        base: TileCodec::Png,
+        motion: Some(MotionEncode::Stream { quality: 60 }),
+        debug: false,
+    };
+
+    /// A sink whose moving encode is a stream, told how big the desktop is.
+    async fn stream_sink(w: u16, h: u16) -> (TileSink, mpsc::Receiver<ServerMsg>) {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = TileSink::new("test", frame_tx, MOTION_STREAM);
+        sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
+        sink.flush().await;
+        assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
+        (sink, frame_rx)
+    }
+
+    /// A flat colour, so which send a pixel came from is readable a byte at a time.
+    fn flat(w: u16, h: u16, v: u8) -> Vec<u8> {
+        vec![v; usize::from(w) * usize::from(h) * 3]
+    }
+
+    /// Damage `area` slot by slot, with the frame boundaries an engine would produce,
+    /// until a stream is carrying it. Requires a paused clock.
+    ///
+    /// It takes a while by construction: `CHURN_MOVING` slots before the cells count
+    /// as moving, and `RETUNE` before geometry may change again.
+    async fn until_streamed(sink: &TileSink, area: Rect, colour: u8) {
+        for _ in 0..40 {
+            sink.damage(&all_of(area), |piece| flat(piece.w(), piece.h(), colour))
+                .await
+                .unwrap();
+            sink.frame().await.unwrap();
+            tokio::time::advance(CHURN_SLOT).await;
+            if sink.shared.video.lock().await.regions.covers(area.cell_key()) {
+                return;
+            }
+        }
+        panic!("a region that changed every slot never got a stream");
+    }
+
+    /// The claim the whole strategy makes: what moves goes out as a stream, and the
+    /// cells beside it are not touched. A cell a stream carries must not *also* be
+    /// sent as a tile — that is a second delivery of pixels the stream has not paid
+    /// for, and it is what would discharge a debt nothing had settled.
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_a_stream_carries_is_not_also_sent_as_a_tile() {
+        let (sink, mut frame_rx) = stream_sink(640, 128).await;
+        let moving = rect(0, 0, 320, 64);
+        until_streamed(&sink, moving, 40).await;
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        sink.damage(&all_of(moving), |piece| flat(piece.w(), piece.h(), 90)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 1).await;
+        let ServerMsg::Video(unit) = &out[0] else {
+            panic!("expected an access unit, got {:?}", out[0]);
+        };
+        assert_eq!((unit.x, unit.y, unit.w, unit.h), (0, 0, 320, 64));
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "a streamed cell was sent as a tile as well as in its stream"
+        );
+    }
+
+    /// And the other half: a quiet cell beside a streamed one is still crisp, and a
+    /// band with nothing streamed in it still goes out whole. This is what the
+    /// strategy is *for* — the text beside a video costs nothing and stays exact.
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_cell_beside_a_streamed_one_is_still_a_crisp_tile() {
+        let (sink, mut frame_rx) = stream_sink(640, 128).await;
+        let moving = rect(0, 0, 320, 64);
+        until_streamed(&sink, moving, 40).await;
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        // A band across both cells, one streamed and one not, and a band below with
+        // neither.
+        sink.damage(&all_of(rect(0, 0, 640, 64)), |piece| flat(piece.w(), piece.h(), 90))
+            .await
+            .unwrap();
+        sink.damage(&all_of(rect(0, 64, 640, 64)), |piece| flat(piece.w(), piece.h(), 91))
+            .await
+            .unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 3).await;
+        let tiles: Vec<(u16, u16, u16, u16)> = out
+            .iter()
+            .filter_map(|msg| match msg {
+                ServerMsg::Tile(tile) => Some((tile.x, tile.y, tile.w, tile.h)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tiles,
+            vec![(320, 0, 320, 64), (0, 64, 640, 64)],
+            "the split band should send only its quiet cell, and the quiet band whole"
+        );
+        assert!(
+            out.iter().any(|msg| matches!(msg, ServerMsg::Video(_))),
+            "the streamed cell was not carried at all"
+        );
+    }
+
+    /// The answer to what happens when a region stops moving while its stream is
+    /// still the truth on screen — and the reason the debt holds no pixels.
+    ///
+    /// The stream ends, the cells come due, and the cleanup is cropped from the
+    /// mirror, which holds the *newest* source. The still path has to remember the
+    /// pixels it approximated and can therefore restore a frame that has been
+    /// overtaken; here that is not expressible.
+    #[tokio::test(start_paused = true)]
+    async fn a_settled_region_is_restored_from_the_newest_pixels_in_the_mirror() {
+        let (sink, mut frame_rx) = stream_sink(640, 128).await;
+        let moving = rect(0, 0, 320, 64);
+        until_streamed(&sink, moving, 40).await;
+
+        // The last thing the stream carried, and the only thing a cleanup may restore.
+        sink.damage(&all_of(moving), |piece| flat(piece.w(), piece.h(), 200)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        while frame_rx.try_recv().is_ok() {}
+
+        // Nothing more happens: no damage, so no frame boundary either. The cleanup
+        // timer is the only thing running, which is the case it exists for.
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 1).await;
+        let ServerMsg::Tile(tile) = &out[0] else {
+            panic!("the settled region was never restored: {:?}", out[0]);
+        };
+        assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, 320, 64));
+        assert_eq!(tile.format, Tile::FORMAT_PNG, "a cleanup is the base encode");
+        let newest = Tile::from_rgb(0, 0, 320, 64, &flat(320, 64, 200)).unwrap();
+        assert_eq!(tile.data, newest.data, "the cleanup restored a frame that was overtaken");
     }
 
     // ---- congestion ---------------------------------------------------------

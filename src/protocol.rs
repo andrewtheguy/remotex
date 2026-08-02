@@ -1,6 +1,7 @@
-//! Client wire types: tagged JSON for control and input, binary batches for
-//! PNG/JPEG tiles and Opus audio. WebSocket ordering is required because resize
-//! messages change the coordinate space of following tiles.
+//! Client wire types: tagged JSON for control and input, binary batches for still
+//! tiles and H.264 access units, and binary frames for Opus audio. WebSocket
+//! ordering is required because resize messages change the coordinate space of
+//! following tiles — and because an access unit means nothing out of sequence.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// viewer requires an exact match. Bump it when an older peer would otherwise
 /// fail without a useful compatibility error; clients ignore additive control
 /// tags they do not know.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -254,6 +255,7 @@ pub enum ClientMsg {
 ///
 /// 0x01 TILE      u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
 /// 0x02 TILE_REF  u16 slot | u16 x | u16 y
+/// 0x03 VIDEO     u8 stream | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
 /// ```
 ///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
@@ -263,11 +265,22 @@ pub mod batch {
 
     pub const OP_TILE: u8 = 0x01;
     pub const OP_TILE_REF: u8 = 0x02;
+    pub const OP_VIDEO: u8 = 0x03;
 
     /// Bytes a `TILE` record costs besides its payload.
     pub const TILE_HEADER_LEN: usize = 16;
     /// A whole `TILE_REF` record.
     pub const TILE_REF_LEN: usize = 7;
+    /// Bytes a `VIDEO` record costs besides its payload.
+    pub const VIDEO_HEADER_LEN: usize = 14;
+
+    /// The most H.264 streams one session may run at once, and so the range of a
+    /// `VIDEO` record's `stream` byte.
+    ///
+    /// A client may size a decoder table by it. The gateway's own cap on concurrent
+    /// regions is `crate::regions::MAX_STREAMS`, which is smaller; this is the wire's
+    /// bound rather than the policy's.
+    pub const MAX_STREAMS: u8 = 16;
 
     /// `slot` meaning "draw this and do not remember it".
     ///
@@ -357,8 +370,9 @@ pub const CELL_H: u16 = STRIP_ROWS;
 /// format travels with the tile instead of being a constant.
 #[derive(Debug, Clone)]
 pub struct Tile {
-    /// Payload codec: [`Tile::FORMAT_PNG`], [`Tile::FORMAT_JPEG`], [`Tile::FORMAT_WEBP`]
-    /// or [`Tile::FORMAT_H264`].
+    /// Payload codec: [`Tile::FORMAT_PNG`], [`Tile::FORMAT_JPEG`] or
+    /// [`Tile::FORMAT_WEBP`]. Every one of them is a self-contained picture; a frame
+    /// that only means something in sequence is a [`VideoUnit`] and not a tile at all.
     pub format: u8,
     pub x: u16,
     pub y: u16,
@@ -372,37 +386,6 @@ impl Tile {
     pub const FORMAT_PNG: u8 = 1;
     pub const FORMAT_JPEG: u8 = 2;
     pub const FORMAT_WEBP: u8 = 3;
-    /// One complete H.264 access unit, for a target on `render_type = "video"`.
-    ///
-    /// The odd one out, and every client has to know how: the other three formats are
-    /// self-contained pictures, and this is one link in a chain. The contract is:
-    ///
-    /// - The payload is **one whole access unit** — every NAL unit of exactly one
-    ///   frame, Annex-B, delimited by start codes. Never a partial one, never two.
-    /// - SPS and PPS accompany every keyframe, so a client can build its decoder from
-    ///   any keyframe it sees and needs nothing out of band. The stream begins with
-    ///   one, and a repaint, a resize or a client coming back produces another.
-    /// - `(x, y, w, h)` is the **true desktop rectangle**, always the whole
-    ///   framebuffer at the origin. The decoded picture may be one pixel wider and/or
-    ///   taller, because H.264 needs even sides and a desktop need not have them: a
-    ///   client draws the top-left `w`×`h` of what it decodes and ignores the rest.
-    /// - Every access unit matters and their order matters. A client that drops one
-    ///   decodes wrongly until the next keyframe, so unlike a still tile this is
-    ///   never cached into a slot, never referenced, and never superseded by a later
-    ///   record that happens to cover it — see [`crate::wire`].
-    pub const FORMAT_H264: u8 = 4;
-
-    /// Whether this tile's payload only means anything in sequence.
-    ///
-    /// True for H.264 and false for every still, and it is what [`crate::wire`] reads
-    /// before deciding whether a tile may be cached, referenced, or dropped because
-    /// something covers it. All three are sound reasoning about *pixels* — a paint
-    /// nobody could have seen, a payload identical to one already held — and all
-    /// three are wrong about a frame whose meaning is "what changed since the last
-    /// one".
-    pub fn stateful(&self) -> bool {
-        self.format == Self::FORMAT_H264
-    }
 
     /// Build a tile from packed RGB888 pixels, PNG-compressing the payload.
     pub fn from_rgb(x: u16, y: u16, w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Self> {
@@ -478,11 +461,8 @@ impl Tile {
 
     /// Wrap an already-encoded payload, for a caller that did the encoding itself.
     ///
-    /// The H.264 path takes this: [`crate::h264`] owns one stream for the whole
-    /// session and produces access units rather than pictures, so there is nothing
-    /// here for it to compress. It also remains the pass-through for a source that
-    /// hands over frames already encoded, so the gateway never decodes and
-    /// re-encodes a pixel.
+    /// The pass-through for a source that hands over frames already encoded, so the
+    /// gateway never decodes and re-encodes a pixel.
     pub fn encoded(format: u8, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> Self {
         Self {
             format,
@@ -526,6 +506,74 @@ pub fn write_tile_ref(slot: u16, x: u16, y: u16, out: &mut Vec<u8>) {
     out.extend_from_slice(&slot.to_le_bytes());
     out.extend_from_slice(&x.to_le_bytes());
     out.extend_from_slice(&y.to_le_bytes());
+}
+
+/// One H.264 access unit for one region of the framebuffer, carried as a `VIDEO`
+/// record inside a [`batch`] frame.
+///
+/// A record of its own rather than a fourth [`Tile`] format, because it is not the
+/// same kind of thing. A tile is a self-contained picture: independent, reorderable,
+/// cacheable, and droppable once something covers it. This is one link in a chain,
+/// where losing any link decodes wrongly until the next keyframe. Making it a
+/// different record is what keeps [`crate::wire`]'s cache and coverage rules from
+/// ever having to ask whether they apply.
+///
+/// The contract every client implements:
+///
+/// - The payload is **one whole access unit** — every NAL unit of exactly one frame,
+///   Annex-B, delimited by start codes. Never a partial one, never two.
+/// - SPS and PPS accompany every keyframe, so a client can build its decoder from any
+///   keyframe it sees and needs nothing out of band. A stream begins with one, and a
+///   repaint, a resize, a client coming back or a region that grew produces another.
+/// - `stream` names which decoder this belongs to. A session may run several at once
+///   — one per moving region under `render_motion_subtype = "h264"`, exactly one
+///   under `render_type = "video"` — and ids are reused as regions come and go, so a
+///   record whose `(w, h)` differs from the last one on the same id means that
+///   decoder is starting over on a differently sized picture.
+/// - `(x, y, w, h)` is the **true region rectangle**, in framebuffer pixels. The
+///   decoded picture may be one pixel wider and/or taller, because H.264 needs even
+///   sides and a region at the edge of an odd desktop does not have them: a client
+///   draws the top-left `w`×`h` of what it decodes, at `(x, y)`, and ignores the rest.
+/// - Every access unit matters and their order matters — including their order
+///   against the tiles around them, since a still tile covering the same pixels is
+///   how a settled region is restored to full quality.
+#[derive(Debug, Clone)]
+pub struct VideoUnit {
+    /// Which of this session's streams, `0..batch::MAX_STREAMS`.
+    pub stream: u8,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    /// Whether a decoder that has seen nothing before this can start here. Not on the
+    /// wire: a client reads it out of the bitstream, and the gateway keeps it for the
+    /// totals, where keyframe bytes against total bytes is the whole measurement of
+    /// whether a stream is winning.
+    pub keyframe: bool,
+    /// The Annex-B access unit.
+    pub data: Vec<u8>,
+}
+
+impl VideoUnit {
+    /// What this unit will cost inside a batch, payload included.
+    pub fn record_len(&self) -> usize {
+        batch::VIDEO_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this unit as a `VIDEO` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_VIDEO);
+        out.push(self.stream);
+        out.extend_from_slice(&self.x.to_le_bytes());
+        out.extend_from_slice(&self.y.to_le_bytes());
+        out.extend_from_slice(&self.w.to_le_bytes());
+        out.extend_from_slice(&self.h.to_le_bytes());
+        // u32 for the same reason a tile's length is: a keyframe of a 4K desktop runs
+        // to hundreds of kilobytes, and a length field that cannot describe the
+        // payload is not a saving.
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
 }
 
 /// The remote pointer shape, for engines whose server does **not** composite
@@ -657,6 +705,10 @@ pub struct DisplayInfo {
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
     Tile(Tile),
+    /// One H.264 access unit for one region. Like a tile this has no text encoding
+    /// and is not a control message: it is a binary record, and [`crate::wire`] is
+    /// what puts it in a batch — in its place among the tiles, which is load-bearing.
+    Video(VideoUnit),
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -818,7 +870,7 @@ impl ServerMsg {
     /// type-level fact is what stops a future caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Tile(_) | ServerMsg::Audio(_) => return None,
+            ServerMsg::Tile(_) | ServerMsg::Video(_) | ServerMsg::Audio(_) => return None,
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,

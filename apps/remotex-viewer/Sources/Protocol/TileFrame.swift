@@ -7,6 +7,9 @@ import Foundation
 /// path (WebP since macOS 11, and the app's minimum is 15). `Tile::FORMAT_PNG`,
 /// `Tile::FORMAT_JPEG`, `Tile::FORMAT_WEBP` in `src/protocol.rs`.
 ///
+/// Every one of them is a self-contained picture. A frame that only means something
+/// in sequence is a `VIDEO` record and not a tile at all — see `BatchFrame.Record`.
+///
 /// A byte outside these cases makes `BatchFrame.decode` fail — a refusal — rather
 /// than handing bytes to a decoder that will mangle them. The version check in
 /// `GatewayClient` is what catches a codec change *first* and legibly; this is the
@@ -15,18 +18,6 @@ enum TileFormat: UInt8, Sendable, Equatable {
     case png = 1
     case jpeg = 2
     case webp = 3
-    /// One H.264 access unit, from a target on `render_type = "video"`.
-    ///
-    /// **This viewer cannot decode it.** It is a case here anyway, and that is the
-    /// whole point of it: an unrecognised format byte makes `BatchFrame.decode`
-    /// return nil, and the caller drops the *entire batch* — so without this a video
-    /// target would show a frozen desktop and say nothing about why. Recognising it
-    /// is what lets `GatewayConnection` refuse the session by name instead.
-    ///
-    /// Decoding it is planned; see docs/roadmap.md, which records what it would take
-    /// (VideoToolbox, and a checked-in fixture because macOS cannot encode H.264
-    /// through ImageIO). The browser decodes it today.
-    case h264 = 4
 }
 
 /// One dirty rectangle of the framebuffer, as one `TILE` record inside a batch
@@ -60,6 +51,8 @@ struct TileFrame: Sendable, Equatable {
 /// TILE (op 0x01):     u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 ///                     | u32 len | payload[len]
 /// TILE_REF (op 0x02): u16 slot | u16 x | u16 y
+/// VIDEO (op 0x03):    u8 stream | u16 x | u16 y | u16 w | u16 h
+///                     | u32 len | payload[len]
 /// ```
 ///
 /// One frame carries however many tiles were ready at once, which is what a full
@@ -70,8 +63,10 @@ enum BatchFrame {
     static let headerLength = 4
     static let opTile: UInt8 = 0x01
     static let opTileRef: UInt8 = 0x02
+    static let opVideo: UInt8 = 0x03
     static let tileHeaderLength = 16
     static let tileRefLength = 7
+    static let videoHeaderLength = 14
     /// `slot` meaning "draw this and do not remember it".
     static let noSlot: UInt16 = 0xFFFF
     /// How many tiles this client keeps. Part of the wire contract
@@ -79,12 +74,34 @@ enum BatchFrame {
     /// than a reason to grow an array, which keeps this client's memory a function
     /// of the protocol instead of of what a gateway chooses to send.
     static let slotCount: UInt16 = 256
+    /// How many H.264 streams one session may run at once (`batch::MAX_STREAMS`).
+    /// The same kind of bound as `slotCount`, and read the same way: a stream id at
+    /// or above it is a malformed record. The gateway's own cap on concurrent
+    /// regions is smaller.
+    static let maxStreams: UInt8 = 16
 
-    /// One record of a batch: pixels to draw and keep, or a position to redraw
-    /// something already kept at.
+    /// One record of a batch: pixels to draw and keep, a position to redraw
+    /// something already kept at, or one H.264 access unit for one region.
+    ///
+    /// Nothing in this process paints any of them — the app draws through the shared
+    /// canvas page in a `WKWebView`, which has its own parser. What reads these is
+    /// `--probe`, and it has to know every record the gateway can send: a batch it
+    /// cannot parse is reported as malformed, which would make a legal session look
+    /// like a broken one.
     enum Record: Sendable, Equatable {
         case tile(TileFrame)
         case reference(slot: UInt16, x: UInt16, y: UInt16)
+        /// `VideoUnit` in `src/protocol.rs`. `stream` names which of the session's
+        /// decoders it belongs to; `(x, y, w, h)` is the true region rectangle, which
+        /// the decoded picture may exceed by a pixel on either axis.
+        case video(
+            stream: UInt8,
+            x: UInt16,
+            y: UInt16,
+            w: UInt16,
+            h: UInt16,
+            payload: Data
+        )
     }
 
     /// Parse a binary frame into its tile records, or nil for anything malformed
@@ -115,10 +132,13 @@ enum BatchFrame {
             records.reserveCapacity(count)
             var at = headerLength
             while at < raw.count {
-                guard let parsed = raw[at] == opTileRef
-                    ? reference(raw, at)
-                    : tile(raw, at)
-                else {
+                let read: (record: Record, next: Int)?
+                switch raw[at] {
+                case opTileRef: read = reference(raw, at)
+                case opVideo: read = video(raw, at)
+                default: read = tile(raw, at)
+                }
+                guard let parsed = read else {
                     return nil
                 }
                 records.append(parsed.record)
@@ -182,6 +202,37 @@ enum BatchFrame {
                     // came out of the middle of a larger buffer.
                     payload: Data(raw[start..<(start + length)])
                 )
+            ),
+            start + length
+        )
+    }
+
+    private static func video(
+        _ raw: UnsafeRawBufferPointer,
+        _ at: Int
+    ) -> (record: Record, next: Int)? {
+        guard at + videoHeaderLength <= raw.count else {
+            return nil
+        }
+        let stream = raw[at + 1]
+        guard stream < maxStreams else {
+            return nil
+        }
+        let length = Int(
+            UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: at + 10, as: UInt32.self))
+        )
+        let start = at + videoHeaderLength
+        guard start + length <= raw.count else {
+            return nil
+        }
+        return (
+            .video(
+                stream: stream,
+                x: u16(raw, at + 2),
+                y: u16(raw, at + 4),
+                w: u16(raw, at + 6),
+                h: u16(raw, at + 8),
+                payload: Data(raw[start..<(start + length)])
             ),
             start + length
         )

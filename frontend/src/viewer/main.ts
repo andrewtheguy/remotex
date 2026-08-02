@@ -44,13 +44,11 @@ let inputEnabled = false;
 
 const painter = createTilePainter({
   context: () => context,
-  size: () => size,
   onCacheReset: () => postToApp({ type: "cacheReset" }),
   // Reported when it happens rather than checked at startup, unlike the audio
-  // decoder: a target on `render_type = "video"` is the only one this can go
-  // wrong for, and most are not. The app turns it into an error the user sees,
-  // because a video target sends no stills — nothing paints, and the window
-  // would otherwise just stay black.
+  // decoder: only a target that streams can hit this, and most do not. The app
+  // turns it into an error the user sees, because a video target sends no
+  // stills — nothing paints, and the window would otherwise just stay black.
   onVideoError: (error) => postToApp({ type: "videoState", error }),
 });
 

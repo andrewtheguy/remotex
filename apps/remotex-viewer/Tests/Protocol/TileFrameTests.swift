@@ -100,34 +100,70 @@ struct TileFrameTests {
 
     @Test
     func anUnknownRecordOpIsRejected() {
-        for op: UInt8 in [0x00, 0x02, 0xFF] {
+        for op: UInt8 in [0x00, 0x02, 0x04, 0xFF] {
             #expect(BatchFrame.decode(batch(tile(op: op, w: 8, h: 8))) == nil)
         }
     }
 
-    /// Only 1 (PNG), 2 (JPEG), 3 (WebP) and 4 (H.264) are formats this build knows;
-    /// any other byte is a gateway this build cannot render. Rejecting the frame is
-    /// the intended outcome — `GatewayClient`'s `protocolVersion` check turns that
-    /// into a legible refusal before a session even opens.
+    /// Only 1 (PNG), 2 (JPEG) and 3 (WebP) are formats this build knows; any other
+    /// byte is a gateway this build cannot render. Rejecting the frame is the
+    /// intended outcome — `GatewayClient`'s `protocolVersion` check turns that into a
+    /// legible refusal before a session even opens. 4 is in the list deliberately: it
+    /// was the H.264 format byte before access units became a record of their own.
     @Test
     func anUnknownFormatIsRejected() {
-        for format: UInt8 in [0x00, 0x05, 0x06, 0xFF] {
+        for format: UInt8 in [0x00, 0x04, 0x05, 0x06, 0xFF] {
             #expect(BatchFrame.decode(batch(tile(format: format, w: 8, h: 8))) == nil)
         }
     }
 
-    /// A video target's access units arrive as ordinary tile records. Nothing in
-    /// this process draws them — the canvas page does — but `--probe` reads batches
-    /// here, and an unrecognised format byte fails the *whole batch*, so without
-    /// this the diagnostic that exists to say what a target sends would report
-    /// nothing at all for the one target whose framing is worth checking.
+    /// Access units arrive as `VIDEO` records beside the tiles. Nothing in this
+    /// process draws them — the canvas page does — but `--probe` reads batches here,
+    /// and an unrecognised record fails the *whole batch*, so without this the
+    /// diagnostic that exists to say what a target sends would report nothing at all
+    /// for the targets whose framing is worth checking.
     @Test
-    func anH264RecordParses() throws {
-        let frame = batch(tile(format: TileFormat.h264.rawValue, w: 8, h: 8, payload: [0x01]))
+    func aVideoRecordParsesBesideTheTiles() throws {
+        let frame = batch(
+            tile(w: 8, h: 8, payload: [0x01]),
+            video(stream: 1, x: 320, y: 64, w: 640, h: 128, payload: [0x02, 0x03])
+        )
         let records = try #require(BatchFrame.decode(frame))
-        #expect(records.count == 1, "a batch carrying an access unit was dropped whole")
-        let tiles = try #require(tileRecords(frame))
-        #expect(tiles[0].format == .h264)
+        #expect(records.count == 2, "a batch carrying an access unit was dropped whole")
+        #expect(
+            records[1]
+                == .video(
+                    stream: 1,
+                    x: 320,
+                    y: 64,
+                    w: 640,
+                    h: 128,
+                    payload: Data([0x02, 0x03])
+                )
+        )
+    }
+
+    /// The same bound the slot table has, for the same reason: what a client may be
+    /// asked to hold is a function of the protocol, not of what a gateway sends.
+    @Test
+    func aStreamIdTheWireDoesNotAllowIsRejected() {
+        let frame = batch(video(stream: 16, x: 0, y: 0, w: 8, h: 8, payload: [0x01]))
+        #expect(BatchFrame.decode(frame) == nil)
+        let legal = batch(video(stream: 15, x: 0, y: 0, w: 8, h: 8, payload: [0x01]))
+        #expect(BatchFrame.decode(legal)?.count == 1, "the last legal id was refused")
+    }
+
+    /// Half an access unit is not a smaller one: it has to fail the batch, exactly
+    /// as a truncated tile does.
+    @Test
+    func aTruncatedVideoRecordIsRejected() {
+        let whole = batch(video(stream: 0, x: 0, y: 0, w: 8, h: 8, payload: [1, 2, 3, 4]))
+        for cut in 1 ..< whole.count {
+            #expect(
+                BatchFrame.decode(whole.prefix(cut)) == nil,
+                "a frame cut at \(cut) of \(whole.count) bytes must not decode"
+            )
+        }
     }
 
     /// The other side of that gate: 2 (JPEG) and 3 (WebP) are codecs this build
@@ -268,6 +304,29 @@ struct TileFrameTests {
             data.append(UInt8(value & 0xFF))
             data.append(UInt8(value >> 8))
         }
+        return data
+    }
+
+    /// One `VIDEO` record, as bytes.
+    private func video(
+        op: UInt8 = BatchFrame.opVideo,
+        stream: UInt8,
+        x: UInt16,
+        y: UInt16,
+        w: UInt16,
+        h: UInt16,
+        payload: [UInt8]
+    ) -> Data {
+        var data = Data([op, stream])
+        for value in [x, y, w, h] {
+            data.append(UInt8(value & 0xFF))
+            data.append(UInt8(value >> 8))
+        }
+        let length = UInt32(payload.count)
+        for shift in [0, 8, 16, 24] {
+            data.append(UInt8((length >> shift) & 0xFF))
+        }
+        data.append(contentsOf: payload)
         return data
     }
 

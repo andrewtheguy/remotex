@@ -8,39 +8,43 @@ is the only place they can be read in context.
 
 ## Planned
 
-### Render dial — video per moving region
+### Render dial — what the region streams do not decide yet
 
-The per-target render dial ships four strategies, described in
-[architecture.md](architecture.md#the-render-dial): `full`, `fixed-quality`,
-`motion`, and `video`.
+`render_motion_subtype = "h264"` ships: the `motion` detection chooses the regions,
+an H.264 stream carries each one, and the still codecs carry everything else. Three
+of its numbers are policy that was chosen to be legible rather than measured, and the
+measurements are what should settle them:
 
-**`video` sends the whole desktop as one H.264 stream**, which is the simple shape
-and the one built first, deliberately: it makes what the codec actually costs on
-real screens measurable before anything is built on top of it. What remains planned
-is the thing the `motion` detection was built for — **a stream per coalesced moving
-region**, with the still codecs carrying everything else, so a video in a window
-costs its own pixels and the text beside it stays exact.
+- **`MAX_STREAMS` is four**, and the merge that keeps the count under it is judged by
+  one ratio (`MERGE_WASTE`). A desktop with five genuinely independent moving regions
+  is not obviously a desktop where merging beats dropping the smallest to stills.
+- **`RETUNE` and `STREAM_IDLE` are both 500 ms**, and a retune costs a keyframe only
+  when the region it wants no longer fits inside the rectangle its stream already
+  has. Shrinking is free and so is any change of shape that stays inside it; what
+  pays is growing, and a region that ended and came back. One measurement exists —
+  25 s of a pointer swept in a circle on a 1280×800 RDP desktop, which grows and
+  moves the wanted rectangle about as often as anything real would: 12 keyframes
+  costing 38 KB of the 140 KB the streams sent, so **27% of the stream went on
+  rectangles that had to be replaced**. Whether a longer `RETUNE`, or a rectangle
+  deliberately grown past what is moving, recovers that is the question, and it wants
+  more than one kind of content behind it.
+- **A component's own bounding box is not checked against `MERGE_WASTE`.** Only
+  merges are. A single diagonal streak of moving cells therefore streams a box mostly
+  full of still ones — safe, since every cell inside is owed a cleanup, but wasteful
+  if it turns out to be common.
 
-That is not a smaller version of `video`; it is the open question `video` exists to
-inform. A 320×64 cell is a poor unit for a video encoder, so the shape is a coalesced
-region rather than a stream per cell — and then the hard parts are which regions to
-coalesce, when a region's stream starts and ends, and what happens to a region that
-stops moving while its stream is still the truth on screen. `motion`'s cleanup pass
-answers that last one for stills by re-sending the settled cell at the base encode;
-a stream has no equivalent yet. Deliberately not designed further until `video`'s
-measurements say what a stream costs.
-
-`h264` is not a `MotionSubtype` variant and the config refuses it by name, which is
-now a statement about this rather than about the codec: the motion axis hands out a
-cheaper encode *per cell*, and a stream has no per-cell dial to turn down.
+None of these is worth changing on argument. They want the same treatment `video`
+got: a measurement first.
 
 ### Raising quality above the dial
 
-`video`'s congestion loop can notice a backlog but never find headroom: it walks the
-quantizer up when the outbound queue says the link is behind and back down to the
-configured quality when it is not, and never past it. That is sound where it is used
-— exceeding the operator's setting was never a goal — but it means a link with room
-to spare is never discovered.
+The congestion loop both streaming dials share can notice a backlog but never find
+headroom: it walks the quantizer up when the outbound queue says the link is behind
+and back down to the configured quality when it is not, and never past it. Under
+`render_motion_subtype = "h264"` it is blunter still, because that target's outbound
+queue is sized for its still tiles and so absorbs a backlog before the signal
+appears. Both are sound where they are used — exceeding the operator's setting was
+never a goal — but it means a link with room to spare is never discovered.
 
 Going further needs the receiver's view, which TCP hides: loss and jitter are behind
 retransmission, and the only thing the sending side can observe is how fast its own

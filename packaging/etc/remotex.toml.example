@@ -258,6 +258,30 @@ password = "change-me"
 #render_quality = 60
 #render_motion_quality = 10
 
+# render_motion_subtype = "h264" is the third thing the motion axis can be, and the
+# only one that is not a still: the cells in motion are coalesced into regions and
+# each region gets its own H.264 stream, while the base codec carries everything
+# else. A video in a window costs its own pixels; the text beside it stays exactly
+# what render_subtype says, and is never re-encoded at all.
+#
+# It is never a default — "jpeg" and "webp" fall back to the base codec, this one has
+# to be written out — because it is not a cheaper version of the base but a different
+# transport beside it. render_motion_quality is its dial, and there it is a *ceiling*:
+# on a link that can carry it you get that quality, and a link that cannot makes the
+# picture coarser until it can. Nothing goes finer than what is set here.
+#
+# A region that stops moving ends its stream and is re-sent once at the base encode,
+# so a paused video sharpens by itself — the same promise the still motion encodes
+# make, from the same cleanup pass.
+#
+# The secure-context note under "video" below applies here too: the access units are
+# decoded with WebCodecs either way. The difference is what a browser that cannot
+# decode them is left with — a desktop with a blank rectangle where the video is,
+# rather than no desktop at all.
+#render_type = "motion"
+#render_motion_subtype = "h264"
+#render_motion_quality = 30
+
 # render_type = "video" is not a fourth codec, it is a different transport: the whole
 # desktop as one H.264 stream instead of one encoded image per changed region. Every
 # frame says what changed since the one before it, so nothing is cut into per-region
@@ -288,8 +312,11 @@ password = "change-me"
 # in the pixels themselves, so which cells it put in motion is something you read
 # off the screen rather than infer from how blurry a region looks.
 #
-#   magenta — sent at the motion encode. Magenta over something that is not moving
-#             is the detection reaching further than the movement.
+#   magenta — sent at the motion encode. Under render_motion_subtype = "h264" it is
+#             the outline of a streamed region, drawn on the picture the encoder
+#             sees rather than on the pixels a cleanup restores. Magenta over
+#             something that is not moving is the detection reaching further than
+#             the movement.
 #   cyan    — sent at the base encode from inside a split region: a quiet cell
 #             beside a moving one, and so the edge of the split.
 #   green   — a cleanup: a settled cell restored to the base encode.

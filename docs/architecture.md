@@ -46,6 +46,7 @@ queue.
 | `rdp.rs` | RDP connection, framebuffer, input, clipboard, audio, resize |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
+| `regions.rs`, `h264.rs` | which regions get an H.264 stream, and the encoder behind them |
 | `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding, MS-RDPEA |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -74,29 +75,36 @@ combinations that exist are:
 | `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
 | `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
 | `motion` | `jpeg` / `webp` | base at `render_quality`; cells in motion cheaper still |
+| `motion` + `render_motion_subtype = "h264"` | `png` / `jpeg` / `webp` | base as above; an H.264 stream per coalesced moving region at `render_motion_quality` |
 | `video` | *(refused)* | the whole desktop as one H.264 stream at `render_quality` |
 
 `video` is the one row where `render_subtype` is empty, and that is what it is
-saying: the first four rows all send **one encoded image per changed region**, and
-it does not send regions at all. There is no per-tile codec left to name.
+saying: it sends no per-region streams and no tiles at all — one fixed region, the
+whole desktop, for the whole session — so there is no per-tile codec left to name.
+The `h264` motion row still has one, because the base encode is still a still image:
+only what is moving becomes a stream.
 
 No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
 honest trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewer
 bytes for the same visible result.
 
-The dial costs no wire change. A tile record's first byte is already its format
+The still dial costs no wire change. A tile record's first byte is already its format
 (`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and both clients decode all
 three through `createImageBitmap` from a MIME type — `remotex.app` draws on a web
 canvas too, so this is one implementation rather than two that could disagree
-about a format.
+about a format. What streams costs one: a `VIDEO` record, described under the
+client protocol below.
 
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
 one arm per transport — `Tiles { base, motion, debug }` and `Video { quality }` —
 rather than a struct with a flag, because the two share no code path worth sharing
-and the compiler is what stops a consumer handling only the first:
+and the compiler is what stops a consumer handling only the first. `motion` is itself
+a `MotionEncode`, `Tile(codec)` or `Stream { quality }`, for the same reason one
+level down: a cheaper still and an inter-frame stream are not two settings of one
+mechanism.
 
 ```text
 render_type / render_subtype / render_quality / render_motion_*
@@ -128,8 +136,8 @@ render_motion_subtype = "jpeg"   # moving cells: need not be the base codec
 render_motion_quality = 10       # moving cells: as cheap as it takes
 ```
 
-The moving encode has its own codec axis (`MotionSubtype`, which admits no `png`),
-not just its own quality. A settled cell is sent once and can afford WebP's slower,
+The moving encode has its own axis (`MotionSubtype`, which admits no `png` and does
+admit `h264` — see below), not just its own quality. A settled cell is sent once and can afford WebP's slower,
 smaller encode, while a moving cell is re-encoded every frame, where JPEG's faster
 encode may beat WebP's smaller output; cheapest and smallest are not the same
 question at quality 60 as at 10. `render_motion_subtype` defaults to
@@ -227,21 +235,86 @@ their damage through:
 Cleanups ride the wire as ordinary tiles; nothing about the record changed. What it
 cost is in the `encode totals` line, where `motion` and `cleanup` are read together:
 every cleanup is a tile sent twice, so a scheme paying more in re-sends than it
-saves in motion shows up as a cleanup byte count rivalling the saving. Replacing the
-moving-cell encoder with H.264 — a stream per coalesced moving region, rather than
-the whole-screen stream `video` is — is the [roadmap](roadmap.md)'s business.
+saves in motion shows up as a cleanup byte count rivalling the saving.
+
+##### `render_motion_subtype = "h264"`: a stream per moving region
+
+The third thing the motion axis can be, and the only one that is not a still. The
+detection above is unchanged — the same cell grid, the same churn window, the same
+hard switch — but what it hands the moving cells to is an inter-frame H.264 stream
+per coalesced region (`src/regions.rs`, encoding through `src/h264.rs`), with the
+base codec carrying every cell outside one. A video in a window costs its own pixels;
+the text beside it stays exactly what `render_subtype` says and is never re-encoded.
+
+`RenderPlan`'s `motion` is a `MotionEncode` rather than a codec, so the compiler is
+what makes every consumer answer which of the two it is holding.
+
+- **Which regions.** `coalesce` in `src/regions.rs` takes the cells in motion,
+  groups them into 4-connected components, and takes each component's bounding box.
+  Over `MAX_STREAMS` (4) it merges the pair whose merged box adds the fewest cells;
+  a merge that would cover more than twice the cells actually moving inside it is
+  refused, and the smallest region goes to the still codecs instead. That last rule
+  is `Changed::cells`' fault one level up: a banner ad in one corner must not put the
+  screen in a stream because a video is playing in the other.
+- **When one starts and stops.** Geometry moves at most once per `RETUNE` (500 ms).
+  A region that shrinks keeps its stream — the idle margin codes as skipped
+  macroblocks, where a restart costs an encoder and a keyframe — and one that grows
+  past its rectangle gets a new stream, because an inter-frame stream means nothing
+  if its rectangle moves. A region with nothing moving in it for `STREAM_IDLE` ends.
+  A screen that has stopped changing produces no frame boundary at all, so the
+  cleanup tick expires idle streams itself; it may only *end* them, never start one,
+  which is what keeps a cell from being delivered twice.
+- **The debt is a cell key, not a picture.** Every cell a stream covers is owed a
+  crisp re-send from the moment it is streamed, moving or not — the stream codes
+  them lossily either way and nothing else will send them. When the stream ends they
+  come due, and the cleanup crops them out of the **mirror**, which holds the exact
+  current source for every pixel. So none of the still path's staleness applies here:
+  no stash, no cap, no partial-cover patching, and no way to restore a frame that has
+  been overtaken. A crisp send discharges a cell only if it covered that cell in full.
+- **One mirror, several encoders.** `damage` blits every rectangle into the whole-
+  framebuffer mirror whether or not anything is streaming it, which is what lets a
+  stream start mid-session with correct pixels for its whole rectangle. A round takes
+  the mirror and every stream to one blocking worker: their rectangles are disjoint
+  and bounded by the desktop, so a round costs what one whole-desktop frame costs.
+- **A region is even, or the desktop's own edge is odd.** A region is a union of
+  whole grid cells and `CELL_W`/`CELL_H` are both even, so an odd side can only come
+  from the clip at the desktop's right or bottom edge — where the mirror's own
+  padding is already the column or row the encoder needs. That is why `Stream::new`
+  can assert its geometry rather than pad defensively.
+
+One measurement, so that the shape of the trade is on the record rather than assumed
+— 25 s of the same driven motion on a 1280×800 RDP desktop, release build:
+
+| dial | to the client | encode CPU |
+|---|---|---|
+| `motion` + `webp` 10 | 4.5 MB | 0.17 s |
+| `motion` + `h264` 30 | 0.70 MB | 1.39 s |
+| `video` 60 | 0.45 MB | 5.48 s |
+
+So the regions cost about a sixth of the still motion encode's bytes with the still
+parts left lossless, and a quarter of whole-desktop `video`'s CPU — because only what
+moved was coded, rather than 1280×800 every frame. What it buys over `video` is
+exactness everywhere else; what it costs is bytes.
+
+Both dials that stream share `Congestion`, one verdict for one link: the quantizer
+walks up when a round's push blocks and back down to `render_motion_quality`, never
+past it. Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
+because the same queue carries its still tiles — so `coarsened` in the totals is a
+less sharp signal, which is worth knowing when reading it.
 
 #### `video`: a different transport, not a fourth codec
 
 `render_type = "video"` sends the whole framebuffer as one inter-frame H.264 stream
-for the session (`src/h264.rs`, encoding with openh264). It is on the `render_type`
-axis and refuses `render_subtype` because an access unit is not the same kind of
-thing as a tile: a tile is an independent picture — reorderable, cacheable,
+for the session — the degenerate case of the region streams above, and it runs the
+same code: one region, fixed at the whole desktop, never retuned (`Policy::Whole` in
+`src/regions.rs`). It is on the `render_type` axis and refuses
+`render_subtype` because an access unit is not the same kind of thing as a tile: a tile is an independent picture — reorderable, cacheable,
 droppable once something covers it — and an access unit is one link in a chain,
 where losing any link decodes wrongly until the next keyframe. `RenderPlan` being an
 enum is that distinction made structural.
 
-Five consequences, each of which is a rule somewhere:
+Five consequences, each of which is a rule somewhere — and every one of them holds
+for the region streams above too, which is why they run the same code:
 
 - **`Shadow::accept` is a promise.** It records source pixels as delivered the
   moment it accepts them, and nothing re-sends them, so the encoder may never drop a
@@ -270,11 +343,13 @@ Five consequences, each of which is a rule somewhere:
 - **`src/wire.rs` must leave an access unit alone.** Never cached into a slot, never
   a `TILE_REF`, and outside the coverage relation in both directions. Coverage is
   sound reasoning about pixels nobody could have seen; under `video` every record
-  covers the whole framebuffer, so each covers its predecessor exactly.
-- **The picture may be a pixel larger than the desktop.** H.264 needs even sides, so
+  covers the whole framebuffer, so each covers its predecessor exactly. That is not
+  enforced by a check but by the record kinds: a `VIDEO` record never reaches the
+  cache or the coverage test, so neither has to know about it.
+- **The picture may be a pixel larger than the region.** H.264 needs even sides, so
   the mirror is padded up with its edge repeated (black would be a seam the encoder
-  paid for every frame). The tile header carries the *true* desktop size and the
-  client crops — reporting the padded size would push a tile past the framebuffer,
+  paid for every frame). The record header carries the *true* rectangle and the
+  client crops — reporting the padded size would push a paint past the framebuffer,
   which the viewer's renderer drops outright rather than clamps.
 
 `render_quality` maps to a constant quantizer (1 → 51, 100 → 12; the floor is
@@ -299,8 +374,8 @@ picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 
 **Both clients decode it, with one decoder between them.** It is WebCodecs
 `VideoDecoder`, reached through `frontend/src/videoDecoder.ts` and driven from
-`tilePainter.ts` — the shared batch loop, which is also where the rule that an access
-unit is never cached into a slot is enforced on the client side. `remotex.app` draws
+`tilePainter.ts` — the shared batch loop, which keys a decoder per `stream` id and
+replaces one whose region has restarted on a different size. `remotex.app` draws
 into a `WKWebView` running that same page, so video was not a second implementation
 there; it was the record type arriving in a module both clients already used.
 
@@ -359,6 +434,8 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | records
 TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
                   | u32 len | payload[len]
 TILE_REF op 0x02: u16 slot | u16 x | u16 y
+VIDEO    op 0x03: u8 stream | u16 x | u16 y | u16 w | u16 h
+                  | u32 len | payload[len]
 ```
 
 Tile formats are PNG, JPEG and WebP. One frame carries multiple ready updates so a
@@ -369,6 +446,14 @@ flags, unknown operations, truncated records, and unsupported formats.
 slot. `TILE_REF` redraws the encoded payload already stored in that slot.
 `NO_SLOT` means the payload must not be retained. Clients keep a fixed
 `SLOT_COUNT` array and never choose eviction themselves.
+
+`VIDEO` carries one H.264 access unit for one region, and is a separate record
+rather than a fourth tile format because it is not the same kind of thing: a tile is
+a self-contained picture and an access unit is one link in a chain. Making it its own
+record is what keeps the cache and coverage rules above from ever having to ask
+whether they apply — they see tiles only. `stream` names which decoder it belongs to,
+since a session may run several at once; the rectangle is the region's true one, and
+the decoded picture may exceed it by a pixel on either axis (see the render dial).
 
 A client that cannot decode a cached tile or receives a reference to a missing
 slot sends `cacheReset`. This clears the outbound slot table and requests a

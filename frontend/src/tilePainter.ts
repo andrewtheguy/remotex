@@ -5,7 +5,7 @@ import {
   SLOT_COUNT,
   type TileMsg,
 } from "./protocol.ts";
-import { createVideoStream, type VideoStream } from "./videoDecoder.ts";
+import { createVideoStreams, type VideoStreams } from "./videoDecoder.ts";
 
 // The tile cache and the batch draw loop, shared by the browser SPA and the
 // macOS viewer's canvas page.
@@ -15,29 +15,33 @@ import { createVideoStream, type VideoStream } from "./videoDecoder.ts";
 // slot to overwrite, which is what keeps the two ends in step without either
 // modelling the other's memory.
 //
-// A target on `render_type = "video"` sends its desktop through the same batches
-// as one H.264 record per frame, so the video stream lives here too rather than
-// beside each caller: it belongs to exactly what the slot table belongs to — one
-// attachment — and `clear` is the one place that has to end both.
+// A target that streams sends its access units through the same batches as VIDEO
+// records — the whole desktop under `render_type = "video"`, a region at a time
+// under `render_motion_subtype = "h264"` — so the decoders live here too rather
+// than beside each caller: they belong to exactly what the slot table belongs to,
+// one attachment, and `clear` is the one place that has to end both.
 
-// The presentation timestamp one access unit advances by, in microseconds.
-//
-// A number rather than a measurement, and it does not have to be the truth: the
-// wire carries no timestamps, nothing here schedules by them, and a frame is
-// painted when it decodes. WebCodecs only requires that they increase, and a
-// nominal 30 Hz keeps them recognisable in a decoder's own diagnostics.
-const VIDEO_FRAME_US = 33_333;
-
-// What a record turns into once the cache has had its say: a payload to decode
+// What a record turns into once the cache has had its say: something to decode
 // and where to put it, or nothing.
-interface PaintJob {
-  x: number;
-  y: number;
-  data: Uint8Array;
-  codec: TileMsg["codec"];
-  /** True when the server believes this client is keeping these bytes. */
-  cached: boolean;
-}
+type PaintJob =
+  | {
+      kind: "tile";
+      x: number;
+      y: number;
+      data: Uint8Array;
+      codec: TileMsg["codec"];
+      /** True when the server believes this client is keeping these bytes. */
+      cached: boolean;
+    }
+  | {
+      kind: "video";
+      stream: number;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      data: Uint8Array;
+    };
 
 export interface TilePainter {
   /**
@@ -48,8 +52,8 @@ export interface TilePainter {
    */
   draw(frame: ArrayBuffer): Promise<void>;
   /**
-   * Forget every slot and drop the video stream. The next attachment's server
-   * starts with an empty table, and its stream starts again from a keyframe.
+   * Forget every slot and drop every decoder. The next attachment's server
+   * starts with an empty table, and its streams start again from a keyframe.
    */
   clear(): void;
 }
@@ -60,11 +64,6 @@ export function createTilePainter(options: {
    * replaces the 2D context does not need the painter rebuilt.
    */
   context: () => CanvasRenderingContext2D | null;
-  /**
-   * The desktop's size in framebuffer pixels, null until the first resize names
-   * one. Only the video path reads it, and only to crop: see `paintBatch`.
-   */
-  size: () => { w: number; h: number } | null;
   /**
    * The two ends disagree about the slot table and only the server can repair
    * it. Called at most once per batch: fifty references into a cache this
@@ -82,18 +81,13 @@ export function createTilePainter(options: {
   const tileCache: ({ data: Uint8Array; codec: TileMsg["codec"] } | null)[] =
     new Array(SLOT_COUNT).fill(null);
 
-  // The video stream, for a target on `render_type = "video"`. Built on the
-  // first access unit rather than up front, because most targets send none at
-  // all.
-  let video: VideoStream | null = null;
-  // Presentation timestamps for that stream, in microseconds. Counted rather
-  // than measured — see `VIDEO_FRAME_US`.
-  let videoTimestamp = 0;
+  // The decoders, for a target that streams. Built on the first access unit
+  // rather than up front, because most targets send none at all.
+  let video: VideoStreams | null = null;
 
   const releaseVideo = () => {
     video?.close();
     video = null;
-    videoTimestamp = 0;
   };
 
   // Whether this batch has already asked for a reset. One per batch rather than
@@ -122,13 +116,11 @@ export function createTilePainter(options: {
     record: BatchRecord,
     batch: Batch,
   ): PaintJob | null => {
+    if (record.kind === "video") {
+      return record;
+    }
     if (record.kind === "tile") {
-      // An access unit is never remembered, whatever slot it names. A reference
-      // replays a payload, and replaying one of these out of sequence
-      // desynchronises every frame after it until the next keyframe — the same
-      // reason the gateway never assigns one a slot (`Slots::place` in
-      // src/wire.rs). This is the client declining to be told otherwise.
-      const cached = record.slot !== NO_SLOT && record.codec !== "h264";
+      const cached = record.slot !== NO_SLOT;
       if (cached) {
         tileCache[record.slot] = {
           data: new Uint8Array(record.data),
@@ -144,15 +136,15 @@ export function createTilePainter(options: {
       askForCacheReset(batch);
       return null;
     }
-    return { x: record.x, y: record.y, ...held, cached: true };
+    return { kind: "tile", x: record.x, y: record.y, ...held, cached: true };
   };
 
   const decodeJob = async (job: PaintJob | null, batch: Batch) => {
     if (!job) {
       return null;
     }
-    if (job.codec === "h264") {
-      return decodeAccessUnit(job.data);
+    if (job.kind === "video") {
+      return decodeAccessUnit(job);
     }
     try {
       return await createImageBitmap(
@@ -169,20 +161,22 @@ export function createTilePainter(options: {
     }
   };
 
-  // One access unit of the video stream.
+  // One access unit, routed to its own stream's decoder.
   //
   // Unlike a still tile this cannot simply be dropped when something goes wrong:
-  // every later frame is expressed relative to this one, and a video target
-  // sends no stills to recover with. So a failure here is *said*, and the stream
-  // is torn down rather than left decoding from history it does not have.
-  const decodeAccessUnit = async (data: Uint8Array) => {
+  // every later frame of that stream is expressed relative to this one, and no
+  // still is coming to recover with. So a failure here is *said*, and the
+  // decoders are torn down rather than left decoding from history they do not
+  // have.
+  const decodeAccessUnit = async (job: PaintJob & { kind: "video" }) => {
     if (!video) {
       try {
-        video = createVideoStream({
-          onError: (reason) => {
-            options.onVideoError(reason);
-            releaseVideo();
-          },
+        // The failed stream has already dropped itself from the table; the others
+        // are chains of their own and keep decoding. Rebuilding one is not this
+        // client's decision either way — a stream begins again when the gateway
+        // sends a keyframe, which a repaint, a resize or a region restarting does.
+        video = createVideoStreams({
+          onError: (reason) => options.onVideoError(reason),
         });
       } catch (e) {
         options.onVideoError(
@@ -192,8 +186,7 @@ export function createTilePainter(options: {
       }
       options.onVideoError(null);
     }
-    videoTimestamp += VIDEO_FRAME_US;
-    return video.decode(data, videoTimestamp);
+    return video.decode(job.stream, { w: job.w, h: job.h }, job.data);
   };
 
   // Every image is closed whether or not it was drawn: with no canvas to draw
@@ -203,19 +196,19 @@ export function createTilePainter(options: {
     decoded: (ImageBitmap | VideoFrame | null)[],
   ) => {
     const ctx = options.context();
-    const size = options.size();
     for (let i = 0; i < decoded.length; i += 1) {
       const image = decoded[i];
       const job = jobs[i];
       if (!image || !job) {
         continue;
       }
-      if (job.codec === "h264" && size) {
+      if (job.kind === "video") {
         // Cropped by the source rectangle rather than drawn whole: H.264 needs
-        // even sides and a desktop need not have them, so the decoded picture
-        // can be a pixel wider or taller than the framebuffer. The tile header
-        // carries the *desktop* size, which is what the canvas is.
-        ctx?.drawImage(image, 0, 0, size.w, size.h, 0, 0, size.w, size.h);
+        // even sides and a region at the edge of an odd desktop does not have
+        // them, so the decoded picture can be a pixel wider or taller than the
+        // rectangle. The record carries the *true* rectangle, which is where it
+        // belongs on the canvas.
+        ctx?.drawImage(image, 0, 0, job.w, job.h, job.x, job.y, job.w, job.h);
       } else {
         ctx?.drawImage(image, job.x, job.y);
       }

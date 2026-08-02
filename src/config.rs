@@ -158,11 +158,13 @@ pub enum RenderType {
     /// is a lossless base, a lossy subtype with a quality is a fixed-quality one.
     /// The moving encode has its own two keys,
     /// [`TargetConfig::render_motion_subtype`] and
-    /// [`TargetConfig::render_motion_quality`].
+    /// [`TargetConfig::render_motion_quality`], and it may be either a cheaper still
+    /// per cell or — under [`MotionSubtype::H264`] — an H.264 stream per coalesced
+    /// moving region.
     ///
     /// A cell that stops changing is re-sent once at the base encode, so a paused
     /// screen returns to full quality on its own: the base is the truth, motion is
-    /// a temporary discount on cells too busy to notice.
+    /// a temporary discount on what is too busy to notice.
     Motion,
     /// The whole desktop as one H.264 stream, at a fixed quality
     /// ([`TargetConfig::render_quality`]).
@@ -203,15 +205,15 @@ pub enum RenderSubtype {
     Webp,
 }
 
-/// The codec for the cells [`RenderType::Motion`] finds in motion — an axis of
-/// its own rather than a reuse of [`RenderSubtype`], for two reasons.
+/// The encode for what [`RenderType::Motion`] finds in motion — an axis of its own
+/// rather than a reuse of [`RenderSubtype`], for two reasons.
 ///
 /// The base is sent once when a cell settles and can afford WebP's slower, smaller
 /// encode, while a moving cell is re-encoded every frame, where JPEG's faster
 /// encode may beat WebP's smaller output; cheapest and smallest are not the same
-/// question at quality 60 as at 10. And this is the axis `h264` will appear on
-/// when the moving encode stops being a still image, which it can only do if it is
-/// nameable apart from the base. `png` is not a variant and never will be: a
+/// question at quality 60 as at 10. And this is the axis `h264` appears on, where
+/// the moving encode stops being a still image at all — which it could only do by
+/// being nameable apart from the base. `png` is not a variant and never will be: a
 /// moving cell needs a quality to turn down, and lossless has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -220,6 +222,20 @@ pub enum MotionSubtype {
     Jpeg,
     /// WebP at [`TargetConfig::render_motion_quality`].
     Webp,
+    /// An H.264 stream per coalesced moving region, at
+    /// [`TargetConfig::render_motion_quality`], with the base codec carrying
+    /// everything else.
+    ///
+    /// The other two are still pictures per cell, re-encoded from scratch every
+    /// frame; this is an inter-frame stream, which is what moving content is cheap
+    /// in. What it costs instead is statefulness — an access unit means nothing out
+    /// of sequence — and that is why it never reaches the client as a tile. See
+    /// [`crate::regions`] for which regions get a stream and when one ends, and
+    /// [`crate::protocol::VideoUnit`] for what arrives.
+    ///
+    /// Never the default: it has to be written out, because unlike `jpeg` and `webp`
+    /// it is not a cheaper version of the base but a different transport beside it.
+    H264,
 }
 
 /// The tile encoder an engine uses, resolved from a target's render dial by
@@ -243,6 +259,26 @@ pub enum TileCodec {
 /// [`Self::Tiles`] cuts damage into independent images, and [`Self::Video`] feeds one
 /// stateful stream. Nothing sensible is shared between those two paths, and making it
 /// an enum is what stops a consumer from quietly handling only the first.
+/// What the `motion` strategy does with what it finds moving, resolved from
+/// [`MotionSubtype`] and [`TargetConfig::render_motion_quality`].
+///
+/// An enum rather than a codec and a flag, because the two arms are not two settings
+/// of one mechanism: one produces an independent picture per cell, the other a link
+/// in a chain per region. Everything that differs downstream — whether pixels may be
+/// re-cut per cell, whether a record may be dropped, what a cleanup owes — follows
+/// from which arm this is, and the compiler is what makes a consumer say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotionEncode {
+    /// A cheaper still per moving cell, at this codec's quality.
+    Tile(TileCodec),
+    /// An H.264 stream per coalesced moving region, at this 1–100 quality.
+    ///
+    /// The quality is the dial rather than a quantizer: turning that into one is
+    /// [`crate::h264`]'s business, and it is the only module that should know what a
+    /// quantizer is.
+    Stream { quality: u8 },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderPlan {
     /// One encoded image per changed region — every configuration that predates
@@ -250,13 +286,13 @@ pub enum RenderPlan {
     Tiles {
         /// What a settled cell is sent as, and what a cleanup pass restores a cell to.
         base: TileCodec,
-        /// What a cell changing fast is sent as instead, while it keeps changing.
+        /// What a region changing fast is sent as instead, while it keeps changing.
         ///
         /// `None` is the switch that keeps the entire motion path off, and it is
         /// `None` for every configuration but `motion` — so a target that does not
         /// ask for the feature does not pay for it and is byte-identical to what it
         /// sent before the feature existed.
-        motion: Option<TileCodec>,
+        motion: Option<MotionEncode>,
         /// Draw the motion strategy's decisions into the pixels. QA only, and only
         /// meaningful when `motion` is `Some`.
         debug: bool,
@@ -398,13 +434,16 @@ pub struct TargetConfig {
     /// cell gets — and it is omitted when the base is lossless PNG.
     #[serde(default)]
     pub render_quality: Option<u8>,
-    /// Codec for the cells [`RenderType::Motion`] finds in motion. Defaults to
+    /// What [`RenderType::Motion`] does with what it finds moving. Defaults to
     /// whatever [`Self::render_subtype`] is, and is *required* when that is `png`,
     /// which has no quality to turn down. Refused for any other render type.
+    ///
+    /// `h264` is never a default: it is not a cheaper still but a stream per moving
+    /// region, so it has to be asked for.
     #[serde(default)]
     pub render_motion_subtype: Option<MotionSubtype>,
-    /// Quality (1–100) for a cell in motion — as cheap as it takes, since motion
-    /// hides the artifacts and a cell that stops moving is re-sent at the base
+    /// Quality (1–100) for what is in motion — as cheap as it takes, since motion
+    /// hides the artifacts and a region that stops moving is re-sent at the base
     /// encode anyway. Required by [`RenderType::Motion`] and refused for any other
     /// render type.
     #[serde(default)]
@@ -415,8 +454,9 @@ pub struct TargetConfig {
     /// for any other render type; off unless asked for.
     ///
     /// See [`crate::encode::TileSink::damage`] for what the colours mean. The marks
-    /// go on the *copy* handed to the encoder, so the shadow and the stash keep the
-    /// true pixels and a cleanup erases the outline it replaces.
+    /// go on the *copy* handed to the encoder — for a region stream, on the crop it
+    /// encodes rather than on the mirror — so the shadow, the stash and the mirror
+    /// keep the true pixels, and a cleanup erases the outline it replaces.
     #[serde(default)]
     pub render_motion_debug: bool,
 }
@@ -441,8 +481,9 @@ impl TargetConfig {
         };
         let motion = match (self.render_type, self.render_motion_quality) {
             (RenderType::Motion, Some(q)) => match self.motion_subtype() {
-                Some(MotionSubtype::Jpeg) => Some(TileCodec::Jpeg(q)),
-                Some(MotionSubtype::Webp) => Some(TileCodec::Webp(q)),
+                Some(MotionSubtype::Jpeg) => Some(MotionEncode::Tile(TileCodec::Jpeg(q))),
+                Some(MotionSubtype::Webp) => Some(MotionEncode::Tile(TileCodec::Webp(q))),
+                Some(MotionSubtype::H264) => Some(MotionEncode::Stream { quality: q }),
                 None => None,
             },
             _ => None,
@@ -450,8 +491,9 @@ impl TargetConfig {
         RenderPlan::Tiles { base, motion, debug: self.render_motion_debug }
     }
 
-    /// The motion codec this target asked for, falling back to the base codec when
-    /// the key is omitted. `None` only for the pairing parse rejects — a `png` base
+    /// The motion encode this target asked for, falling back to the base codec when
+    /// the key is omitted — which `h264` never is, since a stream is not a cheaper
+    /// version of a still. `None` only for the pairing parse rejects: a `png` base
     /// with no motion subtype named.
     fn motion_subtype(&self) -> Option<MotionSubtype> {
         self.render_motion_subtype.or(match self.render_subtype {
@@ -831,9 +873,10 @@ impl ConfigFile {
                     anyhow::ensure!(
                         target.render_motion_subtype.is_some(),
                         "target {:?} pairs render_type \"motion\" with render_subtype \"png\" \
-                         but names no render_motion_subtype. The motion codec defaults to the \
+                         but names no render_motion_subtype. The motion encode defaults to the \
                          base codec, and PNG is lossless — it has no quality to turn down — so \
-                         a PNG base must name its own: \"jpeg\" or \"webp\"",
+                         a PNG base must name its own: \"jpeg\", \"webp\", or \"h264\" for a \
+                         stream per moving region",
                         target.name
                     );
                 }
@@ -894,7 +937,9 @@ impl ConfigFile {
                      render_motion_quality — it needs one, an integer 1–100. It is what the \
                      cells in motion are encoded at, and can go as low as it takes: motion \
                      hides the artifacts, and a cell that stops moving is re-sent at the base \
-                     encode",
+                     encode. Under render_motion_subtype = \"h264\" it is the quality each \
+                     region's stream holds on a link that can carry it, and a link that \
+                     cannot will fall below it",
                     target.name
                 ))?;
                 anyhow::ensure!(
@@ -1085,7 +1130,7 @@ mod tests {
     /// The moving encode a plan resolves, for the tests that are about that and not
     /// about which arm of [`RenderPlan`] they landed in. `video` has none by
     /// construction — there are no cells to find in motion.
-    fn motion_of(plan: RenderPlan) -> Option<TileCodec> {
+    fn motion_of(plan: RenderPlan) -> Option<MotionEncode> {
         match plan {
             RenderPlan::Tiles { motion, .. } => motion,
             RenderPlan::Video { .. } => None,
@@ -1710,7 +1755,11 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Png);
         assert_eq!(
             t.render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Png, motion: Some(TileCodec::Jpeg(10)), debug: false }
+            RenderPlan::Tiles {
+                base: TileCodec::Png,
+                motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
+                debug: false
+            }
         );
     }
 
@@ -1734,7 +1783,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: Some(TileCodec::Webp(10)), debug: false }
+            RenderPlan::Tiles {
+                base: TileCodec::Webp(60),
+                motion: Some(MotionEncode::Tile(TileCodec::Webp(10))),
+                debug: false
+            }
         );
     }
 
@@ -1759,8 +1812,81 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.targets[0].render_plan(),
-            RenderPlan::Tiles { base: TileCodec::Webp(60), motion: Some(TileCodec::Jpeg(10)), debug: false }
+            RenderPlan::Tiles {
+                base: TileCodec::Webp(60),
+                motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
+                debug: false
+            }
         );
+    }
+
+    /// The flagship pairing for a stream per moving region: a lossless base, so the
+    /// text beside a video is exact and never re-encoded, and H.264 carrying only
+    /// what moves.
+    #[test]
+    fn a_stream_per_moving_region_over_a_lossless_base_is_accepted() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "h264"
+            render_motion_quality = 30
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.targets[0].render_plan(),
+            RenderPlan::Tiles {
+                base: TileCodec::Png,
+                motion: Some(MotionEncode::Stream { quality: 30 }),
+                debug: false
+            }
+        );
+    }
+
+    /// A stream is not a cheaper still, so it is never what a lossy base falls back
+    /// to — it has to be asked for by name.
+    #[test]
+    fn a_stream_is_never_the_default_motion_encode() {
+        let cfg = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_subtype = "webp"
+            render_quality = 60
+            render_motion_quality = 30
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            motion_of(cfg.targets[0].render_plan()),
+            Some(MotionEncode::Tile(TileCodec::Webp(30))),
+            "a lossy base defaulted its moving encode to a stream"
+        );
+    }
+
+    /// The dial the stream holds to has no default either — the same requirement
+    /// the still motion encodes have, for the same reason.
+    #[test]
+    fn a_stream_without_a_motion_quality_is_rejected() {
+        let err = ConfigFile::parse(
+            r#"
+            [[targets]]
+            name = "a"
+            protocol = "rdp"
+            host = "h"
+            render_type = "motion"
+            render_motion_subtype = "h264"
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion_quality"), "{err:#}");
     }
 
     /// PNG has no quality to turn down, so the default the lossy bases enjoy is
@@ -1982,7 +2108,10 @@ mod tests {
         // The other Apple subtype is untouched: this is one pairing, not a rule
         // about Macs.
         let cfg = ConfigFile::parse(&target("ard")).expect("motion belongs on plain ard");
-        assert_eq!(motion_of(cfg.targets[0].render_plan()), Some(TileCodec::Jpeg(10)));
+        assert_eq!(
+            motion_of(cfg.targets[0].render_plan()),
+            Some(MotionEncode::Tile(TileCodec::Jpeg(10)))
+        );
     }
 
     /// And the same target is fine on any other strategy — what is refused is the

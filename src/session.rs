@@ -33,6 +33,14 @@ const FRAME_BUFFER: usize = 64;
 const VIDEO_FRAME_BUFFER: usize = 4;
 
 /// How deep this target's outbound queue should be. See [`VIDEO_FRAME_BUFFER`].
+///
+/// `render_motion_subtype = "h264"` keeps the tile depth, deliberately, even though
+/// it produces access units too: the same queue carries its still tiles, and a
+/// repaint is dozens of them, so four would stall the engine on the ordinary path to
+/// sharpen a signal about the streaming one. Its regions are also a fraction of a
+/// desktop apiece, so sixty-four records is nowhere near sixty-four frames. The
+/// congestion loop is correspondingly less sharp there, which is a thing to know when
+/// reading `coarsened` in the `encode totals` line.
 fn frame_buffer(target: &TargetConfig) -> usize {
     match target.render_plan() {
         crate::config::RenderPlan::Video { .. } => VIDEO_FRAME_BUFFER,
