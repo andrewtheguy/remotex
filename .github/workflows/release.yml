@@ -150,9 +150,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
+      # Deliberately bare: no flags and no environment, so this is character for
+      # character what a developer runs. Pinning CODESIGN_IDENTITY here would have
+      # set the same ad-hoc identity the script already defaults to, at the cost of
+      # being the one place the two could drift apart without anyone noticing.
       - name: Build remotex.app and its disk image
-        env:
-          CODESIGN_IDENTITY: "-"
         run: bash packaging/macos-viewer/build-viewer-app.sh
 
       - name: Verify the disk image

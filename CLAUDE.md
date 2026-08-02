@@ -160,7 +160,7 @@ a prebuilt static libopus archive. Its library name remains `opus`, so
 After Swift changes:
 
 1. Run `swift test --package-path apps/remotex-viewer`.
-2. Run `packaging/macos-viewer/build-viewer-app.sh --no-dmg`; this also rebuilds
+2. Run `packaging/macos-viewer/build-viewer-app.sh`; this also rebuilds
    the bundled gateway **and the canvas page**, so `bun` is required. After a
    change under `frontend/src/viewer`, run `bun run check` and `bun test src` in
    `frontend/` too — the build only proves the page compiles.
@@ -173,7 +173,10 @@ Preferences must remain in the instance's JSON file, not `UserDefaults`: a defau
 suite lives in the user's Preferences directory regardless of `--instance-dir`.
 
 Never validate with `swift run`, standalone `swift build`, or `.build` binaries;
-they lack the bundle menus, `Info.plist` metadata, and gateway. Use `--no-dmg` for routine
-development. Build a DMG only for releases, DMG changes, or an explicit request;
-its filename remains `remotex-viewer-<version>` while the contained app is
-`remotex.app`. macOS GUI QA is manual only.
+they lack the bundle menus, `Info.plist` metadata, and gateway. Run the build script
+bare: with no arguments it is exactly what `release.yml` runs, so what you validate
+and what ships are not two commands apart. `--no-dmg` remains as a shortcut for a
+fast edit-build-launch loop and produces the same bundle — the image is made from
+it and no longer consumes it — but the bare command is the one to trust a result
+from. The image's filename remains `remotex-viewer-<version>` while the contained
+app is `remotex.app`. macOS GUI QA is manual only.

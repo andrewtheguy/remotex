@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
-# Build and sign remotex.app — the macOS 15+ client and the gateway it runs —
-# optionally wrapping it in a DMG.
+# Build and sign remotex.app — the macOS 15+ client and the gateway it runs — and
+# wrap it in the DMG that is the release asset.
 #
 # Usage:
 #   packaging/macos-viewer/build-viewer-app.sh [--debug] [--no-dmg]
+#
+# **Run it bare.** With no arguments this is character for character what
+# `release.yml` runs — no flags, no environment — so the thing built here and the
+# thing released are not two commands apart. That is the way to build the viewer,
+# and what the docs tell you to run.
+#
+# `--no-dmg` stops after the app bundle, for a fast edit-build-launch loop. It does
+# not change the bundle: signing happens before the image and what the image holds
+# is the same bytes. It is a shortcut, not a second kind of build — and much less
+# of one now that the image step leaves `dist/remotex.app` in place rather than
+# deleting it.
+#
+# `--debug` changes the compiler configuration, not the shape of the output: the
+# same bundle, named so it cannot be mistaken for a release.
 #
 # The bundle carries two executables: the Swift app, and a copy of the `remotex`
 # gateway binary as `remotex-gateway`. The app starts that gateway on an ephemeral
@@ -181,9 +195,15 @@ mkdir -p "$staging"
 ln -s /Applications "$staging/Applications"
 hdiutil create -volname "remotex viewer $version" -srcfolder "$staging" \
   -fs HFS+ -format UDZO -ov -quiet "$dmg"
-rm -rf "$staging" "$app"
+# The staging copy goes; the app itself stays. It is what QA launches
+# (`open -n dist/remotex.app`), and it is the same bundle the image holds — the
+# image was made from it. Deleting it here is what made "build the image" and
+# "have something to run" two different commands. `release.yml` uploads
+# `dist/*.dmg`, so the bundle left beside it reaches nothing.
+rm -rf "$staging"
 
 if [ "$identity" != "-" ]; then
   codesign --force --sign "$identity" "${timestamp_flag[@]}" "$dmg"
 fi
 echo ">> wrote $dmg"
+echo ">> wrote $app"

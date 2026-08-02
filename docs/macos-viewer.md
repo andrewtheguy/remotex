@@ -528,7 +528,7 @@ Run the tests, build the packaged app, and launch QA against a throwaway instanc
 ```sh
 (cd frontend && bun run check && bun test src)
 swift test --package-path apps/remotex-viewer
-packaging/macos-viewer/build-viewer-app.sh --no-dmg
+packaging/macos-viewer/build-viewer-app.sh
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 
