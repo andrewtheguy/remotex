@@ -96,10 +96,13 @@ enum ProbeCommand {
         var controlBytes = 0
         var binary = 0
         var binaryBytes = 0
-        /// Tile records across all batches.
+        /// Records across all batches, of every kind.
         var records = 0
         /// Records sent as cache slot references.
         var references = 0
+        /// Records carrying one H.264 access unit — what a target that streams sends
+        /// instead of tiles, counted apart from them because it is not one.
+        var units = 0
         var largestBinary = 0
         var largestTile = "none"
 
@@ -115,6 +118,9 @@ enum ProbeCommand {
             references += batch?.count { record in
                 if case .reference = record { true } else { false }
             } ?? 0
+            units += batch?.count { record in
+                if case .video = record { true } else { false }
+            } ?? 0
             // Keep the largest frame and its tile summary paired.
             if data.count > largestBinary {
                 largestBinary = data.count
@@ -123,6 +129,8 @@ enum ProbeCommand {
                         switch record {
                         case .tile(let tile): "\(tile.w)x\(tile.h) \(tile.format)"
                         case .reference(let slot, _, _): "ref slot \(slot)"
+                        case .video(let stream, _, _, let w, let h, _):
+                            "\(w)x\(h) h264 stream \(stream)"
                         }
                     }
                     let more = records.count > 3 ? ", +\(records.count - 3) more" : ""
@@ -176,8 +184,8 @@ enum ProbeCommand {
     private static func summarize(_ counts: Counts, survivedHeartbeat: Bool) {
         print(
             "probe: \(counts.binary) binary frames / \(counts.binaryBytes) bytes "
-                + "carrying \(counts.records) tile records "
-                + "(\(counts.references) cache references), "
+                + "carrying \(counts.records) records "
+                + "(\(counts.references) cache references, \(counts.units) access units), "
                 + "\(counts.control) control frames / \(counts.controlBytes) bytes"
         )
         print("probe: largest binary frame \(counts.largestBinary) bytes (\(counts.largestTile))")

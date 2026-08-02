@@ -3,7 +3,7 @@
 //! are bounded, and a tile covered later in the same batch may be dropped.
 //! Cache state lives here because frames are discarded before attachment.
 
-use crate::protocol::{self, ServerMsg, Tile, WireFrame, batch};
+use crate::protocol::{self, ServerMsg, Tile, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead without making a full repaint one work unit.
@@ -56,13 +56,7 @@ enum Placed {
 
 impl Slots {
     fn place(&mut self, tile: &Tile) -> Placed {
-        // A stateful payload is never cached, and so can never come back as a
-        // reference. A `TILE_REF` says "redraw what you have in slot N here", which is
-        // a claim about *pixels*; an H.264 access unit is a claim about the decoder's
-        // state, and replaying one out of sequence desynchronises every frame after
-        // it until the next keyframe. Two identical access units are also not a thing
-        // that happens — each describes a different moment — so this costs nothing.
-        if tile.stateful() || tile.data.len() > batch::MAX_CACHED_BYTES {
+        if tile.data.len() > batch::MAX_CACHED_BYTES {
             return Placed::Plain;
         }
         // The dimensions and format are hashed with the payload: a reference
@@ -109,15 +103,41 @@ impl Slots {
     }
 }
 
+/// One record of the batch being built.
+///
+/// Two kinds rather than one with a flag, because the whole difference is that the
+/// rules below apply to one of them and not the other. A tile may be cached,
+/// referenced, and dropped when something covers it — all three sound reasoning
+/// about *pixels*, and all three wrong about a frame whose meaning is "what changed
+/// since the last one".
+enum Record {
+    Tile(Tile),
+    Video(VideoUnit),
+}
+
+impl Record {
+    fn record_len(&self) -> usize {
+        match self {
+            Record::Tile(tile) => tile.record_len(),
+            Record::Video(unit) => unit.record_len(),
+        }
+    }
+}
+
 /// Per-attachment encoder for the server -> client direction.
 #[derive(Default)]
 pub struct Wire {
-    /// Tiles accumulated for the batch currently being built.
+    /// Records accumulated for the batch currently being built.
     ///
-    /// Held as tiles rather than serialized on arrival so a later one can still
+    /// Held as records rather than serialized on arrival so a later tile can still
     /// displace an earlier one it covers. Serializing happens once, at flush, so
     /// this costs no extra copy — only the ability to change one's mind.
-    pending: Vec<Tile>,
+    ///
+    /// Access units sit in the same list as the tiles rather than beside them,
+    /// because their order *against* the tiles is load-bearing: a settled region is
+    /// restored by a still tile that has to land after the last access unit covering
+    /// it, not before.
+    pending: Vec<Record>,
     /// What `pending` will serialize to, so the byte cap can be checked without
     /// serializing to find out.
     ///
@@ -151,7 +171,8 @@ impl Wire {
                 // variant added later without a `text_frame` arm should cost that
                 // one message, not the whole attachment.
                 None => match msg {
-                    ServerMsg::Tile(tile) => self.push(tile, &mut frames),
+                    ServerMsg::Tile(tile) => self.push_tile(tile, &mut frames),
+                    ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames),
                     // Audio has no pixel-order dependency, so do not delay it
                     // behind the current tile batch.
                     ServerMsg::Audio(packets) => {
@@ -167,12 +188,15 @@ impl Wire {
         frames
     }
 
-    fn push(&mut self, tile: Tile, frames: &mut Vec<WireFrame>) {
+    fn push_tile(&mut self, tile: Tile, frames: &mut Vec<WireFrame>) {
         // Before the cap is consulted, because dropping covered tiles is what
         // makes room and a flush that was not needed costs a frame.
         self.supersede(&tile);
+        self.push(Record::Tile(tile), frames);
+    }
 
-        let len = tile.record_len();
+    fn push(&mut self, record: Record, frames: &mut Vec<WireFrame>) {
+        let len = record.record_len();
         if !self.pending.is_empty()
             && (self.pending_bytes + len > MAX_BATCH_BYTES
                 || self.pending.len() >= MAX_BATCH_RECORDS)
@@ -180,7 +204,7 @@ impl Wire {
             self.flush(frames);
         }
         self.pending_bytes += len;
-        self.pending.push(tile);
+        self.pending.push(record);
     }
 
     /// Drop pending tiles that `tile` completely covers.
@@ -189,17 +213,15 @@ impl Wire {
     /// anything is presented, so a covered paint is one nothing could have seen.
     /// A partial overlap is left alone: the uncovered part is still owed.
     ///
-    /// A stateful tile is outside the coverage relation entirely — it neither
+    /// An access unit is outside the coverage relation entirely — it neither
     /// supersedes nor is superseded — because "nothing could have seen it" is true of
     /// pixels and false of an inter-frame stream. A dropped access unit is one the
     /// decoder needed, and everything after it decodes wrongly until the next
     /// keyframe. That case is not hypothetical: under `render_type = "video"` every
-    /// record covers the whole framebuffer, so each one covers its predecessor
-    /// exactly.
+    /// unit covers the whole framebuffer, so each one covers its predecessor exactly.
+    /// It follows from the record kinds here, which is the point of them: the
+    /// question is not asked rather than answered carefully.
     fn supersede(&mut self, tile: &Tile) {
-        if tile.stateful() {
-            return;
-        }
         let (right, bottom) = (
             u32::from(tile.x) + u32::from(tile.w),
             u32::from(tile.y) + u32::from(tile.h),
@@ -207,8 +229,10 @@ impl Wire {
         let mut dropped_bytes = 0usize;
         let mut dropped = 0u64;
         self.pending.retain(|old| {
-            let covered = !old.stateful()
-                && old.x >= tile.x
+            let Record::Tile(old) = old else {
+                return true;
+            };
+            let covered = old.x >= tile.x
                 && old.y >= tile.y
                 && u32::from(old.x) + u32::from(old.w) <= right
                 && u32::from(old.y) + u32::from(old.h) <= bottom;
@@ -232,7 +256,15 @@ impl Wire {
         frame.push(batch::FRAME_KIND);
         frame.push(0); // flags
         frame.extend_from_slice(&(self.pending.len() as u16).to_le_bytes());
-        for tile in self.pending.drain(..) {
+        for record in self.pending.drain(..) {
+            let tile = match record {
+                Record::Video(unit) => {
+                    self.totals.video(unit.record_len());
+                    unit.write_record(&mut frame);
+                    continue;
+                }
+                Record::Tile(tile) => tile,
+            };
             match self.slots.place(&tile) {
                 Placed::Ref(slot) => {
                     self.totals.tile_ref(tile.record_len());
@@ -281,6 +313,12 @@ pub struct Totals {
     pub refs: u64,
     pub refs_saved_bytes: u64,
     pub cache_resets: u64,
+    /// Access units and their record bytes, counted apart from tiles because none of
+    /// the numbers beside them can apply: a `VIDEO` record is never a reference,
+    /// never superseded, and never in a slot. Folding them into `tiles` would flatter
+    /// every ratio the cache is judged by.
+    pub video: u64,
+    pub video_bytes: u64,
     /// Opus packets and their binary-frame bytes, separate from tile traffic.
     pub audio_frames: u64,
     pub audio_packets: u64,
@@ -310,6 +348,11 @@ impl Totals {
         self.tile_bytes += len as u64;
     }
 
+    fn video(&mut self, len: usize) {
+        self.video += 1;
+        self.video_bytes += len as u64;
+    }
+
     fn tile_ref(&mut self, would_have_been: usize) {
         self.refs += 1;
         self.tile_bytes += batch::TILE_REF_LEN as u64;
@@ -326,7 +369,8 @@ impl std::fmt::Display for Totals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} binary frames / {} bytes carrying {} tile records / {} bytes, \
+            "{} binary frames / {} bytes carrying {} tile records / {} bytes \
+             and {} video records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} superseded / {} bytes, \
              {} cache refs saving {} bytes, {} cache resets, \
@@ -335,6 +379,8 @@ impl std::fmt::Display for Totals {
             self.binary_bytes,
             self.tiles,
             self.tile_bytes,
+            self.video,
+            self.video_bytes,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,
@@ -353,7 +399,7 @@ impl std::fmt::Display for Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Tile, UNSCALED};
+    use crate::protocol::{Tile, UNSCALED, VideoUnit};
 
     fn tile(y: u16, bytes: usize) -> ServerMsg {
         rect(0, y, 320, 64, bytes)
@@ -396,10 +442,12 @@ mod tests {
     }
 
     /// A parsed batch record: `(op, slot, x, y, w, h, payload_len, format)`. A
-    /// reference carries no size, payload or format, so those come back zero.
-    type Record = (u8, u16, u16, u16, u16, u16, usize, u8);
+    /// reference carries no size, payload or format, so those come back zero; a
+    /// `VIDEO` record puts its stream id where a tile's slot goes and its keyframe
+    /// flag nowhere, since the wire does not carry one.
+    type Parsed = (u8, u16, u16, u16, u16, u16, usize, u8);
 
-    fn records(frame: &[u8]) -> Vec<Record> {
+    fn records(frame: &[u8]) -> Vec<Parsed> {
         assert_eq!(frame[0], batch::FRAME_KIND);
         assert_eq!(frame[1], 0, "flags must be zero");
         let count = u16::from_le_bytes([frame[2], frame[3]]);
@@ -422,6 +470,25 @@ mod tests {
                     ]) as usize;
                     out.push((op, le(2), le(4), le(6), le(8), le(10), len, frame[at + 1]));
                     at += batch::TILE_HEADER_LEN + len;
+                }
+                batch::OP_VIDEO => {
+                    let len = u32::from_le_bytes([
+                        frame[at + 10],
+                        frame[at + 11],
+                        frame[at + 12],
+                        frame[at + 13],
+                    ]) as usize;
+                    out.push((
+                        op,
+                        u16::from(frame[at + 1]),
+                        le(2),
+                        le(4),
+                        le(6),
+                        le(8),
+                        len,
+                        0,
+                    ));
+                    at += batch::VIDEO_HEADER_LEN + len;
                 }
                 other => panic!("unknown record op {other}"),
             }
@@ -794,15 +861,20 @@ mod tests {
         assert_eq!(wire.totals.refs, 0);
     }
 
-    /// An access unit for the whole framebuffer, which is the only shape a video
-    /// target's records ever have.
+    /// An access unit for the whole framebuffer, which is the shape a `video`
+    /// target's records have; a region's differs only in its rectangle.
     fn access_unit(bytes: usize) -> ServerMsg {
-        ServerMsg::Tile(Tile {
-            format: Tile::FORMAT_H264,
-            x: 0,
-            y: 0,
-            w: 1280,
-            h: 800,
+        region_unit(0, 0, 0, 1280, 800, bytes)
+    }
+
+    fn region_unit(stream: u8, x: u16, y: u16, w: u16, h: u16, bytes: usize) -> ServerMsg {
+        ServerMsg::Video(VideoUnit {
+            stream,
+            x,
+            y,
+            w,
+            h,
+            keyframe: false,
             data: vec![4u8; bytes],
         })
     }
@@ -810,22 +882,24 @@ mod tests {
     // Identical bytes are the cache's trigger, and two access units may be identical
     // by accident where two frames of a still screen encode the same. A reference
     // would tell the client to redraw a picture it does not have, from a payload
-    // whose meaning was "what changed since the one before it".
+    // whose meaning was "what changed since the one before it". It is a different
+    // record now, so the cache never sees one — this is that, asserted.
     #[test]
     fn an_access_unit_is_never_cached_or_referenced() {
         let mut wire = Wire::default();
         wire.encode(vec![access_unit(900)]);
         let frames = wire.encode(vec![access_unit(900)]);
         let records = records(binary(&frames)[0]);
-        assert_eq!(records[0].0, batch::OP_TILE, "an access unit came back as a reference");
-        assert_eq!(records[0].1, batch::NO_SLOT, "an access unit was stored in a slot");
+        assert_eq!(records[0].0, batch::OP_VIDEO, "an access unit came back as a reference");
         assert_eq!(wire.totals.refs, 0);
+        assert_eq!(wire.totals.video, 2, "access units are counted apart from tiles");
+        assert_eq!(wire.totals.tiles, 0);
     }
 
-    // The corruption case, stated as a test. Under video every record covers the
-    // whole framebuffer, so each covers its predecessor exactly — and coverage is
-    // sound reasoning about pixels nobody could have seen, not about a frame the
-    // decoder needs in order to make sense of the next one.
+    // The corruption case, stated as a test. Under video every unit covers the whole
+    // framebuffer, so each covers its predecessor exactly — and coverage is sound
+    // reasoning about pixels nobody could have seen, not about a frame the decoder
+    // needs in order to make sense of the next one.
     #[test]
     fn an_access_unit_is_neither_dropped_nor_drops_anything() {
         let mut wire = Wire::default();
@@ -834,11 +908,57 @@ mod tests {
         assert_eq!(wire.totals.superseded, 0);
 
         // And in the other direction: a still tile covering the same rectangle must
-        // not take an access unit with it either.
+        // not take an access unit with it either. That is the cleanup a settled
+        // region gets, and it lands *after* the unit it replaces.
         let mut wire = Wire::default();
         let frames = wire.encode(vec![access_unit(900), rect(0, 0, 1280, 800, 900)]);
-        assert_eq!(records(binary(&frames)[0]).len(), 2, "a still tile dropped an access unit");
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2, "a still tile dropped an access unit");
+        assert_eq!(records[0].0, batch::OP_VIDEO, "the cleanup overtook what it replaces");
+        assert_eq!(records[1].0, batch::OP_TILE);
         assert_eq!(wire.totals.superseded, 0);
+    }
+
+    // A region stream's record carries its own rectangle and its stream id, and
+    // several may share a batch — which is the whole difference from the shape the
+    // whole-desktop transport had.
+    #[test]
+    fn several_regions_ride_one_batch_each_with_its_own_rectangle() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![
+            region_unit(0, 320, 64, 640, 128, 500),
+            region_unit(1, 1280, 512, 320, 64, 300),
+        ]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2);
+        assert_eq!((records[0].0, records[0].1), (batch::OP_VIDEO, 0), "stream 0");
+        assert_eq!((records[0].2, records[0].3), (320, 64), "at its own position");
+        assert_eq!((records[0].4, records[0].5), (640, 128), "at its own size");
+        assert_eq!(records[0].6, 500);
+        assert_eq!((records[1].0, records[1].1), (batch::OP_VIDEO, 1), "stream 1");
+        assert_eq!((records[1].2, records[1].3), (1280, 512));
+        assert_eq!(wire.totals.video, 2);
+        assert_eq!(
+            wire.totals.video_bytes,
+            (2 * batch::VIDEO_HEADER_LEN + 800) as u64
+        );
+    }
+
+    // Tiles either side of an access unit still supersede each other: putting a
+    // record between them must not make the cache stupider, only safer.
+    #[test]
+    fn an_access_unit_between_two_tiles_does_not_stop_them_superseding() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![
+            rect(0, 0, 320, 64, 400),
+            access_unit(500),
+            rect(0, 0, 640, 128, 600),
+        ]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2, "the covered tile was not dropped");
+        assert_eq!(records[0].0, batch::OP_VIDEO);
+        assert_eq!(records[1].0, batch::OP_TILE);
+        assert_eq!(wire.totals.superseded, 1);
     }
 
     // A slot spent on one screen-sized payload is a slot not spent on the dozens of

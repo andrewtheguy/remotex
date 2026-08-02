@@ -645,11 +645,10 @@ export function useRemoteDesktop(
 
     let disposed = false;
     let ws: WebSocket | null = null;
-    // The slot table, the video stream and the batch draw loop, shared with the
+    // The slot table, the video decoders and the batch draw loop, shared with the
     // macOS viewer's canvas page — see tilePainter.ts.
     const painter = createTilePainter({
       context: () => ctxRef.current,
-      size: () => sizeRef.current,
       onCacheReset: () => sendRef.current({ type: "cacheReset" }),
       onVideoError: setVideoError,
     });

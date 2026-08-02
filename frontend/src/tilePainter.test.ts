@@ -14,8 +14,8 @@ import { createTilePainter } from "./tilePainter.ts";
 
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
+const OP_VIDEO = 0x03;
 const FORMAT_PNG = 1;
-const FORMAT_H264 = 4;
 
 type Record =
   | {
@@ -28,7 +28,16 @@ type Record =
       w?: number;
       h?: number;
     }
-  | { op: "ref"; slot: number; x: number; y: number };
+  | { op: "ref"; slot: number; x: number; y: number }
+  | {
+      op: "video";
+      stream: number;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      payload: number[];
+    };
 
 function batchFrame(records: Record[]): ArrayBuffer {
   const bytes: number[] = [];
@@ -43,6 +52,16 @@ function batchFrame(records: Record[]): ArrayBuffer {
       u16(record.slot);
       u16(record.x);
       u16(record.y);
+      continue;
+    }
+    if (record.op === "video") {
+      bytes.push(OP_VIDEO, record.stream);
+      u16(record.x);
+      u16(record.y);
+      u16(record.w);
+      u16(record.h);
+      u32(record.payload.length);
+      bytes.push(...record.payload);
       continue;
     }
     bytes.push(OP_TILE, record.format ?? FORMAT_PNG);
@@ -72,18 +91,31 @@ interface FakeBitmap {
 
 let drawn: { tag: number; x: number; y: number }[] = [];
 /** Nine-argument draws: the source rectangle is what crops a padded frame. */
-let cropped: { sw: number; sh: number; dw: number; dh: number }[] = [];
+let cropped: {
+  sw: number;
+  sh: number;
+  dx: number;
+  dy: number;
+  dw: number;
+  dh: number;
+}[] = [];
 let decoded: FakeBitmap[] = [];
 let resets = 0;
 let videoErrors: (string | null)[] = [];
-let size: { w: number; h: number } | null = null;
 /** Payload first bytes the stubbed decoder refuses. */
 let undecodable = new Set<number>();
 
 const context = {
   drawImage(bitmap: FakeBitmap, ...args: number[]) {
     if (args.length === 8) {
-      cropped.push({ sw: args[2], sh: args[3], dw: args[6], dh: args[7] });
+      cropped.push({
+        sw: args[2],
+        sh: args[3],
+        dx: args[4],
+        dy: args[5],
+        dw: args[6],
+        dh: args[7],
+      });
       return;
     }
     drawn.push({ tag: bitmap.tag, x: args[0], y: args[1] });
@@ -95,6 +127,8 @@ const context = {
 // the bitstream — that is browser QA, as `h264.test.ts` says at its top.
 let videoClosed = false;
 let chunkTypes: string[] = [];
+/** How many decoders were built — one per live stream, replaced on a resize. */
+let decoders = 0;
 
 class FakeVideoDecoder {
   private readonly output: (frame: unknown) => void;
@@ -102,6 +136,7 @@ class FakeVideoDecoder {
 
   constructor(init: { output: (frame: unknown) => void }) {
     this.output = init.output;
+    decoders += 1;
   }
 
   configure() {
@@ -148,9 +183,9 @@ beforeEach(() => {
   decoded = [];
   resets = 0;
   videoErrors = [];
-  size = null;
   videoClosed = false;
   chunkTypes = [];
+  decoders = 0;
   undecodable = new Set();
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
@@ -192,7 +227,6 @@ afterEach(() => {
 function painter(ctx: CanvasRenderingContext2D | null = context) {
   return createTilePainter({
     context: () => ctx,
-    size: () => size,
     onCacheReset: () => {
       resets += 1;
     },
@@ -314,51 +348,37 @@ test("a malformed frame is dropped whole", async () => {
   assert.equal(resets, 0);
 });
 
-test("an access unit is never remembered, whatever slot it names", async () => {
-  // The corruption case, from the client's side. A reference replays a payload,
-  // and replaying an access unit out of sequence desynchronises every frame
-  // after it until the next keyframe. The gateway never assigns one a slot
-  // (`Slots::place` in src/wire.rs); this is the client declining to be told
-  // otherwise, so the miss — and the reset — are the correct outcome.
-  const p = painter();
-  await p.draw(
-    batchFrame([
-      {
-        op: "tile",
-        format: FORMAT_H264,
-        slot: 9,
-        x: 0,
-        y: 0,
-        w: 64,
-        h: 64,
-        payload: KEYFRAME,
-      },
-    ]),
-  );
-  await p.draw(batchFrame([{ op: "ref", slot: 9, x: 0, y: 0 }]));
-  assert.equal(resets, 1, "an access unit was cached and then replayed");
+test("a truncated access unit drops the batch rather than decoding half of it", async () => {
+  // Half an access unit is not a smaller access unit: submitting one would leave
+  // the decoder's state wrong for every frame after it.
+  const frame = batchFrame([
+    { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+  ]);
+  await painter().draw(frame.slice(0, frame.byteLength - 1));
+  assert.deepEqual(cropped, []);
+  assert.deepEqual(chunkTypes, []);
 });
 
-test("a video frame is cropped to the desktop rather than drawn whole", async () => {
-  // H.264 needs even sides and a desktop need not have them, so the decoded
-  // picture can be a pixel wider or taller than the framebuffer. The tile header
-  // carries the desktop size, which is what the canvas is.
-  size = { w: 1919, h: 1079 };
+test("a video frame is cropped to its region and drawn where it belongs", async () => {
+  // H.264 needs even sides and a region at the edge of an odd desktop does not
+  // have them, so the decoded picture can be a pixel wider or taller than the
+  // rectangle. The record carries the true rectangle, which is where it goes.
   await painter().draw(
     batchFrame([
       {
-        op: "tile",
-        format: FORMAT_H264,
-        slot: 0xffff,
-        x: 0,
-        y: 0,
-        w: 1919,
-        h: 1079,
+        op: "video",
+        stream: 0,
+        x: 320,
+        y: 64,
+        w: 1599,
+        h: 1015,
         payload: KEYFRAME,
       },
     ]),
   );
-  assert.deepEqual(cropped, [{ sw: 1919, sh: 1079, dw: 1919, dh: 1079 }]);
+  assert.deepEqual(cropped, [
+    { sw: 1599, sh: 1015, dx: 320, dy: 64, dw: 1599, dh: 1015 },
+  ]);
   assert.deepEqual(drawn, [], "a padded frame was drawn at its own size");
   assert.deepEqual(chunkTypes, ["key"], "an IDR was submitted as a delta");
   assert.ok(
@@ -367,25 +387,65 @@ test("a video frame is cropped to the desktop rather than drawn whole", async ()
   );
 });
 
-test("clear() ends the video stream, not only the slot table", async () => {
-  const p = painter();
-  size = { w: 64, h: 64 };
-  await p.draw(
+test("each stream id gets its own decoder", async () => {
+  // A target on `render_motion_subtype = "h264"` runs one per moving region, and
+  // they are separate chains: a unit decoded against the wrong region's history
+  // is corruption, not a misplaced picture.
+  await painter().draw(
     batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 320, h: 64, payload: KEYFRAME },
       {
-        op: "tile",
-        format: FORMAT_H264,
-        slot: 0xffff,
-        x: 0,
-        y: 0,
-        w: 64,
+        op: "video",
+        stream: 1,
+        x: 640,
+        y: 128,
+        w: 320,
         h: 64,
         payload: KEYFRAME,
       },
     ]),
   );
+  assert.equal(decoders, 2, "two regions shared one decoder");
+  assert.deepEqual(
+    cropped.map((c) => [c.dx, c.dy]),
+    [
+      [0, 0],
+      [640, 128],
+    ],
+  );
+});
+
+test("a region that restarts on a new size replaces its decoder", async () => {
+  // The codec string carries no resolution, so an in-band size change is not
+  // something to bet two browsers on. A region that grew is a new picture.
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 320, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 640, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.equal(
+    decoders,
+    2,
+    "the grown region kept a decoder built for the old size",
+  );
+  assert.ok(videoClosed, "the replaced decoder was left holding memory");
+});
+
+test("clear() ends the video decoders, not only the slot table", async () => {
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
   p.clear();
-  assert.ok(videoClosed, "the stream belongs to one attachment");
+  assert.ok(videoClosed, "the decoders belong to one attachment");
 });
 
 test("a runtime with no video decoder says so rather than showing nothing", async () => {
@@ -396,19 +456,9 @@ test("a runtime with no video decoder says so rather than showing nothing", asyn
   // A secure origin with no decoder, which is the honest half of the pair: the
   // other message is about the origin, and only a browser can be insecure.
   globals.window = { isSecureContext: true };
-  size = { w: 64, h: 64 };
   await painter().draw(
     batchFrame([
-      {
-        op: "tile",
-        format: FORMAT_H264,
-        slot: 0xffff,
-        x: 0,
-        y: 0,
-        w: 64,
-        h: 64,
-        payload: KEYFRAME,
-      },
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
     ]),
   );
   assert.equal(videoErrors.length, 1);
