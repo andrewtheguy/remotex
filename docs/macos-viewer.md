@@ -521,28 +521,6 @@ authorizes the client. They are independent.
 `URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
 limit ends the socket rather than dropping one frame.
 
-### Local network permission
-
-The first target picked after a fresh install asks the user to allow local
-network access, and everything the gateway tries before that answer is refused
-by the kernel with `EHOSTUNREACH` — indistinguishable from an address with no
-route. That covers the embedded gateway as well: the permission belongs to the
-responsible app bundle, and `remotex-gateway` is a child of `remotex.app`.
-
-The sheet is expected and is the user's to answer; what is not expected is the
-session failing while it is open, which is what it used to do — the first target
-reported "No route to host" and picking it again worked. `engine::tcp_connect`
-now waits out its ordinary connect budget instead, retrying while the kernel
-gives that one refusal, so the desktop appears when the sheet is answered. An
-already-running process starts connecting on its next attempt, so nothing has to
-be restarted. Every other connect error is still reported the moment it happens.
-
-When macOS decides to ask again is not keyed on anything this repo controls: an
-ad-hoc-signed bundle that had been allowed once went on being allowed after both
-its identifier and its path changed. So a rebuild does not reproduce the
-pre-approval state, and testing this path means turning the app off under System
-Settings > Privacy & Security > Local Network first.
-
 ## Build and QA
 
 Run the tests, build the packaged app, and launch QA against a throwaway instance:

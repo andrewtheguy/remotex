@@ -28,14 +28,6 @@
 	<string>public.app-category.utilities</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<!-- Reaching another computer is the whole product, and macOS 15 and later gate
-	     that behind a Local Network sheet: until it is answered every connection off
-	     this machine is refused with EHOSTUNREACH, including the embedded gateway's,
-	     which is a child of this bundle and so covered by this bundle's answer. The
-	     wait for that answer lives in `tcp_connect` (src/engine.rs); this key is what
-	     declares the intent behind the sheet. -->
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>remotex needs this to reach the remote desktops you configure, which are usually other computers on your network.</string>
 	<!-- The gateway this app talks to is its own, on plain HTTP over loopback, and
 	     ATS treats ws:// as http:// so the session socket needs the same exception.
 	     Deliberately not scoped to 127.0.0.1 with NSExceptionDomains: ATS exempts
