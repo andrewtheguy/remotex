@@ -20,18 +20,19 @@ private let audioFormatJSON = #"""
 
 @MainActor
 struct GatewayConnectionTests {
-    /// The invariant the whole receive loop is shaped around. Tiles decode
-    /// asynchronously; a `resize` that overtook the tiles queued ahead of it
-    /// would blit stale pixels into a freshly allocated texture, and two
-    /// reordered tiles leave the older one on screen. Tiles carry no delta state,
-    /// so nothing downstream can repair either.
+    /// The invariant the whole receive loop is shaped around, and the only one
+    /// this layer still owes now that decoding is the canvas page's: everything
+    /// off the socket reaches the sink in the order it arrived, control messages
+    /// and binary frames interleaved as the gateway sent them.
     ///
-    /// Audio is in the stream because it shares the invariant for a second reason: an
-    /// `audioFormat` that arrived after the packets it configures configures nothing,
-    /// and Opus packets carry inter-packet state, so a reordered pair is a decoder
-    /// running on wrong history.
+    /// It matters at both ends of the pipe. A `resize` that overtook the tiles
+    /// queued ahead of it paints stale pixels into a freshly sized canvas, and
+    /// tiles carry no delta state, so nothing downstream can repair it. An
+    /// `audioFormat` that arrived after the packets it configures configures
+    /// nothing, and Opus packets carry inter-packet state, so a reordered pair is
+    /// a decoder running on wrong history.
     @Test
-    func framesReachTheSinkInArrivalOrderAcrossTheAsyncTileDecode() async throws {
+    func everythingReachesTheSinkInArrivalOrder() async throws {
         let transport = FakeWebSocketTransport(
             inbound: [
                 .text(connectedJSON),
@@ -55,22 +56,50 @@ struct GatewayConnectionTests {
         await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
 
         let interesting = sink.trace.filter {
-            $0.hasPrefix("control:") || $0.hasPrefix("tiles:") || $0.hasPrefix("audio:")
+            $0.hasPrefix("control:") || $0.hasPrefix("frame:")
         }
         #expect(
             interesting == [
                 "control:connected(mac)",
                 "control:resize(64x64@2.0x)",
-                "tiles:0,0,2x2",
+                "frame:2,\(try tileFrame(x: 0, y: 0).count)",
                 "control:audioFormat(opus)",
-                "audio:240",
-                "tiles:8,16,2x2",
+                "frame:3,\(audioFrame([Data(repeating: 7, count: 240)]).count)",
+                "frame:2,\(try tileFrame(x: 8, y: 16).count)",
                 "control:remoteOs(true)",
-                "audio:12|1",
-                "tiles:32,48,2x2",
+                "frame:3,\(audioFrame([Data(repeating: 8, count: 12), Data([9])]).count)",
+                "frame:2,\(try tileFrame(x: 32, y: 48).count)",
                 "control:picker",
             ]
         )
+        await connection.stop()
+    }
+
+    /// A binary frame is handed on byte for byte. The page parses it with the same
+    /// code the browser SPA uses, so anything rewritten here would be a second
+    /// implementation of a format only one side reads.
+    @Test
+    func aBinaryFrameIsForwardedVerbatim() async throws {
+        let batch = batchFrame([
+            try tileRecord(x: 0, y: 0),
+            referenceRecord(slot: 3, x: 8, y: 16),
+        ])
+        let audio = audioFrame([Data(repeating: 7, count: 240), Data([1, 2, 3])])
+        let transport = FakeWebSocketTransport(
+            inbound: [.binary(batch), .binary(audio), .text(#"{"type":"picker"}"#)],
+            closeCode: nil
+        )
+        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
+        let sink = RecordingSink()
+        let connection = GatewayConnection(gateway: gateway, sink: sink)
+
+        await connection.start()
+        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
+
+        let forwarded = sink.events.compactMap { event -> Data? in
+            if case .frame(let data) = event { data } else { nil }
+        }
+        #expect(forwarded == [batch, audio])
         await connection.stop()
     }
 
@@ -97,230 +126,11 @@ struct GatewayConnectionTests {
         await connection.start()
         await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
 
+        let batch = try tileFrame(x: 0, y: 0)
         let delivered = sink.trace.filter {
-            $0.hasPrefix("control:") || $0.hasPrefix("tiles:") || $0.hasPrefix("audio:")
+            $0.hasPrefix("control:") || $0.hasPrefix("frame:")
         }
-        #expect(delivered == ["tiles:0,0,2x2", "control:picker"])
-        await connection.stop()
-    }
-
-    /// A batch reaches the sink as one event, in wire order.
-    ///
-    /// One event per frame is what lets the renderer ask for a single redraw per
-    /// frame; delivering tile by tile would put that back to one per tile, and no
-    /// pixel assertion downstream could tell the difference.
-    @Test
-    func aBatchReachesTheSinkAsOneEventInWireOrder() async throws {
-        let batch = batchFrame([
-            try tileRecord(x: 0, y: 0),
-            try tileRecord(x: 8, y: 0),
-            try tileRecord(x: 16, y: 32),
-        ])
-        let transport = FakeWebSocketTransport(
-            inbound: [
-                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
-                .binary(batch),
-                .text(#"{"type":"picker"}"#),
-            ],
-            closeCode: nil
-        )
-        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
-        let sink = RecordingSink()
-        let connection = GatewayConnection(gateway: gateway, sink: sink)
-
-        await connection.start()
-        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
-
-        #expect(
-            sink.trace.filter { $0.hasPrefix("tiles:") }
-                == ["tiles:0,0,2x2|8,0,2x2|16,32,2x2"]
-        )
-        await connection.stop()
-    }
-
-    /// One record this build cannot decode must not cost the rest of its batch:
-    /// those tiles decoded, and the pixels they cover would stay stale until
-    /// something else happened to repaint them.
-    @Test
-    func anUndecodableRecordIsDroppedWithoutItsBatch() async throws {
-        // A structurally valid record whose payload is not an image.
-        var garbage = Data([BatchFrame.opTile, TileFormat.png.rawValue])
-        for value: UInt16 in [BatchFrame.noSlot, 8, 8, 2, 2] {
-            garbage.append(UInt8(value & 0xFF))
-            garbage.append(UInt8(value >> 8))
-        }
-        garbage.append(contentsOf: [0x03, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE])
-        let batch = batchFrame([
-            try tileRecord(x: 0, y: 0),
-            garbage,
-            try tileRecord(x: 16, y: 0),
-        ])
-        let transport = FakeWebSocketTransport(
-            inbound: [
-                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
-                .binary(batch),
-                .text(#"{"type":"picker"}"#),
-            ],
-            closeCode: nil
-        )
-        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
-        let sink = RecordingSink()
-        let connection = GatewayConnection(gateway: gateway, sink: sink)
-
-        await connection.start()
-        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
-
-        #expect(
-            sink.trace.filter { $0.hasPrefix("tiles:") } == ["tiles:0,0,2x2|16,0,2x2"]
-        )
-        await connection.stop()
-    }
-
-    /// A video target has to be refused out loud. This build cannot decode H.264, and
-    /// a video target sends nothing else — so dropping the records the way an
-    /// undecodable *tile* is dropped would leave a desktop that simply never paints,
-    /// with the reason only in the log.
-    @Test
-    func aVideoTargetIsRefusedByNameRatherThanShowingNothing() async throws {
-        let batch = batchFrame([
-            tileRecord(x: 0, y: 0, w: 64, h: 64, format: .h264, payload: Data([0, 0, 0, 1, 0x67]))
-        ])
-        let transport = FakeWebSocketTransport(
-            inbound: [
-                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
-                .binary(batch),
-                .binary(batch),
-                // A sentinel behind the second batch. Waiting on the rejection alone
-                // would be satisfied by the *first* batch, so "said once" would pass
-                // without the second batch having been looked at — which is the half
-                // of the latch worth testing. The receive loop is strictly ordered,
-                // so this control message arriving means both batches are done.
-                .text(#"{"type":"picker"}"#),
-            ],
-            closeCode: nil
-        )
-        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
-        let sink = RecordingSink()
-        let connection = GatewayConnection(gateway: gateway, sink: sink)
-
-        await connection.start()
-        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
-
-        let reasons = sink.events.compactMap { event -> String? in
-            if case .rejected(let reason) = event { reason } else { nil }
-        }
-        #expect(reasons.count == 1, "one unusable target should say so once, not once a batch")
-        #expect(reasons[0].contains("H.264"), "the message should name what arrived")
-        #expect(reasons[0].contains("browser"), "the message should say where it does work")
-        #expect(
-            !sink.trace.contains { $0.hasPrefix("tiles:") },
-            "an access unit reached the renderer"
-        )
-        await connection.stop()
-    }
-
-    /// The tile cache's whole claim, from the side that has to honour it: seven
-    /// bytes become the pixels a slot already holds, at a new position.
-    ///
-    /// Asserted on the decoded bytes and not only on geometry, because resolving a
-    /// reference to the wrong slot would put the same rectangle in the trace. Both
-    /// lifetimes are covered: a slot filled by an earlier batch, which is what the
-    /// cache exists for, and one filled earlier in the reference's own batch, which
-    /// the gateway emits because records are applied in order.
-    @Test
-    func aReferenceRedrawsTheCachedPixelsAtItsOwnPosition() async throws {
-        let stored = batchFrame([try tileRecord(x: 0, y: 0, red: 0x11, slot: 3)])
-        let reused = batchFrame([
-            referenceRecord(slot: 3, x: 8, y: 16),
-            try tileRecord(x: 0, y: 32, red: 0x22, slot: 4),
-            referenceRecord(slot: 4, x: 24, y: 32),
-        ])
-        let transport = FakeWebSocketTransport(
-            inbound: [
-                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
-                .binary(stored),
-                .binary(reused),
-                .text(#"{"type":"picker"}"#),
-            ],
-            closeCode: nil
-        )
-        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
-        let sink = RecordingSink()
-        let connection = GatewayConnection(gateway: gateway, sink: sink)
-
-        await connection.start()
-        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
-
-        #expect(
-            sink.trace.filter { $0.hasPrefix("tiles:") } == [
-                "tiles:0,0,2x2",
-                "tiles:8,16,2x2|0,32,2x2|24,32,2x2",
-            ]
-        )
-
-        let painted = sink.events.compactMap { event -> [DecodedTile]? in
-            if case .tiles(let tiles) = event { tiles } else { nil }
-        }
-        try #require(painted.count == 2)
-        let cached = try #require(painted[0].first)
-        let second = painted[1]
-        #expect(!cached.bgra.isEmpty)
-        #expect(second[0].bgra == cached.bgra, "slot 3's bytes, at 8,16")
-        #expect(second[2].bgra == second[1].bgra, "slot 4's, filled this same batch")
-        #expect(second[1].bgra != cached.bgra, "different colours, so different slots")
-        await connection.stop()
-    }
-
-    /// A reference into a slot this client does not hold cannot be recovered from
-    /// here: the gateway believes the slot is full, and nothing else would ever
-    /// correct that. So the client says so — once per batch, because fifty stale
-    /// references are one disagreement, not fifty.
-    @Test
-    func referencesIntoAnEmptyCacheAskForOneResetPerBatch() async throws {
-        let batch = batchFrame([
-            try tileRecord(x: 0, y: 0, slot: 1),
-            referenceRecord(slot: 9, x: 8, y: 0), // never filled
-            referenceRecord(slot: 10, x: 16, y: 0), // nor this
-            referenceRecord(slot: 1, x: 24, y: 0), // filled by this very batch
-        ])
-        let transport = FakeWebSocketTransport(
-            inbound: [
-                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
-                .binary(batch),
-                .text(#"{"type":"picker"}"#),
-            ],
-            closeAfterDraining: false
-        )
-        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
-        let sink = RecordingSink()
-        let connection = GatewayConnection(gateway: gateway, sink: sink)
-
-        await connection.start()
-        await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
-
-        // A sentinel behind whatever the batch enqueued: the outbound queue is
-        // FIFO, so a `refresh` that reached the socket means every reset the batch
-        // asked for has too. Waiting on a count instead would be asserting that
-        // nothing more arrived, over a wall clock — true on a fast machine and a
-        // flake on a slow one.
-        connection.send(.refresh)
-        await sink.wait { _ in transport.sentFrames.contains { $0.contains("refresh") } }
-
-        let sent = try transport.sentFrames.map { frame in
-            try #require(
-                JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any]
-            )
-        }
-        #expect(
-            sent.compactMap { $0["type"] as? String }
-                .filter { $0 == "cacheReset" || $0 == "refresh" } == ["cacheReset", "refresh"]
-        )
-        // And the record naming a slot this batch filled itself still painted: the
-        // cache is emptied after the pass over the records, not in the middle of
-        // one, or a miss would take a hit down with it.
-        #expect(
-            sink.trace.filter { $0.hasPrefix("tiles:") } == ["tiles:0,0,2x2|24,0,2x2"]
-        )
+        #expect(delivered == ["frame:2,\(batch.count)", "control:picker"])
         await connection.stop()
     }
 
@@ -502,7 +312,7 @@ struct GatewayConnectionTests {
         await connection.start()
         await sink.wait { $0.contains { if case .control(.picker) = $0 { true } else { false } } }
 
-        let delivered = sink.trace.filter { $0.hasPrefix("control:") || $0.hasPrefix("tiles:") }
+        let delivered = sink.trace.filter { $0.hasPrefix("control:") || $0.hasPrefix("frame:") }
         #expect(delivered == ["control:unsupported(aNewMessage)", "control:picker"])
         await connection.stop()
     }

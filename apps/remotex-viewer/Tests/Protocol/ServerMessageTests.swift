@@ -179,7 +179,7 @@ struct ServerMessageTests {
 
     /// The exact bytes `src/protocol.rs` pins for this message, `head` included: the
     /// base64 there decodes to the 19-byte `OpusHead` an Opus stream begins with, and
-    /// the pre-skip inside it is what the decoder needs (see `OpusDecoder`).
+    /// the pre-skip inside it is what the decoder needs (see `audioPlayer.ts`).
     @Test
     func audioFormatDecodesItsHeadFromBase64() throws {
         let message = try ServerMessage.decode(#"""

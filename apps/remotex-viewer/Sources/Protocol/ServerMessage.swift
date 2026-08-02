@@ -108,7 +108,8 @@ enum ServerMessage: Sendable, Equatable {
     struct AudioFormat: Sendable, Equatable, Decodable {
         /// `"opus"`, and there is no second codec to branch on: the gateway sends Opus
         /// with no fallback representation in either direction. Carried rather than
-        /// assumed so a gateway that grew one is *refused* by `OpusDecoder` instead of
+        /// assumed so a gateway that grew one is *refused* by the canvas page's decoder
+        /// instead of
         /// being fed to a decoder built for something else.
         let codec: String
         let sampleRate: Double
@@ -119,7 +120,8 @@ enum ServerMessage: Sendable, Equatable {
         /// the cursor's PNG is — and 19 bytes once a session is not worth a second
         /// binary frame kind. macOS takes none of it as a magic cookie (measured: the
         /// system decoder ignores one), so what this is *for* here is the pre-skip
-        /// inside it; see `OpusDecoder`.
+        /// inside it, which WebCodecs takes as the decoder config's `description` —
+        /// see `frontend/src/audioPlayer.ts`.
         let head: Data
 
         private enum CodingKeys: String, CodingKey {

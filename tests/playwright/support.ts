@@ -109,12 +109,19 @@ export function setRemoteClipboard(text: string): void {
 
 // A pasteboard of `bytes` ASCII characters, generated on the Mac rather than
 // sent over SSH: the point of this one is a size the link is meant to refuse.
+//
+// Built with `head`, `tr` and `pbcopy` — no interpreter. This used to ask
+// `python3` for the string, which on a Mac without the Xcode command line tools
+// is a stub that prints the install notice to stderr, writes nothing, and
+// *exits zero*: the pasteboard kept whatever it already held, and the spec
+// failed twenty seconds later waiting for a card about a value that had never
+// been set. A QA Mac should not need a toolchain to hold a string.
 export function setRemoteClipboardBytes(bytes: number): void {
   execFileSync(
     "ssh",
     [
       required("REMOTEX_PLAYWRIGHT_MAC_SSH", MAC_SSH),
-      `python3 -c 'print("x"*${bytes}, end="")' | pbcopy`,
+      `head -c ${bytes} /dev/zero | tr '\\0' 'x' | pbcopy`,
     ],
     { timeout: SSH_TIMEOUT_MS },
   );

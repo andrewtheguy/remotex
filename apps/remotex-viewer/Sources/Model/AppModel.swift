@@ -98,7 +98,7 @@ final class AppModel: GatewaySessionSink {
     private(set) var remoteCursor: ServerMessage.Cursor?
 
     let clipboard: ClipboardSynchronizer
-    let audio: AudioOutput
+    let audio: AudioControl
 
     /// The gateway this app can run, and the config it would run on. Held rather
     /// than created per launch: `stop()` has to reach the same process `start()`
@@ -175,11 +175,15 @@ final class AppModel: GatewaySessionSink {
     /// comes from `session.remoteScale` alone, see `RemoteGeometry`. Observed
     /// where `lastHostScale` is not, because a menu has to redraw when it moves.
     private(set) var hostScale: UInt16 = 100
-    /// Deliberately outside Observation. Tiles arrive dozens of times a second;
+    /// Deliberately outside Observation. Frames arrive dozens of times a second;
     /// routing them through `@Observable` would invalidate the view hierarchy on
-    /// every strip.
+    /// every batch.
     @ObservationIgnored
-    private weak var renderer: FramebufferRenderer?
+    private weak var canvas: (any RemoteCanvas)?
+    /// The last input gate sent to the page, so the same answer is not resent
+    /// after every session event. Cleared with the canvas.
+    @ObservationIgnored
+    private var lastInputEnabled: Bool?
     /// The AppKit half of "Resize to Display", installed by the surface's
     /// coordinator for as long as it is on screen. Sizing a window needs the window,
     /// the scroll view and the room it gives the document, none of which this model
@@ -204,7 +208,7 @@ final class AppModel: GatewaySessionSink {
         gateway: EmbeddedGateway? = nil,
         config: GatewayConfigStore? = nil,
         clipboard: ClipboardSynchronizer = ClipboardSynchronizer(),
-        audio: AudioOutput = AudioOutput(),
+        audio: AudioControl = AudioControl(),
         urlSession: URLSession = GatewayClient.defaultSession
     ) {
         self.preferences = preferences
@@ -664,6 +668,9 @@ final class AppModel: GatewaySessionSink {
         audio.report = { [weak self] message in
             self?.showError(message)
         }
+        audio.stopPlayback = { [weak self] in
+            self?.canvas?.send(.audioStop)
+        }
         // Provisional: the gateway's `picker` or `connected` decides which of the
         // two post-login screens this really is, and the interstitial covers the
         // wait either way.
@@ -683,6 +690,7 @@ final class AppModel: GatewaySessionSink {
         audio.send = nil
         audio.report = nil
         audio.reset()
+        audio.stopPlayback = nil
     }
 
     /// The gateway refused this client's credential — and what that means is the one
@@ -732,6 +740,10 @@ final class AppModel: GatewaySessionSink {
     // MARK: - Session events
 
     func apply(_ event: SessionEvent) {
+        // Every session transition arrives here, so this is the one place the
+        // page's input gate can be kept in step with `canSendInput` without
+        // three call sites having to remember to.
+        defer { publishInputEnablement() }
         switch event {
         case .status(let status):
             session.connectionStatus = status
@@ -739,15 +751,13 @@ final class AppModel: GatewaySessionSink {
             updateAudioAvailability()
         case .control(let message):
             handle(message)
-        case .tiles(let tiles):
-            renderer?.upload(tiles)
-        case .audio(let packets):
-            audio.play(packets: packets)
+        case .frame(let data):
+            canvas?.send(frame: data)
         case .clearFramebuffer:
             // Dropping the size is what puts the "waiting for the remote
             // desktop" interstitial back up; the gateway always repaints in full.
             session.remoteSize = nil
-            renderer?.clear()
+            canvas?.send(.clear)
         case .releaseInput:
             releaseInput()
         case .failPendingClipboardFetch:
@@ -814,7 +824,7 @@ final class AppModel: GatewaySessionSink {
             // Cleared with the rest of what belonged to that target: the answer was
             // about the target being left, not a setting the next pick inherits. Not
             // cleared on a mere disconnection, which is what
-            // `AudioOutput.update(available:)` handles — a reconnect keeps playing.
+            // `AudioControl.update(available:)` handles — a reconnect keeps playing.
             audio.reset()
             viewportPolicy = ViewportPolicy()
             updateClipboardEnablement()
@@ -892,11 +902,18 @@ final class AppModel: GatewaySessionSink {
         case .resize(let w, let h, let scale):
             let size = DisplayMode(w: w, h: h)
             session.remoteSize = size
-            // The texture is the remote's pixels; the density only decides how
-            // large those pixels are drawn (`RemoteGeometry`), so the renderer
-            // never hears about it.
-            session.remoteScale = scale > 0 ? CGFloat(scale) : 1
-            renderer?.resize(to: size)
+            // Sanitized once and used for both. A gateway reporting a density of
+            // zero would otherwise leave the page dividing by whatever it made of
+            // the raw number while this side had already settled on 1 — and
+            // `canvasAttached` re-sends the sanitized one, so a page that
+            // reloaded would present the desktop at a different size than the
+            // page that did not.
+            let density = scale > 0 ? scale : 1
+            session.remoteScale = CGFloat(density)
+            // The canvas bitmap is the remote's pixels and its CSS box is those
+            // pixels divided by this density, so unlike the Metal texture this
+            // replaced, the page needs both numbers — see `desktopCanvas.ts`.
+            canvas?.send(.resize(w: w, h: h, scale: density))
 
         case .displays(let active, let displays):
             let switched = session.activeDisplayID != active
@@ -934,9 +951,10 @@ final class AppModel: GatewaySessionSink {
             // Receiving one of these at all means the viewer owns pointer
             // rendering for the rest of the session.
             remoteCursor = payload
+            canvas?.send(.cursor(payload))
 
         case .audioFormat(let format):
-            audio.start(format: format)
+            canvas?.send(.audioFormat(format))
 
         case .unsupported(let type):
             // A newer gateway. Deliberately nothing: the frame was already
@@ -993,14 +1011,81 @@ final class AppModel: GatewaySessionSink {
 
     // MARK: - The remote surface
 
-    func attach(renderer: FramebufferRenderer?) {
-        self.renderer = renderer
-        // A surface appearing mid-session has an empty texture, so ask for the
-        // pixels rather than waiting for the remote to change something.
-        if renderer != nil, let size = session.remoteSize {
-            renderer?.resize(to: size)
-            refresh()
+    func attach(canvas: (any RemoteCanvas)?) {
+        self.canvas = canvas
+        canvasAttached()
+    }
+
+    /// The page measured the room it has for the desktop, and what the desktop
+    /// is laid out at.
+    ///
+    /// Traced rather than acted on, and that is the point of it. The fit is
+    /// computed from the web view's bounds, which is the *window* chrome and
+    /// nothing else; this pair is the only way to see what the page made of the
+    /// result. Equal means the desktop sits flush with no scroll bars, and the
+    /// two differing by a bar's width is what a latched scroll bar looks like
+    /// from here — which is a bug that cost a long evening precisely because
+    /// neither side could see it alone.
+    func noteCanvasRoom(_ room: DisplayMode, content: DisplayMode) {
+        trace("canvas room \(room.w)x\(room.h), content \(content.w)x\(content.h)")
+    }
+
+    /// A line for `REMOTEX_VIEWER_TRACE=1`, on stderr.
+    ///
+    /// The app is launched by Launch Services, whose `os_log` output is not
+    /// something a terminal can read back; a QA run started from a shell can
+    /// read stderr. Off unless asked for, so a normal launch is silent.
+    func trace(_ message: @autoclosure () -> String) {
+        guard ProcessInfo.processInfo.environment["REMOTEX_VIEWER_TRACE"] != nil else {
+            return
         }
+        FileHandle.standardError.write(Data("viewer: \(message())\n".utf8))
+    }
+
+    /// Tell the page whether to report input, when the answer has changed.
+    ///
+    /// Deduped because it is called after every session event and the answer
+    /// moves twice a session; the memo is cleared with the canvas, so a fresh
+    /// page is always told.
+    private func publishInputEnablement() {
+        let enabled = canSendInput
+        guard lastInputEnabled != enabled else {
+            return
+        }
+        lastInputEnabled = enabled
+        canvas?.send(.input(enabled: enabled))
+    }
+
+    /// Bring a blank canvas up to date.
+    ///
+    /// Called when the view is built and again whenever the page's stream
+    /// attaches — which is also what a reload looks like from here, since the app
+    /// never saw the view go away. So everything it sends is unconditional and
+    /// idempotent, and the input gate's dedupe is cleared first: what the page
+    /// was last told went with the page.
+    func canvasAttached() {
+        lastInputEnabled = nil
+        publishInputEnablement()
+        guard let canvas else {
+            return
+        }
+        // Sound belongs to the page that was playing it, and this one has never
+        // heard an `audioFormat`: the gateway sends one when a subscription
+        // starts and never again, so a reloaded page would sit there receiving
+        // packets it has no decoder for, silent with nothing to say why.
+        // Re-subscribing is what makes the gateway describe the stream again. A
+        // no-op unless sound was actually on, so it costs a target with none
+        // nothing — and it is above the size guard because a page that came back
+        // before the first `resize` still needs its decoder.
+        audio.reassert()
+        guard let size = session.remoteSize else {
+            return
+        }
+        canvas.send(.resize(w: size.w, h: size.h, scale: Double(session.remoteScale)))
+        if let remoteCursor {
+            canvas.send(.cursor(remoteCursor))
+        }
+        refresh()
     }
 
     /// The surface measured how much room it has, in the remote's pixels.
@@ -1109,6 +1194,15 @@ final class AppModel: GatewaySessionSink {
         connection?.send(.refresh)
     }
 
+    /// The page and the gateway disagree about the tile slot table.
+    ///
+    /// A plain `refresh` cannot repair this: it repaints without clearing the
+    /// gateway's own table, so every reference into a slot this client lost would
+    /// miss again. Raised by the page, which is the side that owns the table.
+    func resetTileCache() {
+        connection?.send(.cacheReset)
+    }
+
     /// Share a different one of the remote's displays (the Display menu).
     ///
     /// Fire and forget, and deliberately not optimistic: the answer is the
@@ -1153,7 +1247,7 @@ final class AppModel: GatewaySessionSink {
 
     /// The Remote menu's "Enable Audio" toggle. Like `setAutoResize` it also writes
     /// the remembered default, so muting or unmuting mid-session is remembered for
-    /// the next connect. The live effect is `AudioOutput`'s.
+    /// the next connect. The live effect is `AudioControl`'s.
     func setAudioEnabled(_ enabled: Bool) {
         audioByDefault = enabled
         audio.setEnabled(enabled)

@@ -85,17 +85,6 @@ enum BatchFrame {
     enum Record: Sendable, Equatable {
         case tile(TileFrame)
         case reference(slot: UInt16, x: UInt16, y: UInt16)
-
-        /// Whether this record carries a video frame rather than a picture.
-        ///
-        /// Only a tile can: an access unit is never cached into a slot, so a
-        /// reference can never name one (`Slots::place` in `src/wire.rs`).
-        var isVideo: Bool {
-            switch self {
-            case .tile(let frame): frame.format == .h264
-            case .reference: false
-            }
-        }
     }
 
     /// Parse a binary frame into its tile records, or nil for anything malformed
