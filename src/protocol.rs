@@ -16,7 +16,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// viewer requires an exact match. Bump it when an older peer would otherwise
 /// fail without a useful compatibility error; clients ignore additive control
 /// tags they do not know.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -741,6 +741,10 @@ pub enum ServerMsg {
     /// the first is whether a client may resize the remote when the user asks, the
     /// second whether it may hand the size to its window and let every drag report.
     /// Only plain `vnc` gets the second — see [`crate::config::TargetConfig::auto_resize`].
+    /// `auto_resize` is required rather than defaulted, which is what moved
+    /// [`PROTOCOL_VERSION`] to 9: version 8 shipped this message without it, so a
+    /// gateway that omits it must be refused by version rather than decoded into a
+    /// target that silently cannot follow the window.
     Connected {
         name: String,
         protocol: &'static str,

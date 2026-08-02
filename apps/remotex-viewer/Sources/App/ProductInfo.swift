@@ -4,7 +4,7 @@ enum ProductInfo {
     /// The wire protocol revision this build speaks, checked against the
     /// `protocolVersion` in `GET /api/config`. Mirrors `PROTOCOL_VERSION` in
     /// `src/protocol.rs`; `ProductInfoTests` pins the two together.
-    static let protocolVersion = 8
+    static let protocolVersion = 9
 
     /// The workspace version, and only ever out of the bundle:
     /// `build-viewer-app.sh` puts `workspace.package.version` from Cargo.toml into
