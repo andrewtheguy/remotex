@@ -879,18 +879,22 @@ impl TileSink {
         if qp > video.congestion.dial {
             self.shared.coarsened.fetch_add(1, Ordering::Relaxed);
         }
+        let dial = video.congestion.dial;
         let Some(wanted) = video.congestion.observe(blocked, tokio::time::Instant::now()) else {
             return;
         };
-        let Ok(stream) = video.stream() else {
-            return; // nothing built yet; the next one starts at the dial anyway
+        // The stream as it stands, never one built to be re-tuned: `Video::stream`
+        // would construct an encoder here, which is both wasted work and the wrong
+        // path for the failure it can produce. A stream that does not exist yet has
+        // encoded nothing to be behind on, and the one that replaces it starts at the
+        // dial anyway.
+        let Some(stream) = video.stream.as_mut() else {
+            return;
         };
         if let Err(e) = stream.set_qp(wanted) {
             warn!("{}: could not move the h264 quantizer to {wanted}: {e:#}", self.engine);
         } else {
-            debug!("{}: h264 quantizer now {wanted} (the dial asks for {})", self.engine, {
-                video.congestion.dial
-            });
+            debug!("{}: h264 quantizer now {wanted} (the dial asks for {dial})", self.engine);
         }
     }
 

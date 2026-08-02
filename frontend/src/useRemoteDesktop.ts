@@ -1175,13 +1175,19 @@ export function useRemoteDesktop(
     // slot.
     const resolveRecord = (record: BatchRecord): PaintJob | null => {
       if (record.kind === "tile") {
-        if (record.slot !== NO_SLOT) {
+        // An access unit is never remembered, whatever slot it names. A reference
+        // replays a payload, and replaying one of these out of sequence
+        // desynchronises every frame after it until the next keyframe — the same
+        // reason the gateway never assigns one a slot (`Slots::place` in
+        // src/wire.rs). This is the client declining to be told otherwise.
+        const cached = record.slot !== NO_SLOT && record.codec !== "h264";
+        if (cached) {
           tileCache[record.slot] = {
             data: new Uint8Array(record.data),
             codec: record.codec,
           };
         }
-        return { ...record, cached: record.slot !== NO_SLOT };
+        return { ...record, cached };
       }
       const held = tileCache[record.slot];
       if (!held) {

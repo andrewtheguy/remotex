@@ -516,7 +516,8 @@ impl SessionManager {
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
         // now nothing else feeds this channel — so the buffer holds at most the
-        // attach status, never 64 frames, and Connected lands before any tile.
+        // attach status rather than a queue's worth of frames, whatever depth it
+        // was given, and Connected lands before any tile.
         if let Some(client) = &st.client {
             let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected {
                 name,
