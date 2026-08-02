@@ -537,8 +537,11 @@ gives that one refusal, so the desktop appears when the sheet is answered. An
 already-running process starts connecting on its next attempt, so nothing has to
 be restarted. Every other connect error is still reported the moment it happens.
 
-A new bundle identity is a new grant, so `make-instance-bundle.sh` variants each
-ask once, and so does the first launch after a rebuild if the signature changed.
+When macOS decides to ask again is not keyed on anything this repo controls: an
+ad-hoc-signed bundle that had been allowed once went on being allowed after both
+its identifier and its path changed. So a rebuild does not reproduce the
+pre-approval state, and testing this path means turning the app off under System
+Settings > Privacy & Security > Local Network first.
 
 ## Build and QA
 
