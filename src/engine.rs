@@ -48,7 +48,18 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A host that is switched off swallows SYNs, and the kernel's own retry budget
 /// runs to about two minutes with the client showing "Connecting…" for all of
 /// it — no client has a timeout of its own. Generous enough to cross a slow VPN.
+///
+/// It is also how long there is to answer the macOS sheet described at
+/// [`awaiting_local_network_permission`], which is the other thing a connect can
+/// now be waiting for.
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long to wait before trying again while the local network sheet is open.
+///
+/// Only ever reached where [`awaiting_local_network_permission`] can be true.
+/// Short enough that the desktop appears as soon as the sheet is answered rather
+/// than up to a second later, long enough that waiting is not a spin.
+const NO_ROUTE_RETRY: Duration = Duration::from_millis(250);
 
 /// How long a protocol handshake may take once the TCP connect has succeeded.
 ///
@@ -76,16 +87,40 @@ pub fn keepalive_budget() -> Duration {
 /// answering. For RDP and VNC that is the whole of it — a server process that
 /// wedges behind a kernel which still answers reads as an idle desktop, and
 /// neither RFB nor IronRDP offers a probe to close that gap.
+///
+/// The retry loop is for one specific refusal and no other — see
+/// [`awaiting_local_network_permission`]. Every other error is still reported the
+/// moment it happens, so a mistyped address does not become a twenty-second wait.
 pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
-    let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(dest))
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "TCP connect to {dest}: no answer after {}s",
-                TCP_CONNECT_TIMEOUT.as_secs()
-            )
-        })?
-        .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}"))?;
+    let deadline = tokio::time::Instant::now() + TCP_CONNECT_TIMEOUT;
+    // Whether anything was ever refused for want of a route, which is what decides
+    // *which* explanation the budget running out deserves.
+    let mut no_route = false;
+    let stream = loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            anyhow::bail!("{}", out_of_time(dest, no_route));
+        }
+        match tokio::time::timeout(left, TcpStream::connect(dest)).await {
+            Ok(Ok(stream)) => break stream,
+            Ok(Err(e)) if awaiting_local_network_permission(&e) => {
+                if !no_route {
+                    // Once, not per attempt: a log line every 250 ms would bury the
+                    // one thing worth reading here.
+                    warn!(
+                        "engine: no route to {dest} yet — if this is a first run, macOS \
+                         is asking whether to allow local network access. Waiting up to \
+                         {}s for an answer.",
+                        TCP_CONNECT_TIMEOUT.as_secs()
+                    );
+                }
+                no_route = true;
+                tokio::time::sleep(NO_ROUTE_RETRY).await;
+            }
+            Ok(Err(e)) => anyhow::bail!("TCP connect to {dest}: {e}"),
+            Err(_) => anyhow::bail!("{}", out_of_time(dest, no_route)),
+        }
+    };
     // Input events are tiny and latency-critical; never coalesce them.
     stream.set_nodelay(true).ok();
     if let Err(e) = arm_liveness_probes(&stream) {
@@ -150,6 +185,56 @@ where
             .await;
             None
         }
+    }
+}
+
+/// Whether a refused connect is one the user is about to be asked to allow.
+///
+/// macOS 15 and later gate an app's access to anything off this machine behind a
+/// Local Network sheet, and until that sheet is answered the kernel refuses every
+/// connection with `EHOSTUNREACH` — the *same* error a genuinely unrouteable
+/// address gives, with no way to tell them apart. So the first target picked after
+/// a fresh install failed instantly with "No route to host" and picking it again
+/// worked, which also accounts for one address family appearing to work where
+/// another did not: the variable was the attempt, not the address.
+///
+/// Waiting is enough, and that is the measured part: on macOS 26 a process that
+/// was *already running* when the sheet was answered connects on its very next
+/// attempt, so nothing has to be restarted or re-execed. The sheet covers the
+/// embedded gateway too — the permission belongs to the responsible app bundle,
+/// and `remotex-gateway` is a child of `remotex.app`.
+///
+/// Everywhere else there is no such gate and an unreachable address is simply
+/// unreachable, so it is reported at once rather than waited on.
+#[cfg(target_os = "macos")]
+fn awaiting_local_network_permission(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(e.kind(), ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable)
+}
+
+/// See the macOS half. No other platform gates a local connection on a user
+/// decision, so there is nothing here that waiting would fix.
+#[cfg(not(target_os = "macos"))]
+fn awaiting_local_network_permission(_: &std::io::Error) -> bool {
+    false
+}
+
+/// What to say when the connect budget ran out, which depends on how it ran out.
+///
+/// A host that swallowed every SYN and a host the kernel would not route to are
+/// different problems with different answers, and the old message only knew about
+/// the first.
+fn out_of_time(dest: &str, no_route: bool) -> String {
+    let secs = TCP_CONNECT_TIMEOUT.as_secs();
+    if no_route {
+        format!(
+            "TCP connect to {dest}: no route for {secs}s. On macOS an app cannot reach \
+             anything off this machine until local network access is allowed — answer \
+             the sheet, or turn remotex on under System Settings > Privacy & Security > \
+             Local Network. If it is already on, check the address"
+        )
+    } else {
+        format!("TCP connect to {dest}: no answer after {secs}s")
     }
 }
 
@@ -320,6 +405,63 @@ mod tests {
             !message.contains("handshake"),
             "a connect failure must not read as a handshake one: {message}"
         );
+    }
+
+    /// The guard on the retry loop's blast radius: only the one refusal macOS can
+    /// change its mind about is waited on.
+    #[test]
+    fn only_the_refusal_a_user_can_answer_is_waited_on() {
+        use std::io::ErrorKind;
+        let refused = std::io::Error::from(ErrorKind::ConnectionRefused);
+        assert!(
+            !awaiting_local_network_permission(&refused),
+            "a closed port is a decided answer, not a pending one"
+        );
+        assert!(!awaiting_local_network_permission(&std::io::Error::from(ErrorKind::TimedOut)));
+        // The two the sheet produces — and only where the sheet exists.
+        let macos = cfg!(target_os = "macos");
+        for kind in [ErrorKind::HostUnreachable, ErrorKind::NetworkUnreachable] {
+            assert_eq!(
+                awaiting_local_network_permission(&std::io::Error::from(kind)),
+                macos,
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The regression this fix could have introduced: turning *every* failure into
+    /// a twenty-second wait. A refused port must still be answered at once.
+    #[tokio::test]
+    async fn a_refused_connection_is_reported_without_spending_the_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        let started = std::time::Instant::now();
+        let failed = tcp_connect(&dest).await;
+
+        assert!(failed.is_err(), "a port with nothing behind it connected");
+        // Not a timing measurement: a refused connect is one round trip to the
+        // loopback, so any machine that finishes this at all finishes it in a
+        // small fraction of the budget. What fails here is a *retry*, which
+        // cannot come in under the budget at all.
+        assert!(
+            started.elapsed() < TCP_CONNECT_TIMEOUT / 2,
+            "a refused connect was retried rather than reported"
+        );
+    }
+
+    #[test]
+    fn the_reason_the_budget_ran_out_reaches_the_message() {
+        let silent = out_of_time("10.0.0.2:3389", false);
+        assert!(silent.contains("no answer after 20s"), "{silent}");
+        assert!(!silent.contains("Local Network"), "a silent host is not a permission: {silent}");
+
+        let unrouted = out_of_time("10.0.0.2:3389", true);
+        // Both ways out, because either can be the true one and the message is all
+        // the user gets: the permission, and an address that is simply wrong.
+        assert!(unrouted.contains("Local Network"), "{unrouted}");
+        assert!(unrouted.contains("check the address"), "{unrouted}");
     }
 
     #[test]
