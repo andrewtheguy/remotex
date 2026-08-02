@@ -474,9 +474,10 @@ func tileRecord(
     w: UInt16,
     h: UInt16,
     slot: UInt16 = BatchFrame.noSlot,
+    format: TileFormat = .png,
     payload: Data
 ) -> Data {
-    var record = Data([BatchFrame.opTile, TileFormat.png.rawValue])
+    var record = Data([BatchFrame.opTile, format.rawValue])
     for value in [slot, x, y, w, h] {
         record.append(UInt8(value & 0xFF))
         record.append(UInt8(value >> 8))

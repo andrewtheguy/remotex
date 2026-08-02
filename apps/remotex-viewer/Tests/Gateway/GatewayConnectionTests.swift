@@ -176,6 +176,45 @@ struct GatewayConnectionTests {
         await connection.stop()
     }
 
+    /// A video target has to be refused out loud. This build cannot decode H.264, and
+    /// a video target sends nothing else — so dropping the records the way an
+    /// undecodable *tile* is dropped would leave a desktop that simply never paints,
+    /// with the reason only in the log.
+    @Test
+    func aVideoTargetIsRefusedByNameRatherThanShowingNothing() async throws {
+        let batch = batchFrame([
+            tileRecord(x: 0, y: 0, w: 64, h: 64, format: .h264, payload: Data([0, 0, 0, 1, 0x67]))
+        ])
+        let transport = FakeWebSocketTransport(
+            inbound: [
+                .text(#"{"type":"resize","w":64,"h":64,"scale":1.0}"#),
+                .binary(batch),
+                .binary(batch),
+            ],
+            closeCode: nil
+        )
+        let gateway = FakeGateway(claims: [.claimed("tok-1")], sockets: [transport])
+        let sink = RecordingSink()
+        let connection = GatewayConnection(gateway: gateway, sink: sink)
+
+        await connection.start()
+        await sink.wait { events in
+            events.contains { if case .rejected = $0 { true } else { false } }
+        }
+
+        let reasons = sink.events.compactMap { event -> String? in
+            if case .rejected(let reason) = event { reason } else { nil }
+        }
+        #expect(reasons.count == 1, "one unusable target should say so once, not once a batch")
+        #expect(reasons[0].contains("H.264"), "the message should name what arrived")
+        #expect(reasons[0].contains("browser"), "the message should say where it does work")
+        #expect(
+            !sink.trace.contains { $0.hasPrefix("tiles:") },
+            "an access unit reached the renderer"
+        )
+        await connection.stop()
+    }
+
     /// The tile cache's whole claim, from the side that has to honour it: seven
     /// bytes become the pixels a slot already holds, at a new position.
     ///
