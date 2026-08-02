@@ -154,10 +154,13 @@ instance. Keep `--instance-dir` only as a QA override.
 
 - **13 MB, and it goes stale.** Re-run the script after updating `remotex.app`;
   it replaces the bundle without touching its instance directory.
-- **Nothing else.** No entitlements, no notarization, no TCC. The shipped bundle is
-  ad-hoc signed itself (`codesign -dv` → `Signature=adhoc`), and the viewer holds no TCC
-  grants for a change of code identity to break: it captures keys with a *local*
-  `NSEvent` monitor, which needs no Accessibility permission.
+- **No entitlements, no notarization, no TCC.** The shipped bundle is ad-hoc signed
+  itself (`codesign -dv` → `Signature=adhoc`), and the viewer holds no TCC grants
+  for a change of code identity to break: it captures keys with a *local* `NSEvent`
+  monitor, which needs no Accessibility permission.
+- **One permission that is not TCC.** Local network access is asked for per app,
+  and a variant is a different app, so each one is asked once — see
+  [Local network permission](#local-network-permission).
 
 Do not edit `remotex.app` in place; use the script so the copy is re-signed.
 
