@@ -140,6 +140,10 @@ jobs:
       - name: Test the native viewer
         run: swift test --package-path apps/remotex-viewer
 
+      # The bundle carries the remote surface as a web page, built from the same
+      # sources as the browser client.
+      - uses: oven-sh/setup-bun@v2
+
       # This job builds the gateway binary too, since it goes inside the bundle — and
       # without a cache that means compiling the whole graph, libopus through cmake
       # included, on every release.
@@ -180,8 +184,16 @@ jobs:
             echo "::error::expected 'remotex ${version}', got '${got}'"
             exit 1
           }
-          # No frontend ships in the app: the embedded gateway serves no web UI, and a
-          # web root appearing here would mean it had started to.
+          # The remote surface, which the app serves to its own WKWebView from its own
+          # loopback listener. Without it the desktop screen has nothing to show, and
+          # `CanvasServer.start()` refuses rather than loading a 404.
+          [ -f "$app/Contents/Resources/canvas/viewer.html" ] || {
+            echo "::error::remotex.app is missing its canvas page"
+            exit 1
+          }
+          # No SPA ships in the app: the embedded gateway serves no web UI, and a web
+          # root appearing here would mean it had started to. `viewer.html` above is
+          # the app's own surface and is deliberately not named index.html.
           if find "$app" -name index.html -print -quit | grep -q .; then
             echo "::error::remotex.app must not ship a frontend"
             exit 1

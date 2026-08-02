@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>remotex desktop</title>
+  </head>
+  <body>
+    <!--
+      The macOS viewer's remote surface. Not the SPA: this page owns no session,
+      opens no WebSocket and knows no gateway. It is handed wire frames down one
+      stream from the app it is embedded in and hands input back — see
+      docs/macos-viewer.md and src/viewer/main.ts.
+    -->
+    <div class="surface">
+      <!--
+        Starts 0x0 so no ghost block shows before the first resize; the resize
+        command keeps the full pixel bitmap separate from its remote-point CSS
+        size.
+      -->
+      <canvas id="framebuffer" class="framebuffer" width="0" height="0"></canvas>
+      <!--
+        Transparent overlay captures pointer input and wears the remote cursor.
+        Keyboard is deliberately absent: the app takes keys with an AppKit event
+        monitor ahead of the menu bar, so they never reach this page.
+      -->
+      <div id="overlay" class="input-overlay" role="application"></div>
+    </div>
+    <script type="module" src="/src/viewer/main.ts"></script>
+  </body>
+</html>

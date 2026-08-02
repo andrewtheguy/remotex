@@ -1,0 +1,50 @@
+/* The macOS viewer's canvas page. Shares the SPA's desktop layout (index.css)
+   and none of its chrome: there is no login, picker, menu or overlay here. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  /* The page IS the viewport. The framebuffer bitmap keeps every remote pixel
+     while its CSS box uses the remote's own logical size; when that desktop is
+     larger than the window this scrolls, which is the whole reason the surface
+     is a web page — AppKit's overlay scrollers never drew, because the native
+     surface forwarded every wheel event to the remote. */
+  overflow: auto;
+  background: #000;
+}
+
+/* Shrink-wraps the canvas so the input overlay lines up exactly with the
+   displayed framebuffer (for correct coordinate mapping), and so the canvas
+   drives the scroll extent when it overflows the window. */
+.surface {
+  position: relative;
+  width: max-content;
+  line-height: 0;
+}
+
+.framebuffer {
+  display: block;
+  /* Tiles land 1:1 in the framebuffer-sized canvas bitmap. When guest and host
+     densities differ, let the browser smoothly resample that finished bitmap
+     into the CSS box, as Core Animation did for the Metal surface. */
+  image-rendering: auto;
+}
+
+.input-overlay {
+  position: absolute;
+  inset: 0;
+  outline: none;
+  /* Nothing here is text, and a drag must not select the page. */
+  user-select: none;
+  -webkit-user-select: none;
+  /* Default for engines that composite the cursor into the framebuffer (RDP,
+     and VNC servers that ignore the Cursor pseudo-encoding): hide the browser's
+     own cursor so only one pointer shows. A `cursor` command overrides this
+     inline with the remote shape — see main.ts. */
+  cursor: none;
+}

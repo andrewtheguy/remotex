@@ -56,7 +56,7 @@ final class KeyboardCapture {
 
     func invalidate() {
         // Before the teardown, not after: the deferred setup in `init` may still
-        // be waiting its turn, and `RemoteSurfaceHost` holds this until it has
+        // be waiting its turn, and `RemoteCanvasHost` holds this until it has
         // built the next one.
         isInvalidated = true
         releaseAll()

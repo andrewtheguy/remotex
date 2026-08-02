@@ -218,10 +218,9 @@ final class RecordingSink: GatewaySessionSink {
             switch event {
             case .status(let status): "status:\(status.rawValue)"
             case .control(let message): "control:\(Self.label(message))"
-            case .tiles(let tiles):
-                "tiles:" + tiles.map { "\($0.x),\($0.y),\($0.w)x\($0.h)" }.joined(separator: "|")
-            case .audio(let packets):
-                "audio:" + packets.map { "\($0.count)" }.joined(separator: "|")
+            // Kind byte and length, which is the whole of what this layer knows
+            // about a binary frame now that it forwards them whole.
+            case .frame(let data): "frame:\(data.first ?? 0),\(data.count)"
             case .clearFramebuffer: "clear"
             case .releaseInput: "release"
             case .failPendingClipboardFetch: "failFetch"
@@ -285,10 +284,12 @@ struct AttachedSession {
     /// The synchronizer's pasteboard, so a test can put something on it to be
     /// pushed. Its own, never the user's.
     let pasteboard: NSPasteboard
+    /// What the model told the canvas page, in order.
+    let canvas: FakeCanvas
 
     static func attached(
         suite: String,
-        audio: AudioOutput = AudioOutput()
+        audio: AudioControl = AudioControl()
     ) async throws -> AttachedSession {
         let socket = FakeWebSocketTransport(closeAfterDraining: false)
         let pasteboard = NSPasteboard.withUniqueName()
@@ -314,7 +315,16 @@ struct AttachedSession {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(model.session.connectionStatus == .connected)
-        return AttachedSession(model: model, socket: socket, pasteboard: pasteboard)
+        // Attached after the session is up, as the real one is: the surface
+        // belongs to a screen, and the screen exists once there is a session.
+        let canvas = FakeCanvas()
+        model.attach(canvas: canvas)
+        return AttachedSession(
+            model: model,
+            socket: socket,
+            pasteboard: pasteboard,
+            canvas: canvas
+        )
     }
 
     func connect(
@@ -365,6 +375,33 @@ struct AttachedSession {
     /// drained, for the assertions that something was *not* sent.
     func settle() async throws {
         try await Task.sleep(for: .milliseconds(400))
+    }
+}
+
+/// A canvas that records instead of drawing.
+///
+/// The real one is a loopback HTTP listener with a `WKWebView` reading it, and
+/// none of that is what a session test is about: what these suites can assert is
+/// that the model told the page the right things in the right order, which is
+/// the whole of its part in rendering.
+final class FakeCanvas: RemoteCanvas, @unchecked Sendable {
+    private let recorded = Mutex<(commands: [CanvasCommand], frames: [Data])>(([], []))
+
+    var commands: [CanvasCommand] {
+        recorded.withLock { $0.commands }
+    }
+
+    /// The gateway binary frames forwarded, verbatim and in order.
+    var frames: [Data] {
+        recorded.withLock { $0.frames }
+    }
+
+    func send(_ command: CanvasCommand) {
+        recorded.withLock { $0.commands.append(command) }
+    }
+
+    func send(frame: Data) {
+        recorded.withLock { $0.frames.append(frame) }
     }
 }
 

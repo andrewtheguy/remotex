@@ -64,26 +64,6 @@ enum RemoteGeometry {
         return min(max(value.rounded(), least), ceiling)
     }
 
-    /// Map a point in the framebuffer view's own coordinates — flipped, so the
-    /// origin is top-left as the DOM's is — to a remote pixel.
-    ///
-    /// Clamped to the framebuffer, which is what keeps a drag that runs off the
-    /// edge reporting positions the gateway will accept instead of ones it
-    /// rejects. Rounded rather than truncated so the pixel under the pointer is
-    /// the nearest one.
-    static func remotePoint(
-        _ point: CGPoint,
-        in surface: CGSize,
-        remote: DisplayMode
-    ) -> (x: Int32, y: Int32) {
-        let scaleX = surface.width > 0 ? CGFloat(remote.w) / surface.width : 1
-        let scaleY = surface.height > 0 ? CGFloat(remote.h) / surface.height : 1
-        return (
-            x: clamp(point.x * scaleX, limit: remote.w),
-            y: clamp(point.y * scaleY, limit: remote.h)
-        )
-    }
-
     /// Convert visible host points to remote pixels, clamped to the nonzero
     /// `u16` wire range.
     static func viewport(clip size: CGSize, guestScale: CGFloat) -> DisplayMode {
@@ -99,13 +79,5 @@ enum RemoteGeometry {
             return 1
         }
         return UInt16(min(max(value.rounded(), 1), CGFloat(UInt16.max)))
-    }
-
-    private static func clamp(_ value: CGFloat, limit: UInt16) -> Int32 {
-        guard value.isFinite else {
-            return 0
-        }
-        let highest = CGFloat(limit) - 1
-        return Int32(min(max(value.rounded(), 0), max(highest, 0)))
     }
 }

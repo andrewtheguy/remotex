@@ -8,8 +8,12 @@
 # The bundle carries two executables: the Swift app, and a copy of the `remotex`
 # gateway binary as `remotex-gateway`. The app starts that gateway on an ephemeral
 # loopback port at launch (see docs/macos-viewer.md), so a build with only one of
-# the two is not a working app. No frontend is copied: the embedded gateway serves
-# no web UI.
+# the two is not a working app.
+#
+# It also carries `Contents/Resources/canvas`, the remote surface — a web page the
+# app serves to its own WKWebView from its own loopback listener. That is not the
+# SPA and not a web UI: the embedded gateway still serves nothing, and an
+# `index.html` inside this bundle would mean it had started to.
 #
 # Builds are ad-hoc signed by default. Set CODESIGN_IDENTITY explicitly to use
 # another identity; Developer ID distribution also requires notarization.
@@ -92,6 +96,22 @@ gateway="target/$cargo_profile/remotex"
   exit 1
 }
 
+# The remote surface. Built from the same sources as the browser client — the wire
+# format has one implementation (frontend/src/protocol.ts) and both clients read
+# it — but to its own output directory, so an SPA `index.html` can never reach
+# this bundle.
+echo ">> building the canvas page"
+command -v bun >/dev/null || {
+  echo "bun is required to build the viewer's canvas page" >&2
+  exit 1
+}
+(cd frontend && bun install --frozen-lockfile && bun run build:viewer)
+canvas="frontend/dist-viewer"
+[ -f "$canvas/viewer.html" ] || {
+  echo "canvas page missing at $canvas/viewer.html" >&2
+  exit 1
+}
+
 app="dist/remotex.app"
 echo ">> assembling $app"
 rm -rf "$app"
@@ -104,6 +124,9 @@ chmod +x "$app/Contents/MacOS/remotex-viewer"
 cp "$gateway" "$app/Contents/MacOS/remotex-gateway"
 chmod +x "$app/Contents/MacOS/remotex-gateway"
 cp packaging/macos-viewer/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+# `ditto` rather than `cp -R`: the destination must be exactly this directory's
+# contents, and `cp -R` onto an existing directory nests instead of replacing.
+/usr/bin/ditto "$canvas" "$app/Contents/Resources/canvas"
 sed -e "s|<string>0\\.0\\.0</string>|<string>${version}</string>|g" \
   packaging/macos-viewer/Info.plist > "$app/Contents/Info.plist"
 

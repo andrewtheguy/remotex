@@ -165,7 +165,7 @@ struct TileFrameTests {
     }
 
     /// An empty payload is structurally a record; whether those bytes are an
-    /// image is `TileDecoder`'s question, not this one's.
+    /// image is the canvas page's question (`tilePainter.ts`), not this one's.
     @Test
     func aRecordWithNoPayloadDecodesToAnEmptyPayload() throws {
         let decoded = try #require(tileRecords(batch(tile(w: 8, h: 8))))

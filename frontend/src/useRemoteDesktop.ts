@@ -6,11 +6,16 @@ import {
   createAudioPlayer,
   decodeAudioHead,
 } from "./audioPlayer.ts";
+import {
+  applyCursorCss,
+  cursorImage,
+  MIN_POINTER_CSS_PX,
+  type RemoteCursor,
+} from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { createSender } from "./outbound.ts";
 import {
-  type BatchRecord,
   binaryFrameKind,
   type ClientMsg,
   type ClipboardSnapshot,
@@ -18,16 +23,13 @@ import {
   clickCount,
   type DisplayInfo,
   decodeAudioFrame,
-  decodeBatchFrame,
   MAX_CLIPBOARD_BYTES,
   type MouseButton,
   mouseButtonFromEvent,
-  NO_SLOT,
   type RemoteClipboard,
-  SLOT_COUNT,
-  type TileMsg,
   wheelUnitFromEvent,
 } from "./protocol.ts";
+import { createTilePainter } from "./tilePainter.ts";
 import {
   attachTouchGestures,
   MAX_ZOOM,
@@ -224,106 +226,6 @@ function applyCanvasCss(
   }
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
-}
-
-// ── Pointer rendering ───────────────────────────────────────────────────────
-// Engines whose server hands the cursor shape over instead of drawing it into
-// the framebuffer (VNC's Cursor pseudo-encoding — macOS Screen Sharing never
-// draws one) make the browser responsible for the pointer: the hardware
-// pointer wears the shape as a CSS cursor, and the touch gesture layer's
-// virtual pointer gets an image drawn at its remote position. Engines that
-// composite the pointer themselves (RDP, and VNC servers that ignore the
-// pseudo-encoding) send no `cursor` message at all, and the browser keeps its
-// own pointer hidden — see index.css.
-
-interface CursorImage {
-  url: string;
-  /** Hotspot within the image, in cursor pixels. */
-  hx: number;
-  hy: number;
-  w: number;
-  h: number;
-}
-
-// How small the virtual pointer may get on screen, in CSS pixels across its
-// longer side. Zoomed out to fit a phone, a pointer drawn at the desktop's own
-// scale is a few pixels across, and the pointer is the one thing on screen that
-// has to stay findable. Deliberately low: the pointer should read as part of
-// the desktop it sits on, so the floor is a last resort rather than a size.
-const MIN_POINTER_CSS_PX = 14;
-
-// The engine's pointer state. `image` is null when the remote hid the pointer;
-// the state as a whole is null while the remote is drawing it itself.
-interface RemoteCursor {
-  image: CursorImage | null;
-}
-
-let arrow: CursorImage | null = null;
-
-// A neutral arrow, standing in when the browser owns the pointer but the
-// remote has hidden its shape — on a remote desktop a pointer you can't see is
-// worse than a generic one. Painted into a canvas rather than carried as an
-// embedded blob, and PNG rather than SVG because Safari rejects SVG cursors.
-function fallbackCursor(): CursorImage {
-  if (arrow) {
-    return arrow;
-  }
-  const w = 12;
-  const h = 19;
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (ctx) {
-    // The usual arrow, on half-pixel coordinates so the 1px outline lands on
-    // whole pixels. The tip is the hotspot, hence (0, 0).
-    ctx.beginPath();
-    ctx.moveTo(0.5, 0.5);
-    ctx.lineTo(0.5, 16);
-    ctx.lineTo(4, 12.5);
-    ctx.lineTo(6.5, 18);
-    ctx.lineTo(9, 17);
-    ctx.lineTo(6.5, 11.5);
-    ctx.lineTo(11, 11.5);
-    ctx.closePath();
-    // White with a black outline, so it reads against any remote background.
-    ctx.fillStyle = "#fff";
-    ctx.fill();
-    ctx.strokeStyle = "#000";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-  arrow = { url: canvas.toDataURL("image/png"), hx: 0, hy: 0, w, h };
-  return arrow;
-}
-
-// A cursor image as a CSS url() token. An unquoted token ends at the first
-// `)`, so quoting (and escaping what would close the quote) keeps the image
-// string from spilling into the declaration. Our own base64 can't contain
-// either character, but the URL is server-supplied and this is one line.
-function cssUrl(url: string): string {
-  return `url("${url.replace(/["\\]/g, "\\$&")}")`;
-}
-
-// What to draw for the pointer, or null to leave it to the remote.
-function cursorImage(remote: RemoteCursor | null): CursorImage | null {
-  if (!remote) {
-    return null;
-  }
-  return remote.image ?? fallbackCursor();
-}
-
-// Scale a framebuffer-pixel cursor with image-set resolution. Keep a plain URL
-// fallback because unsupported image-set values are rejected as a whole.
-function applyCursorCss(el: HTMLElement, image: CursorImage, view: number) {
-  el.style.cursor = `${cssUrl(image.url)} ${image.hx} ${image.hy}, default`;
-  if (!(view > 0) || !Number.isFinite(view) || Math.abs(view - 1) < 0.01) {
-    return;
-  }
-  const density = (1 / view).toFixed(3);
-  const hx = Math.round(image.hx * view);
-  const hy = Math.round(image.hy * view);
-  el.style.cursor = `image-set(${cssUrl(image.url)} ${density}x) ${hx} ${hy}, default`;
 }
 
 // Push the pointer state to the DOM: the CSS cursor on the input overlay (it
@@ -735,15 +637,12 @@ export function useRemoteDesktop(
 
     let disposed = false;
     let ws: WebSocket | null = null;
-    // The tiles the server has told this client to remember, by slot. Fixed
-    // length because the wire says how many there are (`SLOT_COUNT`), so a server
-    // cannot grow it — and the client never evicts: the server names the slot to
-    // overwrite, which is what keeps the two ends in step without either
-    // modelling the other's memory.
-    const tileCache: ({ data: Uint8Array; mime: TileMsg["mime"] } | null)[] =
-      new Array(SLOT_COUNT).fill(null);
-    // Whether a reset has already been asked for while handling this batch.
-    let resetAsked = false;
+    // The slot table and the batch draw loop, shared with the macOS viewer's
+    // canvas page — see tilePainter.ts.
+    const painter = createTilePainter({
+      context: () => ctxRef.current,
+      onCacheReset: () => sendRef.current({ type: "cacheReset" }),
+    });
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
 
@@ -771,7 +670,7 @@ export function useRemoteDesktop(
       // these would only cost memory. (Nothing could be *drawn* wrongly: a
       // reference always follows the tile that filled its slot on the same
       // socket.)
-      tileCache.fill(null);
+      painter.clear();
       // The socket carrying the audio is going away, and a subscription belongs to
       // one attachment: the gateway has already stopped this one, so holding a
       // decoder open would only be holding the audio hardware. The next `connected`
@@ -1025,7 +924,7 @@ export function useRemoteDesktop(
       // its way through an Opus packet looking for tile records.
       switch (binaryFrameKind(data)) {
         case "batch":
-          await drawBatch(data);
+          await painter.draw(data);
           break;
         case "audio":
           playAudio(data);
@@ -1103,105 +1002,6 @@ export function useRemoteDesktop(
             : "this browser cannot play remote audio",
         );
         sendRef.current({ type: "audio", enabled: false });
-      }
-    };
-
-    // Decode records concurrently, then draw synchronously in wire order.
-    // Malformed framing drops the batch; individual decode failures drop a tile.
-    const drawBatch = async (data: ArrayBuffer) => {
-      const records = decodeBatchFrame(data);
-      if (!records) {
-        return;
-      }
-      // One reset per batch at most: fifty references into a cache this client
-      // lost are one disagreement, not fifty.
-      resetAsked = false;
-      const jobs = records.map(resolveRecord);
-      paintBatch(jobs, await Promise.all(jobs.map(decodeJob)));
-      // Clear after the pass so references may use slots filled earlier in it.
-      if (resetAsked) {
-        tileCache.fill(null);
-      }
-    };
-
-    // What a record turns into once the cache has had its say: a payload to
-    // decode and where to put it, or nothing.
-    interface PaintJob {
-      x: number;
-      y: number;
-      data: Uint8Array;
-      mime: TileMsg["mime"];
-      /** True when the server believes this client is keeping these bytes. */
-      cached: boolean;
-    }
-
-    // Store what the server says to store, and resolve what it says to reuse.
-    //
-    // The payload is copied out of the frame rather than held as a view of it:
-    // a view would pin the whole batch — up to 256 KB — for the lifetime of one
-    // slot.
-    const resolveRecord = (record: BatchRecord): PaintJob | null => {
-      if (record.kind === "tile") {
-        if (record.slot !== NO_SLOT) {
-          tileCache[record.slot] = {
-            data: new Uint8Array(record.data),
-            mime: record.mime,
-          };
-        }
-        return { ...record, cached: record.slot !== NO_SLOT };
-      }
-      const held = tileCache[record.slot];
-      if (!held) {
-        // The server thinks this client holds a tile it does not. Nothing else
-        // will ever correct that, so say so and draw nothing here.
-        askForCacheReset();
-        return null;
-      }
-      return { x: record.x, y: record.y, ...held, cached: true };
-    };
-
-    const decodeJob = async (job: PaintJob | null) => {
-      if (!job) {
-        return null;
-      }
-      try {
-        return await createImageBitmap(
-          new Blob([job.data as Uint8Array<ArrayBuffer>], { type: job.mime }),
-        );
-      } catch {
-        // A tile that will not decode is one dropped tile — unless the server is
-        // keeping it as a slot, in which case every later reference to it would
-        // fail the same way.
-        if (job.cached) {
-          askForCacheReset();
-        }
-        return null;
-      }
-    };
-
-    const askForCacheReset = () => {
-      if (resetAsked) {
-        return;
-      }
-      resetAsked = true;
-      sendRef.current({ type: "cacheReset" });
-    };
-
-    // Every bitmap is closed whether or not it was drawn: with no canvas to draw
-    // into there is nothing to paint, but the decoded images still have to go.
-    const paintBatch = (
-      jobs: (PaintJob | null)[],
-      bitmaps: (ImageBitmap | null)[],
-    ) => {
-      const ctx = ctxRef.current;
-      for (let i = 0; i < bitmaps.length; i += 1) {
-        const bitmap = bitmaps[i];
-        const job = jobs[i];
-        if (!bitmap || !job) {
-          continue;
-        }
-        ctx?.drawImage(bitmap, job.x, job.y);
-        bitmap.close();
       }
     };
 

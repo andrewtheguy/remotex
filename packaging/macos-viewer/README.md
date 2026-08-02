@@ -8,16 +8,18 @@
 - **Somewhere Else:** connect to a deployed gateway using its address and login.
 
 Both choices use the same config, target, session, and WebSocket APIs and differ
-only in the credential header on protected requests. There is no embedded web
-view. The client owns:
+only in the credential header on protected requests. The client owns:
 
 - starting, supervising, and stopping the embedded gateway;
 - editing embedded-gateway configuration, validated before it is written;
 - target selection;
 - the session socket, including reconnects, takeover, and the single-slot claim;
-- Metal framebuffer rendering at the remote point size (`pixels / remote scale`),
-  without fit-to-window scaling;
-- pointer and keyboard input, plus the remote pointer shape;
+- the remote surface, which is a `WKWebView` showing
+  `Contents/Resources/canvas` — the app's own page, served from its own loopback
+  listener and handed wire frames. It presents the desktop at the remote point
+  size (`pixels / remote scale`) without fit-to-window scaling. Not the SPA, and
+  not a web UI on the embedded gateway, which still serves none;
+- keyboard input, and the window sizing behind **Resize to Display**;
 - application-level keyboard capture ahead of menu shortcuts;
 - Command translation that follows the remote (Control shortcuts for a non-Mac,
   unchanged Command shortcuts for a Mac);
@@ -38,12 +40,13 @@ decides the keyboard convention.
 ## Build
 
 ```sh
+(cd frontend && bun run check && bun test src)
 swift test --package-path apps/remotex-viewer
 packaging/macos-viewer/build-viewer-app.sh --no-dmg
 ```
 
 The script builds both executables — the Swift app and the `remotex` gateway binary —
-and signs the nested one first. Omit `--no-dmg` for the installable disk image, whose
+plus the canvas page (so `bun` is required), and signs the nested executable first. Omit `--no-dmg` for the installable disk image, whose
 file name keeps the `remotex-viewer-<version>` prefix because
 `remotex-<version>-macos-arm64.tar.gz` is already the CLI gateway's release asset.
 

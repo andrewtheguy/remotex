@@ -1,10 +1,14 @@
 # remotex.app
 
 `remotex.app` is a native macOS 26 client. It can start its bundled gateway or
-connect to a remote one. It contains no `WKWebView`; it shares the browser
-client's protocol, not its implementation. It owns target selection, session
-recovery, tile decoding, Metal rendering, input, clipboard synchronization, and
-audio playback.
+connect to a remote one. It owns the gateway session — target selection, the
+claim, reconnection, takeover — plus the menu bar, keyboard capture, pasteboard
+synchronization, and the window.
+
+The remote surface inside that window is a `WKWebView`, and only that. See
+[The canvas](#the-canvas): the app hands it wire frames and it draws them,
+sharing the browser client's decoding rather than reimplementing it. Everything
+above the surface is native; nothing about the session is the page's.
 
 The two gateways are the app's first question, asked on the `home` screen at every
 launch with the last answer preselected:
@@ -29,12 +33,17 @@ reported by the gateway, with resize policy as the only client-side branch.
 Whether the remote is a Mac is likewise discovered from the gateway's
 `remoteOs` message and affects only keyboard conventions.
 
-The bundle holds two executables:
+The bundle holds two executables and the remote surface:
 
 | path | what it is |
 |---|---|
 | `Contents/MacOS/remotex-viewer` | the Swift app (`CFBundleExecutable`) |
 | `Contents/MacOS/remotex-gateway` | a copy of the `remotex` gateway binary |
+| `Contents/Resources/canvas` | the canvas page — see [The canvas](#the-canvas) |
+
+`canvas` is not the SPA and not a web UI: the embedded gateway still serves
+nothing, and an `index.html` in this bundle would mean it had started to (which
+`release.yml` checks).
 
 `CFBundleIdentifier` remains `dev.remotex.viewer`; TCC grants and saved window
 state are keyed to it.
@@ -221,36 +230,79 @@ is usable, not merely when the WebSocket opens. Any interruption clears the
 framebuffer and releases held input; the gateway requests a full repaint when a
 client attaches again.
 
-## Rendering
+## The canvas
 
-The viewer maintains one `MTLTexture` at the remote framebuffer's pixel size.
-Tiles overwrite their rectangles with `replaceRegion`, and a paused `MTKView`
-redraws after every complete batch.
+The remote surface is a web page — `frontend/src/viewer`, built by
+`bun run build:viewer` into `Contents/Resources/canvas` — shown in a `WKWebView`.
+It draws tiles to a 2D canvas, wears the remote cursor as a CSS cursor, decodes
+Opus with WebCodecs, and scrolls an oversized desktop with the browser's own
+scrollbars. It shares `protocol.ts`, `tilePainter.ts`, `cursorCss.ts` and
+`audioPlayer.ts` with the browser client, so the wire format has one
+implementation and both clients read it.
 
-The gateway may replace a tile payload with a reference to one of 256 cache
-slots. The viewer stores encoded PNG/JPEG payloads in those slots and re-decodes a
-payload when it is referenced. The gateway chooses which slot to overwrite. A
-missing slot or a cached payload that cannot decode sends `cacheReset` and drops
-that record.
+It owns nothing else. There is no session, no gateway socket and no claim in the
+page; it is handed frames and it reports pointer input.
 
-Frames are processed strictly in arrival order. The socket loop completes every
-decode and upload for one frame before receiving the next, so a resize cannot
-overtake tiles in the preceding coordinate space and older tiles cannot land
-over newer ones.
+### The loopback bridge
 
-`TileDecoder` leaves decoded rows in raster order. The Metal shader flips the
-texture's vertical coordinate because Metal clip space and the desktop texture
-use opposite vertical origins.
+`CanvasServer` is an `NWListener` bound to `127.0.0.1` on an ephemeral port, with
+a random path prefix minted per launch — the same split as the embedded gateway's
+bearer token, and for the same reason: the port is not a secret and the token is.
+It serves the page and one held-open `GET /<token>/frames`.
 
-The framebuffer view is laid out at the remote's point size:
+The document's origin is therefore `http://127.0.0.1:<port>`, which is what makes
+this work at all. Loopback is potentially trustworthy, so the page is a **secure
+context** and WebCodecs is available against *any* gateway — embedded or remote,
+HTTP or HTTPS. A `file:` URL or a custom scheme is not reliably trustworthy in
+WebKit, and without a secure context `AudioDecoder` is simply absent and remote
+sound disappears with nothing in any log to say why. The page reports
+`isSecureContext` and whether it found a decoder in its first message; the app
+raises an alert if either is wrong, because both fail silently on their own.
+
+Everything from the app rides that one stream, in order:
 
 ```text
-point size = framebuffer pixels / remote backing scale
+[u32 be length][u8 kind][payload]        length counts the kind byte
+  kind 0x00 — a JSON control command
+  kind 0x01 — a gateway binary frame, its own 0x02/0x03 kind byte included
 ```
 
-The window's screen then rasterizes that view at its own backing scale. A remote
-larger than the available area scrolls; the viewer does not zoom or fit the
-framebuffer to the window.
+Ordering is the point of using one channel for both. Tiles carry no delta state
+and overwrite their rectangles, so a `resize` that overtook the tiles queued ahead
+of it would paint stale pixels into a freshly sized canvas; an `audioFormat` that
+arrived after the packets it configures configures nothing. The commands are
+`resize`, `clear`, `cursor`, `audioFormat`, `audioStop` and `input`.
+
+Binary frames are forwarded byte for byte. The 256-slot tile cache, the image
+decode, `cacheReset` and the audio decoder are all the page's, which is why a new
+record type — H.264, see [roadmap.md](roadmap.md) — is a frontend change on this
+client rather than a second implementation of a format only one side reads.
+
+The page reports back over one `WKScriptMessageHandler`: `ready`, `pointer`,
+`button`, `wheel`, `cacheReset` and `audioState`. It holds no protocol state —
+the app builds every `ClientMsg` and `PressedInput` still answers for releasing
+what was held on a target switch, a takeover or a dropped socket. Keyboard events
+never reach the page at all; see [Keyboard and pointer input](#keyboard-and-pointer-input).
+
+A reloaded page reattaches its stream, and the app re-primes it from scratch:
+the current size, the current cursor, and a `refresh` for the pixels.
+
+### Presentation
+
+The canvas bitmap is the remote's framebuffer, pixel for pixel, and its CSS box
+is that divided by the remote's own density:
+
+```text
+CSS size = framebuffer pixels / remote backing scale
+```
+
+The window's screen then rasterizes that box at its own backing scale. A remote
+larger than the window scrolls; the viewer does not zoom or fit the framebuffer
+to the window.
+
+`REMOTEX_VIEWER_DEV_URL` points the web view at `bun run dev` instead of the
+bundled page, keeping the stream — the same shape as `REMOTEX_DEV_BACKEND` for
+the SPA.
 
 ## Display and resize behavior
 
@@ -307,10 +359,10 @@ size; a selected Retina display uses its reported scale and renders at 100%. See
 
 ### Viewport measurement
 
-The viewer observes the scroll view's `frameDidChange` and reports the scroll
-view's size. It does not use `NSClipView.boundsDidChange`, which represents
-scrolling rather than window resizing, or the clip view's size, which changes
-when legacy scrollbars appear and can cause resize oscillation.
+The viewer reports the web view's own bounds, as its frame changes. That is the
+whole measurement: a page scrolls inside those bounds and cannot change them, so
+the scrollbar-driven resize oscillation the native surface had to discount
+cannot arise. Nothing about the viewport goes through the page.
 
 Reports are not sent before initial layout or while the target picker is active.
 Each axis is clamped to `1...u16.max`. Starting a new target clears both the
@@ -332,6 +384,11 @@ Remote-menu commands therefore have no keyboard shortcuts. macOS-global
 shortcuts such as Command-Tab and Command-Space remain local because the
 application never receives them.
 
+The monitor is why keyboard input is the one thing that did **not** move to the
+canvas page. It sits outside the web view and swallows what it consumes, so
+WebKit never sees a key event — which is what lets ⌘Q and ⌘W reach the guest
+instead of this application. The page has no keyboard handling in it at all.
+
 The Edit menu remains available for text fields and supplies the standard
 copy/paste/cut/select-all actions through the responder chain. `ViewerMenus`
 restores it when SwiftUI rebuilds the main menu.
@@ -348,15 +405,18 @@ Command-to-Control translation when turned off. `PressedInput` tracks every
 pressed code and releases them on focus loss, window deactivation, target
 switch, socket closure, takeover, or teardown.
 
-Before the first `cursor` message, the viewer hides the local pointer because an
-engine may already composite its cursor into the framebuffer. After a cursor
-message, the viewer renders the remote shape; a null image uses a local arrow so
-the pointer remains visible. Hotspots arrive in remote pixels and are converted
-to points.
+Pointer input, by contrast, is the page's: it is the only side that knows where
+the canvas sits after a scroll, so it maps and clamps positions to remote pixels
+itself (`remotePoint` in `frontend/src/viewer/input.ts`) and reports them. A
+press is preceded by its own position, so a click never lands where the pointer
+used to be. Wheel deltas come from the DOM already signed and already carrying
+their `deltaMode`, so nothing converts them.
 
-AppKit scroll deltas are inverted on both axes to match DOM wheel direction.
-Trackpad deltas pass through directly; line-based wheel deltas are scaled for the
-gateway's line conversion.
+Before the first `cursor` message the pointer is hidden, because an engine may
+already composite its own into the framebuffer. After one, the page wears the
+remote shape as a CSS cursor; a null image uses a drawn arrow so the pointer
+remains visible. Hotspots arrive in remote pixels and are scaled by whatever the
+desktop is currently drawn at.
 
 ## Clipboard
 
@@ -381,8 +441,8 @@ boundary — set per target on the gateway currently in use.
 ## Audio
 
 **Remote → Enable Audio** is available when `connected.audio` is true. The
-gateway owns the wire format and bounded audio queue; the viewer owns decoding
-and playback scheduling.
+gateway owns the wire format and bounded audio queue; the app owns the
+*subscription* (`AudioControl`) and the canvas page owns decoding and playback.
 
 Like **Auto Resize**, the toggle writes a **remembered** default — the same value
 the picker's *Play the remote's sound, if compatible* toggle edits
@@ -398,29 +458,32 @@ the one persistent surface that can show it, since the toggle is a menu item. Th
 browser does the same on its tab title, but at the front, where a truncated-from-
 the-right tab title keeps it visible.
 
-The viewer decodes bare Opus packets with `AVAudioConverter` and
-`kAudioFormatOpus`; it needs neither a container nor a vendored decoder.
-`AVAudioConverter` does not apply the `OpusHead` pre-skip, so `OpusDecoder`
-discards the reported priming frames itself.
+Decoding is WebCodecs, through the browser client's own `audioPlayer.ts` and
+`audioSchedule.ts` — the same 0.1-second start cushion and 0.3-second latency
+ceiling, and the same trim when the ceiling is exceeded. The `audioFormat`
+control message is forwarded to the page whole, `OpusHead` included, because that
+is where the pre-skip is. Nothing on the Swift side reads the codec: it has no
+decoder to choose and would only be a second opinion about one.
 
-Decoded buffers are scheduled explicitly on an `AVAudioPlayerNode`.
-`AudioSchedule` uses the same 0.1-second start cushion and 0.3-second latency
-ceiling as the browser. When the ceiling is exceeded, the viewer stops the
-player, discards its queued audio, and restarts the timeline at the cushion.
+`mediaTypesRequiringUserActionForPlayback` is set to nothing, so unlike a browser
+tab there is no gesture requirement and the subscription is asserted straight
+from `connected`. This is also the one place the secure-context requirement in
+[The canvas](#the-canvas) is load-bearing: without it there is no `AudioDecoder`,
+and the failure is silence.
 
 An ordinary reconnect reasserts the subscription; a target switch clears it.
-The output follows the Mac's default device, rebuilding the engine after
-`AVAudioEngineConfigurationChange`.
 
-The viewer can report local decoder or output failures. It cannot distinguish a
-quiet remote from an RDP server that never opens its audio channel; the gateway
-log carries that diagnosis.
+A page that cannot play what arrived reports it, which raises the alert and
+unsubscribes — packets decoded by nothing are bytes spent on nothing. Neither
+side can distinguish a quiet remote from an RDP server that never opens its audio
+channel; the gateway log carries that diagnosis.
 
 ## Networking
 
 The embedded gateway uses plain HTTP on loopback, and remote gateways may also use
 HTTP. Because ATS treats `ws://` as `http://`, the bundle sets
-`NSAllowsArbitraryLoads`.
+`NSAllowsArbitraryLoads`. That covers the canvas page's own loopback origin too,
+which is plain HTTP for the same reason.
 
 Every request, including `/api/config` and the WebSocket upgrade, carries the
 credential. `/api/config` is public, but sending the credential uniformly avoids
@@ -452,10 +515,15 @@ limit ends the socket rather than dropping one frame.
 Run the tests, build the packaged app, and launch QA against a throwaway instance:
 
 ```sh
+(cd frontend && bun run check && bun test src)
 swift test --package-path apps/remotex-viewer
 packaging/macos-viewer/build-viewer-app.sh --no-dmg
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
+
+The build script builds the canvas page itself, so `bun` is required for it. The
+first line is separate because it is the page's *own* checks — a bundle whose
+page builds but whose tile painter is wrong looks fine until pixels land.
 
 `--instance-dir` is the only GUI-launch argument and is the whole of the isolation:
 config, log, and preferences are all under the directory it names, so QA cannot
@@ -487,9 +555,12 @@ dist/remotex.app/Contents/MacOS/remotex-gateway check-config --embedded \
   --config ~/Library/Application\ Support/remotex/remotex.toml
 ```
 
-Automated tests cover message decoding, frame parsing, tile ordering, geometry,
-audio framing, schedule arithmetic, and Opus fixtures produced by the gateway.
-Audio playback still requires manual QA.
+Automated tests cover message decoding, frame parsing, arrival ordering,
+geometry, the bridge's JSON both ways, and the loopback listener over a real
+socket. What the page does with what it is handed — the slot table, the draw
+order, the envelope reassembler, pointer mapping — is checked in `bun test`,
+where the code is. Audio playback and anything about pixels still require manual
+QA; the Web Inspector is available on the canvas in a debug build.
 
 The in-process tone harness (`cargo test --lib serve_a_test_tone -- --ignored`)
 serves a login gateway. Test it in the app by choosing **Somewhere Else**, entering
