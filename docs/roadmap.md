@@ -8,33 +8,65 @@ is the only place they can be read in context.
 
 ## Planned
 
-### Render dial — video
+### Render dial — video per moving region
 
-The per-target render dial and its `motion` strategy are **built** and are
-described in [architecture.md](architecture.md#the-render-dial): a `render_type`
-(quality strategy), a `render_subtype` (codec), `render_quality`, and — under
-`motion` — `render_motion_subtype` and `render_motion_quality` for the cells
-currently changing fast. Detection is a 320×64 churn grid, the moving encode is a
-cheap lossy still, and a cell that settles is re-sent at the base encode. The
-earlier plan of a content classifier (`adaptive-jpeg` subtype) and a quality that
-follows the link (`adaptive` type) is **scrapped**: neither is on the way to video,
-and content is the wrong question when what costs bandwidth is what moves.
+The per-target render dial ships four strategies, described in
+[architecture.md](architecture.md#the-render-dial): `full`, `fixed-quality`,
+`motion`, and `video`.
 
-What remains is the encoder the detection was built to be replaceable underneath.
+**`video` sends the whole desktop as one H.264 stream**, which is the simple shape
+and the one built first, deliberately: it makes what the codec actually costs on
+real screens measurable before anything is built on top of it. What remains planned
+is the thing the `motion` detection was built for — **a stream per coalesced moving
+region**, with the still codecs carrying everything else, so a video in a window
+costs its own pixels and the text beside it stays exact.
 
-**Swap the moving-cell encoder for H.264** — `render_motion_subtype = "h264"`, a
-value legal only on that axis, which is why the axis exists. The detection, the
-base encode and the cleanup path are all unchanged; what changes is that a moving
-cell feeds an inter-frame stream instead of one independent still per frame, which
-is where the real win is. That is a wire change — a new record or format byte,
-keyframe and stream lifetime rules, and a decode path in each client
-(VideoToolbox, WebCodecs) — and the open question is what the stream is *of*, since
-a 320×64 cell is a poor unit for a video encoder: the likely answer is a coalesced
-moving region rather than a stream per cell. Deliberately not designed yet; what
-the shipped detection measures on real targets decides its shape.
+That is not a smaller version of `video`; it is the open question `video` exists to
+inform. A 320×64 cell is a poor unit for a video encoder, so the shape is a coalesced
+region rather than a stream per cell — and then the hard parts are which regions to
+coalesce, when a region's stream starts and ends, and what happens to a region that
+stops moving while its stream is still the truth on screen. `motion`'s cleanup pass
+answers that last one for stills by re-sending the settled cell at the base encode;
+a stream has no equivalent yet. Deliberately not designed further until `video`'s
+measurements say what a stream costs.
 
-`h264` is not a `MotionSubtype` variant yet; the config refuses it by name until it
-is built.
+`h264` is not a `MotionSubtype` variant and the config refuses it by name, which is
+now a statement about this rather than about the codec: the motion axis hands out a
+cheaper encode *per cell*, and a stream has no per-cell dial to turn down.
+
+### Video in the native viewer
+
+**`remotex.app` cannot decode a `video` target** and refuses one by name, saying to
+use a browser or another `render_type`. The browser is the use case video was built
+for, so it is the one that has a decoder.
+
+What it would take, recorded so the work starts from something: a
+`Sources/Render/H264Decoder.swift` turning Annex-B into SPS/PPS →
+`CMVideoFormatDescriptionCreateFromH264ParameterSets`, start codes → 4-byte AVCC
+lengths, and `VTDecompressionSession` → `CVPixelBuffer` → the top-down BGRA
+`DecodedTile` already documents, cropped to the tile header's size; the session
+rebuilt on a format-description change, which is what a resize is. Keep `DecodedTile`
+`Sendable, Equatable` over `[UInt8]` — `SessionEvent.tiles([DecodedTile])` requires
+`Sendable`, and a `CVPixelBuffer` would break both.
+
+One cost worth knowing in advance: macOS cannot *encode* H.264 through ImageIO, so
+unlike every other tile format this needs a checked-in `Tests/Fixtures/` payload. The
+precedent is the inline base64 WebP in `TileDecoderTests`, and `Package.swift`'s
+comment that "Tile payloads are encoded at runtime through ImageIO" stops being true.
+
+### Raising quality above the dial
+
+`video`'s congestion loop can notice a backlog but never find headroom: it walks the
+quantizer up when the outbound queue says the link is behind and back down to the
+configured quality when it is not, and never past it. That is sound where it is used
+— exceeding the operator's setting was never a goal — but it means a link with room
+to spare is never discovered.
+
+Going further needs the receiver's view, which TCP hides: loss and jitter are behind
+retransmission, and the only thing the sending side can observe is how fast its own
+socket drains. So this wants a client-reported measurement — bytes received and
+arrival timing as a new `ClientMsg` — and work in both clients. A separate feature,
+and one whose value should be argued from `video`'s measurements rather than assumed.
 
 ### Apple Screen Sharing display modes
 
