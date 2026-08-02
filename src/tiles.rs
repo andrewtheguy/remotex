@@ -49,6 +49,14 @@ impl Rect {
             && self.bottom >= other.bottom
     }
 
+    /// The pixels these two rectangles have in common, or `None` where they have
+    /// none. Touching edges do count: `right`/`bottom` are inclusive.
+    pub fn intersect(&self, other: &Self) -> Option<Self> {
+        let (left, top) = (self.left.max(other.left), self.top.max(other.top));
+        let (right, bottom) = (self.right.min(other.right), self.bottom.min(other.bottom));
+        (left <= right && top <= bottom).then_some(Self { left, top, right, bottom })
+    }
+
     /// This rectangle split into pieces at most [`CELL_H`] rows tall, top down.
     ///
     /// Payloads have to stay bounded — one payload for a whole 4K desktop is neither a
@@ -726,6 +734,26 @@ mod tests {
         assert_eq!(bands[2], rect(0, CELL_H * 2, 99, CELL_H * 2));
         // No gaps, no overlap, and the whole rectangle is covered.
         assert_eq!(bands.iter().map(|b| usize::from(b.h())).sum::<usize>(), usize::from(tall.h()));
+    }
+
+    #[test]
+    fn an_intersection_is_the_pixels_two_rectangles_share() {
+        let a = rect(10, 10, 29, 29);
+        assert_eq!(a.intersect(&a), Some(a), "a rectangle does not intersect itself");
+        assert_eq!(
+            a.intersect(&rect(20, 20, 39, 39)),
+            Some(rect(20, 20, 29, 29)),
+            "an overlapping corner"
+        );
+        assert_eq!(
+            a.intersect(&rect(0, 0, 100, 100)),
+            Some(a),
+            "a rectangle wholly inside another is the whole of the overlap"
+        );
+        // right/bottom are inclusive, so 29 and 30 are neighbours, not overlaps.
+        assert_eq!(a.intersect(&rect(29, 10, 40, 29)), Some(rect(29, 10, 29, 29)), "one column");
+        assert_eq!(a.intersect(&rect(30, 10, 40, 29)), None, "touching edges are not an overlap");
+        assert_eq!(a.intersect(&rect(0, 0, 5, 5)), None, "disjoint");
     }
 
     /// Every pixel of the source lands in exactly one piece, and in no piece

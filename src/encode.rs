@@ -244,19 +244,41 @@ impl Motion {
         true
     }
 
-    /// Forget the cleanup owed for `key` if `sent` — a rectangle just sent at the
-    /// base encode — covers all of what is owed.
+    /// Discharge what `key` owes as far as `sent` reaches — a rectangle whose exact
+    /// source pixels, `rgb`, have just gone out at the base encode.
     ///
-    /// The containment test is the whole of it. Damage is sent as it is reported,
-    /// clipped to the cell rather than snapped out to it, so a cell can owe a
-    /// cleanup for a region wider than the piece that just went out crisp. Settling
-    /// on that would leave a sliver at the motion encode with nothing left to
-    /// remember it.
-    fn settle(&mut self, key: (u16, u16), sent: Rect) {
-        if self.stash.get(&key).is_some_and(|owed| sent.contains(&owed.rect)) {
-            let old = self.stash.remove(&key).expect("just found it");
-            self.stash_bytes -= old.rgb.len();
+    /// Covering all of what is owed cancels the debt outright. Covering *part* of it
+    /// does not, because damage is sent as it is reported, clipped to the cell rather
+    /// than snapped out to it: a cell can owe a cleanup for a region wider than the
+    /// piece that just went out crisp, and cancelling on that would strand the rest
+    /// at the motion encode with nothing left to remember it.
+    ///
+    /// So a partial cover writes those newer pixels into the debt instead. That is
+    /// not an optimisation — it is what stops a cleanup from *undoing* a later send.
+    /// A debt holds the pixels of the frame it was recorded on; when something inside
+    /// it changes and goes out crisp, the debt still holds the older version, and the
+    /// cleanup would faithfully restore it over the newer one. On RDP, where the
+    /// pointer is composited into the framebuffer, that is a cursor painted back onto
+    /// a spot it has already left — wrong content rather than coarse content, and
+    /// permanent, since the shadow has recorded the newer pixels as delivered and
+    /// nothing will send them twice.
+    fn settle(&mut self, key: (u16, u16), sent: Rect, rgb: &[u8]) {
+        let Some(owed) = self.stash.get_mut(&key) else {
+            return;
+        };
+        if !sent.contains(&owed.rect) {
+            match sent.intersect(&owed.rect) {
+                // Nothing in common: what the debt holds is still true.
+                None => return,
+                // A debt that cannot be brought up to date has to go, and the cell
+                // keeps the motion encode until it next changes. Losing crispness is
+                // recoverable; restoring superseded pixels is not.
+                Some(over) if patch(owed, sent, rgb, over) => return,
+                Some(_) => {}
+            }
         }
+        let owed = self.stash.remove(&key).expect("just found it");
+        self.stash_bytes -= owed.rgb.len();
     }
 
     /// Take up to `max` of the cells that have sat unchanged for [`CLEANUP_IDLE`],
@@ -291,6 +313,28 @@ impl Motion {
         self.stash.clear();
         self.stash_bytes = 0;
     }
+}
+
+/// Write `over` — the part of `sent` that lies inside what `owed` is holding — over
+/// the debt's own pixels, so that what a cleanup restores is the newest source and
+/// not the frame the debt happened to be recorded on. Reports whether it could.
+///
+/// Copy-on-write through the `Arc`: the encoder task may still be holding the buffer
+/// this debt was recorded from, and it must go out as it was measured.
+fn patch(owed: &mut Stashed, sent: Rect, rgb: &[u8], over: Rect) -> bool {
+    let (dw, dh) = (usize::from(owed.rect.w()), usize::from(owed.rect.h()));
+    let (sw, sh) = (usize::from(sent.w()), usize::from(sent.h()));
+    if owed.rgb.len() != dw * dh * 3 || rgb.len() != sw * sh * 3 {
+        return false;
+    }
+    let run = usize::from(over.w()) * 3;
+    let dst = Arc::make_mut(&mut owed.rgb);
+    for y in over.top..=over.bottom {
+        let d = (usize::from(y - owed.rect.top) * dw + usize::from(over.left - owed.rect.left)) * 3;
+        let s = (usize::from(y - sent.top) * sw + usize::from(over.left - sent.left)) * 3;
+        dst[d..d + run].copy_from_slice(&rgb[s..s + run]);
+    }
+    true
 }
 
 /// `rgb` with the border of `rect` painted `colour`, for `render_motion_debug`.
@@ -453,7 +497,7 @@ impl TileSink {
                 {
                     let mut motion = self.shared.motion.lock().unwrap();
                     for (cell, _) in &cells {
-                        motion.settle(cell.cell_key(), band);
+                        motion.settle(cell.cell_key(), band, &rgb);
                     }
                 }
                 self.encode(band, rgb, self.plan.base).await?;
@@ -484,7 +528,7 @@ impl TileSink {
                 } else {
                     // Crisp pixels discharge whatever this cell was owed, whether it
                     // is quiet or only crisp because the stash is full.
-                    self.shared.motion.lock().unwrap().settle(cell.cell_key(), cell);
+                    self.shared.motion.lock().unwrap().settle(cell.cell_key(), cell, &rgb);
                     self.plan.base
                 };
                 // Only a *split* band is marked. A quiet band goes out whole and
@@ -1269,16 +1313,71 @@ mod tests {
         };
 
         stash(&mut motion);
-        motion.settle((0, 0), rect(0, 0, 160, 64));
+        let half = rect(0, 0, 160, 64);
+        motion.settle((0, 0), half, &rgb(160, 64, 2));
         assert_eq!(motion.stash.len(), 1, "a partial cover cancelled the whole debt");
 
-        motion.settle((0, 0), owed);
+        motion.settle((0, 0), owed, &rgb(320, 64, 2));
         assert!(motion.stash.is_empty(), "an exact cover left the debt standing");
         assert_eq!(motion.stash_bytes, 0);
 
         stash(&mut motion);
-        motion.settle((0, 0), rect(0, 0, 1280, 64));
+        motion.settle((0, 0), rect(0, 0, 1280, 64), &rgb(1280, 64, 2));
         assert!(motion.stash.is_empty(), "a band covering the cell left the debt standing");
+    }
+
+    /// The cursor bug: a debt holds the frame it was recorded on, so anything that
+    /// changed inside it since — the pointer RDP composites into the framebuffer,
+    /// having moved on — would be painted back by the cleanup, over the crisp send
+    /// that replaced it. Wrong content, not coarse content, and permanent: the shadow
+    /// has already recorded the newer pixels as delivered.
+    #[test]
+    fn a_partial_cover_brings_the_debt_it_leaves_standing_up_to_date() {
+        let mut motion = Motion::default();
+        let owed = rect(0, 0, 320, 64);
+        // Flat colours rather than `rgb`'s gradient, so which pixels came from which
+        // send is readable a byte at a time.
+        let flat = |w: usize, h: usize, v: u8| vec![v; w * h * 3];
+        assert!(motion.stash(
+            (0, 0),
+            owed,
+            Arc::new(flat(320, 64, 1)),
+            tokio::time::Instant::now()
+        ));
+
+        // The left half changes and goes out crisp, which settles nothing: the right
+        // half is still owed, and is still worth a cleanup.
+        motion.settle((0, 0), rect(0, 0, 160, 64), &flat(160, 64, 2));
+        let due = motion.take_due(tokio::time::Instant::now() + CLEANUP_IDLE, 8);
+        assert_eq!(due.len(), 1, "the debt did not survive a partial cover");
+
+        let row = |y: usize| &due[0].rgb[y * 320 * 3..][..320 * 3];
+        assert!(
+            row(0)[..160 * 3].iter().all(|&b| b == 2),
+            "the cleanup would have repainted the half that changed under it"
+        );
+        assert!(
+            row(0)[160 * 3..].iter().all(|&b| b == 1),
+            "the cleanup lost the half it is actually owed for"
+        );
+        assert!(row(63)[..160 * 3].iter().all(|&b| b == 2), "only the first row was patched");
+    }
+
+    /// A debt is patched only where the newer pixels reach. A send that misses it
+    /// entirely says nothing about it.
+    #[test]
+    fn a_send_that_misses_a_debt_leaves_it_alone() {
+        let mut motion = Motion::default();
+        let owed = rect(0, 0, 320, 64);
+        let flat = |v: u8| vec![v; 320 * 64 * 3];
+        assert!(motion.stash((0, 0), owed, Arc::new(flat(1)), tokio::time::Instant::now()));
+
+        // The cell next door, which is a different key anyway, and a strip below.
+        motion.settle((0, 0), rect(320, 0, 320, 64), &flat(2));
+        motion.settle((0, 0), rect(0, 64, 320, 64), &flat(2));
+        let due = motion.take_due(tokio::time::Instant::now() + CLEANUP_IDLE, 8);
+        assert_eq!(due.len(), 1);
+        assert!(due[0].rgb.iter().all(|&b| b == 1), "a debt was patched from outside itself");
     }
 
     /// A whole stopped video settles over a few ticks rather than in one burst, and
