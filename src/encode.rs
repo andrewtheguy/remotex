@@ -39,12 +39,27 @@ use crate::tiles::Rect;
 /// roughly one 1280×800 repaint while bounding memory and worker pressure.
 const ENCODE_DEPTH: usize = 16;
 
-/// Frames of change history each cell keeps — the width of the `u8` shift
-/// register in [`ChurnCell`], so it may not exceed 8.
+/// The granularity churn is counted at. Several changes inside one slot count
+/// once, so churn measures how much of a stretch of *time* a cell was busy for.
+///
+/// Time rather than frames, because neither engine has a frame worth counting.
+/// RDP's outer loop turns once per PDU received, most of which redraw nothing, so
+/// a counter driven by it races ahead of the repaints and a cell's history ages
+/// out between its own changes. VNC's turns once per `FramebufferUpdate`, which is
+/// damage-driven and so much closer, but its rate is set by the update-request
+/// loop rather than by the remote: a cell changing in every update looks identical
+/// whether that is sixty times a second or twice. A slot means the same thing on
+/// both, and "in motion" stays one statement about the remote rather than two
+/// about the transports.
+const CHURN_SLOT: Duration = Duration::from_millis(100);
+
+/// Slots of change history each cell keeps — the width of the `u8` shift register
+/// in [`ChurnCell`], so it may not exceed 8. With [`CHURN_SLOT`] that is a window
+/// of 800ms.
 const CHURN_WINDOW: u64 = 8;
 
-/// Churn — how many of a cell's last [`CHURN_WINDOW`] frames changed it — at
-/// which the cell is taken to be in motion and switches to the motion encode.
+/// Churn — how many of a cell's last [`CHURN_WINDOW`] slots changed it — at which
+/// the cell is taken to be in motion and switches to the motion encode.
 ///
 /// A hard switch rather than a ramp between the two encodes. Which of those is
 /// right is a question for measurement, and the switch is the one worth measuring
@@ -52,9 +67,9 @@ const CHURN_WINDOW: u64 = 8;
 /// the answer across every quality in between.
 ///
 /// Half the window, so one isolated change is never motion — a popup, an image
-/// that just finished loading, a cursor — and a cell has to keep changing before
-/// its quality drops. Anything less would only draw a pointless cleanup a moment
-/// later.
+/// that just finished loading, a cursor — and a cell has to keep changing for
+/// 400ms of the last 800ms before its quality drops. Anything less would only draw
+/// a pointless cleanup a moment later.
 const CHURN_MOVING: u32 = 4;
 
 /// How long a cell sent at the motion encode must sit unchanged before it is
@@ -90,13 +105,13 @@ enum Pending {
     Flush(oneshot::Sender<()>),
 }
 
-/// One cell's recent history: bit 0 is the frame it was last seen changing,
-/// shifted left one place for every frame since. Its churn is the number of set
-/// bits — how many of the last [`CHURN_WINDOW`] frames it changed in.
+/// One cell's recent history: bit 0 is the slot it was last seen changing,
+/// shifted left one place for every slot since. Its churn is the number of set
+/// bits — how many of the last [`CHURN_WINDOW`] slots it changed in.
 #[derive(Clone, Copy)]
 struct ChurnCell {
     history: u8,
-    last_frame: u64,
+    last_slot: u64,
 }
 
 /// A piece sent at the motion encode, held so it can be re-sent at the base one
@@ -128,30 +143,44 @@ struct Stashed {
 /// arithmetic; nothing holds the lock across an await.
 #[derive(Default)]
 struct Motion {
+    /// Where slot numbering starts, taken from the first observation and dropped
+    /// by [`Self::clear`].
+    ///
+    /// Slots have to be numbered against one origin every cell shares rather than
+    /// measured as a delta per cell: a cell changing faster than [`CHURN_SLOT`]
+    /// would otherwise carry its own last-seen instant forward with every change,
+    /// never advance its register, and so never be in motion — which is the case
+    /// this exists to catch.
+    origin: Option<tokio::time::Instant>,
     churn: HashMap<(u16, u16), ChurnCell>,
     stash: HashMap<(u16, u16), Stashed>,
     stash_bytes: usize,
 }
 
 impl Motion {
-    /// Record that `key` changed on `frame`, and return its churn.
+    /// Record that `key` changed at `now`, and return its churn.
     ///
     /// Aging is lazy: a cell that did not change is not touched, and its history is
     /// shifted by the whole gap when it is next seen. That is also what keeps the
     /// shift from overflowing — a gap of a full window empties the history instead.
-    fn observe(&mut self, key: (u16, u16), frame: u64) -> u32 {
+    fn observe(&mut self, key: (u16, u16), now: tokio::time::Instant) -> u32 {
+        let origin = *self.origin.get_or_insert(now);
+        let slot = u64::try_from(
+            now.saturating_duration_since(origin).as_millis() / CHURN_SLOT.as_millis(),
+        )
+        .unwrap_or(u64::MAX);
         let cell = self
             .churn
             .entry(key)
-            .or_insert(ChurnCell { history: 0, last_frame: frame });
-        let elapsed = frame.saturating_sub(cell.last_frame);
+            .or_insert(ChurnCell { history: 0, last_slot: slot });
+        let elapsed = slot.saturating_sub(cell.last_slot);
         cell.history = if elapsed >= CHURN_WINDOW {
             0
         } else {
             cell.history << elapsed
         };
         cell.history |= 1;
-        cell.last_frame = frame;
+        cell.last_slot = slot;
         cell.history.count_ones()
     }
 
@@ -219,6 +248,7 @@ impl Motion {
     /// Drop everything. A resize changes what every key means, and a repaint has
     /// already re-sent every pixel the stash was holding.
     fn clear(&mut self) {
+        self.origin = None;
         self.churn.clear();
         self.stash.clear();
         self.stash_bytes = 0;
@@ -235,9 +265,6 @@ struct Shared {
     /// Why the order task gave up, so the engine's next push can report it rather
     /// than a bare closed channel. See [`TileSink::closed`].
     failure: Mutex<Option<String>>,
-    /// What churn is counted against, advanced by the engine — see
-    /// [`TileSink::frame`]. Untouched, and so meaningless, without a motion plan.
-    frame: AtomicU64,
     motion: Mutex<Motion>,
     tiles: AtomicU64,
     encoded_bytes: AtomicU64,
@@ -310,7 +337,10 @@ impl TileSink {
             return Ok(());
         };
 
-        let frame = self.shared.frame.load(Ordering::Relaxed);
+        // One reading for the whole rectangle: the pieces of one report of damage
+        // arrived together and belong in the same slot, however long the cutting
+        // and encoding below take.
+        let now = tokio::time::Instant::now();
         for band in changed.bands() {
             // Every cell this band touches is a cell that just changed, so this is
             // where its churn is recorded — whether or not the band is then cut.
@@ -318,7 +348,7 @@ impl TileSink {
                 let mut motion = self.shared.motion.lock().unwrap();
                 band.cells()
                     .map(|cell| {
-                        let churn = motion.observe(cell.cell_key(), frame);
+                        let churn = motion.observe(cell.cell_key(), now);
                         (cell, churn >= CHURN_MOVING)
                     })
                     .collect()
@@ -343,12 +373,11 @@ impl TileSink {
                     // what keeps a cleanup from overtaking fresher pixels: a cell
                     // with a tile still in the queue has just been touched, so it
                     // cannot also be idle.
-                    self.shared.motion.lock().unwrap().stash(
-                        cell.cell_key(),
-                        cell,
-                        Arc::clone(&rgb),
-                        tokio::time::Instant::now(),
-                    );
+                    self.shared
+                        .motion
+                        .lock()
+                        .unwrap()
+                        .stash(cell.cell_key(), cell, Arc::clone(&rgb), now);
                     self.shared.motion_tiles.fetch_add(1, Ordering::Relaxed);
                     motion_codec
                 } else {
@@ -361,16 +390,6 @@ impl TileSink {
         Ok(())
     }
 
-    /// Mark the end of one frame from the remote: an RDP batch of outputs, or a
-    /// VNC `FramebufferUpdate`.
-    ///
-    /// Churn is counted in frames rather than in wall time because a frame is what
-    /// the remote actually decided to redraw. It costs the engines one call each
-    /// and means a slow link's cells are not read as still.
-    pub fn frame(&self) {
-        self.shared.frame.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Forget every cell's history and every cleanup owed.
     ///
     /// For a resize, where the keys no longer name the same pixels, and for a
@@ -379,7 +398,6 @@ impl TileSink {
     /// being redrawn once.
     pub fn reset_motion(&self) {
         self.shared.motion.lock().unwrap().clear();
-        self.shared.frame.store(0, Ordering::Relaxed);
     }
 
     /// Queue one rectangle of packed RGB888 at the base encode.
@@ -892,25 +910,22 @@ mod tests {
 
     // ---- motion ----
     //
-    // `Motion` is driven directly here, with the frame number and the clock passed
-    // in. Nothing sleeps and nothing counts wall-clock events, so no assertion below
-    // changes if the machine is twice as slow.
+    // Churn is counted in wall-clock slots, so every test below either drives
+    // `Motion` directly with instants it made up or runs under `start_paused` and
+    // moves the clock itself. Nothing sleeps for real and nothing counts events, so
+    // no assertion here changes if the machine is twice as slow.
 
     const MOTION: RenderPlan = RenderPlan {
         base: TileCodec::Png,
         motion: Some(TileCodec::Jpeg(10)),
     };
 
-    /// Damage covering `cells` cells across, given to `sink` as `frames`
-    /// consecutive frames — what a video playing in a window looks like from here.
-    async fn drive(sink: &TileSink, area: Rect, frames: u64) {
-        for _ in 0..frames {
-            sink.damage(area, |piece| {
-                rgb(piece.w(), piece.h(), 7)
-            })
-            .await
-            .unwrap();
-            sink.frame();
+    /// Damage given to `sink` once per churn slot for `slots` slots — what a video
+    /// playing in a window looks like from here. Requires a paused clock.
+    async fn drive(sink: &TileSink, area: Rect, slots: u64) {
+        for _ in 0..slots {
+            sink.damage(area, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
+            tokio::time::advance(CHURN_SLOT).await;
         }
     }
 
@@ -923,29 +938,59 @@ mod tests {
             .collect()
     }
 
+    /// A slot's worth of instants, for driving `Motion` by hand.
+    fn slots(base: tokio::time::Instant, n: u64) -> tokio::time::Instant {
+        base + CHURN_SLOT * u32::try_from(n).unwrap()
+    }
+
     #[test]
-    fn churn_counts_recent_frames_and_ages_out() {
+    fn churn_counts_recent_slots_and_ages_out() {
         let mut motion = Motion::default();
         let key = (0, 0);
-        // Changing every frame ramps churn up one per frame, to the window width.
-        for frame in 1..=CHURN_WINDOW {
-            assert_eq!(u64::from(motion.observe(key, frame)), frame, "frame {frame}");
+        let base = tokio::time::Instant::now();
+        // Changing every slot ramps churn up one per slot, to the window width.
+        for slot in 0..CHURN_WINDOW {
+            assert_eq!(
+                u64::from(motion.observe(key, slots(base, slot))),
+                slot + 1,
+                "slot {slot}"
+            );
         }
         // It saturates at the window rather than overflowing the register.
         assert_eq!(
-            u64::from(motion.observe(key, CHURN_WINDOW + 1)),
+            u64::from(motion.observe(key, slots(base, CHURN_WINDOW))),
             CHURN_WINDOW,
             "churn should cap at the window"
         );
         // A gap longer than the window empties the history: one recent change only.
-        assert_eq!(motion.observe(key, CHURN_WINDOW * 3), 1, "a long-idle cell reset");
+        assert_eq!(
+            motion.observe(key, slots(base, CHURN_WINDOW * 3)),
+            1,
+            "a long-idle cell reset"
+        );
+    }
+
+    /// Churn is how much of a stretch of time a cell was busy for, not how many
+    /// rectangles described it. This is the property that decides the whole scheme:
+    /// a burst of damage in one instant is not motion, and an engine that reports
+    /// the same change as ten rectangles must not read as ten times as busy.
+    #[test]
+    fn changes_inside_one_slot_count_once() {
+        let mut motion = Motion::default();
+        let base = tokio::time::Instant::now();
+        for i in 0..40 {
+            let churn = motion.observe((0, 0), base + Duration::from_millis(i));
+            assert_eq!(churn, 1, "a flurry inside one slot counted as motion");
+        }
+        // And the next slot advances it by exactly one.
+        assert_eq!(motion.observe((0, 0), slots(base, 1)), 2);
     }
 
     /// The claim the whole design rests on: a target with nothing moving sends
     /// exactly what it would send without a motion plan at all — same rectangles,
     /// same codec, same bytes. Asserted against a second sink rather than against a
     /// written-down expectation, so it cannot drift.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_still_screen_is_byte_identical_to_its_base_configuration() {
         let area = rect(37, 41, 900, 200);
         let mut out = Vec::new();
@@ -954,14 +999,12 @@ mod tests {
             let sink = TileSink::new("test", frame_tx, plan);
             // A screen that changes now and then rather than continuously: the same
             // region redrawn four times, but with a full churn window of quiet
-            // frames between each, so no cell is ever in motion. Four redraws
-            // rather than one, so a plan that simply never split would not pass by
-            // never being asked to.
+            // between each, so no cell is ever in motion. Four redraws rather than
+            // one, so a plan that simply never split would not pass by never being
+            // asked to.
             for _ in 0..4 {
                 sink.damage(area, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
-                for _ in 0..CHURN_WINDOW {
-                    sink.frame();
-                }
+                tokio::time::advance(CHURN_SLOT * u32::try_from(CHURN_WINDOW).unwrap()).await;
             }
             sink.flush().await;
 
@@ -975,14 +1018,14 @@ mod tests {
         assert!(!out[0].is_empty(), "the test sent nothing");
     }
 
-    /// A cell changing every frame switches to the motion encode once its churn
-    /// reaches the threshold, and not one frame before.
-    #[tokio::test]
-    async fn a_cell_changing_every_frame_switches_at_the_threshold() {
+    /// A cell changing every slot switches to the motion encode once its churn
+    /// reaches the threshold, and not one slot before.
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_changing_every_slot_switches_at_the_threshold() {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
         let sink = TileSink::new("test", frame_tx, MOTION);
 
-        // One cell, so one tile per frame and the tile index is the frame index.
+        // One cell, so one tile per slot and the tile index is the slot index.
         let cell = rect(0, 0, 320, 64);
         drive(&sink, cell, u64::from(CHURN_MOVING) + 2).await;
         sink.flush().await;
@@ -1002,16 +1045,16 @@ mod tests {
     /// The payoff the grid buys: a video in a window costs its own cells their
     /// quality and costs the text beside it nothing. The band spans four cells and
     /// only the first keeps changing.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn only_the_cells_in_motion_lose_their_quality() {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
         let sink = TileSink::new("test", frame_tx, MOTION);
 
         let moving = rect(0, 0, 320, 64);
         let band = rect(0, 0, 1280, 64);
-        // Enough frames of the small region alone to put its cell in motion.
+        // Enough slots of the small region alone to put its cell in motion.
         drive(&sink, moving, u64::from(CHURN_MOVING)).await;
-        // Then one frame of the whole band, which now contains one moving cell and
+        // Then one report of the whole band, which now contains one moving cell and
         // three quiet ones.
         sink.damage(band, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
         sink.flush().await;
@@ -1183,7 +1226,7 @@ mod tests {
 
     /// A resize makes every key name somewhere else, and a repaint re-sends every
     /// pixel at the base encode. Either way nothing carries across.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_reset_drops_every_history_and_every_debt() {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
         let sink = TileSink::new("test", frame_tx, MOTION);
@@ -1201,7 +1244,7 @@ mod tests {
             assert_eq!(motion.stash_bytes, 0);
         }
 
-        // The next frame is a first change, not the continuation of a motion.
+        // The next change is a first change, not the continuation of a motion.
         sink.damage(cell, |piece| rgb(piece.w(), piece.h(), 7)).await.unwrap();
         sink.flush().await;
         assert_eq!(formats(&drain(&mut frame_rx, 1).await), vec![Tile::FORMAT_PNG]);

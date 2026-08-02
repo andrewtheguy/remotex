@@ -1390,10 +1390,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         break;
                     }
                 }
-                // One FramebufferUpdate is one frame: RFB's own unit for "here is
-                // everything that changed since you last asked", however many
-                // rectangles it took.
-                sink.frame();
                 let size = desktop.lock().unwrap().size;
                 if full_repaint_owed {
                     // Layout metadata and empty updates can arrive before the

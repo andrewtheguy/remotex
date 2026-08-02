@@ -1041,10 +1041,6 @@ async fn active_loop(
                 _ => {}
             }
         }
-        // One PDU's worth of outputs is one frame from the server: its graphics
-        // updates are the regions it decided to redraw together, however many
-        // rectangles it took to describe them.
-        sink.frame();
     }
 
     shadow.report();

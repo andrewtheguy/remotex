@@ -141,10 +141,21 @@ their damage through:
   not change — and VNC could not reach them anyway, since it crops from the
   rectangle it just read.
 - **Churn → encode.** Each cell keeps an 8-bit shift register of which of the last
-  `CHURN_WINDOW` frames changed it, advanced by `TileSink::frame` — one RDP batch
-  of outputs, one VNC `FramebufferUpdate`. At `CHURN_MOVING` set bits the cell is
-  in motion and takes the motion codec. A hard switch rather than a ramp, because
-  the switch is what a measurement can read.
+  `CHURN_WINDOW` slots of `CHURN_SLOT` wall time changed it — 4 of the last 8
+  hundred-millisecond slots at `CHURN_MOVING`, at which the cell is in motion and
+  takes the motion codec. A hard switch rather than a ramp, because the switch is
+  what a measurement can read.
+
+  Slots of time rather than frames, because neither engine has a frame worth
+  counting. RDP's outer loop turns once per PDU received, most of which redraw
+  nothing, so a counter driven by it races ahead of the repaints and a cell's
+  history ages out between its own changes. VNC's turns once per
+  `FramebufferUpdate`, which is damage-driven and so much closer, but its rate is
+  set by the update-request loop rather than by the remote: a cell changing in every
+  update reads the same whether that is sixty times a second or twice. Several
+  changes inside one slot count once, so an engine that reports one change as ten
+  rectangles does not read as ten times as busy, and "in motion" stays one statement
+  about the remote rather than two about the transports.
 - **Splitting only where it matters.** A band whose cells are all quiet is sent
   whole and at the base encode, so a target with nothing moving is byte-for-byte
   what the same target sends without `motion` at all. Only a band containing a
