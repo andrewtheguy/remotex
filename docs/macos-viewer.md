@@ -521,6 +521,25 @@ authorizes the client. They are independent.
 `URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
 limit ends the socket rather than dropping one frame.
 
+### Local network permission
+
+The first target picked after a fresh install asks the user to allow local
+network access, and everything the gateway tries before that answer is refused
+by the kernel with `EHOSTUNREACH` — indistinguishable from an address with no
+route. That covers the embedded gateway as well: the permission belongs to the
+responsible app bundle, and `remotex-gateway` is a child of `remotex.app`.
+
+The sheet is expected and is the user's to answer; what is not expected is the
+session failing while it is open, which is what it used to do — the first target
+reported "No route to host" and picking it again worked. `engine::tcp_connect`
+now waits out its ordinary connect budget instead, retrying while the kernel
+gives that one refusal, so the desktop appears when the sheet is answered. An
+already-running process starts connecting on its next attempt, so nothing has to
+be restarted. Every other connect error is still reported the moment it happens.
+
+A new bundle identity is a new grant, so `make-instance-bundle.sh` variants each
+ask once, and so does the first launch after a rebuild if the signature changed.
+
 ## Build and QA
 
 Run the tests, build the packaged app, and launch QA against a throwaway instance:
