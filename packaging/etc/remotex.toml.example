@@ -59,7 +59,8 @@ name = "example"
 protocol = "rdp"           # required: "rdp" or "vnc"
 # Which flavour of that protocol the far end is, where a protocol has more than
 # one. Only "vnc" has any, and both are macOS Screen Sharing: "ard" and
-# "ard-high-performance" (see the two Mac targets below).
+# "ard-high-performance" (see the two Mac targets below). The latter is
+# EXPERIMENTAL — prefer "ard" where it will do.
 #subtype = "ard"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc).
@@ -171,6 +172,14 @@ password = "change-me"
 # username = "andrew"
 # password = "the-account-password"
 
+# EXPERIMENTAL. Alone among the subtypes, nothing this one speaks is documented
+# by Apple: the protocol revision, its record layer, its control messages and its
+# virtual display handling were all reverse engineered, and are only as correct as
+# the Macs they have been measured against. A macOS update is free to change any
+# of it, and the dynamic-resolution path behind `resize` is the least settled
+# part. Prefer "ard" unless you need a virtual display, and expect to have to
+# reconnect if a resize leaves the screen wrong.
+#
 # `subtype = "ard-high-performance"` requests one virtual display instead of the
 # Mac's physical displays. `width` and `height` select the mode requested during
 # setup. Once connected, the Mac's physical displays are disabled and all of its

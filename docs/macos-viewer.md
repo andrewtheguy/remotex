@@ -292,7 +292,8 @@ fitting itself to the window.
 Apple Screen Sharing Standard mode (`subtype = "ard"`, RFB 3.8) fills the Display
 menu with physical screens and *All Displays*; choosing one narrows the framebuffer
 to that screen's own pixels.
-`subtype = "ard-high-performance"` instead requests one virtual display at the
+`subtype = "ard-high-performance"` (experimental — see
+[apple-vnc-889.md](apple-vnc-889.md)) instead requests one virtual display at the
 configured size. It disables the remote physical displays and moves the Mac's
 windows to that virtual display. With `resize = true`, viewport reports replace
 its mode through Apple dynamic resolution. Apple's client supports up to two

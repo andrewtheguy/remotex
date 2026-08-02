@@ -73,6 +73,13 @@ pub enum Subtype {
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
     /// control messages (see [`crate::vnc_apple`]).
     ///
+    /// **Experimental.** Alone among the subtypes, none of this is documented by
+    /// Apple: the revision, its record layer, its control messages and its virtual
+    /// display handling were all reverse engineered, and are only as correct as the
+    /// Macs they have been measured against — docs/apple-vnc-889.md records which,
+    /// and what is still inferred. A macOS update is free to change any of it, and
+    /// the dynamic-resolution path is the least settled part.
+    ///
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the
     /// target's [`TargetConfig::width`] and [`TargetConfig::height`], adds zlib

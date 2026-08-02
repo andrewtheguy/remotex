@@ -59,7 +59,8 @@ session.
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
 raw, and supports the native Apple pasteboard. Apple Screen Sharing High
-Performance mode (`ard-high-performance`) takes the same credentials, requests
+Performance mode (`ard-high-performance`, **experimental**) takes the same
+credentials, requests
 one virtual display at the target's configured `width` and `height`, disables the
 remote Mac's physical displays once connected, and puts all of the remote Mac's
 windows on that virtual display. It also adds zlib compression over Apple's
@@ -73,6 +74,15 @@ reports. Every fresh connection turns the Mac's Dynamic resolution setting back
 on. Standard `ard` still refuses resize, and the one/two-virtual-display control
 is not implemented. See
 [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
+
+High Performance mode is **experimental**, and is the one part of remotex built
+entirely without a specification: Apple documents none of the protocol revision,
+its record layer, its control messages or its virtual display handling, so all of
+it is reverse engineered and only as correct as the Macs it has been measured
+against. A macOS update is free to change any of it. The dynamic-resolution path
+behind `resize = true` is the least settled part — a resize can leave the screen
+wrong until the session is reconnected. Prefer `ard` unless you need a virtual
+display.
 
 ## Container
 
@@ -146,9 +156,9 @@ password = "change-me"
 Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
 physical displays, or
-`"ard-high-performance"` for one configured virtual display containing all of its
-windows, with its physical displays disabled for the connection, and the Mac
-account's username and password. Keep the config mode `0600`; target
+`"ard-high-performance"` (experimental) for one configured virtual display
+containing all of its windows, with its physical displays disabled for the
+connection, and the Mac account's username and password. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in

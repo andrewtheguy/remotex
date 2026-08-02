@@ -14,6 +14,14 @@ no conclusions combine state from the two session types.
 
 ## Summary
 
+`subtype = "ard-high-performance"` is **experimental**. Everything below is
+measurement, not specification: Apple documents none of RFB 003.889, and the
+confirmations here hold for the Macs and the macOS version named above rather
+than for the protocol. A macOS update is free to invalidate any row. The
+dynamic-resolution path behind `resize = true` is the least settled part —
+a resize can leave the screen wrong until the session is reconnected. Prefer
+`subtype = "ard"`, which rides the standard RFB 3.8 wire, where it will do.
+
 | | |
 |---|---|
 | Confirmed | `subtype = "ard"` is Apple Screen Sharing Standard mode over RFB 3.8 and shares physical displays. `subtype = "ard-high-performance"` is High Performance mode over RFB 003.889 and uses dynamically resizable virtual displays. The 003.889 handshake, type-30 authentication and wrap key, rekey, record layer, zlib, cursor cache, and metadata framing are also confirmed. |
