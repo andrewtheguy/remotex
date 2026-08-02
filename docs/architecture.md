@@ -479,6 +479,36 @@ rather than measured. With `clipboard = true`, MS-RDPECLIP carries
 `CF_UNICODETEXT` with CRLF/LF conversion. With `audio = true`, the engine
 negotiates the static and dynamic MS-RDPEA transports described above.
 
+**A slow host can fail the reactivation a size change triggers.** When a resize
+actually changes the desktop size, the server answers `DeactivateAll` and
+`reactivate` runs the Deactivation-Reactivation Sequence. On one old machine that
+sequence usually fails at the first PDU it reads, ending the session with
+
+```text
+RDP session ended: reactivation: … invalid `pdu_type`: invalid pdu type
+```
+
+decoding a `ShareControlHeader`, or occasionally `read frame: cannot decrypt peer's
+message`. Both are stream-level: what arrives is not the PDU the sequence expects.
+
+**It looks like old hardware rather than a protocol fault**, which is why this is
+recorded here and not planned work. Forcing a real size change:
+
+| host | result |
+|---|---|
+| 2013 MacBook Pro running Windows | 12 failures in ~18 attempts |
+| a current Windows desktop | 5 reactivations, 0 failures |
+
+So the working assumption is that the old machine is too slow to complete the
+sequence in time and something else reaches the socket first — not that the sequence
+is written wrongly. Two further measurements support that: it reproduces identically
+on `fixed-quality`/`webp` and on `video`, so neither encoder is implicated, and it
+predates the render dial entirely. Both VNC resize paths are unaffected.
+
+One thing that makes it look intermittent from a browser: only a size change that is
+*real* reactivates at all. Asking twice for the same size triggers it once, and a
+request equal to the current size never triggers it.
+
 ### VNC
 
 The built-in client speaks two dialects, chosen by the target's `subtype`, that
