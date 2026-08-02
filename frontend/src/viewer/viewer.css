@@ -1,6 +1,12 @@
 /* The macOS viewer's canvas page. Shares the SPA's desktop layout (index.css)
    and none of its chrome: there is no login, picker, menu or overlay here. */
 
+:root {
+  /* As the SPA sets it. Beyond the obvious, this is what tells WebKit to draw
+     the scroll bars below for a dark surface rather than a light one. */
+  color-scheme: dark;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -27,6 +33,55 @@ body {
   height: 100%;
   overflow: auto;
   background: #000;
+}
+
+/* Always-visible scroll bars, and on this page that is a function rather than a
+   preference.
+
+   Every wheel event on the surface is forwarded to the guest, so the bar is the
+   *only* way to reach the rest of a desktop bigger than the window. WebKit's
+   default is an overlay bar that fades out and, under the usual "automatically
+   based on mouse or trackpad" setting, may never appear at all — leaving no
+   visible way to get there and no hint that there is anywhere to go. Chrome
+   draws the classic bar on macOS, which is why the browser client needs none of
+   this and looks right in a screenshot.
+
+   Defining `::-webkit-scrollbar` at all is what opts this element out of overlay
+   bars and into ones that hold their own space, which also keeps the desktop
+   from sitting under them. The metrics and colours below are the platform's own
+   dark-mode values, so what shows up is the ordinary macOS scroll bar. */
+.screen::-webkit-scrollbar {
+  width: 15px;
+  height: 15px;
+}
+
+.screen::-webkit-scrollbar-track {
+  background: #1e1e1e;
+  border-left: 1px solid #333;
+}
+
+.screen::-webkit-scrollbar-track:horizontal {
+  border-left: 0;
+  border-top: 1px solid #333;
+}
+
+.screen::-webkit-scrollbar-thumb {
+  background: #6b6b6b;
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+  min-height: 24px;
+}
+
+.screen::-webkit-scrollbar-thumb:hover {
+  background: #8c8c8c;
+  background-clip: content-box;
+}
+
+/* Both bars meet here; without this the square is transparent and the desktop
+   shows through it. */
+.screen::-webkit-scrollbar-corner {
+  background: #1e1e1e;
 }
 
 /* Shrink-wraps the canvas so the input overlay lines up exactly with the
