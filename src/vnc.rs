@@ -1328,7 +1328,31 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // encoding carries from one rectangle to the next.
     let mut decoders = Decoders::default();
     loop {
-        let msg_type = match reader.read_u8().await {
+        // Raced against the next message rather than awaited on its own, so a paced
+        // video stream still hands over pixels the mirror is holding when the remote
+        // has gone quiet — see `TileSink::due_at` for why that is correctness rather
+        // than smoothness. `None` on every still target, which leaves this exactly as
+        // it was.
+        //
+        // Here and only here: at the *top* of the loop this is a message boundary, so
+        // a flush cannot land between the rectangles of one FramebufferUpdate and cut
+        // a frame in half. And a cancelled one-byte read is safe to retry — a byte is
+        // either taken or it is not, so unlike a multi-byte `read_exact` there is no
+        // half-read state for `select!` to strand.
+        let video_flush = async {
+            match sink.due_at().await {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        let read = tokio::select! {
+            byte = reader.read_u8() => byte,
+            () = video_flush => {
+                sink.frame().await?;
+                continue;
+            }
+        };
+        let msg_type = match read {
             Ok(t) => t,
             // A clean hang-up is an event the user should be told about — a
             // stopped server, a Mac logged out, `vncserver -kill`. Returning

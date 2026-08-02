@@ -138,6 +138,25 @@ const ADJUST_COOLDOWN: Duration = Duration::from_secs(1);
 /// same reason [`CLEAR_FRAMES`] is bigger than [`BEHIND_FRAMES`].
 const QP_STEP: u8 = 4;
 
+/// The shortest gap between two access units.
+///
+/// The engines' frame boundaries are not a frame *rate*: RDP's is one `outputs`
+/// batch, and a busy desktop produces those far faster than anything presents
+/// them — 126 a second, measured, against a 60 Hz screen and a 30 Hz stream. Every
+/// one of them cost a full encode of the mirror, which is how a stream carrying
+/// under 800 kbit/s came to spend 88% of a session inside the encoder: the cost
+/// scaled with how *often* the remote reported damage rather than with how much
+/// had changed.
+///
+/// So the boundary proposes and this disposes. Damage between two access units
+/// accumulates in the mirror and rides the next one as an ordinary, slightly
+/// larger delta — which is cheaper than coding the same movement across four
+/// frames, not merely fewer frames of it.
+///
+/// 33_333 µs is the interval `VIDEO_FRAME_US` in `frontend/src/tilePainter.ts`
+/// already stamps access units with, so the timestamps stop being a fiction.
+const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+
 /// What the link will bear, as a quantizer.
 ///
 /// One-directional by construction, and that is the whole design rather than a
@@ -213,6 +232,10 @@ struct Video {
     /// Built lazily rather than when the size arrives. See [`Self::stream`].
     stream: Option<h264::Stream>,
     congestion: Congestion,
+    /// The earliest the next access unit may be encoded — see
+    /// [`VIDEO_FRAME_INTERVAL`]. `None` before the first one, so a freshly
+    /// connected desktop paints without waiting out an interval.
+    due_at: Option<tokio::time::Instant>,
 }
 
 impl Video {
@@ -222,7 +245,17 @@ impl Video {
             size: None,
             stream: None,
             congestion: Congestion::new(h264::qp_for(quality)),
+            due_at: None,
         }
+    }
+
+    /// Whether the mirror holds pixels no access unit has carried yet.
+    ///
+    /// The question [`TileSink::due_at`] answers for the engines, and the reason a
+    /// deferred frame is safe: these pixels are already counted as delivered by the
+    /// shadow, so something has to come back for them.
+    fn dirty(&self) -> bool {
+        self.stream.as_ref().is_some_and(h264::Stream::is_dirty)
     }
 
     /// The stream, built if it is not there yet.
@@ -804,14 +837,34 @@ impl TileSink {
     /// The encode runs on a blocking worker with the stream's lock held across it —
     /// serial, which is what an inter-frame stream requires and what the still path
     /// deliberately is not. Only the finished tile's place in the order is queued.
+    ///
+    /// **Calling it is a proposal, not an instruction.** At most one access unit is
+    /// produced per [`VIDEO_FRAME_INTERVAL`]; a call inside that window leaves the
+    /// mirror dirty and returns. So an engine may call this as often as its boundaries
+    /// occur, but must also call it when [`Self::due_at`] says to — see there for why
+    /// that second half is not optional.
     pub async fn frame(&self) -> anyhow::Result<()> {
         if !matches!(self.plan, RenderPlan::Video { .. }) {
             return Ok(());
         }
         let mut video = self.shared.video.lock().await;
+        // Read before it is consumed, because it decides whether the interval below
+        // applies at all. A forced keyframe is never deferred: `reset_render` arms it
+        // for a repaint, a reattach, a takeover or a resize, and every one of those is
+        // a client sitting in front of nothing until the keyframe arrives. Holding one
+        // back to keep a frame rate would be keeping time with an empty window.
+        let owed = self.shared.keyframe_owed.load(Ordering::Relaxed);
+        let now = tokio::time::Instant::now();
+        if !owed && video.due_at.is_some_and(|due| now < due) {
+            // Deliberately before `take_dirty`: the mirror keeps what was blitted into
+            // it and the next access unit carries it as an ordinary delta. Something
+            // must come back for it, which is what `due_at` tells the engines.
+            return Ok(());
+        }
         let Some(mut stream) = video.take_dirty() else {
             return Ok(());
         };
+        video.due_at = Some(now + VIDEO_FRAME_INTERVAL);
         let forced = self.shared.keyframe_owed.swap(false, Ordering::Relaxed);
         if forced {
             stream.force_keyframe();
@@ -865,6 +918,32 @@ impl TileSink {
         // is about the link rather than about this frame.
         self.adjust(queued.elapsed(), qp).await;
         pushed
+    }
+
+    /// When the engine must call [`Self::frame`] again, whatever its own boundaries
+    /// are doing — or `None` when there is nothing waiting.
+    ///
+    /// **This is the correctness half of pacing, not a convenience.**
+    /// [`crate::tiles::Shadow::accept`] records source pixels as delivered to the
+    /// client the moment `damage` blits them into the mirror, and nothing re-sends
+    /// them. A deferred frame that is never followed by another encode is therefore
+    /// permanently wrong pixels — and "the motion stopped right after one" is the
+    /// ordinary case rather than a corner: a video paused, a pointer come to rest, a
+    /// window settled. The deadline is what comes back for them.
+    ///
+    /// `None` while the mirror is clean, so an idle stream parks on
+    /// [`std::future::pending`] instead of waking an engine to encode nothing.
+    pub async fn due_at(&self) -> Option<tokio::time::Instant> {
+        if !matches!(self.plan, RenderPlan::Video { .. }) {
+            return None;
+        }
+        let video = self.shared.video.lock().await;
+        if !video.dirty() {
+            return None;
+        }
+        // A dirty mirror with no deadline yet is one whose pixels arrived before any
+        // access unit went out; it is owed one now rather than in an interval.
+        Some(video.due_at.unwrap_or_else(tokio::time::Instant::now))
     }
 
     /// Let the congestion policy see how long that frame's push blocked, and move the
@@ -2220,6 +2299,117 @@ mod tests {
         sink.flush().await;
         drain(&mut frame_rx, 1).await;
         assert!(frame_rx.try_recv().is_err(), "the same pixels were encoded twice");
+    }
+
+    /// The pacing, from the engine's side: a boundary is a proposal.
+    ///
+    /// RDP produced 126 of these a second on a busy desktop, each costing a full
+    /// encode of the mirror — 88% of a session inside the encoder for a stream
+    /// carrying under 800 kbit/s. Three boundaries inside one interval are one
+    /// access unit, and the two that did not encode must have left their pixels in
+    /// the mirror rather than dropped them.
+    #[tokio::test(start_paused = true)]
+    async fn several_frame_boundaries_inside_one_interval_are_one_access_unit() {
+        let (sink, mut frame_rx) = video_sink(640, 480).await;
+
+        for y in [0, 64, 128] {
+            let area = rect(0, y, 320, 64);
+            sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 3)).await.unwrap();
+            sink.frame().await.unwrap();
+        }
+        sink.flush().await;
+
+        drain(&mut frame_rx, 1).await;
+        assert!(frame_rx.try_recv().is_err(), "the interval did not hold the later boundaries");
+        assert!(
+            sink.due_at().await.is_some(),
+            "the deferred blits were dropped rather than held for the next access unit"
+        );
+    }
+
+    /// The half that makes deferring safe.
+    ///
+    /// `Shadow::accept` counts pixels as delivered the moment `damage` blits them, so
+    /// a deferral nobody comes back for is permanently wrong pixels — and motion
+    /// stopping right after one is the ordinary case, not a corner. Nothing further is
+    /// damaged here: the deadline alone has to collect them.
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_collects_what_a_deferred_frame_held() {
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        let area = rect(0, 0, 320, 64);
+
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 1)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain(&mut frame_rx, 1).await;
+
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 2)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        assert!(frame_rx.try_recv().is_err(), "the second frame was not held");
+
+        // What an engine's flush arm does, and the only thing that happens here.
+        let due = sink.due_at().await.expect("pixels the shadow calls delivered are owed");
+        tokio::time::sleep_until(due).await;
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain(&mut frame_rx, 1).await;
+        assert!(
+            sink.due_at().await.is_none(),
+            "the mirror is still holding pixels nothing will send again"
+        );
+    }
+
+    /// A forced keyframe is never deferred. `reset_render` arms one for a repaint, a
+    /// reattach, a takeover or a resize, and every one of those is a client sitting in
+    /// front of nothing until it arrives — keeping time there would be keeping time
+    /// with an empty window.
+    #[tokio::test(start_paused = true)]
+    async fn a_forced_keyframe_does_not_wait_for_the_interval() {
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        let area = rect(0, 0, 320, 64);
+
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 1)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain(&mut frame_rx, 1).await;
+        let before = sink.shared.keyframes.load(Ordering::Relaxed);
+
+        // Inside the interval, so without the bypass this would be held.
+        sink.reset_render();
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 2)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 1).await;
+        assert!(matches!(out[0], ServerMsg::Tile(_)), "the repaint waited out the interval");
+        assert_eq!(
+            sink.shared.keyframes.load(Ordering::Relaxed),
+            before + 1,
+            "the client was sent a delta to start its decoder from"
+        );
+    }
+
+    /// What the engines park on. `None` has to mean "nothing is owed", or a still
+    /// target's loop would wake to encode nothing and a video stream with an empty
+    /// mirror would spin.
+    #[tokio::test(start_paused = true)]
+    async fn nothing_is_due_while_the_mirror_is_clean() {
+        let (tiles_tx, _tiles_rx) = mpsc::channel(8);
+        let tiles = TileSink::new("test", tiles_tx, plan(TileCodec::Png, None));
+        assert!(tiles.due_at().await.is_none(), "a still target has no frame to owe");
+
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        assert!(sink.due_at().await.is_none(), "an untouched mirror owes nothing");
+
+        let area = rect(0, 0, 320, 64);
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 4)).await.unwrap();
+        assert!(sink.due_at().await.is_some(), "blitted pixels are owed an access unit");
+
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain(&mut frame_rx, 1).await;
+        assert!(sink.due_at().await.is_none(), "the encode settled the debt");
     }
 
     /// A resize is the client reallocating its canvas, so the stream has to start

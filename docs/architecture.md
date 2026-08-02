@@ -241,7 +241,7 @@ droppable once something covers it — and an access unit is one link in a chain
 where losing any link decodes wrongly until the next keyframe. `RenderPlan` being an
 enum is that distinction made structural.
 
-Four consequences, each of which is a rule somewhere:
+Five consequences, each of which is a rule somewhere:
 
 - **`Shadow::accept` is a promise.** It records source pixels as delivered the
   moment it accepts them, and nothing re-sends them, so the encoder may never drop a
@@ -254,6 +254,19 @@ Four consequences, each of which is a rule somewhere:
   arm, which `continue`s past that) and at VNC's `FramebufferUpdate` end. It is a
   no-op when nothing was blitted, because RDP's loop turns once per PDU and most
   redraw nothing.
+- **A frame boundary is a proposal, not a frame rate.** Those boundaries occur at
+  whatever rate the remote reports damage — 126 a second, measured, on a busy RDP
+  desktop against a 30 Hz stream and a 60 Hz screen — and every one of them used to
+  cost a full encode, which is how a session carrying under 800 kbit/s spent 88% of
+  itself inside the encoder. `VIDEO_FRAME_INTERVAL` caps it at one access unit per
+  33 ms; damage in between accumulates in the mirror and rides the next one, which
+  is cheaper than coding the same movement four times over. A forced keyframe skips
+  the cap, because a repaint, reattach, takeover or resize is a client with nothing
+  on screen. And because a deferral leaves pixels the shadow has already promised,
+  `TileSink::due_at` tells the engines when to come back for them whether or not
+  more damage arrives — RDP in a `select!` arm beside its layout retry, VNC raced
+  against its next message read, at a message boundary so a flush cannot split a
+  `FramebufferUpdate`.
 - **`src/wire.rs` must leave an access unit alone.** Never cached into a slot, never
   a `TILE_REF`, and outside the coverage relation in both directions. Coverage is
   sound reasoning about pixels nobody could have seen; under `video` every record
