@@ -634,6 +634,15 @@ async fn active_loop(
                 None => std::future::pending().await,
             }
         };
+        // Video only, and `None` unless the mirror is holding pixels no access unit
+        // has carried — see `TileSink::due_at` for why a paced stream cannot rely on
+        // the next `outputs` batch to come and collect them.
+        let video_flush = async {
+            match sink.due_at().await {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
 
         let outputs = tokio::select! {
             frame = framed.read_pdu() => {
@@ -979,6 +988,13 @@ async fn active_loop(
                     // agrees.
                     Asked::Redundant | Asked::Refused => pending_layout = None,
                 }
+                continue;
+            }
+            _ = video_flush => {
+                // The interval elapsed with pixels still sitting in the mirror. On the
+                // same task as every other frame boundary, so the stream stays serial
+                // by construction rather than by the lock.
+                sink.frame().await?;
                 continue;
             }
         };
