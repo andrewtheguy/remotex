@@ -30,16 +30,21 @@ extension CanvasBridge: WKScriptMessageHandler {
         _ controller: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        // Inside the hop, all of it: `WKScriptMessage.body` is main-actor
+        // isolated, so reading it out here to decode first is a concurrency
+        // violation rather than a saving. WebKit delivers this on the main
+        // thread, which is what `assumeIsolated` asserts.
+        //
         // `body` is JSON-serializable by construction (WebKit converts it), so
         // it round-trips through `JSONSerialization` into the typed decoder
         // rather than being read key by key.
-        guard JSONSerialization.isValidJSONObject(message.body),
-              let json = try? JSONSerialization.data(withJSONObject: message.body),
-              let event = CanvasEvent.decode(json)
-        else {
-            return
-        }
         MainActor.assumeIsolated {
+            guard JSONSerialization.isValidJSONObject(message.body),
+                  let json = try? JSONSerialization.data(withJSONObject: message.body),
+                  let event = CanvasEvent.decode(json)
+            else {
+                return
+            }
             apply(event)
         }
     }
