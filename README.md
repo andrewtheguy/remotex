@@ -113,7 +113,7 @@ without a source change — after deleting it, after `CI=true` builds, which ski
 the frontend step entirely, or when a prebuilt `target/` came from elsewhere:
 
 ```sh
-(cd frontend && bun run build) && cargo run -- serve -c remotex.toml
+bun run --cwd frontend build && cargo run -- serve -c remotex.toml
 ```
 
 The main directories are:
