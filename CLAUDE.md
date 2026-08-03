@@ -130,6 +130,14 @@ a prebuilt static libopus archive. Its library name remains `opus`, so
 `LIBOPUS_NO_PKG`, or `CMAKE_POLICY_VERSION_MINIMUM` in
 `packaging/build-tarball.sh`.
 
+VP9 strikes the same bargain through `libvpx-prebuilt` (`vpx-sys` in `Cargo.toml`,
+pinned by tag): a static libvpx built once per target, and a sys crate whose build
+script only downloads and links. No `configure`, no assembler, no `pkg-config` and no
+libclang on this side — the bindings are committed in that repository. Do not restore a
+source build, a vcpkg dependency, or bindgen at build time. Its archives are VP9 only
+and `--enable-realtime-only`, which is all `src/vp9.rs` asks for; anything else needs
+its own build behind `LIBVPX_PREBUILT_DIR`.
+
 The only other option is `audio_codec = "pcm"` (`src/pcm_stream.rs`), and it adds
 no dependency at all: the remote's wave buffer goes to the socket as it arrived,
 one packet per buffer, unresampled and unencoded, at 1.41 Mbit/s. Do not add a
@@ -164,3 +172,17 @@ reattach and a target switch — `SessionManager::arm_audio` re-arms it from `co
 It is closed only where the claim changes (`evict_audio`), and that eviction is
 load-bearing rather than tidy: without it the next `connect` re-arms an evicted
 browser onto the new holder's desktop.
+
+## Video codec
+
+`render_type = "video"` is carried by **VP9 by default** — BSD-licensed with a
+patent grant, and in every browser build, which H.264 is not. A target may name the
+other with `video_codec = "h264"`, which is the operator saying something about
+which browsers reach that target; it is refused on a target that streams nothing,
+the same shape `audio_codec` already has.
+
+The gateway holds no codec logic past that key — no probe, no gate, no fallback
+path. `ServerMsg::VideoFormat` announces the codec and the exact WebCodecs
+configuration string before a stream's first unit, and a client that cannot decode
+what arrives says so from its own `VideoDecoder`, naming the codec. See
+[`docs/architecture.md`](docs/architecture.md).

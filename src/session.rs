@@ -109,14 +109,6 @@ pub enum ConnectError {
     /// A target session is already running; disconnect before connecting again.
     #[error("a session is already connected")]
     AlreadyConnected,
-    /// The target streams video and the client accepted no codec that can carry it.
-    ///
-    /// The one refusal that is about the *client* rather than about the session: everything else
-    /// here would refuse any browser, and this one refuses only a browser whose `VideoDecoder`
-    /// took neither VP9 nor H.264 — which today means a page on an insecure origin, or an engine
-    /// with no WebCodecs at all.
-    #[error("target {0:?} streams video and this client accepted no codec for it")]
-    NoVideoCodec(String),
 }
 
 /// One WebSocket's live handle on the session slot, returned by
@@ -162,15 +154,11 @@ pub struct AudioAttachment {
 /// today means one RDP engine reads it and the other never sees it (see
 /// [`spawn_engine`]).
 ///
-/// The [`VideoCodec`] is what [`SessionManager::connect`] negotiated with this client. It is
-/// passed rather than read from the config because there is no config key for it, and it is
-/// passed even to a target that streams nothing — see [`TargetConfig::render_plan`].
 type EngineSpawner = Box<
     dyn Fn(
             TargetConfig,
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
-            VideoCodec,
             Option<Arc<AudioBridge>>,
         ) + Send
         + Sync,
@@ -180,15 +168,21 @@ struct EngineSlot {
     input_tx: mpsc::UnboundedSender<ClientMsg>,
     /// Guards the pump's cleanup against clearing a *newer* engine.
     generation: u64,
-    /// The codec this engine's streams were negotiated to, for a target that streams. Held here
-    /// because that is exactly its lifetime: it was decided when this engine was built and cannot
-    /// change while it runs — an encoder cannot switch codec mid-stream, and a second session is
-    /// permanently out of scope. `None` for a target that streams nothing.
+    /// The codec this engine's streams are encoded with, for a target that streams; `None`
+    /// for one that does not. Held here because that is exactly its lifetime: it was read
+    /// when this engine was built and cannot change while it runs — an encoder cannot switch
+    /// codec mid-stream, and a second session is permanently out of scope.
     ///
-    /// What reads it is [`SessionManager::attach`]: a browser taking over a running session never
-    /// sent `Connect` and so never negotiated, and telling it what is already being sent is what
-    /// lets it say so by name instead of failing to decode.
+    /// What reads it is [`SessionManager::attach`]: it goes on `Connected` so a client can
+    /// name the codec it is being sent, in the session card and in a decoder error, rather
+    /// than leaving "this did not decode" as the whole of what anybody knows.
     video: Option<VideoCodec>,
+    /// The render dial this engine resolved to, as one line for the client's session card.
+    ///
+    /// Held rather than recomputed, and for the same reason as `video`: it is resolved when
+    /// the engine is built and cannot change while the engine runs, so a reattach reports
+    /// what is *running* rather than what today's config file says.
+    render: String,
     /// Where this engine puts redirected audio, for an audio target. It lives on
     /// the engine slot because that is the lifetime audio has: a subscription
     /// ([`SessionManager::arm_audio`]) finds it here, and every way an engine ends
@@ -345,7 +339,6 @@ impl SessionManager {
             TargetConfig,
             mpsc::UnboundedReceiver<ClientMsg>,
             mpsc::Sender<ServerMsg>,
-            VideoCodec,
             Option<Arc<AudioBridge>>,
         ) + Send
         + Sync
@@ -454,6 +447,7 @@ impl SessionManager {
                     clipboard: target.clipboard,
                     audio: target.audio,
                     video: engine.video.map(VideoCodec::name),
+                    render: engine.render.clone(),
                 }
             }
             // No engine (idle, or an engine that ended): the picker.
@@ -627,22 +621,18 @@ impl SessionManager {
     /// Pick a target and start its engine (the picker's "connect"). The browser
     /// is told [`ServerMsg::Connected`]; the engine then paints. Refused if this
     /// attachment is no longer the current client, the name is unknown, a
-    /// session is already connected, or the target streams video and this browser
-    /// accepted no codec that can carry it — each refusal (except a stale attachment,
-    /// which isn't the current browser) tells the browser with a
-    /// [`ServerMsg::Error`] so a rejected pick never hangs the picker.
+    /// session is already connected — each refusal (except a stale attachment, which isn't
+    /// the current browser) tells the browser with a [`ServerMsg::Error`] so a rejected pick
+    /// never hangs the picker.
     ///
-    /// `accepted` is the codec negotiation, and this is where it is decided: the browser probed
-    /// each of [`VideoCodec::PREFERENCE`]'s `probe` strings with `VideoDecoder.isConfigSupported`
-    /// before it connected, and named the ones it accepted on `ClientMsg::Connect`. The
-    /// *gateway's* preference picks from that list rather than the client's order, so which codec
-    /// is better is one decision in one place. A target that streams nothing ignores the list
-    /// entirely — a tiles target has no reason to care what a video decoder can do.
+    /// Nothing here asks the browser what it can decode. The codec is the target's
+    /// ([`TargetConfig::video_codec`]), it is on `Connected` so the client can name it, and a
+    /// client that cannot decode it says so from its own `VideoDecoder` rather than being
+    /// refused here on the strength of a probe.
     pub fn connect(
         self: &Arc<Self>,
         attach_id: u64,
         target_name: &str,
-        accepted: &[VideoCodec],
     ) -> Result<(), ConnectError> {
         // Scoped so the lock is released before the re-arm below: every refusal returns
         // from inside it, so only the success path falls through.
@@ -669,32 +659,14 @@ impl SessionManager {
             }
         };
 
-        // The negotiation. `PREFERENCE` decides, so a browser that accepted both gets VP9 —
-        // and a target that streams nothing takes the first entry and never looks at it.
-        let codec = VideoCodec::PREFERENCE.into_iter().find(|c| accepted.contains(c));
-        let codec = match codec {
-            Some(codec) => codec,
-            None if target.streams_video() => {
-                // Named rather than generic, and it names the insecure-origin case too: the
-                // gateway cannot tell "this browser has no VP9" from "this page has no
-                // WebCodecs at all because it was served over plain http", and the client can.
-                // Whichever it is, the operator's reply is the same, so the message carries both.
-                let message = format!(
-                    "target {target_name:?} streams video, and this browser accepted neither \
-                     VP9 nor H.264. A page served over plain http:// has no WebCodecs video \
-                     decoder at all — reach this gateway over HTTPS, or localhost. Otherwise \
-                     pick a target with a still render_type."
-                );
-                Self::notify(st.client.as_ref(), ServerMsg::Error { message });
-                return Err(ConnectError::NoVideoCodec(target_name.to_owned()));
-            }
-            // A tiles target with a client that probed nothing: the value is never read. See
-            // `NO_STREAM_CODEC` in [`crate::encode`], which says the same thing from the
-            // other end.
-            None => VideoCodec::PREFERENCE[0],
-        };
+        // One resolution of the dial, read for both of the things a connect needs from it: the
+        // line the client shows, and which codec — if any — this target streams. Two calls
+        // could not disagree today, but they are the shape a drift grows in.
+        let plan = target.render_plan();
+        let video = plan.video_codec();
+        let render = plan.describe();
 
-        info!("session: connecting to target {:?} ({} video)", target.name, codec.name());
+        info!("session: connecting to target {:?} ({render})", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let (frame_tx, frame_rx) = mpsc::channel(frame_buffer(&target));
         st.next_generation += 1;
@@ -709,10 +681,11 @@ impl SessionManager {
         st.engine = Some(EngineSlot {
             input_tx,
             generation,
-            video: target.streams_video().then_some(codec),
+            video,
+            render: render.clone(),
             audio: audio.clone(),
         });
-        (self.spawn_engine)(target.clone(), input_rx, frame_tx, codec, audio);
+        (self.spawn_engine)(target.clone(), input_rx, frame_tx, audio);
         tokio::spawn(Self::pump(Arc::clone(self), frame_rx, generation));
 
         let name = target.name.clone();
@@ -721,7 +694,7 @@ impl SessionManager {
         let auto_resize = target.auto_resize();
         let clipboard = target.clipboard;
         let audio = target.audio;
-        let video = target.streams_video().then(|| codec.name());
+        let video = video.map(VideoCodec::name);
         st.selected = Some(target);
         // try_send is safe and ordered here: this runs under the state lock
         // before the just-spawned pump can acquire it, and with no engine until
@@ -737,6 +710,7 @@ impl SessionManager {
                 clipboard,
                 audio,
                 video,
+                render,
             }));
         }
         }
@@ -953,7 +927,6 @@ fn spawn_engine(
     target: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
-    codec: VideoCodec,
     audio: Option<Arc<AudioBridge>>,
 ) {
     std::thread::spawn(move || {
@@ -965,8 +938,8 @@ fn spawn_engine(
             }
         };
         match target.protocol {
-            Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx, codec, audio)),
-            Protocol::Vnc => rt.block_on(vnc::run(target, input_rx, frame_tx, codec)),
+            Protocol::Rdp => rt.block_on(rdp::run(target, input_rx, frame_tx, audio)),
+            Protocol::Vnc => rt.block_on(vnc::run(target, input_rx, frame_tx)),
         }
     });
 }
@@ -982,22 +955,20 @@ mod tests {
     use crate::config::Security;
     use crate::protocol::UNSCALED;
 
-    /// A scripted engine: each spawn hands its channel ends — the codec that was
-    /// negotiated, and the audio bridge the slot built for the target, if any — to
+    /// A scripted engine: each spawn hands its channel ends — the codec its target's
+    /// plan resolved to, and the audio bridge the slot built for the target, if any — to
     /// the test, which plays the engine role directly (no task, no sockets).
+    ///
+    /// The codec is resolved by the fake spawner rather than passed to it, because that is
+    /// what the real one does: `spawn_engine` hands the whole `TargetConfig` over and
+    /// `rdp::run`/`vnc::run` ask it for a plan. A test that was given the codec would be
+    /// asserting against the session layer's opinion instead of the engine's.
     type EngineEnds = (
         mpsc::UnboundedReceiver<ClientMsg>,
         mpsc::Sender<ServerMsg>,
-        VideoCodec,
+        Option<VideoCodec>,
         Option<Arc<AudioBridge>>,
     );
-
-    /// A client that accepted both codecs, which is what any current browser on a secure
-    /// origin sends. The default for tests that are not about the negotiation.
-    const VIDEO_BOTH: &[VideoCodec] = &VideoCodec::PREFERENCE;
-    /// A client that accepted neither — a page served over plain `http://`, whose
-    /// `VideoDecoder` does not exist. Only a target that streams video cares.
-    const NO_VIDEO: &[VideoCodec] = &[];
 
     /// The per-target capabilities the connected status carries. One struct
     /// rather than four positional bools, and the same value builds the target
@@ -1077,14 +1048,17 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            video_codec: None,
         }
     }
 
-    /// A target that streams the whole desktop as video, which is what the negotiation is about.
-    fn video_target(name: &str) -> TargetConfig {
+    /// A target that streams the whole desktop as video, in the codec it names — `None` for
+    /// one that names none, which is the default and therefore VP9.
+    fn video_target(name: &str, codec: Option<VideoCodec>) -> TargetConfig {
         TargetConfig {
             render_type: crate::config::RenderType::Video,
             render_quality: Some(60),
+            video_codec: codec,
             ..fake_target(name)
         }
     }
@@ -1093,7 +1067,8 @@ mod tests {
     /// ends to the test (which plays the engine role directly).
     fn manager_with_fake_engine() -> (Arc<SessionManager>, std_mpsc::Receiver<EngineEnds>) {
         let (hook_tx, hook_rx) = std_mpsc::channel();
-        let spawner: EngineSpawner = Box::new(move |_target, input_rx, frame_tx, codec, audio| {
+        let spawner: EngineSpawner = Box::new(move |target: TargetConfig, input_rx, frame_tx, audio| {
+            let codec = target.render_plan().video_codec();
             hook_tx.send((input_rx, frame_tx, codec, audio)).unwrap();
         });
         let targets = vec![
@@ -1110,7 +1085,8 @@ mod tests {
                 Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
             ),
             // The one target the codec negotiation can refuse.
-            video_target("video"),
+            video_target("video", None),
+            video_target("video-h264", Some(VideoCodec::H264)),
         ];
         (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
@@ -1160,6 +1136,7 @@ mod tests {
                 // The fake targets all stream tiles, so there is no codec to report. The
                 // negotiation's own tests below assert the value where there is one.
                 video: None,
+                render: _,
             }) => {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
@@ -1222,13 +1199,13 @@ mod tests {
         assert!(hooks.try_recv().is_err(), "attach must not spawn an engine");
 
         // Picking a target starts the engine and confirms with connected.
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_ok(), "connect spawns the engine");
 
         // A second connect while one is live is refused.
         assert!(matches!(
-            mgr.connect(att.id, "other", VIDEO_BOTH),
+            mgr.connect(att.id, "other"),
             Err(ConnectError::AlreadyConnected)
         ));
     }
@@ -1245,7 +1222,7 @@ mod tests {
         // UI off them). The VNC/no-resize case is covered by every other test's
         // expect_connected.
         let rdp_resize = Meta::of(Protocol::Rdp).resize();
-        mgr.connect(att.id, "rdp-resize", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "rdp-resize").unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
         // Keep the engine channels alive so the engine stays up across the
         // reattach below (dropping frame_tx would end it and flip to picker).
@@ -1263,7 +1240,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "vnc-clip", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "vnc-clip").unwrap();
         expect_connected_meta(&mut att.events, "vnc-clip", Meta::of(Protocol::Vnc).clipboard()).await;
 
         // And so does audio, which is what tells the browser it may offer the toggle
@@ -1272,7 +1249,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-audio", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "rdp-audio").unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
     }
 
@@ -1289,7 +1266,7 @@ mod tests {
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();
             expect_picker(&mut att.events).await;
-            mgr.connect(att.id, name, VIDEO_BOTH).unwrap();
+            mgr.connect(att.id, name).unwrap();
             match recv(&mut att.events).await {
                 AttachEvent::Msg(ServerMsg::Connected {
                     protocol: got_protocol,
@@ -1314,52 +1291,57 @@ mod tests {
         expect_picker(&mut att.events).await;
 
         assert!(matches!(
-            mgr.connect(att.id, "nope", VIDEO_BOTH),
+            mgr.connect(att.id, "nope"),
             Err(ConnectError::UnknownTarget(name)) if name == "nope"
         ));
         // An attachment that is no longer the current client can't connect.
-        assert!(matches!(mgr.connect(att.id + 999, "fake", VIDEO_BOTH), Err(ConnectError::NotCurrent)));
+        assert!(matches!(mgr.connect(att.id + 999, "fake"), Err(ConnectError::NotCurrent)));
     }
 
-    // ---- the codec negotiation ----------------------------------------------
+    // ---- the configured video codec -----------------------------------------
 
-    /// The gateway's preference decides, not the client's order.
+    /// A video target with no `video_codec` key streams VP9, and the connected status says so.
     ///
-    /// A browser that can decode both gets VP9 — which is the whole point of the negotiation, since
-    /// H.264 is the codec `remotex.app` cannot decode — and it gets it whichever order it listed
-    /// them in, because "which is better" is one decision and it is the gateway's.
+    /// The default matters more than a default usually does: it is the codec a browser build
+    /// with no proprietary codecs in it can still decode — so a target that says nothing about
+    /// codecs is one every client can show.
     #[tokio::test]
-    async fn a_browser_that_accepts_both_is_sent_vp9() {
-        for accepted in [
-            vec![VideoCodec::Vp9, VideoCodec::H264],
-            vec![VideoCodec::H264, VideoCodec::Vp9],
-        ] {
-            let (mgr, hooks) = manager_with_fake_engine();
-            let token = mgr.claim(false, None).unwrap();
-            let mut att = mgr.attach(&token).unwrap();
-            expect_picker(&mut att.events).await;
-
-            mgr.connect(att.id, "video", &accepted).unwrap();
-            let (_input_rx, _frame_tx, codec, _audio) =
-                hooks.try_recv().expect("engine spawned on connect");
-            assert_eq!(codec, VideoCodec::Vp9, "listed as {accepted:?}");
-        }
-    }
-
-    /// The fallback: a browser whose `VideoDecoder` refused VP9 still gets a picture.
-    #[tokio::test]
-    async fn a_browser_with_only_h264_is_sent_h264() {
+    async fn a_video_target_streams_vp9_unless_it_says_otherwise() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
 
-        mgr.connect(att.id, "video", &[VideoCodec::H264]).unwrap();
+        mgr.connect(att.id, "video").unwrap();
         let (_input_rx, _frame_tx, codec, _audio) =
             hooks.try_recv().expect("engine spawned on connect");
-        assert_eq!(codec, VideoCodec::H264);
-        // And the connected status says so, which is what a browser taking this session over
-        // later reads to find out it cannot decode it.
+        assert_eq!(codec, Some(VideoCodec::Vp9), "the default codec");
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Connected { video, .. }) => {
+                assert_eq!(video, Some("vp9"))
+            }
+            other => panic!("expected connected, got {other:?}"),
+        }
+    }
+
+    /// And a target that names the other one gets the other one — the whole of what the key
+    /// does, and the thing a probe used to decide.
+    ///
+    /// The status message is half the assertion. Nothing asks the browser what it can decode
+    /// any more, so naming the codec on `connected` is the only way a client can say "this
+    /// session is H.264 and I have no decoder for it" rather than failing silently — and it is
+    /// what a browser that *took over* a running session reads, having sent no connect at all.
+    #[tokio::test]
+    async fn a_video_target_streams_the_codec_it_names() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+
+        mgr.connect(att.id, "video-h264").unwrap();
+        let (_input_rx, _frame_tx, codec, _audio) =
+            hooks.try_recv().expect("engine spawned on connect");
+        assert_eq!(codec, Some(VideoCodec::H264));
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { video, .. }) => {
                 assert_eq!(video, Some("h264"))
@@ -1368,37 +1350,8 @@ mod tests {
         }
     }
 
-    /// A browser that accepted neither is refused — **and told why**, because a pick that
-    /// silently does nothing leaves somebody staring at a picker wondering what they did wrong.
-    /// This is the ordinary answer from a page served over plain `http://`, where WebCodecs does
-    /// not exist at all.
-    #[tokio::test]
-    async fn a_video_target_is_refused_by_name_when_no_codec_survives() {
-        let (mgr, hooks) = manager_with_fake_engine();
-        let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token).unwrap();
-        expect_picker(&mut att.events).await;
-
-        assert!(matches!(
-            mgr.connect(att.id, "video", NO_VIDEO),
-            Err(ConnectError::NoVideoCodec(name)) if name == "video"
-        ));
-        assert!(hooks.try_recv().is_err(), "a refused connect must not spawn an engine");
-        match recv(&mut att.events).await {
-            AttachEvent::Msg(ServerMsg::Error { message }) => {
-                assert!(message.contains("video"), "{message}");
-                assert!(message.contains("VP9"), "the message must name what was tried: {message}");
-                assert!(message.contains("H.264"), "{message}");
-                // The insecure-origin case, which the gateway cannot tell apart from a browser
-                // that simply lacks both and which is far the likelier of the two.
-                assert!(message.contains("http"), "{message}");
-            }
-            other => panic!("expected an error against the picker, got {other:?}"),
-        }
-    }
-
-    /// And a target that streams nothing does not care. A tiles session is the common case, and
-    /// making it depend on a video decoder would refuse browsers that have no reason to have one.
+    /// And a target that streams nothing reports no codec at all, which is what keeps a
+    /// tiles session — the common case — free of anything to do with video decoders.
     #[tokio::test]
     async fn a_tiles_target_connects_with_no_video_codec_at_all() {
         let (mgr, hooks) = manager_with_fake_engine();
@@ -1406,7 +1359,7 @@ mod tests {
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
 
-        mgr.connect(att.id, "fake", NO_VIDEO).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         assert!(hooks.try_recv().is_ok(), "a tiles target was refused over a video codec");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { video, .. }) => {
@@ -1422,7 +1375,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx, _codec, _audio) = hooks.try_recv().expect("engine spawned on connect");
 
@@ -1480,7 +1433,7 @@ mod tests {
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token).unwrap();
             expect_picker(&mut att.events).await;
-            mgr.connect(att.id, target, VIDEO_BOTH).unwrap();
+            mgr.connect(att.id, target).unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
             let (input_rx, _frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
 
@@ -1503,7 +1456,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, _frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
 
@@ -1525,7 +1478,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
 
@@ -1539,7 +1492,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, _frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
         assert!(
@@ -1563,7 +1516,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
 
@@ -1574,7 +1527,7 @@ mod tests {
         assert!(input_rx.is_closed(), "disconnect closes the engine input channel");
 
         // Picking again spawns a fresh engine — a different target this time.
-        mgr.connect(att.id, "other", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "other").unwrap();
         expect_connected(&mut att.events, "other").await;
         assert!(hooks.try_recv().is_ok(), "reconnect spawns a fresh engine");
     }
@@ -1589,7 +1542,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (input_rx, _frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
 
@@ -1631,7 +1584,7 @@ mod tests {
         let token_a = mgr.claim(false, None).unwrap();
         let mut att_a = mgr.attach(&token_a).unwrap();
         expect_picker(&mut att_a.events).await;
-        mgr.connect(att_a.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att_a.id, "fake").unwrap();
         expect_connected(&mut att_a.events, "fake").await;
         let (mut input_rx, frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
 
@@ -1676,7 +1629,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (_input_rx, frame_tx, _codec, _audio) = hooks.try_recv().unwrap();
 
@@ -1695,7 +1648,7 @@ mod tests {
         expect_picker(&mut att.events).await;
 
         // Picking again (same socket) spawns a fresh engine.
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         tokio::task::spawn_blocking(move || {
             hooks
@@ -1718,7 +1671,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-audio", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "rdp-audio").unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
         let ends = hooks.try_recv().unwrap();
         let audio = ends
@@ -1838,7 +1791,7 @@ mod tests {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-pcm", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "rdp-pcm").unwrap();
         expect_connected_meta(
             &mut att.events,
             "rdp-pcm",
@@ -1960,7 +1913,7 @@ mod tests {
             assert!(st.audio_pump.is_none(), "the picker has no audio to subscribe to");
         }
 
-        mgr.connect(att.id, "fake", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(
             mgr.state.lock().unwrap().audio_pump.is_none(),
@@ -2006,7 +1959,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         expect_listeners(&first_bridge, 0).await;
 
-        mgr.connect(att.id, "rdp-audio", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "rdp-audio").unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
         // Held, not dropped: letting the ends go is how a fake engine dies, and this
         // one has to outlive the assertions below.
@@ -2088,7 +2041,7 @@ mod tests {
             .await;
         mgr.disconnect(att_b.id);
         expect_picker(&mut att_b.events).await;
-        mgr.connect(att_b.id, "rdp-audio", VIDEO_BOTH).unwrap();
+        mgr.connect(att_b.id, "rdp-audio").unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
             .await;
         assert!(
@@ -2221,7 +2174,7 @@ mod tests {
         expect_picker(&mut att.events).await;
         expect_listeners(&audio, 0).await;
 
-        mgr.connect(att.id, "rdp-audio", VIDEO_BOTH).unwrap();
+        mgr.connect(att.id, "rdp-audio").unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
         let revived_ends = hooks.try_recv().unwrap();
         let revived = revived_ends

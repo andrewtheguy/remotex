@@ -51,12 +51,7 @@ export type ClientMsg =
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it.
-  // `videoCodecs` is the codec negotiation: the families whose `probe` string from
-  // `GET /api/config` this browser's `VideoDecoder.isConfigSupported` accepted. The
-  // gateway's own preference picks from the list, so order carries no meaning here.
-  // An empty list is legal and says "no video decoder at all", which is the ordinary
-  // answer from a page on an insecure origin — it refuses only a target that streams.
-  | { type: "connect"; target: string; videoCodecs: string[] }
+  | { type: "connect"; target: string }
   | { type: "disconnect" }
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
   // text on the remote's clipboard, "clipboardRequest" asks for the remote's
@@ -162,12 +157,17 @@ export type ControlMsg =
       autoResize: boolean;
       clipboard: boolean;
       audio: boolean;
-      // The codec family this session's video is being encoded with, or null for a
-      // target that streams none. Only interesting on a *takeover*: a browser that
-      // attached to a session somebody else started never sent `connect`, so it had no
-      // say in the negotiation, and this is what lets it say "this session is VP9,
-      // which I cannot decode" rather than waiting for a keyframe to fail.
+      // The codec family this session's video is being encoded with — the target's
+      // `video_codec` — or null for a target that streams none. Nothing asks this
+      // browser what it can decode, so this is how a client can name what it is being
+      // sent: in the session card, and in a decoder error that would otherwise be
+      // "something did not decode".
       video: string | null;
+      // The render dial this session resolved to, in one line — `tiles · jpeg q60`,
+      // `motion · base png, moving vp9 q40`, `video · vp9 q60`. The *resolved plan*
+      // rather than the config keys, which the reader may not have and which take a
+      // pairing matrix to collapse into what the encoder is actually doing.
+      render: string;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already

@@ -36,7 +36,6 @@ import {
   MIN_ZOOM,
   type Point,
 } from "./touchGestures.ts";
-import { acceptedVideoCodecs } from "./videoCodecs.ts";
 
 // The WebSocket/claim connection-flow state machine (independent of the
 // picker-vs-desktop `mode` the attached socket carries):
@@ -413,6 +412,21 @@ export function useRemoteDesktop(
   // decoder means no desktop at all, so this needs a surface that stays up while
   // `status` is "connected", which the status overlay does not.
   const [videoError, setVideoError] = useState<string | null>(null);
+  // What this session's video is, for the "This session" card — the codec family the
+  // target is configured to stream, and the exact WebCodecs configuration string each
+  // stream was announced with.
+  //
+  // Both, because they answer different questions and neither implies the other: the
+  // family is decided before a pixel moves and is what a target *is*, while the string
+  // is what a decoder was actually configured with and carries the profile and the
+  // level. A motion target runs up to four streams over regions of different sizes, so
+  // there can be several strings for one family.
+  //
+  // Null family means a target that streams no video at all, which is most of them.
+  // The render dial this session resolved to, from `connected`. Empty in the picker.
+  const [renderPlan, setRenderPlan] = useState("");
+  const [videoCodec, setVideoCodec] = useState<string | null>(null);
+  const [videoDecodeStrings, setVideoDecodeStrings] = useState<string[]>([]);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -1179,21 +1193,13 @@ export function useRemoteDesktop(
       setCanClipboard(msg.clipboard);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
-      // The takeover case, and the only reason `video` is on this message. A browser
-      // that attached to a session somebody else started never sent `connect`, so it had
-      // no say in the codec: saying so now is the difference between a named sentence and
-      // a black window followed by a decoder error nobody can act on. Told rather than
-      // fixed, because fixing it means a new engine — which is what picking the target
-      // again does, and what this says to do.
-      if (msg.video) {
-        void acceptedVideoCodecs().then((accepted) => {
-          setVideoError(
-            accepted.includes(msg.video as string)
-              ? null
-              : `This session is streaming ${msg.video?.toUpperCase()}, which this browser cannot decode. Switch target and pick it again.`,
-          );
-        });
-      }
+      // What this session is, for the card — and for the decoder error, which names the
+      // codec out of this rather than guessing. Nothing is checked here: the gateway sends
+      // the codec its target names, and whether this browser has a decoder for it is
+      // answered by `configure` refusing it, once, with the codec in hand.
+      setRenderPlan(msg.render);
+      setVideoCodec(msg.video);
+      setVideoDecodeStrings([]);
       // Manual on every connect, before either branch: a reattach, a target switch
       // and a takeover all arrive with the remote's own size left alone. The
       // remembered default is then applied below, once permission is known — and it
@@ -1295,6 +1301,10 @@ export function useRemoteDesktop(
           startAudio(msg);
           break;
         case "videoFormat":
+          setVideoCodec(msg.codec);
+          setVideoDecodeStrings((held) =>
+            held.includes(msg.decode) ? held : [...held, msg.decode],
+          );
           // Straight to the painter, which owns the decoders. Nothing here holds it:
           // this is the announcement, and every unit after it is already routed by
           // `stream` id. A browser that cannot decode what it names finds out from the
@@ -1369,6 +1379,9 @@ export function useRemoteDesktop(
           // decode is no longer on the screen, and the next target may not send
           // video at all.
           setVideoError(null);
+          setRenderPlan("");
+          setVideoCodec(null);
+          setVideoDecodeStrings([]);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
@@ -1501,14 +1514,7 @@ export function useRemoteDesktop(
         releaseAudio();
         audioContextRef.current = createAudioContext();
       }
-      // The video codecs go with the pick, because the gateway builds the encoder from
-      // them and it builds it here. Awaited *after* the AudioContext above, which is the
-      // whole reason the order of these two statements matters: a gesture is spent by
-      // the first `await`, and audio's context is the one that needs one. The probe is
-      // memoized and started at module load, so in practice this is already resolved.
-      void acceptedVideoCodecs().then((videoCodecs) => {
-        sendRef.current({ type: "connect", target, videoCodecs });
-      });
+      sendRef.current({ type: "connect", target });
     },
     [releaseAudio],
   );
@@ -1916,6 +1922,9 @@ export function useRemoteDesktop(
     pendingTarget,
     size,
     hostScale,
+    renderPlan,
+    videoCodec,
+    videoDecodeStrings,
     // The two permissions, and the client's per-session choice of how to use
     // them.
     canResize,

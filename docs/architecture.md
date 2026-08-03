@@ -45,7 +45,8 @@ queue.
 | `rdp.rs` | RDP connection, framebuffer, input, clipboard, audio, resize |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
-| `regions.rs`, `h264.rs` | which regions get an H.264 stream, and the encoder behind them |
+| `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
+| `vp9.rs`, `h264.rs` | libvpx and openh264 — the default video codec and the other one |
 | `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding, MS-RDPEA |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -74,14 +75,19 @@ combinations that exist are:
 | `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
 | `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
 | `motion` | `jpeg` / `webp` | base at `render_quality`; cells in motion cheaper still |
-| `motion` + `render_motion_subtype = "h264"` | `png` / `jpeg` / `webp` | base as above; an H.264 stream per coalesced moving region at `render_motion_quality` |
-| `video` | *(refused)* | the whole desktop as one H.264 stream at `render_quality` |
+| `motion` + `render_motion_subtype = "stream"` | `png` / `jpeg` / `webp` | base as above; a video stream per coalesced moving region at `render_motion_quality` |
+| `video` | *(refused)* | the whole desktop as one video stream at `render_quality` |
 
 `video` is the one row where `render_subtype` is empty, and that is what it is
 saying: it sends no per-region streams and no tiles at all — one fixed region, the
 whole desktop, for the whole session — so there is no per-tile codec left to name.
-The `h264` motion row still has one, because the base encode is still a still image:
+The `stream` motion row still has one, because the base encode is still a still image:
 only what is moving becomes a stream.
+
+**Neither streaming row names a video codec, because a key of its own does:**
+`video_codec`, `vp9` (the default) or `h264`, shared by both — see [which codec, and
+who chooses](#which-codec-and-who-chooses). It is refused on a target that streams
+nothing, the same way `audio_codec` is refused on one with no audio.
 
 No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
@@ -96,15 +102,15 @@ three through `createImageBitmap` from a MIME type. What streams costs one: a
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
-one arm per transport — `Tiles { base, motion, debug }` and `Video { quality }` —
+one arm per transport — `Tiles { base, motion, debug }` and `Video { quality, codec }` —
 rather than a struct with a flag, because the two share no code path worth sharing
 and the compiler is what stops a consumer handling only the first. `motion` is itself
-a `MotionEncode`, `Tile(codec)` or `Stream { quality }`, for the same reason one
+a `MotionEncode`, `Tile(codec)` or `Stream { quality, codec }`, for the same reason one
 level down: a cheaper still and an inter-frame stream are not two settings of one
 mechanism.
 
 ```text
-render_type / render_subtype / render_quality / render_motion_*
+render_type / render_subtype / render_quality / render_motion_* / video_codec
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
@@ -134,7 +140,7 @@ render_motion_quality = 10       # moving cells: as cheap as it takes
 ```
 
 The moving encode has its own axis (`MotionSubtype`, which admits no `png` and does
-admit `h264` — see below), not just its own quality. A settled cell is sent once and can afford WebP's slower,
+admit `stream` — see below), not just its own quality. A settled cell is sent once and can afford WebP's slower,
 smaller encode, while a moving cell is re-encoded every frame, where JPEG's faster
 encode may beat WebP's smaller output; cheapest and smallest are not the same
 question at quality 60 as at 10. `render_motion_subtype` defaults to
@@ -301,7 +307,7 @@ less sharp signal, which is worth knowing when reading it.
 
 #### `video`: a different transport, not a fourth codec
 
-`render_type = "video"` sends the whole framebuffer as one inter-frame H.264 stream
+`render_type = "video"` sends the whole framebuffer as one inter-frame video stream
 for the session — the degenerate case of the region streams above, and it runs the
 same code: one region, fixed at the whole desktop, never retuned (`Policy::Whole` in
 `src/regions.rs`). It is on the `render_type` axis and refuses
@@ -378,7 +384,43 @@ restarted on a different size.
 worse one to hit, since no audio decoder means silence beside a working desktop and no
 video decoder means no desktop. So a failure is *said* rather than logged: a banner
 that stays up, naming the codec the browser would not take.
-See [`known-issues.md`](known-issues.md).
+
+#### Which codec, and who chooses
+
+`video_codec` chooses, per target, and it defaults to `vp9`.
+
+Both codecs are behind one `video::Stream` enum and one `RenderPlan`, so nothing
+downstream of `TargetConfig::render_plan` knows which is running: `encode.rs`,
+`regions.rs` and the wire carry access units, a keyframe bit and a codec string, and
+neither `vp9.rs` nor `h264.rs` is reachable from anywhere but that enum. Adding a third
+is a variant and a module.
+
+VP9 is the default on measurement rather than principle. On synthetic screen content at
+1080p and quality 60, encoding a frame took **4.7 ms** against H.264's 15.0 ms and
+produced **18 KB** against 34 KB — three times faster for half the bytes, on the content
+this gateway actually sends. It is also BSD-3-Clause with a patent grant and present in
+builds that carry no proprietary codecs, which H.264 is not. Re-measure with
+`cargo test --release measure_the_encoders -- --ignored --nocapture`; a debug build
+reports nonsense, because the RGB→I420 conversion it also times is scalar Rust and runs
+66× slower unoptimised.
+
+**The browser is not asked, and that is a deliberate reversal.** The client used to
+probe: `/api/config` published the gateway's ordered codecs with a WebCodecs string for
+each, the client asked `VideoDecoder.isConfigSupported` about them before login, and
+`ClientMsg::Connect` carried the accepted names for `connect` to pick from. It worked,
+and it was removed. It put a round trip and a decoder query in front of every video
+session; `isConfigSupported` is not reliable enough on the same browser twice to build a
+refusal on; and because the refusal was phrased as "this browser accepted neither", any
+fault anywhere near the path — a serde field-name mismatch, for one — surfaced as an
+accusation against the browser and sent the reader to the wrong half of the system.
+
+What replaces it is one key and one honest failure. The gateway announces the
+configuration in `ServerMsg::VideoFormat` before the stream's first unit,
+`VideoDecoder.configure` accepts it or refuses it, and a refusal is reported by name —
+"this browser cannot decode the H.264 video this target sends" — with the same codec on
+the session card's **Video** row. `ServerMsg::Connected` carries the codec too, so a
+browser that took over a running session and sent no `connect` can still say what it is
+looking at.
 
 ## Session lifecycle
 

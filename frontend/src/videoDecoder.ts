@@ -12,11 +12,10 @@
 //
 // **Nothing here parses a bitstream.** The gateway says how to decode a stream in a
 // `videoFormat` control message before its first unit, and marks each unit's keyframe
-// bit on the wire. That is not a convenience: VP9 — the codec this now negotiates
-// first, because a stock Chromium carries it and H.264 is not guaranteed — has no
-// in-band parameter sets at all, so there is nothing in a VP9 payload for a client to
-// read a codec string out of. One contract for both codecs, decided by the side that
-// did the encoding.
+// bit on the wire. That is not a convenience: VP9 — the default, because a stock
+// Chromium carries it and H.264 is not guaranteed — has no in-band parameter sets at
+// all, so there is nothing in a VP9 payload for a client to read a codec string out of.
+// One contract for both codecs, decided by the side that did the encoding.
 //
 // The awkward part is the shape of the API rather than the codec. `decode()` is
 // fire-and-forget and frames come back on a callback, while the paint path wants
@@ -47,11 +46,12 @@ export interface VideoFormat {
  * where no video decoder means a desktop that never paints at all, so this is said
  * plainly rather than logged.
  *
- * A gateway now refuses a video target outright when the browser accepted no codec for
- * it, so this should be unreachable on a target that streams — the picker says so
- * before a session starts. It stays because "should be" rests on the negotiation
- * having happened, and a browser that took over somebody else's session did not
- * negotiate at all.
+ * Reachable, and by an ordinary route: nothing asks this browser what it can decode
+ * before a target is picked. A gateway once probed for that and refused the pick — the
+ * probe was removed because it made every video session depend on a round trip that
+ * could answer differently on the same browser twice, and its refusals blamed the
+ * browser for whatever had actually gone wrong. So the answer arrives here instead,
+ * where it is a fact rather than a prediction.
  */
 export function videoUnavailable(): string | null {
   if (typeof VideoDecoder !== "undefined") {
@@ -125,6 +125,9 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
   // decoder is running on: the announcement arrives first and the decoder is built by
   // the unit that follows it.
   const formats = new Map<number, VideoFormat>();
+  // Streams already logged as arriving before their format, so a takeover costs one
+  // console line rather than one per frame until the repaint lands.
+  const warned = new Set<number>();
 
   const dropDecoder = (id: number) => {
     const held = live.get(id);
@@ -134,9 +137,61 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
     }
   };
 
+  // The decoder for one stream, built on demand and replaced when its picture changes.
+  // Split out of `decode` because it is the only part with branches worth naming: the
+  // caller's job is the format lookup and the timestamp, and this one's is the decoder's
+  // lifetime.
+  const liveStream = (
+    id: number,
+    size: { w: number; h: number },
+    format: VideoFormat,
+  ): Live | null => {
+    const existing = live.get(id);
+    if (existing && existing.w === size.w && existing.h === size.h) {
+      return existing;
+    }
+    if (existing) {
+      // A region that restarted on a different picture. Neither codec's configuration
+      // string carries a resolution, and an in-band size change is not a thing to bet
+      // two browsers on, so the decoder is replaced rather than reused.
+      dropDecoder(id);
+    }
+    let entry: Live | undefined;
+    // Bound to this id, so a decoder that gives up takes its own region down and no
+    // others: under `render_motion_subtype = "stream"` the rest of the desktop is still
+    // arriving as still tiles and still painting, and the other regions have chains of
+    // their own that this one says nothing about. Under `render_type = "video"` there is
+    // only ever one, so it is the same outcome.
+    const failed = (reason: string) => {
+      // Only if this entry is still the live one: a region that restarted on a new size
+      // has already replaced it, and dropping the newer decoder because the older one
+      // errored would lose a chain that is decoding fine.
+      if (live.get(id) === entry) {
+        live.delete(id);
+      }
+      handlers.onError(reason);
+    };
+    let stream: VideoStream;
+    try {
+      stream = createVideoStream(format, { onError: failed });
+    } catch (e) {
+      // Unreachable once the table exists — it refused to be built without a decoder —
+      // but a throw from here would escape into the paint loop and drop a whole batch of
+      // tiles that had nothing to do with video.
+      handlers.onError(
+        e instanceof Error ? e.message : "This browser cannot decode video.",
+      );
+      return null;
+    }
+    entry = { stream, format, w: size.w, h: size.h, timestamp: 0 };
+    live.set(id, entry);
+    return entry;
+  };
+
   return {
     setFormat(id, format) {
       formats.set(id, format);
+      warned.delete(id);
       const held = live.get(id);
       if (held && held.format.decode !== format.decode) {
         // A stream that came back configured differently — a resize is the way this
@@ -147,50 +202,29 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
     decode(id, size, data, keyframe) {
       const format = formats.get(id);
       if (!format) {
-        // The gateway announces before it sends, so this is a contract violation
-        // rather than a state to recover from — and it is worth naming, because the
-        // alternative is a window that stays black with nothing said.
-        handlers.onError(
-          "This gateway sent video before saying how to decode it.",
-        );
+        // **Dropped, and that is correct rather than defensive.** It happens on a
+        // takeover: the gateway announces a stream once, to whoever was attached, and a
+        // browser that takes the session over receives whatever units were already in
+        // flight before the repaint its attach triggers has taken effect. Those units
+        // are undecodable here whatever this does — a decoder that has just been built
+        // can only start at a keyframe, and the keyframe is in the repaint that is
+        // already on its way with the format in front of it.
+        //
+        // So this used to report "the gateway sent video before saying how to decode
+        // it", and that was wrong twice over: it named a contract violation for an
+        // ordinary race, and it left a banner up over a session that had already
+        // recovered.
+        if (!warned.has(id)) {
+          warned.add(id);
+          console.warn(
+            `video: dropping a unit on stream ${id} until its format arrives`,
+          );
+        }
         return Promise.resolve(null);
       }
-      let held = live.get(id);
-      if (held && (held.w !== size.w || held.h !== size.h)) {
-        dropDecoder(id);
-        held = undefined;
-      }
+      const held = liveStream(id, size, format);
       if (!held) {
-        let stream: VideoStream;
-        // Bound to this id, so a decoder that gives up takes its own region down and
-        // no others: under `render_motion_subtype = "stream"` the rest of the desktop
-        // is still arriving as still tiles and still painting, and the other regions
-        // have chains of their own that this one says nothing about. Under
-        // `render_type = "video"` there is only ever one, so it is the same outcome.
-        const failed = (reason: string) => {
-          // Only if this entry is still the live one: a region that restarted on a
-          // new size has already replaced it, and dropping the newer decoder because
-          // the older one errored would lose a chain that is decoding fine.
-          if (live.get(id) === held) {
-            live.delete(id);
-          }
-          handlers.onError(reason);
-        };
-        try {
-          stream = createVideoStream(format, { onError: failed });
-        } catch (e) {
-          // Unreachable once the table exists — it refused to be built without a
-          // decoder — but a throw from here would escape into the paint loop and
-          // drop a whole batch of tiles that had nothing to do with video.
-          handlers.onError(
-            e instanceof Error
-              ? e.message
-              : "This browser cannot decode video.",
-          );
-          return Promise.resolve(null);
-        }
-        held = { stream, format, w: size.w, h: size.h, timestamp: 0 };
-        live.set(id, held);
+        return Promise.resolve(null);
       }
       held.timestamp += VIDEO_FRAME_US;
       return held.stream.decode(data, held.timestamp, keyframe);
@@ -201,6 +235,7 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
       }
       live.clear();
       formats.clear();
+      warned.clear();
     },
   };
 }
@@ -296,7 +331,7 @@ export function createVideoStream(
       drain();
       handlers.onError(
         e instanceof Error && e.name === "NotSupportedError"
-          ? `This browser cannot decode the ${format.codec.toUpperCase()} video this target sends.`
+          ? `This browser cannot decode the ${format.codec.toUpperCase()} video this target sends. Its video_codec is what chooses; the other option is ${format.codec === "vp9" ? "H.264" : "VP9"}.`
           : "This browser's video decoder failed.",
       );
     },

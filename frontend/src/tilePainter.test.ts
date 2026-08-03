@@ -487,6 +487,55 @@ test("a video record with an unknown flag drops the batch", async () => {
   assert.deepEqual(cropped, []);
 });
 
+test("units that arrive before their format are dropped, not reported", async () => {
+  // The takeover: the gateway announces a stream once, to whoever was attached, so a
+  // browser that takes the session over gets whatever was already in flight before the
+  // repaint its attach triggers. Those units cannot be decoded here whatever happens —
+  // a decoder built now can only start at a keyframe — so they are dropped in silence,
+  // and the repaint that follows carries the format and a keyframe.
+  //
+  // It used to raise "the gateway sent video before saying how to decode it", which
+  // named a contract violation for an ordinary race and left the banner up over a
+  // session that had already recovered.
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 64,
+        h: 64,
+        payload: [4, 5, 6],
+        keyframe: false,
+      },
+    ]),
+  );
+  assert.deepEqual(
+    videoErrors,
+    [null],
+    "a unit before its format was reported",
+  );
+  assert.deepEqual(chunkTypes, [], "a unit with no format reached a decoder");
+  assert.deepEqual(cropped, []);
+
+  // And the recovery is the ordinary path: the format lands, the keyframe after it
+  // decodes, and nothing had to be reset by hand.
+  p.setVideoFormat(0, { codec: "vp9", decode: "vp09.00.40.08" });
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.deepEqual(
+    chunkTypes,
+    ["key"],
+    "the stream did not recover once announced",
+  );
+  assert.equal(cropped.length, 1);
+});
+
 test("each stream id gets its own decoder", async () => {
   // A target on `render_motion_subtype = "stream"` runs one per moving region, and
   // they are separate chains: a unit decoded against the wrong region's history

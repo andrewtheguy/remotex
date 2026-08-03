@@ -265,9 +265,15 @@ function DisplaySection({
 function ScreenHelp({
   size,
   hostScale,
+  renderPlan,
+  videoCodec,
+  videoDecodeStrings,
 }: {
   size: RemoteSize | null;
   hostScale: number;
+  renderPlan: string;
+  videoCodec: string | null;
+  videoDecodeStrings: string[];
 }) {
   return (
     <>
@@ -290,9 +296,48 @@ function ScreenHelp({
             {densityLabel(hostScale)} ({dpiLabel(hostScale)})
           </dd>
         </div>
+        <div className="help-item">
+          <dt>Render</dt>
+          {/* The dial the gateway resolved, which is the one property of a session that
+              decides how the picture looks and costs and that nothing else reveals: it
+              lives in the operator's config file, which whoever is looking at the screen
+              usually does not have. Empty only before `connected`. */}
+          <dd>{renderPlan || "Waiting for the target"}</dd>
+        </div>
+        <div className="help-item">
+          <dt>Video</dt>
+          <dd>{videoLabel(videoCodec, videoDecodeStrings)}</dd>
+        </div>
       </dl>
     </>
   );
+}
+
+// What this session's moving pixels are being carried by, for the Help card.
+//
+// Worth showing because it is the one property of a session nothing else reveals: the
+// codec is the operator's, set per target, and a picture that decodes says nothing
+// about which one is decoding it. When one does *not* decode, this row and the error
+// are the only two places the answer appears.
+//
+// Three states, and they are genuinely different rather than degrees of the same one:
+// a target that streams nothing, one that is connected but has not yet produced a
+// frame, and one that is streaming. The last shows the exact `VideoDecoder.configure` strings
+// too, because the family alone hides the profile and level a decoder was built with —
+// which is what a "this browser cannot decode…" report turns on. A `motion` target runs
+// a stream per moving region and its regions differ in size, so there may be several.
+export function videoLabel(
+  codec: string | null,
+  decodeStrings: string[],
+): string {
+  if (!codec) {
+    return "None — this target sends tiles";
+  }
+  const family = codec.toUpperCase();
+  if (decodeStrings.length === 0) {
+    return `${family} — waiting for the first frame`;
+  }
+  return `${family} — ${decodeStrings.join(", ")}`;
 }
 
 // The direct audio toggle is also the user gesture required to create a
@@ -466,6 +511,9 @@ export default function FloatingMenu({
   onSelectDisplay,
   size,
   hostScale,
+  renderPlan,
+  videoCodec,
+  videoDecodeStrings,
   canAudio,
   audioEnabled,
   audioError,
@@ -525,6 +573,12 @@ export default function FloatingMenu({
   // both densities and not just the size.
   size: RemoteSize | null;
   hostScale: number;
+  // The render dial this session resolved to, one line, from `connected`.
+  renderPlan: string;
+  // What this session's video is: the target's codec family, and the exact
+  // configuration string each stream's decoder was built from. See `videoLabel`.
+  videoCodec: string | null;
+  videoDecodeStrings: string[];
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
@@ -994,7 +1048,13 @@ export default function FloatingMenu({
           {/* biome-ignore lint/a11y/noStaticElementInteractions: inner card */}
           <div className="help-card" onClick={(e) => e.stopPropagation()}>
             <h2>Help</h2>
-            <ScreenHelp size={size} hostScale={hostScale} />
+            <ScreenHelp
+              size={size}
+              hostScale={hostScale}
+              renderPlan={renderPlan}
+              videoCodec={videoCodec}
+              videoDecodeStrings={videoDecodeStrings}
+            />
             <h3>Shortcuts</h3>
             <dl className="help-list">
               <div className="help-item">

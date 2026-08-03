@@ -1,10 +1,9 @@
 // `GET /api/config`, and the fallbacks that keep a failure here from becoming a failure
 // somewhere louder.
 //
-// Its own file because the module memoizes one promise per page, deliberately — two
-// callers want the same response — and a memo cannot be reset. So the cases that need it
-// unresolved have to be the only ones that touch it, which is what a file boundary means
-// to the test runner.
+// Its own file because the module memoizes one promise per page, deliberately, and a memo
+// cannot be reset. So the cases that need it unresolved have to be the only ones that
+// touch it, which is what a file boundary means to the test runner.
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
@@ -38,10 +37,9 @@ afterEach(() => {
 });
 
 test("an unreachable gateway answers with the fallback rather than rejecting", async () => {
-  // The whole reason this never rejects: the codec probe awaits it before a connect, and
-  // a rejection there would take the connect down over a branding request. An empty codec
-  // list is also exactly what a browser with no decoder would have reported, so the
-  // gateway's refusal path handles it already.
+  // The whole reason this never rejects: a page whose gateway is unreachable is about to
+  // fail at something far more visible than its branding, and an unhandled rejection here
+  // would be the first thing anybody saw of it.
   globals.fetch = (async () => {
     fetches += 1;
     throw new TypeError("network down");
@@ -50,7 +48,6 @@ test("an unreachable gateway answers with the fallback rather than rejecting", a
   const { gatewayConfig } = await import("./gatewayConfig.ts");
   const config = await gatewayConfig();
   assert.equal(config.branding, "remotex");
-  assert.deepEqual(config.videoCodecs, []);
   assert.equal(config.protocolVersion, 0);
 
   // And memoized even in failure: one unreachable gateway is one request, not one per

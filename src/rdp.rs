@@ -43,7 +43,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::AudioBridge;
-use crate::config::{TargetConfig, VideoCodec};
+use crate::config::TargetConfig;
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -170,10 +170,9 @@ pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
-    codec: VideoCodec,
     audio: Option<Arc<AudioBridge>>,
 ) {
-    let sink = TileSink::new("rdp", frame_tx, config.render_plan(codec));
+    let sink = TileSink::new("rdp", frame_tx, config.render_plan());
     session(config, input_rx, &sink, audio).await;
     sink.finish().await;
 }
@@ -1752,6 +1751,7 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            video_codec: None,
         };
         assert!(!build_connector_config(&target).enable_audio_playback);
         target.audio = true;
@@ -1798,6 +1798,7 @@ mod tests {
                 render_motion_subtype: None,
                 render_motion_quality: None,
                 render_motion_debug: false,
+                video_codec: None,
             };
             let (clip_tx, _clip_rx) = mpsc::unbounded_channel();
             let bridge = audio.then(|| Arc::new(AudioBridge::new()));

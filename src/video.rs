@@ -528,16 +528,27 @@ mod tests {
     /// `#[ignore]`d because it takes a minute and prints rather than asserts: the numbers
     /// are the output, and a threshold on them would be a test of this machine.
     ///
+    /// **`--release`, and that is not the usual boilerplate — a debug run measures the
+    /// wrong thing and says so convincingly.** The two encoders are C and are optimized
+    /// whatever this profile is: libvpx is compiled `-O3` once, into the archive
+    /// `libvpx-prebuilt` publishes, and nothing a consumer does can touch it. The
+    /// conversion is *Rust* — `write_yuv_scalar`, inside the `openh264` crate, reached
+    /// through [`I420`] — so it is compiled with **this** crate's profile, and at
+    /// `opt-level = 0` it is per-pixel arithmetic with bounds checks and no vectorization.
+    /// Measured: 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
+    /// that makes the conversion look like 90% of the encode and sends the reader off to
+    /// replace it with libyuv for nothing.
+    ///
     /// ```sh
-    /// cargo test --lib video::tests::measure_the_encoders -- --ignored --nocapture
+    /// cargo test --release --lib video::tests::measure_the_encoders -- --ignored --nocapture
     /// ```
     ///
-    /// The conversion column is the reason it is measured separately: both codecs go
-    /// through the *same* RGB→I420 conversion ([`I420`], openh264's), so if that ever
-    /// dominates the encode, it is the thing to replace — and nothing else here would say
-    /// so. Sweeping VP9's speed and thread settings means editing the constants at the top
-    /// of `src/vp9.rs` and running this again; they are compile-time on purpose, since a
-    /// deployment has no business setting them.
+    /// The conversion column is still measured separately, for the case the paragraph
+    /// above rules out today: both codecs go through the *same* conversion, so if it ever
+    /// does dominate a release encode, it is the thing to replace — and nothing else here
+    /// would say so. Sweeping VP9's speed and thread settings means editing the constants
+    /// at the top of `src/vp9.rs` and running this again; they are compile-time on
+    /// purpose, since a deployment has no business setting them.
     #[test]
     #[ignore = "manual: measures both encoders and prints a table"]
     fn measure_the_encoders() {
@@ -608,8 +619,20 @@ mod tests {
         println!(
             "\n  {FRAMES} frames of synthetic screen content per row, one stream over the \
              whole desktop.\n  A row's keyframe column is its first frame; everything else \
-             is inter-frame.\n"
+             is inter-frame."
         );
+        // Said in the output rather than only in the doc comment, because the numbers are
+        // what gets pasted into a commit message or a doc, and a debug row's conversion
+        // column is off by two orders of magnitude — see this test's doc comment.
+        if cfg!(debug_assertions) {
+            println!(
+                "  ** debug build: the conversion column is Rust at opt-level 0 and is \
+                 ~66x\n     slower than what ships. Re-run with --release before believing \
+                 it.**\n"
+            );
+        } else {
+            println!("  Release build, so the conversion column is the one that ships.\n");
+        }
     }
 
     /// `w`×`h` of one colour, which makes "did these pixels land here" readable a byte

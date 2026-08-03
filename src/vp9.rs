@@ -1,10 +1,11 @@
 //! VP9 encoding: one stream over a rectangle of a [`crate::video::Mirror`].
 //!
 //! The default codec, and the reason there is a choice at all. H.264 is the one a browser is not
-//! guaranteed to have — stock Chromium ships without it, so `remotex.app` cannot decode its own
-//! fastest render mode — and VP9 is BSD-licensed with a patent grant, which is exactly the
-//! property that gets it into every browser build. [`crate::session`] negotiates which of the two
-//! a session uses before it connects; nothing here knows it was chosen.
+//! guaranteed to have — a Chromium built without proprietary codecs refuses it, and so does a
+//! Firefox on a system with no system decoder — and VP9 is BSD-licensed with a patent grant,
+//! which is exactly the property that gets it into every browser build. Which of the two a
+//! session uses is [`crate::config::TargetConfig::video_codec`]'s; nothing here knows it was
+//! chosen.
 //!
 //! What the two modules share — the mirror, the coded rectangle, the RGB→I420 conversion, the
 //! 1–100 dial — is [`crate::video`]'s. This module is only libvpx.

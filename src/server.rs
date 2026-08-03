@@ -16,7 +16,7 @@ use tower_http::services::ServeDir;
 
 use crate::{
     auth::{self, AuthSessions},
-    config::{self, AppConfig},
+    config::AppConfig,
     error::{ApiResult, AppError},
     protocol,
     session::SessionManager,
@@ -352,39 +352,15 @@ struct ConfigResponse {
     /// [`protocol::PROTOCOL_VERSION`] — what a client checks before it opens a
     /// session.
     protocol_version: u32,
-    /// The video codecs this gateway can send, best first.
-    ///
-    /// The client's half of the negotiation starts here: it asks
-    /// `VideoDecoder.isConfigSupported` about each `probe` and names the ones it accepted on
-    /// `ClientMsg::Connect`, which is where the gateway picks. Published rather than hardcoded in
-    /// the client so the order the client probes and the order `connect` prefers are one list.
-    video_codecs: Vec<VideoCodecInfo>,
-}
-
-/// One entry of [`ConfigResponse::video_codecs`].
-#[derive(Serialize)]
-struct VideoCodecInfo {
-    /// The family name to send back — `vp9`, `h264`.
-    name: &'static str,
-    /// A **representative** WebCodecs configuration string to probe with, not the one a session
-    /// will use: the exact string depends on the picture size, which only the remote knows. See
-    /// [`config::VideoCodec::probe`], which explains why both entries are held at comparable
-    /// strictness.
-    probe: &'static str,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
-/// browser tab title carry the deployment's branding before authentication, so
-/// a client can refuse a wire protocol it cannot speak, and so the client knows
-/// what to ask its video decoder about before it picks a target.
+/// browser tab title carry the deployment's branding before authentication, and
+/// so a client can refuse a wire protocol it cannot speak.
 async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         branding: state.config.branding.clone(),
         protocol_version: protocol::PROTOCOL_VERSION,
-        video_codecs: config::VideoCodec::PREFERENCE
-            .iter()
-            .map(|codec| VideoCodecInfo { name: codec.name(), probe: codec.probe() })
-            .collect(),
     })
 }
 
@@ -496,6 +472,7 @@ mod tests {
                 render_motion_subtype: None,
                 render_motion_quality: None,
                 render_motion_debug: false,
+                video_codec: None,
             }],
             auth: crate::auth::SitePasswd::parse(
                 &crate::auth::generate("admin", "hunter2", 4).unwrap(),
@@ -804,6 +781,7 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            video_codec: None,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its
@@ -813,7 +791,7 @@ mod tests {
         // ends so the session layer sees a live engine.
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target.clone()],
-            |_target, input_rx, frame_tx, _codec, audio| {
+            |_target, input_rx, frame_tx, audio| {
                 let audio: Arc<AudioBridge> = audio.expect("the target opted into audio");
                 std::thread::spawn(move || {
                     let mut input_rx = input_rx;
@@ -923,29 +901,8 @@ mod tests {
         let json = serde_json::to_string(&ConfigResponse {
             branding: "remotex".to_owned(),
             protocol_version: 1,
-            video_codecs: vec![VideoCodecInfo { name: "vp9", probe: "vp09.00.31.08" }],
         })
         .unwrap();
-        assert_eq!(
-            json,
-            r#"{"branding":"remotex","protocolVersion":1,"videoCodecs":[{"name":"vp9","probe":"vp09.00.31.08"}]}"#
-        );
-    }
-
-    /// The list the client probes, from the handler rather than from a literal: the order is the
-    /// gateway's preference and a client that reordered it would be choosing the codec, which is
-    /// the one decision this list exists to keep on the server.
-    #[test]
-    fn the_config_response_offers_vp9_before_h264() {
-        let offered: Vec<&str> = config::VideoCodec::PREFERENCE.iter().map(|c| c.name()).collect();
-        assert_eq!(offered, ["vp9", "h264"], "VP9 is the default and H.264 the fallback");
-        for codec in config::VideoCodec::PREFERENCE {
-            // A probe string a browser can be asked about: `vp09.…` or `avc1.…`, never a bare
-            // family name, which `isConfigSupported` would reject as malformed.
-            let probe = codec.probe();
-            assert!(probe.contains('.'), "{probe} is not a WebCodecs codec string");
-            assert_eq!(config::VideoCodec::from_name(codec.name()), Some(codec));
-        }
-        assert_eq!(config::VideoCodec::from_name("av1"), None, "a codec this gateway cannot send");
+        assert_eq!(json, r#"{"branding":"remotex","protocolVersion":1}"#);
     }
 }

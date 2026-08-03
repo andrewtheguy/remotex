@@ -10,8 +10,8 @@ is the only place they can be read in context.
 
 ### Render dial — what the region streams do not decide yet
 
-`render_motion_subtype = "h264"` ships: the `motion` detection chooses the regions,
-an H.264 stream carries each one, and the still codecs carry everything else. Three
+`render_motion_subtype = "stream"` ships: the `motion` detection chooses the regions,
+a video stream carries each one, and the still codecs carry everything else. Three
 of its numbers are policy that was chosen to be legible rather than measured, and the
 measurements are what should settle them:
 
@@ -39,9 +39,9 @@ got: a measurement first.
 ### Raising quality above the dial
 
 The congestion loop both streaming dials share can notice a backlog but never find
-headroom: it walks the quantizer up when the outbound queue says the link is behind
-and back down to the configured quality when it is not, and never past it. Under
-`render_motion_subtype = "h264"` it is blunter still, because that target's outbound
+headroom: it walks the dial down when the outbound queue says the link is behind
+and back up to the configured quality when it is not, and never past it. Under
+`render_motion_subtype = "stream"` it is blunter still, because that target's outbound
 queue is sized for its still tiles and so absorbs a backlog before the signal
 appears. Both are sound where they are used — exceeding the operator's setting was
 never a goal — but it means a link with room to spare is never discovered.
@@ -52,27 +52,26 @@ socket drains. So this wants a client-reported measurement — bytes received an
 arrival timing as a new `ClientMsg` — and work in the client. A separate feature,
 and one whose value should be argued from `video`'s measurements rather than assumed.
 
-### A video codec every engine has
+### AV1, if it ever measures better than VP9
 
-`render_type = "video"` and `render_motion_subtype = "h264"` both carry H.264, and
-H.264 is the one codec a browser is not guaranteed to have — a Chromium built
-without proprietary codecs refuses it, and so does a Firefox on a system with no
-system decoder. A licence-free codec would end that class of failure rather than
-route around it: VP9 and AV1 are both carried by builds that H.264 is not. Neither
-is universal — AV1 is refused by engines with no hardware path for it — so the
-client's own `isConfigSupported` probe stays the thing that decides, and a
-negotiation is part of the work below rather than an assumption underneath it.
+VP9 shipped and is the default: `render_type = "video"` and
+`render_motion_subtype = "stream"` carry it unless a target's `video_codec` says
+otherwise, and it is licence-free where H.264 is not — a Chromium built without
+proprietary codecs refuses H.264, and so does a Firefox on a system with no system
+decoder. See [`architecture.md`](architecture.md) for the mechanism.
 
-The work is on the sending side and is not small: an encoder per stream in the
-gateway, a `ServerMsg::VideoFormat` that names the codec and its decoder
-configuration the way `AudioFormat` already does for sound, and a negotiation that
-picks one rather than assuming. The client changes least — it hands encoded packets
-to WebCodecs and reports what it refuses.
+AV1 is the codec that might still be worth adding, and it is a measurement rather than
+a preference. It compresses better and costs more to encode, and this gateway encodes
+in real time on whatever machine it is running on — so the case for it is a number
+from `video::measure_the_encoders` against VP9's, on real content, not an argument
+from the format. Adding one is a variant on `VideoCodec` and an encoder module; it
+would **not** be a default, because
+AV1 is refused by engines with no hardware path for it and a codec nobody can play is
+a worse default than a codec everybody can.
 
-Which of the two is a measurement, not a preference: AV1 is the better codec and the
-more expensive encode, and this gateway encodes in real time on whatever machine it
-is running on. The dial's existing numbers were settled by measuring, and so should
-this be.
+It would not bring the probe back either. The client-side codec negotiation was built
+and removed (see [`architecture.md`](architecture.md)); a third codec is a third value
+for a key, not a reason to ask the browser again.
 
 ### Apple Screen Sharing display modes
 

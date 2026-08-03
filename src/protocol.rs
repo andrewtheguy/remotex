@@ -221,21 +221,7 @@ pub enum ClientMsg {
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
     ///
-    /// `video_codecs` is the codec negotiation, and it rides on this message because a codec has
-    /// to be chosen before an encoder is built and the encoder is built by this: the client asked
-    /// `VideoDecoder.isConfigSupported` about each entry `/api/config` published, before it sent
-    /// this, and names the ones it accepted. Order carries no meaning — the gateway's preference
-    /// decides — and an unknown name is ignored rather than refused, since a newer client may
-    /// probe for something this gateway cannot send.
-    ///
-    /// An empty list is legal and means "this browser can decode no video at all", which is the
-    /// ordinary answer from a page on an insecure origin. It refuses only a target that streams
-    /// video; a tiles target does not care.
-    Connect {
-        target: String,
-        #[serde(default)]
-        video_codecs: Vec<String>,
-    },
+    Connect { target: String },
     /// Tear the current session's engine down and return to the picker
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
@@ -793,6 +779,15 @@ pub enum ServerMsg {
         clipboard: bool,
         audio: bool,
         video: Option<&'static str>,
+        /// The render dial this session resolved to, as one line — see
+        /// [`crate::config::RenderPlan::describe`].
+        ///
+        /// Carried because it was invisible from a client: which of the dial's
+        /// combinations a target runs decides how the picture looks and what it costs, and
+        /// nothing on the wire said which one. Answering "why is this soft" or "why is
+        /// this slow" began with reading the operator's config file, which the person
+        /// looking at the screen generally does not have.
+        render: String,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -910,6 +905,7 @@ enum ControlMsg<'a> {
         clipboard: bool,
         audio: bool,
         video: Option<&'a str>,
+        render: &'a str,
     },
     RemoteOs { macos: bool },
     Clipboard {
@@ -996,6 +992,7 @@ impl ServerMsg {
                 clipboard,
                 audio,
                 video,
+                render,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
@@ -1004,6 +1001,7 @@ impl ServerMsg {
                 clipboard: *clipboard,
                 audio: *audio,
                 video: *video,
+                render,
             }),
             ServerMsg::VideoFormat { stream, codec, decode } => {
                 control(&ControlMsg::VideoFormat { stream: *stream, codec, decode })
@@ -1245,12 +1243,13 @@ mod tests {
             clipboard: true,
             audio: false,
             video: None,
+            render: "tiles · lossless png".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"autoResize":false,"clipboard":true,"audio":false,"video":null}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"autoResize":false,"clipboard":true,"audio":false,"video":null,"render":"tiles · lossless png"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1264,6 +1263,7 @@ mod tests {
             clipboard: false,
             audio: false,
             video: Some("vp9"),
+            render: "video · vp9 q60".to_owned(),
         })
         .text_frame()
         {

@@ -36,6 +36,9 @@ export default function RemoteDesktop({
     pendingTarget,
     size,
     hostScale,
+    renderPlan,
+    videoCodec,
+    videoDecodeStrings,
     canResize,
     canAutoResize,
     autoResize,
@@ -136,6 +139,9 @@ export default function RemoteDesktop({
           onSelectDisplay={selectDisplay}
           size={size}
           hostScale={hostScale}
+          renderPlan={renderPlan}
+          videoCodec={videoCodec}
+          videoDecodeStrings={videoDecodeStrings}
           canAudio={canAudio}
           audioEnabled={audioEnabled}
           audioError={audioError}
