@@ -46,13 +46,6 @@ pub enum Commands {
         /// is this binary's to know.
         #[arg(long)]
         web_root: PathBuf,
-        /// Loopback port to listen on, overriding `port` in the instance's
-        /// remotex.toml (default 45380). Fixed rather than ephemeral so the
-        /// page's origin — and with it the client's saved preferences —
-        /// survives a relaunch, which is also why two instances running at
-        /// once need one of them moved.
-        #[arg(long)]
-        port: Option<u16>,
     },
 
     /// Check a config file and say what is wrong with it, without starting
@@ -109,9 +102,8 @@ mod tests {
     }
 
     /// The app's own subcommand. It takes the two paths only the app knows — the
-    /// instance it owns and where its bundle keeps the SPA — and an optional port.
-    /// The secret is still not among them: that is the gateway's to mint and the
-    /// app's to be told, never the app's to pass.
+    /// instance it owns and where its bundle keeps the SPA — and nothing else: the
+    /// port and the secret are the gateway's to decide, not the app's to pass.
     #[test]
     fn serve_embedded_takes_the_two_paths_the_app_knows() {
         let cli = Cli::try_parse_from([
@@ -126,18 +118,12 @@ mod tests {
         let Commands::ServeEmbedded {
             instance_dir,
             web_root,
-            port,
         } = cli.command
         else {
             panic!("expected the serve-embedded subcommand");
         };
         assert_eq!(instance_dir, std::path::Path::new("/i"));
         assert_eq!(web_root, std::path::Path::new("/w"));
-        assert_eq!(
-            port, None,
-            "absent means the config's `port`, or the default below it — the flag \
-             must not decide that here"
-        );
 
         for missing in [
             vec!["remotex", "serve-embedded"],
@@ -149,24 +135,7 @@ mod tests {
                 "neither path has a default: the app names both {missing:?}"
             );
         }
-
-        let cli = Cli::try_parse_from([
-            "remotex",
-            "serve-embedded",
-            "--instance-dir",
-            "/i",
-            "--web-root",
-            "/w",
-            "--port",
-            "45999",
-        ])
-        .unwrap();
-        let Commands::ServeEmbedded { port, .. } = cli.command else {
-            panic!("expected the serve-embedded subcommand");
-        };
-        assert_eq!(port, Some(45_999));
-
-        for rejected in ["--gateway", "--token"] {
+        for rejected in ["--port", "--gateway", "--token"] {
             assert!(
                 Cli::try_parse_from([
                     "remotex",

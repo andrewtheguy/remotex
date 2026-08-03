@@ -3,23 +3,9 @@
 //! `remotex serve-embedded --instance-dir <dir> --web-root <dir>` is not a
 //! deployment. It is started by the macOS app, serves that app alone, and dies with
 //! it. Everything that makes a `serve` gateway configurable is therefore decided
-//! here instead: the address is `127.0.0.1`, the SPA comes out of the app's bundle,
-//! and there is no login to offer — see [`crate::config::Audience::Embedded`].
-//!
-//! The one exception is the port, and the client's memory is why. The page's origin
-//! is `http://<label>.localhost:<port>`, and both halves of it have to hold still
-//! from one launch to the next or the client's `localStorage` — where its three
-//! remembered preferences live — comes up empty every time, silently. So the port is
-//! [`DEFAULT_PORT`] rather than whatever the kernel gives, and the label is derived
-//! from the instance directory ([`Instance::origin_label`]).
-//!
-//! Those two are doing different jobs. The **port** is what makes the origin
-//! repeatable; being fixed, it is also the one thing here two instances can collide
-//! over, which is why it is the one thing their config may set. The **label** is what
-//! keeps instances apart *given* a shared port: same origin would mean one instance's
-//! preferences showing up in another's window, and — because cookies ignore the port
-//! entirely — one instance's launch token being handed to another's gateway by any
-//! browser that had visited both.
+//! here instead: the port is whatever the kernel gives, the address is `127.0.0.1`,
+//! the SPA comes out of the app's bundle, and there is no login to offer — see
+//! [`crate::config::Audience::Embedded`].
 //!
 //! The SPA it serves is the same one a browser gets, and `remotex.app` shows exactly
 //! that page in a web view. The token below stands in for the login: the app puts it
@@ -54,14 +40,6 @@ use serde::{Deserialize, Serialize};
 use crate::auth::EmbeddedToken;
 use crate::config::{Audience, ConfigFile};
 
-/// The loopback port `remotex.app`'s gateway listens on unless its config or its
-/// command line says otherwise.
-///
-/// Any unassigned port would do; what matters is that it is the *same* one every
-/// launch. Below 49152 so it is outside the ephemeral range, where some other
-/// process's outbound connection could be holding it at the moment the app starts.
-pub const DEFAULT_PORT: u16 = 45380;
-
 /// The line this process prints on stdout once, before serving.
 ///
 /// Serialized as JSON rather than as two lines of text so the app can tell a
@@ -70,12 +48,7 @@ pub const DEFAULT_PORT: u16 = 45380;
 /// coming" from "this build does not send it".
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct Handshake {
-    /// The `<label>.localhost` name the app must load the page from, and the only
-    /// one it may use. Announced rather than derived on the app's side, for the
-    /// reason the port is: the origin is one decision, and a second implementation
-    /// of it is a second thing to get wrong.
-    pub host: String,
-    /// The loopback port that was bound, and the only one the app may use.
+    /// The loopback port the kernel gave us, and the only one the app may use.
     pub port: u16,
     /// The token the app puts in its web view's `remotex_session` cookie, which
     /// then carries it to every request and to the `/ws` upgrades.
@@ -89,7 +62,6 @@ pub struct Handshake {
 impl std::fmt::Debug for Handshake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Handshake")
-            .field("host", &self.host)
             .field("port", &self.port)
             .finish_non_exhaustive()
     }
@@ -144,28 +116,6 @@ impl Instance {
         ConfigFile::parse_with(&text, Audience::Embedded)
             .with_context(|| format!("in config file {}", path.display()))
     }
-
-    /// The DNS label this instance's origin is spelled with: `remotex-<hash>`, which
-    /// [`crate::config::loopback_hostname`] turns into `remotex-<hash>.localhost`.
-    ///
-    /// Derived from the directory rather than remembered in a file, so there is no
-    /// state to keep in step and none to migrate, and two instances get two origins
-    /// without anybody having to allocate them.
-    ///
-    /// Hashed with xxh3 because that algorithm is *specified*: `DefaultHasher` is
-    /// documented as free to change between toolchains, and this value changing
-    /// between builds is precisely the bug the whole arrangement exists to fix. It is
-    /// not a secret and does not need to be one — it names an instance to itself.
-    pub fn origin_label(&self) -> String {
-        // Symlinks resolved, so `/tmp/x` and `/private/tmp/x` are one instance rather
-        // than two. Falls back to the path as given, which can only matter before the
-        // directory exists — and by the time anything asks for this, the config has
-        // been read out of it.
-        let dir = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
-        let hash = xxhash_rust::xxh3::xxh3_64(dir.as_os_str().as_encoded_bytes());
-        // 24 characters, well inside a DNS label's 63, and alphanumeric throughout.
-        format!("remotex-{hash:016x}")
-    }
 }
 
 /// Serve an instance until something stops us, printing the handshake to `stdout`.
@@ -173,19 +123,10 @@ impl Instance {
 /// The order is the contract: bind, *then* announce. A port announced before it is
 /// bound is a promise this process might not keep, and the app would race a
 /// connection against a listener that does not exist yet.
-pub async fn serve(
-    instance: &Instance,
-    web_root: PathBuf,
-    port_override: Option<u16>,
-) -> anyhow::Result<()> {
+pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
-    // Command line over config over default. The config key is the one that matters
-    // in practice — a GUI launch has no arguments to pass, which is exactly the
-    // limitation `--instance-dir` already has — and the flag is what makes a
-    // hand-started gateway movable without editing the file it is about to read.
-    let port = port_override.or(file.port).unwrap_or(DEFAULT_PORT);
-    let config = file.resolve_embedded(token.clone(), web_root, port, &instance.origin_label())?;
+    let config = file.resolve_embedded(token.clone(), web_root)?;
 
     // Before the bind, so the reason is above the handshake in `gateway.log` rather
     // than below whatever the app did next. A missing page here is not a
@@ -197,40 +138,21 @@ pub async fn serve(
         "this is remotex.app's --web-root, so the bundle is incomplete",
     );
 
-    // The name the app is about to be given. Built before the bind so a label this
-    // gateway could not spell is a refusal rather than a listening socket nobody can
-    // reach, and unwrapped rather than matched: `resolve_embedded` has just built the
-    // same name from the same label, so a `None` here is unreachable.
-    let host = config
-        .loopback_hostname
-        .clone()
-        .expect("an embedded gateway is always given a loopback hostname");
-
     // One socket on one address, and that address comes from the config rather than
     // from a literal here — `resolve_embedded` is where it is decided, and two places
     // saying `127.0.0.1` is one of them going stale the day the other changes.
     //
-    // `serve` binds every address its host name resolves to. This one binds a single
-    // address even though `<label>.localhost` resolves to two, because a client that
-    // tries `::1` first falls back to this one immediately — measured, not assumed.
-    //
-    // A taken port is *refused*, not worked around. Falling back to an ephemeral one
-    // would start fine and then quietly hand the client an origin it has never seen,
-    // which is this whole mechanism failing in exactly the way it was built to stop —
-    // so the app shows its launch failure screen with the reason and the fix in it.
-    let listener = TcpListener::bind((config.host.as_str(), config.port)).with_context(|| {
-        format!(
-            "cannot listen on {}:{port} — most likely another instance of remotex.app \
-             is already running, since this port is fixed rather than ephemeral so \
-             that the client's saved preferences survive a relaunch. Set `port` in {} \
-             to give this instance one of its own",
-            config.host,
-            instance.config_path().display()
-        )
-    })?;
+    // `serve` binds every address its host name resolves to, for reasons that do not
+    // apply here: the client is told a single port on a single address by the line
+    // below, so there is no name to resolve and no second family for it to arrive on.
+    let listener = TcpListener::bind((config.host.as_str(), config.port))
+        .with_context(|| format!("cannot listen on {}", config.host))?;
+    let port = listener
+        .local_addr()
+        .context("cannot read the port the kernel gave us")?
+        .port();
 
     let handshake = Handshake {
-        host: host.clone(),
         port,
         token: token.as_str().to_owned(),
     };
@@ -243,13 +165,7 @@ pub async fn serve(
         .context("cannot write the handshake to stdout")?;
     drop(stdout);
 
-    // Both spellings, because they are two different facts: the address the socket is
-    // on, and the origin the page is served from. A reader chasing a preference that
-    // was not remembered needs the second one, and it is the one that is not obvious.
-    info!(
-        "embedded gateway listening on http://{}:{port}, serving the client at http://{host}:{port}",
-        config.host
-    );
+    info!("embedded gateway listening on http://{}:{port}", config.host);
     info!("config: {}", instance.config_path().display());
     info!("web root: {}", config.static_dir.display());
     info!("{} target(s) available in the picker:", config.targets.len());
@@ -333,18 +249,8 @@ pub fn check(text: &str, audience: Audience) -> anyhow::Result<()> {
         // The web root is the app's to name and is not in the file, so checking
         // text says nothing about it: any path resolves, and whether it holds an
         // SPA is a question about the bundle rather than about this config.
-        //
-        // Same for the origin: the label comes from the instance directory, which the
-        // editor's unsaved text has no bearing on, so a placeholder is checked here
-        // and the real one is built at `serve`. Both are valid labels, which is the
-        // only property this call is in a position to depend on.
         Audience::Embedded => file
-            .resolve_embedded(
-                EmbeddedToken::generate(),
-                PathBuf::new(),
-                DEFAULT_PORT,
-                "remotex-check",
-            )
+            .resolve_embedded(EmbeddedToken::generate(), PathBuf::new())
             .map(|_| ()),
         Audience::Served => file.resolve().map(|_| ()),
     }
@@ -376,7 +282,6 @@ mod tests {
     #[test]
     fn a_handshake_is_one_parseable_line() {
         let handshake = Handshake {
-            host: "remotex-0123456789abcdef.localhost".to_owned(),
             port: 49213,
             token: "abc-123".to_owned(),
         };
@@ -389,56 +294,8 @@ mod tests {
         );
         // The field names the app reads, spelled out so renaming one here fails
         // here rather than at launch.
-        assert!(
-            line.contains("\"host\":\"remotex-0123456789abcdef.localhost\""),
-            "{line}"
-        );
         assert!(line.contains("\"port\":49213"), "{line}");
         assert!(line.contains("\"token\":\"abc-123\""), "{line}");
-    }
-
-    /// The origin's label is a function of the instance directory: the same one
-    /// twice, a different one for a different instance, and always a name
-    /// `loopback_hostname` will accept.
-    #[test]
-    fn an_instances_origin_label_is_derived_and_stable() {
-        let a = tempfile::tempdir().unwrap();
-        let b = tempfile::tempdir().unwrap();
-
-        let label = Instance::new(a.path()).origin_label();
-        assert_eq!(
-            label,
-            Instance::new(a.path()).origin_label(),
-            "the same directory must give the same origin, or the client's saved \
-             preferences are lost at the launch it changes"
-        );
-        assert_ne!(
-            label,
-            Instance::new(b.path()).origin_label(),
-            "two instances must not share an origin: they share a port"
-        );
-        assert_eq!(
-            crate::config::loopback_hostname(&label).unwrap(),
-            format!("{label}.localhost"),
-            "the label has to be one the hostname builder accepts, or the gateway \
-             refuses to start on a directory name it derived itself"
-        );
-    }
-
-    /// `/tmp/x` and `/private/tmp/x` are one instance on macOS, not two. Without
-    /// this, spelling the same directory either way would land on a different
-    /// origin — and on this platform the temp directory is reached through exactly
-    /// such a link, so the fixture is the real case rather than a contrived one.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn an_origin_label_follows_the_directory_through_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = std::fs::canonicalize(dir.path()).unwrap();
-        assert_ne!(real, dir.path(), "the fixture assumes a link to see through");
-        assert_eq!(
-            Instance::new(dir.path()).origin_label(),
-            Instance::new(&real).origin_label()
-        );
     }
 
     #[test]
@@ -478,12 +335,7 @@ mod tests {
         let file = ConfigFile::parse_with("branding = \"work laptop\"\n", Audience::Embedded)
             .unwrap();
         let resolved = file
-            .resolve_embedded(
-                EmbeddedToken::generate(),
-                PathBuf::from("/w"),
-                DEFAULT_PORT,
-                "remotex-test",
-            )
+            .resolve_embedded(EmbeddedToken::generate(), PathBuf::from("/w"))
             .unwrap();
         assert_eq!(resolved.branding, "work laptop");
         assert_eq!(resolved.static_dir, PathBuf::from("/w"), "the app's bundle");

@@ -31,14 +31,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::ServeEmbedded {
             instance_dir,
             web_root,
-            port,
         } => {
-            serve_embedded(
-                &remotex::embedded::Instance::new(instance_dir),
-                web_root,
-                port,
-            )
-            .await?;
+            serve_embedded(&remotex::embedded::Instance::new(instance_dir), web_root).await?;
         }
         Commands::CheckConfig { config, embedded } => {
             let audience = if embedded {
@@ -94,10 +88,9 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 async fn serve_embedded(
     instance: &remotex::embedded::Instance,
     web_root: std::path::PathBuf,
-    port: Option<u16>,
 ) -> anyhow::Result<()> {
     tokio::select! {
-        result = remotex::embedded::serve(instance, web_root, port) => result?,
+        result = remotex::embedded::serve(instance, web_root) => result?,
         _ = remotex::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");
         }
