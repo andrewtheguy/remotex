@@ -16,7 +16,7 @@ members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.102"
+version = "0.0.103"
 
 [package]
 name = "remotex"
@@ -155,9 +155,12 @@ socket2 = { version = "0.6", features = ["all"] }
 # (see src/rdp_audio.rs). `rdpdr` is MS-RDPEFS, which
 # remote audio needs registered even though nothing is ever redirected through
 # it — see the Rdpdr registration in src/rdp.rs for why.
-ironrdp = { version = "0.17", features = ["cliprdr", "connector", "session", "graphics", "dvc", "displaycontrol", "svc", "rdpsnd", "rdpdr"] }
-ironrdp-tokio = { version = "0.10", features = ["reqwest-rustls-ring"] }
-ironrdp-tls = { version = "0.2", features = ["rustls-ring"] }
+# Keep all IronRDP crates on the same workspace revision. This includes the
+# unreleased source-stride fix for bitmap updates whose encoded row width is
+# wider than their destination rectangle (IronRDP #1486).
+ironrdp = { git = "https://github.com/Devolutions/IronRDP.git", rev = "e55ee839a0c4f2fe1c8ffe78228791d8bf2a0880", features = ["cliprdr", "connector", "session", "graphics", "dvc", "displaycontrol", "svc", "rdpsnd", "rdpdr"] }
+ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP.git", rev = "e55ee839a0c4f2fe1c8ffe78228791d8bf2a0880", features = ["reqwest-rustls-ring"] }
+ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP.git", rev = "e55ee839a0c4f2fe1c8ffe78228791d8bf2a0880", features = ["rustls-ring"] }
 # Direct dep so we can install the ring CryptoProvider as the process default
 # before any TLS handshake (ironrdp-tls uses rustls with no bundled provider).
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
