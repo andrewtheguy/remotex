@@ -520,14 +520,21 @@ Audio frames bypass a tile batch still being collected, although a batch already
 being written may delay them.
 
 Both clients own their playback schedule, and it is the same code: a 0.1-second
-cushion, and backlog beyond a 0.3-second ceiling discarded. Neither decodes
-either codec itself — both hand the packets to WebCodecs, `remotex.app` through
-its canvas page — so a codec a browser will not take surfaces as a decoder error
-naming it, not as silence. WebCodecs requires a secure context, so the browser
-needs HTTPS or localhost; `remotex.app` serves its canvas page from `127.0.0.1`
-and therefore always has one. A quiet remote and one
-that never negotiates audio are indistinguishable to the client, so detailed
-negotiation status remains in the gateway log.
+cushion, and backlog beyond a 0.3-second ceiling discarded. What reaches that
+schedule differs by codec, and only there. Neither client decodes anything
+itself: an *encoded* stream goes to WebCodecs — `remotex.app` through its canvas
+page — so a codec a browser will not take surfaces as a decoder error naming it
+rather than as silence. A `pcm-s16le` stream reaches no decoder at all; the
+client turns the packet into an `AudioBuffer` and schedules it directly.
+
+The secure-context requirement belongs to that first path alone. WebCodecs is
+unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
+localhost, while passthrough plays anywhere. `remotex.app` is unaffected either
+way: it serves its canvas page from `127.0.0.1`, which is always a secure
+context.
+
+A quiet remote and one that never negotiates audio are indistinguishable to the
+client, so detailed negotiation status remains in the gateway log.
 
 ### Client input and display control
 

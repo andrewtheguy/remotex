@@ -376,7 +376,8 @@ mod tests {
     /// that. The encoding itself is covered in [`crate::opus_stream`], which
     /// decodes what it encoded.
     fn one_frame_of_pcm() -> Vec<u8> {
-        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate);
+        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate)
+            .expect("the negotiated rate makes whole groups");
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 

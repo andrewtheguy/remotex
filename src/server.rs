@@ -723,6 +723,14 @@ mod tests {
             buf
         }
 
+        // Read once and reused below, so what the target actually serves and what
+        // the printed line claims it serves cannot drift apart.
+        let tone_codec = match std::env::var("REMOTEX_TEST_TONE_CODEC").as_deref() {
+            Ok("pcm") => Some(crate::config::AudioCodec::Pcm),
+            Ok("opus") | Err(_) => None,
+            Ok(other) => panic!("REMOTEX_TEST_TONE_CODEC is opus or pcm, not {other:?}"),
+        };
+
         let target = TargetConfig {
             name: "test-tone".to_owned(),
             protocol: Protocol::Rdp,
@@ -739,11 +747,7 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: true,
-            audio_codec: match std::env::var("REMOTEX_TEST_TONE_CODEC").as_deref() {
-                Ok("pcm") => Some(crate::config::AudioCodec::Pcm),
-                Ok("opus") | Err(_) => None,
-                Ok(other) => panic!("REMOTEX_TEST_TONE_CODEC is opus or pcm, not {other:?}"),
-            },
+            audio_codec: tone_codec,
             render_type: crate::config::RenderType::Full,
             render_subtype: crate::config::RenderSubtype::Png,
             render_quality: None,
@@ -844,14 +848,19 @@ mod tests {
         println!("  Pick \"test-tone\", then ☰ → Enable audio. 440 Hz for 5s, quiet for 5s.");
         println!("  Press it during a quiet phase and then close the drawer: the tone");
         println!("  must arrive on its own, go away, and come back, untouched.");
-        println!(
-            "  Serving {}. A line under the button instead means this browser has no",
-            match std::env::var("REMOTEX_TEST_TONE_CODEC").as_deref() {
-                Ok("pcm") => "passthrough PCM (no decoder)",
-                _ => "Opus",
+        // Two different things to watch for, so they are said separately rather
+        // than as one sentence that half applies.
+        match tone_codec {
+            Some(crate::config::AudioCodec::Pcm) => {
+                println!("  Serving passthrough PCM, which reaches no decoder at all: silence");
+                println!("  here is the schedule or the socket, never WebCodecs.");
             }
-        );
-        println!("  decoder for it — set REMOTEX_TEST_TONE_CODEC=pcm|opus to try the other.");
+            _ => {
+                println!("  Serving Opus through WebCodecs. A line under the button instead");
+                println!("  means this browser has no decoder for it.");
+            }
+        }
+        println!("  Set REMOTEX_TEST_TONE_CODEC=pcm|opus to try the other.");
         // remotex.app can use this login gateway through Somewhere Else. A real
         // `audio = true` RDP target separately covers server negotiation.
         println!("  Ctrl-C when done; this waits 15 minutes.\n");

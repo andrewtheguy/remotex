@@ -274,34 +274,54 @@ export function createAudioPlayer(
     void context.close();
   }
 
+  /** Passthrough: a packet is already samples, so this runs inline. */
+  function playPassthrough(packets: Uint8Array[]): void {
+    for (const packet of packets) {
+      if (packet.byteLength < format.channels * 2) {
+        continue; // too short to hold a frame
+      }
+      try {
+        schedule(pcmToAudioBuffer(context, packet, format));
+      } catch (e) {
+        // Caught because this conversion is synchronous, unlike the decoder's,
+        // which reports through `error` above. A throw here — a channel count
+        // `createBuffer` refuses, a context already closing — would otherwise
+        // escape into the socket's frame dispatch and take the whole message
+        // loop with it, costing the desktop as well as the sound.
+        console.error("audio: cannot play a passthrough packet", e);
+        close();
+        handlers.onError(
+          "This browser could not play the audio the gateway sends.",
+        );
+        return;
+      }
+    }
+  }
+
+  function decodeEncoded(built: AudioDecoder, packets: Uint8Array[]): void {
+    if (built.state !== "configured") {
+      return;
+    }
+    for (const packet of packets) {
+      // Every packet on this wire is independently decodable — an Opus packet
+      // is — so they are all key frames, which is also why a listener can
+      // attach mid-stream at all.
+      built.decode(
+        new EncodedAudioChunk({ type: "key", timestamp, data: packet }),
+      );
+      timestamp += packetUs;
+    }
+  }
+
   return {
     push(packets) {
       if (closed) {
         return;
       }
-      if (!decoder) {
-        for (const packet of packets) {
-          if (packet.byteLength >= format.channels * 2) {
-            schedule(pcmToAudioBuffer(context, packet, format));
-          }
-        }
-        return;
-      }
-      if (decoder.state !== "configured") {
-        return;
-      }
-      for (const packet of packets) {
-        // Every packet on this wire is independently decodable — an Opus packet
-        // is — so they are all key frames, which is also why a listener can
-        // attach mid-stream at all.
-        decoder.decode(
-          new EncodedAudioChunk({
-            type: "key",
-            timestamp,
-            data: packet,
-          }),
-        );
-        timestamp += packetUs;
+      if (decoder) {
+        decodeEncoded(decoder, packets);
+      } else {
+        playPassthrough(packets);
       }
     },
     close,

@@ -310,8 +310,8 @@ pub mod batch {
 /// offset 4: packets, each u16 length | length bytes  (little-endian throughout)
 /// ```
 ///
-/// Receivers reject nonzero flags. Packet lengths delimit multiple Opus packets
-/// within one WebSocket frame.
+/// Receivers reject nonzero flags. Packet lengths delimit multiple packets within
+/// one WebSocket frame — Opus packets, or one wave buffer's worth of PCM.
 pub mod audio {
     pub const FRAME_KIND: u8 = 0x03;
     pub const HEADER_LEN: usize = 4;
@@ -337,7 +337,7 @@ pub mod audio {
         frame.extend_from_slice(&count.to_le_bytes());
         for packet in packets {
             let size = u16::try_from(packet.len())
-                .expect("an opus packet is at most u16::MAX bytes");
+                .expect("an opus or pcm packet is at most u16::MAX bytes");
             frame.extend_from_slice(&size.to_le_bytes());
             frame.extend_from_slice(packet);
         }

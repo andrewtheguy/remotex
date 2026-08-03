@@ -394,7 +394,8 @@ mod tests {
     /// complete one is held by the encoder, so a stream fed scraps yields nothing
     /// and a `next()` on it would wait forever rather than fail.
     fn one_frame_of_pcm() -> Vec<u8> {
-        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate);
+        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate)
+            .expect("the negotiated rate makes whole groups");
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 

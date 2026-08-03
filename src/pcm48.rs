@@ -13,6 +13,12 @@
 //! exact at 44.1 kHz, and that exactness is what lets the resampler be driven from
 //! its input side. Fixing the group and buffering the output is what keeps a
 //! codec's own granule from constraining the resampler.
+//!
+//! That exactness is a **precondition**, not a happy accident: [`Pcm48`] accepts
+//! only rates for which one group is a whole number of input frames, and refuses
+//! the rest rather than rounding them (see [`group_frames_in`]). The gateway
+//! advertises one RDPSND format and it qualifies, so the refusal is for a server
+//! that answers with something other than what it was offered.
 
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Resampler};
@@ -32,8 +38,19 @@ pub const SAMPLE_RATE: u32 = 48_000;
 const GROUP_FRAMES: usize = 960;
 
 /// Input frames that make one group at `rate`: 882 at 44.1 kHz, 960 at 48 kHz.
-pub fn group_frames_in(rate: u32) -> usize {
-    (GROUP_FRAMES as u64 * u64::from(rate) / u64::from(SAMPLE_RATE)) as usize
+///
+/// `None` when `rate` does not make a whole number of them, which is the
+/// invariant the module doc above is about rather than a corner case: the group
+/// is exact, and that is what lets the resampler be driven from its input side
+/// with nothing accumulating a fractional remainder. Truncating instead would
+/// build a resampler whose ratio is not the stream's, and the drift would be
+/// silent — a stream slowly running ahead of or behind real time with no error
+/// anywhere to explain it. [`Pcm48::new`] therefore refuses such a rate outright.
+pub fn group_frames_in(rate: u32) -> Option<usize> {
+    let frames = GROUP_FRAMES as u64 * u64::from(rate);
+    frames
+        .is_multiple_of(u64::from(SAMPLE_RATE))
+        .then(|| (frames / u64::from(SAMPLE_RATE)) as usize)
 }
 
 /// Turns wave buffers into interleaved 48 kHz `f32`.
@@ -74,7 +91,13 @@ impl Pcm48 {
         } else {
             // `FixedSync::Input` is what makes the input side the fixed one, so the
             // caller controls how much it hands over and the group size falls out.
-            let frames_in = group_frames_in(format.sample_rate);
+            let frames_in = group_frames_in(format.sample_rate).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} Hz does not divide into whole {SAMPLE_RATE} Hz groups, \
+                     so it cannot be resampled with a fixed group",
+                    format.sample_rate
+                )
+            })?;
             let resampler = Fft::<f32>::new(
                 format.sample_rate as usize,
                 SAMPLE_RATE as usize,
@@ -272,6 +295,31 @@ mod tests {
         let right = pcm.ready[mid * 2 + 1];
         assert!(left > 0.9, "left should still be near +1.0, got {left}");
         assert!(right < -0.9, "right should still be near -1.0, got {right}");
+    }
+
+    /// The fixed group only works where it is exact, so a rate that would need a
+    /// fractional one is refused rather than rounded to a resampler whose ratio is
+    /// not the stream's — which would drift with nothing to say why.
+    #[test]
+    fn a_rate_that_makes_no_whole_group_is_refused_rather_than_rounded() {
+        // The rates RDP could plausibly offer, and what they cost: 44.1 and 22.05
+        // are exact, 11.025 is 220.5 input frames and is not.
+        assert_eq!(group_frames_in(44_100), Some(882));
+        assert_eq!(group_frames_in(48_000), Some(GROUP_FRAMES));
+        assert_eq!(group_frames_in(22_050), Some(441));
+        assert_eq!(group_frames_in(11_025), None, "220.5 frames is not a group");
+
+        let awkward = PcmFormat {
+            channels: 2,
+            sample_rate: 11_025,
+            bits_per_sample: 16,
+        };
+        // Matched rather than `expect_err`, which would need `Pcm48: Debug` — and
+        // the resampler it holds has none.
+        let Err(err) = Pcm48::new(awkward) else {
+            panic!("11025 Hz has no whole group and must not build a resampler");
+        };
+        assert!(format!("{err:#}").contains("11025"), "{err:#}");
     }
 
     #[test]

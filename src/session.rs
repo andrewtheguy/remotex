@@ -908,7 +908,8 @@ mod tests {
     /// ends — so a packet is only ever proof that sound reached the socket. The bytes
     /// themselves are [`crate::opus_stream`]'s business.
     fn one_frame_of_pcm() -> Vec<u8> {
-        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate);
+        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate)
+            .expect("the negotiated rate makes whole groups");
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 
