@@ -26,43 +26,29 @@ struct RemoteWebHost: NSViewRepresentable {
         Coordinator(model: model, gateway: gateway)
     }
 
-    func makeNSView(context: Context) -> BrowserContainerView {
-        let container = BrowserContainerView()
+    /// A plain container, and plain on purpose: Chromium adds its own view under
+    /// this one and `client::fill_parent` gives that view an autoresizing mask, so
+    /// keeping the two the same size is AppKit's job and nothing here has to watch
+    /// for it.
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
         context.coordinator.attach(container: container)
         return container
     }
 
-    func updateNSView(_ container: BrowserContainerView, context: Context) {
+    func updateNSView(_ container: NSView, context: Context) {
         context.coordinator.apply(hidesToolbar: hidesToolbar)
     }
 
-    static func dismantleNSView(_ container: BrowserContainerView, coordinator: Coordinator) {
+    static func dismantleNSView(_ container: NSView, coordinator: Coordinator) {
         coordinator.detach()
-    }
-
-    /// The view Chromium's own view is added under.
-    ///
-    /// It exists to do one thing AppKit will not do for a subview it did not
-    /// create: keep the browser the size of its parent. CEF adds its view as a
-    /// child at whatever bounds it was given and does not resize with us.
-    final class BrowserContainerView: NSView {
-        /// Told after every layout, so the engine re-reads its size and repaints.
-        var onLayout: ((CGSize) -> Void)?
-
-        override func layout() {
-            super.layout()
-            for subview in subviews {
-                subview.frame = bounds
-            }
-            onLayout?(bounds.size)
-        }
     }
 
     @MainActor
     final class Coordinator {
         private let model: AppModel
         private let gateway: GatewayEndpoint
-        private weak var container: BrowserContainerView?
+        private weak var container: NSView?
         private var bridge: NativeBridge?
         private var keyboard: KeyboardCapture?
 
@@ -71,7 +57,7 @@ struct RemoteWebHost: NSViewRepresentable {
             self.gateway = gateway
         }
 
-        func attach(container: BrowserContainerView) {
+        func attach(container: NSView) {
             self.container = container
             // A local event monitor rather than letting Chromium see keys: menu key
             // equivalents are consumed by the menu bar before any responder, and a
@@ -113,13 +99,10 @@ struct RemoteWebHost: NSViewRepresentable {
         /// of the bundle rather than of whichever port the kernel handed out this
         /// time. The gateway is then only a backend, and the page is told where it
         /// is — by the scheme handler, as `index.html` is served.
-        private func load(into container: BrowserContainerView) {
+        private func load(into container: NSView) {
             let bridge = NativeBridge(model: model)
             self.bridge = bridge
             model.attach(bridge: bridge)
-            container.onLayout = { [weak bridge] size in
-                bridge?.resize(to: size)
-            }
 
             let gateway = self.gateway
             gateway.origin.withCString { origin in
@@ -190,7 +173,6 @@ struct RemoteWebHost: NSViewRepresentable {
             // screen under a bare title bar would be this coordinator's doing
             // outliving it.
             apply(hidesToolbar: false)
-            container?.onLayout = nil
             keyboard?.invalidate()
             keyboard = nil
             if let bridge {

@@ -209,7 +209,6 @@ wrap_browser_process_handler! {
         /// inside this callback re-enters the pump, which is the documented way to
         /// wedge it.
         fn on_schedule_message_pump_work(&self, delay_ms: i64) {
-            crate::note_pump_scheduled(delay_ms);
             if let Some(scheduler) = self.schedule.borrow().as_ref() {
                 scheduler.schedule(delay_ms);
             }

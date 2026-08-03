@@ -165,8 +165,9 @@ pub(crate) fn mark_context_ready() {
 /// One browser. The handle the shell holds is a pointer to this.
 pub struct RemotexCefBrowser {
     browser: client::BrowserSlot,
+    /// Kept for as long as the browser is, because everything the page can reach
+    /// this process through — the message router included — hangs off it.
     client: RefCell<Option<Client>>,
-    router: RefCell<Option<std::sync::Arc<cef::wrapper::message_router::BrowserSideRouter>>>,
     deliver: MessageSink,
 }
 
@@ -256,7 +257,6 @@ pub unsafe extern "C" fn remotex_cef_initialize(
     // `Args` owns the C strings CEF will read for the life of the process, so it
     // is leaked rather than dropped at the end of this function.
     let args = Box::leak(Box::new(args::Args::new()));
-    #[allow(clippy::let_and_return)]
     let started = initialize(
         Some(args.as_main_args()),
         Some(&settings),
@@ -269,31 +269,7 @@ pub unsafe extern "C" fn remotex_cef_initialize(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn remotex_cef_do_work() {
-    PUMP_RAN.with(|count| {
-        let ran = count.get() + 1;
-        count.set(ran);
-        if ran <= 3 || ran % 1000 == 0 {
-            trace!("pump: {ran} slices run, {} scheduled", PUMP_ASKED.with(|c| c.get()));
-        }
-    });
     do_message_loop_work();
-}
-
-thread_local! {
-    static PUMP_RAN: Cell<u64> = const { Cell::new(0) };
-    static PUMP_ASKED: Cell<u64> = const { Cell::new(0) };
-}
-
-/// CEF asked for a pump slice. Counted so a pump that has stopped being asked for
-/// and a pump that has stopped being run are two different symptoms.
-pub(crate) fn note_pump_scheduled(delay_ms: i64) {
-    PUMP_ASKED.with(|count| {
-        let asked = count.get() + 1;
-        count.set(asked);
-        if asked <= 3 || asked % 1000 == 0 {
-            trace!("pump: asked {asked} times, latest in {delay_ms} ms");
-        }
-    });
 }
 
 /// # Safety
@@ -388,7 +364,6 @@ pub unsafe extern "C" fn remotex_cef_create(
     let handle = Box::into_raw(Box::new(RemotexCefBrowser {
         browser: StdRc::new(RefCell::new(None)),
         client: RefCell::new(None),
-        router: RefCell::new(None),
         deliver: MessageSink {
             deliver: on_message,
             context: on_message_context,
@@ -417,8 +392,7 @@ unsafe fn spawn_browser(parent_view: *mut c_void, handle: *mut RemotexCefBrowser
     let entry = unsafe { &*handle };
     let startup = scheme::startup_url();
     trace!("creating a browser on {parent_view:?} for {startup}");
-    let (mut cef_client, router) = client::client(entry.browser.clone(), entry.deliver.clone());
-    *entry.router.borrow_mut() = Some(router);
+    let mut cef_client = client::client(entry.browser.clone(), entry.deliver.clone());
     *entry.client.borrow_mut() = Some(cef_client.clone());
 
     let window_info = WindowInfo::default().set_as_child(
@@ -472,33 +446,13 @@ pub unsafe extern "C" fn remotex_cef_execute(
     );
 }
 
-/// # Safety
-/// `browser` must come from `remotex_cef_create`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn remotex_cef_resize(
-    browser: *mut RemotexCefBrowser,
-    width: f64,
-    height: f64,
-) {
-    if browser.is_null() {
-        return;
-    }
-    let entry = unsafe { &*browser };
-    let Some(host) = entry
-        .browser
-        .borrow()
-        .as_ref()
-        .and_then(|browser| browser.host())
-    else {
-        return;
-    };
-    let _ = (width, height);
-    // Only this. A windowed browser follows the `NSView` AppKit has already
-    // resized, so all that is wanted is to be told to re-read it.
-    // `notify_move_or_resize_started` was tried here and is for a *windowless*
-    // browser — CEF answers it with "Incorrect usage" in the log and does nothing.
-    host.was_resized();
-}
+// There is deliberately no `remotex_cef_resize`. A windowed browser is an `NSView`
+// under the shell's, and `client::fill_parent` gives it the autoresizing mask that
+// makes AppKit keep it the size of its parent — so a resize is something the view
+// system has already done by the time anyone could be told about it. The two calls
+// that look like they belong here do not: `was_resized` and
+// `notify_move_or_resize_started` are both *windowless* rendering, and CEF answers
+// them on a windowed browser with "Incorrect usage" in its log and nothing else.
 
 /// # Safety
 /// `browser` must come from `remotex_cef_create`.

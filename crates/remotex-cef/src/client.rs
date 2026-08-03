@@ -123,6 +123,10 @@ wrap_client! {
             Some(RemotexDisplayHandler::new())
         }
 
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(RemotexContextMenuHandler::new())
+        }
+
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(RemotexLoadHandler::new())
         }
@@ -188,6 +192,39 @@ wrap_life_span_handler! {
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
             1
+        }
+    }
+}
+
+// No context menu, anywhere in this window.
+//
+// Chromium's is a *browser's* menu — Back, Reload, View Page Source, Inspect — and
+// none of it has a meaning here: there is no history, no address bar, and the page
+// is the app. Worse, a right-click is something the guest wants. The desktop
+// surface already calls `preventDefault` on `contextmenu`, but that only covers the
+// canvas, and even there the menu is Chromium's answer to the *native* event rather
+// than to the DOM one. Clearing the model is what covers the whole window.
+//
+// Cleared rather than replaced: what a right-click ought to offer — Copy, Paste,
+// the display controls — is on the menu bar, which is the shell's and is already
+// there.
+wrap_context_menu_handler! {
+    pub struct RemotexContextMenuHandler {}
+
+    impl ContextMenuHandler {
+        fn on_before_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _params: Option<&mut ContextMenuParams>,
+            model: Option<&mut MenuModel>,
+        ) {
+            // An empty model is not shown at all, which is the documented way to
+            // suppress the menu without also suppressing the click.
+            if let Some(model) = model {
+                model.clear();
+            }
+            crate::trace!("context menu suppressed");
         }
     }
 }
@@ -293,15 +330,15 @@ wrap_request_handler! {
     }
 }
 
-/// Build the client, its browser slot and the router that carries the page's
-/// events out.
-pub fn client(browser: BrowserSlot, deliver: crate::MessageSink) -> (Client, Arc<BrowserSideRouter>) {
+/// Build the client, and with it the router that carries the page's events out.
+///
+/// The router is not handed back. Every hook it needs is one of the client's own —
+/// the life span, request and process-message handlers above all forward to it —
+/// and the client holds the only reference there is any use for.
+pub fn client(browser: BrowserSlot, deliver: crate::MessageSink) -> Client {
     let router = BrowserSideRouter::new(crate::app::router_config());
     router.add_handler(Arc::new(PageMessages { deliver }), false);
-    (
-        RemotexClient::new(browser, router.clone()),
-        router,
-    )
+    RemotexClient::new(browser, router)
 }
 
 #[cfg(test)]

@@ -371,7 +371,6 @@ wrap_resource_handler! {
             if let Some(bytes_read) = bytes_read {
                 *bytes_read = count as ::std::os::raw::c_int;
             }
-            crate::trace!("read: asked {bytes_to_read}, gave {count}, at {}", *offset);
             // Zero read with nothing left is end of stream, which is a 0 return;
             // anything copied is a 1.
             i32::from(count > 0)

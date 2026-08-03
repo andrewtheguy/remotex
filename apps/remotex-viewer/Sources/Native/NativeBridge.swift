@@ -64,15 +64,7 @@ final class NativeBridge: NSObject, CommandSink {
         browser = nil
     }
 
-    /// Size the page to its container, which AppKit has just laid out.
-    func resize(to size: CGSize) {
-        guard let browser else {
-            return
-        }
-        remotex_cef_resize(browser, size.width, size.height)
-    }
-
-    /// Open Chromium's inspector. A no-op in a release build, on the Rust side.
+    /// Open Chromium's inspector on the page.
     func showDevTools() {
         guard let browser else {
             return

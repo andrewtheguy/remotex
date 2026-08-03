@@ -96,10 +96,11 @@ RemotexCefBrowser *remotex_cef_create(void *parent_view,
 /// is a menu item pressed while the window is still empty.
 void remotex_cef_execute(RemotexCefBrowser *browser, const char *script);
 
-/// Size the browser to `width` by `height` points, its parent having changed.
-void remotex_cef_resize(RemotexCefBrowser *browser, double width, double height);
+// There is deliberately nothing here about size. The browser is an `NSView` under
+// the one passed to `remotex_cef_create`, with an autoresizing mask, so AppKit
+// keeps it filling its parent and the shell has nothing to say about it.
 
-/// Open Chromium's inspector on the page. A no-op in a release build.
+/// Open Chromium's inspector on the page.
 void remotex_cef_show_dev_tools(RemotexCefBrowser *browser);
 
 /// Close the browser and forget it. The pointer is invalid afterwards.
