@@ -34,12 +34,24 @@ interface HostRemoteSize {
 /**
  * The query function `remotex.app`'s embedded Chromium installs on `window`.
  *
- * One string in, nothing back. The app never answers — every command it has for
- * the page goes the other way, through {@link useNativeCommands} — so the
- * `onSuccess` and `onFailure` members the message router also accepts are left
- * off, and this is a one-way post shaped like a query.
+ * One string in, nothing back that matters: the app never answers, because every
+ * command it has for the page goes the other way, through {@link useNativeCommands}.
+ *
+ * The callbacks are still **required**, and leaving them off is not a tidier way of
+ * saying the same thing — it is a message that never arrives. A missing member of a
+ * JavaScript object reads back as a value of type `undefined` rather than as no
+ * value at all, and the router's renderer half tests these two for "is a function"
+ * without first testing for "is undefined" (it does exactly that for `persistent`).
+ * So an object without them is rejected as malformed, and the rejection is silent
+ * in both directions: the exception never reaches the page, and the query never
+ * reaches the app. What that looks like is every menu in the app permanently
+ * disabled, because the state they derive from is the thing that was dropped.
  */
-type NativeQuery = (query: { request: string }) => number;
+type NativeQuery = (query: {
+  request: string;
+  onSuccess: (response: string) => void;
+  onFailure: (code: number, message: string) => void;
+}) => number;
 
 /**
  * Whether this page is running inside `remotex.app` rather than a browser.
@@ -152,6 +164,11 @@ export function postToHost(event: NativeEvent): void {
     // what this file's types describe.
     (window as unknown as { remotexNative: NativeQuery }).remotexNative({
       request: JSON.stringify(event),
+      // Both empty on purpose, and both mandatory — see {@link NativeQuery}. The
+      // app's receipt says only that the query arrived, and a failure here is a
+      // message about the window this page is already drawing.
+      onSuccess: () => {},
+      onFailure: () => {},
     });
   } catch {
     // The app is gone or refused the message; the page carries on regardless.

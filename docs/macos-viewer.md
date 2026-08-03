@@ -185,6 +185,22 @@ persistent files.
 The app keeps the write end of the gateway's stdin open without writing. When the
 app exits, the kernel closes it; the gateway reads EOF and exits.
 
+### Quitting Chromium
+
+`remotex_cef_shutdown` closes every browser and **waits** before taking the engine
+down, turning the pump by hand while it waits — a close finishes on the UI thread,
+which is the thread already inside `terminate:`, so it cannot happen otherwise.
+
+Shutting down with a browser still open is not a leak. CEF walks structures the
+browser owns and the process dies on the way out of ⌘Q: a crash report every quit,
+and a profile left marked unclean, so the following launch comes up in Chromium's
+crash-recovery state. The fault is therefore visible one launch after the one that
+caused it, which is what made it look like a startup problem.
+
+If the browsers do not close inside a second, the engine is left standing rather
+than shut down. The process is exiting either way; a dirty profile is a worse next
+launch and a segfault is a worse one still.
+
 ### Shutdown, in three layers
 
 1. **The liveness pipe** handles clean quit, crash, Force Quit, and `kill -9`
@@ -317,6 +333,17 @@ created — which is why `NATIVE_HOST` can be read at module load and never be w
 The page posts and does not wait: the router's reply is a receipt, because a query
 left unanswered leaks on both sides of the IPC, and everything the app has to say
 goes the other way.
+
+**`onSuccess` and `onFailure` are not optional**, even though nothing reads them.
+A missing member of a JavaScript object reads back as a value of type `undefined`,
+and the router's renderer half tests these two for "is a function" without first
+testing for "is undefined" — which it does do for `persistent`. So a query without
+them is rejected as malformed, and the rejection is silent in both directions: the
+exception never reaches the page and the query never reaches the app. The symptom
+is every menu in **View** and **Remote** permanently disabled, since the `state`
+they derive from is the message being dropped. `nativeHost.test.ts` is what holds
+the shape now; no browser test can, because in a browser `postToHost` returns
+without doing anything, which is exactly what the broken version did here.
 
 **Page → app** — `state`, `clipboardFromRemote`, `unauthenticated`.
 

@@ -97,6 +97,12 @@ thread_local! {
     static CONTEXT_READY: Cell<bool> = const { Cell::new(false) };
     /// A create that arrived before the context was ready, waiting for it.
     static PENDING_CREATE: RefCell<Option<PendingCreate>> = const { RefCell::new(None) };
+    /// Every browser this process has made and not yet seen closed.
+    ///
+    /// Kept so that [`remotex_cef_shutdown`] can close them and *wait*. A slot
+    /// holds `None` again once `on_before_close` has run, which is the only signal
+    /// CEF gives that a browser is really gone.
+    static LIVE_BROWSERS: RefCell<Vec<client::BrowserSlot>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The gateway origin the scheme handler injects into `index.html`.
@@ -394,6 +400,7 @@ unsafe fn spawn_browser(parent_view: *mut c_void, handle: *mut RemotexCefBrowser
     trace!("creating a browser on {parent_view:?} for {startup}");
     let mut cef_client = client::client(entry.browser.clone(), entry.deliver.clone());
     *entry.client.borrow_mut() = Some(cef_client.clone());
+    LIVE_BROWSERS.with(|live| live.borrow_mut().push(entry.browser.clone()));
 
     let window_info = WindowInfo::default().set_as_child(
         parent_view.cast(),
@@ -496,10 +503,54 @@ pub unsafe extern "C" fn remotex_cef_close(browser: *mut RemotexCefBrowser) {
     {
         host.close_browser(1);
     }
+    LIVE_BROWSERS.with(|live| {
+        live.borrow_mut()
+            .retain(|slot| !StdRc::ptr_eq(slot, &entry.browser))
+    });
 }
 
+/// Take Chromium down — **after** every browser it made is really gone.
+///
+/// The order is the whole of it, and getting it wrong is not a leak: CEF walks
+/// structures the browser still owns and the process dies on the way out of ⌘Q,
+/// on the main thread, with a crash report and a profile left marked unclean. The
+/// next launch then comes up in Chromium's crash-recovery state, so one bad quit is
+/// visible on the following launch rather than on the one that caused it.
+///
+/// A close is asynchronous and finishes on the UI thread, which in this process is
+/// the thread now inside `terminate:` — so it cannot happen unless the pump is
+/// turned by hand here. That is what the loop is: ask, turn, and watch the slots,
+/// which `on_before_close` empties.
+///
+/// If they do not empty, the engine is left standing rather than shut down. The
+/// process is exiting either way; a dirty profile is a worse next launch, and a
+/// segfault is a worse one still.
 #[unsafe(no_mangle)]
 pub extern "C" fn remotex_cef_shutdown() {
+    /// A millisecond each, so a browser that will not close costs a second of
+    /// quitting rather than the whole of it.
+    const SPINS: usize = 1_000;
+
+    let slots = LIVE_BROWSERS.with(|live| live.borrow().clone());
+    for slot in &slots {
+        if let Some(host) = slot.borrow().as_ref().and_then(|browser| browser.host()) {
+            // Forced: this is a quit, and a page is not entitled to refuse one.
+            host.close_browser(1);
+        }
+    }
+    let gone = |slots: &[client::BrowserSlot]| slots.iter().all(|slot| slot.borrow().is_none());
+    let mut spins = 0;
+    while !gone(&slots) && spins < SPINS {
+        do_message_loop_work();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        spins += 1;
+    }
+    LIVE_BROWSERS.with(|live| live.borrow_mut().clear());
+    if !gone(&slots) {
+        trace!("{} browser(s) would not close; leaving the engine up", slots.len());
+        return;
+    }
+    trace!("every browser closed in {spins} pump slices; shutting down");
     shutdown();
 }
 

@@ -89,6 +89,7 @@ impl BrowserSideHandler for PageMessages {
         _persistent: bool,
         callback: Arc<std::sync::Mutex<dyn BrowserSideCallback>>,
     ) -> bool {
+        crate::trace!("page posted {} bytes: {}", request.len(), &request[..request.len().min(120)]);
         self.deliver.deliver(request);
         // Answered at once and always successfully. The page does not read the
         // reply — `postToHost` supplies no `onSuccess` — but a query left
