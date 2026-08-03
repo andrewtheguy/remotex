@@ -1067,8 +1067,8 @@ impl ConfigFile {
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_deref()),
             dev_hostname: None,
-            // The client is loaded from `file://` out of the bundle, so it talks to
-            // this gateway cross-origin. See the field.
+            // The client is loaded as `remotex://app` out of the bundle, so it talks
+            // to this gateway cross-origin. See the field.
             allow_shell_origin: true,
         })
     }

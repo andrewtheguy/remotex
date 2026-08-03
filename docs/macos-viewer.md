@@ -165,10 +165,16 @@ A profile on disk is necessary and not sufficient — a stable [origin](#the-ori
 is the other half. Either one alone looks exactly like working until the app is quit
 and launched again, which is how this shipped twice as fixed and was not.
 
-`persist_session_cookies` is deliberately off: it governs cookies with no expiry,
-the launch token is written with one, and the gateway that minted it is gone by the
-next launch anyway. The claim lives in `sessionStorage`, which is per browser
-whatever the profile does.
+`persist_session_cookies` is deliberately off, and it is worth being exact about
+what that does and does not mean: it governs cookies with **no** expiry, and the
+launch token is written with one — so the token *is* stored in this instance's
+profile on disk, whatever that setting says. Nothing is done about it, because there
+is nothing there to protect: the gateway that would accept it is gone by the next
+launch, the shell overwrites it before the first page load, and the directory it sits
+in is the `0700` one that already holds `remotex.toml`. Anyone who can read the jar
+can read the credentials of every machine this app can reach.
+
+The claim lives in `sessionStorage`, which is per browser whatever the profile does.
 
 ### Process pipes
 

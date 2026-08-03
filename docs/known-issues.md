@@ -29,7 +29,12 @@ fallback path. A `video` target failing in the app looks exactly like the same
 target failing in a browser without the codec, which is the right shape for it.
 
 What would move it: either a CEF build with the codecs, or VP9/AV1 as a render
-subtype — every engine has those, and it is on the roadmap.
+subtype, which is on the roadmap. Neither is a codec every engine is guaranteed to
+decode either — VP9 is broad but AV1 in particular is refused by engines without a
+hardware path for it — so the thing that decides remains what decides today:
+`VideoDecoder.isConfigSupported` on the exact string, profile and level the gateway
+encoded, asked by the client and reported by it. The point of a licence-free codec
+is that stock CEF *can* carry it, not that probing stops being necessary.
 
 
 ## RDP: the reactivation a size change triggers can fail

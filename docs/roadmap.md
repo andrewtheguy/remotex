@@ -59,8 +59,11 @@ H.264 is the one codec a browser is not guaranteed to have. `remotex.app` is now
 proof: it embeds Chromium, stock CEF ships without proprietary codecs, and the
 fastest client remotex has cannot decode its fastest render mode — see
 [`known-issues.md`](known-issues.md). A licence-free codec would end that class of
-failure rather than route around it, and both VP9 and AV1 are decodable everywhere
-WebCodecs is.
+failure rather than route around it: both VP9 and AV1 are carried by a stock CEF
+build, which H.264 is not. Neither is universal — AV1 is refused by engines with no
+hardware path for it — so the client's own `isConfigSupported` probe stays the thing
+that decides, and a negotiation is part of the work below rather than an assumption
+underneath it.
 
 The work is on the sending side and is not small: an encoder per stream in the
 gateway, a `ServerMsg::VideoFormat` that names the codec and its decoder
