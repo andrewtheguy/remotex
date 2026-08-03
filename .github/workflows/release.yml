@@ -186,20 +186,20 @@ jobs:
             echo "::error::expected 'remotex ${version}', got '${got}'"
             exit 1
           }
-          # The remote surface, which the app serves to its own WKWebView from its own
-          # loopback listener. Without it the desktop screen has nothing to show, and
-          # `CanvasServer.start()` refuses rather than loading a 404.
-          [ -f "$app/Contents/Resources/canvas/viewer.html" ] || {
-            echo "::error::remotex.app is missing its canvas page"
+          # The client, which the bundled gateway serves on loopback and the app
+          # shows in a web view. Without it there is a window with nothing in it:
+          # the gateway answers the document request with a 404 and the app reports
+          # a page that would not load.
+          [ -f "$app/Contents/Resources/web/index.html" ] || {
+            echo "::error::remotex.app is missing the SPA it shows"
             exit 1
           }
-          # No SPA ships in the app: the embedded gateway serves no web UI, and a web
-          # root appearing here would mean it had started to. `viewer.html` above is
-          # the app's own surface and is deliberately not named index.html.
-          if find "$app" -name index.html -print -quit | grep -q .; then
-            echo "::error::remotex.app must not ship a frontend"
+          # And the assets it references, since an index.html whose script 404s is a
+          # blank window rather than an error.
+          [ -d "$app/Contents/Resources/web/assets" ] || {
+            echo "::error::remotex.app ships an index.html with no assets beside it"
             exit 1
-          fi
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
