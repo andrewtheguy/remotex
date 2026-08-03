@@ -114,9 +114,9 @@ For counts, assert invariant relationships such as `records > frames`.
 ## remotex.app
 
 It is a **shell**, not a second client. The bundle starts `remotex-gateway
-serve-embedded --instance-dir <dir> --web-root <dir>` on an ephemeral `127.0.0.1`
-port, and shows the SPA that gateway serves in a `WKWebView`. There is one
-gateway, in this bundle; a gateway elsewhere is reached with a browser.
+serve-embedded --instance-dir <dir> --web-root <dir>` on `127.0.0.1`, and shows
+the SPA that gateway serves in a `WKWebView`. There is one gateway, in this
+bundle; a gateway elsewhere is reached with a browser.
 
 `dist/remotex.app` contains `Contents/MacOS/remotex-viewer`,
 `Contents/MacOS/remotex-gateway`, and `Contents/Resources/web` — the built SPA,
@@ -130,11 +130,26 @@ its own `fetch` calls and opens its own `ws://` sockets, and neither can be give
 a header from outside the document. `require_auth` reads that cookie on both
 kinds of gateway and differs only in what makes the value valid.
 
-The web view's data store must be **persistent and per instance**
-(`WKWebsiteDataStore(forIdentifier:)`, keyed off `InstanceDirectory.dataStoreIdentifier`).
-The client's three remembered preferences live in its `localStorage`, so a
-non-persistent store drops them at every launch without saying so, and a shared
-one would leak a QA instance's into the real one.
+The client's three remembered preferences live in its `localStorage`, and three
+things have to hold or they are dropped at every launch, silently. `localStorage`
+is keyed by **origin**, so the origin is the thing being kept still:
+
+- The web view's data store is **persistent and per instance**
+  (`WKWebsiteDataStore(forIdentifier:)`, keyed off
+  `InstanceDirectory.dataStoreIdentifier`). Non-persistent forgets; shared would
+  leak a QA instance's preferences into the real one.
+- The **port is fixed** — `embedded::DEFAULT_PORT` (45380), overridable by
+  top-level `port` in the instance's `remotex.toml` or by `--port`. An origin
+  includes the port, so the ephemeral one this used to take gave every launch an
+  empty storage area and made the persistent store pointless. A port already in
+  use **refuses the start** and names the fix; falling back would silently
+  reintroduce the bug.
+- The **host is derived**: `remotex-<xxh3 of the instance directory>.localhost`
+  (`Instance::origin_label`), announced on the handshake and never recomputed in
+  Swift. It is what keeps two instances apart now that they share a port —
+  including their cookies, which ignore the port entirely. `<label>.localhost` is
+  loopback by RFC 6761, resolves on macOS, and is a **secure context**, so
+  WebCodecs still decodes audio and video.
 
 The app holds **no session**: no claim, no socket, no wire format, no protocol
 version. Do not put any of it back. Everything about the session is the client's,
@@ -170,10 +185,13 @@ closes it in the kernel, causing gateway EOF and exit. `SIGTERM` and explicit
 termination are supplemental. Preserve
 `aGatewayIgnoringSignalsStillDiesWithThePipe`, which proves the pipe alone works.
 
-The embedded `<instance>/remotex.toml` permits top-level `branding` and
-`[[targets]]`, refuses `[server]`, and permits zero targets. **Remote ›
-Configuration…** validates through `remotex-gateway check-config --embedded`
-and writes nothing on failure; do not add a Swift TOML parser.
+The embedded `<instance>/remotex.toml` permits top-level `branding`, `port` and
+`[[targets]]`, refuses `[server]`, and permits zero targets. `port` is top-level
+for the reason `branding` is — there is no `[server]` block to put it in — and a
+served config is refused it, since that audience already spells it
+`[server].port`. **Remote › Configuration…** validates through
+`remotex-gateway check-config --embedded` and writes nothing on failure; do not
+add a Swift TOML parser.
 
 Each instance is a separate app. `packaging/macos-viewer/make-instance-bundle.sh
 <name> [icon.png]` copies and ad-hoc re-signs the bundle into `~/Applications`
