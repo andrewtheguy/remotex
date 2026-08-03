@@ -32,11 +32,11 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 
-use crate::config::{MotionEncode, RenderPlan, TileCodec};
-use crate::h264;
+use crate::config::{MotionEncode, RenderPlan, TileCodec, VideoCodec};
 use crate::protocol::{ServerMsg, Tile, VideoUnit};
 use crate::regions::{Policy, Regions};
 use crate::tiles::{Changed, Rect};
+use crate::video;
 
 /// Maximum queued encodes ahead of the handle currently collected. This covers
 /// roughly one 1280×800 repaint while bounding memory and worker pressure.
@@ -134,9 +134,19 @@ const CLEAR_FRAMES: u32 = 30;
 /// rather than one per frame.
 const ADJUST_COOLDOWN: Duration = Duration::from_secs(1);
 
-/// How much coarser one step down is. Bigger than the step back up (one), for the
-/// same reason [`CLEAR_FRAMES`] is bigger than [`BEHIND_FRAMES`].
-const QP_STEP: u8 = 4;
+/// How much of the dial one step down gives up, and how much one step back up
+/// reclaims. Bigger down than up, for the same reason [`CLEAR_FRAMES`] is bigger than
+/// [`BEHIND_FRAMES`].
+///
+/// These are the H.264 steps this loop used to take, converted once: it walked the
+/// quantizer by 4 down and 1 up, and H.264's dial spans 39 quantizer values over 99
+/// points of quality, so one quantizer step is about 2.54 points. The loop speaks
+/// quality rather than a quantizer because there are two codecs now and their
+/// quantizers are different scales — 0–63 for VP9 — while the dial is the gateway's own
+/// and means the same thing on both.
+const QUALITY_STEP_DOWN: u8 = 10;
+/// See [`QUALITY_STEP_DOWN`].
+const QUALITY_STEP_UP: u8 = 3;
 
 /// The quality a plan that produces no access units is given.
 ///
@@ -145,6 +155,11 @@ const QP_STEP: u8 = 4;
 /// used, because a quality *is* a meaningful number everywhere else in this module
 /// and a reader should not have to work out that this one is not.
 const NO_STREAM_QUALITY: u8 = 1;
+
+/// The codec a plan that produces no access units is given. Never read, for the same reason
+/// [`NO_STREAM_QUALITY`] is not, and named for the same reason: a codec *is* a meaningful choice
+/// everywhere else, and a reader should not have to work out that this one is not.
+const NO_STREAM_CODEC: VideoCodec = VideoCodec::Vp9;
 
 /// The shortest gap between two access units.
 ///
@@ -165,37 +180,41 @@ const NO_STREAM_QUALITY: u8 = 1;
 /// already stamps access units with, so the timestamps stop being a fiction.
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 
-/// What the link will bear, as a quantizer.
+/// What the link will bear, on the 1–100 dial.
 ///
 /// One-directional by construction, and that is the whole design rather than a
-/// simplification: `dial` is a *ceiling* on quality, so this can only ever make the
-/// picture coarser than the operator asked for and never finer. What TCP hides is
-/// headroom — you can tell you are behind, never how far ahead you could be — and
-/// this never needs to know, because exceeding the configured quality was never a
-/// goal. The worst it can do is coarsen a link that was already struggling.
+/// simplification: `dial` is a *ceiling*, so this can only ever make the picture
+/// coarser than the operator asked for and never finer. What TCP hides is headroom —
+/// you can tell you are behind, never how far ahead you could be — and this never needs
+/// to know, because exceeding the configured quality was never a goal. The worst it can
+/// do is coarsen a link that was already struggling.
 ///
-/// Pure, and takes `now` rather than reading a clock, so every one of its decisions
-/// is testable without waiting for one.
+/// In dial units rather than a quantizer, which is what lets one loop serve both codecs:
+/// H.264's quantizer runs 12–51 and VP9's 0–63, and each module maps the dial onto its
+/// own. Nothing here knows which is running.
+///
+/// Pure, and takes `now` rather than reading a clock, so every one of its decisions is
+/// testable without waiting for one.
 struct Congestion {
-    /// The configured quality as a quantizer: the finest this will ever ask for.
+    /// The configured quality: the finest this will ever ask for.
     dial: u8,
-    /// The quantizer in force.
-    qp: u8,
+    /// The quality in force.
+    quality: u8,
     /// Consecutive frames whose queueing blocked, and consecutive frames whose did
     /// not. Only one is ever non-zero.
     behind: u32,
     clear: u32,
-    /// When the quantizer last moved, for [`ADJUST_COOLDOWN`]. `None` before it ever
+    /// When the quality last moved, for [`ADJUST_COOLDOWN`]. `None` before it ever
     /// has, so the first verdict does not have to wait out a cooldown that never ran.
     changed_at: Option<tokio::time::Instant>,
 }
 
 impl Congestion {
     fn new(dial: u8) -> Self {
-        Self { dial, qp: dial, behind: 0, clear: 0, changed_at: None }
+        Self { dial, quality: dial, behind: 0, clear: 0, changed_at: None }
     }
 
-    /// Record how long queueing a frame blocked, and return a new quantizer if that
+    /// Record how long queueing a frame blocked, and return a new quality if that
     /// changes the verdict.
     fn observe(&mut self, blocked: Duration, now: tokio::time::Instant) -> Option<u8> {
         if blocked >= BEHIND_BLOCK {
@@ -209,18 +228,18 @@ impl Congestion {
             return None;
         }
         let wanted = if self.behind >= BEHIND_FRAMES {
-            self.qp.saturating_add(QP_STEP).min(h264::QP_COARSEST)
+            self.quality.saturating_sub(QUALITY_STEP_DOWN).max(video::QUALITY_MIN)
         } else if self.clear >= CLEAR_FRAMES {
-            // Stops at the dial, never below it. A link with room to spare does not
+            // Stops at the dial, never above it. A link with room to spare does not
             // earn a better picture than the one that was configured.
-            self.qp.saturating_sub(1).max(self.dial)
+            self.quality.saturating_add(QUALITY_STEP_UP).min(self.dial)
         } else {
             return None;
         };
-        if wanted == self.qp {
+        if wanted == self.quality {
             return None;
         }
-        self.qp = wanted;
+        self.quality = wanted;
         self.behind = 0;
         self.clear = 0;
         self.changed_at = Some(now);
@@ -243,10 +262,10 @@ struct Video {
 }
 
 impl Video {
-    fn new(policy: Policy, quality: u8, mark: Option<h264::Mark>) -> Self {
+    fn new(policy: Policy, codec: VideoCodec, quality: u8, mark: Option<video::Mark>) -> Self {
         Self {
-            regions: Regions::new(policy, quality, mark),
-            congestion: Congestion::new(h264::qp_for(quality)),
+            regions: Regions::new(policy, codec, quality, mark),
+            congestion: Congestion::new(quality),
             due_at: None,
         }
     }
@@ -598,10 +617,13 @@ struct Shared {
     keyframe_bytes: AtomicU64,
     /// Frames the encoder produced no bitstream for. Must stay zero.
     skipped: AtomicU64,
-    /// Frames sent coarser than the dial asked for, and the coarsest quantizer the
-    /// link ever forced. The whole measurement of [`Congestion`].
+    /// Frames sent coarser than the dial asked for, and the lowest quality the link
+    /// ever forced. The whole measurement of [`Congestion`].
     coarsened: AtomicU64,
-    coarsest_qp: AtomicU64,
+    /// Starts at [`video::QUALITY_MAX`] and only ever falls, because "the worst" is a
+    /// minimum on this scale — the opposite direction from the quantizer this used to
+    /// count, where a `fetch_max` from zero was the right accumulator.
+    worst_quality: AtomicU64,
     /// Summed across workers, so it may exceed the wall clock.
     encode_micros: AtomicU64,
     /// Wall time the order task spent waiting for encodes to finish.
@@ -616,19 +638,26 @@ impl Shared {
         // none still builds a `Video` — never touched, and holding no mirror until
         // something is blitted into it — so that the streaming paths need no
         // unwrapping once they have established which plan they are on.
-        let (policy, quality, mark) = match plan {
-            RenderPlan::Video { quality } => (Policy::Whole, quality, None),
-            RenderPlan::Tiles { motion: Some(MotionEncode::Stream { quality }), debug, .. } => (
+        let (policy, codec, quality, mark) = match plan {
+            RenderPlan::Video { quality, codec } => (Policy::Whole, codec, quality, None),
+            RenderPlan::Tiles {
+                motion: Some(MotionEncode::Stream { quality, codec }), debug, ..
+            } => (
                 Policy::Moving,
+                codec,
                 quality,
-                debug.then_some(h264::Mark { colour: MARK_MOTION, px: MARK_PX }),
+                debug.then_some(video::Mark { colour: MARK_MOTION, px: MARK_PX }),
             ),
-            RenderPlan::Tiles { .. } => (Policy::Whole, NO_STREAM_QUALITY, None),
+            // The codec is as unread as the quality here: nothing blits into that target's
+            // mirror, so no stream is ever built from either.
+            RenderPlan::Tiles { .. } => {
+                (Policy::Whole, NO_STREAM_CODEC, NO_STREAM_QUALITY, None)
+            }
         };
         Self {
             failure: Mutex::default(),
             motion: Mutex::default(),
-            video: tokio::sync::Mutex::new(Video::new(policy, quality, mark)),
+            video: tokio::sync::Mutex::new(Video::new(policy, codec, quality, mark)),
             keyframe_owed: AtomicBool::new(false),
             tiles: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
@@ -640,7 +669,7 @@ impl Shared {
             keyframe_bytes: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
             coarsened: AtomicU64::new(0),
-            coarsest_qp: AtomicU64::new(0),
+            worst_quality: AtomicU64::new(u64::from(video::QUALITY_MAX)),
             encode_micros: AtomicU64::new(0),
             waited_micros: AtomicU64::new(0),
             stalled_micros: AtomicU64::new(0),
@@ -967,53 +996,68 @@ impl TileSink {
         video.due_at = Some(now + VIDEO_FRAME_INTERVAL);
 
         let started = Instant::now();
-        let (round, units) = tokio::task::spawn_blocking(move || {
-            let units = round.encode();
-            (round, units)
+        let (round, produced) = tokio::task::spawn_blocking(move || {
+            let produced = round.encode();
+            (round, produced)
         })
         .await
         .map_err(|e| {
             // Not recoverable by rebuilding: a fresh stream would hand a blank mirror
             // to a keyframe, which is wrong pixels rather than coarse ones, and the
             // shadow already counts the real ones as delivered.
-            let message = format!("h264 encoder stopped: {e}");
+            let message = format!("video encoder stopped: {e}");
             give_up(self.engine, &self.shared, message.clone());
             anyhow::anyhow!(message)
         })?;
         let encode_micros = micros(started);
-        let qp = video.regions.qp();
+        let quality = video.regions.quality();
         // Streams that produced nothing keep their dirty flag and their keyframe, so
         // those pixels ride the next round. `skip_frames(false)` should make that
         // unreachable; the counter is how we would find out that it is not.
         if round.skipped() > 0 {
             self.shared.skipped.fetch_add(round.skipped(), Ordering::Relaxed);
             warn!(
-                "{}: {} h264 frame(s) encoded to nothing; their pixels wait for the next",
+                "{}: {} video frame(s) encoded to nothing; their pixels wait for the next",
                 self.engine,
                 round.skipped()
             );
         }
         video.regions.put_back(round, now);
-        let units = units?;
-        if units.is_empty() {
+        let produced = produced?;
+        if produced.units.is_empty() {
             return Ok(());
         }
         // Dropped before the push, which may block: holding the streams' lock while
         // waiting on a full queue would make every later `damage` wait on the socket.
         drop(video);
 
+        // Every announcement first, so a client's decoder is configured before the units that
+        // need it arrive. Pushed as ordinary queue items rather than sent directly, because the
+        // queue *is* the order: a `VideoFormat` that overtook the tiles ahead of it would be a
+        // decoder reconfigured for a region the client has not been shown yet. `crate::wire`
+        // flushes the pending batch before any text frame, which is what carries the ordering
+        // through to the socket.
+        for format in produced.formats {
+            self.push(Pending::Msg(ServerMsg::VideoFormat {
+                stream: format.stream,
+                codec: format.codec,
+                decode: format.decode,
+            }))
+            .await?;
+        }
+
         let queued = Instant::now();
-        let pushed = self.push(Pending::Round { units, encode_micros }).await;
+        let pushed = self.push(Pending::Round { units: produced.units, encode_micros }).await;
         // How long that took is the congestion signal, and it is read whether or not
         // the push succeeded: a push that failed waited just as long, and the verdict
         // is about the link rather than about this round.
-        self.adjust(queued.elapsed(), qp).await;
+        self.adjust(queued.elapsed(), quality).await;
         pushed
     }
 
     /// Whether this target's moving pixels go out as access units — either the whole
     /// desktop (`render_type = "video"`) or a region at a time
-    /// (`render_motion_subtype = "h264"`).
+    /// (`render_motion_subtype = "stream"`).
     fn streaming(&self) -> bool {
         matches!(
             self.plan,
@@ -1049,15 +1093,15 @@ impl TileSink {
     }
 
     /// Let the congestion policy see how long that frame's push blocked, and move the
-    /// quantizer if it has changed its mind.
+    /// dial if it has changed its mind.
     ///
     /// A failure to re-tune is logged and dropped rather than ending the session: the
     /// stream is still perfectly good at the quality it already had, and losing the
     /// ability to *degrade* is not a reason to stop.
-    async fn adjust(&self, blocked: Duration, qp: u8) {
-        self.shared.coarsest_qp.fetch_max(u64::from(qp), Ordering::Relaxed);
+    async fn adjust(&self, blocked: Duration, quality: u8) {
+        self.shared.worst_quality.fetch_min(u64::from(quality), Ordering::Relaxed);
         let mut video = self.shared.video.lock().await;
-        if qp > video.congestion.dial {
+        if quality < video.congestion.dial {
             self.shared.coarsened.fetch_add(1, Ordering::Relaxed);
         }
         let dial = video.congestion.dial;
@@ -1067,10 +1111,10 @@ impl TileSink {
         // Every live stream, and every one started afterwards: one link, one verdict.
         // A region that appears while the link is behind has no more room than the
         // ones already running.
-        if let Err(e) = video.regions.set_qp(wanted) {
-            warn!("{}: could not move the h264 quantizer to {wanted}: {e:#}", self.engine);
+        if let Err(e) = video.regions.set_quality(wanted) {
+            warn!("{}: could not move the video quality to {wanted}: {e:#}", self.engine);
         } else {
-            debug!("{}: h264 quantizer now {wanted} (the dial asks for {dial})", self.engine);
+            debug!("{}: video quality now {wanted} (the dial asks for {dial})", self.engine);
         }
     }
 
@@ -1591,7 +1635,7 @@ struct Totals {
     keyframe_bytes: u64,
     skipped: u64,
     coarsened: u64,
-    coarsest_qp: u64,
+    worst_quality: u64,
     encode_micros: u64,
     waited_micros: u64,
     stalled_micros: u64,
@@ -1612,7 +1656,7 @@ impl Totals {
             keyframe_bytes: shared.keyframe_bytes.load(Ordering::Relaxed),
             skipped: shared.skipped.load(Ordering::Relaxed),
             coarsened: shared.coarsened.load(Ordering::Relaxed),
-            coarsest_qp: shared.coarsest_qp.load(Ordering::Relaxed),
+            worst_quality: shared.worst_quality.load(Ordering::Relaxed),
             encode_micros: shared.encode_micros.load(Ordering::Relaxed),
             waited_micros: shared.waited_micros.load(Ordering::Relaxed),
             stalled_micros: shared.stalled_micros.load(Ordering::Relaxed),
@@ -1626,7 +1670,7 @@ impl fmt::Display for Totals {
             f,
             "{} tile(s) / {} bytes ({} in motion, {} cleanup / {} bytes), \
              {} access unit(s), {} keyframe(s) / {} bytes, {} skipped, \
-             {} round(s) coarsened (worst qp {}), \
+             {} round(s) coarsened (lowest quality {}), \
              {}µs encoding across workers in {}µs of waiting, engine stalled {}µs",
             self.tiles,
             self.encoded_bytes,
@@ -1638,7 +1682,7 @@ impl fmt::Display for Totals {
             self.keyframe_bytes,
             self.skipped,
             self.coarsened,
-            self.coarsest_qp,
+            self.worst_quality,
             self.encode_micros,
             self.waited_micros,
             self.stalled_micros
@@ -2432,7 +2476,7 @@ mod tests {
 
     // ---- the video transport ------------------------------------------------
 
-    const VIDEO: RenderPlan = RenderPlan::Video { quality: 60 };
+    const VIDEO: RenderPlan = RenderPlan::Video { quality: 60, codec: VideoCodec::Vp9 };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -2444,6 +2488,87 @@ mod tests {
         // The resize itself, so a test can count what follows.
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
         (sink, frame_rx)
+    }
+
+    /// Take the next `units` access units, stepping over the format announcements among them.
+    ///
+    /// A stream announces its `VideoFormat` before its first unit and again after a repaint, so a
+    /// test about the *units* has to allow for them. That the announcement really does come first
+    /// is its own test below rather than an assertion buried in a helper, because it is a claim
+    /// about the order of two messages and not about what a unit contains.
+    async fn drain_units(rx: &mut mpsc::Receiver<ServerMsg>, units: usize) -> Vec<VideoUnit> {
+        let mut out = Vec::new();
+        while out.len() < units {
+            match rx.recv().await.expect("frame channel closed early") {
+                ServerMsg::VideoFormat { codec, decode, .. } => {
+                    assert!(
+                        codec == "vp9" || codec == "h264",
+                        "a format named a codec no client dispatches on: {codec}"
+                    );
+                    assert!(
+                        decode.starts_with("vp09.") || decode.starts_with("avc1."),
+                        "a format named no WebCodecs configuration: {decode}"
+                    );
+                }
+                ServerMsg::Video(unit) => out.push(unit),
+                other => panic!("expected video, got {other:?}"),
+            }
+        }
+        out
+    }
+
+    /// The `VideoFormat` contract, which is the whole of what a client needs to build a decoder:
+    /// it arrives **before** the first unit, it is not repeated while nothing changes, and a
+    /// repaint says it again — because a repaint is what a browser that just attached gets, and it
+    /// never saw the first one.
+    /// Paused, because the second round below is an *ordinary* one and an ordinary round waits
+    /// out [`VIDEO_FRAME_INTERVAL`] — the third does not, since a repaint bypasses it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_announces_its_format_before_its_first_unit() {
+        let (sink, mut frame_rx) = video_sink(640, 480).await;
+        let area = rect(0, 0, 320, 64);
+
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 1)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 2).await;
+        let ServerMsg::VideoFormat { stream, codec, decode } = &out[0] else {
+            panic!("the first thing a stream sends must be its format, got {:?}", out[0]);
+        };
+        assert_eq!(*stream, 0, "one desktop, one stream");
+        assert_eq!(*codec, VideoCodec::Vp9.name(), "the negotiated codec, not the fallback");
+        assert!(decode.starts_with("vp09.00."), "not a VP9 profile-0 configuration: {decode}");
+        let announced = decode.clone();
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
+
+        // A second round changes nothing about how to decode it, so it says nothing.
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 2)).await.unwrap();
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 1).await;
+        assert!(
+            matches!(out[0], ServerMsg::Video(_)),
+            "the format was repeated for a decoder that already has it"
+        );
+
+        // A repaint does. This is the reattach and the takeover: `reset_render` is what
+        // `ClientMsg::Refresh` reaches, and the browser it is for has seen neither the format nor
+        // a keyframe.
+        sink.reset_render();
+        sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 3)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        let ServerMsg::VideoFormat { decode: again, .. } = &out[0] else {
+            panic!("a repaint must re-announce the format, got {:?}", out[0]);
+        };
+        assert_eq!(again, &announced, "the same stream came back as a different configuration");
+        assert!(
+            matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe),
+            "a re-announced stream owes a keyframe too"
+        );
     }
 
     /// The test for the whole design: `damage` is called once per damage
@@ -2461,11 +2586,8 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
 
-        let out = drain(&mut frame_rx, 1).await;
-        let ServerMsg::Video(unit) = &out[0] else {
-            panic!("expected an access unit");
-        };
-        assert_eq!(unit.stream, 0, "one desktop, one stream");
+        let units = drain_units(&mut frame_rx, 1).await;
+        assert_eq!(units[0].stream, 0, "one desktop, one stream");
         assert!(frame_rx.try_recv().is_err(), "three rectangles produced more than one frame");
     }
 
@@ -2481,10 +2603,8 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
 
-        let out = drain(&mut frame_rx, 1).await;
-        let ServerMsg::Video(unit) = &out[0] else {
-            panic!("expected an access unit");
-        };
+        let units = drain_units(&mut frame_rx, 1).await;
+        let unit = &units[0];
         assert_eq!((unit.x, unit.y, unit.w, unit.h), (0, 0, 1919, 1079));
     }
 
@@ -2505,7 +2625,7 @@ mod tests {
         sink.frame().await.unwrap();
         sink.frame().await.unwrap();
         sink.flush().await;
-        drain(&mut frame_rx, 1).await;
+        drain_units(&mut frame_rx, 1).await;
         assert!(frame_rx.try_recv().is_err(), "the same pixels were encoded twice");
     }
 
@@ -2527,7 +2647,7 @@ mod tests {
         }
         sink.flush().await;
 
-        drain(&mut frame_rx, 1).await;
+        drain_units(&mut frame_rx, 1).await;
         assert!(frame_rx.try_recv().is_err(), "the interval did not hold the later boundaries");
         assert!(
             sink.due_at().await.is_some(),
@@ -2549,7 +2669,7 @@ mod tests {
         sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 1)).await.unwrap();
         sink.frame().await.unwrap();
         sink.flush().await;
-        drain(&mut frame_rx, 1).await;
+        drain_units(&mut frame_rx, 1).await;
 
         sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 2)).await.unwrap();
         sink.frame().await.unwrap();
@@ -2561,7 +2681,7 @@ mod tests {
         tokio::time::sleep_until(due).await;
         sink.frame().await.unwrap();
         sink.flush().await;
-        drain(&mut frame_rx, 1).await;
+        drain_units(&mut frame_rx, 1).await;
         assert!(
             sink.due_at().await.is_none(),
             "the mirror is still holding pixels nothing will send again"
@@ -2580,7 +2700,7 @@ mod tests {
         sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 1)).await.unwrap();
         sink.frame().await.unwrap();
         sink.flush().await;
-        drain(&mut frame_rx, 1).await;
+        drain_units(&mut frame_rx, 1).await;
         let before = sink.shared.keyframes.load(Ordering::Relaxed);
 
         // Inside the interval, so without the bypass this would be held.
@@ -2589,8 +2709,8 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
 
-        let out = drain(&mut frame_rx, 1).await;
-        assert!(matches!(out[0], ServerMsg::Video(_)), "the repaint waited out the interval");
+        let units = drain_units(&mut frame_rx, 1).await;
+        assert!(units[0].keyframe, "the repaint waited out the interval, or was not a keyframe");
         assert_eq!(
             sink.shared.keyframes.load(Ordering::Relaxed),
             before + 1,
@@ -2616,7 +2736,7 @@ mod tests {
 
         sink.frame().await.unwrap();
         sink.flush().await;
-        drain(&mut frame_rx, 1).await;
+        drain_units(&mut frame_rx, 1).await;
         assert!(sink.due_at().await.is_none(), "the encode settled the debt");
     }
 
@@ -2629,7 +2749,7 @@ mod tests {
         sink.damage(&all_of(area), |piece| rgb(piece.w(), piece.h(), 1)).await.unwrap();
         sink.frame().await.unwrap();
         sink.flush().await;
-        drain(&mut frame_rx, 1).await;
+        drain_units(&mut frame_rx, 1).await;
 
         sink.reset_render();
         sink.msg(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED }).await.unwrap();
@@ -2637,12 +2757,10 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
 
-        let out = drain(&mut frame_rx, 2).await;
+        let out = drain(&mut frame_rx, 1).await;
         assert!(matches!(out[0], ServerMsg::Resize { w: 640, .. }), "the resize lost its place");
-        let ServerMsg::Video(unit) = &out[1] else {
-            panic!("expected an access unit after the resize");
-        };
-        assert_eq!((unit.w, unit.h), (640, 480), "the stream kept the old picture size");
+        let units = drain_units(&mut frame_rx, 1).await;
+        assert_eq!((units[0].w, units[0].h), (640, 480), "the stream kept the old picture size");
     }
 
     /// Where a desktop the encoder cannot handle has to surface. Learning the size
@@ -2670,7 +2788,7 @@ mod tests {
 
     const MOTION_STREAM: RenderPlan = RenderPlan::Tiles {
         base: TileCodec::Png,
-        motion: Some(MotionEncode::Stream { quality: 60 }),
+        motion: Some(MotionEncode::Stream { quality: 60, codec: VideoCodec::Vp9 }),
         debug: false,
     };
 
@@ -2815,8 +2933,8 @@ mod tests {
 
     // ---- congestion ---------------------------------------------------------
 
-    /// A link with room to spare never moves the quantizer off the dial. The dial is
-    /// a ceiling, so there is nothing above it to reclaim.
+    /// A link with room to spare never moves the dial. The dial is a ceiling, so there
+    /// is nothing above it to reclaim.
     #[test]
     fn a_clear_link_stays_on_the_dial() {
         let mut congestion = Congestion::new(30);
@@ -2825,7 +2943,7 @@ mod tests {
             let at = start + Duration::from_millis(u64::from(i) * 33);
             assert_eq!(congestion.observe(Duration::ZERO, at), None);
         }
-        assert_eq!(congestion.qp, 30);
+        assert_eq!(congestion.quality, 30);
     }
 
     #[test]
@@ -2835,7 +2953,7 @@ mod tests {
 
         // One slow frame is not a verdict.
         assert_eq!(congestion.observe(BEHIND_BLOCK, start), None);
-        assert_eq!(congestion.observe(BEHIND_BLOCK, start), Some(34));
+        assert_eq!(congestion.observe(BEHIND_BLOCK, start), Some(20));
 
         // The cooldown holds the next ones off however bad the link is — but it does
         // not stop them being *counted*, so a link that never recovered acts the
@@ -2843,7 +2961,7 @@ mod tests {
         assert_eq!(congestion.observe(BEHIND_BLOCK, start), None);
         assert_eq!(congestion.observe(BEHIND_BLOCK, start), None);
         let later = start + ADJUST_COOLDOWN;
-        assert_eq!(congestion.observe(BEHIND_BLOCK, later), Some(38));
+        assert_eq!(congestion.observe(BEHIND_BLOCK, later), Some(10));
 
         // Now a link that has recovered: one step back per spell of clear frames,
         // and it stops at the dial rather than going past it.
@@ -2854,7 +2972,10 @@ mod tests {
                 congestion.observe(Duration::ZERO, at);
             }
         }
-        assert_eq!(congestion.qp, 30, "the link recovered past the quality that was asked for");
+        assert_eq!(
+            congestion.quality, 30,
+            "the link recovered past the quality that was asked for"
+        );
     }
 
     #[test]
@@ -2868,6 +2989,6 @@ mod tests {
                 congestion.observe(BEHIND_BLOCK, at);
             }
         }
-        assert_eq!(congestion.qp, h264::QP_COARSEST);
+        assert_eq!(congestion.quality, video::QUALITY_MIN);
     }
 }

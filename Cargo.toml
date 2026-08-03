@@ -18,7 +18,7 @@ members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.104"
+version = "0.0.105"
 
 [package]
 name = "remotex"
@@ -74,6 +74,22 @@ openh264 = "0.9"
 # Already compiled as `openh264`'s own dependency, so this costs no build time; it must
 # stay on the same version, since the two share the encoder handle.
 openh264-sys2 = "0.9"
+# libvpx, for VP9 — the *default* video codec, with H.264 above as the alternative. The
+# reason it is the default is a licence: VP9 is BSD-3-Clause with a patent grant, so a
+# browser build carrying no proprietary codecs still decodes it, which H.264 is not.
+# Which of the two a session uses is a target's `video_codec` key (`src/config.rs`),
+# never a negotiation with the browser.
+#
+# Its sys crate downloads a prebuilt static archive and compiles no C: the same bargain
+# `opus-prebuilt` below strikes, and for the same reason — libvpx's own build is
+# `configure` + `make` and wants an assembler, which is a thing no check of this gateway
+# should have to have. Do not restore a source build, a vcpkg dependency, or bindgen:
+# the bindings are committed in that repository.
+#
+# Encoder and decoder are both in the archive; this gateway only encodes. Unlike
+# openh264 this crate asserts nothing — libvpx returns error codes — which is why
+# `src/vp9.rs` can be a plain `?` path under `panic = "abort"`.
+vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewtheguy/libvpx-prebuilt", tag = "v1.16.0-20260803200400-d592833" }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a

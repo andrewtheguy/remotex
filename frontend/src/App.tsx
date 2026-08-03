@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { gatewayFetch } from "./gateway.ts";
+import { gatewayConfig } from "./gatewayConfig.ts";
 import Login from "./Login.tsx";
 import RemoteDesktop from "./RemoteDesktop.tsx";
 import { SESSION_KEY } from "./useRemoteDesktop.ts";
@@ -18,17 +19,12 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    gatewayFetch("/api/config")
-      .then((res) => res.json() as Promise<{ branding: string }>)
-      .then(({ branding }) => {
-        if (!cancelled && branding) {
-          setBranding(branding);
-          document.title = branding;
-        }
-      })
-      .catch(() => {
-        // Keep the "remotex" default; the tab title stays index.html's.
-      });
+    gatewayConfig().then(({ branding }) => {
+      if (!cancelled && branding) {
+        setBranding(branding);
+        document.title = branding;
+      }
+    });
     return () => {
       cancelled = true;
     };

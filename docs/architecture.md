@@ -45,7 +45,8 @@ queue.
 | `rdp.rs` | RDP connection, framebuffer, input, clipboard, audio, resize |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `encode.rs`, `tiles.rs` | ordered tile encoding and change detection |
-| `regions.rs`, `h264.rs` | which regions get an H.264 stream, and the encoder behind them |
+| `regions.rs`, `video.rs` | which regions get a video stream, and what both encoders share |
+| `vp9.rs`, `h264.rs` | libvpx and openh264 — the default video codec and the other one |
 | `audio.rs`, `opus_stream.rs`, `rdp_audio.rs` | PCM queue, Opus encoding, MS-RDPEA |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -74,14 +75,19 @@ combinations that exist are:
 | `fixed-quality` | `webp` | every tile WebP at `render_quality` — typically ~30% fewer bytes than JPEG at a matched quality |
 | `motion` | `png` | lossless base; cells in motion at `render_motion_subtype`/`render_motion_quality` |
 | `motion` | `jpeg` / `webp` | base at `render_quality`; cells in motion cheaper still |
-| `motion` + `render_motion_subtype = "h264"` | `png` / `jpeg` / `webp` | base as above; an H.264 stream per coalesced moving region at `render_motion_quality` |
-| `video` | *(refused)* | the whole desktop as one H.264 stream at `render_quality` |
+| `motion` + `render_motion_subtype = "stream"` | `png` / `jpeg` / `webp` | base as above; a video stream per coalesced moving region at `render_motion_quality` |
+| `video` | *(refused)* | the whole desktop as one video stream at `render_quality` |
 
 `video` is the one row where `render_subtype` is empty, and that is what it is
 saying: it sends no per-region streams and no tiles at all — one fixed region, the
 whole desktop, for the whole session — so there is no per-tile codec left to name.
-The `h264` motion row still has one, because the base encode is still a still image:
+The `stream` motion row still has one, because the base encode is still a still image:
 only what is moving becomes a stream.
+
+**Neither streaming row names a video codec, because a key of its own does:**
+`video_codec`, `vp9` (the default) or `h264`, shared by both — see [which codec, and
+who chooses](#which-codec-and-who-chooses). It is refused on a target that streams
+nothing, the same way `audio_codec` is refused on one with no audio.
 
 No classifier runs in either fixed lossy combination: `jpeg` sends *every* tile as
 JPEG, so flat UI and text soften along with photographic content. That is the
@@ -96,15 +102,15 @@ three through `createImageBitmap` from a MIME type. What streams costs one: a
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
 the encode call through the engine-agnostic `TileSink`. `RenderPlan` is an enum with
-one arm per transport — `Tiles { base, motion, debug }` and `Video { quality }` —
+one arm per transport — `Tiles { base, motion, debug }` and `Video { quality, codec }` —
 rather than a struct with a flag, because the two share no code path worth sharing
 and the compiler is what stops a consumer handling only the first. `motion` is itself
-a `MotionEncode`, `Tile(codec)` or `Stream { quality }`, for the same reason one
+a `MotionEncode`, `Tile(codec)` or `Stream { quality, codec }`, for the same reason one
 level down: a cheaper still and an inter-frame stream are not two settings of one
 mechanism.
 
 ```text
-render_type / render_subtype / render_quality / render_motion_*
+render_type / render_subtype / render_quality / render_motion_* / video_codec
   → TargetConfig::render_plan() → RenderPlan → vnc::run / rdp::run
   → TileSink::new(engine, frame_tx, plan)
   → Tile::from_rgb / from_rgb_jpeg / from_rgb_webp
@@ -134,7 +140,7 @@ render_motion_quality = 10       # moving cells: as cheap as it takes
 ```
 
 The moving encode has its own axis (`MotionSubtype`, which admits no `png` and does
-admit `h264` — see below), not just its own quality. A settled cell is sent once and can afford WebP's slower,
+admit `stream` — see below), not just its own quality. A settled cell is sent once and can afford WebP's slower,
 smaller encode, while a moving cell is re-encoded every frame, where JPEG's faster
 encode may beat WebP's smaller output; cheapest and smallest are not the same
 question at quality 60 as at 10. `render_motion_subtype` defaults to
@@ -234,13 +240,13 @@ cost is in the `encode totals` line, where `motion` and `cleanup` are read toget
 every cleanup is a tile sent twice, so a scheme paying more in re-sends than it
 saves in motion shows up as a cleanup byte count rivalling the saving.
 
-##### `render_motion_subtype = "h264"`: a stream per moving region
+##### `render_motion_subtype = "stream"`: a stream per moving region
 
 The third thing the motion axis can be, and the only one that is not a still. The
 detection above is unchanged — the same cell grid, the same churn window, the same
-hard switch — but what it hands the moving cells to is an inter-frame H.264 stream
-per coalesced region (`src/regions.rs`, encoding through `src/h264.rs`), with the
-base codec carrying every cell outside one. A video in a window costs its own pixels;
+hard switch — but what it hands the moving cells to is an inter-frame video stream
+per coalesced region (`src/regions.rs`, encoding through `src/vp9.rs` or `src/h264.rs`
+as `video_codec` says), with the base codec carrying every cell outside one. A video in a window costs its own pixels;
 the text beside it stays exactly what `render_subtype` says and is never re-encoded.
 
 `RenderPlan`'s `motion` is a `MotionEncode` rather than a codec, so the compiler is
@@ -285,7 +291,7 @@ One measurement, so that the shape of the trade is on the record rather than ass
 | dial | to the client | encode CPU |
 |---|---|---|
 | `motion` + `webp` 10 | 4.5 MB | 0.17 s |
-| `motion` + `h264` 30 | 0.70 MB | 1.39 s |
+| `motion` + `stream` 30, in h264 | 0.70 MB | 1.39 s |
 | `video` 60 | 0.45 MB | 5.48 s |
 
 So the regions cost about a sixth of the still motion encode's bytes with the still
@@ -293,15 +299,15 @@ parts left lossless, and a quarter of whole-desktop `video`'s CPU — because on
 moved was coded, rather than 1280×800 every frame. What it buys over `video` is
 exactness everywhere else; what it costs is bytes.
 
-Both dials that stream share `Congestion`, one verdict for one link: the quantizer
-walks up when a round's push blocks and back down to `render_motion_quality`, never
+Both dials that stream share `Congestion`, one verdict for one link: the quality dial
+walks down when a round's push blocks and back up to `render_motion_quality`, never
 past it. Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
 because the same queue carries its still tiles — so `coarsened` in the totals is a
 less sharp signal, which is worth knowing when reading it.
 
 #### `video`: a different transport, not a fourth codec
 
-`render_type = "video"` sends the whole framebuffer as one inter-frame H.264 stream
+`render_type = "video"` sends the whole framebuffer as one inter-frame video stream
 for the session — the degenerate case of the region streams above, and it runs the
 same code: one region, fixed at the whole desktop, never retuned (`Policy::Whole` in
 `src/regions.rs`). It is on the `render_type` axis and refuses
@@ -343,24 +349,30 @@ for the region streams above too, which is why they run the same code:
   covers the whole framebuffer, so each covers its predecessor exactly. That is not
   enforced by a check but by the record kinds: a `VIDEO` record never reaches the
   cache or the coverage test, so neither has to know about it.
-- **The picture may be a pixel larger than the region.** H.264 needs even sides, so
-  the mirror is padded up with its edge repeated (black would be a seam the encoder
-  paid for every frame). The record header carries the *true* rectangle and the
+- **The picture may be a pixel larger than the region.** H.264 needs even sides — VP9
+  does not and is held to them anyway, so one geometry serves both — so the mirror is
+  padded up with its edge repeated (black would be a seam the encoder paid for every
+  frame). The record header carries the *true* rectangle and the
   client crops — reporting the padded size would push a paint past the framebuffer,
   which the renderer drops outright rather than clamps.
 
-`render_quality` maps to a constant quantizer (1 → 51, 100 → 12; the floor is
-openh264's own `GOM_MIN_QP_MODE`, and mapping past it would give a dial whose top
-third did nothing). A constant quantizer *is* variable bitrate — bits go where the
+`render_quality` maps to a constant quantizer on whichever scale the codec has, and
+the two scales are not the same one: VP9 spans 63 → 8 of its own 0–63, H.264 51 → 12
+of its 0–51 (the floor is openh264's own `GOM_MIN_QP_MODE`, and mapping past it would
+give a dial whose top third did nothing). Neither quantizer leaves its codec module —
+the dial is what everything above them speaks. A constant quantizer *is* variable
+bitrate — bits go where the
 picture needs them, so a motionless desktop costs almost nothing.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
 `Congestion` in `src/encode.rs` watches one local signal — how long queueing an
-access unit blocked — and walks the quantizer up towards 51 when the link is behind,
-back down towards the dial when it is not; never below it. What TCP hides is
+access unit blocked — and walks the 1–100 dial down towards 1 when the link is behind,
+back up towards the configured quality when it is not; never past it. It moves the
+dial rather than a quantizer because the two codecs' quantizers are different scales
+and neither leaves its module. What TCP hides is
 *headroom*, and this never needs headroom, because exceeding the operator's setting
 was never a goal. "Am I behind?" is the whole question, and the outbound queue
-answers it. Quality moves through `Stream::set_qp`, which re-tunes the running
+answers it. Quality moves through `Stream::set_quality`, which re-tunes the running
 encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
 spending a few hundred KB exactly when bytes are scarce.
 
@@ -378,7 +390,43 @@ restarted on a different size.
 worse one to hit, since no audio decoder means silence beside a working desktop and no
 video decoder means no desktop. So a failure is *said* rather than logged: a banner
 that stays up, naming the codec the browser would not take.
-See [`known-issues.md`](known-issues.md).
+
+#### Which codec, and who chooses
+
+`video_codec` chooses, per target, and it defaults to `vp9`.
+
+Both codecs are behind one `video::Stream` enum and one `RenderPlan`, so nothing
+downstream of `TargetConfig::render_plan` knows which is running: `encode.rs`,
+`regions.rs` and the wire carry access units, a keyframe bit and a codec string, and
+neither `vp9.rs` nor `h264.rs` is reachable from anywhere but that enum. Adding a third
+is a variant and a module.
+
+VP9 is the default on measurement rather than principle. On synthetic screen content at
+1080p and quality 60, encoding a frame took **4.7 ms** against H.264's 15.0 ms and
+produced **18 KB** against 34 KB — three times faster for half the bytes, on the content
+this gateway actually sends. It is also BSD-3-Clause with a patent grant and present in
+builds that carry no proprietary codecs, which H.264 is not. Re-measure with
+`cargo test --release measure_the_encoders -- --ignored --nocapture`; a debug build
+reports nonsense, because the RGB→I420 conversion it also times is scalar Rust and runs
+66× slower unoptimised.
+
+**The browser is not asked, and that is a deliberate reversal.** The client used to
+probe: `/api/config` published the gateway's ordered codecs with a WebCodecs string for
+each, the client asked `VideoDecoder.isConfigSupported` about them before login, and
+`ClientMsg::Connect` carried the accepted names for `connect` to pick from. It worked,
+and it was removed. It put a round trip and a decoder query in front of every video
+session; `isConfigSupported` is not reliable enough on the same browser twice to build a
+refusal on; and because the refusal was phrased as "this browser accepted neither", any
+fault anywhere near the path — a serde field-name mismatch, for one — surfaced as an
+accusation against the browser and sent the reader to the wrong half of the system.
+
+What replaces it is one key and one honest failure. The gateway announces the
+configuration in `ServerMsg::VideoFormat` before the stream's first unit,
+`VideoDecoder.configure` accepts it or refuses it, and a refusal is reported by name —
+"this browser cannot decode the H.264 video this target sends" — with the same codec on
+the session card's **Video** row. `ServerMsg::Connected` carries the codec too, so a
+browser that took over a running session and sent no `connect` can still say what it is
+looking at.
 
 ## Session lifecycle
 
@@ -427,26 +475,30 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | records
 TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
                   | u32 len | payload[len]
 TILE_REF op 0x02: u16 slot | u16 x | u16 y
-VIDEO    op 0x03: u8 stream | u16 x | u16 y | u16 w | u16 h
+VIDEO    op 0x03: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
                   | u32 len | payload[len]
 ```
 
 Tile formats are PNG, JPEG and WebP. One frame carries multiple ready updates so a
-repaint does not require one WebSocket event per tile. Receivers reject nonzero
-flags, unknown operations, truncated records, and unsupported formats.
+repaint does not require one WebSocket event per tile. Receivers reject unknown
+operations, truncated records, and unsupported formats, and reject a nonzero frame
+flags byte. A `VIDEO` record's own flags byte is `0x01` for a keyframe and nothing
+else — any other bit is rejected the same way.
 
 `TILE` draws a payload and optionally stores it in a gateway-selected cache
 slot. `TILE_REF` redraws the encoded payload already stored in that slot.
 `NO_SLOT` means the payload must not be retained. Clients keep a fixed
 `SLOT_COUNT` array and never choose eviction themselves.
 
-`VIDEO` carries one H.264 access unit for one region, and is a separate record
-rather than a fourth tile format because it is not the same kind of thing: a tile is
-a self-contained picture and an access unit is one link in a chain. Making it its own
-record is what keeps the cache and coverage rules above from ever having to ask
-whether they apply — they see tiles only. `stream` names which decoder it belongs to,
-since a session may run several at once; the rectangle is the region's true one, and
-the decoded picture may exceed it by a pixel on either axis (see the render dial).
+`VIDEO` carries one access unit for one region, in whichever codec `video_codec` named,
+and is a separate record rather than a fourth tile format because it is not the same
+kind of thing: a tile is a self-contained picture and an access unit is one link in a
+chain. Making it its own record is what keeps the cache and coverage rules above from
+ever having to ask whether they apply — they see tiles only. `stream` names which
+decoder it belongs to, since a session may run several at once, and its keyframe bit
+comes from the encoder rather than from parsing the payload — VP9 carries no parameter
+sets to read one out of. The rectangle is the region's true one, and the decoded picture
+may exceed it by a pixel on either axis (see the render dial).
 
 A client that cannot decode a cached tile or receives a reference to a missing
 slot sends `cacheReset`. This clears the outbound slot table and requests a

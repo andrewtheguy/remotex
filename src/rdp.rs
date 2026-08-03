@@ -1751,6 +1751,7 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            video_codec: None,
         };
         assert!(!build_connector_config(&target).enable_audio_playback);
         target.audio = true;
@@ -1797,6 +1798,7 @@ mod tests {
                 render_motion_subtype: None,
                 render_motion_quality: None,
                 render_motion_debug: false,
+                video_codec: None,
             };
             let (clip_tx, _clip_rx) = mpsc::unbounded_channel();
             let bridge = audio.then(|| Arc::new(AudioBridge::new()));

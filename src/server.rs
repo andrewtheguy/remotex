@@ -472,6 +472,7 @@ mod tests {
                 render_motion_subtype: None,
                 render_motion_quality: None,
                 render_motion_debug: false,
+                video_codec: None,
             }],
             auth: crate::auth::SitePasswd::parse(
                 &crate::auth::generate("admin", "hunter2", 4).unwrap(),
@@ -780,6 +781,7 @@ mod tests {
             render_motion_subtype: None,
             render_motion_quality: None,
             render_motion_debug: false,
+            video_codec: None,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its

@@ -5,6 +5,7 @@
     "test": "playwright test",
     "test:clipboard": "playwright test '/clipboard\\.spec\\.ts$'",
     "test:oversized": "playwright test '/oversized-clipboard\\.spec\\.ts$'",
+    "test:video": "playwright test '/video-stream\\.spec\\.ts$'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -412,6 +412,21 @@ export function useRemoteDesktop(
   // decoder means no desktop at all, so this needs a surface that stays up while
   // `status` is "connected", which the status overlay does not.
   const [videoError, setVideoError] = useState<string | null>(null);
+  // What this session's video is, for the "This session" card — the codec family the
+  // target is configured to stream, and the exact WebCodecs configuration string each
+  // stream was announced with.
+  //
+  // Both, because they answer different questions and neither implies the other: the
+  // family is decided before a pixel moves and is what a target *is*, while the string
+  // is what a decoder was actually configured with and carries the profile and the
+  // level. A motion target runs up to four streams over regions of different sizes, so
+  // there can be several strings for one family.
+  //
+  // Null family means a target that streams no video at all, which is most of them.
+  // The render dial this session resolved to, from `connected`. Empty in the picker.
+  const [renderPlan, setRenderPlan] = useState("");
+  const [videoCodec, setVideoCodec] = useState<string | null>(null);
+  const [videoDecodeStrings, setVideoDecodeStrings] = useState<string[]>([]);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -1178,6 +1193,13 @@ export function useRemoteDesktop(
       setCanClipboard(msg.clipboard);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
+      // What this session is, for the card — and for the decoder error, which names the
+      // codec out of this rather than guessing. Nothing is checked here: the gateway sends
+      // the codec its target names, and whether this browser has a decoder for it is
+      // answered by `configure` refusing it, once, with the codec in hand.
+      setRenderPlan(msg.render);
+      setVideoCodec(msg.video);
+      setVideoDecodeStrings([]);
       // Manual on every connect, before either branch: a reattach, a target switch
       // and a takeover all arrive with the remote's own size left alone. The
       // remembered default is then applied below, once permission is known — and it
@@ -1278,6 +1300,20 @@ export function useRemoteDesktop(
         case "audioFormat":
           startAudio(msg);
           break;
+        case "videoFormat":
+          setVideoCodec(msg.codec);
+          setVideoDecodeStrings((held) =>
+            held.includes(msg.decode) ? held : [...held, msg.decode],
+          );
+          // Straight to the painter, which owns the decoders. Nothing here holds it:
+          // this is the announcement, and every unit after it is already routed by
+          // `stream` id. A browser that cannot decode what it names finds out from the
+          // decoder's own error, which arrives at `onVideoError` naming the codec.
+          painter.setVideoFormat(msg.stream, {
+            codec: msg.codec,
+            decode: msg.decode,
+          });
+          break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
           // into the browser's OS clipboard. Opening/revealing the panel is a
@@ -1343,6 +1379,9 @@ export function useRemoteDesktop(
           // decode is no longer on the screen, and the next target may not send
           // video at all.
           setVideoError(null);
+          setRenderPlan("");
+          setVideoCodec(null);
+          setVideoDecodeStrings([]);
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
           // would silently stop translating Command for a Windows guest.
@@ -1883,6 +1922,9 @@ export function useRemoteDesktop(
     pendingTarget,
     size,
     hostScale,
+    renderPlan,
+    videoCodec,
+    videoDecodeStrings,
     // The two permissions, and the client's per-session choice of how to use
     // them.
     canResize,

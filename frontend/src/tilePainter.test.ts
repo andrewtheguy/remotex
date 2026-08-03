@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import { NO_SLOT } from "./protocol.ts";
-import { createTilePainter } from "./tilePainter.ts";
+import { createTilePainter, type TilePainter } from "./tilePainter.ts";
 
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
@@ -37,6 +37,8 @@ type Record =
       w: number;
       h: number;
       payload: number[];
+      /** Defaults to true: most fixtures below are a stream's first unit. */
+      keyframe?: boolean;
     };
 
 function batchFrame(records: Record[]): ArrayBuffer {
@@ -55,7 +57,7 @@ function batchFrame(records: Record[]): ArrayBuffer {
       continue;
     }
     if (record.op === "video") {
-      bytes.push(OP_VIDEO, record.stream);
+      bytes.push(OP_VIDEO, record.stream, record.keyframe === false ? 0 : 0x01);
       u16(record.x);
       u16(record.y);
       u16(record.w);
@@ -76,9 +78,12 @@ function batchFrame(records: Record[]): ArrayBuffer {
   return new Uint8Array(bytes).buffer;
 }
 
-// An access unit the way the gateway sends a keyframe: SPS, PPS, IDR slice, each
-// behind an Annex-B start code. Transcribed from `src/h264.rs`'s output the same
-// way the batch layout above is — `h264.test.ts` reads the same shape.
+// An access unit's payload. **Opaque here, deliberately**: nothing on this side of the
+// wire parses a bitstream any more — the gateway says how to decode a stream in a
+// `videoFormat` message and marks each unit's keyframe bit in the record — so these
+// bytes only need to be distinguishable from each other. They are still a real H.264
+// keyframe (SPS, PPS, IDR slice behind Annex-B start codes) because a plausible payload
+// reads better in a failure than a run of zeros.
 const KEYFRAME = [
   0, 0, 0, 1, 7, 0x42, 0xc0, 0x1e, 0, 0, 0, 1, 8, 0xce, 0, 0, 1, 5, 0x88,
 ];
@@ -397,11 +402,22 @@ test("a truncated access unit drops the batch rather than decoding half of it", 
   assert.deepEqual(chunkTypes, []);
 });
 
+// The `videoFormat` a gateway sends before a stream's first unit. Every video test goes
+// through this, because a painter with no format for a stream refuses to decode it — and
+// that refusal has a test of its own below.
+function announced(streams: number[] = [0]): TilePainter {
+  const p = painter();
+  for (const stream of streams) {
+    p.setVideoFormat(stream, { codec: "vp9", decode: "vp09.00.40.08" });
+  }
+  return p;
+}
+
 test("a video frame is cropped to its region and drawn where it belongs", async () => {
-  // H.264 needs even sides and a region at the edge of an odd desktop does not
-  // have them, so the decoded picture can be a pixel wider or taller than the
-  // rectangle. The record carries the true rectangle, which is where it goes.
-  await painter().draw(
+  // The encoders are held to even sides and a region at the edge of an odd desktop
+  // does not have them, so the decoded picture can be a pixel wider or taller than
+  // the rectangle. The record carries the true rectangle, which is where it goes.
+  await announced().draw(
     batchFrame([
       {
         op: "video",
@@ -421,18 +437,110 @@ test("a video frame is cropped to its region and drawn where it belongs", async 
     { sx: 0, sy: 0, sw: 1599, sh: 1015, dx: 320, dy: 64, dw: 1599, dh: 1015 },
   ]);
   assert.deepEqual(drawn, [], "a padded frame was drawn at its own size");
-  assert.deepEqual(chunkTypes, ["key"], "an IDR was submitted as a delta");
+  assert.deepEqual(
+    chunkTypes,
+    ["key"],
+    "the record's keyframe flag did not reach the chunk",
+  );
   assert.ok(
     decoded.every((frame) => frame.closed),
     "a VideoFrame holds decoder memory until it is closed",
   );
 });
 
+test("a record's keyframe flag decides the chunk type, both ways", async () => {
+  // The flag is the whole reason the record grew a byte: it comes from the encoder, and
+  // VP9 — which has no parameter sets — offers a client nothing to work it out from.
+  await announced().draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 64,
+        h: 64,
+        payload: [1, 2, 3],
+        keyframe: false,
+      },
+    ]),
+  );
+  assert.deepEqual(chunkTypes, ["key", "delta"]);
+});
+
+test("a video record with an unknown flag drops the batch", async () => {
+  // The same strictness the frame's own flags byte gets, and for the same reason: a bit
+  // this client does not know means a gateway newer than it, and painting half of what it
+  // meant is worse than painting none of it.
+  const frame = batchFrame([
+    { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+  ]);
+  // Byte 4 is the op, 5 the stream, 6 the flags.
+  new Uint8Array(frame)[6] = 0x02;
+  await announced().draw(frame);
+  assert.deepEqual(
+    chunkTypes,
+    [],
+    "a record with an unknown flag was decoded anyway",
+  );
+  assert.deepEqual(cropped, []);
+});
+
+test("units that arrive before their format are dropped, not reported", async () => {
+  // The takeover: the gateway announces a stream once, to whoever was attached, so a
+  // browser that takes the session over gets whatever was already in flight before the
+  // repaint its attach triggers. Those units cannot be decoded here whatever happens —
+  // a decoder built now can only start at a keyframe — so they are dropped in silence,
+  // and the repaint that follows carries the format and a keyframe.
+  //
+  // It used to raise "the gateway sent video before saying how to decode it", which
+  // named a contract violation for an ordinary race and left the banner up over a
+  // session that had already recovered.
+  const p = painter();
+  await p.draw(
+    batchFrame([
+      {
+        op: "video",
+        stream: 0,
+        x: 0,
+        y: 0,
+        w: 64,
+        h: 64,
+        payload: [4, 5, 6],
+        keyframe: false,
+      },
+    ]),
+  );
+  assert.deepEqual(
+    videoErrors,
+    [null],
+    "a unit before its format was reported",
+  );
+  assert.deepEqual(chunkTypes, [], "a unit with no format reached a decoder");
+  assert.deepEqual(cropped, []);
+
+  // And the recovery is the ordinary path: the format lands, the keyframe after it
+  // decodes, and nothing had to be reset by hand.
+  p.setVideoFormat(0, { codec: "vp9", decode: "vp09.00.40.08" });
+  await p.draw(
+    batchFrame([
+      { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
+    ]),
+  );
+  assert.deepEqual(
+    chunkTypes,
+    ["key"],
+    "the stream did not recover once announced",
+  );
+  assert.equal(cropped.length, 1);
+});
+
 test("each stream id gets its own decoder", async () => {
-  // A target on `render_motion_subtype = "h264"` runs one per moving region, and
+  // A target on `render_motion_subtype = "stream"` runs one per moving region, and
   // they are separate chains: a unit decoded against the wrong region's history
   // is corruption, not a misplaced picture.
-  await painter().draw(
+  await announced([0, 1]).draw(
     batchFrame([
       { op: "video", stream: 0, x: 0, y: 0, w: 320, h: 64, payload: KEYFRAME },
       {
@@ -457,9 +565,11 @@ test("each stream id gets its own decoder", async () => {
 });
 
 test("a region that restarts on a new size replaces its decoder", async () => {
-  // The codec string carries no resolution, so an in-band size change is not
-  // something to bet two browsers on. A region that grew is a new picture.
-  const p = painter();
+  // Neither codec's configuration string carries a resolution, so an in-band size
+  // change is not something to bet two browsers on. A region that grew is a new
+  // picture — and the gateway re-announces its format, which is the other half of the
+  // same statement and has its own test below.
+  const p = announced();
   await p.draw(
     batchFrame([
       { op: "video", stream: 0, x: 0, y: 0, w: 320, h: 64, payload: KEYFRAME },
@@ -479,11 +589,11 @@ test("a region that restarts on a new size replaces its decoder", async () => {
 });
 
 test("one region's decoder giving up does not take the others down", async () => {
-  // Under `render_motion_subtype = "h264"` the rest of the desktop is arriving as
+  // Under `render_motion_subtype = "stream"` the rest of the desktop is arriving as
   // still tiles and the other regions are chains of their own, so a decoder that
   // fails is one region that stops — not the session.
   poison = 0xbd;
-  const p = painter();
+  const p = announced([0, 1]);
   await p.draw(
     batchFrame([
       {
@@ -541,7 +651,7 @@ test("one region's decoder giving up does not take the others down", async () =>
 });
 
 test("clear() ends the video decoders, not only the slot table", async () => {
-  const p = painter();
+  const p = announced();
   await p.draw(
     batchFrame([
       { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
@@ -559,7 +669,7 @@ test("a runtime with no video decoder says so rather than showing nothing", asyn
   // A secure origin with no decoder, which is the honest half of the pair: the
   // other message is about the origin, and only a browser can be insecure.
   globals.window = { isSecureContext: true };
-  await painter().draw(
+  await announced().draw(
     batchFrame([
       { op: "video", stream: 0, x: 0, y: 0, w: 64, h: 64, payload: KEYFRAME },
     ]),

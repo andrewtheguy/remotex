@@ -345,11 +345,9 @@ pub async fn connect_target(ws: &mut Ws, target: &str) {
     use futures_util::SinkExt as _;
     use tokio_tungstenite::tungstenite::Message;
 
-    ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{target}"}}"#
-    )))
-    .await
-    .unwrap();
+    ws.send(Message::text(format!(r#"{{"type":"connect","target":"{target}"}}"#)))
+        .await
+        .unwrap();
 }
 
 /// Locate a *working* container runtime. These tests are ignored by default, so

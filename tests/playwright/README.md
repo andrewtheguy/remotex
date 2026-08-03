@@ -27,6 +27,18 @@ agree with their own fixtures and disagree with each other. Its frame parser is
 deliberately a second implementation rather than an import of the SPA's, because a
 wrong parser would otherwise agree with itself.
 
+`video-stream.spec.ts` is the video dial read from the same socket, and it exists
+because the codec is now a **config key** rather than a negotiation: what a target
+streams is decided in the operator's file, so both ends of that decision are
+assertable without asking the browser anything. It parses VIDEO records itself —
+op, keyframe flags byte, the coded rectangle's even sides — checks that no stream's
+first access unit outran the `videoFormat` that says how to decode it, and reads the
+codec back off the session card's Video row. The one browser-dependent claim, whether
+this runtime decodes the H.264 a target may be configured for, is put to the runtime
+with `VideoDecoder.isConfigSupported` and then asserted both ways: a decoder that
+refuses must produce the banner naming the codec, and one that accepts must produce no
+banner at all.
+
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
 revealing the panel leave the local clipboard untouched until explicit Copy.
@@ -84,10 +96,32 @@ that address before starting, rather than failing later inside the browser and
 making an unavailable target look like a product bug. This is the same bargain
 the Rust e2e tests make with `#[ignore]`.
 
-That runs all specs. `npm run test:clipboard` and `npm run test:oversized` run
-one each; their filters are anchored (`'/clipboard\.spec\.ts$'`) because a
-positional argument is a regex matched against the whole path, and the bare name
-`clipboard.spec.ts` also matches `oversized-clipboard.spec.ts`.
+The video spec needs a gateway whose config hard-codes the video targets, which
+`tmp/qa_vp9.toml` does, and it opts in by naming them — one variable per codec, so a
+run can cover the default alone or both:
+
+```sh
+cargo run -- serve --config tmp/qa_vp9.toml
+```
+
+```sh
+cd tests/playwright
+REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
+REMOTEX_PLAYWRIGHT_USERNAME='admin' \
+REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
+REMOTEX_PLAYWRIGHT_VIDEO_TARGET='video' \
+REMOTEX_PLAYWRIGHT_VIDEO_H264_TARGET='video-h264' \
+npm run test:video
+```
+
+That gateway serves the built SPA from `frontend/dist`, so run `bun run build` in
+`frontend/` first; a stale bundle is exactly what these specs cannot see.
+
+A bare `npx playwright test` runs all specs. `npm run test:clipboard`,
+`npm run test:oversized` and `npm run test:video` run one each; their filters are
+anchored (`'/clipboard\.spec\.ts$'`) because a positional argument is a regex matched
+against the whole path, and the bare name `clipboard.spec.ts` also matches
+`oversized-clipboard.spec.ts`.
 
 The specs are TypeScript, which Playwright transpiles itself — and transpiling is
 all it does, so a type error would otherwise never surface. `npm run typecheck`

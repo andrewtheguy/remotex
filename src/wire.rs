@@ -445,8 +445,8 @@ mod tests {
 
     /// A parsed batch record: `(op, slot, x, y, w, h, payload_len, format)`. A
     /// reference carries no size, payload or format, so those come back zero; a
-    /// `VIDEO` record puts its stream id where a tile's slot goes and its keyframe
-    /// flag nowhere, since the wire does not carry one.
+    /// `VIDEO` record puts its stream id where a tile's slot goes and its flags byte
+    /// where a tile's format goes.
     type Parsed = (u8, u16, u16, u16, u16, u16, usize, u8);
 
     fn records(frame: &[u8]) -> Vec<Parsed> {
@@ -474,21 +474,24 @@ mod tests {
                     at += batch::TILE_HEADER_LEN + len;
                 }
                 batch::OP_VIDEO => {
+                    // `op | stream | flags | x | y | w | h | u32 len`, so the length sits two
+                    // bytes further in than a reader written against the pre-flags layout would
+                    // look — which is the whole reason `PROTOCOL_VERSION` moved.
                     let len = u32::from_le_bytes([
-                        frame[at + 10],
                         frame[at + 11],
                         frame[at + 12],
                         frame[at + 13],
+                        frame[at + 14],
                     ]) as usize;
                     out.push((
                         op,
                         u16::from(frame[at + 1]),
-                        le(2),
-                        le(4),
-                        le(6),
-                        le(8),
+                        le(3),
+                        le(5),
+                        le(7),
+                        le(9),
                         len,
-                        0,
+                        frame[at + 2],
                     ));
                     at += batch::VIDEO_HEADER_LEN + len;
                 }
@@ -871,6 +874,37 @@ mod tests {
             keyframe: false,
             data: vec![4u8; bytes],
         })
+    }
+
+    /// The unit a decoder may start from, which the flags byte is the only record of.
+    fn keyframe_unit(stream: u8, bytes: usize) -> ServerMsg {
+        ServerMsg::Video(VideoUnit {
+            stream,
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 800,
+            keyframe: true,
+            data: vec![5u8; bytes],
+        })
+    }
+
+    /// The keyframe bit, written and read back at the offset the layout puts it — the one
+    /// field of a `VIDEO` record a client cannot recover from the payload, because VP9 has
+    /// no parameter sets to read it out of. A flags byte in the wrong place would still
+    /// parse: `stream` would read as a plausible id and the rectangle as plausible
+    /// coordinates, so the bit itself is what has to be asserted.
+    #[test]
+    fn a_keyframes_flag_survives_the_wire_and_a_delta_frames_absence_does_too() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![keyframe_unit(1, 700), region_unit(1, 0, 0, 1280, 800, 600)]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2);
+        assert_eq!((records[0].0, records[0].1), (batch::OP_VIDEO, 1));
+        assert_eq!(records[0].7, batch::VIDEO_KEYFRAME, "the keyframe bit did not survive");
+        assert_eq!(records[0].6, 700, "the payload length is where the flags byte leaves it");
+        assert_eq!(records[1].7, 0, "a delta frame must not claim a decoder can start there");
+        assert_eq!(records[1].6, 600);
     }
 
     // Identical bytes are the cache's trigger, and two access units may be identical
