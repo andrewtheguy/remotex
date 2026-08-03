@@ -144,6 +144,13 @@ pub(crate) fn router_with_sessions(
 
     routed
         .fallback_service(spa)
+        // Inside the redirect below, so a preflight is answered before anything
+        // tries to send one somewhere else: a 307 on an `OPTIONS` is a preflight
+        // that never completes, and the request it was clearing then never happens.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            opaque_origin_cors,
+        ))
         // Outermost, so it sees the request before routing does: what it acts on
         // is the `Host` a browser arrived under, not which handler would answer.
         // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
@@ -152,6 +159,75 @@ pub(crate) fn router_with_sessions(
             dev_hostname_redirect,
         ))
         .with_state(state)
+}
+
+/// The one origin an embedded gateway answers cross-origin: the opaque one.
+///
+/// `remotex.app` loads its client from `file://` in its own bundle, and a `file://`
+/// document's origin serializes to exactly this — so this string is not a wildcard
+/// standing in for "anything", it is the literal origin of the one page this
+/// gateway exists to serve.
+const OPAQUE_ORIGIN: &str = "null";
+
+/// Let the bundled `file://` client talk to its own gateway.
+///
+/// Two headers and a preflight, and the pair of them is the whole mechanism:
+/// `Access-Control-Allow-Origin: null` names the caller, and
+/// `Access-Control-Allow-Credentials: true` is what lets the `remotex_session`
+/// cookie travel — without the second one the request succeeds and arrives
+/// *unauthenticated*, which is the confusing half of getting this wrong.
+///
+/// Deliberately narrow in three ways:
+///
+/// - **Only when [`AppConfig::allow_opaque_origin`] is set**, which is only an
+///   embedded gateway. On a served one these headers would let any sandboxed frame
+///   on the web make credentialed calls; see that field.
+/// - **Only for `Origin: null`.** Every other origin is either same-origin (a
+///   browser opened on this gateway's own address, which needs no header at all) or
+///   something this gateway has no business answering. Echoing back whatever
+///   arrived would turn one allowed caller into all of them.
+/// - **`Vary: Origin`**, so nothing caches an answer made for one origin and
+///   serves it to another.
+async fn opaque_origin_cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    if !state.config.allow_opaque_origin {
+        return next.run(req).await;
+    }
+    let opaque = req
+        .headers()
+        .get(header::ORIGIN)
+        .is_some_and(|value| value.as_bytes() == OPAQUE_ORIGIN.as_bytes());
+    if !opaque {
+        return next.run(req).await;
+    }
+
+    // A preflight is answered here rather than routed: it asks what *would* be
+    // allowed, and no handler downstream knows. `OPTIONS` never reaches a route.
+    let mut response = if req.method() == axum::http::Method::OPTIONS {
+        let mut preflight = StatusCode::NO_CONTENT.into_response();
+        preflight.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            header::HeaderValue::from_static("GET, POST, OPTIONS"),
+        );
+        preflight.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            header::HeaderValue::from_static("content-type"),
+        );
+        preflight
+    } else {
+        next.run(req).await
+    };
+
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        header::HeaderValue::from_static(OPAQUE_ORIGIN),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+        header::HeaderValue::from_static("true"),
+    );
+    headers.insert(header::VARY, header::HeaderValue::from_static("Origin"));
+    response
 }
 
 /// Whether `name` — a `Host` header with its port and brackets already stripped —
@@ -488,7 +564,13 @@ mod tests {
     /// redirect, and a request that is *not* redirected only has to be shown not
     /// to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
-        let config = AppConfig {
+        router(router_config(dev_hostname))
+    }
+
+    /// The config both test routers are built from, so the only thing that ever
+    /// differs between them is the field under test.
+    fn router_config(dev_hostname: Option<&str>) -> AppConfig {
+        AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 52675,
             static_dir: "frontend/dist".into(),
@@ -525,8 +607,122 @@ mod tests {
             ),
             branding: "remotex".to_owned(),
             dev_hostname: dev_hostname.map(str::to_owned),
-        };
+            allow_opaque_origin: false,
+        }
+    }
+
+    /// `dev_router`, but answering an opaque origin the way an embedded gateway
+    /// does. The two differ in exactly the one field, which is the point.
+    fn embedded_router() -> Router {
+        let mut config = router_config(None);
+        config.allow_opaque_origin = true;
         router(config)
+    }
+
+    /// The response to `method path` carrying `origin` as `Origin`, or no `Origin`
+    /// header at all when it is `None`.
+    async fn response_for(
+        router: Router,
+        method: &str,
+        path: &str,
+        origin: Option<&str>,
+    ) -> Response {
+        use tower::ServiceExt as _;
+
+        let mut request = axum::http::Request::builder().method(method).uri(path);
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        router
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn header_of(response: &Response, name: header::HeaderName) -> Option<String> {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().unwrap().to_owned())
+    }
+
+    /// The client is loaded from `file://`, so it calls its own gateway
+    /// cross-origin as `Origin: null`. Both headers matter and for different
+    /// reasons: without the first the call is refused, and without the second it
+    /// succeeds *without the cookie* — which surfaces as a mysterious 401 rather
+    /// than as a CORS error.
+    #[tokio::test]
+    async fn an_embedded_gateway_answers_the_opaque_origin_with_credentials() {
+        let response = response_for(embedded_router(), "GET", "/api/health", Some("null")).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN).as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS).as_deref(),
+            Some("true"),
+            "without this the cookie does not travel and the call arrives anonymous"
+        );
+        assert_eq!(
+            header_of(&response, header::VARY).as_deref(),
+            Some("Origin"),
+            "or a cache could serve this answer to a different origin"
+        );
+    }
+
+    /// The preflight has to be answered here, because no route knows what would be
+    /// allowed and `OPTIONS` reaches none of them.
+    #[tokio::test]
+    async fn a_preflight_from_the_opaque_origin_is_answered() {
+        let response = response_for(embedded_router(), "OPTIONS", "/api/session", Some("null")).await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN).as_deref(),
+            Some("null")
+        );
+        assert!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_METHODS)
+                .is_some_and(|methods| methods.contains("POST")),
+            "claiming the session slot is a POST"
+        );
+    }
+
+    /// The half that keeps this safe. A served gateway is reachable by browsers on
+    /// a network and holds a login cookie; `null` is the origin of every sandboxed
+    /// iframe and `data:` URL on the web, so these headers there would let any page
+    /// somebody visited make credentialed calls to it.
+    #[tokio::test]
+    async fn a_served_gateway_never_answers_an_opaque_origin() {
+        let response = response_for(dev_router(None), "GET", "/api/health", Some("null")).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "the request still works");
+        assert_eq!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            None,
+            "but a browser may not read it cross-origin"
+        );
+        assert_eq!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            None
+        );
+    }
+
+    /// Only the opaque origin, and not whatever turned up. Echoing the request's
+    /// own `Origin` back is how one allowed caller quietly becomes all of them.
+    #[tokio::test]
+    async fn an_embedded_gateway_answers_no_other_origin() {
+        for origin in ["http://evil.example", "http://127.0.0.1:52675", "https://null"] {
+            let response =
+                response_for(embedded_router(), "GET", "/api/health", Some(origin)).await;
+            assert_eq!(
+                header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
+                None,
+                "{origin} must not be granted cross-origin access"
+            );
+        }
     }
 
     /// The `Location` a `GET /` under `host` is sent to, or `None` when it was
@@ -850,6 +1046,7 @@ mod tests {
             ),
             branding: "audio tone harness".to_owned(),
             dev_hostname: None,
+            allow_opaque_origin: false,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
