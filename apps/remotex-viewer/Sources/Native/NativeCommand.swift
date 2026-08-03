@@ -9,6 +9,17 @@ import Foundation
 @MainActor
 protocol CommandSink: AnyObject {
     func send(_ command: NativeCommand)
+
+    /// Open the engine's inspector on the page.
+    ///
+    /// Not a `NativeCommand`: it is the one menu item the page is not told about,
+    /// because the thing it acts on is the engine and not the client. Defaulted to
+    /// nothing so a recorder in a test stays a list of commands.
+    func showDevTools()
+}
+
+extension CommandSink {
+    func showDevTools() {}
 }
 
 /// What the app tells the page: a key it was given, the Mac's pasteboard, or a

@@ -416,6 +416,12 @@ final class AppModel {
         send(.openClipboard)
     }
 
+    /// Chromium's inspector, on this page. The one menu item that does not go
+    /// through `send`, because it asks the engine rather than the client.
+    func showDevTools() {
+        bridge?.showDevTools()
+    }
+
     func setAudioEnabled(_ enabled: Bool) {
         send(.setAudio(enabled))
     }
