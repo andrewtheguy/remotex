@@ -135,9 +135,16 @@ export function readRemoteClipboard(): string {
   ).replace(/\r?\n$/, "");
 }
 
+// A picker button reads "<name> <protocol> · <host>", so a target is named by what
+// its button starts with — up to the first space, and no further.
+//
+// `\b` was wrong for that: a word boundary sits between "video" and the hyphen in
+// "video-h264" too, so a config holding `video`, `video-h264` and `video-motion`
+// matched three buttons and every click failed on strict mode. Whitespace is the
+// separator the button actually uses, and it is the one a name can never contain.
 export function targetNamePattern(name: string): RegExp {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped}\\b`);
+  return new RegExp(`^${escaped}(?!\\S)`);
 }
 
 // Log in and get to a live desktop, which the floating menu's button proves
@@ -148,6 +155,40 @@ export function targetNamePattern(name: string): RegExp {
 // — is reattached straight to it and never sees the picker. Requiring the picker
 // here made one abandoned run break every run after it.
 export async function logInAndConnect(page: Page): Promise<void> {
+  await logIn(page);
+  const picker = page.getByRole("heading", { name: "Pick a target" });
+  if (await picker.isVisible()) {
+    await page.getByRole("button", { name: targetNamePattern(TARGET) }).click();
+  }
+  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+    timeout: 20_000,
+  });
+}
+
+// Log in and land on *one named target*, whichever the run started on.
+//
+// The tolerance above is what makes an abandoned run harmless, and it is exactly
+// what a spec about a particular target cannot have: reattaching to whatever was
+// left running would assert against the wrong dial and read as a product failure.
+// So a session found on a desktop is handed back to the picker first, and the
+// target is then chosen by name.
+export async function logInAndConnectTo(
+  page: Page,
+  target: string,
+): Promise<void> {
+  await logIn(page);
+  const picker = page.getByRole("heading", { name: "Pick a target" });
+  if (!(await picker.isVisible())) {
+    await returnToPicker(page);
+  }
+  await page.getByRole("button", { name: targetNamePattern(target) }).click();
+  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+    timeout: 20_000,
+  });
+}
+
+// The login itself, which ends on whichever of the two landings this run gets.
+async function logIn(page: Page): Promise<void> {
   await page.goto(BASE_URL);
   await expect(page.getByText(/^v\d+\.\d+\.\d+$/)).toBeVisible();
   await page
@@ -158,13 +199,21 @@ export async function logInAndConnect(page: Page): Promise<void> {
     .fill(required("REMOTEX_PLAYWRIGHT_PASSWORD", PASSWORD));
   await page.getByRole("button", { name: "Log in" }).click();
 
+  // A third landing, and the one that used to end a run before it started: the slot
+  // is held by a browser that is gone or busy — a previous test's context, a QA tab
+  // left open — and the page offers the takeover rather than deciding for anybody.
+  // Taking it is what a test run wants and is the flow the product documents; a
+  // session survives it, so nothing is lost by claiming a slot nobody is watching.
+  const takeOver = page.getByRole("button", { name: "Take over" });
   const picker = page.getByRole("heading", { name: "Pick a target" });
   const menu = page.getByRole("button", { name: "Open menu" });
-  await expect(picker.or(menu).first()).toBeVisible({ timeout: 20_000 });
-  if (await picker.isVisible()) {
-    await page.getByRole("button", { name: targetNamePattern(TARGET) }).click();
+  await expect(takeOver.or(picker).or(menu).first()).toBeVisible({
+    timeout: 20_000,
+  });
+  if (await takeOver.isVisible()) {
+    await takeOver.click();
   }
-  await expect(menu).toBeVisible({ timeout: 20_000 });
+  await expect(picker.or(menu).first()).toBeVisible({ timeout: 20_000 });
 }
 
 export async function openClipboardPanel(page: Page): Promise<void> {
