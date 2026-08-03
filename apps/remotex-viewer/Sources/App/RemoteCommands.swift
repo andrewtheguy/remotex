@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+/// The menu bar, which is most of what this app is.
+///
+/// Every item here stands in for a control the client hides inside this window (see
+/// `chromeless` in `frontend/src/RemoteDesktop.tsx`): the same actions a browser
+/// puts in a floating drawer, in the place a Mac app puts them. Each one sends a
+/// command over the bridge and each one's title, tick and enabled state is read
+/// back off what the page reports — so a menu can never claim something the thing
+/// on screen is not doing.
 struct RemoteCommands: Commands {
     let model: AppModel
 
@@ -36,21 +44,21 @@ struct RemoteCommands: Commands {
                 model.macOSKeyboardOverridesLabel,
                 isOn: Binding(
                     get: { model.macOSKeyboardOverridesActive },
-                    set: { model.macOSKeyboardOverridesEnabled = $0 }
+                    set: { model.setMacKeyOverrides($0) }
                 )
             )
-            .disabled(model.session.remoteIsMac)
+            .disabled(!model.isOnDesktop || model.state.remoteIsMac)
 
             Divider()
 
-            Button(
-                model.clipboard.isFetching
-                    ? "Fetching Clipboard…"
-                    : "Clipboard…"
-            ) {
-                model.clipboard.togglePanel()
+            // Opens the client's own clipboard panel, which fetches the remote's
+            // text first and shows it concealed. Rebuilding that in AppKit would be
+            // two clipboard editors to keep in step, and the consent boundary — the
+            // panel's Copy button — would then exist in two places.
+            Button("Clipboard…") {
+                model.openClipboardPanel()
             }
-            .disabled(!model.clipboard.isEnabled || model.clipboard.isFetching)
+            .disabled(!model.canClipboard)
 
             // Sound from the remote. Greyed rather than hidden for a target that has
             // none: a menu whose items come and go is harder to learn than one item
@@ -61,59 +69,52 @@ struct RemoteCommands: Commands {
             Toggle(
                 "Enable Audio",
                 isOn: Binding(
-                    // The live session state to show, and a setter that also writes
-                    // the remembered default — one value the picker's toggle edits
-                    // too, so muting mid-session is what the next connect starts from.
-                    get: { model.audio.isEnabled },
+                    get: { model.audioEnabled },
                     set: { model.setAudioEnabled($0) }
                 )
             )
-            .disabled(!model.audio.isAvailable)
+            .disabled(!model.canAudio)
 
             // The escape hatch for a framebuffer that has gone wrong: re-announce
             // the size and repaint everything.
             Button("Refresh") {
                 model.refresh()
             }
-            .disabled(model.session.screen != .desktop)
+            .disabled(!model.isOnDesktop)
 
             Button("Switch Target") {
                 model.switchTarget()
             }
-            .disabled(model.session.screen != .desktop)
+            .disabled(!model.isOnDesktop)
 
-            if model.session.connectionStatus == .busy {
-                Button("Take Over Session") {
-                    model.takeOver()
+            // The keys a menu is the only way to send: this app captures the whole
+            // keyboard, so ⌥F4 and the modifier taps have nowhere else to come from.
+            Menu("Send Keys") {
+                ForEach(SpecialKeys.chords, id: \.label) { chord in
+                    Button(chord.label) {
+                        model.sendKeyCombo(chord.codes)
+                    }
                 }
-            } else if model.session.connectionStatus == .takenOver {
-                Button("Take Session Back") {
+                Divider()
+                ForEach(SpecialKeys.modifierTaps, id: \.label) { tap in
+                    Button("Tap \(tap.label)") {
+                        model.sendKeyCombo(tap.codes)
+                    }
+                }
+            }
+            .disabled(!model.isOnDesktop)
+
+            if let title = model.takeOverTitle {
+                Button(title) {
                     model.takeOver()
                 }
             }
 
             Divider()
 
-            // Back to the home screen, to run the local gateway instead of a remote
-            // one or the other way round. Also the log out: a remote gateway is told,
-            // so the login and the session slot are given up rather than left for the
-            // reattach grace period.
-            //
-            // Named for what it does on both branches. "Log Out" would be wrong on
-            // the embedded one, where there is no login to end, and two items that
-            // are the same action under two names would be worse than one.
-            Button("Change Gateway…") {
-                Task { await model.changeGateway() }
-            }
-            .disabled(!model.canChangeGateway)
-
-            // Where the targets come from. Reachable from every screen the local
-            // gateway is behind, including the launch failure — a config it refused is
-            // the likeliest reason to be looking for this item at all.
-            //
-            // Greyed against a remote gateway, which reads its own config wherever it
-            // runs: this panel edits the file in *this* instance, and Save restarts a
-            // process that session is not using. See `AppModel.canEditConfiguration`.
+            // Where the targets come from. Reachable from every screen, including the
+            // launch failure — a config the gateway refused is the likeliest reason to
+            // be looking for this item at all.
             //
             // No chord for the same reason nothing else here has one, ⌘, included:
             // while a desktop is focused every Command chord belongs to the guest, so
@@ -123,44 +124,35 @@ struct RemoteCommands: Commands {
             }
             .disabled(!model.canEditConfiguration)
 
-            // Restart the gateway this app runs. Not a "log out" — there is no session
-            // with the gateway to end — but it is the same escape hatch: everything
-            // below the app is rebuilt from the config on disk.
+            // Restart the gateway this app runs. Everything below the app is rebuilt
+            // from the config on disk — including the token, which is why the page is
+            // reloaded with it rather than left holding the old one.
             Button("Restart Local Gateway") {
                 Task { await model.relaunchGateway() }
             }
-            .disabled(!model.usesEmbeddedGateway || model.isBusy)
+            .disabled(!model.canRestartGateway)
         }
 
-        // Display selection, scaffolding for a future phase; every engine today
-        // leaves the stable menu disabled.
         CommandMenu("Display") {
             // A readout rather than a command, and present for every target: on
             // RDP and on VNC this menu is otherwise empty and these numbers appear
             // nowhere at all. See `displaySummary`.
-            Button(
-                displaySummary(
-                    remote: model.session.remoteSize,
-                    remoteScale: model.session.remoteScale,
-                    hostScale: model.hostScale
-                )
-            ) {}
+            Button(model.displaySummaryLine) {}
                 .disabled(true)
             Divider()
 
-            if model.session.displays.isEmpty {
+            if model.displays.isEmpty {
                 Button("No Displays to Choose From") {}
                     .disabled(true)
             } else {
-                ForEach(model.session.displays) { display in
+                ForEach(model.displays) { display in
                     Toggle(
                         "\(display.label) — \(display.detail)",
                         isOn: Binding(
-                            get: { display.id == model.session.activeDisplayID },
+                            get: { display.id == model.activeDisplayID },
                             // Only ever set to true, by picking the item: the
                             // remote is always sharing exactly one display, so
-                            // there is no "off" to honour. Unticking the active
-                            // item asks for nothing and `selectDisplay` drops it.
+                            // there is no "off" to honour.
                             set: { _ in model.selectDisplay(display.id) }
                         )
                     )
@@ -168,4 +160,34 @@ struct RemoteCommands: Commands {
             }
         }
     }
+}
+
+/// The chords a captured keyboard cannot type.
+///
+/// Two kinds, and they are different things. The first are chords macOS keeps for
+/// itself or spells differently — ⌥F4 has no Mac equivalent at all. The second are
+/// single modifier *taps*, which a guest reads as "open the menu" and which cannot
+/// be typed here because holding a modifier and letting go is a chord with nothing
+/// in it as far as this Mac's keyboard is concerned.
+enum SpecialKeys {
+    struct Chord {
+        let label: String
+        let codes: [String]
+    }
+
+    static let chords: [Chord] = [
+        Chord(label: "F5", codes: ["F5"]),
+        Chord(label: "F11", codes: ["F11"]),
+        Chord(label: "Ctrl+R", codes: ["ControlLeft", "KeyR"]),
+        Chord(label: "Ctrl+W", codes: ["ControlLeft", "KeyW"]),
+        Chord(label: "Ctrl+T", codes: ["ControlLeft", "KeyT"]),
+        Chord(label: "Alt+F4", codes: ["AltLeft", "F4"]),
+    ]
+
+    static let modifierTaps: [Chord] = [
+        Chord(label: "Ctrl", codes: ["ControlLeft"]),
+        Chord(label: "Alt", codes: ["AltLeft"]),
+        Chord(label: "Shift", codes: ["ShiftLeft"]),
+        Chord(label: "Super", codes: ["MetaLeft"]),
+    ]
 }

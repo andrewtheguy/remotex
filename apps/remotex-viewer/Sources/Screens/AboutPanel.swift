@@ -45,12 +45,6 @@ struct AboutPanel: View {
                     Text("Version \(ProductInfo.version)")
                         .font(.callout)
                         .textSelection(.enabled)
-                    // The number that has to match the gateway's, checked on every
-                    // launch (`AppModel.launch`). Worth showing next to the version
-                    // because it is what a refusal to attach would be about.
-                    Text("Wire protocol \(ProductInfo.protocolVersion)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
 

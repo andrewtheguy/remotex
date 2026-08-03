@@ -118,10 +118,9 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
 
 /// The process entry point, ahead of SwiftUI.
 ///
-/// Both command-line paths have to be answered before an application exists:
-/// `--probe` runs its own main loop and never returns, and neither it nor
-/// `--version` wants a window. Doing this in `RemotexViewerApp.init()` meant
-/// SwiftUI had already begun bringing one up around them.
+/// `--version` has to be answered before an application exists: it does not want a
+/// window, and doing this in `RemotexViewerApp.init()` meant SwiftUI had already
+/// begun bringing one up around it.
 @main
 @MainActor
 enum ViewerMain {
@@ -133,7 +132,6 @@ enum ViewerMain {
             print("remotex-viewer \(ProductInfo.version)")
             Foundation.exit(EXIT_SUCCESS)
         }
-        ProbeCommand.runIfRequested()
 
         NSWindow.allowsAutomaticWindowTabbing = false
         RemotexViewerApp.main()
