@@ -1,10 +1,16 @@
 //! The gateway inside `remotex.app`: one client, one loopback port, one token.
 //!
-//! `remotex serve-embedded --instance-dir <dir>` is not a deployment. It is started
-//! by the macOS app, serves that app alone, and dies with it. Everything that makes
-//! a `serve` gateway configurable is therefore decided here instead: the port is
-//! whatever the kernel gives, the address is `127.0.0.1`, there is no SPA to serve
-//! and no login to offer — see [`crate::config::Audience::Embedded`].
+//! `remotex serve-embedded --instance-dir <dir> --web-root <dir>` is not a
+//! deployment. It is started by the macOS app, serves that app alone, and dies with
+//! it. Everything that makes a `serve` gateway configurable is therefore decided
+//! here instead: the port is whatever the kernel gives, the address is `127.0.0.1`,
+//! the SPA comes out of the app's bundle, and there is no login to offer — see
+//! [`crate::config::Audience::Embedded`].
+//!
+//! The SPA it serves is the same one a browser gets, and `remotex.app` shows exactly
+//! that page in a web view. The token below stands in for the login: the app puts it
+//! in the view's cookie store, so the page authenticates itself the way any logged-in
+//! browser does and the app needs no session of its own.
 //!
 //! Two pipes carry the whole arrangement, in opposite directions, and neither one
 //! carries the other's job:
@@ -44,7 +50,8 @@ use crate::config::{Audience, ConfigFile};
 pub struct Handshake {
     /// The loopback port the kernel gave us, and the only one the app may use.
     pub port: u16,
-    /// The bearer token for every request and for the `/ws` upgrade.
+    /// The token the app puts in its web view's `remotex_session` cookie, which
+    /// then carries it to every request and to the `/ws` upgrades.
     pub token: String,
 }
 
@@ -116,10 +123,10 @@ impl Instance {
 /// The order is the contract: bind, *then* announce. A port announced before it is
 /// bound is a promise this process might not keep, and the app would race a
 /// connection against a listener that does not exist yet.
-pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
+pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
-    let config = file.resolve_embedded(token.clone())?;
+    let config = file.resolve_embedded(token.clone(), web_root)?;
 
     // One socket on one address, and that address comes from the config rather than
     // from a literal here — `resolve_embedded` is where it is decided, and two places
@@ -150,6 +157,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
 
     info!("embedded gateway listening on http://{}:{port}", config.host);
     info!("config: {}", instance.config_path().display());
+    info!("web root: {}", config.static_dir.display());
     info!("{} target(s) available in the picker:", config.targets.len());
     for target in &config.targets {
         info!(
@@ -228,7 +236,12 @@ pub fn check(text: &str, audience: Audience) -> anyhow::Result<()> {
     // the check goes all the way through resolution — for the served audience that
     // is where the login credential is validated.
     match audience {
-        Audience::Embedded => file.resolve_embedded(EmbeddedToken::generate()).map(|_| ()),
+        // The web root is the app's to name and is not in the file, so checking
+        // text says nothing about it: any path resolves, and whether it holds an
+        // SPA is a question about the bundle rather than about this config.
+        Audience::Embedded => file
+            .resolve_embedded(EmbeddedToken::generate(), PathBuf::new())
+            .map(|_| ()),
         Audience::Served => file.resolve().map(|_| ()),
     }
 }
@@ -311,8 +324,11 @@ mod tests {
 
         let file = ConfigFile::parse_with("branding = \"work laptop\"\n", Audience::Embedded)
             .unwrap();
-        let resolved = file.resolve_embedded(EmbeddedToken::generate()).unwrap();
+        let resolved = file
+            .resolve_embedded(EmbeddedToken::generate(), PathBuf::from("/w"))
+            .unwrap();
         assert_eq!(resolved.branding, "work laptop");
+        assert_eq!(resolved.static_dir, PathBuf::from("/w"), "the app's bundle");
 
         // There is exactly one place to write it, so the block it used to live in
         // refuses it — `deny_unknown_fields` and nothing else, which is the whole of

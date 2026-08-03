@@ -28,8 +28,11 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve()?;
             serve(config).await?;
         }
-        Commands::ServeEmbedded { instance_dir } => {
-            serve_embedded(&remotex::embedded::Instance::new(instance_dir)).await?;
+        Commands::ServeEmbedded {
+            instance_dir,
+            web_root,
+        } => {
+            serve_embedded(&remotex::embedded::Instance::new(instance_dir), web_root).await?;
         }
         Commands::CheckConfig { config, embedded } => {
             let audience = if embedded {
@@ -82,9 +85,12 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// of our stdin closing, which happens however the app ended — see
 /// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
-async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
+async fn serve_embedded(
+    instance: &remotex::embedded::Instance,
+    web_root: std::path::PathBuf,
+) -> anyhow::Result<()> {
     tokio::select! {
-        result = remotex::embedded::serve(instance) => result?,
+        result = remotex::embedded::serve(instance, web_root) => result?,
         _ = remotex::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");
         }
@@ -96,22 +102,17 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
     // Surface a misconfigured static path before we start listening. The SPA
     // handler still 404s per-request; this just makes the cause obvious.
-    //
-    // Only for a gateway that has a web root at all: `None` is not a path that went
-    // missing, it is an embedded gateway that ships no SPA — and it never reaches
-    // this function anyway (see `serve_embedded`).
-    if let Some(static_dir) = config.static_dir.as_deref() {
-        if !static_dir.is_dir() {
-            warn!(
-                "static dir {} not found — the web UI will 404 (set static_dir under [server])",
-                static_dir.display()
-            );
-        } else if !static_dir.join("index.html").is_file() {
-            warn!(
-                "no index.html in static dir {} — the web UI will 404",
-                static_dir.display()
-            );
-        }
+    let static_dir = config.static_dir.as_path();
+    if !static_dir.is_dir() {
+        warn!(
+            "static dir {} not found — the web UI will 404 (set static_dir under [server])",
+            static_dir.display()
+        );
+    } else if !static_dir.join("index.html").is_file() {
+        warn!(
+            "no index.html in static dir {} — the web UI will 404",
+            static_dir.display()
+        );
     }
 
     let app = server::router(config.clone());

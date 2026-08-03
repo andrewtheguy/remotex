@@ -720,7 +720,7 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
     let config = AppConfig {
         host: "127.0.0.1".to_owned(),
         port: 0,
-        static_dir: Some("frontend/dist".into()),
+        static_dir: "frontend/dist".into(),
         targets: vec![target],
         auth: common::test_auth(),
         branding: "remotex".to_owned(),

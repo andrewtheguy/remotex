@@ -209,8 +209,8 @@ pub enum ClientMsg {
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
     /// engine. A client may also send it to recover a canvas that has gone
-    /// wrong, which the viewer offers as Remote > Refresh; the SPA has no such
-    /// command and never sends this.
+    /// wrong, which `remotex.app` offers as Remote > Refresh. A browser has no
+    /// such command: a reload is right there, and it does more.
     Refresh,
     /// Clear this attachment's tile-cache table and repaint. Unlike
     /// [`ClientMsg::Refresh`], this repairs disagreement about cache slots.
