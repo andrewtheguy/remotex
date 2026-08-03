@@ -16,7 +16,9 @@ pub const STRIP_ROWS: u16 = 64;
 /// viewer requires an exact match. Bump it when an older peer would otherwise
 /// fail without a useful compatibility error; clients ignore additive control
 /// tags they do not know.
-pub const PROTOCOL_VERSION: u32 = 11;
+/// Version 12 is the video negotiation: a `VIDEO` record grew a flags byte carrying its keyframe
+/// bit, so the binary layout moved, which no client can decode its way around.
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -218,7 +220,22 @@ pub enum ClientMsg {
     /// Pick a target from the post-login picker and start a session against it.
     /// Handled by the session layer (spawns the engine for `target`), never
     /// forwarded to an engine. `target` is a `[[targets]]` profile name.
-    Connect { target: String },
+    ///
+    /// `video_codecs` is the codec negotiation, and it rides on this message because a codec has
+    /// to be chosen before an encoder is built and the encoder is built by this: the client asked
+    /// `VideoDecoder.isConfigSupported` about each entry `/api/config` published, before it sent
+    /// this, and names the ones it accepted. Order carries no meaning — the gateway's preference
+    /// decides — and an unknown name is ignored rather than refused, since a newer client may
+    /// probe for something this gateway cannot send.
+    ///
+    /// An empty list is legal and means "this browser can decode no video at all", which is the
+    /// ordinary answer from a page on an insecure origin. It refuses only a target that streams
+    /// video; a tiles target does not care.
+    Connect {
+        target: String,
+        #[serde(default)]
+        video_codecs: Vec<String>,
+    },
     /// Tear the current session's engine down and return to the picker
     /// ("switch target"). Handled by the session layer, never forwarded to an
     /// engine.
@@ -253,8 +270,14 @@ pub enum ClientMsg {
 ///
 /// 0x01 TILE      u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
 /// 0x02 TILE_REF  u16 slot | u16 x | u16 y
-/// 0x03 VIDEO     u8 stream | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
+/// 0x03 VIDEO     u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
 /// ```
+///
+/// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
+/// other bit, as it does for the frame's own flags byte. The encoder knows which frames are
+/// keyframes, so telling the client costs one byte and saves it parsing a bitstream — which is
+/// what it used to do, and which VP9 does not offer: VP9 carries no parameter sets, so there is
+/// nothing in the payload to read.
 ///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
@@ -270,9 +293,12 @@ pub mod batch {
     /// A whole `TILE_REF` record.
     pub const TILE_REF_LEN: usize = 7;
     /// Bytes a `VIDEO` record costs besides its payload.
-    pub const VIDEO_HEADER_LEN: usize = 14;
+    pub const VIDEO_HEADER_LEN: usize = 15;
 
-    /// The most H.264 streams one session may run at once, and so the range of a
+    /// A `VIDEO` record's only flag: a decoder that has seen nothing before this can start here.
+    pub const VIDEO_KEYFRAME: u8 = 0x01;
+
+    /// The most video streams one session may run at once, and so the range of a
     /// `VIDEO` record's `stream` byte.
     ///
     /// A client may size a decoder table by it. The gateway's own cap on concurrent
@@ -508,7 +534,7 @@ pub fn write_tile_ref(slot: u16, x: u16, y: u16, out: &mut Vec<u8>) {
     out.extend_from_slice(&y.to_le_bytes());
 }
 
-/// One H.264 access unit for one region of the framebuffer, carried as a `VIDEO`
+/// One video access unit for one region of the framebuffer, carried as a `VIDEO`
 /// record inside a [`batch`] frame.
 ///
 /// A record of its own rather than a fourth [`Tile`] format, because it is not the
@@ -520,18 +546,22 @@ pub fn write_tile_ref(slot: u16, x: u16, y: u16, out: &mut Vec<u8>) {
 ///
 /// The contract every client implements:
 ///
-/// - The payload is **one whole access unit** — every NAL unit of exactly one frame,
-///   Annex-B, delimited by start codes. Never a partial one, never two.
-/// - SPS and PPS accompany every keyframe, so a client can build its decoder from any
-///   keyframe it sees and needs nothing out of band. A stream begins with one, and a
-///   repaint, a resize, a client coming back or a region that grew produces another.
+/// - The payload is **one whole access unit** — exactly one frame's worth, never a partial one
+///   and never two. Under H.264 that is every NAL unit of the frame, Annex-B, delimited by start
+///   codes; under VP9 it is the frame as libvpx emitted it.
+/// - **[`ServerMsg::VideoFormat`] arrives first**, before this stream's first record, and names
+///   the codec and the exact WebCodecs configuration string to build the decoder with. Nothing in
+///   the payload has to be parsed to find that out — which H.264 permits, since SPS and PPS
+///   accompany every keyframe, and VP9 does not, since it has no parameter sets at all.
+/// - `keyframe` is on the wire, as bit 0 of the record's flags. It comes from the encoder itself.
 /// - `stream` names which decoder this belongs to. A session may run several at once
-///   — one per moving region under `render_motion_subtype = "h264"`, exactly one
+///   — one per moving region under `render_motion_subtype = "stream"`, exactly one
 ///   under `render_type = "video"` — and ids are reused as regions come and go, so a
 ///   record whose `(w, h)` differs from the last one on the same id means that
-///   decoder is starting over on a differently sized picture.
+///   decoder is starting over on a differently sized picture, and a fresh `VideoFormat`
+///   precedes it.
 /// - `(x, y, w, h)` is the **true region rectangle**, in framebuffer pixels. The
-///   decoded picture may be one pixel wider and/or taller, because H.264 needs even
+///   decoded picture may be one pixel wider and/or taller, because the encoders are held to even
 ///   sides and a region at the edge of an odd desktop does not have them: a client
 ///   draws the top-left `w`×`h` of what it decodes, at `(x, y)`, and ignores the rest.
 /// - Every access unit matters and their order matters — including their order
@@ -545,12 +575,14 @@ pub struct VideoUnit {
     pub y: u16,
     pub w: u16,
     pub h: u16,
-    /// Whether a decoder that has seen nothing before this can start here. Not on the
-    /// wire: a client reads it out of the bitstream, and the gateway keeps it for the
-    /// totals, where keyframe bytes against total bytes is the whole measurement of
-    /// whether a stream is winning.
+    /// Whether a decoder that has seen nothing before this can start here.
+    ///
+    /// On the wire, as [`batch::VIDEO_KEYFRAME`] in the record's flags byte, and from the encoder
+    /// rather than from a parse of what it produced. The gateway also keeps it for the totals,
+    /// where keyframe bytes against total bytes is the whole measurement of whether a stream is
+    /// winning.
     pub keyframe: bool,
-    /// The Annex-B access unit.
+    /// The access unit, in whatever codec [`ServerMsg::VideoFormat`] announced.
     pub data: Vec<u8>,
 }
 
@@ -564,6 +596,7 @@ impl VideoUnit {
     pub fn write_record(&self, out: &mut Vec<u8>) {
         out.push(batch::OP_VIDEO);
         out.push(self.stream);
+        out.push(if self.keyframe { batch::VIDEO_KEYFRAME } else { 0 });
         out.extend_from_slice(&self.x.to_le_bytes());
         out.extend_from_slice(&self.y.to_le_bytes());
         out.extend_from_slice(&self.w.to_le_bytes());
@@ -745,6 +778,13 @@ pub enum ServerMsg {
     /// [`PROTOCOL_VERSION`] to 9: version 8 shipped this message without it, so a
     /// gateway that omits it must be refused by version rather than decoded into a
     /// target that silently cannot follow the window.
+    ///
+    /// `video` is the codec family this session's streams are being encoded with, or `None` for a
+    /// target that streams nothing. Its point is the *takeover*: a browser that attaches to a
+    /// session somebody else started never sent `ClientMsg::Connect` and so had no say in the
+    /// negotiation, and this is what lets it say "this session is streaming VP9, which I cannot
+    /// decode" immediately rather than after the first keyframe fails to decode. A client that
+    /// *did* negotiate learns nothing new from it.
     Connected {
         name: String,
         protocol: &'static str,
@@ -752,6 +792,7 @@ pub enum ServerMsg {
         auto_resize: bool,
         clipboard: bool,
         audio: bool,
+        video: Option<&'static str>,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -813,6 +854,26 @@ pub enum ServerMsg {
     /// Like a tile, this has no text encoding and is not a control message: it is a
     /// binary frame, and [`crate::wire`] is what turns it into one.
     Audio(Vec<Vec<u8>>),
+    /// How to decode the video that follows on one stream, sent before its first
+    /// [`ServerMsg::Video`] and again whenever it changes.
+    ///
+    /// The video counterpart of [`ServerMsg::AudioFormat`], and it exists for the same reason: a
+    /// decoder configured after the first packet has already thrown away the frame it was meant
+    /// to decode. [`crate::wire`] flushes the pending batch before any text frame, so pushing this
+    /// ahead of a round's units is enough to guarantee the order.
+    ///
+    /// **Per stream, not per session.** Under `render_motion_subtype = "stream"` a session runs up
+    /// to four at once over regions of different sizes, and both codecs' configuration strings
+    /// carry a size-derived level — so one string for the session would be wrong for some of them.
+    /// Under `render_type = "video"` there is exactly one stream, and so one of these per session
+    /// plus one per resize.
+    ///
+    /// `codec` is the family (`vp9` or `h264`), which is what a client dispatches on. `decode` is
+    /// the exact WebCodecs configuration string to hand `VideoDecoder.configure` — `vp09.00.40.08`,
+    /// `avc1.42c01e`. Both come from the encoder rather than from a prediction, which is why this
+    /// is sent when the first unit is produced rather than when the session starts: H.264's
+    /// profile and level are in an SPS, and there is no SPS before there is a keyframe.
+    VideoFormat { stream: u8, codec: &'static str, decode: String },
 }
 
 /// One encoded WebSocket frame, ready to send.
@@ -848,6 +909,7 @@ enum ControlMsg<'a> {
         auto_resize: bool,
         clipboard: bool,
         audio: bool,
+        video: Option<&'a str>,
     },
     RemoteOs { macos: bool },
     Clipboard {
@@ -873,6 +935,11 @@ enum ControlMsg<'a> {
         /// base64: a text frame cannot carry bytes, and this is tens of them
         /// once a session.
         head: String,
+    },
+    VideoFormat {
+        stream: u8,
+        codec: &'a str,
+        decode: &'a str,
     },
 }
 
@@ -928,6 +995,7 @@ impl ServerMsg {
                 auto_resize,
                 clipboard,
                 audio,
+                video,
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
@@ -935,7 +1003,11 @@ impl ServerMsg {
                 auto_resize: *auto_resize,
                 clipboard: *clipboard,
                 audio: *audio,
+                video: *video,
             }),
+            ServerMsg::VideoFormat { stream, codec, decode } => {
+                control(&ControlMsg::VideoFormat { stream: *stream, codec, decode })
+            }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::AudioFormat {
                 codec,
@@ -1172,13 +1244,30 @@ mod tests {
             auto_resize: false,
             clipboard: true,
             audio: false,
+            video: None,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"autoResize":false,"clipboard":true,"audio":false}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"autoResize":false,"clipboard":true,"audio":false,"video":null}"#
             ),
+            None => panic!("connected must be a text frame"),
+        }
+        // And a video target's, which is the takeover case: a browser that attached to a
+        // running session learns the codec here rather than from the first keyframe.
+        match (ServerMsg::Connected {
+            name: "desk".to_owned(),
+            protocol: "rdp",
+            resize: false,
+            auto_resize: false,
+            clipboard: false,
+            audio: false,
+            video: Some("vp9"),
+        })
+        .text_frame()
+        {
+            Some(json) => assert!(json.contains(r#""video":"vp9""#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
         match (ServerMsg::Displays {

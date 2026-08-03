@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { gatewayFetch } from "./gateway.ts";
+import { gatewayConfig } from "./gatewayConfig.ts";
 import Login from "./Login.tsx";
 import RemoteDesktop from "./RemoteDesktop.tsx";
 import { SESSION_KEY } from "./useRemoteDesktop.ts";
+import { acceptedVideoCodecs } from "./videoCodecs.ts";
 
 // Gate the desktop behind the web login. The desktop is only mounted
 // once authenticated — mounting it claims the session slot, which must not
@@ -18,17 +20,17 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    gatewayFetch("/api/config")
-      .then((res) => res.json() as Promise<{ branding: string }>)
-      .then(({ branding }) => {
-        if (!cancelled && branding) {
-          setBranding(branding);
-          document.title = branding;
-        }
-      })
-      .catch(() => {
-        // Keep the "remotex" default; the tab title stays index.html's.
-      });
+    // Started here rather than at the first connect: it is a round trip plus a decoder
+    // query, and the click that picks a target should not be what waits for it. Shares
+    // this component's `GET /api/config` — one request, whichever asks first — and
+    // resolves to a shorter list rather than throwing, so nothing here handles it.
+    void acceptedVideoCodecs();
+    gatewayConfig().then(({ branding }) => {
+      if (!cancelled && branding) {
+        setBranding(branding);
+        document.title = branding;
+      }
+    });
     return () => {
       cancelled = true;
     };

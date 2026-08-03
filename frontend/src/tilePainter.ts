@@ -5,7 +5,11 @@ import {
   SLOT_COUNT,
   type TileMsg,
 } from "./protocol.ts";
-import { createVideoStreams, type VideoStreams } from "./videoDecoder.ts";
+import {
+  createVideoStreams,
+  type VideoFormat,
+  type VideoStreams,
+} from "./videoDecoder.ts";
 
 // The tile cache and the batch draw loop, shared by the browser SPA and the
 // macOS viewer's canvas page.
@@ -17,7 +21,7 @@ import { createVideoStreams, type VideoStreams } from "./videoDecoder.ts";
 //
 // A target that streams sends its access units through the same batches as VIDEO
 // records — the whole desktop under `render_type = "video"`, a region at a time
-// under `render_motion_subtype = "h264"` — so the decoders live here too rather
+// under `render_motion_subtype = "stream"` — so the decoders live here too rather
 // than beside each caller: they belong to exactly what the slot table belongs to,
 // one attachment, and `clear` is the one place that has to end both.
 
@@ -40,6 +44,8 @@ type PaintJob =
       y: number;
       w: number;
       h: number;
+      /** From the record's flags byte, so from the encoder rather than a bitstream parse. */
+      keyframe: boolean;
       data: Uint8Array;
     };
 
@@ -56,6 +62,16 @@ export interface TilePainter {
    * starts with an empty table, and its streams start again from a keyframe.
    */
   clear(): void;
+  /**
+   * Adopt a `videoFormat` for one stream: which codec, and the exact string to configure
+   * its decoder with. Always arrives before that stream's first access unit.
+   *
+   * Held here rather than passed with each unit because it is announced once and used by
+   * every unit after it — and because it builds the decoder table, which a client with no
+   * video decoder at all cannot have. A runtime that fails here says so through
+   * `onVideoError` exactly as a failing decode does.
+   */
+  setVideoFormat(stream: number, format: VideoFormat): void;
 }
 
 export function createTilePainter(options: {
@@ -85,9 +101,15 @@ export function createTilePainter(options: {
   // rather than up front, because most targets send none at all.
   let video: VideoStreams | null = null;
 
+  // Set when `createVideoStreams` refused, which means this runtime has no video
+  // decoder at all. Cleared with the decoders, since a new attachment is a new chance —
+  // the same page could have been reached over HTTPS the second time.
+  let videoUnusable = false;
+
   const releaseVideo = () => {
     video?.close();
     video = null;
+    videoUnusable = false;
   };
 
   // Whether this batch has already asked for a reset. One per batch rather than
@@ -168,25 +190,49 @@ export function createTilePainter(options: {
   // still is coming to recover with. So a failure here is *said*, and the
   // decoders are torn down rather than left decoding from history they do not
   // have.
-  const decodeAccessUnit = async (job: PaintJob & { kind: "video" }) => {
-    if (!video) {
-      try {
-        // The failed stream has already dropped itself from the table; the others
-        // are chains of their own and keep decoding. Rebuilding one is not this
-        // client's decision either way — a stream begins again when the gateway
-        // sends a keyframe, which a repaint, a resize or a region restarting does.
-        video = createVideoStreams({
-          onError: (reason) => options.onVideoError(reason),
-        });
-      } catch (e) {
-        options.onVideoError(
-          e instanceof Error ? e.message : "This browser cannot decode video.",
-        );
-        return null;
-      }
-      options.onVideoError(null);
+  // The decoder table, built on demand and shared by the format announcements and the
+  // units that follow them. `null` means this runtime has no video decoder at all and
+  // has already said so.
+  const videoStreams = (): VideoStreams | null => {
+    if (video) {
+      return video;
     }
-    return video.decode(job.stream, { w: job.w, h: job.h }, job.data);
+    if (videoUnusable) {
+      // Said once per attachment, not once per announcement and once per unit: a
+      // runtime with no decoder will fail every time it is asked, and repeating it
+      // would put the same sentence on the screen twice for one cause.
+      return null;
+    }
+    try {
+      // The failed stream has already dropped itself from the table; the others
+      // are chains of their own and keep decoding. Rebuilding one is not this
+      // client's decision either way — a stream begins again when the gateway
+      // sends a keyframe, which a repaint, a resize or a region restarting does.
+      video = createVideoStreams({
+        onError: (reason) => options.onVideoError(reason),
+      });
+    } catch (e) {
+      videoUnusable = true;
+      options.onVideoError(
+        e instanceof Error ? e.message : "This browser cannot decode video.",
+      );
+      return null;
+    }
+    options.onVideoError(null);
+    return video;
+  };
+
+  const decodeAccessUnit = async (job: PaintJob & { kind: "video" }) => {
+    const video = videoStreams();
+    if (!video) {
+      return null;
+    }
+    return video.decode(
+      job.stream,
+      { w: job.w, h: job.h },
+      job.data,
+      job.keyframe,
+    );
   };
 
   // Every image is closed whether or not it was drawn: with no canvas to draw
@@ -203,11 +249,12 @@ export function createTilePainter(options: {
         continue;
       }
       if (job.kind === "video") {
-        // Cropped by the source rectangle rather than drawn whole: H.264 needs
-        // even sides and a region at the edge of an odd desktop does not have
-        // them, so the decoded picture can be a pixel wider or taller than the
-        // rectangle. The record carries the *true* rectangle, which is where it
-        // belongs on the canvas.
+        // Cropped by the source rectangle rather than drawn whole: the encoders
+        // are held to even sides and a region at the edge of an odd desktop does
+        // not have them, so the decoded picture can be a pixel wider or taller
+        // than the rectangle. The record carries the *true* rectangle, which is
+        // where it belongs on the canvas.  It is the mirror's padding that makes
+        // this a crop rather than a codec's requirement, so it holds for VP9 too.
         ctx?.drawImage(image, 0, 0, job.w, job.h, job.x, job.y, job.w, job.h);
       } else {
         ctx?.drawImage(image, job.x, job.y);
@@ -237,6 +284,9 @@ export function createTilePainter(options: {
     clear() {
       tileCache.fill(null);
       releaseVideo();
+    },
+    setVideoFormat(stream, format) {
+      videoStreams()?.setFormat(stream, format);
     },
   };
 }

@@ -1,14 +1,22 @@
 // A WebCodecs `VideoDecoder` shaped like the rest of the tile path.
 //
 // Two render dials send access units (see `VideoUnit` in src/protocol.rs).
-// `render_type = "video"` sends the whole desktop as one inter-frame H.264 stream;
-// `render_motion_subtype = "h264"` sends one stream per moving region, with the
+// `render_type = "video"` sends the whole desktop as one inter-frame stream;
+// `render_motion_subtype = "stream"` sends one stream per moving region, with the
 // still codecs carrying everything else — so a session may have several of these
 // running at once, which is what `createVideoStreams` is for. Everything else about
 // that path is ordinary: the units arrive as VIDEO records in the same batches and
 // are painted onto the same canvas. What is not ordinary is that each stream is a
 // *chain* — every frame means "what changed since the one before it" — so unlike a
 // still tile, none of them may be dropped, reordered, or decoded twice.
+//
+// **Nothing here parses a bitstream.** The gateway says how to decode a stream in a
+// `videoFormat` control message before its first unit, and marks each unit's keyframe
+// bit on the wire. That is not a convenience: VP9 — the codec this now negotiates
+// first, because a stock Chromium carries it and H.264 is not guaranteed — has no
+// in-band parameter sets at all, so there is nothing in a VP9 payload for a client to
+// read a codec string out of. One contract for both codecs, decided by the side that
+// did the encoding.
 //
 // The awkward part is the shape of the API rather than the codec. `decode()` is
 // fire-and-forget and frames come back on a callback, while the paint path wants
@@ -19,7 +27,16 @@
 // One that is never settled hangs `useRemoteDesktop`'s per-connection promise chain
 // forever, which stops the whole session — not just the picture.
 
-import { readAccessUnit } from "./h264.ts";
+/**
+ * How to decode one stream, from the gateway's `videoFormat` message.
+ *
+ * `codec` is the family — `vp9` or `h264` — and is what an error message names. `decode`
+ * is the exact string to hand `VideoDecoder.configure`: `vp09.00.40.08`, `avc1.42c01e`.
+ */
+export interface VideoFormat {
+  codec: string;
+  decode: string;
+}
 
 /**
  * Why video cannot play here, distinguishing an insecure origin from a browser with
@@ -29,6 +46,12 @@ import { readAccessUnit } from "./h264.ts";
  * already uses. The difference is what it costs: no audio decoder means silence,
  * where no video decoder means a desktop that never paints at all, so this is said
  * plainly rather than logged.
+ *
+ * A gateway now refuses a video target outright when the browser accepted no codec for
+ * it, so this should be unreachable on a target that streams — the picker says so
+ * before a session starts. It stays because "should be" rests on the negotiation
+ * having happened, and a browser that took over somebody else's session did not
+ * negotiate at all.
  */
 export function videoUnavailable(): string | null {
   if (typeof VideoDecoder !== "undefined") {
@@ -43,21 +66,29 @@ export function videoUnavailable(): string | null {
 /** One session's decoders, one per `stream` id on the wire. */
 export interface VideoStreams {
   /**
+   * Adopt the gateway's `videoFormat` for one stream.
+   *
+   * Always arrives before that stream's first unit, and again after a repaint — which
+   * is what a browser that just attached gets, and it has seen neither the original
+   * announcement nor a keyframe. A format that says the same thing as the one in force
+   * changes nothing, so a re-announcement costs no decoder.
+   */
+  setFormat: (stream: number, format: VideoFormat) => void;
+  /**
    * Decode one access unit for `stream`, resolving to its frame — or to null when
    * there is nothing to paint for it.
    *
    * A record whose size differs from the last one on the same id means that region
    * restarted on a different picture: the decoder is replaced rather than reused,
-   * because the `avc1.PPCCLL` codec string carries no resolution and an in-band size
-   * change is not a thing to bet two browsers on. The gateway sends a keyframe
+   * because neither codec's configuration string carries a resolution and an in-band
+   * size change is not a thing to bet two browsers on. The gateway sends a keyframe
    * whenever that happens, so a fresh decoder always has somewhere to start.
-   *
-   * The caller owns the frame and must `close()` it.
    */
   decode: (
     stream: number,
     size: { w: number; h: number },
     data: Uint8Array,
+    keyframe: boolean,
   ) => Promise<VideoFrame | null>;
   /** Drop every decoder. Everything still pending resolves to null. */
   close: () => void;
@@ -79,6 +110,7 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
   }
   interface Live {
     stream: VideoStream;
+    format: VideoFormat;
     w: number;
     h: number;
     /**
@@ -89,18 +121,49 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
     timestamp: number;
   }
   const live = new Map<number, Live>();
+  // What the gateway last announced per stream, which is not the same as what a
+  // decoder is running on: the announcement arrives first and the decoder is built by
+  // the unit that follows it.
+  const formats = new Map<number, VideoFormat>();
+
+  const dropDecoder = (id: number) => {
+    const held = live.get(id);
+    if (held) {
+      held.stream.close();
+      live.delete(id);
+    }
+  };
 
   return {
-    decode(id, size, data) {
+    setFormat(id, format) {
+      formats.set(id, format);
+      const held = live.get(id);
+      if (held && held.format.decode !== format.decode) {
+        // A stream that came back configured differently — a resize is the way this
+        // happens — is a new chain, and its old decoder cannot decode it.
+        dropDecoder(id);
+      }
+    },
+    decode(id, size, data, keyframe) {
+      const format = formats.get(id);
+      if (!format) {
+        // The gateway announces before it sends, so this is a contract violation
+        // rather than a state to recover from — and it is worth naming, because the
+        // alternative is a window that stays black with nothing said.
+        handlers.onError(
+          "This gateway sent video before saying how to decode it.",
+        );
+        return Promise.resolve(null);
+      }
       let held = live.get(id);
       if (held && (held.w !== size.w || held.h !== size.h)) {
-        held.stream.close();
+        dropDecoder(id);
         held = undefined;
       }
       if (!held) {
         let stream: VideoStream;
         // Bound to this id, so a decoder that gives up takes its own region down and
-        // no others: under `render_motion_subtype = "h264"` the rest of the desktop
+        // no others: under `render_motion_subtype = "stream"` the rest of the desktop
         // is still arriving as still tiles and still painting, and the other regions
         // have chains of their own that this one says nothing about. Under
         // `render_type = "video"` there is only ever one, so it is the same outcome.
@@ -114,7 +177,7 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
           handlers.onError(reason);
         };
         try {
-          stream = createVideoStream({ onError: failed });
+          stream = createVideoStream(format, { onError: failed });
         } catch (e) {
           // Unreachable once the table exists — it refused to be built without a
           // decoder — but a throw from here would escape into the paint loop and
@@ -126,17 +189,18 @@ export function createVideoStreams(handlers: VideoHandlers): VideoStreams {
           );
           return Promise.resolve(null);
         }
-        held = { stream, w: size.w, h: size.h, timestamp: 0 };
+        held = { stream, format, w: size.w, h: size.h, timestamp: 0 };
         live.set(id, held);
       }
       held.timestamp += VIDEO_FRAME_US;
-      return held.stream.decode(data, held.timestamp);
+      return held.stream.decode(data, held.timestamp, keyframe);
     },
     close() {
       for (const held of live.values()) {
         held.stream.close();
       }
       live.clear();
+      formats.clear();
     },
   };
 }
@@ -157,7 +221,7 @@ export interface VideoHandlers {
    * Reported rather than worked around, because there is no fallback to switch to.
    * How much of the desktop that costs depends on the dial — under
    * `render_type = "video"` it is all of it, and under
-   * `render_motion_subtype = "h264"` it is one region, with the still codecs
+   * `render_motion_subtype = "stream"` it is one region, with the still codecs
    * carrying everything around it — so this says what happened and lets the caller
    * decide how loudly to say it.
    */
@@ -171,7 +235,11 @@ export interface VideoStream {
    *
    * The caller owns the frame and must `close()` it.
    */
-  decode: (data: Uint8Array, timestamp: number) => Promise<VideoFrame | null>;
+  decode: (
+    data: Uint8Array,
+    timestamp: number,
+    keyframe: boolean,
+  ) => Promise<VideoFrame | null>;
   /** Drop the decoder. Everything still pending resolves to null. */
   close: () => void;
 }
@@ -182,22 +250,24 @@ interface Pending {
 }
 
 /**
- * Build a decoder for one connection's video stream.
+ * Build a decoder for one stream, configured from the format the gateway announced.
  *
- * Throws if there is no `VideoDecoder` to be had (see {@link videoUnavailable}); an
- * *unsupported profile* is not a throw, because WebCodecs reports that
- * asynchronously — it arrives at `onError`.
+ * Throws if there is no `VideoDecoder` to be had (see {@link videoUnavailable}); a
+ * configuration string this browser refuses is *not* a throw, because WebCodecs
+ * reports that asynchronously — it arrives at `onError`, naming the codec.
  */
-export function createVideoStream(handlers: VideoHandlers): VideoStream {
+export function createVideoStream(
+  format: VideoFormat,
+  handlers: VideoHandlers,
+): VideoStream {
   const unavailable = videoUnavailable();
   if (unavailable) {
     throw new Error(unavailable);
   }
-  // FIFO, and that is the whole ordering argument: H.264 with no B-frames — which
-  // is what the gateway's encoder produces — emits frames in the order it was given
-  // them, so the nth output belongs to the nth pending entry.
+  // FIFO, and that is the whole ordering argument: neither encoder here produces
+  // frames out of order — no B-frames, no alt-ref frames a decoder would reorder — so
+  // the nth output belongs to the nth pending entry.
   const pending: Pending[] = [];
-  let codec: string | null = null;
   let closed = false;
 
   const settle = (frame: VideoFrame | null) => {
@@ -226,33 +296,21 @@ export function createVideoStream(handlers: VideoHandlers): VideoStream {
       drain();
       handlers.onError(
         e instanceof Error && e.name === "NotSupportedError"
-          ? "This browser cannot decode the H.264 video this target sends."
+          ? `This browser cannot decode the ${format.codec.toUpperCase()} video this target sends.`
           : "This browser's video decoder failed.",
       );
     },
   });
+  // Configured here rather than on the first keyframe, because the gateway has already
+  // said what this stream is. `codedWidth` and `codedHeight` are deliberately left
+  // out: the bitstream carries the coded size, and the record header carries the
+  // *desktop* size, which is smaller by up to a pixel in each axis and is not what a
+  // decoder should be told.
+  decoder.configure({ codec: format.decode, optimizeForLatency: true });
 
   return {
-    decode(data, timestamp) {
-      if (closed) {
-        return Promise.resolve(null);
-      }
-      const unit = readAccessUnit(data);
-      if (!unit) {
-        return Promise.resolve(null);
-      }
-      if (unit.codec && unit.codec !== codec) {
-        // Configure on the first keyframe, and again whenever the stream restarts
-        // with different parameters — a resize does exactly that. `codedWidth` and
-        // `codedHeight` are deliberately left out: the bitstream carries the coded
-        // size, and the tile header carries the *desktop* size, which is smaller by
-        // up to a pixel in each axis and is not what a decoder should be told.
-        codec = unit.codec;
-        decoder.configure({ codec, optimizeForLatency: true });
-      }
-      if (decoder.state !== "configured") {
-        // No keyframe yet. Nothing can be decoded until one arrives, and one will:
-        // every repaint, resize and reattach makes the gateway send one.
+    decode(data, timestamp, keyframe) {
+      if (closed || decoder.state !== "configured") {
         return Promise.resolve(null);
       }
       const frame = new Promise<VideoFrame | null>((resolve) => {
@@ -262,7 +320,7 @@ export function createVideoStream(handlers: VideoHandlers): VideoStream {
         decoder.decode(
           new EncodedVideoChunk({
             timestamp,
-            type: unit.key ? "key" : "delta",
+            type: keyframe ? "key" : "delta",
             data: data as Uint8Array<ArrayBuffer>,
           }),
         );

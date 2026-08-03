@@ -342,11 +342,28 @@ pub async fn connect_audio_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws
 /// need no connect — the slot announces `connected` on its own.
 #[allow(dead_code)]
 pub async fn connect_target(ws: &mut Ws, target: &str) {
+    // Both codecs, which is what any current browser on a secure origin reports — see
+    // `videoCodecs.ts`. It changes nothing for a tiles target and is what a video target
+    // needs, so the default here is the realistic one.
+    connect_target_with_codecs(ws, target, &["vp9", "h264"]).await;
+}
+
+/// Connect naming exactly these video codecs, for the tests that are about the negotiation.
+///
+/// An empty list is a page with no `VideoDecoder` at all — an insecure origin, in practice —
+/// and the gateway refuses a target that streams video by name rather than connecting it to
+/// a client that cannot show it.
+pub async fn connect_target_with_codecs(ws: &mut Ws, target: &str, codecs: &[&str]) {
     use futures_util::SinkExt as _;
     use tokio_tungstenite::tungstenite::Message;
 
+    let codecs = codecs
+        .iter()
+        .map(|codec| format!("\"{codec}\""))
+        .collect::<Vec<_>>()
+        .join(",");
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{target}"}}"#
+        r#"{{"type":"connect","target":"{target}","videoCodecs":[{codecs}]}}"#
     )))
     .await
     .unwrap();

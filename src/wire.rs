@@ -445,8 +445,8 @@ mod tests {
 
     /// A parsed batch record: `(op, slot, x, y, w, h, payload_len, format)`. A
     /// reference carries no size, payload or format, so those come back zero; a
-    /// `VIDEO` record puts its stream id where a tile's slot goes and its keyframe
-    /// flag nowhere, since the wire does not carry one.
+    /// `VIDEO` record puts its stream id where a tile's slot goes and its flags byte
+    /// where a tile's format goes.
     type Parsed = (u8, u16, u16, u16, u16, u16, usize, u8);
 
     fn records(frame: &[u8]) -> Vec<Parsed> {
@@ -474,21 +474,24 @@ mod tests {
                     at += batch::TILE_HEADER_LEN + len;
                 }
                 batch::OP_VIDEO => {
+                    // `op | stream | flags | x | y | w | h | u32 len`, so the length sits two
+                    // bytes further in than a reader written against the pre-flags layout would
+                    // look — which is the whole reason `PROTOCOL_VERSION` moved.
                     let len = u32::from_le_bytes([
-                        frame[at + 10],
                         frame[at + 11],
                         frame[at + 12],
                         frame[at + 13],
+                        frame[at + 14],
                     ]) as usize;
                     out.push((
                         op,
                         u16::from(frame[at + 1]),
-                        le(2),
-                        le(4),
-                        le(6),
-                        le(8),
+                        le(3),
+                        le(5),
+                        le(7),
+                        le(9),
                         len,
-                        0,
+                        frame[at + 2],
                     ));
                     at += batch::VIDEO_HEADER_LEN + len;
                 }

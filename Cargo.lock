@@ -1984,6 +1984,11 @@ version = "0.1.0"
 source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260731073637-74aab76#74aab76ebd6dc1ca666afa53e016e3926dadbaec"
 
 [[package]]
+name = "libvpx-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260803200400-d592833#d59283389b435bce98e5c46d5fb5074e23e8baf6"
+
+[[package]]
 name = "libwebp-sys"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2819,6 +2824,7 @@ dependencies = [
  "ironrdp-tls",
  "ironrdp-tokio",
  "jpeg-encoder",
+ "libvpx-prebuilt-sys",
  "log",
  "md-5 0.11.0",
  "num-bigint 0.4.8",

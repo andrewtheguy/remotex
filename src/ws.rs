@@ -44,6 +44,7 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
+    config::VideoCodec,
     protocol::{ClientMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager},
@@ -347,8 +348,14 @@ async fn session(
                 // Session-control messages act on the slot, not an engine: pick a
                 // target from the picker, or tear the session down and go back to
                 // it ("switch target").
-                Ok(ClientMsg::Connect { target }) => {
-                    if let Err(e) = sessions.connect(attach_id, &target) {
+                Ok(ClientMsg::Connect { target, video_codecs }) => {
+                    // Names to codecs here rather than in the session layer, so an unknown
+                    // name — a newer client probing for something this gateway cannot send —
+                    // is dropped at the edge where the wire is parsed, and `connect` reasons
+                    // only about codecs that exist.
+                    let accepted: Vec<VideoCodec> =
+                        video_codecs.iter().filter_map(|name| VideoCodec::from_name(name)).collect();
+                    if let Err(e) = sessions.connect(attach_id, &target, &accepted) {
                         warn!("ws: connect to {target:?} refused: {e}");
                     }
                 }
@@ -442,7 +449,7 @@ mod tests {
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target],
-            move |_target, input_rx, frame_tx, _audio| {
+            move |_target, input_rx, frame_tx, _codec, _audio| {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
@@ -525,7 +532,7 @@ mod tests {
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![fake_target(true)],
-            move |_target, input_rx, frame_tx, audio| {
+            move |_target, input_rx, frame_tx, _codec, audio| {
                 engine_tx.send((input_rx, frame_tx, audio)).unwrap();
             },
         ));
@@ -537,7 +544,7 @@ mod tests {
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
         ));
-        sessions.connect(att.id, "fake").unwrap();
+        sessions.connect(att.id, "fake", &VideoCodec::PREFERENCE).unwrap();
         let (input_rx, _frame_tx, bridge) = engine_rx.recv().await.unwrap();
         let bridge = bridge.expect("an audio target's engine is given a bridge");
 

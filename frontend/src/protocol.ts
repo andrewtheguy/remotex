@@ -51,7 +51,12 @@ export type ClientMsg =
   // Session control (handled by the server's session slot, not an engine):
   // pick a target from the post-login picker, or tear the session down and
   // switch back to it.
-  | { type: "connect"; target: string }
+  // `videoCodecs` is the codec negotiation: the families whose `probe` string from
+  // `GET /api/config` this browser's `VideoDecoder.isConfigSupported` accepted. The
+  // gateway's own preference picks from the list, so order carries no meaning here.
+  // An empty list is legal and says "no video decoder at all", which is the ordinary
+  // answer from a page on an insecure origin — it refuses only a target that streams.
+  | { type: "connect"; target: string; videoCodecs: string[] }
   | { type: "disconnect" }
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
   // text on the remote's clipboard, "clipboardRequest" asks for the remote's
@@ -157,6 +162,12 @@ export type ControlMsg =
       autoResize: boolean;
       clipboard: boolean;
       audio: boolean;
+      // The codec family this session's video is being encoded with, or null for a
+      // target that streams none. Only interesting on a *takeover*: a browser that
+      // attached to a session somebody else started never sent `connect`, so it had no
+      // say in the negotiation, and this is what lets it say "this session is VP9,
+      // which I cannot decode" rather than waiting for a keyframe to fail.
+      video: string | null;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already
@@ -177,6 +188,20 @@ export type ControlMsg =
       packetFrames: number;
       head: string;
     }
+  // How to decode one video stream, sent before its first VIDEO record and again
+  // whenever it changes — a decoder configured afterwards has already thrown away the
+  // frame it was meant to decode. The video counterpart of `audioFormat`.
+  //
+  // Per `stream`, not per session: under `render_motion_subtype = "stream"` a session
+  // runs up to four at once over regions of different sizes, and both codecs' strings
+  // carry a size-derived level, so one string for the session would be wrong for some
+  // of them.
+  //
+  // `codec` is the family — `vp9` or `h264` — which is what an error message names.
+  // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08`,
+  // `avc1.42c01e`. Nothing here parses a bitstream to find either out; VP9 has no
+  // parameter sets to parse.
+  | { type: "videoFormat"; stream: number; codec: string; decode: string }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // Only the native viewer acts on it, to decide whether a local Command
   // shortcut stays Command or becomes remote Control.
@@ -215,28 +240,34 @@ export interface TileRefMsg {
   y: number;
 }
 
-// One H.264 access unit for one region of the framebuffer.
+// One video access unit for one region of the framebuffer.
 //
 // Not a tile, and the separate record is the point: a tile is a self-contained
 // picture — reorderable, cacheable, droppable once something covers it — and this is
 // one link in a chain, where losing any link decodes wrongly until the next keyframe.
 //
 // `stream` says which decoder it belongs to. A session may run several at once — one
-// per moving region under `render_motion_subtype = "h264"`, exactly one under
+// per moving region under `render_motion_subtype = "stream"`, exactly one under
 // `render_type = "video"` — and ids are reused as regions come and go, so a record
 // whose size differs from the last one on the same id means that decoder is starting
 // over on a differently sized picture.
 //
 // `(x, y, w, h)` is the true region rectangle. The decoded picture may be a pixel
-// wider or taller, because H.264 needs even sides and a region at the edge of an odd
-// desktop does not have them: draw the top-left w×h of it at (x, y). See
-// `VideoUnit` in src/protocol.rs for the whole contract.
+// wider or taller, because the encoders are held to even sides and a region at the edge
+// of an odd desktop does not have them: draw the top-left w×h of it at (x, y).
+//
+// `keyframe` comes from the record's flags byte, and so from the encoder rather than
+// from a parse of what it produced. It is on the wire because VP9 carries no parameter
+// sets: there is nothing in a VP9 payload to read it out of, and one contract for both
+// codecs beats two. `videoFormat` says how to configure the decoder, and always arrives
+// first. See `VideoUnit` in src/protocol.rs for the whole contract.
 export interface VideoMsg {
   stream: number;
   x: number;
   y: number;
   w: number;
   h: number;
+  keyframe: boolean;
   data: Uint8Array;
 }
 
@@ -255,7 +286,11 @@ const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
 const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
-const VIDEO_HEADER_LEN = 14;
+const VIDEO_HEADER_LEN = 15;
+// A VIDEO record's only flag: a decoder that has seen nothing before it can start here.
+// Any other bit means a gateway newer than this client, and the record is dropped rather
+// than guessed at — the same strictness the batch's own flags byte gets.
+const VIDEO_KEYFRAME = 0x01;
 // The format byte, as what the payload is: `Tile::FORMAT_PNG`, `Tile::FORMAT_JPEG`,
 // `Tile::FORMAT_WEBP`. A byte outside this map (a stale gateway's, or a corrupt
 // frame) yields `undefined`, and `decodeTile` drops the record rather than handing
@@ -288,7 +323,7 @@ export const SLOT_COUNT = 256;
 //   TILE (op 0x01):     u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 //                       | u32 len | payload[len]
 //   TILE_REF (op 0x02):  u16 slot | u16 x | u16 y
-//   VIDEO (op 0x03):     u8 stream | u16 x | u16 y | u16 w | u16 h
+//   VIDEO (op 0x03):     u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
 //                       | u32 len | payload[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
@@ -403,7 +438,11 @@ function decodeVideo(
   if (stream >= MAX_STREAMS) {
     return null;
   }
-  const len = view.getUint32(at + 10, true);
+  const flags = view.getUint8(at + 2);
+  if ((flags & ~VIDEO_KEYFRAME) !== 0) {
+    return null;
+  }
+  const len = view.getUint32(at + 11, true);
   const start = at + VIDEO_HEADER_LEN;
   if (start + len > buf.byteLength) {
     return null;
@@ -412,10 +451,11 @@ function decodeVideo(
     record: {
       kind: "video",
       stream,
-      x: view.getUint16(at + 2, true),
-      y: view.getUint16(at + 4, true),
-      w: view.getUint16(at + 6, true),
-      h: view.getUint16(at + 8, true),
+      x: view.getUint16(at + 3, true),
+      y: view.getUint16(at + 5, true),
+      w: view.getUint16(at + 7, true),
+      h: view.getUint16(at + 9, true),
+      keyframe: (flags & VIDEO_KEYFRAME) !== 0,
       data: new Uint8Array(buf, start, len),
     },
     next: start + len,

@@ -155,28 +155,28 @@ pub enum RenderType {
     /// The moving encode has its own two keys,
     /// [`TargetConfig::render_motion_subtype`] and
     /// [`TargetConfig::render_motion_quality`], and it may be either a cheaper still
-    /// per cell or — under [`MotionSubtype::H264`] — an H.264 stream per coalesced
+    /// per cell or — under [`MotionSubtype::Stream`] — a video stream per coalesced
     /// moving region.
     ///
     /// A cell that stops changing is re-sent once at the base encode, so a paused
     /// screen returns to full quality on its own: the base is the truth, motion is
     /// a temporary discount on what is too busy to notice.
     Motion,
-    /// The whole desktop as one H.264 stream, at a fixed quality
+    /// The whole desktop as one video stream, at a fixed quality
     /// ([`TargetConfig::render_quality`]).
     ///
     /// Not a codec on the [`RenderSubtype`] axis, and deliberately not: the other
     /// three are *per-tile* codecs, where every tile is independent, reorderable,
-    /// cacheable and droppable once something covers it. An H.264 access unit is none
-    /// of those — it is one link in a chain, and losing any link corrupts every frame
+    /// cacheable and droppable once something covers it. An access unit is none of
+    /// those — it is one link in a chain, and losing any link corrupts every frame
     /// after it until the next keyframe. So this axis is where it goes, and it
     /// refuses the subtype axis outright rather than pretending to be a fourth value
     /// on it.
     ///
     /// It follows that this is a different *transport*, not a different compressor:
     /// no tiles, no cell grid, no per-region decisions, one access unit per remote
-    /// frame. See [`crate::h264`]. A browser without the codec says so itself,
-    /// through the client's "this browser cannot decode…" path.
+    /// frame. Which codec carries it is [`VideoCodec`]'s — negotiated with the
+    /// browser, not configured — so this axis names no codec either.
     Video,
 }
 
@@ -239,7 +239,7 @@ pub enum RenderSubtype {
 /// The base is sent once when a cell settles and can afford WebP's slower, smaller
 /// encode, while a moving cell is re-encoded every frame, where JPEG's faster
 /// encode may beat WebP's smaller output; cheapest and smallest are not the same
-/// question at quality 60 as at 10. And this is the axis `h264` appears on, where
+/// question at quality 60 as at 10. And this is the axis `stream` appears on, where
 /// the moving encode stops being a still image at all — which it could only do by
 /// being nameable apart from the base. `png` is not a variant and never will be: a
 /// moving cell needs a quality to turn down, and lossless has none.
@@ -250,7 +250,7 @@ pub enum MotionSubtype {
     Jpeg,
     /// WebP at [`TargetConfig::render_motion_quality`].
     Webp,
-    /// An H.264 stream per coalesced moving region, at
+    /// A video stream per coalesced moving region, at
     /// [`TargetConfig::render_motion_quality`], with the base codec carrying
     /// everything else.
     ///
@@ -263,7 +263,11 @@ pub enum MotionSubtype {
     ///
     /// Never the default: it has to be written out, because unlike `jpeg` and `webp`
     /// it is not a cheaper version of the base but a different transport beside it.
-    H264,
+    ///
+    /// Named `stream` rather than after a codec, because *which* codec it is is not the
+    /// operator's to choose: it is negotiated with the browser before a connect
+    /// ([`VideoCodec`]). It was `h264` when H.264 was the only one this could be.
+    Stream,
 }
 
 /// The tile encoder an engine uses, resolved from a target's render dial by
@@ -278,6 +282,63 @@ pub enum TileCodec {
     Jpeg(u8),
     /// WebP at the given quality (1–100).
     Webp(u8),
+}
+
+/// Which video codec a session's streams are encoded with.
+///
+/// **Not a config axis, and that is the point.** No `remotex.toml` key selects this: it is
+/// negotiated with the browser before a target is connected ([`crate::session`]), because the
+/// operator cannot know which codecs the browser that eventually connects can decode. VP9 first,
+/// H.264 only where a browser refuses VP9 — the order [`Self::PREFERENCE`] states.
+///
+/// It rides inside [`RenderPlan`] rather than beside it, so the engines and
+/// [`crate::encode::TileSink`] go on matching one value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoCodec {
+    /// BSD-licensed with a patent grant, and therefore in every browser build including the
+    /// stock Chromium `remotex.app` embeds. The default. See [`crate::vp9`].
+    Vp9,
+    /// The fallback, for a browser whose `VideoDecoder` refuses VP9. See [`crate::h264`].
+    H264,
+}
+
+impl VideoCodec {
+    /// The gateway's order of preference, best first. What a negotiation picks from, and the one
+    /// statement of the order — `/api/config` publishes it and `connect` chooses by it, so the
+    /// two cannot drift apart.
+    pub const PREFERENCE: [VideoCodec; 2] = [VideoCodec::Vp9, VideoCodec::H264];
+
+    /// The name this codec goes by on the wire, in `/api/config` and in `ClientMsg::Connect`.
+    pub fn name(self) -> &'static str {
+        match self {
+            VideoCodec::Vp9 => "vp9",
+            VideoCodec::H264 => "h264",
+        }
+    }
+
+    /// A representative WebCodecs configuration string for this codec, for the client's
+    /// `VideoDecoder.isConfigSupported` probe.
+    ///
+    /// **Representative, not the session's.** The exact string depends on the picture size, which
+    /// only the remote knows and which may change mid-session, so the probe decides the *family*
+    /// and `ServerMsg::VideoFormat` names the configuration. The two are held at comparable
+    /// strictness on purpose: a probe that asked for 4K VP9 and baseline H.264 would prefer H.264
+    /// on any browser fussy about VP9 levels, having never asked it to be fussy about H.264's.
+    ///
+    /// VP9 is profile 0, level 3.1, 8-bit; H.264 is constrained baseline level 3.0, which is the
+    /// configuration a browser with H.264 at all can decode.
+    pub fn probe(self) -> &'static str {
+        match self {
+            VideoCodec::Vp9 => "vp09.00.31.08",
+            VideoCodec::H264 => "avc1.42E01E",
+        }
+    }
+
+    /// The codec a client named, or `None` for a name this gateway does not know — which is not an
+    /// error: a newer client may probe for something this gateway cannot send.
+    pub fn from_name(name: &str) -> Option<Self> {
+        VideoCodec::PREFERENCE.into_iter().find(|codec| codec.name() == name)
+    }
 }
 
 /// The whole render dial as an engine sees it, and the one place the two ways this
@@ -299,12 +360,12 @@ pub enum TileCodec {
 pub enum MotionEncode {
     /// A cheaper still per moving cell, at this codec's quality.
     Tile(TileCodec),
-    /// An H.264 stream per coalesced moving region, at this 1–100 quality.
+    /// A video stream per coalesced moving region, at this 1–100 quality, in this codec.
     ///
-    /// The quality is the dial rather than a quantizer: turning that into one is
-    /// [`crate::h264`]'s business, and it is the only module that should know what a
-    /// quantizer is.
-    Stream { quality: u8 },
+    /// The quality is the dial rather than a quantizer: turning that into one is the codec
+    /// module's business, and they are the only modules that should know what a quantizer is —
+    /// the two codecs' are different scales.
+    Stream { quality: u8, codec: VideoCodec },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,12 +386,12 @@ pub enum RenderPlan {
         /// meaningful when `motion` is `Some`.
         debug: bool,
     },
-    /// The whole framebuffer as one H.264 stream at a fixed quantizer.
+    /// The whole framebuffer as one video stream at a fixed quantizer.
     ///
-    /// The quality is the 1–100 dial rather than a quantizer: turning that into one
-    /// is [`crate::h264`]'s business, and it is the only module that should know what
-    /// a quantizer is.
-    Video { quality: u8 },
+    /// The quality is the 1–100 dial rather than a quantizer: turning that into one is the codec
+    /// module's business, and they are the only modules that should know what a quantizer is —
+    /// the two codecs' are different scales.
+    Video { quality: u8, codec: VideoCodec },
 }
 
 /// One `[[targets]]` profile: a remote machine plus its credentials.
@@ -473,8 +534,8 @@ pub struct TargetConfig {
     /// whatever [`Self::render_subtype`] is, and is *required* when that is `png`,
     /// which has no quality to turn down. Refused for any other render type.
     ///
-    /// `h264` is never a default: it is not a cheaper still but a stream per moving
-    /// region, so it has to be asked for.
+    /// `stream` is never a default: it is not a cheaper still but a video stream per
+    /// moving region, so it has to be asked for.
     #[serde(default)]
     pub render_motion_subtype: Option<MotionSubtype>,
     /// Quality (1–100) for what is in motion — as cheap as it takes, since motion
@@ -529,9 +590,13 @@ impl TargetConfig {
     /// already guaranteed is present and in range; each `None` arm falls back to
     /// the safe answer — lossless PNG for the base, no motion encode at all —
     /// rather than trusting that here.
-    pub fn render_plan(&self) -> RenderPlan {
+    ///
+    /// `codec` is the negotiated one, from [`crate::session::SessionManager::connect`] — it is not
+    /// a property of the config and there is no key for it. A target whose plan streams nothing
+    /// ignores it, which is why the tiles path takes it without looking.
+    pub fn render_plan(&self, codec: VideoCodec) -> RenderPlan {
         if let (RenderType::Video, Some(quality)) = (self.render_type, self.render_quality) {
-            return RenderPlan::Video { quality };
+            return RenderPlan::Video { quality, codec };
         }
         let base = match (self.render_subtype, self.render_quality) {
             (RenderSubtype::Jpeg, Some(q)) => TileCodec::Jpeg(q),
@@ -542,12 +607,27 @@ impl TargetConfig {
             (RenderType::Motion, Some(q)) => match self.motion_subtype() {
                 Some(MotionSubtype::Jpeg) => Some(MotionEncode::Tile(TileCodec::Jpeg(q))),
                 Some(MotionSubtype::Webp) => Some(MotionEncode::Tile(TileCodec::Webp(q))),
-                Some(MotionSubtype::H264) => Some(MotionEncode::Stream { quality: q }),
+                Some(MotionSubtype::Stream) => Some(MotionEncode::Stream { quality: q, codec }),
                 None => None,
             },
             _ => None,
         };
         RenderPlan::Tiles { base, motion, debug: self.render_motion_debug }
+    }
+
+    /// Whether this target puts moving pixels on the wire as a video stream — either the whole
+    /// desktop (`render_type = "video"`) or a region at a time (`render_motion_subtype =
+    /// "stream"`).
+    ///
+    /// Codec-independent by construction, which is the point: it is what
+    /// [`crate::session::SessionManager::connect`] refuses on, and a refusal that depended on
+    /// which codec was negotiated would be circular.
+    pub fn streams_video(&self) -> bool {
+        match self.render_type {
+            RenderType::Video => true,
+            RenderType::Motion => self.motion_subtype() == Some(MotionSubtype::Stream),
+            RenderType::Full | RenderType::FixedQuality => false,
+        }
     }
 
     /// The motion encode this target asked for, falling back to the base codec when
@@ -883,8 +963,8 @@ impl ConfigFile {
                         "target {:?} pairs render_type \"motion\" with render_subtype \"png\" \
                          but names no render_motion_subtype. The motion encode defaults to the \
                          base codec, and PNG is lossless — it has no quality to turn down — so \
-                         a PNG base must name its own: \"jpeg\", \"webp\", or \"h264\" for a \
-                         stream per moving region",
+                         a PNG base must name its own: \"jpeg\", \"webp\", or \"stream\" for a \
+                         video stream per moving region",
                         target.name
                     );
                 }
@@ -945,7 +1025,7 @@ impl ConfigFile {
                      render_motion_quality — it needs one, an integer 1–100. It is what the \
                      cells in motion are encoded at, and can go as low as it takes: motion \
                      hides the artifacts, and a cell that stops moving is re-sent at the base \
-                     encode. Under render_motion_subtype = \"h264\" it is the quality each \
+                     encode. Under render_motion_subtype = \"stream\" it is the quality each \
                      region's stream holds on a link that can carry it, and a link that \
                      cannot will fall below it",
                     target.name
@@ -1493,7 +1573,7 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Png);
         assert_eq!(t.render_quality, None);
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles { base: TileCodec::Png, motion: None, debug: false }
         );
     }
@@ -1517,7 +1597,7 @@ mod tests {
         assert_eq!(t.render_subtype, RenderSubtype::Jpeg);
         assert_eq!(t.render_quality, Some(60));
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles { base: TileCodec::Jpeg(60), motion: None, debug: false }
         );
     }
@@ -1539,7 +1619,7 @@ mod tests {
         let t = &cfg.targets[0];
         assert_eq!(t.render_subtype, RenderSubtype::Webp);
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles { base: TileCodec::Webp(50), motion: None, debug: false }
         );
     }
@@ -1607,7 +1687,7 @@ mod tests {
             "#,
         )
         .expect("video with a quality");
-        assert_eq!(cfg.targets[0].render_plan(), RenderPlan::Video { quality: 60 });
+        assert_eq!(cfg.targets[0].render_plan(VideoCodec::Vp9), RenderPlan::Video { quality: 60, codec: VideoCodec::Vp9 });
     }
 
     #[test]
@@ -1780,7 +1860,7 @@ mod tests {
         assert_eq!(t.render_type, RenderType::Motion);
         assert_eq!(t.render_subtype, RenderSubtype::Png);
         assert_eq!(
-            t.render_plan(),
+            t.render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
                 motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
@@ -1808,7 +1888,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles {
                 base: TileCodec::Webp(60),
                 motion: Some(MotionEncode::Tile(TileCodec::Webp(10))),
@@ -1837,7 +1917,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles {
                 base: TileCodec::Webp(60),
                 motion: Some(MotionEncode::Tile(TileCodec::Jpeg(10))),
@@ -1858,16 +1938,16 @@ mod tests {
             protocol = "rdp"
             host = "h"
             render_type = "motion"
-            render_motion_subtype = "h264"
+            render_motion_subtype = "stream"
             render_motion_quality = 30
             "#,
         )
         .unwrap();
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles {
                 base: TileCodec::Png,
-                motion: Some(MotionEncode::Stream { quality: 30 }),
+                motion: Some(MotionEncode::Stream { quality: 30, codec: VideoCodec::Vp9 }),
                 debug: false
             }
         );
@@ -1891,7 +1971,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            motion_of(cfg.targets[0].render_plan()),
+            motion_of(cfg.targets[0].render_plan(VideoCodec::Vp9)),
             Some(MotionEncode::Tile(TileCodec::Webp(30))),
             "a lossy base defaulted its moving encode to a stream"
         );
@@ -1908,7 +1988,7 @@ mod tests {
             protocol = "rdp"
             host = "h"
             render_type = "motion"
-            render_motion_subtype = "h264"
+            render_motion_subtype = "stream"
             "#,
         )
         .unwrap_err();
@@ -2007,7 +2087,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(matches!(cfg.targets[0].render_plan(), RenderPlan::Tiles { debug: true, .. }));
+        assert!(matches!(cfg.targets[0].render_plan(VideoCodec::Vp9), RenderPlan::Tiles { debug: true, .. }));
 
         let plain = ConfigFile::parse(
             r#"
@@ -2019,7 +2099,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(plain.targets[0].render_plan(), RenderPlan::Tiles { debug: false, .. }),
+            matches!(plain.targets[0].render_plan(VideoCodec::Vp9), RenderPlan::Tiles { debug: false, .. }),
             "the overlay defaulted on"
         );
 
@@ -2135,7 +2215,7 @@ mod tests {
         // about Macs.
         let cfg = ConfigFile::parse(&target("ard")).expect("motion belongs on plain ard");
         assert_eq!(
-            motion_of(cfg.targets[0].render_plan()),
+            motion_of(cfg.targets[0].render_plan(VideoCodec::Vp9)),
             Some(MotionEncode::Tile(TileCodec::Jpeg(10)))
         );
     }
@@ -2162,7 +2242,7 @@ mod tests {
         )
         .expect("only the motion pairing is refused");
         assert_eq!(
-            cfg.targets[0].render_plan(),
+            cfg.targets[0].render_plan(VideoCodec::Vp9),
             RenderPlan::Tiles { base: TileCodec::Webp(60), motion: None, debug: false }
         );
     }
@@ -2190,7 +2270,7 @@ mod tests {
         )
         .unwrap();
         for t in &cfg.targets {
-            assert_eq!(motion_of(t.render_plan()), None, "target {:?}", t.name);
+            assert_eq!(motion_of(t.render_plan(VideoCodec::Vp9)), None, "target {:?}", t.name);
         }
     }
 

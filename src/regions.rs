@@ -1,16 +1,16 @@
-//! Which parts of the framebuffer get an H.264 stream, when one starts and stops,
+//! Which parts of the framebuffer get a video stream, when one starts and stops,
 //! and what a client is owed when one does.
 //!
 //! Two dials arrive here and they differ only in how many rectangles they ask for.
 //! `render_type = "video"` asks for one covering the whole desktop and never changes
 //! its mind ([`Policy::Whole`]). `render_motion_subtype = "h264"` asks for one per
 //! coalesced moving region, with the still codecs carrying everything else
-//! ([`Policy::Moving`]). [`crate::h264`] knows how to encode a rectangle; this module
+//! ([`Policy::Moving`]). A codec module knows how to encode a rectangle; this module
 //! is every decision about *which*.
 //!
 //! Three things hold the whole design up:
 //!
-//! - **One mirror, several encoders.** [`crate::h264::Mirror`] holds the exact
+//! - **One mirror, several encoders.** [`crate::video::Mirror`] holds the exact
 //!   current source for every pixel, moving or not, and each stream encodes a crop
 //!   of it. That is what lets a stream start in the middle of a session — its
 //!   region's pixels are already there — and it is why the debts below hold no
@@ -35,9 +35,10 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::h264::{Mark, Mirror, Stream};
+use crate::config::VideoCodec;
 use crate::protocol::{CELL_H, CELL_W, VideoUnit, batch};
 use crate::tiles::Rect;
+use crate::video::{Mark, Mirror, Stream};
 
 /// The most streams one session runs at once.
 ///
@@ -106,6 +107,12 @@ struct Live {
     /// Whether the round just encoded produced a unit for this stream — which is what
     /// says its cells have just been carried and are not idle.
     carried: bool,
+    /// The configuration string this stream has already announced to the client, if any.
+    ///
+    /// Cleared by [`Regions::force_keyframes`], which is what makes a reattach or a takeover
+    /// re-announce: the browser that just arrived never saw the original text frame, and its
+    /// decoder cannot be configured from the units alone.
+    announced: Option<String>,
     /// When something inside this region was last seen moving. What [`STREAM_IDLE`]
     /// is measured from.
     moving_at: Instant,
@@ -113,7 +120,7 @@ struct Live {
 
 /// A rectangle of the cell grid, in cell coordinates. What [`coalesce`] works in,
 /// because a region is a union of whole cells by construction — which is what makes
-/// [`crate::h264::Stream`]'s evenness a theorem rather than a check.
+/// [`crate::video::coded_rect`]'s evenness a theorem rather than a check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CellBox {
     c0: u16,
@@ -282,12 +289,13 @@ fn free_id(taken: &[u8]) -> Option<u8> {
 /// The mirror, the live streams, and the cells they owe.
 pub struct Regions {
     policy: Policy,
-    /// The 1–100 dial, straight from the config and never changed.
+    /// The negotiated codec every stream here is built with. One per session: it was decided
+    /// before the target was connected, and nothing changes it afterwards.
+    codec: VideoCodec,
+    /// The 1–100 dial a new stream starts at — the config's, unless the congestion loop
+    /// has moved it. Without that a region appearing on a struggling link would start at
+    /// full quality and make the struggle worse.
     quality: u8,
-    /// The quantizer new streams start at — the dial's, unless the congestion loop
-    /// has moved it. Without this a region that appears on a struggling link would
-    /// start at full quality and make the struggle worse.
-    qp: u8,
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
@@ -305,11 +313,11 @@ pub struct Regions {
 }
 
 impl Regions {
-    pub fn new(policy: Policy, quality: u8, mark: Option<Mark>) -> Self {
+    pub fn new(policy: Policy, codec: VideoCodec, quality: u8, mark: Option<Mark>) -> Self {
         Self {
             policy,
+            codec,
             quality,
-            qp: crate::h264::qp_for(quality),
             size: None,
             mirror: None,
             live: Vec::new(),
@@ -373,7 +381,7 @@ impl Regions {
         if self.mirror.is_none() {
             let (w, h) = self
                 .size
-                .ok_or_else(|| anyhow::anyhow!("the h264 mirror was asked for pixels before a desktop size"))?;
+                .ok_or_else(|| anyhow::anyhow!("the video mirror was asked for pixels before a desktop size"))?;
             self.mirror = Some(Mirror::new(w, h)?);
         }
         Ok(self.mirror.as_mut().expect("just built"))
@@ -543,7 +551,7 @@ impl Regions {
     fn build(&mut self, rect: Rect, now: Instant, taken: &[u8]) -> anyhow::Result<Live> {
         let id = free_id(taken).ok_or_else(|| {
             anyhow::anyhow!(
-                "h264 regions: no stream id left for a {}x{} region; {} are in use and \
+                "video regions: no stream id left for a {}x{} region; {} are in use and \
                  the wire allows {}",
                 rect.w(),
                 rect.h(),
@@ -552,10 +560,9 @@ impl Regions {
             )
         })?;
         let mirror = self.mirror_mut()?.coded();
-        let mut stream = Stream::new(rect, mirror, self.quality)?;
-        // A region that appears while the link is behind starts where the link left
-        // off, not at the dial.
-        stream.set_qp(self.qp)?;
+        // At `self.quality` rather than the config's: a region that appears while the
+        // link is behind starts where the link left off.
+        let stream = Stream::new(self.codec, rect, mirror, self.quality)?;
         let cells: Vec<(u16, u16)> = rect.cells().map(|cell| cell.cell_key()).collect();
         // Every cell of the region is owed from the moment it is streamed, including
         // the ones that are not moving: the stream codes them lossily whether they
@@ -574,6 +581,7 @@ impl Regions {
             dirty: true,
             keyframe_owed: true,
             carried: false,
+            announced: None,
             moving_at: now,
         })
     }
@@ -667,22 +675,22 @@ impl Regions {
         }
     }
 
-    /// Move every live stream's quantizer, for the congestion loop.
+    /// Move every live stream's quality, for the congestion loop.
     ///
     /// One link, one verdict: the streams share a socket, and a policy that treated
     /// them separately would be reasoning about a bottleneck none of them can see on
     /// its own.
-    pub fn set_qp(&mut self, qp: u8) -> anyhow::Result<()> {
-        self.qp = qp;
+    pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
+        self.quality = quality;
         for live in &mut self.live {
-            live.stream.set_qp(qp)?;
+            live.stream.set_quality(quality)?;
         }
         Ok(())
     }
 
-    /// The coarsest quantizer any live stream is encoding at, for the totals.
-    pub fn qp(&self) -> u8 {
-        self.qp
+    /// The dial every live stream is encoding at, for the totals.
+    pub fn quality(&self) -> u8 {
+        self.quality
     }
 
     /// Arm a keyframe on every live stream. Its callers are exactly the moments a
@@ -690,6 +698,10 @@ impl Regions {
     pub fn force_keyframes(&mut self) {
         for live in &mut self.live {
             live.keyframe_owed = true;
+            // And the format is owed again, for the same reason the keyframe is: the client this
+            // is for may be one that has never seen either. A `VideoFormat` costs a short text
+            // frame, against a keyframe's hundreds of kilobytes, so there is nothing to weigh.
+            live.announced = None;
             // Without this a keyframe would wait for the region to change again,
             // which on a paused desktop is never — and a client that just attached
             // would sit in front of nothing.
@@ -718,9 +730,10 @@ impl Round {
     /// A stream the encoder produced no bitstream for keeps its dirty flag and its
     /// keyframe, so those pixels ride the next round — which is what stops a frame
     /// that produced nothing from becoming pixels the client never gets.
-    pub fn encode(&mut self) -> anyhow::Result<Vec<VideoUnit>> {
+    pub fn encode(&mut self) -> anyhow::Result<Produced> {
         self.mirror.pad_edges();
-        let mut units = Vec::with_capacity(self.live.len());
+        let mut produced =
+            Produced { formats: Vec::new(), units: Vec::with_capacity(self.live.len()) };
         for live in &mut self.live {
             live.carried = false;
             if !live.dirty {
@@ -736,7 +749,21 @@ impl Round {
             live.dirty = false;
             live.keyframe_owed = false;
             live.carried = true;
-            units.push(VideoUnit {
+            // Collected after the encode rather than before it, because H.264 has nothing to say
+            // until a keyframe has carried its SPS — and the first unit of a stream is one. VP9
+            // knew from construction. Either way the announcement goes out ahead of every unit in
+            // this round, which is the contract `ServerMsg::VideoFormat` states.
+            if let Some(decode) = live.stream.decode_string()
+                && live.announced.as_deref() != Some(decode)
+            {
+                live.announced = Some(decode.to_owned());
+                produced.formats.push(Format {
+                    stream: live.id,
+                    codec: live.stream.codec().name(),
+                    decode: decode.to_owned(),
+                });
+            }
+            produced.units.push(VideoUnit {
                 stream: live.id,
                 x: live.rect.left,
                 y: live.rect.top,
@@ -746,7 +773,7 @@ impl Round {
                 data: unit.data,
             });
         }
-        Ok(units)
+        Ok(produced)
     }
 
     /// Streams whose encode yielded no bitstream. Must stay zero: `skip_frames(false)`
@@ -755,6 +782,24 @@ impl Round {
     pub fn skipped(&self) -> u64 {
         self.skipped
     }
+}
+
+/// What one round produced: the announcements owed, and then the access units.
+///
+/// Two lists rather than one interleaved sequence, because the order that matters is only
+/// "every announcement before every unit" — which is stronger than the contract needs and
+/// simpler than tracking which unit each one belongs in front of.
+pub struct Produced {
+    pub formats: Vec<Format>,
+    pub units: Vec<VideoUnit>,
+}
+
+/// One stream's `ServerMsg::VideoFormat`, owed because it is new or because its configuration
+/// string changed.
+pub struct Format {
+    pub stream: u8,
+    pub codec: &'static str,
+    pub decode: String,
 }
 
 #[cfg(test)]
@@ -887,7 +932,7 @@ mod tests {
     /// test about two *separate* regions needs a desktop at least three cells wide:
     /// neighbouring cells coalesce into one.
     async fn sized(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(Policy::Moving, 60, None);
+        let mut regions = Regions::new(Policy::Moving, VideoCodec::Vp9, 60, None);
         regions.want(w, h);
         let bytes = usize::from(w) * usize::from(h) * 3;
         regions

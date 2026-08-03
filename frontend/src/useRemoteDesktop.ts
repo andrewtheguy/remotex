@@ -36,6 +36,7 @@ import {
   MIN_ZOOM,
   type Point,
 } from "./touchGestures.ts";
+import { acceptedVideoCodecs } from "./videoCodecs.ts";
 
 // The WebSocket/claim connection-flow state machine (independent of the
 // picker-vs-desktop `mode` the attached socket carries):
@@ -1178,6 +1179,21 @@ export function useRemoteDesktop(
       setCanClipboard(msg.clipboard);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
+      // The takeover case, and the only reason `video` is on this message. A browser
+      // that attached to a session somebody else started never sent `connect`, so it had
+      // no say in the codec: saying so now is the difference between a named sentence and
+      // a black window followed by a decoder error nobody can act on. Told rather than
+      // fixed, because fixing it means a new engine — which is what picking the target
+      // again does, and what this says to do.
+      if (msg.video) {
+        void acceptedVideoCodecs().then((accepted) => {
+          setVideoError(
+            accepted.includes(msg.video as string)
+              ? null
+              : `This session is streaming ${msg.video?.toUpperCase()}, which this browser cannot decode. Switch target and pick it again.`,
+          );
+        });
+      }
       // Manual on every connect, before either branch: a reattach, a target switch
       // and a takeover all arrive with the remote's own size left alone. The
       // remembered default is then applied below, once permission is known — and it
@@ -1277,6 +1293,16 @@ export function useRemoteDesktop(
           break;
         case "audioFormat":
           startAudio(msg);
+          break;
+        case "videoFormat":
+          // Straight to the painter, which owns the decoders. Nothing here holds it:
+          // this is the announcement, and every unit after it is already routed by
+          // `stream` id. A browser that cannot decode what it names finds out from the
+          // decoder's own error, which arrives at `onVideoError` naming the codec.
+          painter.setVideoFormat(msg.stream, {
+            codec: msg.codec,
+            decode: msg.decode,
+          });
           break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
@@ -1475,7 +1501,14 @@ export function useRemoteDesktop(
         releaseAudio();
         audioContextRef.current = createAudioContext();
       }
-      sendRef.current({ type: "connect", target });
+      // The video codecs go with the pick, because the gateway builds the encoder from
+      // them and it builds it here. Awaited *after* the AudioContext above, which is the
+      // whole reason the order of these two statements matters: a gesture is spent by
+      // the first `await`, and audio's context is the one that needs one. The probe is
+      // memoized and started at module load, so in practice this is already resolved.
+      void acceptedVideoCodecs().then((videoCodecs) => {
+        sendRef.current({ type: "connect", target, videoCodecs });
+      });
     },
     [releaseAudio],
   );

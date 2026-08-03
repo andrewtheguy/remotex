@@ -32,7 +32,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{Subtype, TargetConfig};
+use crate::config::{Subtype, TargetConfig, VideoCodec};
 use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -439,8 +439,9 @@ pub async fn run(
     config: TargetConfig,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     frame_tx: mpsc::Sender<ServerMsg>,
+    codec: VideoCodec,
 ) {
-    let sink = TileSink::new("vnc", frame_tx, config.render_plan());
+    let sink = TileSink::new("vnc", frame_tx, config.render_plan(codec));
     session(config, input_rx, &sink).await;
     sink.finish().await;
 }
