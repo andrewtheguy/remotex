@@ -3,7 +3,7 @@
 //! Register both static `rdpsnd` and dynamic `AUDIO_PLAYBACK_DVC`; the server
 //! chooses between them, and the static form also depends on `rdpdr` registered
 //! by the session. Callbacks advertise one PCM format and only copy complete
-//! buffers, keeping resampling and Opus encoding off the RDP read loop.
+//! buffers, keeping resampling and audio encoding off the RDP read loop.
 
 use std::sync::Arc;
 
@@ -376,8 +376,7 @@ mod tests {
     /// that. The encoding itself is covered in [`crate::opus_stream`], which
     /// decodes what it encoded.
     fn one_frame_of_pcm() -> Vec<u8> {
-        let frames = crate::opus_stream::FRAME_FRAMES * PCM_CD_QUALITY.sample_rate as usize
-            / crate::opus_stream::OPUS_SAMPLE_RATE as usize;
+        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate);
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 
@@ -438,8 +437,10 @@ mod tests {
         let mut handler = Handler::new(Arc::clone(&bridge));
         handler.get_formats();
         let format = listener.negotiated_format().expect("answering the formats negotiates");
-        let (_head, packets) = listener.into_packets(format).expect("an encoder");
-        let mut stream = Box::pin(packets);
+        let encoded = listener
+            .into_packets(format, crate::config::AudioCodec::default())
+            .expect("an encoder");
+        let mut stream = Box::pin(encoded.packets);
 
         let frame = one_frame_of_pcm();
         handler.wave(0, 0, Cow::Borrowed(&frame));
@@ -544,7 +545,10 @@ mod tests {
             .expect("the client confirms training");
         assert!(!answer.is_empty(), "training must be confirmed");
 
-        let (_head, packets) = listener.into_packets(PCM_CD_QUALITY).expect("an encoder");
+        let packets = listener
+            .into_packets(PCM_CD_QUALITY, crate::config::AudioCodec::default())
+            .expect("an encoder")
+            .packets;
         let mut stream = Box::pin(packets);
 
         let samples = one_frame_of_pcm();
@@ -611,7 +615,10 @@ mod tests {
             .expect("the client confirms training");
         assert_eq!(answer.len(), 1, "training is confirmed");
 
-        let (_head, packets) = listener.into_packets(PCM_CD_QUALITY).expect("an encoder");
+        let packets = listener
+            .into_packets(PCM_CD_QUALITY, crate::config::AudioCodec::default())
+            .expect("an encoder")
+            .packets;
         let mut stream = Box::pin(packets);
 
         let samples = one_frame_of_pcm();
@@ -669,11 +676,11 @@ mod tests {
         // The dynamic channel gets there first.
         dvc.process(1, &server_formats(&[audio_format(PCM_CD_QUALITY)]))
             .unwrap();
-        let (_head, packets) = bridge
+        let encoded = bridge
             .take_listener()
-            .into_packets(PCM_CD_QUALITY)
+            .into_packets(PCM_CD_QUALITY, crate::config::AudioCodec::default())
             .expect("an encoder");
-        let mut stream = Box::pin(packets);
+        let mut stream = Box::pin(encoded.packets);
 
         // The two buffers are deliberately different lengths, because Opus makes
         // them otherwise indistinguishable: three frames from the transport that

@@ -184,6 +184,38 @@ pub enum RenderType {
     Video,
 }
 
+/// What a target's redirected audio is carried as, chosen per target because it
+/// is a bandwidth-against-processing trade and only the operator knows which side
+/// of it a given link is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AudioCodec {
+    /// Opus at 96 kbps in 20 ms packets ([`crate::opus_stream`]). The default,
+    /// and the right answer for any link that leaves the building: it is well
+    /// clear of where stereo Opus starts to be audibly lossy, and 96 kbps is a
+    /// fifteenth of what the alternative costs.
+    #[default]
+    Opus,
+    /// The remote's own PCM, unencoded and unresampled ([`crate::pcm_stream`]):
+    /// 1.41 Mbit/s, no encoder in the gateway and no decoder in the client.
+    ///
+    /// For a fast local network, where those megabits are free and the thing
+    /// worth removing is everything that touches a sample. It is also the only
+    /// option that plays without WebCodecs, and therefore the only one that
+    /// works over plain `http://` to a host that is not `localhost`.
+    Pcm,
+}
+
+impl AudioCodec {
+    /// How the config key spells it, for messages that name it back.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Opus => "opus",
+            Self::Pcm => "pcm",
+        }
+    }
+}
+
 /// The codec a target's **base** tiles are encoded with — the second render axis,
 /// paired with [`RenderType`]. Under `full` and `fixed-quality` that is every
 /// tile; under [`RenderType::Motion`] it is every tile except the ones currently
@@ -415,6 +447,12 @@ pub struct TargetConfig {
     /// client subscribes. Rejected for VNC.
     #[serde(default)]
     pub audio: bool,
+    /// Which codec [`Self::audio`] encodes with; `None` reads as
+    /// [`AudioCodec::Opus`]. `Option` rather than a bare default so that setting
+    /// it on a target that never enabled audio is refused at parse time instead
+    /// of accepted and left inert.
+    #[serde(default)]
+    pub audio_codec: Option<AudioCodec>,
     /// Quality *strategy* for this target's tiles. Defaults to [`RenderType::Full`]
     /// (lossless PNG), so an unset target is byte-identical to before the dial
     /// existed. Validated against [`Self::render_subtype`] and [`Self::render_quality`]
@@ -733,6 +771,14 @@ impl ConfigFile {
                  support — MS-RDPEA is the one audio channel the gateway speaks",
                 target.name,
                 target.protocol.name()
+            );
+            // Same rule one step down: a codec for audio that was never turned on
+            // is a key that could not do anything, and the likely typo behind it
+            // is a forgotten `audio = true` rather than a deliberate choice.
+            anyhow::ensure!(
+                target.audio_codec.is_none() || target.audio,
+                "target {:?} sets audio_codec but not audio, so nothing would encode",
+                target.name
             );
             // Which credentials a VNC target may carry is the subtype's to say,
             // and the two sets do not overlap: an Apple subtype authenticates an
@@ -2529,5 +2575,87 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("audio"), "{rendered}");
         assert!(rendered.contains("vnc"), "{rendered}");
+    }
+
+    /// An audio target that says nothing about the codec gets Opus, and one that
+    /// asks for passthrough gets it. The default is the load-bearing half: it is
+    /// what keeps every existing config encoding exactly what it encoded before.
+    #[test]
+    fn the_audio_codec_defaults_to_opus_and_can_be_asked_for() {
+        let config = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "quiet"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            audio = true
+
+            [[targets]]
+            name = "on-the-lan"
+            protocol = "rdp"
+            host = "10.0.0.6"
+            audio = true
+            audio_codec = "pcm"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert_eq!(config.targets[0].audio_codec, None);
+        assert_eq!(
+            config.targets[0].audio_codec.unwrap_or_default(),
+            AudioCodec::Opus,
+            "an unset codec reads as Opus"
+        );
+        assert_eq!(config.targets[1].audio_codec, Some(AudioCodec::Pcm));
+    }
+
+    /// A codec without the audio it would encode is refused rather than ignored:
+    /// the likely mistake behind it is a forgotten `audio = true`, and a silently
+    /// accepted key would leave that looking like a codec that does not work.
+    #[test]
+    fn an_audio_codec_without_audio_is_refused() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            audio_codec = "pcm"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("audio_codec"), "{rendered}");
+    }
+
+    /// The codec names are the config's, not Rust's: `pcm`, never `Pcm`.
+    #[test]
+    fn an_unknown_audio_codec_is_refused_by_name() {
+        let err = ConfigFile::parse(&format!(
+            r#"
+            [server]
+            {}
+
+            [[targets]]
+            name = "win"
+            protocol = "rdp"
+            host = "10.0.0.5"
+            audio = true
+            audio_codec = "mp3"
+            "#,
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("audio_codec"), "{rendered}");
     }
 }

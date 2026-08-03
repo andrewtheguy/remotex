@@ -38,6 +38,7 @@ async fn spawn_app() -> SocketAddr {
             resize: false,
             clipboard: false,
             audio: false,
+            audio_codec: None,
             render_type: remotex::config::RenderType::Full,
             render_subtype: remotex::config::RenderSubtype::Png,
             render_quality: None,

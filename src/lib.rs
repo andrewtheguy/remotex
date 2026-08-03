@@ -14,6 +14,8 @@ pub mod error;
 pub mod h264;
 pub mod keymap;
 pub mod opus_stream;
+pub mod pcm48;
+pub mod pcm_stream;
 pub mod protocol;
 pub mod rdp;
 pub mod rdp_audio;

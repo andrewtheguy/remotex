@@ -40,7 +40,15 @@ export type CanvasCommand =
       codec: string;
       sampleRate: number;
       channels: number;
-      /** `OpusHead`, base64, exactly as the control message carried it. */
+      /**
+       * Samples in one packet at `sampleRate`: 960 on Opus, and 0 on passthrough,
+       * whose packets carry their own length.
+       */
+      packetFrames: number;
+      /**
+       * The decoder configuration for `codec` — an `OpusHead`, or empty where
+       * there is no decoder — base64, exactly as the control message carried it.
+       */
       head: string;
     }
   | { type: "audioStop" }

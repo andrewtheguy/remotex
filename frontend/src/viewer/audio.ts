@@ -1,9 +1,14 @@
-// Remote audio, over the same WebCodecs path the browser SPA uses.
+// Remote audio, over the same playback path the browser SPA uses — WebCodecs for
+// an encoded target, and straight to Web Audio for a passthrough one.
 //
 // The app owns the *subscription* — the Remote menu's toggle is what puts
 // `{"type":"audio"}` on the wire — and this page owns decode and playback. It
 // reports back only what the menu cannot know from the wire: whether sound is
 // actually coming out, and why not when it isn't.
+//
+// Which of the two paths applies is `createAudioPlayer`'s to decide, since the
+// format is what says so; a browser with no decoder surfaces from its throw,
+// caught below, rather than from a check made before the format arrived.
 //
 // There is no enabling gesture here, unlike in a browser tab. The app sets
 // `mediaTypesRequiringUserActionForPlayback` to nothing, so the context can be
@@ -11,7 +16,6 @@
 
 import {
   type AudioPlayer,
-  audioUnavailable,
   createAudioContext,
   createAudioPlayer,
   decodeAudioHead,
@@ -23,6 +27,7 @@ export interface ViewerAudio {
     codec: string;
     sampleRate: number;
     channels: number;
+    packetFrames: number;
     head: string;
   }): void;
   /** One binary audio frame, verbatim off the gateway's socket. */
@@ -53,11 +58,6 @@ export function createViewerAudio(handlers: {
   return {
     start(format) {
       release();
-      const unavailable = audioUnavailable();
-      if (unavailable) {
-        handlers.onState(false, unavailable);
-        return;
-      }
       try {
         // Held here before the player is built, not in a local: if
         // `createAudioPlayer` throws, `fail` -> `release` is the only thing that
@@ -69,6 +69,7 @@ export function createViewerAudio(handlers: {
             codec: format.codec,
             sampleRate: format.sampleRate,
             channels: format.channels,
+            packetFrames: format.packetFrames,
             head: decodeAudioHead(format.head),
           },
           context,

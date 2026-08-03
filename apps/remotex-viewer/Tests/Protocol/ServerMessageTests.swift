@@ -185,7 +185,7 @@ struct ServerMessageTests {
     func audioFormatDecodesItsHeadFromBase64() throws {
         let message = try ServerMessage.decode(#"""
         {"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
-        "head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}
+        "packetFrames":960,"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}
         """#)
         guard case .audioFormat(let format) = message else {
             Issue.record("expected audioFormat, got \(message)")
@@ -194,11 +194,38 @@ struct ServerMessageTests {
         #expect(format.codec == "opus")
         #expect(format.sampleRate == 48_000)
         #expect(format.channels == 2)
+        #expect(format.packetFrames == 960)
         #expect(format.head.count == 19)
         #expect(format.head.prefix(8) == Data("OpusHead".utf8))
         // Bytes 10–11, little-endian: the encoder's own delay, which the gateway builds
         // rather than stubs.
         #expect(UInt16(format.head[10]) | (UInt16(format.head[11]) << 8) == 312)
+    }
+
+    /// The same message for an `audio_codec = "pcm"` target, exactly as
+    /// `src/protocol.rs` pins it, and every value in it differs. This app plays
+    /// neither kind — the canvas page does — so what has to hold here is that nothing
+    /// in the parser assumes Opus: not the codec string, not 48 kHz, not the 20 ms
+    /// packet, and not a head at all.
+    ///
+    /// The empty head is the one to watch. `Data(base64Encoded: "")` is a valid empty
+    /// `Data` and not a failure, and it has to stay that way: parsing it as malformed
+    /// would report a passthrough target as a broken message.
+    @Test
+    func audioFormatCarriesPassthroughJustAsWell() throws {
+        let message = try ServerMessage.decode(#"""
+        {"type":"audioFormat","codec":"pcm-s16le","sampleRate":44100,"channels":2,\#
+        "packetFrames":0,"head":""}
+        """#)
+        guard case .audioFormat(let format) = message else {
+            Issue.record("expected audioFormat, got \(message)")
+            return
+        }
+        #expect(format.codec == "pcm-s16le")
+        #expect(format.sampleRate == 44_100, "the remote's own rate, not the encoder's")
+        #expect(format.channels == 2)
+        #expect(format.packetFrames == 0, "each packet's length is its own")
+        #expect(format.head.isEmpty, "there is no decoder to configure")
     }
 
     /// A tag this build *does* know, arriving with a payload it cannot read, is
@@ -211,12 +238,25 @@ struct ServerMessageTests {
         expectMalformed(
             #"""
             {"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
-            "head":"not base64 !!"}
+            "packetFrames":960,"head":"not base64 !!"}
             """#,
             type: "audioFormat"
         )
         expectMalformed(
-            #"{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2}"#,
+            #"""
+            {"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
+            "packetFrames":960}
+            """#,
+            type: "audioFormat"
+        )
+        // A packet length is not optional: without it the page has no honest
+        // timestamp to stamp on a chunk. Missing is not the same as the 0 a
+        // passthrough target sends, which says the packets carry their own.
+        expectMalformed(
+            #"""
+            {"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
+            "head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}
+            """#,
             type: "audioFormat"
         )
         expectMalformed(#"{"type":"resize","w":1280,"scale":1.0}"#, type: "resize")

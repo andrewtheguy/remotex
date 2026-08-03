@@ -313,6 +313,7 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: false,
+            audio_codec: None,
             render_type: crate::config::RenderType::Full,
             render_subtype: crate::config::RenderSubtype::Png,
             render_quality: None,

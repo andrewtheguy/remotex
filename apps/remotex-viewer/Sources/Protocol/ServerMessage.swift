@@ -115,53 +115,66 @@ enum ServerMessage: Sendable, Equatable {
 
     /// The `audioFormat` payload: everything needed to build a decoder.
     ///
-    /// `sampleRate` is 48 000 whatever the remote negotiated — libopus encodes at that
-    /// rate and nothing else, so the gateway resamples on the way in
-    /// (`src/opus_stream.rs`) and this is the rate the packets are actually in.
+    /// `sampleRate` is the rate the packets are actually in, and which rate that is
+    /// depends on the target: 48 000 for an encoded stream, because the gateway
+    /// resamples to it on the way in (`src/pcm48.rs`), and the remote's own rate
+    /// under `audio_codec = "pcm"`, because nothing resampled it.
+    ///
+    /// Nothing here is interpreted. This app has no audio decoder of its own; every
+    /// field is forwarded verbatim to the canvas page, which decides from them
+    /// whether to build a WebCodecs decoder at all. That is why a second option cost
+    /// this type one field and no logic.
     struct AudioFormat: Sendable, Equatable, Decodable {
-        /// `"opus"`, and there is no second codec to branch on: the gateway sends Opus
-        /// with no fallback representation in either direction. Carried rather than
-        /// assumed so a gateway that grew one is *refused* by the canvas page's decoder
-        /// instead of
-        /// being fed to a decoder built for something else.
+        /// `"opus"` — a WebCodecs codec string — or `"pcm-s16le"` for a target
+        /// configured `audio_codec = "pcm"`, which is not a WebCodecs codec at all
+        /// and tells the page to play the packets rather than decode them. Carried
+        /// rather than assumed, so a name this build has never heard of is *refused*
+        /// by the page instead of being fed to a decoder built for something else.
         let codec: String
         let sampleRate: Double
         let channels: UInt32
-        /// `OpusHead` (RFC 7845 §5.1), verbatim.
+        /// Samples in one packet at `sampleRate`: 960 for Opus's 20 ms frame, and 0
+        /// for passthrough, whose packets are whatever length the remote's buffers
+        /// were and so carry their own. The one number a client cannot work out from
+        /// the others, and what the page turns into a packet duration.
+        let packetFrames: UInt32
+        /// The decoder configuration for `codec`, verbatim: `OpusHead` (RFC 7845 §5.1),
+        /// or empty where there is no decoder to configure.
         ///
         /// base64 on the wire because a text frame cannot carry bytes — the same reason
-        /// the cursor's PNG is — and 19 bytes once a session is not worth a second
-        /// binary frame kind. macOS takes none of it as a magic cookie (measured: the
-        /// system decoder ignores one), so what this is *for* here is the pre-skip
-        /// inside it, which WebCodecs takes as the decoder config's `description` —
-        /// see `frontend/src/audioPlayer.ts`.
+        /// the cursor's PNG is — and tens of bytes once a session is not worth a second
+        /// binary frame kind. WebCodecs takes it as the decoder config's `description`
+        /// — see `frontend/src/audioPlayer.ts`.
         let head: Data
 
         private enum CodingKeys: String, CodingKey {
             case codec
             case sampleRate
             case channels
+            case packetFrames
             case head
         }
 
         /// Spelled out because the custom `init(from:)` below suppresses the memberwise
         /// one, and the decoder's tests build these directly.
-        init(codec: String, sampleRate: Double, channels: UInt32, head: Data) {
+        init(codec: String, sampleRate: Double, channels: UInt32, packetFrames: UInt32, head: Data) {
             self.codec = codec
             self.sampleRate = sampleRate
             self.channels = channels
+            self.packetFrames = packetFrames
             self.head = head
         }
 
         /// Hand-written for `head` alone: base64 that will not decode is drift worth
         /// reporting as `malformed`, right here where the tag is still known, rather
         /// than an empty `Data` that fails later inside a decoder as "this browser
-        /// cannot play Opus".
+        /// cannot play the audio the gateway sends".
         init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             codec = try container.decode(String.self, forKey: .codec)
             sampleRate = try container.decode(Double.self, forKey: .sampleRate)
             channels = try container.decode(UInt32.self, forKey: .channels)
+            packetFrames = try container.decode(UInt32.self, forKey: .packetFrames)
             let encoded = try container.decode(String.self, forKey: .head)
             guard let bytes = Data(base64Encoded: encoded) else {
                 throw DecodingError.dataCorruptedError(

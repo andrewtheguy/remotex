@@ -144,11 +144,30 @@ password = "change-me"
 # says so.
 #
 # One thing worth knowing before switching this on, and it is the browser's alone:
-# it decodes the Opus the gateway sends with WebCodecs, which is **secure-context
-# only** — so a gateway reached over plain HTTP on a LAN address has no audio until
-# it is behind TLS (localhost is exempt). remotex.app has no such limit; it decodes
-# with AVAudioConverter over its own loopback gateway.
+# it decodes Opus with WebCodecs, which is **secure-context only** — so a gateway
+# reached over plain HTTP on a LAN address has no audio until it is behind TLS
+# (localhost is exempt). `audio_codec = "pcm"` below is the exception and needs no
+# decoder at all. remotex.app has no such limit either way: it plays through its
+# canvas page, served from its own loopback gateway.
 #audio = false
+
+# How that audio is carried. Ignored unless `audio = true` above, and refused
+# rather than ignored if it is set without it.
+#
+#   "opus" (the default) — 96 kbps, 20 ms packets. Well clear of where stereo Opus
+#     starts to be audibly lossy. Right for anything that leaves the building, and
+#     the one to leave alone unless the link is a fast local network.
+#   "pcm" — the remote's own samples, unencoded and unresampled, at 1.41 Mbit/s.
+#     Fifteen times the bandwidth, and in exchange nothing between the remote's
+#     mixer and the browser's output touches a sample: no encoder here, no decoder
+#     there. It is also the only option that plays without WebCodecs, so it is the
+#     one that works over plain HTTP to a LAN address.
+#
+# "pcm" is not the better-sounding option in any way you are likely to hear; it is
+# the simpler path. Reach for it on a fast LAN, or where the secure-context rule
+# above is in the way. Guacamole carries desktop audio this way and only this way,
+# which is where it came from.
+#audio_codec = "opus"
 
 # A VNC target needs host and, usually, one of the two passwords; domain and
 # security are ignored, and width/height only ever answer a default-size request

@@ -1,16 +1,56 @@
-// Browser-owned remote audio: WebCodecs decodes bare Opus packets and Web Audio
-// schedules them with bounded lead. AudioContext creation stays in the enabling
-// click, and non-local origins require HTTPS for WebCodecs.
+// Browser-owned remote audio: a packet becomes an `AudioBuffer`, and Web Audio
+// schedules it with bounded lead. There are two ways to get from one to the
+// other and `audioFormat` says which — WebCodecs decodes an encoded packet, and
+// a passthrough packet is already samples. The scheduling half below is the same
+// either way and is where the interesting behaviour is.
+//
+// AudioContext creation stays in the enabling click. WebCodecs is required only
+// for the encoded path, which is also the only one that needs a secure context.
 
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 
-/** What `audioFormat` said, which is what a decoder has to be configured with. */
+/** What `audioFormat` said, which is everything needed to play the packets. */
 export interface AudioFormat {
+  /** `"opus"` — a WebCodecs codec string — or {@link PCM_CODEC}. */
   codec: string;
+  /**
+   * The rate the packets are at: 48 kHz for Opus, because that is what the
+   * gateway resampled to, and the remote's own rate under {@link PCM_CODEC},
+   * because nothing resampled it. An `AudioBuffer` carries its own rate, so a
+   * context at a different one simply resamples on playback.
+   */
   sampleRate: number;
   channels: number;
-  /** `OpusHead`, verbatim: WebCodecs takes it as the config's `description`. */
+  /**
+   * Samples in one packet at `sampleRate`: 960 on Opus, and 0 under
+   * {@link PCM_CODEC}, whose packets are whatever length the remote's buffers
+   * were and so carry their own.
+   */
+  packetFrames: number;
+  /**
+   * `OpusHead`, verbatim: WebCodecs takes it as the config's `description`.
+   * Empty under {@link PCM_CODEC}, where there is no decoder to configure.
+   */
   head: Uint8Array;
+}
+
+/**
+ * The gateway is sending the remote's PCM as it arrived, not an encoded stream.
+ *
+ * Deliberately not a WebCodecs codec string, because there is no WebCodecs
+ * decoder for PCM and this path does not want one: the packets are interleaved
+ * signed 16-bit little-endian samples at `sampleRate`, which is what an
+ * `AudioBuffer` holds already. The name spells the sample format out because
+ * `audioFormat`'s other fields do not carry it.
+ */
+export const PCM_CODEC = "pcm-s16le";
+
+/**
+ * Whether this format has to go through WebCodecs, which is what decides
+ * whether {@link audioUnavailable} applies to it at all.
+ */
+export function needsDecoder(format: AudioFormat): boolean {
+  return format.codec !== PCM_CODEC;
 }
 
 /**
@@ -29,7 +69,7 @@ export function decodeAudioHead(head: string): Uint8Array {
 }
 
 export interface AudioPlayer {
-  /** One audio frame's Opus packets, in arrival order. */
+  /** One audio frame's encoded packets, in arrival order. */
   push(packets: Uint8Array[]): void;
   /**
    * Stop playing, and release the decoder **and the context** — the player takes
@@ -41,26 +81,37 @@ export interface AudioPlayer {
 }
 
 /**
- * Nominal length of one Opus packet, in microseconds.
+ * The rate the context is built at, before anything is known about the stream.
+ *
+ * A guess, and it has to be one: the context must exist inside the enabling
+ * click, and `audioFormat` arrives a round trip later. 48 kHz is the rate the
+ * gateway encodes at (src/pcm48.rs) and what most output hardware runs at, so
+ * the common case resamples nothing. A passthrough stream at 44.1 kHz does get
+ * resampled here — by Web Audio, on playback, exactly as it would be by the OS
+ * mixer for any buffer whose rate is not the device's. Nothing about the samples
+ * that crossed the network changed.
+ */
+const STREAM_RATE = 48_000;
+
+/**
+ * Nominal length of one packet, in microseconds, from what the gateway said.
  *
  * A decoder needs *increasing* timestamps on its input and derives nothing else
  * from them, so this is a label rather than a measurement — but it is the honest
- * label: the gateway cuts 20 ms frames (`FRAME_FRAMES` at 48 kHz in
- * src/opus_stream.rs) and every packet on this wire is one.
+ * label. Only the encoded path uses it; passthrough never reaches a decoder.
  */
-const PACKET_US = 20_000;
+function packetDurationUs(format: AudioFormat): number {
+  return Math.round((format.packetFrames / format.sampleRate) * 1_000_000);
+}
 
 /**
- * The rate everything here runs at.
+ * Why a *decoder* cannot be had here, distinguishing insecure origin from no
+ * decoder at all.
  *
- * Not a preference and not negotiable: libopus encodes at 48 kHz and nothing else,
- * so this is the rate the gateway's stream is in whatever the remote negotiated
- * (see src/opus_stream.rs). Naming it here lets the context be built before the
- * `audioFormat` message arrives, which is the whole trick below.
+ * Only asked about a format that needs one (see {@link needsDecoder}): a
+ * passthrough stream plays without WebCodecs, and so plays on origins where
+ * WebCodecs does not exist.
  */
-const OPUS_RATE = 48_000;
-
-/** Why audio cannot play here, distinguishing insecure origin from no decoder. */
 export function audioUnavailable(): string | null {
   if (typeof AudioDecoder !== "undefined") {
     return null;
@@ -84,7 +135,7 @@ export function createAudioContext(): AudioContext {
   const context = new AudioContext({
     // The stream's own rate, so the common case needs no resampling at all. A
     // device whose hardware disagrees resamples anyway, which is its business.
-    sampleRate: OPUS_RATE,
+    sampleRate: STREAM_RATE,
     latencyHint: "interactive",
   });
   void context.resume();
@@ -106,7 +157,8 @@ function decoderConfig(format: AudioFormat): AudioDecoderConfig {
 export interface AudioHandlers {
   /**
    * The decoder gave up, which on this path means one thing in practice: this
-   * browser will not decode Opus. There is no fallback to switch to, so this is
+   * browser will not decode what the target's codec produces. There is no
+   * fallback to switch to — the codec is the gateway's to choose — so this is
    * reported rather than worked around.
    */
   onError: (reason: string) => void;
@@ -117,54 +169,67 @@ export interface AudioHandlers {
 /**
  * Start playing on `context`, keeping the schedule under the ceiling.
  *
- * Throws if there is no `AudioDecoder` to be had (see [`audioUnavailable`]); an
- * *unsupported codec* is not a throw, because WebCodecs reports that
- * asynchronously — it arrives at `onError`.
+ * Throws if the format needs an `AudioDecoder` and there is none to be had (see
+ * {@link audioUnavailable}); an *unsupported codec* is not a throw, because
+ * WebCodecs reports that asynchronously — it arrives at `onError`.
  */
 export function createAudioPlayer(
   format: AudioFormat,
   context: AudioContext,
   handlers: AudioHandlers,
 ): AudioPlayer {
-  const unavailable = audioUnavailable();
-  if (unavailable) {
-    throw new Error(unavailable);
-  }
+  const packetUs = packetDurationUs(format);
   let nextAt = 0;
   let timestamp = 0;
   let closed = false;
   // Buffers scheduled past a lead clamp must be stopped to prevent overlap.
   let playing: AudioBufferSourceNode[] = [];
 
-  const decoder = new AudioDecoder({
-    output: (data) => {
-      try {
-        schedule(data);
-      } finally {
-        data.close();
-      }
-    },
-    // Nothing is recoverable here: a decoder that has failed will not decode the
-    // next packet either, and there is no second representation to switch to. This
-    // is also where "this browser cannot decode Opus" lands — `configure` accepts an
-    // unsupported codec and fails asynchronously.
-    error: (e) => {
-      console.error("audio: the decoder failed", e);
-      close();
-      handlers.onError(
-        e instanceof Error && e.name === "NotSupportedError"
-          ? "This browser cannot decode the Opus audio the gateway sends."
-          : "This browser's audio decoder failed.",
-      );
-    },
-  });
-  decoder.configure(decoderConfig(format));
+  // Null on the passthrough path, where a packet is already samples. That is the
+  // whole of the difference: everything below `schedule` is shared, because a
+  // buffer is a buffer however it was arrived at.
+  const decoder = needsDecoder(format) ? createDecoder() : null;
 
-  function schedule(data: AudioData): void {
-    if (closed || data.numberOfFrames === 0) {
+  function createDecoder(): AudioDecoder {
+    const unavailable = audioUnavailable();
+    if (unavailable) {
+      throw new Error(unavailable);
+    }
+    const built = new AudioDecoder({
+      output: (data) => {
+        try {
+          // Checked before the buffer is built, not after: `createBuffer`
+          // throws on a zero-length buffer rather than returning an empty one.
+          if (data.numberOfFrames > 0) {
+            schedule(toAudioBuffer(context, data));
+          }
+        } finally {
+          data.close();
+        }
+      },
+      // Nothing is recoverable here: a decoder that has failed will not decode the
+      // next packet either, and there is no second representation to switch to. This
+      // is also where "this browser cannot decode this codec" lands — `configure`
+      // accepts an unsupported codec and fails asynchronously — so the message names
+      // the codec, which is the thing worth putting in a bug report.
+      error: (e) => {
+        console.error("audio: the decoder failed", e);
+        close();
+        handlers.onError(
+          e instanceof Error && e.name === "NotSupportedError"
+            ? `This browser cannot decode the ${format.codec} audio the gateway sends.`
+            : "This browser's audio decoder failed.",
+        );
+      },
+    });
+    built.configure(decoderConfig(format));
+    return built;
+  }
+
+  function schedule(buffer: AudioBuffer): void {
+    if (closed || buffer.length === 0) {
       return;
     }
-    const buffer = toAudioBuffer(context, data);
     const at: Scheduled = scheduleBuffer(
       nextAt,
       context.currentTime,
@@ -203,7 +268,7 @@ export function createAudioPlayer(
       source.stop();
     }
     playing = [];
-    if (decoder.state !== "closed") {
+    if (decoder && decoder.state !== "closed") {
       decoder.close();
     }
     void context.close();
@@ -211,12 +276,24 @@ export function createAudioPlayer(
 
   return {
     push(packets) {
-      if (closed || decoder.state !== "configured") {
+      if (closed) {
+        return;
+      }
+      if (!decoder) {
+        for (const packet of packets) {
+          if (packet.byteLength >= format.channels * 2) {
+            schedule(pcmToAudioBuffer(context, packet, format));
+          }
+        }
+        return;
+      }
+      if (decoder.state !== "configured") {
         return;
       }
       for (const packet of packets) {
-        // Every Opus packet is independently decodable, so they are all key frames —
-        // which is also why a listener can attach mid-stream at all.
+        // Every packet on this wire is independently decodable — an Opus packet
+        // is — so they are all key frames, which is also why a listener can
+        // attach mid-stream at all.
         decoder.decode(
           new EncodedAudioChunk({
             type: "key",
@@ -224,11 +301,77 @@ export function createAudioPlayer(
             data: packet,
           }),
         );
-        timestamp += PACKET_US;
+        timestamp += packetUs;
       }
     },
     close,
   };
+}
+
+/**
+ * One passthrough packet, split into a planar `f32` channel each.
+ *
+ * The only conversion on this whole path, and it is forced: `AudioBuffer` holds
+ * planar `f32` and there is no arrangement in which it does not. `/ 32768` is the
+ * exact inverse of the gateway's own scaling (src/pcm48.rs), so `i16::MIN` maps
+ * to exactly -1.0 and nothing is clipped.
+ *
+ * Planar rather than interleaved for the same reason the gateway's resampler
+ * works that way: anything that treats interleaved samples as one signal blends
+ * left into right.
+ *
+ * The frame count comes from the packet's own length, because there is nowhere
+ * else it could come from — passthrough packets are whatever size the remote's
+ * wave buffers were, which is why `packetFrames` is 0. A trailing part-frame is
+ * dropped; the gateway holds one back rather than sending it (src/pcm_stream.rs),
+ * so this is the floor under a malformed packet rather than a case that happens.
+ */
+export function pcmChannels(
+  packet: Uint8Array,
+  channels: number,
+  // Backed by an `ArrayBuffer` rather than the wider `ArrayBufferLike`, which is
+  // what `copyToChannel` takes: a `SharedArrayBuffer` is not something these are
+  // ever built on, and saying so here is what lets the buffer be filled directly.
+): Float32Array<ArrayBuffer>[] {
+  const frames = Math.floor(packet.byteLength / (channels * 2));
+  // A view over the packet's own bytes: `decodeAudioFrame` hands out subarrays,
+  // so the offset is not zero and `new DataView(packet.buffer)` would read some
+  // other packet in the same frame.
+  const view = new DataView(
+    packet.buffer,
+    packet.byteOffset,
+    packet.byteLength,
+  );
+  const planes: Float32Array<ArrayBuffer>[] = [];
+  for (let channel = 0; channel < channels; channel++) {
+    const plane = new Float32Array(frames);
+    for (let frame = 0; frame < frames; frame++) {
+      plane[frame] =
+        view.getInt16((frame * channels + channel) * 2, true) / 32_768;
+    }
+    planes.push(plane);
+  }
+  return planes;
+}
+
+/** One passthrough packet as something Web Audio can play. */
+function pcmToAudioBuffer(
+  context: AudioContext,
+  packet: Uint8Array,
+  format: AudioFormat,
+): AudioBuffer {
+  const planes = pcmChannels(packet, format.channels);
+  const buffer = context.createBuffer(
+    format.channels,
+    // Never zero: `createBuffer` throws on a zero-length buffer, and the caller
+    // already skips a packet too short to hold a frame.
+    Math.max(planes[0]?.length ?? 0, 1),
+    format.sampleRate,
+  );
+  for (const [channel, plane] of planes.entries()) {
+    buffer.copyToChannel(plane, channel);
+  }
+  return buffer;
 }
 
 /**

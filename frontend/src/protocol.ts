@@ -153,15 +153,23 @@ export type ControlMsg =
       clipboard: boolean;
       audio: boolean;
     }
-  // How to decode the audio frames that follow, sent once when audio is enabled and
+  // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already
-  // thrown away the audio it was meant to decode. `head` is base64 `OpusHead`,
-  // which carries the channel count and the encoder's pre-skip.
+  // thrown away the audio it was meant to decode.
+  //
+  // `codec` is `opus`, with the base64 `OpusHead` in `head` and `sampleRate` the
+  // 48 kHz the gateway resampled to — or `pcm-s16le`, which is not a WebCodecs
+  // codec at all: `head` is then empty, `sampleRate` is the remote's own, and the
+  // packets are interleaved signed 16-bit little-endian samples to play directly.
+  // `packetFrames` is the samples in one packet at `sampleRate` — 960 on Opus, and
+  // 0 on passthrough, whose packets carry their own length — and is the one thing
+  // a client cannot derive for itself.
   | {
       type: "audioFormat";
       codec: string;
       sampleRate: number;
       channels: number;
+      packetFrames: number;
       head: string;
     }
   // Whether the remote runs macOS, discovered by the engine as it connects.
