@@ -12,10 +12,12 @@
 //! browser loads. A protocol change is a change to the SPA and to nothing in this
 //! crate.
 //!
-//! **Threading.** Everything below runs on the main thread. CEF's browser process
-//! puts its UI thread there and AppKit is already there, so there is one thread
-//! rather than two that have to agree — which is why the state here is
-//! `thread_local!` and nothing is a `Mutex`.
+//! **Threading.** Almost everything below runs on the main thread. CEF's browser
+//! process puts its UI thread there and AppKit is already there, so there is one
+//! thread rather than two that have to agree — which is why the state here is
+//! `thread_local!`. The one exception is [`GATEWAY_ORIGIN`], which a scheme
+//! handler reads on the IO thread and which is therefore shared; see the note on
+//! it, and do not reach for a lock for anything else.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char, c_void};
@@ -95,8 +97,53 @@ thread_local! {
     static CONTEXT_READY: Cell<bool> = const { Cell::new(false) };
     /// A create that arrived before the context was ready, waiting for it.
     static PENDING_CREATE: RefCell<Option<PendingCreate>> = const { RefCell::new(None) };
-    /// The gateway origin the scheme handler injects into `index.html`.
-    static GATEWAY_ORIGIN: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// The gateway origin the scheme handler injects into `index.html`.
+///
+/// Shared rather than `thread_local!`, and read at the moment a request is
+/// answered rather than copied when the handler is made — because the two happen
+/// on different threads and in the wrong order. CEF calls a scheme handler
+/// factory on the **IO thread**, while the shell supplies this on the main thread;
+/// and the factory is built during `on_context_initialized`, which is before
+/// `remotex_cef_set_cookie` has said what the origin is. A copy taken then is
+/// always the empty string, and an empty `window.__remotexGateway` is a client
+/// that loads, paints its background, and then cannot reach anything.
+static GATEWAY_ORIGIN: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// Whether to narrate what the engine is doing, on this process's stderr.
+///
+/// Off unless `REMOTEX_CEF_TRACE` is set, and worth having at all because the
+/// interesting failures here are silent ones: a browser that is never created, a
+/// scheme handler that is never asked, a navigation refused by our own policy. All
+/// three look identical from the outside — an empty window — and none of them
+/// reaches Chromium's log.
+pub(crate) fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("REMOTEX_CEF_TRACE").is_some())
+}
+
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        if $crate::tracing() {
+            eprintln!("remotex-cef: {}", format_args!($($arg)*));
+        }
+    };
+}
+pub(crate) use trace;
+
+/// What the page should be told its gateway is.
+pub(crate) fn gateway_origin() -> String {
+    GATEWAY_ORIGIN
+        .read()
+        .map(|origin| origin.clone())
+        .unwrap_or_default()
+}
+
+fn set_gateway_origin(origin: &str) {
+    if let Ok(mut slot) = GATEWAY_ORIGIN.write() {
+        origin.clone_into(&mut slot);
+    }
 }
 
 struct PendingCreate {
@@ -170,40 +217,83 @@ pub unsafe extern "C" fn remotex_cef_initialize(
         schedule,
         context: schedule_context,
     });
-    let mut app = app::browser_app(web_root, String::new(), scheduler);
+    trace!("initialize: web root {web_root:?}, profile {cache_dir:?}");
+    let mut app = app::browser_app(web_root, scheduler);
 
+    // Four fields, and every one of them is here because this app needs it rather
+    // than because CEF wants telling.
+    //
+    // Nothing about *paths* is set. CEF derives the framework and the five helper
+    // bundles from the main executable's own location and name, and it is right
+    // about both — which is why the bundles are `remotex-viewer Helper (…)`, after
+    // this binary, and not `remotex Helper (…)` after the product. Naming them here
+    // instead was tried and made it worse: `browser_subprocess_path` covers only
+    // the plain helper, the four role-suffixed ones are derived regardless, and a
+    // `main_bundle_path` one directory out fails as every child refusing to launch
+    // rather than as a bad path. See `build-viewer-app.sh`, which makes them.
     let settings = Settings {
         // The shell owns the run loop — it is an AppKit app — so CEF is pumped
         // rather than given `[NSApp run]`. `on_schedule_message_pump_work` is the
         // other half of this one flag.
         external_message_pump: 1,
-        // The browser process passes a null `sandbox_info` on macOS and merely
-        // says the sandbox is on; entering it is the helper's job, which is why
-        // only `remotex-cef-helper` links `cef_sandbox`.
-        no_sandbox: 0,
-        // This instance's profile, and the reason it is not a default location:
+        // This instance's profile, and the reason it is not the default location:
         // the client's three remembered preferences live in `localStorage` here,
         // so `--instance-dir` isolating an instance has to isolate these too.
         cache_path: CefString::from(cache_dir.as_str()),
         root_cache_path: CefString::from(cache_dir.as_str()),
-        // The launch token goes in as a session cookie in every sense but this
-        // one: it must outlive the process, or a relaunch is unauthenticated.
-        persist_session_cookies: 1,
+        // Deliberately no `persist_session_cookies`. It governs cookies with no
+        // expiry, and the launch token is written with one — and would not want
+        // persisting anyway, since the gateway that minted it is gone by the next
+        // launch and the shell sets a fresh one before the first page load.
         ..Default::default()
     };
 
-    let args = args::Args::new();
-    initialize(
+    // This process's own argv, and nothing added to it. Chromium's switches are
+    // appended in `on_before_command_line_processing` instead, which is where the
+    // engine asks for them and what the shell's `ArgumentCheck` is then free to go
+    // on refusing an unknown `--option` at the front door.
+    //
+    // `Args` owns the C strings CEF will read for the life of the process, so it
+    // is leaked rather than dropped at the end of this function.
+    let args = Box::leak(Box::new(args::Args::new()));
+    #[allow(clippy::let_and_return)]
+    let started = initialize(
         Some(args.as_main_args()),
         Some(&settings),
         Some(&mut app),
         std::ptr::null_mut(),
-    ) == 1
+    ) == 1;
+    trace!("initialize returned {started}");
+    started
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn remotex_cef_do_work() {
+    PUMP_RAN.with(|count| {
+        let ran = count.get() + 1;
+        count.set(ran);
+        if ran <= 3 || ran % 1000 == 0 {
+            trace!("pump: {ran} slices run, {} scheduled", PUMP_ASKED.with(|c| c.get()));
+        }
+    });
     do_message_loop_work();
+}
+
+thread_local! {
+    static PUMP_RAN: Cell<u64> = const { Cell::new(0) };
+    static PUMP_ASKED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// CEF asked for a pump slice. Counted so a pump that has stopped being asked for
+/// and a pump that has stopped being run are two different symptoms.
+pub(crate) fn note_pump_scheduled(delay_ms: i64) {
+    PUMP_ASKED.with(|count| {
+        let asked = count.get() + 1;
+        count.set(asked);
+        if asked <= 3 || asked % 1000 == 0 {
+            trace!("pump: asked {asked} times, latest in {delay_ms} ms");
+        }
+    });
 }
 
 /// # Safety
@@ -217,7 +307,7 @@ pub unsafe extern "C" fn remotex_cef_set_cookie(
 ) {
     let origin = unsafe { string_from(gateway_origin) };
     let token = unsafe { string_from(token) };
-    GATEWAY_ORIGIN.with(|slot| *slot.borrow_mut() = origin.clone());
+    set_gateway_origin(&origin);
 
     let host = origin
         .split_once("://")
@@ -284,7 +374,7 @@ pub unsafe extern "C" fn remotex_cef_create(
 ) -> *mut RemotexCefBrowser {
     let origin = unsafe { string_from(gateway_origin) };
     if !origin.is_empty() {
-        GATEWAY_ORIGIN.with(|slot| *slot.borrow_mut() = origin);
+        set_gateway_origin(&origin);
     }
     let Some(on_message) = on_message else {
         return std::ptr::null_mut();
@@ -303,6 +393,7 @@ pub unsafe extern "C" fn remotex_cef_create(
     if CONTEXT_READY.with(|ready| ready.get()) {
         unsafe { spawn_browser(parent_view, handle) };
     } else {
+        trace!("create arrived before the context was ready; held");
         // The shell may put its view on screen before Chromium finishes coming
         // up. Held rather than refused, so the caller has one code path.
         PENDING_CREATE.with(|slot| {
@@ -319,6 +410,7 @@ pub unsafe extern "C" fn remotex_cef_create(
 /// `handle` must come from `remotex_cef_create` and still be live.
 unsafe fn spawn_browser(parent_view: *mut c_void, handle: *mut RemotexCefBrowser) {
     let entry = unsafe { &*handle };
+    trace!("creating a browser on {parent_view:?} for {}", scheme::index_url());
     let (mut cef_client, router) = client::client(entry.browser.clone(), entry.deliver.clone());
     *entry.router.borrow_mut() = Some(router);
     *entry.client.borrow_mut() = Some(cef_client.clone());
@@ -334,7 +426,7 @@ unsafe fn spawn_browser(parent_view: *mut c_void, handle: *mut RemotexCefBrowser
     );
     let url = CefString::from(scheme::index_url().as_str());
     let settings = BrowserSettings::default();
-    browser_host_create_browser(
+    let created = browser_host_create_browser(
         Some(&window_info),
         Some(&mut cef_client),
         Some(&url),
@@ -342,6 +434,7 @@ unsafe fn spawn_browser(parent_view: *mut c_void, handle: *mut RemotexCefBrowser
         None,
         None,
     );
+    trace!("browser_host_create_browser = {created}");
 }
 
 /// # Safety
@@ -394,9 +487,10 @@ pub unsafe extern "C" fn remotex_cef_resize(
         return;
     };
     let _ = (width, height);
-    // The child view is laid out by AppKit; this only tells Chromium that its
-    // window changed, which is what makes it re-read the size and repaint.
-    host.notify_move_or_resize_started();
+    // Only this. A windowed browser follows the `NSView` AppKit has already
+    // resized, so all that is wanted is to be told to re-read it.
+    // `notify_move_or_resize_started` was tried here and is for a *windowless*
+    // browser — CEF answers it with "Incorrect usage" in the log and does nothing.
     host.was_resized();
 }
 
@@ -404,25 +498,26 @@ pub unsafe extern "C" fn remotex_cef_resize(
 /// `browser` must come from `remotex_cef_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn remotex_cef_show_dev_tools(browser: *mut RemotexCefBrowser) {
-    #[cfg(debug_assertions)]
-    {
-        if browser.is_null() {
-            return;
-        }
-        let entry = unsafe { &*browser };
-        let Some(host) = entry
-            .browser
-            .borrow()
-            .as_ref()
-            .and_then(|browser| browser.host())
-        else {
-            return;
-        };
-        let window_info = WindowInfo::default();
-        host.show_dev_tools(Some(&window_info), None, None, None);
+    // Not gated on `debug_assertions`. A release build is the only build there is
+    // to look at — the bundle QA runs and the bundle that ships are the same one —
+    // and "why is the window blank" is answered by the inspector in a second and by
+    // a rebuild in a minute. It shows nothing a browser pointed at the same gateway
+    // would not; the client is a web page either way.
+    if browser.is_null() {
+        return;
     }
-    #[cfg(not(debug_assertions))]
-    let _ = browser;
+    let entry = unsafe { &*browser };
+    let Some(host) = entry
+        .browser
+        .borrow()
+        .as_ref()
+        .and_then(|browser| browser.host())
+    else {
+        return;
+    };
+    // Its own window, which is what an empty `WindowInfo` means on macOS.
+    let window_info = WindowInfo::default();
+    host.show_dev_tools(Some(&window_info), None, None, None);
 }
 
 /// # Safety

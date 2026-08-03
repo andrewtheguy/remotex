@@ -51,32 +51,122 @@ enum ChromiumHost {
             return
         }
         started = false
+        ChromiumPump.stop()
         remotex_cef_shutdown()
     }
 }
 
-/// Run one slice of Chromium's message pump, `delayMilliseconds` from now.
+/// CEF asking for a slice of its message pump, from whatever thread it likes.
 ///
-/// Always asynchronously, and never straight from the callback that asked for it:
-/// CEF schedules this from inside its own pump, so calling back in on that stack
-/// re-enters it. Hopping through the main queue is what keeps the two loops —
-/// AppKit's and Chromium's — taking turns rather than nesting.
-///
-/// A file-private top-level function because this becomes a C function pointer, and
-/// one of those can carry no context at all — not even an actor's.
+/// A C function pointer can carry no context at all — not even an actor's — so this
+/// is a top-level function, and all it does is get onto the main thread.
 private func chromiumSchedulePump(
     _ delayMilliseconds: Int64,
     _ context: UnsafeMutableRawPointer?
 ) {
-    let delay = Int(max(0, delayMilliseconds))
-    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delay)) {
+    DispatchQueue.main.async {
         MainActor.assumeIsolated {
-            // A pump scheduled before `stop` can still be in the queue after it,
-            // and running it then is a call into a shut-down engine.
-            guard ChromiumHost.isRunning else {
-                return
-            }
-            remotex_cef_do_work()
+            ChromiumPump.schedule(after: delayMilliseconds)
         }
+    }
+}
+
+/// Chromium's message loop, run by this app's.
+///
+/// With `external_message_pump` CEF does not run a loop of its own; it asks, and
+/// the host calls `cef_do_message_loop_work`. **Asking is not enough on its own**,
+/// and that is the whole reason this type exists rather than a `DispatchQueue.main
+/// .asyncAfter`: CEF's request is edge-triggered, so a browser that has gone quiet
+/// stops asking, and a load that then needs one more slice never gets it. What that
+/// looks like is a window that paints its background and stops — no error, no
+/// console message, no failed request, because the renderer is still there waiting
+/// for a browser process that has stopped turning. It froze after three slices.
+///
+/// So the pump keeps a **timer** as well, re-armed after every slice and never
+/// longer than 1/30 s. This is cefclient's `MainMessageLoopExternalPump`, port for
+/// port: the delay clamp, the reentrancy detection, and running the timer in the
+/// event-tracking run-loop mode as well as the common ones — that last one is why
+/// Chromium keeps painting while a menu is open, which `DispatchQueue.main` does
+/// not do.
+@MainActor
+enum ChromiumPump {
+    /// Never wait longer than this between slices: 1/30 s, as cefclient does.
+    private static let maxDelayMilliseconds: Int64 = 1000 / 30
+
+    private static var timer: Timer?
+    /// Inside `cef_do_message_loop_work`, which can re-enter through AppKit.
+    private static var working = false
+    private static var reentered = false
+
+    /// A slice, `delay` from now. Zero runs it at once.
+    static func schedule(after delay: Int64) {
+        guard ChromiumHost.isRunning else {
+            return
+        }
+        if delay <= 0 {
+            work()
+        } else {
+            setTimer(min(delay, maxDelayMilliseconds))
+        }
+    }
+
+    /// Take the timer down. Called on the way out, so nothing calls into an engine
+    /// that has been shut down.
+    static func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private static func work() {
+        if performWork() {
+            // Re-entered: let the stack unwind first, then finish the work.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { ChromiumPump.schedule(after: 0) }
+            }
+        } else if timer == nil {
+            // Nothing pending that we know of — which is exactly when CEF stops
+            // asking, so this is the tick that keeps it running.
+            setTimer(maxDelayMilliseconds)
+        }
+    }
+
+    /// One slice. Returns whether it was asked for from inside another.
+    private static func performWork() -> Bool {
+        if working {
+            reentered = true
+            return false
+        }
+        timer?.invalidate()
+        timer = nil
+        reentered = false
+        working = true
+        remotex_cef_do_work()
+        working = false
+        return reentered
+    }
+
+    private static func setTimer(_ delay: Int64) {
+        timer?.invalidate()
+        let timer = Timer(
+            timeInterval: max(0.001, Double(delay) / 1000),
+            repeats: false
+        ) { _ in
+            MainActor.assumeIsolated { ChromiumPump.timerFired() }
+        }
+        // Both modes, and the second is not redundant: a menu being tracked or a
+        // window being dragged puts the run loop in `eventTracking`, where a common
+        // -mode timer does not fire — and Chromium would stop for as long as the
+        // mouse is held down.
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        Self.timer = timer
+    }
+
+    private static func timerFired() {
+        timer = nil
+        guard ChromiumHost.isRunning else {
+            return
+        }
+        work()
     }
 }

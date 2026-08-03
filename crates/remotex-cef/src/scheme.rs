@@ -50,7 +50,13 @@ pub fn register_schemes(registrar: Option<&mut SchemeRegistrar>) {
         | sys::cef_scheme_options_t::CEF_SCHEME_OPTION_SECURE as i32
         | sys::cef_scheme_options_t::CEF_SCHEME_OPTION_CORS_ENABLED as i32
         | sys::cef_scheme_options_t::CEF_SCHEME_OPTION_FETCH_ENABLED as i32;
-    registrar.add_custom_scheme(Some(&CefString::from(SCHEME)), options);
+    let registered = registrar.add_custom_scheme(Some(&CefString::from(SCHEME)), options);
+    crate::trace!(
+        "register {SCHEME} = {registered} in {}",
+        std::env::args()
+            .find(|arg| arg.starts_with("--type="))
+            .unwrap_or_else(|| "--type=browser".to_owned())
+    );
 }
 
 /// What a request under the scheme resolves to, and what to answer with.
@@ -130,12 +136,18 @@ fn inject_gateway(body: &[u8], gateway_origin: &str) -> Vec<u8> {
     }
 }
 
+/// The mime type alone, **without** a `; charset=` on the end.
+///
+/// `CefResponse` has a field for each, and putting them in one string is not a
+/// harmless nicety: Chromium compares the mime type exactly, so
+/// `text/html; charset=utf-8` is not `text/html` and the client is rendered as its
+/// own source code. The charset goes through `set_charset`; see [`charset_for`].
 fn mime_for(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
+        Some("html") => "text/html",
+        Some("js") | Some("mjs") => "text/javascript",
+        Some("css") => "text/css",
+        Some("json") => "application/json",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
@@ -146,11 +158,19 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
+/// The charset for a text format, and nothing for the rest. `bun run build` writes
+/// UTF-8 and the injected script is UTF-8 by construction.
+fn charset_for(mime: &str) -> Option<&'static str> {
+    let text = mime.starts_with("text/")
+        || mime == "application/json"
+        || mime == "image/svg+xml";
+    text.then_some("utf-8")
+}
+
 // Answers every `remotex://app/…` request out of `web_root`.
 wrap_scheme_handler_factory! {
     pub struct AssetFactory {
         web_root: PathBuf,
-        gateway_origin: RefCell<String>,
     }
 
     impl SchemeHandlerFactory {
@@ -174,11 +194,18 @@ wrap_scheme_handler_factory! {
             // all would let CEF fall back to its own network stack, which for a
             // scheme only this process knows about means a blank window with
             // nothing said.
-            let asset = load(&self.web_root, &path, &self.gateway_origin.borrow());
+            let asset = load(&self.web_root, &path, &crate::gateway_origin());
             let missing = asset.is_none();
+            crate::trace!(
+                "serve {url} -> {}",
+                match &asset {
+                    Some(asset) => format!("{} bytes, {}", asset.body.len(), asset.mime),
+                    None => format!("404 (no {path:?} under {:?})", self.web_root),
+                }
+            );
             let (body, mime) = asset
                 .map(|asset| (asset.body, asset.mime))
-                .unwrap_or_else(|| (Vec::new(), "text/plain; charset=utf-8"));
+                .unwrap_or_else(|| (Vec::new(), "text/plain"));
             Some(AssetHandler::new(
                 RefCell::new(body),
                 RefCell::new(0),
@@ -223,10 +250,14 @@ wrap_resource_handler! {
             if let Some(response) = response {
                 response.set_status(if self.missing { 404 } else { 200 });
                 response.set_mime_type(Some(&CefString::from(self.mime.as_str())));
+                if let Some(charset) = charset_for(&self.mime) {
+                    response.set_charset(Some(&CefString::from(charset)));
+                }
             }
             if let Some(response_length) = response_length {
                 *response_length = self.body.borrow().len() as i64;
             }
+            crate::trace!("headers: {} bytes of {}", self.body.borrow().len(), self.mime);
         }
 
         // The raw pointer is CEF's signature, not a choice: the macro implements
@@ -259,6 +290,7 @@ wrap_resource_handler! {
             if let Some(bytes_read) = bytes_read {
                 *bytes_read = count as ::std::os::raw::c_int;
             }
+            crate::trace!("read: asked {bytes_to_read}, gave {count}, at {}", *offset);
             // Zero read with nothing left is end of stream, which is a 0 return;
             // anything copied is a 1.
             i32::from(count > 0)
@@ -268,13 +300,30 @@ wrap_resource_handler! {
 
 /// Build the factory that serves `web_root`, and the handle that lets the origin
 /// be set once the gateway's port is known.
-pub fn asset_factory(web_root: PathBuf, gateway_origin: String) -> SchemeHandlerFactory {
-    AssetFactory::new(web_root, RefCell::new(gateway_origin))
+pub fn asset_factory(web_root: PathBuf) -> SchemeHandlerFactory {
+    AssetFactory::new(web_root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mime type with the charset stuck on the end is not the mime type
+    /// Chromium is comparing against, and the symptom is not an error: the client
+    /// is served, loads, and renders as its own source code in a window that looks
+    /// exactly like a working one.
+    #[test]
+    fn a_mime_type_never_carries_its_charset() {
+        for name in ["index.html", "app.js", "app.css", "config.json", "logo.svg"] {
+            let mime = mime_for(Path::new(name));
+            assert!(!mime.contains(';'), "{name} -> {mime}");
+            assert_eq!(charset_for(mime), Some("utf-8"), "{name} -> {mime}");
+        }
+        assert_eq!(mime_for(Path::new("index.html")), "text/html");
+        // Binary formats say nothing about a charset, because they have none.
+        assert_eq!(charset_for(mime_for(Path::new("icon.png"))), None);
+        assert_eq!(charset_for(mime_for(Path::new("body.woff2"))), None);
+    }
 
     /// The gateway answers exactly one origin cross-origin, and this is where that
     /// string is spelled on the other side. They are two constants in two languages
