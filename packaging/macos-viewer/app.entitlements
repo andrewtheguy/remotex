@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The browser process, which is this app.
+
+	     One entitlement, and it buys one thing: the Chromium framework is loaded
+	     with `dlopen` at startup and is signed by us rather than by Apple, and a
+	     hardened process will not load a differently-signed library without this.
+
+	     Deliberately *not* the JIT pair the helpers get. Nothing in this process
+	     executes the page's JavaScript — V8 lives in the renderer, which is a
+	     separate binary with a separate signature and its own entitlements. Giving
+	     writable-executable memory to a process that has no use for it is the
+	     whole thing the hardened runtime exists to stop. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

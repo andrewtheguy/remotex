@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Chromium's subprocesses, and every one of these is what an engine needs
+	     rather than what this app wants.
+
+	     V8 compiles JavaScript to machine code and writes it into pages it then
+	     executes, which the hardened runtime forbids outright unless both of the
+	     first two are granted. Without them the renderer does not run slowly — it
+	     is killed the moment it JITs, which surfaces as a blank window.
+
+	     Library validation is disabled because the framework these load is signed
+	     by us and not by Apple, and dyld refuses a differently-signed library into
+	     a hardened process otherwise. The dyld environment variable is CEF's own
+	     mechanism for pointing a helper at that framework.
+
+	     Scoped to the helpers deliberately. The browser process below gets none of
+	     the JIT ones, because it never runs a line of the page's JavaScript. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

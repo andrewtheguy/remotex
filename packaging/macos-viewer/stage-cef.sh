@@ -46,8 +46,13 @@ cef_path="${CEF_PATH:-$HOME/.local/share/cef}"
 }
 export CEF_PATH="$cef_path"
 
-echo ">> building remotex-cef ($profile)"
-cargo build -p remotex-cef ${cargo_flags[@]+"${cargo_flags[@]}"}
+# Both crates in **one** cargo invocation, and this is not tidiness. `cef-dll-sys`
+# declares `rerun-if-env-changed=CEF_PATH`, so a second `cargo build` that does not
+# have this variable exported rebuilds it — and `cef`, and both crates on top —
+# every single time. Two invocations that disagree about one variable is the whole
+# difference between a one-minute edit-build-launch loop and a five-second one.
+echo ">> building remotex-cef and remotex-cef-helper ($profile)"
+cargo build -p remotex-cef -p remotex-cef-helper ${cargo_flags[@]+"${cargo_flags[@]}"}
 
 staging="target/cef-link"
 mkdir -p "$staging"
