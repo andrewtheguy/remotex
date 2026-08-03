@@ -137,9 +137,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test the native viewer
-        run: swift test --package-path apps/remotex-viewer
-
       # The bundle carries the remote surface as a web page, built from the same
       # sources as the browser client.
       - uses: oven-sh/setup-bun@v2
@@ -149,6 +146,39 @@ jobs:
       # included, on every release.
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Which CEF this build wants
+        id: cef
+        run: |
+          # From the lockfile, so the cache key follows the pinned engine and
+          # nothing else — a version bump in Cargo.toml must not throw away a
+          # 350 MB cache that is still correct.
+          version=$(python3 -c '
+          import tomllib
+          with open("Cargo.lock", "rb") as f:
+              lock = tomllib.load(f)
+          print(next(p["version"] for p in lock["package"] if p["name"] == "cef-dll-sys"))
+          ')
+          echo "Chromium Embedded Framework ${version}"
+          echo "version=${version//+/-}" >> "$GITHUB_OUTPUT"
+
+      # Chromium itself, which `stage-cef.sh` downloads here on a miss. Outside
+      # `target/`, so the Rust cache above does not cover it, and a miss costs the
+      # download *and* the cmake build of libcef_dll_wrapper that follows it.
+      - name: CEF cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/cef
+          key: cef-${{ runner.os }}-${{ runner.arch }}-${{ steps.cef.outputs.version }}
+
+      # Before the tests, not after. `Package.swift` links `-lremotex_cef` out of
+      # `target/cef-link` and this is the only thing that puts it there, so a test
+      # run on a fresh checkout does not fail — it fails to *link*.
+      - name: Stage the Chromium host crate
+        run: bash packaging/macos-viewer/stage-cef.sh
+
+      - name: Test the native viewer
+        run: swift test --package-path apps/remotex-viewer
 
       # Deliberately bare: no flags and no environment, so this is character for
       # character what a developer runs. Pinning CODESIGN_IDENTITY here would have
@@ -186,8 +216,9 @@ jobs:
             echo "::error::expected 'remotex ${version}', got '${got}'"
             exit 1
           }
-          # The client: the app loads this document from `file://` and the bundled
-          # gateway serves the same directory to any browser opened on its port.
+          # The client: the embedded Chromium serves this document to itself as
+          # `remotex://app` and the bundled gateway serves the same directory to
+          # any browser opened on its port.
           # Without it the app has nothing to show and says so at launch.
           [ -f "$app/Contents/Resources/web/index.html" ] || {
             echo "::error::remotex.app is missing the SPA it shows"

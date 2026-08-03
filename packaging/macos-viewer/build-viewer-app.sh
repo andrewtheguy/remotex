@@ -88,11 +88,11 @@ if [ "$configuration" = debug ]; then
   cargo_profile=debug
   cargo_flags=()
 fi
-# The same `CEF_PATH` every cargo invocation below sees. `cef-dll-sys` rebuilds
-# whenever this variable changes, so a script that sets it for one build and not
-# the next pays for a full Chromium-bindings rebuild on every run.
-export CEF_PATH="${CEF_PATH:-$HOME/.local/share/cef}"
-
+# Nothing about CEF is decided here — `stage-cef.sh` owns where it comes from,
+# including downloading it on a machine that has never built this before, and
+# leaves the answer in `target/cef-link/cef-dir`. Reading it back is what keeps
+# this script from making a second cargo invocation with a second opinion about
+# `CEF_PATH`, which `cef-dll-sys` answers by rebuilding the whole graph.
 packaging/macos-viewer/stage-cef.sh "$cargo_profile"
 cef_helper="target/$cargo_profile/remotex-cef-helper"
 [ -x "$cef_helper" ] || {
@@ -100,10 +100,7 @@ cef_helper="target/$cargo_profile/remotex-cef-helper"
   exit 1
 }
 
-# Where CEF actually is. Asked for rather than assumed: `CEF_PATH` names one place
-# and `cef-dll-sys`'s own download is another, under a hashed `OUT_DIR` no script
-# should be reconstructing.
-cef_dir="$(cargo run -q -p remotex-cef --bin cef-dir)"
+cef_dir="$(cat target/cef-link/cef-dir)"
 cef_framework="$cef_dir/Chromium Embedded Framework.framework"
 [ -d "$cef_framework" ] || {
   echo "no Chromium Embedded Framework at $cef_framework" >&2

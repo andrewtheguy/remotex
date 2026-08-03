@@ -580,9 +580,13 @@ builds but whose tile painter is wrong looks fine until pixels land.
 `stage-cef.sh` is what `Package.swift` links against: it builds `remotex-cef` and
 puts `libremotex_cef.a` and CEF's `libcef_sandbox.dylib` under `target/cef-link`.
 `build-viewer-app.sh` runs it itself; a bare `swift build` or `swift test` does not,
-and fails to link without it. CEF itself is expected at `$CEF_PATH`, default
-`~/.local/share/cef`; export one with
-`cargo run -p export-cef-dir -- --force "$HOME/.local/share/cef"`.
+and fails to link without it.
+
+**Nothing has to be installed first.** `CEF_PATH` — `~/.local/share/cef` unless set
+— is a place to keep Chromium, not a prerequisite to have met: `cef-dll-sys` uses
+what is there and downloads a distribution into it when there is not, so the first
+build on a new machine is the same command as every later one. It is about 350 MB,
+which is why CI caches that directory rather than the build that follows it.
 
 An edit to the shell or the Chromium host does not need the whole build:
 `packaging/macos-viewer/refresh-viewer-app.sh` replaces just those two in the
