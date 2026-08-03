@@ -164,6 +164,11 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+# Scratch directories for the tests that need a real path on disk: an instance
+# directory to serve from, and the ones behind `Instance::origin_label`, which
+# canonicalizes what it is given and so cannot be tested against a name that does
+# not exist.
+tempfile = "3"
 # The scripted Apple Screen Sharing server in tests/protocol_e2e.rs plays the
 # *server* side of Apple's DH authentication and wraps the record layer's key,
 # neither of which the gateway does. Written against the specification rather

@@ -33,42 +33,34 @@ pub fn test_auth() -> remotex::auth::GatewayAuth {
 /// A directory that removes itself, for a test that needs somewhere to put a
 /// config file.
 ///
-/// Hand-rolled rather than a `tempfile` dependency — and keyed on a counter as well as
-/// the pid, because one test binary makes several of these and two instance
+/// `tempfile` does the naming and the removal — a unique directory per call, which
+/// matters because one test binary makes several of these and two instance
 /// directories that turned out to be the same directory would quietly share a
-/// config.
+/// config. What is left here is the `tag`, so a path that survives a failure says
+/// which test made it, and the `write` helper below.
 #[allow(dead_code)]
-pub struct ScratchDir(std::path::PathBuf);
+pub struct ScratchDir(tempfile::TempDir);
 
 #[allow(dead_code)]
 impl ScratchDir {
     pub fn new(tag: &str) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "remotex-{tag}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(
+            tempfile::Builder::new()
+                .prefix(&format!("remotex-{tag}-"))
+                .tempdir()
+                .unwrap(),
+        )
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        self.0.path()
     }
 
     /// Write `contents` to `name` inside the directory.
     pub fn write(&self, name: &str, contents: &str) -> std::path::PathBuf {
-        let path = self.0.join(name);
+        let path = self.0.path().join(name);
         std::fs::write(&path, contents).unwrap();
         path
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
