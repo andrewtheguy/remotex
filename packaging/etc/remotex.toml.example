@@ -147,8 +147,8 @@ password = "change-me"
 # it decodes Opus with WebCodecs, which is **secure-context only** — so a gateway
 # reached over plain HTTP on a LAN address has no audio until it is behind TLS
 # (localhost is exempt). `audio_codec = "pcm"` below is the exception and needs no
-# decoder at all. remotex.app has no such limit either way: it plays through its
-# canvas page, served from its own loopback gateway.
+# decoder at all. remotex.app has no such limit either way: it shows this same
+# client, served by the gateway in its bundle over loopback.
 #audio = false
 
 # How that audio is carried. Ignored unless `audio = true` above, and refused

@@ -1,37 +1,32 @@
 # remotex.app for macOS
 
-`remotex.app` is the foreground macOS 26 client. Its first screen chooses between:
+`remotex.app` is a native macOS 26 **shell** around the browser client. It starts
+`Contents/MacOS/remotex-gateway` on an ephemeral loopback port, authenticates with
+a random token delivered through a private pipe, shows the SPA that gateway serves
+in a `WKWebView`, and stops the gateway when the app quits.
 
-- **On This Mac:** start `Contents/MacOS/remotex-gateway` on an ephemeral
-  loopback port, authenticate with a random bearer token delivered through a
-  private pipe, and stop the gateway when the app quits.
-- **Somewhere Else:** connect to a deployed gateway using its address and login.
+There is one gateway, in this bundle. A gateway elsewhere is reached with a
+browser.
 
-Both choices use the same config, target, session, and WebSocket APIs and differ
-only in the credential header on protected requests. The client owns:
+The app owns what a page cannot:
 
 - starting, supervising, and stopping the embedded gateway;
-- editing embedded-gateway configuration, validated before it is written;
-- target selection;
-- the session socket, including reconnects, takeover, and the single-slot claim;
-- the remote surface, which is a `WKWebView` showing
-  `Contents/Resources/canvas` — the app's own page, served from its own loopback
-  listener and handed wire frames. It presents the desktop at the remote point
-  size (`pixels / remote scale`) without fit-to-window scaling. Not the SPA, and
-  not a web UI on the embedded gateway, which still serves none;
-- keyboard input, and the window sizing behind **Resize to Display**;
-- application-level keyboard capture ahead of menu shortcuts;
-- Command translation that follows the remote (Control shortcuts for a non-Mac,
-  unchanged Command shortcuts for a Mac);
-- native `NSPasteboard` synchronization;
-- Remote menu commands for refresh, resize, clipboard, target switching,
-  takeover and, for the embedded gateway, configuration and restart.
+- editing its configuration, validated before it is written;
+- application-level keyboard capture ahead of menu shortcuts, which is what sends
+  ⌘Q, ⌘W, ⌘T and the rest to the guest instead of to this app or to WebKit;
+- native `NSPasteboard` synchronization in both directions;
+- the window, and the sizing behind **Resize to Display**;
+- the menu bar, whose Remote and Display items stand in for the floating menu the
+  client hides inside this window.
 
-The client checks `protocolVersion` from `GET /api/config` before either gateway
-opens a session. An embedded mismatch means a broken bundle; a remote mismatch
-means incompatible deployments. Both are reported before login or target selection.
-See [`../../docs/macos-viewer.md`](../../docs/macos-viewer.md) for both gateway
-paths, the embedded process contract, and the instance directory.
+Everything else — the login the gateway refuses, the target picker, the desktop,
+the claim, reconnects, takeover, tiles, cursor, audio, video — is the client's,
+and is the same code a browser runs. The app holds no session and speaks no wire
+protocol, so there is no version pair to keep in step: the client and the gateway
+are built together and shipped in one bundle.
+
+See [`../../docs/macos-viewer.md`](../../docs/macos-viewer.md) for the handshake,
+the cookie, the bridge, the process contract, and the instance directory.
 
 Nothing to configure per target beyond the target itself: the gateway's engine
 discovers whether the remote is a Mac while connecting and sends the one bit that
@@ -46,7 +41,7 @@ packaging/macos-viewer/build-viewer-app.sh
 ```
 
 The script builds both executables — the Swift app and the `remotex` gateway binary —
-plus the canvas page (so `bun` is required), and signs the nested executable first. It
+plus the SPA it shows (so `bun` is required), and signs the nested executable first. It
 ends with the installable disk image, whose file name keeps the
 `remotex-viewer-<version>` prefix because `remotex-<version>-macos-arm64.tar.gz` is
 already the CLI gateway's release asset. Both land in `dist/`: the image no longer
@@ -69,10 +64,9 @@ packaging/macos-viewer/build-viewer-app.sh
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 
-`--instance-dir` is the only GUI-launch argument and isolates config, gateway log,
-and preferences from the real instance in
-`~/Library/Application Support/remotex`. Delete the directory to start over.
-Gateway choice remains on the app's home screen.
+`--instance-dir` is the only GUI-launch argument and isolates the config and the
+gateway log from the real instance in `~/Library/Application Support/remotex`.
+Delete the directory to start over.
 
 To run a second instance *without* a flag, stamp out a bundle of its own:
 
@@ -85,11 +79,9 @@ It copies the app, gives it its own identifier, name and icon, and re-signs it i
 double-clickable with nothing to pass — see docs/macos-viewer.md, "Running more than
 one instance". It is a copy, so re-run it after each update.
 
-The home screen appears on every launch with the previous gateway choice selected.
-The embedded branch starts its gateway and reaches the picker or a launch screen
-carrying the gateway's explanation. Add embedded targets through **Remote ›
-Configuration…**, which validates before saving. Remote targets are configured on
-their gateway, so the local configuration command is hidden on that branch.
+Each launch starts the gateway and reaches the client's target picker, or a launch
+screen carrying the gateway's explanation. Add targets through **Remote ›
+Configuration…**, which validates before saving and restarts the gateway.
 
 Always launch the packaged `.app` during development. `swift run`, a standalone
 `swift build`, and directly launching the executable under `.build` bypass the
@@ -107,8 +99,12 @@ Command-Space remain owned by the operating system.
 
 The default-on **Enable macOS Keyboard Overrides** item in the **Remote** menu
 maps standard Command shortcuts to remote Control for Windows and Linux guests.
-Uncheck it to send Command unchanged as remote Meta. The preference persists
-across launches.
+Uncheck it to send Command unchanged as remote Meta. The preference is the
+client's and persists across launches with the client's other two.
+
+The mapping itself is the client's as well (`frontend/src/macKeys.ts`), shared with
+the browser. The one difference here is a bigger table: ⌘L, ⌘N, ⌘O, ⌘R, ⌘T and ⌘W
+are mapped only in this app, because only this app is given them.
 
 ## Clipboard permission
 
