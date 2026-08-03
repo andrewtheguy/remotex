@@ -23,10 +23,26 @@ enum ChromiumHost {
         guard !started else {
             return true
         }
-        try? FileManager.default.createDirectory(
-            at: profile,
-            withIntermediateDirectories: true
-        )
+        do {
+            try FileManager.default.createDirectory(
+                at: profile,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            // Said, and then carried on. CEF answers an unusable `cache_path` by
+            // falling back to in-memory storage, so the app still runs — it just
+            // forgets the client's three remembered preferences at every quit, which
+            // is the one failure here with no symptom of its own. Chromium's own
+            // complaint names the directory and stops there; this is the half that
+            // says why it could not be made.
+            FileHandle.standardError.write(Data(
+                """
+                remotex-viewer: \(profile.path) could not be created, so preferences \
+                will not survive a quit: \(error.localizedDescription)
+
+                """.utf8
+            ))
+        }
         started = webRoot.path.withCString { webRoot in
             profile.path.withCString { profile in
                 // A plain function reference rather than a closure: a C function

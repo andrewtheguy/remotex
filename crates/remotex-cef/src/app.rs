@@ -98,6 +98,10 @@ pub const DEFAULT_SWITCHES: &[&str] = &[
 /// every real launch does. It is only ever a diagnostic: a switch worth keeping
 /// belongs in the list above, with the reason.
 ///
+/// Switches are separated by whitespace, and a value that contains any is quoted —
+/// `--host-rules="MAP * 127.0.0.1:8080"`. The quotes are read here rather than by a
+/// shell, because this arrives as one environment string however it was typed.
+///
 /// ```sh
 /// # what the keychain switches are actually buying
 /// REMOTEX_CHROMIUM_SWITCHES="--disable-pinch" \
@@ -109,9 +113,53 @@ pub const SWITCHES_ENV: &str = "REMOTEX_CHROMIUM_SWITCHES";
 /// an optional value.
 pub fn switches() -> Vec<(String, Option<String>)> {
     match std::env::var(SWITCHES_ENV) {
-        Ok(spelled) => spelled.split_whitespace().map(parse_switch).collect(),
+        Ok(spelled) => split_switches(&spelled)
+            .iter()
+            .map(|switch| parse_switch(switch))
+            .collect(),
         Err(_) => DEFAULT_SWITCHES.iter().copied().map(parse_switch).collect(),
     }
+}
+
+/// Cut a typed switch list into switches, keeping a quoted value whole.
+///
+/// A switch value may contain spaces — `--host-rules="MAP * 127.0.0.1:8080"` is the
+/// obvious one, and [`parse_switch`] already handles the pair it makes. Splitting on
+/// whitespace alone would hand Chromium `--host-rules=MAP`, `*` and `127.0.0.1:8080`
+/// as three switches, two of which it has never heard of and none of which it will
+/// complain about. So the quote a shell would have eaten is honoured here instead:
+/// the variable is read out of the environment, where nothing has parsed it.
+fn split_switches(spelled: &str) -> Vec<String> {
+    let mut switches = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    for character in spelled.chars() {
+        match (quote, character) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, c @ ('"' | '\'')) => {
+                // An opening quote is itself the start of a switch, so that
+                // `--x=""` survives as an empty value rather than as nothing.
+                started = true;
+                quote = Some(c);
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    switches.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (None, c) => {
+                started = true;
+                current.push(c);
+            }
+        }
+    }
+    if started {
+        switches.push(current);
+    }
+    switches
 }
 
 /// Split `--name=value` into the pair CEF's two append calls need.
@@ -325,6 +373,32 @@ mod tests {
                 Some("MAP * 127.0.0.1:8080".to_owned())
             )
         );
+    }
+
+    /// A quoted value stays one switch, which is the half of the environment
+    /// variable's parse that whitespace alone gets wrong — see `split_switches`.
+    #[test]
+    fn a_quoted_value_survives_the_split() {
+        assert_eq!(
+            split_switches(r#"--disable-pinch --host-rules="MAP * 127.0.0.1:8080""#),
+            vec![
+                "--disable-pinch".to_owned(),
+                "--host-rules=MAP * 127.0.0.1:8080".to_owned()
+            ]
+        );
+        // Without them the spaces separate switches, and nothing here can tell that
+        // from three switches somebody meant. The quotes that matter are the inner
+        // ones — the outer pair a shell eats never reaches this function.
+        assert_eq!(
+            split_switches("--host-rules=MAP * 127.0.0.1:8080"),
+            vec![
+                "--host-rules=MAP".to_owned(),
+                "*".to_owned(),
+                "127.0.0.1:8080".to_owned()
+            ]
+        );
+        assert_eq!(split_switches("   "), Vec::<String>::new());
+        assert_eq!(split_switches(r#"--x="""#), vec!["--x=".to_owned()]);
     }
 
     /// The defaults must survive the same parse the environment variable gets, or

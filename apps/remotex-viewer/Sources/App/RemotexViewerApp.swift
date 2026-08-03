@@ -151,10 +151,29 @@ enum ViewerMain {
         // error to skip: `swift test` and `--version` both take this path, and the
         // window's own launch screen already says what a bundle-less build cannot do.
         if let webRoot = GatewayBinary.webRootInBundle() {
-            ChromiumHost.start(
-                webRoot: webRoot,
-                profile: InstanceDirectory.resolved().browserProfile
-            )
+            let instance = InstanceDirectory.resolved()
+            // Before the engine, because the engine's profile is *inside* this
+            // directory and creating a child creates the parent as a side effect —
+            // with the process umask rather than the `0700` this one has to have.
+            // `remotex.toml` beside it holds the credentials of every machine this
+            // app can reach, and `create` does not tighten a directory that already
+            // exists, so the order here is the only thing that sets the mode.
+            try? instance.create()
+            guard ChromiumHost.start(webRoot: webRoot, profile: instance.browserProfile) else {
+                // Terminal. There is no second engine to fall back to, and every
+                // screen this app has is drawn by the page that engine would show —
+                // so continuing would open a window that can never paint anything.
+                FileHandle.standardError.write(Data(
+                    """
+                    remotex-viewer: Chromium refused to start; \
+                    nothing can be displayed. Run \
+                    \(Bundle.main.executablePath ?? "remotex-viewer") \
+                    with REMOTEX_CEF_TRACE=1 to see how far it got.
+
+                    """.utf8
+                ))
+                Foundation.exit(EXIT_FAILURE)
+            }
         }
 
         NSWindow.allowsAutomaticWindowTabbing = false

@@ -249,9 +249,11 @@ pub unsafe extern "C" fn remotex_cef_initialize(
         cache_path: CefString::from(cache_dir.as_str()),
         root_cache_path: CefString::from(cache_dir.as_str()),
         // Deliberately no `persist_session_cookies`. It governs cookies with no
-        // expiry, and the launch token is written with one — and would not want
-        // persisting anyway, since the gateway that minted it is gone by the next
-        // launch and the shell sets a fresh one before the first page load.
+        // expiry; the launch token is written with one, so it is kept in the profile
+        // on disk regardless — and that is not a secret worth moving, since the
+        // gateway that would accept it is gone by the next launch, the shell writes a
+        // fresh one before the first page load, and the directory holding the jar is
+        // the `0700` one `remotex.toml` is already in.
         ..Default::default()
     };
 
@@ -494,6 +496,17 @@ pub unsafe extern "C" fn remotex_cef_close(browser: *mut RemotexCefBrowser) {
     if browser.is_null() {
         return;
     }
+    // Before the allocation goes, and only if it is this one: a create that arrived
+    // before the context was ready is still holding this same pointer, and
+    // `mark_context_ready` would spawn a browser on freed memory. A surface that
+    // came and went inside Chromium's startup is exactly that — the window's first
+    // `dismantleNSView` can beat `on_context_initialized`.
+    PENDING_CREATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|pending| pending.handle == browser) {
+            *slot = None;
+        }
+    });
     let entry = unsafe { Box::from_raw(browser) };
     if let Some(host) = entry
         .browser

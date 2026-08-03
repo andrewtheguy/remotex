@@ -35,9 +35,23 @@ fn main() {
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
     let mut app = remotex_cef::app::helper_app();
-    execute_process(
+    let code = execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
         std::ptr::null_mut(),
     );
+    // `-1` means "this is the browser process, carry on" — which cannot happen in
+    // this binary, but the sign is what distinguishes it from an exit code. Anything
+    // else is the subprocess's own status and has to be *this* process's too: the
+    // browser process reads a child's exit code to tell a renderer that crashed from
+    // one that finished, and returning from `main` would report every one of them as
+    // a clean zero.
+    //
+    // The seatbelt is torn down first, by hand: `exit` runs no destructors, and
+    // `cef_sandbox_destroy` is one.
+    #[cfg(target_os = "macos")]
+    drop(_sandbox);
+    if code >= 0 {
+        std::process::exit(code);
+    }
 }
