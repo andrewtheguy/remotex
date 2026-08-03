@@ -133,15 +133,23 @@ enum ViewerMain {
             Foundation.exit(EXIT_SUCCESS)
         }
 
-        // Chromium, before the window that shows it. Touching `NSApplication.shared`
-        // first is what instantiates `NSPrincipalClass`, and CEF asserts that the
-        // running app is that subclass — so the order here is the requirement, not a
-        // preference.
+        // Chromium, before the window that shows it — and `NSApp` before Chromium,
+        // because CEF sends `isHandlingSendEvent` to whatever application object it
+        // finds and there is no second chance to replace it.
         //
+        // Sent to `ViewerApplication` rather than to `NSApplication`, and that is the
+        // whole of it: `shared` is `+[NSApplication sharedApplication]`, which builds
+        // an instance of the class it was sent to. `NSPrincipalClass` is read by
+        // `NSApplicationMain` alone, which SwiftUI reaches long after this — so the
+        // plist entry never had a chance to matter and `NSApplication.shared` here
+        // quietly made a plain one. What that looked like was not a bad application
+        // object: it was an uncaught `unrecognized selector` the moment Chromium
+        // handled an event, i.e. a window that came up and died at the first click.
+        _ = ViewerApplication.shared
+
         // An unbundled build has no SPA and no engine to point at one. It is not an
         // error to skip: `swift test` and `--version` both take this path, and the
         // window's own launch screen already says what a bundle-less build cannot do.
-        _ = NSApplication.shared
         if let webRoot = GatewayBinary.webRootInBundle() {
             ChromiumHost.start(
                 webRoot: webRoot,
