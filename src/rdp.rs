@@ -25,7 +25,7 @@ use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp::dvc::DrdynvcClient;
 use ironrdp::graphics::image_processing::PixelFormat;
-use ironrdp::pdu::gcc::KeyboardType;
+use ironrdp::pdu::gcc::{ConnectionType, KeyboardType};
 use ironrdp::pdu::input::MousePdu;
 use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::PointerFlags;
@@ -568,6 +568,11 @@ async fn active_loop(
         pointer_software_rendering: connection_result.pointer_software_rendering,
     }
     .build();
+    // RDP6 bitmap streams from xrdp use the bottom-up scanline ordering that
+    // IronRDP exposed as an explicit compatibility mode when it fixed source
+    // stride handling. Keep the ordering used by the released decoder while
+    // taking the corrected, independent source stride.
+    active_stage.use_bottom_up_rdp6_bitmap_order();
 
     // Last known pointer position, so button/wheel events (which the browser
     // sends without coordinates) land where the cursor actually is.
@@ -1533,6 +1538,7 @@ fn build_connector_config(config: &TargetConfig) -> Config {
         keyboard_functional_keys_count: 12,
         ime_file_name: String::new(),
         dig_product_id: String::new(),
+        connection_type: ConnectionType::Lan,
         desktop_size: DesktopSize {
             width: config.width,
             height: config.height,
