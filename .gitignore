@@ -9,3 +9,4 @@ tmp/
 CLAUDE.local.md
 # Editor scaffolding, written by whichever one is open. Nothing here is shared.
 .vscode/
+.claude/worktrees
