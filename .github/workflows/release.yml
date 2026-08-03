@@ -200,6 +200,53 @@ jobs:
             echo "::error::remotex.app ships an index.html with no assets beside it"
             exit 1
           }
+          # Every local file the document names, resolved under the web root. The
+          # directory check above is satisfied by an `assets/` that lost the one
+          # hashed script index.html asks for — and vite renames that file on every
+          # build, so "the directory is there" is the weakest form of this question.
+          python3 - "$app/Contents/Resources/web" <<'PY'
+          import html.parser, pathlib, sys, urllib.parse
+
+          root = pathlib.Path(sys.argv[1])
+
+          class Refs(html.parser.HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.refs = []
+
+              def handle_starttag(self, tag, attrs):
+                  for name, value in attrs:
+                      if name in ("src", "href") and value:
+                          self.refs.append(value)
+
+          parser = Refs()
+          parser.feed((root / "index.html").read_text(encoding="utf-8"))
+
+          missing = []
+          checked = 0
+          for ref in parser.refs:
+              parsed = urllib.parse.urlparse(ref)
+              # Somebody else's to serve (a scheme or a host), or not a file at all
+              # (a bare `#fragment`): either way not this bundle's to carry.
+              if parsed.scheme or parsed.netloc or not parsed.path:
+                  continue
+              checked += 1
+              # Vite emits absolute `/assets/…`, which is correct at the origin root
+              # the gateway serves this from — so it resolves against the web root
+              # rather than against the document.
+              if not (root / urllib.parse.unquote(parsed.path).lstrip("/")).is_file():
+                  missing.append(ref)
+
+          if missing:
+              print("::error::remotex.app references files it does not ship: " + ", ".join(missing))
+              sys.exit(1)
+          if not checked:
+              # A document naming nothing is a build that emitted no script, which
+              # would otherwise pass every check above and show a blank window.
+              print("::error::remotex.app ships an index.html that references nothing")
+              sys.exit(1)
+          print(f"index.html references {checked} bundled file(s), all present")
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

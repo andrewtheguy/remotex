@@ -33,8 +33,14 @@ struct GatewayBinary: Sendable {
 
     /// The built SPA inside this bundle — the thing the window shows, served by the
     /// gateway beside it. `nil` in an unbundled build for the same reason as above.
+    ///
+    /// Asked of the bundle rather than assembled from `resourceURL`, so the `nil`
+    /// above is the truth: an unbundled build still *has* a resource directory, and
+    /// appending a name to it yields a URL for a directory that is not there — which
+    /// would be handed to the gateway as `--web-root` and refused a step later,
+    /// somewhere less obvious.
     static func webRootInBundle() -> URL? {
-        Bundle.main.resourceURL?.appendingPathComponent(webRootName, isDirectory: true)
+        Bundle.main.url(forResource: webRootName, withExtension: nil)
     }
 
     struct Output: Sendable {

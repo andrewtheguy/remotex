@@ -77,11 +77,25 @@ extension NativeBridge: WKNavigationDelegate {
         }
     }
 
+    /// A load that never started. Reported, because on loopback it means the
+    /// gateway stopped answering between the handshake and the request — except
+    /// when it is a cancellation, which is not a failure at all.
+    ///
+    /// Cancellations are routine here and one of them is this class's own doing:
+    /// the policy above answers `.cancel` for a navigation off the origin, and
+    /// WebKit delivers that refusal back through this callback. Reporting it would
+    /// put "the gateway stopped answering" on screen for a page that is loaded and
+    /// working. A load superseded by the next one — a relaunch, a redirect — comes
+    /// through the same way.
     nonisolated func webView(
         _ webView: WKWebView,
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: any Error
     ) {
+        let failure = error as NSError
+        if failure.domain == NSURLErrorDomain, failure.code == NSURLErrorCancelled {
+            return
+        }
         MainActor.assumeIsolated {
             model?.pageFailedToLoad(error.localizedDescription)
         }

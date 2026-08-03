@@ -131,12 +131,26 @@ struct NativeState: Equatable, Decodable {
     }
 
     /// The remote's own density, never this Mac's. See `RemoteGeometry`.
+    ///
+    /// Clamped, because this number comes off a page and everything downstream
+    /// assumes it is a density. `densityLabel` converts a whole one with `Int(_:)`,
+    /// which **traps** on infinity or on anything past `Int.max` — so a report of
+    /// `1e300`, which is ordinary JSON, would take the app down rather than draw a
+    /// silly menu. `RemoteGeometry` divides by it, where a huge value is a document
+    /// of no size.
+    ///
+    /// The ceiling is far above any real display: Retina is 2, and nothing this
+    /// side of a synthetic report is above 3.
     var remoteScale: CGFloat {
-        guard let scale = size?.scale, scale > 0 else {
+        guard let scale = size?.scale, scale.isFinite, scale > 0 else {
             return 1
         }
-        return CGFloat(scale)
+        return CGFloat(min(scale, Self.maximumScale))
     }
+
+    /// The largest density this will believe. Not a limit anything real approaches;
+    /// it is the line past which a reported number is a malformed message.
+    static let maximumScale: Double = 64
 
     /// Keyboard capture belongs to a live desktop with something on it.
     var capturesKeyboard: Bool {
@@ -147,6 +161,13 @@ struct NativeState: Equatable, Decodable {
 /// A density as a menu reads it: `2x`, `1x`, `1.5x` for the fractional screens
 /// that exist.
 func densityLabel(_ scale: CGFloat) -> String {
+    // Total by construction, and not only because its callers clamp: the `Int(_:)`
+    // below traps on a value that is not finite or does not fit, and a label is not
+    // worth a crash. Callers that clamp (see `NativeState.remoteScale`) never reach
+    // this; `hostScale` comes from `backingScaleFactor` and never has either.
+    guard scale.isFinite, scale > 0, scale <= CGFloat(NativeState.maximumScale) else {
+        return "?x"
+    }
     let rounded = (scale * 100).rounded() / 100
     // A whole number without the `.0`, which is what almost every screen is.
     if rounded == rounded.rounded() {
