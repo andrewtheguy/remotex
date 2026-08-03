@@ -3035,7 +3035,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "aes",
  "anyhow",
@@ -3080,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "remotex-cef"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "cef",
  "objc2",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "remotex-cef-helper"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "cef",
  "remotex-cef",
