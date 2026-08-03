@@ -60,15 +60,133 @@ enum ChromiumHost {
         started
     }
 
-    /// Take the engine down. Synchronous, because the process may be gone the
-    /// moment this returns.
-    static func stop() {
-        guard started else {
+    /// Take the engine down, then run `quit` — which is the app terminating for
+    /// real. Does nothing if a quit is already under way.
+    ///
+    /// **A quit arrives nested inside `cef_do_message_loop_work`**, and that one fact
+    /// is the whole reason this is shaped the way it is. Chromium's pump turns this
+    /// app's run loop while it works, so AppKit's own events — the ⌘Q, the signal
+    /// handler's `terminate:` — are delivered from *within* a slice. Nothing asked of
+    /// CEF on that stack is done: not the close, and not a thousand hand-turned
+    /// slices either, which is what quitting used to do before giving up on a
+    /// deadline every single time. Waiting there cannot work; `terminateLater` waits
+    /// on the same stack, so the slice it is waiting for is the one it is inside.
+    ///
+    /// So the terminate is *cancelled*, the engine is taken down from a clean stack,
+    /// and the app terminates again with nothing left to do. Two passes, and the
+    /// second one is the real one.
+    static func stopThenQuit(then quit: @escaping @MainActor () -> Void) {
+        guard started, !isQuitting else {
             return
         }
-        started = false
-        ChromiumPump.stop()
+        isQuitting = true
+        quitWhenDown = quit
+        // A browser that will not close must not make the app unquittable. This is
+        // the giving-up path, and it leaves the engine standing rather than taking it
+        // down out of order — the process is exiting either way. Two seconds is
+        // generous: a quit that works takes about a tenth of one.
+        deadline = runLoopTimer(after: 2, modes: [.common, .eventTracking, .modalPanel]) {
+            MainActor.assumeIsolated { ChromiumHost.abandon() }
+        }
+        offThePumpStack {
+            guard isQuitting else {
+                return
+            }
+            if remotex_cef_close_all(chromiumBrowsersClosed, nil) == 0 {
+                // Nothing was open — the launch screen, or a window that never got a
+                // page. No callback is coming, so this is the whole of the quit.
+                finish()
+            }
+        }
+    }
+
+    /// CEF has closed the last browser. It says so from inside a slice, so the
+    /// shutdown that follows has to step off it first.
+    fileprivate static func browsersHaveClosed() {
+        offThePumpStack { finish() }
+    }
+
+    /// Run `work` on the main thread, but never from inside a pump slice.
+    ///
+    /// The same answer the pump gives its own re-entrancy: let the stack unwind and
+    /// look again. It terminates because the slice does — which is true everywhere
+    /// except on a stack that is waiting for the quit, and that is exactly the stack
+    /// `stopThenQuit` refuses to wait on.
+    private static func offThePumpStack(_ work: @escaping @MainActor () -> Void) {
+        guard !ChromiumPump.isSlicing else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { ChromiumHost.offThePumpStack(work) }
+            }
+            return
+        }
+        work()
+    }
+
+    /// Every browser is closed: take the engine down and terminate for real.
+    private static func finish() {
+        guard isQuitting else {
+            return
+        }
+        stopWaiting()
         remotex_cef_shutdown()
+        quitNow()
+    }
+
+    /// Give up waiting and go without shutting Chromium down.
+    private static func abandon() {
+        guard isQuitting else {
+            return
+        }
+        stopWaiting()
+        quitNow()
+    }
+
+    private static func stopWaiting() {
+        isQuitting = false
+        started = false
+        deadline?.invalidate()
+        deadline = nil
+        ChromiumPump.stop()
+    }
+
+    private static func quitNow() {
+        let quit = quitWhenDown
+        quitWhenDown = nil
+        quit?()
+    }
+
+    /// Set between the close request and the engine being down.
+    private static var isQuitting = false
+    private static var quitWhenDown: (@MainActor () -> Void)?
+    private static var deadline: Timer?
+}
+
+/// A one-shot timer that fires in every mode this app waits in.
+///
+/// `NSModalPanelRunLoopMode` is the one that matters here and the one a plain
+/// `Timer.scheduledTimer` would miss: it is the mode AppKit runs while a delegate
+/// has answered `terminateLater`, so a timer without it would not fire until the
+/// quit it is meant to bound had already finished.
+@MainActor
+private func runLoopTimer(
+    after seconds: TimeInterval,
+    modes: [RunLoop.Mode],
+    do work: @escaping @Sendable () -> Void
+) -> Timer {
+    let timer = Timer(timeInterval: seconds, repeats: false) { _ in work() }
+    for mode in modes {
+        RunLoop.main.add(timer, forMode: mode)
+    }
+    return timer
+}
+
+/// CEF saying the last browser has closed.
+///
+/// Delivered on its UI thread, which in this process is the main thread — the same
+/// assertion `chromiumSchedulePump` makes below and for the same reason.
+private func chromiumBrowsersClosed(_ context: UnsafeMutableRawPointer?) {
+    MainActor.assumeIsolated {
+        ChromiumHost.browsersHaveClosed()
     }
 }
 
@@ -111,6 +229,10 @@ enum ChromiumPump {
 
     private static var timer: Timer?
     /// Inside `cef_do_message_loop_work`, which can re-enter through AppKit.
+    ///
+    /// Readable from outside because a quit has to know: what is asked of CEF from
+    /// inside a slice is not done. See `closeBrowsersOffThePumpStack`.
+    static var isSlicing: Bool { working }
     private static var working = false
     private static var reentered = false
 
@@ -163,19 +285,18 @@ enum ChromiumPump {
 
     private static func setTimer(_ delay: Int64) {
         timer?.invalidate()
-        let timer = Timer(
-            timeInterval: max(0.001, Double(delay) / 1000),
-            repeats: false
-        ) { _ in
+        // Three modes, and neither of the last two is redundant. A menu being tracked
+        // or a window being dragged puts the run loop in `eventTracking`, where a
+        // common-mode timer does not fire — and Chromium would stop for as long as
+        // the mouse is held down. `modalPanel` is where AppKit waits out a
+        // `terminateLater`, which is where a browser now does its closing: a pump
+        // that stopped there would be a quit waiting on work nothing is doing.
+        timer = runLoopTimer(
+            after: max(0.001, Double(delay) / 1000),
+            modes: [.common, .eventTracking, .modalPanel]
+        ) {
             MainActor.assumeIsolated { ChromiumPump.timerFired() }
         }
-        // Both modes, and the second is not redundant: a menu being tracked or a
-        // window being dragged puts the run loop in `eventTracking`, where a common
-        // -mode timer does not fire — and Chromium would stop for as long as the
-        // mouse is held down.
-        RunLoop.main.add(timer, forMode: .common)
-        RunLoop.main.add(timer, forMode: .eventTracking)
-        Self.timer = timer
     }
 
     private static func timerFired() {

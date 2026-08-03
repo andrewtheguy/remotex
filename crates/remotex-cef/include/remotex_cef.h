@@ -106,7 +106,19 @@ void remotex_cef_show_dev_tools(RemotexCefBrowser *browser);
 /// Close the browser and forget it. The pointer is invalid afterwards.
 void remotex_cef_close(RemotexCefBrowser *browser);
 
-/// Take Chromium down. Once, on the way out.
+/// Ask every browser to close, and be told when the last of them has.
+///
+/// The first half of a quit. Returns how many browsers were asked; zero means
+/// there is nothing to wait for and `done` will not be called.
+///
+/// The shell waits between this and `remotex_cef_shutdown` by letting its own
+/// run loop turn, because half of what a close does is AppKit's: the browser is
+/// an `NSView` in the shell's window. A wait that turns only Chromium's pump is
+/// waiting for something that cannot happen.
+int remotex_cef_close_all(RemotexCefDone done, void *done_context);
+
+/// Take Chromium down. Once, on the way out, and only after the above says the
+/// browsers are gone — it refuses if one is somehow still open.
 void remotex_cef_shutdown(void);
 
 #ifdef __cplusplus

@@ -45,6 +45,29 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     /// `resizeMenuTarget` is: the delegate exists before there is a model.
     private var gateway: EmbeddedGateway?
 
+    /// Refuse the first quit, and mean the second one.
+    ///
+    /// Not a veto: the engine cannot be taken down from here, because a ⌘Q is
+    /// delivered from *inside* one of Chromium's own pump slices and nothing asked of
+    /// CEF on that stack is done. `ChromiumHost.stopThenQuit` steps off it, closes
+    /// the browsers, shuts the engine down and calls `terminate` again — which
+    /// arrives here with the engine already gone and is allowed straight through.
+    ///
+    /// `terminateLater` looks like the mechanism for this and is not: AppKit waits
+    /// for the reply on the same stack, so the slice being waited for is the one the
+    /// waiting is inside. That was measured, twice.
+    ///
+    /// What it costs to get wrong is a Chromium profile that is never shut down
+    /// cleanly, which the *following* launch reports as a crash — the fault showing
+    /// itself one launch after the one that caused it.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard ChromiumHost.isRunning else {
+            return .terminateNow
+        }
+        ChromiumHost.stopThenQuit { sender.terminate(nil) }
+        return .terminateCancel
+    }
+
     /// Stop the gateway on the way out.
     ///
     /// Belt on top of braces. The guarantee is the liveness pipe — the kernel closes

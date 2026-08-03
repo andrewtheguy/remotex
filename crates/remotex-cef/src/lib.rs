@@ -103,6 +103,14 @@ thread_local! {
     /// holds `None` again once `on_before_close` has run, which is the only signal
     /// CEF gives that a browser is really gone.
     static LIVE_BROWSERS: RefCell<Vec<client::BrowserSlot>> = const { RefCell::new(Vec::new()) };
+    /// Who to tell when the last browser has closed, set for the length of a quit.
+    static CLOSE_WATCHER: RefCell<Option<CloseWatcher>> = const { RefCell::new(None) };
+}
+
+/// The shell's "they are all closed now" hook.
+struct CloseWatcher {
+    done: extern "C" fn(*mut c_void),
+    context: *mut c_void,
 }
 
 /// The gateway origin the scheme handler injects into `index.html`.
@@ -522,48 +530,89 @@ pub unsafe extern "C" fn remotex_cef_close(browser: *mut RemotexCefBrowser) {
     });
 }
 
-/// Take Chromium down — **after** every browser it made is really gone.
-///
-/// The order is the whole of it, and getting it wrong is not a leak: CEF walks
-/// structures the browser still owns and the process dies on the way out of ⌘Q,
-/// on the main thread, with a crash report and a profile left marked unclean. The
-/// next launch then comes up in Chromium's crash-recovery state, so one bad quit is
-/// visible on the following launch rather than on the one that caused it.
-///
-/// A close is asynchronous and finishes on the UI thread, which in this process is
-/// the thread now inside `terminate:` — so it cannot happen unless the pump is
-/// turned by hand here. That is what the loop is: ask, turn, and watch the slots,
-/// which `on_before_close` empties.
-///
-/// If they do not empty, the engine is left standing rather than shut down. The
-/// process is exiting either way; a dirty profile is a worse next launch, and a
-/// segfault is a worse one still.
-#[unsafe(no_mangle)]
-pub extern "C" fn remotex_cef_shutdown() {
-    /// A millisecond each, so a browser that will not close costs a second of
-    /// quitting rather than the whole of it.
-    const SPINS: usize = 1_000;
+/// Whether every browser this process made has reported itself closed.
+fn browsers_gone() -> bool {
+    LIVE_BROWSERS.with(|live| live.borrow().iter().all(|slot| slot.borrow().is_none()))
+}
 
+/// Ask every browser to close, and say when the last of them has.
+///
+/// The shell calls this first and [`remotex_cef_shutdown`] second, with its own
+/// waiting in between, and the split is the whole point. A close is asynchronous
+/// and half of what it does is AppKit's: the browser is an `NSView` in the shell's
+/// window, and tearing that down is run-loop work rather than task-queue work. So a
+/// wait that turns only CEF's pump waits for something that cannot happen — which is
+/// exactly what quitting used to do, spinning a thousand slices inside `terminate:`
+/// and finding the browser as open at the end as at the start. The same close on the
+/// ordinary run loop completes in milliseconds.
+///
+/// Returns how many browsers were asked. Zero means there is nothing to wait for and
+/// `done` will not be called.
+///
+/// # Safety
+/// `done` is called once, on the main thread, and must remain callable until then.
+#[unsafe(no_mangle)]
+pub extern "C" fn remotex_cef_close_all(
+    done: Option<extern "C" fn(*mut c_void)>,
+    done_context: *mut c_void,
+) -> std::os::raw::c_int {
     let slots = LIVE_BROWSERS.with(|live| live.borrow().clone());
+    let mut asked = 0;
     for slot in &slots {
         if let Some(host) = slot.borrow().as_ref().and_then(|browser| browser.host()) {
             // Forced: this is a quit, and a page is not entitled to refuse one.
             host.close_browser(1);
+            // SAFETY: a windowed browser's handle is the `NSView` CEF put under the
+            // shell's, and this runs on the main thread. See `detach_from_parent`
+            // for why a close on its own leaves the browser standing.
+            unsafe { client::detach_from_parent(host.window_handle()) };
+            asked += 1;
         }
     }
-    let gone = |slots: &[client::BrowserSlot]| slots.iter().all(|slot| slot.borrow().is_none());
-    let mut spins = 0;
-    while !gone(&slots) && spins < SPINS {
-        do_message_loop_work();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        spins += 1;
-    }
-    LIVE_BROWSERS.with(|live| live.borrow_mut().clear());
-    if !gone(&slots) {
-        trace!("{} browser(s) would not close; leaving the engine up", slots.len());
+    trace!("asked {asked} browser(s) to close");
+    CLOSE_WATCHER.with(|watcher| {
+        *watcher.borrow_mut() = match (done, asked) {
+            (Some(done), 1..) => Some(CloseWatcher {
+                done,
+                context: done_context,
+            }),
+            _ => None,
+        };
+    });
+    asked
+}
+
+/// One browser has gone; tell the shell if it was the last.
+pub(crate) fn note_browser_closed() {
+    if !browsers_gone() {
         return;
     }
-    trace!("every browser closed in {spins} pump slices; shutting down");
+    if let Some(watcher) = CLOSE_WATCHER.with(|watcher| watcher.borrow_mut().take()) {
+        trace!("every browser has closed");
+        (watcher.done)(watcher.context);
+    }
+}
+
+/// Take Chromium down — **after** every browser it made is really gone.
+///
+/// The order is the whole of it, and getting it wrong is not a leak: CEF walks
+/// structures the browser still owns and the process dies on the way out of ⌘Q, on
+/// the main thread, with a crash report and a profile left marked unclean. The next
+/// launch then comes up in Chromium's crash-recovery state, so one bad quit is
+/// visible on the following launch rather than on the one that caused it.
+///
+/// Refused rather than risked if a browser is somehow still open — the shell waits
+/// with a deadline and calls this either way. The process is exiting regardless; a
+/// dirty profile is a worse next launch, and a crash is a worse one still.
+#[unsafe(no_mangle)]
+pub extern "C" fn remotex_cef_shutdown() {
+    CLOSE_WATCHER.with(|watcher| *watcher.borrow_mut() = None);
+    if !browsers_gone() {
+        trace!("a browser is still open; leaving the engine up");
+        return;
+    }
+    LIVE_BROWSERS.with(|live| live.borrow_mut().clear());
+    trace!("every browser is closed; shutting down");
     shutdown();
 }
 

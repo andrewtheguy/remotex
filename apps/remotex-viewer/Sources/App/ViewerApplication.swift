@@ -39,19 +39,10 @@ final class ViewerApplication: NSApplication {
         handlingSendEvent = handling
     }
 
-    /// Quit by closing the browser, not by `exit()`.
-    ///
-    /// `NSApplication`'s own `terminate:` ends the process without leaving the run
-    /// loop, and Chromium depends on leaving it to shut down in order. So the
-    /// engine is stopped first and the ordinary termination follows — which is what
-    /// keeps `applicationWillTerminate` reachable, and with it the gateway's own
-    /// stop. (The gateway's real guarantee is still the stdin pipe: the kernel
-    /// closes this process's end however it dies. This only makes the ordinary quit
-    /// immediate.)
-    override func terminate(_ sender: Any?) {
-        MainActor.assumeIsolated {
-            ChromiumHost.stop()
-        }
-        super.terminate(sender)
-    }
+    // Nothing about quitting is here any more, and that is the fix rather than a
+    // tidy-up. Stopping the engine on this stack meant stopping it from inside
+    // `terminate:`, where the run loop is not turning — and a CEF browser's close is
+    // half AppKit's work, so it simply never finished. The quit is the delegate's
+    // now: `applicationShouldTerminate` answers `terminateLater`, which is AppKit's
+    // own way of saying "keep the run loop going, I will tell you when".
 }

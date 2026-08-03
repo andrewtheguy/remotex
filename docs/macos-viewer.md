@@ -193,19 +193,37 @@ app exits, the kernel closes it; the gateway reads EOF and exits.
 
 ### Quitting Chromium
 
-`remotex_cef_shutdown` closes every browser and **waits** before taking the engine
-down, turning the pump by hand while it waits — a close finishes on the UI thread,
-which is the thread already inside `terminate:`, so it cannot happen otherwise.
+**A quit is refused, and then done.** `applicationShouldTerminate` answers
+`terminateCancel`, the engine is taken down from a clean stack, and `terminate` is
+called again — arriving with the engine already gone and passing straight through.
+It takes about a tenth of a second.
 
-Shutting down with a browser still open is not a leak. CEF walks structures the
-browser owns and the process dies on the way out of ⌘Q: a crash report every quit,
-and a profile left marked unclean, so the following launch comes up in Chromium's
-crash-recovery state. The fault is therefore visible one launch after the one that
-caused it, which is what made it look like a startup problem.
+Two facts make it that shape, and both were measured rather than reasoned about:
 
-If the browsers do not close inside a second, the engine is left standing rather
-than shut down. The process is exiting either way; a dirty profile is a worse next
-launch and a segfault is a worse one still.
+- **A quit arrives inside `cef_do_message_loop_work`.** Chromium's pump turns this
+  app's run loop while it works, so AppKit's own events — the ⌘Q, the signal
+  handler's `terminate:` — are delivered from *within* a slice, and nothing asked of
+  CEF on that stack is done. A thousand hand-turned pump slices moved a close no
+  further than none at all. `terminateLater` looks like the answer and is not:
+  AppKit waits for the reply on the same stack, so the slice it waits for is the one
+  it is inside. `ChromiumPump.isSlicing` is what the quit checks, and it steps off
+  with the same `DispatchQueue.main.async` the pump uses for its own re-entrancy.
+- **`CloseBrowser` alone does not close this browser.** With no `DoClose` of our
+  own, CEF answers a close by sending the standard close notification to the
+  browser's *top-level parent window*, which is the shell's — and nothing in the
+  shell is listening for it, so the hierarchy is never destroyed and
+  `OnBeforeClose` never arrives. `client::detach_from_parent` takes the browser's
+  `NSView` out of the shell's, which is the destruction CEF is waiting for. It is
+  the same thing that happens on a target switch, where the surface goes away and
+  the close has always worked.
+
+`remotex_cef_shutdown` then refuses to run if a browser is somehow still open.
+Shutting down with one open is not a leak: CEF walks structures the browser owns
+and the process dies on the way out of ⌘Q, with a crash report and a profile left
+unclean, so the fault shows itself on the *following* launch rather than the one
+that caused it. If the browsers have not closed within two seconds the app quits
+anyway and leaves the engine standing — an unquittable app is worse than an
+unclean profile.
 
 ### Shutdown, in three layers
 

@@ -74,6 +74,32 @@ unsafe fn fill_parent(handle: sys::cef_window_handle_t) {
     );
 }
 
+/// Take the browser's view out of the shell's, which is what actually ends it.
+///
+/// `CloseBrowser` alone does not: with no `DoClose` of our own, CEF answers a close
+/// by sending the standard close notification to the browser's *top-level parent
+/// window* — which is the shell's window, and nothing in the shell is listening for
+/// it. Nobody destroys the hierarchy, so `OnBeforeClose` never arrives and the
+/// browser is left half closed. Removing the view is the destruction CEF is waiting
+/// for, and it is the same thing that happens when the page's surface goes away on a
+/// target switch — the one close that always worked.
+///
+/// # Safety
+/// `handle` must be a CEF window handle for a live browser, on the main thread.
+pub(crate) unsafe fn detach_from_parent(handle: sys::cef_window_handle_t) {
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSView;
+
+    if handle.is_null() {
+        return;
+    }
+    let view: Retained<NSView> = match unsafe { Retained::retain(handle.cast()) } {
+        Some(view) => view,
+        None => return,
+    };
+    view.removeFromSuperview();
+}
+
 /// Receives what the page posts and hands it to the shell.
 struct PageMessages {
     deliver: crate::MessageSink,
@@ -169,8 +195,16 @@ wrap_life_span_handler! {
         }
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
+            // The one signal CEF gives that a browser is really gone, and what
+            // `remotex_cef_shutdown` waits for. Traced because its *absence* is the
+            // interesting event: a quit that never sees this is a quit that leaves
+            // the engine standing.
+            crate::trace!("browser closing");
             self.router.on_before_close(browser.map(|b| b.clone()));
             *self.browser.borrow_mut() = None;
+            // After the slot is empty, never before: this is what a quit is waiting
+            // on, and it asks whether *every* slot is.
+            crate::note_browser_closed();
         }
 
         /// No popups. Every URL this client could produce is refused by
