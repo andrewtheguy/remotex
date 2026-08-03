@@ -240,13 +240,13 @@ cost is in the `encode totals` line, where `motion` and `cleanup` are read toget
 every cleanup is a tile sent twice, so a scheme paying more in re-sends than it
 saves in motion shows up as a cleanup byte count rivalling the saving.
 
-##### `render_motion_subtype = "h264"`: a stream per moving region
+##### `render_motion_subtype = "stream"`: a stream per moving region
 
 The third thing the motion axis can be, and the only one that is not a still. The
 detection above is unchanged — the same cell grid, the same churn window, the same
-hard switch — but what it hands the moving cells to is an inter-frame H.264 stream
-per coalesced region (`src/regions.rs`, encoding through `src/h264.rs`), with the
-base codec carrying every cell outside one. A video in a window costs its own pixels;
+hard switch — but what it hands the moving cells to is an inter-frame video stream
+per coalesced region (`src/regions.rs`, encoding through `src/vp9.rs` or `src/h264.rs`
+as `video_codec` says), with the base codec carrying every cell outside one. A video in a window costs its own pixels;
 the text beside it stays exactly what `render_subtype` says and is never re-encoded.
 
 `RenderPlan`'s `motion` is a `MotionEncode` rather than a codec, so the compiler is
@@ -291,7 +291,7 @@ One measurement, so that the shape of the trade is on the record rather than ass
 | dial | to the client | encode CPU |
 |---|---|---|
 | `motion` + `webp` 10 | 4.5 MB | 0.17 s |
-| `motion` + `h264` 30 | 0.70 MB | 1.39 s |
+| `motion` + `stream` 30, in h264 | 0.70 MB | 1.39 s |
 | `video` 60 | 0.45 MB | 5.48 s |
 
 So the regions cost about a sixth of the still motion encode's bytes with the still
@@ -299,8 +299,8 @@ parts left lossless, and a quarter of whole-desktop `video`'s CPU — because on
 moved was coded, rather than 1280×800 every frame. What it buys over `video` is
 exactness everywhere else; what it costs is bytes.
 
-Both dials that stream share `Congestion`, one verdict for one link: the quantizer
-walks up when a round's push blocks and back down to `render_motion_quality`, never
+Both dials that stream share `Congestion`, one verdict for one link: the quality dial
+walks down when a round's push blocks and back up to `render_motion_quality`, never
 past it. Unlike `video`, a target here keeps the ordinary `FRAME_BUFFER` depth,
 because the same queue carries its still tiles — so `coarsened` in the totals is a
 less sharp signal, which is worth knowing when reading it.
@@ -349,24 +349,30 @@ for the region streams above too, which is why they run the same code:
   covers the whole framebuffer, so each covers its predecessor exactly. That is not
   enforced by a check but by the record kinds: a `VIDEO` record never reaches the
   cache or the coverage test, so neither has to know about it.
-- **The picture may be a pixel larger than the region.** H.264 needs even sides, so
-  the mirror is padded up with its edge repeated (black would be a seam the encoder
-  paid for every frame). The record header carries the *true* rectangle and the
+- **The picture may be a pixel larger than the region.** H.264 needs even sides — VP9
+  does not and is held to them anyway, so one geometry serves both — so the mirror is
+  padded up with its edge repeated (black would be a seam the encoder paid for every
+  frame). The record header carries the *true* rectangle and the
   client crops — reporting the padded size would push a paint past the framebuffer,
   which the renderer drops outright rather than clamps.
 
-`render_quality` maps to a constant quantizer (1 → 51, 100 → 12; the floor is
-openh264's own `GOM_MIN_QP_MODE`, and mapping past it would give a dial whose top
-third did nothing). A constant quantizer *is* variable bitrate — bits go where the
+`render_quality` maps to a constant quantizer on whichever scale the codec has, and
+the two scales are not the same one: VP9 spans 63 → 8 of its own 0–63, H.264 51 → 12
+of its 0–51 (the floor is openh264's own `GOM_MIN_QP_MODE`, and mapping past it would
+give a dial whose top third did nothing). Neither quantizer leaves its codec module —
+the dial is what everything above them speaks. A constant quantizer *is* variable
+bitrate — bits go where the
 picture needs them, so a motionless desktop costs almost nothing.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
 `Congestion` in `src/encode.rs` watches one local signal — how long queueing an
-access unit blocked — and walks the quantizer up towards 51 when the link is behind,
-back down towards the dial when it is not; never below it. What TCP hides is
+access unit blocked — and walks the 1–100 dial down towards 1 when the link is behind,
+back up towards the configured quality when it is not; never past it. It moves the
+dial rather than a quantizer because the two codecs' quantizers are different scales
+and neither leaves its module. What TCP hides is
 *headroom*, and this never needs headroom, because exceeding the operator's setting
 was never a goal. "Am I behind?" is the whole question, and the outbound queue
-answers it. Quality moves through `Stream::set_qp`, which re-tunes the running
+answers it. Quality moves through `Stream::set_quality`, which re-tunes the running
 encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
 spending a few hundred KB exactly when bytes are scarce.
 
@@ -469,26 +475,30 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | records
 TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
                   | u32 len | payload[len]
 TILE_REF op 0x02: u16 slot | u16 x | u16 y
-VIDEO    op 0x03: u8 stream | u16 x | u16 y | u16 w | u16 h
+VIDEO    op 0x03: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
                   | u32 len | payload[len]
 ```
 
 Tile formats are PNG, JPEG and WebP. One frame carries multiple ready updates so a
-repaint does not require one WebSocket event per tile. Receivers reject nonzero
-flags, unknown operations, truncated records, and unsupported formats.
+repaint does not require one WebSocket event per tile. Receivers reject unknown
+operations, truncated records, and unsupported formats, and reject a nonzero frame
+flags byte. A `VIDEO` record's own flags byte is `0x01` for a keyframe and nothing
+else — any other bit is rejected the same way.
 
 `TILE` draws a payload and optionally stores it in a gateway-selected cache
 slot. `TILE_REF` redraws the encoded payload already stored in that slot.
 `NO_SLOT` means the payload must not be retained. Clients keep a fixed
 `SLOT_COUNT` array and never choose eviction themselves.
 
-`VIDEO` carries one H.264 access unit for one region, and is a separate record
-rather than a fourth tile format because it is not the same kind of thing: a tile is
-a self-contained picture and an access unit is one link in a chain. Making it its own
-record is what keeps the cache and coverage rules above from ever having to ask
-whether they apply — they see tiles only. `stream` names which decoder it belongs to,
-since a session may run several at once; the rectangle is the region's true one, and
-the decoded picture may exceed it by a pixel on either axis (see the render dial).
+`VIDEO` carries one access unit for one region, in whichever codec `video_codec` named,
+and is a separate record rather than a fourth tile format because it is not the same
+kind of thing: a tile is a self-contained picture and an access unit is one link in a
+chain. Making it its own record is what keeps the cache and coverage rules above from
+ever having to ask whether they apply — they see tiles only. `stream` names which
+decoder it belongs to, since a session may run several at once, and its keyframe bit
+comes from the encoder rather than from parsing the payload — VP9 carries no parameter
+sets to read one out of. The rectangle is the region's true one, and the decoded picture
+may exceed it by a pixel on either axis (see the render dial).
 
 A client that cannot decode a cached tile or receives a reference to a missing
 slot sends `cacheReset`. This clears the outbound slot table and requests a

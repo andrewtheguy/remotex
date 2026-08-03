@@ -387,8 +387,7 @@ impl RenderPlan {
     /// five keys with a pairing matrix between them, two of which default from a third, and
     /// what a target *does* is the plan they collapse to — so a description built from the
     /// keys would restate the file while the encoder did something the reader has to derive.
-    /// This says what is running, including the codec, which no key names at all because it
-    /// was negotiated with the browser.
+    /// This says what is running, including the codec [`TargetConfig::video_codec`] named.
     ///
     /// It exists because that was invisible from a client: nothing on the wire said which of
     /// the seven combinations a session was on, so "why does this look soft" or "why is this
@@ -2070,9 +2069,6 @@ mod tests {
         );
     }
 
-    /// The flagship pairing for a stream per moving region: a lossless base, so the
-    /// text beside a video is exact and never re-encoded, and H.264 carrying only
-    /// what moves.
     /// Every combination the pairing matrix admits, described distinctly.
     ///
     /// Built from real config files rather than from `RenderPlan` literals, so this also
@@ -2163,6 +2159,9 @@ mod tests {
         );
     }
 
+    /// The flagship pairing for a stream per moving region: a lossless base, so the
+    /// text beside a video is exact and never re-encoded, and vp9 carrying only
+    /// what moves.
     #[test]
     fn a_stream_per_moving_region_over_a_lossless_base_is_accepted() {
         let cfg = ConfigFile::parse(

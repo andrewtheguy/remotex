@@ -1,10 +1,11 @@
 //! H.264 encoding: one stream over a rectangle of a [`crate::video::Mirror`].
 //!
-//! The fallback codec rather than the default one. It is what a browser that refuses
-//! VP9 gets, and the negotiation in [`crate::session`] is what decides; nothing here
-//! knows which of the two is running. What the two share — the mirror, the coded
-//! rectangle, the colour conversion — is [`crate::video`]'s, and this module is only
-//! openh264.
+//! The other codec rather than the default one. A target asks for it by name through
+//! [`crate::config::TargetConfig::video_codec`]; nothing here knows which of the two is
+//! running, and a browser that cannot decode what it is configured to send says so from
+//! its own `VideoDecoder`, naming the codec, rather than getting the other one. What the
+//! two share — the mirror, the coded rectangle, the colour conversion — is
+//! [`crate::video`]'s, and this module is only openh264.
 //!
 //! That containment is not tidiness. This crate asserts on odd dimensions, on a
 //! mis-sized slice and on an out-of-range quantizer, and the release profile is
@@ -295,12 +296,17 @@ impl Stream {
         if data.is_empty() {
             return Ok(None);
         }
-        if keyframe {
+        if keyframe && let Some(decode) = codec_string(&data) {
             // A keyframe carries the SPS, so this is the one place the string can be
             // read. It never changes for a live stream — the picture size is fixed for
             // its whole life — but reading it every time costs one scan of one keyframe
             // and needs no argument about when it could not have changed.
-            self.decode = codec_string(&data);
+            //
+            // Only ever replaced by an answer, never by the lack of one: a keyframe this
+            // scan could not find an SPS in would otherwise take the announced string
+            // back to `None` mid-stream, leaving a live decoder that the client can no
+            // longer name.
+            self.decode = Some(decode);
         }
         Ok(Some(AccessUnit { data, keyframe }))
     }

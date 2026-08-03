@@ -5,8 +5,9 @@
 //! they ask for. `render_type = "video"` asks for one covering the whole desktop.
 //! `render_motion_subtype` asks for one per coalesced moving region, with the still
 //! codecs carrying everything else. Which rectangles, and when they start and stop, is
-//! [`crate::regions`]' business; a codec module ([`crate::h264`]) knows only how to
-//! encode one.
+//! [`crate::regions`]' business; which codec carries them is
+//! [`crate::config::TargetConfig::video_codec`]'s, and a codec module
+//! ([`crate::vp9`] or [`crate::h264`]) knows only how to encode one.
 //!
 //! Three things about the shape follow from the rest of the gateway rather than from
 //! any codec:
@@ -329,11 +330,12 @@ impl I420 {
     }
 }
 
-/// One video stream over a fixed rectangle of a [`Mirror`], in whichever codec was negotiated.
+/// One video stream over a fixed rectangle of a [`Mirror`], in whichever codec the target
+/// configured.
 ///
 /// An enum rather than a trait object, and rather than a generic on everything above it: there are
-/// exactly two codecs, the choice is made once per session, and both arms have the same six
-/// methods. A `Box<dyn>` would buy a vtable and cost the compiler its knowledge of which encoder
+/// exactly two codecs, the choice is one key ([`crate::config::TargetConfig::video_codec`]) read
+/// once per session, and both arms have the same six methods. A `Box<dyn>` would buy a vtable and cost the compiler its knowledge of which encoder
 /// it is calling; a generic would spread a type parameter through [`crate::regions`],
 /// [`crate::encode`] and both engines to say something a `match` says here.
 ///
@@ -341,7 +343,7 @@ impl I420 {
 ///
 /// Both arms are boxed, which is not a style choice: openh264's safe wrapper holds its encoder
 /// state inline and comes to some 7 KB against libvpx's ~800 bytes, so an unboxed enum would be
-/// 7 KB whichever codec was negotiated. One allocation per stream — an event that happens when a
+/// 7 KB whichever codec was configured. One allocation per stream — an event that happens when a
 /// region starts moving, not per frame — buys that back and makes the two arms the same size.
 pub enum Stream {
     H264(Box<crate::h264::Stream>),
