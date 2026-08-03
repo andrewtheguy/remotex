@@ -36,6 +36,13 @@ struct RootView: View {
                     hidesToolbar: model.state.mode == .desktop
                 )
                 .ignoresSafeArea(edges: .bottom)
+                // The endpoint is read once, when the coordinator is built, and a
+                // restarted gateway is a different port and a different token. Every
+                // route to one goes through `.launching` first, which tears this
+                // down — so this is not a fault being fixed but an invariant being
+                // written down, in the one place a future `.ready` → `.ready` would
+                // otherwise leave a web view pointed at a gateway that has gone.
+                .id(gateway.port)
             }
         }
         .sheet(isPresented: $isEditingConfiguration) {

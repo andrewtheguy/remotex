@@ -1,6 +1,11 @@
 import CoreGraphics
 import Foundation
 
+/// What this app calls itself before a gateway has said otherwise. Mirrors
+/// `DEFAULT_BRANDING` in `src/config.rs`, which is what the gateway answers with
+/// when the config names nothing.
+let DEFAULT_BRANDING = "remotex"
+
 /// A remote desktop size, in the remote's own pixels.
 ///
 /// `UInt16` because that is what `viewport` is on the wire, and the gateway
@@ -29,6 +34,13 @@ struct DisplayChoice: Equatable, Hashable, Sendable, Decodable, Identifiable {
 /// defaults throughout, so a page mid-navigation that posts a partial object leaves
 /// the menus reading "nothing is connected" rather than failing to decode.
 struct NativeState: Equatable, Decodable {
+    /// This gateway's display name, from `GET /api/config` — the window's title,
+    /// the About item, the About panel.
+    ///
+    /// It arrives from the page because the page is the only half that talks to
+    /// the gateway: the app makes no requests of its own. Until one has been
+    /// reported this is the default, which is what a launch screen shows.
+    var branding = DEFAULT_BRANDING
     /// Which screen the client is on. The menus are dead outside the desktop.
     var mode: Mode = .picker
     /// The connection lifecycle, which decides Take Over's title and presence.
@@ -85,6 +97,7 @@ struct NativeState: Equatable, Decodable {
     /// it. Each name is the field the page posts — see `NativeState` in
     /// `frontend/src/nativeHost.ts`.
     private enum CodingKeys: String, CodingKey {
+        case branding
         case mode, status, ready, size
         case canResize, canAutoResize, autoResize
         case canClipboard, canAudio, audioEnabled, audioError
@@ -107,6 +120,7 @@ struct NativeState: Equatable, Decodable {
         func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
             ((try? values.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
         }
+        branding = value(.branding, DEFAULT_BRANDING)
         mode = value(.mode, Mode.picker)
         status = value(.status, Status.connecting)
         ready = value(.ready, false)

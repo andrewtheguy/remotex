@@ -51,6 +51,14 @@ export const NATIVE_HOST: boolean =
 
 /** Everything the menu bar needs to render itself. Posted whenever it changes. */
 export interface NativeState {
+  /**
+   * This gateway's display name, from `GET /api/config`.
+   *
+   * Reported rather than fetched by the app, because the app makes no requests:
+   * the page is the only thing here that talks to the gateway. It names the
+   * window, the About item and the About panel, all of which are the shell's.
+   */
+  branding: string;
   /** Which screen the client is on: the menus are dead outside the desktop. */
   mode: "picker" | "desktop";
   /** The connection lifecycle, which decides Take Over's title and presence. */

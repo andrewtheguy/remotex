@@ -114,6 +114,48 @@ struct MenuCommandTests {
         #expect(sink.sent(.setMacKeyOverrides(false)))
     }
 
+    /// The gateway's own name, which the window title, the About item and the
+    /// launch screen all read.
+    ///
+    /// It comes off the page because the page is the only half that talks to the
+    /// gateway. This is a regression test: the app used to fetch `/api/config`
+    /// itself, and when the session moved to the client that fetch went with it —
+    /// leaving a stored property nothing assigned, so a gateway branded "QA" still
+    /// put "remotex" in the title bar and in "About remotex".
+    @Test
+    func thebrandingComesFromThePage() {
+        let model = AppModel.underTest(sink: RecordingSink())
+        #expect(model.branding == "remotex", "until a page has said otherwise")
+
+        var state = AppModel.desktopState()
+        state.branding = "QA"
+        model.apply(.state(state))
+        #expect(model.branding == "QA")
+        #expect(model.windowTitle == "QA")
+
+        // And with sound playing, where the title carries the speaker too.
+        state.audioEnabled = true
+        state.canAudio = true
+        model.apply(.state(state))
+        #expect(model.windowTitle == "QA 🔊")
+    }
+
+    /// The keyboard-override item is greyed by one rule, in one place. Off the
+    /// desktop and against a Mac guest are different reasons for the same answer,
+    /// and the label says which — so the two must not be able to disagree.
+    @Test
+    func theKeyboardOverrideRuleLivesInOnePlace() {
+        let model = AppModel.underTest(sink: RecordingSink())
+        #expect(!model.canOverrideMacKeys, "no desktop, nothing to translate for")
+
+        model.apply(.state(AppModel.desktopState()))
+        #expect(model.canOverrideMacKeys)
+
+        model.apply(.state(AppModel.desktopState(remoteIsMac: true)))
+        #expect(!model.canOverrideMacKeys)
+        #expect(model.macOSKeyboardOverridesLabel.hasSuffix("(Not Applicable)"))
+    }
+
     /// The display list is the client's, and the checkmark moves only when the
     /// remote confirms — so a display the Mac refused leaves the menu agreeing with
     /// what is on screen rather than with what was clicked.

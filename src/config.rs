@@ -1183,6 +1183,30 @@ fn installed_etc_dir() -> Option<PathBuf> {
     Some(versions_dir.parent()?.join("etc"))
 }
 
+/// Say so, before binding, when the web root is not one.
+///
+/// The SPA handler still answers per request, so this changes nothing about what
+/// happens — it changes whether anyone can tell *why*. A gateway with no page to
+/// serve is a browser tab showing a 404, or `remotex.app` showing a blank window,
+/// and neither says which of the two ends is wrong.
+///
+/// `hint` is the half that differs: a served gateway is told where to look in its
+/// config, and an embedded one is told this path came from its own bundle — the
+/// config it reads has no key for it and `[server]` is refused there.
+pub fn warn_if_no_web_root(static_dir: &Path, hint: &str) {
+    if !static_dir.is_dir() {
+        log::warn!(
+            "static dir {} not found — the web UI will 404 ({hint})",
+            static_dir.display()
+        );
+    } else if !static_dir.join("index.html").is_file() {
+        log::warn!(
+            "no index.html in static dir {} — the web UI will 404 ({hint})",
+            static_dir.display()
+        );
+    }
+}
+
 /// Default location of the built frontend.
 ///
 /// Prefers the installed layout (`<root>/share/remotex/web`); falls back to

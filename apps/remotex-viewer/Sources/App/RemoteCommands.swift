@@ -47,7 +47,7 @@ struct RemoteCommands: Commands {
                     set: { model.setMacKeyOverrides($0) }
                 )
             )
-            .disabled(!model.isOnDesktop || model.state.remoteIsMac)
+            .disabled(!model.canOverrideMacKeys)
 
             Divider()
 

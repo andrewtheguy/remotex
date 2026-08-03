@@ -1656,7 +1656,7 @@ export function useRemoteDesktop(
     if (NATIVE_HOST || mode !== "desktop" || !canClipboard) {
       return;
     }
-    const pushLocalClipboard = () => {
+    const pushBrowserClipboardOnFocus = () => {
       if (document.hidden || !document.hasFocus()) {
         return;
       }
@@ -1680,13 +1680,16 @@ export function useRemoteDesktop(
         sendRef.current({ type: "clipboard", text });
       })();
     };
-    window.addEventListener("focus", pushLocalClipboard);
-    document.addEventListener("visibilitychange", pushLocalClipboard);
+    window.addEventListener("focus", pushBrowserClipboardOnFocus);
+    document.addEventListener("visibilitychange", pushBrowserClipboardOnFocus);
     // Also once now: the tab may already be focused when the session starts.
-    pushLocalClipboard();
+    pushBrowserClipboardOnFocus();
     return () => {
-      window.removeEventListener("focus", pushLocalClipboard);
-      document.removeEventListener("visibilitychange", pushLocalClipboard);
+      window.removeEventListener("focus", pushBrowserClipboardOnFocus);
+      document.removeEventListener(
+        "visibilitychange",
+        pushBrowserClipboardOnFocus,
+      );
     };
   }, [mode, canClipboard]);
 

@@ -26,7 +26,7 @@ struct RemoteWebHost: NSViewRepresentable {
         Coordinator(model: model, gateway: gateway)
     }
 
-    func makeNSView(context: Context) -> RemoteWebView {
+    func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         // No gesture requirement, unlike a browser tab. This is what lets **Remote ›
         // Enable Audio** start sound from a menu item: a menu press is not a user
@@ -48,7 +48,7 @@ struct RemoteWebHost: NSViewRepresentable {
         if let identifier = model.dataStoreIdentifier {
             configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: identifier)
         }
-        let webView = RemoteWebView(frame: .zero, configuration: configuration)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.allowsMagnification = false
         webView.allowsBackForwardNavigationGestures = false
         #if DEBUG
@@ -58,11 +58,11 @@ struct RemoteWebHost: NSViewRepresentable {
         return webView
     }
 
-    func updateNSView(_ webView: RemoteWebView, context: Context) {
+    func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.apply(hidesToolbar: hidesToolbar)
     }
 
-    static func dismantleNSView(_ webView: RemoteWebView, coordinator: Coordinator) {
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         coordinator.detach()
     }
 
@@ -70,7 +70,7 @@ struct RemoteWebHost: NSViewRepresentable {
     final class Coordinator {
         private let model: AppModel
         private let gateway: GatewayEndpoint
-        private weak var webView: RemoteWebView?
+        private weak var webView: WKWebView?
         private var bridge: NativeBridge?
         private var keyboard: KeyboardCapture?
 
@@ -79,7 +79,7 @@ struct RemoteWebHost: NSViewRepresentable {
             self.gateway = gateway
         }
 
-        func attach(webView: RemoteWebView) {
+        func attach(webView: WKWebView) {
             self.webView = webView
             // A local event monitor rather than letting WebKit see keys: menu key
             // equivalents are consumed by the menu bar before any responder, and a
@@ -116,7 +116,7 @@ struct RemoteWebHost: NSViewRepresentable {
         /// because the requests that matter are not this app's: the page issues its
         /// own `fetch` calls and opens its own `ws://` sockets, and neither can be
         /// given a header from out here. See `src/auth.rs`.
-        private func load(into webView: RemoteWebView) {
+        private func load(into webView: WKWebView) {
             let bridge = NativeBridge(model: model, origin: gateway.url)
             bridge.webView = webView
             self.bridge = bridge
@@ -234,20 +234,5 @@ struct GatewayEndpoint: Equatable {
             .domain: "127.0.0.1",
             .path: "/",
         ])!
-    }
-}
-
-/// A `WKWebView` that says when its frame changed.
-///
-/// Kept for one reason: the page reports the viewport itself from its own window
-/// size, so nothing measures the surface any more — but full screen and a toolbar
-/// appearing still change the bounds under a desktop, and **Resize to Display**
-/// reads them.
-final class RemoteWebView: WKWebView {
-    var onFrameChange: (() -> Void)?
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        onFrameChange?()
     }
 }

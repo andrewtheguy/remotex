@@ -128,6 +128,16 @@ pub async fn serve(instance: &Instance, web_root: PathBuf) -> anyhow::Result<()>
     let token = EmbeddedToken::generate();
     let config = file.resolve_embedded(token.clone(), web_root)?;
 
+    // Before the bind, so the reason is above the handshake in `gateway.log` rather
+    // than below whatever the app did next. A missing page here is not a
+    // misconfiguration — this path came from the bundle — so it means the bundle is
+    // incomplete, and without this the app shows an empty window and the log says
+    // nothing at all about why.
+    crate::config::warn_if_no_web_root(
+        &config.static_dir,
+        "this is remotex.app's --web-root, so the bundle is incomplete",
+    );
+
     // One socket on one address, and that address comes from the config rather than
     // from a literal here — `resolve_embedded` is where it is decided, and two places
     // saying `127.0.0.1` is one of them going stale the day the other changes.

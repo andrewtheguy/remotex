@@ -91,6 +91,7 @@ export default function RemoteDesktop({
   // Everything the shell's menus render themselves from. In a browser this object
   // is built and dropped; `useNativeState` posts nothing.
   useNativeState({
+    branding,
     mode,
     status,
     ready: size !== null,

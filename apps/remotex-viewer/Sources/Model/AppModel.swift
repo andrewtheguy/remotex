@@ -25,7 +25,6 @@ enum ViewerScreen: Equatable {
 @Observable
 final class AppModel {
     private(set) var screen = ViewerScreen.launching
-    private(set) var branding = "remotex"
     /// What the page last reported about itself. Every menu is derived from it.
     private(set) var state = NativeState()
 
@@ -108,6 +107,18 @@ final class AppModel {
 
     // MARK: - Derived UI state
 
+    /// This gateway's display name: the window title, the About item, the launch
+    /// screen.
+    ///
+    /// Read off the page's report rather than held here, and that is the fix for a
+    /// real fault: the app used to fetch `/api/config` itself, and when the session
+    /// moved to the client the fetch went with it — leaving a stored property that
+    /// nothing ever assigned, so every window said `remotex` however the config was
+    /// branded. There is no second copy to go stale now.
+    var branding: String {
+        state.branding
+    }
+
     var windowTitle: String {
         // A speaker suffix while sound is playing — the one persistent surface that
         // can say so, since the toggle is a menu item nobody is looking at.
@@ -133,6 +144,13 @@ final class AppModel {
         state.remoteIsMac
             ? "Enable macOS Keyboard Overrides (Not Applicable)"
             : "Enable macOS Keyboard Overrides"
+    }
+
+    /// Whether the override is a choice at all. Beside the label above, because the
+    /// two answer the same question and a menu that greys on one rule while
+    /// labelling itself by another is how they come to disagree.
+    var canOverrideMacKeys: Bool {
+        isOnDesktop && !state.remoteIsMac
     }
 
     var macOSKeyboardOverridesActive: Bool {

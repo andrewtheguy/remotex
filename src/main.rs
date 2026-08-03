@@ -102,18 +102,10 @@ async fn serve_embedded(
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
     // Surface a misconfigured static path before we start listening. The SPA
     // handler still 404s per-request; this just makes the cause obvious.
-    let static_dir = config.static_dir.as_path();
-    if !static_dir.is_dir() {
-        warn!(
-            "static dir {} not found — the web UI will 404 (set static_dir under [server])",
-            static_dir.display()
-        );
-    } else if !static_dir.join("index.html").is_file() {
-        warn!(
-            "no index.html in static dir {} — the web UI will 404",
-            static_dir.display()
-        );
-    }
+    remotex::config::warn_if_no_web_root(
+        &config.static_dir,
+        "set static_dir under [server]",
+    );
 
     let app = server::router(config.clone());
 
