@@ -724,7 +724,7 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         targets: vec![target],
         auth: common::test_auth(),
         branding: "remotex".to_owned(),
-        loopback_hostname: None,
+        dev_hostname: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

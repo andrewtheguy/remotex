@@ -20,11 +20,6 @@ import Foundation
 final class EmbeddedGateway {
     /// What the gateway prints once, before serving.
     struct Handshake: Decodable, Equatable, Sendable {
-        /// The `<label>.localhost` name to load the page from, derived by the gateway
-        /// from the instance directory. Taken from here rather than worked out on
-        /// this side: the origin is one decision, and two implementations of it would
-        /// disagree the first time either changed.
-        let host: String
         let port: UInt16
         let token: String
     }
@@ -343,7 +338,6 @@ final class EmbeddedGateway {
         guard let data = line.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
               let handshake = try? JSONDecoder().decode(Handshake.self, from: data),
               handshake.port != 0,
-              !handshake.host.isEmpty,
               !handshake.token.isEmpty
         else {
             return nil
