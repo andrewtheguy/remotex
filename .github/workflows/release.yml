@@ -186,10 +186,9 @@ jobs:
             echo "::error::expected 'remotex ${version}', got '${got}'"
             exit 1
           }
-          # The client, which the bundled gateway serves on loopback and the app
-          # shows in a web view. Without it there is a window with nothing in it:
-          # the gateway answers the document request with a 404 and the app reports
-          # a page that would not load.
+          # The client: the app loads this document from `file://` and the bundled
+          # gateway serves the same directory to any browser opened on its port.
+          # Without it the app has nothing to show and says so at launch.
           [ -f "$app/Contents/Resources/web/index.html" ] || {
             echo "::error::remotex.app is missing the SPA it shows"
             exit 1
@@ -231,9 +230,11 @@ jobs:
               if parsed.scheme or parsed.netloc or not parsed.path:
                   continue
               checked += 1
-              # Vite emits absolute `/assets/…`, which is correct at the origin root
-              # the gateway serves this from — so it resolves against the web root
-              # rather than against the document.
+              # Resolved against the web root. Vite emits `./assets/…` (`base: "./"`,
+              # since the app's document is a file and not at an origin root), and
+              # index.html sits at that root, so document-relative and root-relative
+              # are the same thing here — `lstrip` keeps an absolute `/assets/…`
+              # working too if the base ever changes back.
               if not (root / urllib.parse.unquote(parsed.path).lstrip("/")).is_file():
                   missing.append(ref)
 

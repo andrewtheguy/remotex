@@ -545,8 +545,7 @@ client turns the packet into an `AudioBuffer` and schedules it directly.
 The secure-context requirement belongs to that first path alone. WebCodecs is
 unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
 localhost, while passthrough plays anywhere. `remotex.app` is unaffected either
-way: its gateway serves the page from `127.0.0.1`, which is always a secure
-context.
+way: it loads the page from `file://`, which WebKit treats as a secure context.
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
@@ -768,13 +767,18 @@ reclaim actions.
 shows **the SPA above** in a `WKWebView`, and owns what a page cannot: the menu
 bar, keyboard capture ahead of it, `NSPasteboard`, and the window.
 
-Nothing about the session is the app's. The page is served by the gateway beside
-it on `http://127.0.0.1`, so it talks to that gateway directly — same claim, same
-`/ws`, same `/ws/audio` — and this app holds no socket, no claim and no wire
-format. A protocol change is a change to one client, in one language.
+Nothing about the session is the app's. The page is loaded from `file://` inside
+the bundle and talks to the gateway beside it on `http://127.0.0.1` itself — same
+claim, same `/ws`, same `/ws/audio` — and this app holds no socket, no claim and no
+wire format. A protocol change is a change to one client, in one language.
 
-The loopback origin is load-bearing rather than incidental: it is a secure
-context, so WebCodecs is available for Opus and H.264 whatever the app is showing.
+Loading from a file is what gives the page an origin that survives a relaunch, and
+`localStorage` is keyed by origin: on the gateway's ephemeral port the client's
+remembered preferences went into a new bucket every time. The cost is that a
+`file://` origin serializes to `null`, so those calls are cross-origin and the
+embedded gateway answers that one origin with credentials — narrowly, and only
+where the credential is a per-launch token. A `file://` document is a secure
+context in WebKit, so WebCodecs is available for Opus and H.264 as before.
 
 Two things cross the boundary, over one `WKScriptMessageHandler` and one
 `evaluateJavaScript` call (`frontend/src/nativeHost.ts`): the page reports one
@@ -783,9 +787,10 @@ never given, the Mac's pasteboard, and the menu commands standing in for the
 floating menu it hides. See [`macos-viewer.md`](macos-viewer.md#the-bridge).
 
 The gateway it starts is `serve-embedded`: an ephemeral loopback port, the SPA out
-of `Contents/Resources/web`, and a random token minted per launch that the app puts
-in the web view's cookie store instead of a login. It dies with the app. Reaching
-a gateway elsewhere is a browser's job.
+of `Contents/Resources/web` — the same directory the window loads its document
+from, so a browser opened on that port gets the same client — and a random token
+minted per launch that the app puts in the web view's cookie store instead of a
+login. It dies with the app. Reaching a gateway elsewhere is a browser's job.
 
 That path is the one place `GatewayAuth` (in `src/auth.rs`, of which exactly one is
 active per process) and `config::Audience` differ from a served gateway, because the

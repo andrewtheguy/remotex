@@ -2,8 +2,13 @@
 
 `remotex.app` is a native macOS 26 **shell** around the browser client. It starts
 `Contents/MacOS/remotex-gateway` on an ephemeral loopback port, authenticates with
-a random token delivered through a private pipe, shows the SPA that gateway serves
-in a `WKWebView`, and stops the gateway when the app quits.
+a random token delivered through a private pipe, shows the SPA from `file://` in
+its own bundle in a `WKWebView`, and stops the gateway when the app quits.
+
+The page is a file rather than something the gateway serves so that its origin —
+and with it the client's remembered preferences — survives a launch on a different
+port. The gateway serves that same directory, so a browser pointed at the embedded
+port gets the same client.
 
 There is one gateway, in this bundle. A gateway elsewhere is reached with a
 browser.

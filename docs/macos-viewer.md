@@ -1,13 +1,13 @@
 # remotex.app
 
 `remotex.app` is a native macOS 26 client, and it is a **shell**. It starts the
-gateway in its own bundle, shows the SPA that gateway serves, and owns everything
-around it: the menu bar, keyboard capture, pasteboard synchronization, and the
-window.
+gateway in its own bundle, shows the SPA, and owns everything around it: the menu
+bar, keyboard capture, pasteboard synchronization, and the window.
 
 Inside the window is a `WKWebView` and nothing else. The page is
-`frontend/dist` — the same build a browser loads — served over loopback by
-`Contents/MacOS/remotex-gateway`. So the client has one implementation, in one
+`frontend/dist` — the same build a browser loads — copied into the bundle and
+opened from `file://`, with `Contents/MacOS/remotex-gateway` behind it on loopback
+for everything the page asks for. So the client has one implementation, in one
 language, and this app is what a browser cannot be:
 
 | what it adds | why a page cannot |
@@ -27,7 +27,7 @@ The bundle holds two executables and the client:
 |---|---|
 | `Contents/MacOS/remotex-viewer` | the Swift app (`CFBundleExecutable`) |
 | `Contents/MacOS/remotex-gateway` | a copy of the `remotex` gateway binary |
-| `Contents/Resources/web` | the built SPA, served by the gateway above |
+| `Contents/Resources/web` | the built SPA: the web view opens `index.html` here, and the gateway serves the same directory |
 
 `CFBundleIdentifier` remains `dev.remotex.viewer`; TCC grants and saved window
 state are keyed to it.
@@ -42,13 +42,57 @@ server settings:
 |---|---|
 | address | `127.0.0.1`, one socket |
 | port | `0`, read back off the socket after binding |
-| web UI | the SPA in this bundle, named by `--web-root` |
+| web UI | the SPA in this bundle, named by `--web-root`. The window does not use it; a browser opened on this port does |
 | login | refused. `/api/auth/login` and `/api/auth/logout` answer 403 |
 | credential | a random token minted per launch, presented as the `remotex_session` cookie |
 
 `--web-root` is passed rather than derived because nothing about a bundle's
 layout is the gateway binary's to know: `default_static_dir()` finds an installed
 prefix or a cwd-relative checkout, and inside `Contents/MacOS` neither applies.
+
+### The origin
+
+The window loads `Contents/Resources/web/index.html` from `file://`. The gateway
+serves that same directory, but the page in this app never asks it for the
+document — only for `/api/*` and `/ws`.
+
+This is about **`localStorage`**, which is keyed by origin. A gateway on an
+ephemeral port is a different origin at every launch, so the client's three
+remembered preferences were written to a bucket nothing would ever read again: the
+Command-translation override and both "if compatible" defaults came back off at
+every launch, and quitting was the only way to see it. A file inside the bundle is
+the same origin forever, however the port lands.
+
+It cost one thing, and it is paid in the gateway. A `file://` document's origin
+serializes to `null`, so the page calls its own gateway **cross-origin**:
+
+| header | why |
+|---|---|
+| `Access-Control-Allow-Origin: null` | names the one caller. Never echoed from the request — `null` is also every sandboxed frame on the web |
+| `Access-Control-Allow-Credentials: true` | what lets the `remotex_session` cookie travel. Without it the call succeeds *unauthenticated*, which reads as a mysterious 401 rather than as a CORS error |
+| `Vary: Origin` | so no cache serves one origin's answer to another |
+
+`opaque_origin_cors` (`src/server.rs`) answers this only where both halves of an
+embedded gateway hold — `allow_opaque_origin` **and** `GatewayAuth::Token` — because
+the credential is what the second header puts at stake. A served gateway is
+reachable from a network and its cookie is behind a typed password; there, these
+headers would let any sandboxed frame somebody visited make credentialed calls.
+WebSockets do no preflight and carry the cookie on the upgrade, so `/ws` needs
+nothing beyond this.
+
+The client reaches all of it through `frontend/src/gateway.ts`, which is the only
+module that knows an origin: `window.__remotexGateway`, injected as a
+`WKUserScript` at document start, or `location.origin` in a browser. `gatewayFetch`
+sets `credentials: "include"`, which a cross-origin `fetch` needs and a same-origin
+one does not mind.
+
+The bundle has to be a **classic, deferred** script for any of this to load at all,
+which is `classicScriptTag` in `frontend/vite.config.ts`. A module script is always
+fetched with CORS and an opaque origin cannot, so `type="module"` is a blank window
+with two message-less errors; and a classic script is not deferred by definition
+the way a module is, so without `defer` it runs inside `<head>` and throws "Root
+element not found". One build serves both clients, and there is nowhere to put a
+second — this directory is `file://` and `http://` at the same time.
 
 ### The cookie
 
@@ -75,6 +119,10 @@ compatible" defaults at every launch, silently. WebKit keeps that store in the
 app's container rather than in the instance directory, which is why the
 identifier has to come from the directory: it is what makes `--instance-dir`
 isolate preferences the way it isolates the config and the log.
+
+Persistent is necessary and not sufficient — a stable [origin](#the-origin) is the
+other half. Either one alone looks exactly like working until the app is quit and
+launched again, which is how this shipped twice as fixed and was not.
 
 The cookie in it is replaced at every launch by that launch's token, and the claim
 lives in `sessionStorage`, which is per web view whatever the store does.
@@ -249,11 +297,19 @@ The call is a `?.` chain, because the page installs its entry point when the
 desktop mounts and removes it when that unmounts — a menu item pressed a moment
 either side of a target switch has to find nothing and do nothing.
 
-The document's origin is `http://127.0.0.1:<port>`, which is what makes WebCodecs
-available: loopback is potentially trustworthy, so the page is a **secure
-context** and Opus and H.264 decode. It is also the gateway's own origin, so the
-page talks to it directly and nothing about the session passes through this app.
-`WKNavigationDelegate` refuses a navigation anywhere else.
+The document is a `file://` URL, and it is a **secure context** in WebKit, so
+WebCodecs is available and Opus and H.264 decode. Nothing about the session passes
+through this app either way: the page talks to the gateway itself, over the
+cross-origin path [above](#the-origin).
+
+`WKNavigationDelegate` refuses a navigation anywhere else, and for a file URL that
+is a **path** test (`NativeBridge.permits`): this document, or something inside the
+directory it was loaded from, standardized first so `web/../../etc/passwd` is
+resolved rather than compared as written. The scheme/host/port comparison it
+replaced was worthless here — a file URL has neither host nor port, so every one of
+them matched every other and any path on the disk could have replaced the page.
+This matters because the window shows somebody else's pixels and carries their
+clipboard strings, and there is no address bar to notice with.
 
 `mediaTypesRequiringUserActionForPlayback` is set to nothing, which is what lets
 **Remote › Enable Audio** start sound: a menu press is not a user activation as
@@ -368,8 +424,8 @@ permission, while `clipboard = true` remains the boundary.
 ## Networking
 
 The gateway uses plain HTTP on loopback. Because ATS treats `ws://` as `http://`,
-the bundle sets `NSAllowsArbitraryLoads`; that covers the page's own loopback
-origin too.
+the bundle sets `NSAllowsArbitraryLoads`; that covers the `fetch` calls and socket
+upgrades the page makes to loopback from its `file://` document.
 
 ### Local network permission
 
@@ -410,6 +466,13 @@ builds but whose tile painter is wrong looks fine until pixels land.
 `--instance-dir` is the only GUI-launch argument and is the whole of the
 isolation: config and log are under the directory it names, so QA cannot touch
 `~/Library/Application Support/remotex`. Delete the QA directory for a clean run.
+
+**Quit and launch again as part of every QA pass.** Change a remembered preference
+— the Command-translation override, or either "if compatible" default — then ⌘Q and
+reopen. Nothing within a single launch can tell a stored preference from one that
+was written where it will never be read again, which is how this shipped as fixed
+twice; the gateway's port is in `gateway.log` and differing between the two runs is
+the point, not a problem.
 
 Always validate the packaged `.app`; `swift run`, standalone `swift build`, and
 the executable under `.build` bypass bundle menus, `Info.plist` behavior, and the

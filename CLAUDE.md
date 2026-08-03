@@ -9,11 +9,19 @@
   (`ServeDir` in `src/server.rs`); Biome, `tsc -b`, `bun test`, and backend tests
   do not detect a stale bundle. For source-based iteration, use
   `REMOTEX_DEV_BACKEND=<port> bun run dev`.
-- There is one client. `remotex.app` shows this same SPA in a `WKWebView`, served
-  by the gateway in its bundle, so a frontend change is a change to both — and
+- There is one client. `remotex.app` shows this same SPA in a `WKWebView`, loaded
+  from `file://` inside its bundle, so a frontend change is a change to both — and
   `NATIVE_HOST` in `frontend/src/nativeHost.ts` is the only thing that may differ
   between them. Do not add a second implementation of anything the page already
   does.
+- One `bun run build`, one `frontend/dist`, both clients. It is a **classic,
+  deferred** script (`classicScriptTag` in `frontend/vite.config.ts`), and neither
+  half of that is cosmetic: a module script is always fetched with CORS and a
+  `file://` origin is opaque, so `type="module"` is a blank window, while a classic
+  script without `defer` runs inside `<head>` and cannot find `#root`. Every URL the
+  page uses goes through `frontend/src/gateway.ts`; there is no second build to gate
+  behind a mode, because `Contents/Resources/web` is loaded from `file://` *and*
+  served over `http://` at the same time.
 - Put temporary files and test config under `tmp/`. Run efficient local Python
   one-offs with `uv` (GitHub Actions excluded).
 - Use `anyhow` for application errors and `thiserror` for typed API errors.
@@ -115,13 +123,43 @@ For counts, assert invariant relationships such as `records > frames`.
 
 It is a **shell**, not a second client. The bundle starts `remotex-gateway
 serve-embedded --instance-dir <dir> --web-root <dir>` on an ephemeral `127.0.0.1`
-port, and shows the SPA that gateway serves in a `WKWebView`. There is one
-gateway, in this bundle; a gateway elsewhere is reached with a browser.
+port, and shows the SPA in a `WKWebView` — **loaded from `file://` inside the
+bundle**, not from that gateway. There is one gateway, in this bundle; a gateway
+elsewhere is reached with a browser.
 
 `dist/remotex.app` contains `Contents/MacOS/remotex-viewer`,
 `Contents/MacOS/remotex-gateway`, and `Contents/Resources/web` — the built SPA,
 named by `--web-root` because nothing about a bundle's layout is the gateway
-binary's to guess.
+binary's to guess. The web view opens `index.html` in that same directory, and the
+gateway still serves it, so a browser pointed at the embedded port gets the same
+client.
+
+The page is loaded from a file **so that its origin holds still**. A gateway on an
+ephemeral port is a new origin at every launch, and `localStorage` is keyed by
+origin, so the client's three remembered preferences were silently dropped every
+time — twice claimed fixed and not. A fixed port with a derived `.localhost`
+hostname bought the same thing and was reverted for this; the port is ephemeral
+again and nothing depends on it.
+
+What that costs is one thing, paid in the gateway: a `file://` document's origin
+serializes to `null`, so the page calls its own gateway cross-origin.
+`opaque_origin_cors` in `src/server.rs` answers that one origin with
+`Access-Control-Allow-Origin: null` and `Access-Control-Allow-Credentials: true` —
+the second is what lets the cookie travel, and without it the call succeeds
+*unauthenticated*, which surfaces as a mysterious 401 rather than as a CORS error.
+It is answered only on a gateway that is both `allow_opaque_origin` and
+`GatewayAuth::Token`, never for any other origin, and never echoing back whatever
+arrived: `null` is also the origin of every sandboxed frame on the web, so a served
+gateway must never answer it.
+
+`file://` is a **secure context** in WebKit, so WebCodecs is available and audio
+and video decode exactly as before. No private WebKit API is involved;
+`_setAllowFileAccessFromFileURLs:` controls only whether a script error's *message*
+is visible, not whether the script runs.
+
+`NativeBridge.permits` is a **path** test, not scheme/host/port. A `file://` URL has
+neither host nor port, so the old comparison matched every file URL against every
+other and any path on the disk could have replaced the page.
 
 Each launch mints a random token, sends it only to the app in one stdout JSON
 line, and keeps it in memory. The app puts it in the web view's cookie store as
@@ -134,7 +172,9 @@ The web view's data store must be **persistent and per instance**
 (`WKWebsiteDataStore(forIdentifier:)`, keyed off `InstanceDirectory.dataStoreIdentifier`).
 The client's three remembered preferences live in its `localStorage`, so a
 non-persistent store drops them at every launch without saying so, and a shared
-one would leak a QA instance's into the real one.
+one would leak a QA instance's into the real one. A persistent store is necessary
+and was never sufficient — the origin above is the other half, and each half alone
+looks exactly like the whole thing working until you quit and relaunch.
 
 The app holds **no session**: no claim, no socket, no wire format, no protocol
 version. Do not put any of it back. Everything about the session is the client's,
