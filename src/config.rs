@@ -661,6 +661,18 @@ pub struct ConfigFile {
     /// Defaults to [`DEFAULT_BRANDING`]; whitespace-only is treated as absent.
     #[serde(default)]
     pub branding: Option<String>,
+    /// The loopback port `remotex.app`'s own gateway listens on
+    /// ([`crate::embedded::DEFAULT_PORT`] when absent). [`Audience::Embedded`] only:
+    /// a served gateway spells this `[server].port`, and accepting both spellings
+    /// would be two places to write one value.
+    ///
+    /// Top-level for the reason `branding` is — the embedded config has no
+    /// `[server]` block to put it in — and it is here at all because the port is the
+    /// one thing about that gateway a user can be forced to change: it is fixed
+    /// rather than ephemeral so the page's origin holds still across launches, and
+    /// two instances running at once therefore collide on it.
+    #[serde(default)]
+    pub port: Option<u16>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
 }
@@ -671,9 +683,7 @@ pub struct ConfigFile {
 pub struct AppConfig {
     /// Host/interface the web server binds to.
     pub host: String,
-    /// Port the web server binds to. `0` asks the kernel for an ephemeral one,
-    /// which is what an embedded gateway does — the port it got is then read off
-    /// the listener and told to its client, never guessed.
+    /// Port the web server binds to.
     pub port: u16,
     /// Directory holding the built frontend (index.html + assets), served from
     /// disk. Defaults to [`default_static_dir`] for a served gateway; an embedded
@@ -690,13 +700,21 @@ pub struct AppConfig {
     pub auth: GatewayAuth,
     /// Display name for the login screen, interstitials, and browser tab title.
     pub branding: String,
-    /// `<label>.localhost` to send a loopback browser to, from
-    /// `[server].dev_subdomain`. `None` disables the redirect entirely.
+    /// The `<label>.localhost` name this gateway's origin is spelled with. `None`
+    /// disables the redirect entirely.
+    ///
+    /// Two audiences reach it and they want it for the same reason, which is why the
+    /// field is not named after either: a served gateway sets it from
+    /// `[server].dev_subdomain` so two development gateways on one machine stop
+    /// sharing a cookie jar, and an embedded one is *always* given one, derived from
+    /// its instance directory, so the origin of the page `remotex.app` shows is a
+    /// fact about that instance rather than about which port the kernel happened to
+    /// hand out (see [`crate::embedded::Instance::origin_label`]).
     ///
     /// Stored as the whole hostname rather than the label so the one place that
     /// validated it is the only place that builds it — a redirect target
     /// assembled at the point of use is one that can be assembled wrongly.
-    pub dev_hostname: Option<String>,
+    pub loopback_hostname: Option<String>,
 }
 
 impl ConfigFile {
@@ -731,13 +749,22 @@ impl ConfigFile {
             anyhow::ensure!(
                 config.server.is_none(),
                 "this config is remotex.app's own and may not have a [server] block: \
-                 the app decides where its gateway listens, serves no web UI, and \
-                 authenticates itself. Only branding and [[targets]] belong here"
+                 the app serves no web UI and authenticates itself. Only branding, \
+                 port and [[targets]] belong here"
             );
         } else {
             anyhow::ensure!(
                 !config.targets.is_empty(),
                 "config has no [[targets]] — at least one target profile is required"
+            );
+            // The mirror of the refusal above, and refused for the same reason: this
+            // key is the embedded gateway's spelling of a value a served one already
+            // has under `[server]`. Silently preferring one of the two would make the
+            // other read as configuration and behave as decoration.
+            anyhow::ensure!(
+                config.port.is_none(),
+                "top-level `port` belongs to remotex.app's own config; a served \
+                 gateway sets [server].port"
             );
         }
         for target in &config.targets {
@@ -1037,17 +1064,26 @@ impl ConfigFile {
         self,
         token: EmbeddedToken,
         web_root: PathBuf,
+        port: u16,
+        origin_label: &str,
     ) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
-            // Not `localhost`: that name resolves to both loopbacks and the client
-            // is told one port on one address. The app connects to 127.0.0.1.
+            // Not `localhost`: that name resolves to both loopbacks, and binding one
+            // address keeps this a single socket. The *name* the client is given
+            // resolves to both — `<label>.localhost` — and a client that picks the
+            // v6 address falls straight back to this one, which was measured rather
+            // than assumed.
             host: "127.0.0.1".to_owned(),
-            port: 0,
+            port,
             static_dir: web_root,
             targets: self.targets,
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_deref()),
-            dev_hostname: None,
+            // Always a name, never `None`, and that is the difference between the two
+            // audiences: for a served gateway this is an opt-in development
+            // convenience, and here it is what gives the page an origin that survives
+            // a relaunch. See the field.
+            loopback_hostname: Some(loopback_hostname(origin_label)?),
         })
     }
 
@@ -1087,12 +1123,12 @@ impl ConfigFile {
             targets: self.targets,
             auth: GatewayAuth::Login(site_passwd),
             branding: Self::resolve_branding(self.branding.as_deref()),
-            dev_hostname: server
+            loopback_hostname: server
                 .dev_subdomain
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(dev_hostname)
+                .map(loopback_hostname)
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
         })
@@ -1100,6 +1136,11 @@ impl ConfigFile {
 }
 
 /// `<label>.localhost`, refusing anything that is not a single DNS label.
+///
+/// By RFC 6761 every name under `.localhost` is loopback, and macOS resolves them —
+/// to `::1` and `127.0.0.1` both. Two such names are two *origins*, which is the
+/// property both callers are after: separate cookie jars and separate
+/// `localStorage`, on one machine and one port.
 ///
 /// The check is what makes the redirect target unforgeable: a `Location` built
 /// from an unvalidated string could name any host at all, and this one is
@@ -1110,7 +1151,7 @@ impl ConfigFile {
 /// Length is bounded at 63, the DNS label limit, for the same reason the shape is
 /// checked rather than trusted: a name nothing can resolve is a redirect loop
 /// waiting to happen, and a config file is where it should be caught.
-fn dev_hostname(label: &str) -> anyhow::Result<String> {
+pub fn loopback_hostname(label: &str) -> anyhow::Result<String> {
     anyhow::ensure!(
         label.len() <= 63,
         "{label:?} is longer than a DNS label may be (63 characters)"
@@ -1311,20 +1352,20 @@ mod tests {
     #[test]
     fn a_dev_subdomain_becomes_one_label_under_localhost() {
         assert_eq!(
-            resolved(r#"dev_subdomain = "a""#).dev_hostname.as_deref(),
+            resolved(r#"dev_subdomain = "a""#).loopback_hostname.as_deref(),
             Some("a.localhost")
         );
         // Unset, and whitespace-only, both disable it — as `branding` does.
-        assert_eq!(resolved("").dev_hostname, None);
-        assert_eq!(resolved(r#"dev_subdomain = "  ""#).dev_hostname, None);
+        assert_eq!(resolved("").loopback_hostname, None);
+        assert_eq!(resolved(r#"dev_subdomain = "  ""#).loopback_hostname, None);
         // Trimmed, so a stray space cannot become part of a hostname.
         assert_eq!(
-            resolved(r#"dev_subdomain = "  b  ""#).dev_hostname.as_deref(),
+            resolved(r#"dev_subdomain = "  b  ""#).loopback_hostname.as_deref(),
             Some("b.localhost")
         );
         // Digits and inner hyphens are legal in a DNS label.
         assert_eq!(
-            resolved(r#"dev_subdomain = "gw-2""#).dev_hostname.as_deref(),
+            resolved(r#"dev_subdomain = "gw-2""#).loopback_hostname.as_deref(),
             Some("gw-2.localhost")
         );
     }
@@ -1357,7 +1398,7 @@ mod tests {
         }
         assert_eq!(
             resolved(&format!("dev_subdomain = {:?}", "a".repeat(63)))
-                .dev_hostname
+                .loopback_hostname
                 .as_deref(),
             Some(&*format!("{}.localhost", "a".repeat(63)))
         );

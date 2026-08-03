@@ -50,7 +50,13 @@ extension AppModel {
     /// `launch()` cannot get here without a gateway to start, and starting one is
     /// not what any of these tests are about.
     func showPage(sink: RecordingSink) {
-        showReadyForTesting(GatewayEndpoint(port: 49_213, token: "test-token"))
+        showReadyForTesting(
+            GatewayEndpoint(
+                host: "remotex-test.localhost",
+                port: 49_213,
+                token: "test-token"
+            )
+        )
         attach(bridge: sink)
     }
 

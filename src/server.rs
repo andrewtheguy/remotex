@@ -149,7 +149,7 @@ pub(crate) fn router_with_sessions(
         // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            dev_hostname_redirect,
+            loopback_hostname_redirect,
         ))
         .with_state(state)
 }
@@ -178,7 +178,14 @@ fn is_loopback_name(name: &str) -> bool {
 }
 
 /// Send a loopback browser to `<label>.localhost`, so this gateway has a cookie
-/// origin of its own (see `[server].dev_subdomain`).
+/// origin of its own.
+///
+/// Set from `[server].dev_subdomain` on a served gateway, where it is opt-in, and
+/// always set on an embedded one, where the origin is what carries the client's
+/// remembered preferences from one launch of `remotex.app` to the next (see
+/// [`crate::embedded`]). `remotex.app` loads the right name to begin with, so this
+/// redirect is not on its path at all — what it catches is anything else that
+/// arrives on the bare loopback address.
 ///
 /// Three deliberate limits, because a redirect is a thing to be careful with:
 ///
@@ -197,10 +204,11 @@ fn is_loopback_name(name: &str) -> bool {
 ///   does not follow one at all.
 /// - **307, not 301.** A permanent redirect is cached by the browser hard enough
 ///   to outlive the config key that caused it, on a hostname somebody may want
-///   back. This one is a development convenience and must be as easy to remove as
-///   it was to add.
-async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let Some(dev_hostname) = state.config.dev_hostname.as_deref() else {
+///   back. On a served gateway this is a development convenience and must be as
+///   easy to remove as it was to add; on an embedded one the label moves with the
+///   instance directory, and a cached permanent redirect would outlive that too.
+async fn loopback_hostname_redirect(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let Some(loopback_hostname) = state.config.loopback_hostname.as_deref() else {
         return next.run(req).await;
     };
     if req.uri().path() != "/" {
@@ -234,13 +242,13 @@ async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next
     //
     // Also the loop guard: without the second half this would redirect its own
     // target forever.
-    if !is_loopback_name(name) || name.eq_ignore_ascii_case(dev_hostname) {
+    if !is_loopback_name(name) || name.eq_ignore_ascii_case(loopback_hostname) {
         return next.run(req).await;
     }
 
     let authority = match port {
-        Some(port) => format!("{dev_hostname}:{port}"),
-        None => dev_hostname.to_owned(),
+        Some(port) => format!("{loopback_hostname}:{port}"),
+        None => loopback_hostname.to_owned(),
     };
     let target = format!(
         "http://{authority}{}",
@@ -487,7 +495,7 @@ mod tests {
     /// static dir that does not exist — every assertion below is about the
     /// redirect, and a request that is *not* redirected only has to be shown not
     /// to be one.
-    fn dev_router(dev_hostname: Option<&str>) -> Router {
+    fn dev_router(loopback_hostname: Option<&str>) -> Router {
         let config = AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 52675,
@@ -524,7 +532,7 @@ mod tests {
                 .unwrap(),
             ),
             branding: "remotex".to_owned(),
-            dev_hostname: dev_hostname.map(str::to_owned),
+            loopback_hostname: loopback_hostname.map(str::to_owned),
         };
         router(config)
     }
@@ -849,7 +857,7 @@ mod tests {
                 .unwrap(),
             ),
             branding: "audio tone harness".to_owned(),
-            dev_hostname: None,
+            loopback_hostname: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
