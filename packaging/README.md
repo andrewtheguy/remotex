@@ -29,7 +29,6 @@ assets relative to its real path and loads the stable config from
 | `install.sh` | stage a version, switch `current`, and retain one rollback |
 | `uninstall.sh` | remove an installation or one version |
 | `Dockerfile` | build an image from an extracted release tarball |
-| `macos-viewer/build-viewer-app.sh` | build the macOS viewer app/DMG |
 
 The repository-root `install.sh` downloads and verifies a release before
 calling `packaging/install.sh`.
@@ -46,8 +45,8 @@ Output is written to `dist/remotex-<version>-<os>-<arch>.tar.gz`.
 ## Releases
 
 `.github/workflows/release.yml` creates a draft, builds gateway tarballs for
-Linux x86_64, Linux arm64, and macOS arm64, builds the macOS viewer DMG, then
-publishes only after all assets succeed.
+Linux x86_64, Linux arm64, and macOS arm64, then publishes only after all assets
+succeed.
 
 The frontend is built once and reused for every platform. Container images are
 assembled from the published Linux tarballs, so they contain the same binary

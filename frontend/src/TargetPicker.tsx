@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { gatewayFetch } from "./gateway.ts";
-import { NATIVE_HOST } from "./nativeHost.ts";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
@@ -136,19 +135,14 @@ export default function TargetPicker({
             <span>Play the remote's sound, if compatible</span>
           </label>
         </div>
-        {/* No login, nothing to log out of: inside `remotex.app` the credential is
-            a token minted for this launch, and ending it would leave the app
-            holding a cookie its own gateway refuses. Quitting is the way out. */}
-        {!NATIVE_HOST && (
-          <button
-            type="button"
-            className="picker-logout"
-            onClick={onLogout}
-            disabled={pendingTarget !== null}
-          >
-            Log out
-          </button>
-        )}
+        <button
+          type="button"
+          className="picker-logout"
+          onClick={onLogout}
+          disabled={pendingTarget !== null}
+        >
+          Log out
+        </button>
       </div>
     </div>
   );

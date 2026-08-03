@@ -80,7 +80,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         auth: common::test_auth(),
         branding: "remotex".to_owned(),
         dev_hostname: None,
-            allow_shell_origin: false,
         targets: vec![TargetConfig {
             name: "tigervnc-dummy".to_owned(),
             protocol: Protocol::Vnc,

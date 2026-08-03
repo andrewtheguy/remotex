@@ -1,7 +1,8 @@
-# The gateway is the workspace root package; `crates/` holds the two that embed
-# Chromium for `remotex.app` (see docs/macos-viewer.md). The macOS agent and the
-# protocol crate it shared were removed (see docs/roadmap.md for the
-# virtual-display utility idea that could one day revive its one kept feature).
+# The gateway is the only package here. The macOS agent and the protocol crate it
+# shared were removed (see docs/roadmap.md for the virtual-display utility idea
+# that could one day revive its one kept feature), and so was the native macOS
+# viewer that embedded Chromium — the client is a browser client, and what the
+# shell used to add is a Chrome extension's to add now (docs/roadmap.md).
 #
 # One version for the whole workspace. `[workspace.package]` below is the only
 # literal `version` in the tree — the root package inherits it with
@@ -13,14 +14,7 @@
 # not match the regex (the `.` after `version` breaks it), which is what keeps
 # the root package from shadowing it.
 [workspace]
-members = [".", "crates/remotex-cef", "crates/remotex-cef-helper"]
-# The gateway alone is what a bare `cargo build`, `cargo clippy` and `cargo test`
-# act on. The two CEF crates are excluded deliberately: building either one
-# downloads and unpacks a ~350 MB Chromium framework and compiles
-# `libcef_dll_wrapper` through cmake, which is not a price every check of the
-# gateway should pay. `packaging/macos-viewer/build-viewer-app.sh` names them
-# explicitly with `-p`, and so does their own clippy run.
-default-members = ["."]
+members = ["."]
 resolver = "3"
 
 [workspace.package]
@@ -55,12 +49,12 @@ png = "0.18"
 # JPEG for the lossy tile path: a target with `render_type = "fixed-quality"`,
 # `render_subtype = "jpeg"` encodes every tile at a fixed `render_quality` instead
 # of lossless PNG (`Tile::from_rgb_jpeg` in src/protocol.rs). The format byte
-# already distinguishes PNG from JPEG on the wire and both clients decode either,
+# already distinguishes PNG from JPEG on the wire and the client decodes either,
 # so this is a gateway-only encoder. `simd` because it runs on the session hot path.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
 # WebP for the lossy tile path's `webp` subtype — ~30% fewer bytes than JPEG at a
-# matched quality, decoded natively by both clients (browser createImageBitmap,
-# Swift ImageIO on macOS 11+). Binds a statically-linked libwebp built by `cc`
+# matched quality, decoded natively by the browser through `createImageBitmap`.
+# Binds a statically-linked libwebp built by `cc`
 # (not cmake) with the target's SIMD, so it costs no cmake and no new runtime dep.
 webp = "0.3"
 # H.264 for `render_type = "video"`, which is not a fourth still codec but a
@@ -68,8 +62,8 @@ webp = "0.3"
 # whole session (src/h264.rs). Cisco's encoder, whose sys crate compiles the vendored
 # C with `cc` — no system library, no cmake, and no runtime dependency, which is the
 # same bargain `webp` above strikes. Encoder only; the gateway never decodes H.264,
-# and neither client's decoder is ours (WebCodecs in the browser, VideoToolbox on a
-# Mac). Note for anyone editing src/h264.rs: this crate asserts on odd dimensions and
+# and the client's decoder is not ours either — it is WebCodecs. Note for anyone
+# editing src/h264.rs: this crate asserts on odd dimensions and
 # on an out-of-range QP, and this binary is `panic = "abort"`, so an assertion here
 # takes the process down rather than one session.
 openh264 = "0.9"

@@ -1,5 +1,4 @@
 /target
-**/.build/
 frontend/node_modules
 tests/playwright/node_modules
 frontend/dist
@@ -8,9 +7,5 @@ tmp/
 .env
 .DS_Store
 CLAUDE.local.md
-# Editor scaffolding, written by whichever one is open. Nothing here is shared, and
-# the Swift extension's launch.json in particular configures the run this project
-# does not use: `remotex.app` needs the gateway binary beside it in the bundle, so a
-# target launched from .build comes up saying the copy is incomplete. Debug the
-# packaged app instead (packaging/macos-viewer/README.md).
+# Editor scaffolding, written by whichever one is open. Nothing here is shared.
 .vscode/

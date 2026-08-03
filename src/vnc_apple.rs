@@ -972,7 +972,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.displays.len(), 1);
         assert_eq!(parsed.displays[0].info.id, 11);
-        // One entry is what makes both clients hide the picker, which is right:
+        // One entry is what makes the client hide the picker, which is right:
         // there is nothing to choose.
     }
 

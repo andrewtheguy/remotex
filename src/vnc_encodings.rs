@@ -544,8 +544,8 @@ async fn rre<R: AsyncRead + Unpin>(reader: &mut R, w: u16, h: u16) -> anyhow::Re
 /// are.
 ///
 /// A server sends this for a scroll or a window move — the pixels are on both
-/// sides of the link already, so neither has to carry them again. The browser and
-/// the Swift client take tiles and cannot blit, so the saving stops at this
+/// sides of the link already, so neither has to carry them again. The client takes
+/// tiles and cannot blit, so the saving stops at this
 /// gateway: the source is read out of the shadow and forwarded as ordinary pixels,
 /// which is still the whole of the VNC link's traffic saved.
 async fn copy_rect<R: AsyncRead + Unpin>(

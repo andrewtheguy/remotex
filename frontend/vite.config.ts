@@ -27,71 +27,21 @@ const backendUrl = /^\d+$/.test(backend)
 
 // Dev server proxies the API and the WebSocket to the Rust backend, so
 // `bun run dev` on :5173 talks to a locally running gateway.
-// Strip `type="module"` and `crossorigin` from the emitted script tag.
 //
-// Both are fatal for the one client that is not served over HTTP. A module script
-// is *always* fetched with CORS, and a `file://` document's origin is opaque, so
-// WebKit blocks it — the page loads, the bundle never runs, and the window is
-// blank with two errors carrying no message. `crossorigin` would put a classic
-// script in the same mode for the same result.
-//
-// `defer` replaces it rather than simply going away, and that part is not
-// cosmetic: a module script is deferred by definition, a classic one runs the
-// moment the parser reaches it — which here is inside `<head>`, before the
-// `<div id="root">` it mounts into exists. Without this the bundle loads, runs and
-// throws "Root element not found".
-//
-// The bundle below is an IIFE precisely so this rewrite is honest: without the
-// format change, dropping `type="module"` from a file full of `import` statements
-// would trade a blocked fetch for a syntax error.
-function classicScriptTag() {
-  return {
-    name: "remotex:classic-script-tag",
-    transformIndexHtml(html: string) {
-      return html
-        .replace(/\stype="module"/g, " defer")
-        .replace(/\scrossorigin/g, "");
-    },
-  };
-}
-
-// One build, not one per client, and deliberately so: `bun run build` runs once in
-// CI and the single `frontend/dist` it makes is what every consumer ships — the
-// tarball's `share/remotex/web`, the container image, and `remotex.app`'s
-// `Contents/Resources/web`. That last copy is both at once, loaded from `file://`
-// by the web view and served over `http://` by the embedded gateway beside it to
-// any browser pointed at the same port, so there is no directory a mode flag could
-// put a second build in.
-//
-// It costs the served client nothing measurable. There are no dynamic imports here
-// for `inlineDynamicImports` to inline and no router to split on, `modulePreload`
-// only emits a hint that is meaningless without modules, and a deferred classic
-// script runs the same bundle a module would.
+// One build, and one consumer shape: `bun run build` runs once in CI and the
+// single `frontend/dist` it makes is what everything ships — the tarball's
+// `share/remotex/web` and the container image. Both serve it over HTTP from an
+// origin root, which is the only thing the output below has to suit.
 export default defineConfig({
-  build: {
-    rollupOptions: {
-      output: {
-        // One classic script, no `import` at runtime. See `classicScriptTag`.
-        format: "iife" as const,
-        inlineDynamicImports: true,
-      },
-    },
-    // Emits `<link rel="modulepreload">`, which is meaningless without modules.
-    modulePreload: false,
-  },
-  // Relative asset URLs, because one of the two clients is not served from an
-  // origin root: `remotex.app` loads this page from `file://` inside its bundle,
-  // where the absolute `/assets/…` vite emits by default resolves to the
-  // filesystem root and finds nothing.
-  //
-  // Safe for the served client too, and not by luck: there is no client-side
-  // router here, so the document is only ever at `/` or at a one-segment path the
-  // SPA fallback answered — and `./assets/…` resolves to `/assets/…` from both.
+  // Relative asset URLs, and safe here rather than by luck: there is no
+  // client-side router, so the document is only ever at `/` or at a one-segment
+  // path the SPA fallback answered — and `./assets/…` resolves to `/assets/…`
+  // from both.
   base: "./",
   define: {
     __APP_VERSION__: JSON.stringify(version),
   },
-  plugins: [react(), classicScriptTag()],
+  plugins: [react()],
   server: {
     proxy: {
       "/api": backendUrl,

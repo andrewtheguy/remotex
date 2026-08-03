@@ -20,14 +20,10 @@ pub const TEST_PASSWORD: &str = "hunter2";
 
 /// A web login for [`TEST_USER`]/[`TEST_PASSWORD`], for building an `AppConfig`
 /// directly. bcrypt's minimum cost keeps logins fast in tests.
-///
-/// The login rather than a token because these tests are about the gateway a
-/// browser reaches; the embedded one has its own suite
-/// (`tests/embedded_gateway_e2e.rs`).
 #[allow(dead_code)]
-pub fn test_auth() -> remotex::auth::GatewayAuth {
+pub fn test_auth() -> remotex::auth::SitePasswd {
     let encoded = remotex::auth::generate(TEST_USER, TEST_PASSWORD, 4).unwrap();
-    remotex::auth::GatewayAuth::Login(remotex::auth::SitePasswd::parse(&encoded).unwrap())
+    remotex::auth::SitePasswd::parse(&encoded).unwrap()
 }
 
 /// A directory that removes itself, for a test that needs somewhere to put a

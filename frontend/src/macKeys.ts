@@ -1,42 +1,31 @@
 // Mac host, non-Mac guest: turn local Command chords into the Control chords the
-// guest expects. A port of the macOS viewer's `KeyboardTranslator` (see
-// apps/remotex-viewer/Sources/Input/KeyboardTranslator.swift) — same state
-// machine, same emitted vocabulary, deliberately a smaller mapping table.
+// guest expects. Neither the wire format nor the gateway knows this file exists —
+// a translated chord is indistinguishable from one the user really typed.
 //
-// The two clients can share the logic because they already share the alphabet:
-// the viewer maps macOS virtual keycodes to DOM `code` strings, which is what a
-// `KeyboardEvent` hands us directly. Neither the wire format nor the gateway
-// knows this file exists — a translated chord is indistinguishable from one the
-// user really typed.
+// The table is small, and what keeps it small is what a browser is willing to hand
+// this page. Command plus L, N, O, R, T and W are *not* in it: Command-W closes the
+// tab, Command-T and Command-N open one, Command-L goes to the address bar and
+// Command-O opens a file dialog, and `preventDefault()` does not reach any of them
+// in either Chrome or Safari. Mapping them would not send Control-W to the guest,
+// it would end the session — strictly worse than leaving them alone. Command-R is
+// preventable and is still left out: it would work until some browser version where
+// it doesn't, and the failure is the SPA reloading out from under a live session.
+// docs/roadmap.md's companion extension is the thing that would widen this table.
 //
-// What differs from the viewer, and why:
+// Two details a keyboard read at a lower level would not need:
 //
-//   - **Six chords are only in the table for one host.** Command plus L, N, O,
-//     R, T and W are mapped when this page runs inside `remotex.app`, whose
-//     AppKit local monitor sees every chord the app is given, and not when it runs
-//     in a browser. A browser does not get them: Command-W closes the tab,
-//     Command-T and Command-N open one, Command-L goes to the address bar and
-//     Command-O opens a file dialog, and `preventDefault()` does not reach any of
-//     them in either Chrome or Safari. Mapping them there would not send Control-W
-//     to the guest, it would end the session — strictly worse than leaving them
-//     alone. Command-R is preventable and is still left out of the browser's set:
-//     it would work until some browser version where it doesn't, and the failure
-//     is the SPA reloading out from under a live session. See the constructor.
-//   - **Shift, Control and Option are told apart from ordinary keys.** AppKit
-//     reports them as `flagsChanged`, a branch that never reaches the viewer's
-//     `translateKey`; a browser reports them as ordinary key events. Without the
-//     distinction, the Shift in Command-Shift-Z looked like a key outside the
-//     table and forwarded Command, so redo arrived as Meta-Shift-Control-Z.
-//   - **A release flush on Command up.** macOS browsers can withhold `keyup` for
-//     a character key while Command is held. The viewer never sees that because
-//     it reads `NSEvent`s. Here a missing `keyup` would strand both the letter
-//     *and* the synthetic Control down on the guest, so Command's own release
+//   - **Shift, Control and Option are told apart from ordinary keys.** A browser
+//     reports them as ordinary key events, so without the distinction the Shift in
+//     Command-Shift-Z looked like a key outside the table and forwarded Command,
+//     and redo arrived as Meta-Shift-Control-Z.
+//   - **A release flush on Command up.** macOS browsers can withhold `keyup` for a
+//     character key while Command is held; a missing `keyup` would strand both the
+//     letter *and* the synthetic Control down on the guest, so Command's own release
 //     flushes anything still held.
 //
-// Command-V does not push the local clipboard the way the viewer's does
-// (`KeyboardCapture.swift:149-155`). `useRemoteDesktop` already pushes on focus
-// and visibility change, which covers the same case — copy elsewhere, come back,
-// paste — and a `readText()` on every Command-V would put Safari's paste
+// Command-V does not push the local clipboard. `useRemoteDesktop` already pushes on
+// focus and visibility change, which covers the same case — copy elsewhere, come
+// back, paste — and a `readText()` on every Command-V would put Safari's paste
 // confirmation in front of a user who is typing.
 
 export type TranslatedKey = {
@@ -69,35 +58,12 @@ const COMMAND_MAPS_TO_CONTROL: ReadonlySet<string> = new Set([
   "KeyZ", // undo
 ]);
 
-// The six the header says a browser never receives, added back for the one host
-// that does receive them.
-//
-// `remotex.app` captures keys with an AppKit local monitor ahead of the menu bar,
-// so ⌘W does not close anything and ⌘L does not go anywhere — the app is given the
-// chord and hands it here. That is the whole difference between the two clients'
-// keyboards, and it is why this is one set rather than a second translator: the
-// state machine, the bare-Command tap and the release bookkeeping are all the same
-// code, tested once.
-const COMMAND_MAPS_TO_CONTROL_NATIVE: ReadonlySet<string> = new Set([
-  ...COMMAND_MAPS_TO_CONTROL,
-  "KeyL", // address bar in a browser; focus/lock in a guest
-  "KeyN", // new window
-  "KeyO", // open
-  "KeyR", // reload
-  "KeyT", // new tab
-  "KeyW", // close
-]);
-
 const META_CODES: ReadonlySet<string> = new Set(["MetaLeft", "MetaRight"]);
 
 // Modifiers that qualify a chord rather than being its key. They must not be
 // mistaken for "some key that isn't in the table", which is what decides that
 // Command should be forwarded as itself: Command-Shift-Z is a mapped chord with a
 // Shift on it, and forwarding Command there sent the guest Meta-Shift-Control-Z.
-//
-// The viewer needs no such set. AppKit reports these as `flagsChanged`, a
-// separate branch that never reaches its `translateKey`; a browser reports them
-// as ordinary key events, so the distinction has to be made here.
 const CHORD_MODIFIERS: ReadonlySet<string> = new Set([
   "ShiftLeft",
   "ShiftRight",
@@ -137,18 +103,7 @@ export class MacKeyboardTranslator {
   // sent for the same code and the synthetic Control is lifted after the last.
   private translatedCommandKeys = new Set<string>();
   private syntheticControlHeld = false;
-  private readonly mappedChords: ReadonlySet<string>;
-
-  /// `capturesEveryChord` is the host's answer to "am I given ⌘W?" — false for a
-  /// browser, true for `remotex.app`, which takes keys before the menu bar. It
-  /// selects the chord table and changes nothing else: a chord outside the table is
-  /// forwarded as Meta either way, so the two hosts differ in what they can offer
-  /// rather than in how they behave.
-  constructor(capturesEveryChord = false) {
-    this.mappedChords = capturesEveryChord
-      ? COMMAND_MAPS_TO_CONTROL_NATIVE
-      : COMMAND_MAPS_TO_CONTROL;
-  }
+  private readonly mappedChords: ReadonlySet<string> = COMMAND_MAPS_TO_CONTROL;
 
   /// Translate one event into what should go on the wire, in order.
   ///
@@ -159,7 +114,7 @@ export class MacKeyboardTranslator {
     const { code, pressed, caps } = event;
 
     // Browsers report CapsLock as a press when it engages and a release when it
-    // disengages, never as a tap. The guest wants the tap, same as the viewer.
+    // disengages, never as a tap. The guest wants the tap.
     if (code === "CapsLock") {
       return [
         { code, pressed: true, caps },
@@ -211,9 +166,9 @@ export class MacKeyboardTranslator {
       return [];
     }
 
-    // Command is up, so anything it was holding down is over. This is the guard
-    // the viewer does not need: without it a swallowed `keyup` leaves the letter
-    // and the synthetic Control pressed on the guest forever.
+    // Command is up, so anything it was holding down is over. Without this guard
+    // a swallowed `keyup` leaves the letter and the synthetic Control pressed on
+    // the guest forever.
     const translated = this.flushHeldTranslations(caps);
 
     const wasPending = this.pendingCommandCodes.delete(code);

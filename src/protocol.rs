@@ -209,7 +209,7 @@ pub enum ClientMsg {
     /// Re-announce the desktop size and repaint the whole framebuffer.
     /// Injected by the session layer when a client (re)attaches to a running
     /// engine. A client may also send it to recover a canvas that has gone
-    /// wrong, which `remotex.app` offers as Remote > Refresh. A browser has no
+    /// wrong. A browser has no
     /// such command: a reload is right there, and it does more.
     Refresh,
     /// Clear this attachment's tile-cache table and repaint. Unlike
@@ -436,7 +436,7 @@ impl Tile {
     /// Build a tile from packed RGB888 pixels, WebP-compressing the payload at a
     /// fixed `quality` (1–100). The other lossy counterpart to [`Tile::from_rgb`],
     /// taken when a target set `render_subtype = "webp"`: typically ~30% fewer
-    /// bytes than [`Tile::from_rgb_jpeg`] at a matched quality. Both clients decode
+    /// bytes than [`Tile::from_rgb_jpeg`] at a matched quality. The browser decodes
     /// WebP natively, so the only difference on the wire is the format byte.
     ///
     /// Like the JPEG path there is no classifier — every tile goes to WebP, so flat
@@ -677,7 +677,7 @@ pub const UNSCALED: f32 = 1.0;
 ///
 /// The strings are built by the remote end and passed through: the Mac knows how
 /// its displays are named and numbered, and having it say so once keeps the
-/// browser panel and the viewer's menu reading the same.
+/// browser panel reading it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
@@ -1376,8 +1376,7 @@ mod tests {
         assert!((ServerMsg::Tile(tile)).text_frame().is_none());
     }
 
-    // The record layout `protocol.ts` (decodeBatchFrame) and `BatchFrame.swift`
-    // parse.
+    // The record layout `protocol.ts` (decodeBatchFrame) parses.
     #[test]
     fn tile_record_layout_is_op_format_slot_le_coords_len_payload() {
         let tile = Tile {

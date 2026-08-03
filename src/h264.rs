@@ -639,7 +639,7 @@ mod tests {
             .blit(rect(0, 0, 320, 240), &flat(320, 240, [7, 7, 7]))
             .expect("a full-screen blit");
         let unit = stream.encode(&mirror, None).expect("an encode").expect("an access unit");
-        // Both clients split on start codes, so this is the wire contract in one
+        // The client splits on start codes, so this is the wire contract in one
         // assertion: openh264's own four-byte one, ahead of the SPS.
         assert_eq!(&unit.data[..4], &[0, 0, 0, 1], "not an Annex-B start code");
     }

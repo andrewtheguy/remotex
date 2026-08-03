@@ -9,9 +9,9 @@
 #   chmod 600 remotex.toml
 
 # Display name of this gateway: the login screen, the interstitials, and the
-# browser tab title. Defaults to "remotex". Top-level rather than under [server],
-# because it is the one setting remotex.app's own config shares with this one and
-# that file has no [server] block at all.
+# browser tab title. Defaults to "remotex". Top-level rather than under [server]:
+# it names the deployment rather than the server, and one value with two spellings
+# is one of them going stale.
 #branding = "remotex"
 
 [server]
@@ -132,9 +132,8 @@ password = "change-me"
 # Performance carries its fetches and data inside the encrypted record transport.
 #clipboard = false
 
-# Remote audio (opt-in): redirect this target's sound to whichever client asks for
-# it — the browser's floating-menu Audio button, or remotex.app's Remote > Enable
-# Audio. RDP only — MS-RDPEA is the one audio channel the gateway speaks, so this is
+# Remote audio (opt-in): redirect this target's sound when the client asks for it,
+# with the floating menu's Audio button. RDP only — MS-RDPEA is the one audio channel the gateway speaks, so this is
 # refused on "vnc" rather than accepted and left doing nothing.
 #
 # The channel has to be negotiated when the connection is made, so an audio
@@ -147,8 +146,7 @@ password = "change-me"
 # it decodes Opus with WebCodecs, which is **secure-context only** — so a gateway
 # reached over plain HTTP on a LAN address has no audio until it is behind TLS
 # (localhost is exempt). `audio_codec = "pcm"` below is the exception and needs no
-# decoder at all. remotex.app has no such limit either way: it shows this same
-# client, served by the gateway in its bundle over loopback.
+# decoder at all.
 #audio = false
 
 # How that audio is carried. Ignored unless `audio = true` above, and refused
@@ -250,7 +248,7 @@ password = "change-me"
 # their own blocks below.
 #
 # render_subtype picks the codec: "jpeg" is decoded by everything, "webp" is roughly
-# 30% smaller at a matched quality and is decoded natively by both clients. With
+# 30% smaller at a matched quality and is decoded natively by the browser. With
 # "full" the subtype must be "png". Under "motion" it is the *base* codec — see the
 # block below, where it also decides which of the motion keys are required.
 #
@@ -331,8 +329,7 @@ password = "change-me"
 #   - It is decoded with WebCodecs, which is **secure-context only** — the same limit
 #     remote audio already has. A browser pointed at a gateway on a plain-HTTP LAN
 #     address shows a banner saying so instead of a desktop, until it is behind TLS
-#     (localhost is exempt). remotex.app is unaffected: it draws through a page it
-#     serves itself on 127.0.0.1, which is a secure context either way.
+#     (localhost is exempt).
 #
 # Worth measuring rather than assuming: it is a large win on anything that moves and
 # it costs CPU on the gateway for every frame, including on a screen that is barely

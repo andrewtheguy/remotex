@@ -1,8 +1,8 @@
 // The v3 binary envelope, observed from the real SPA's own WebSocket.
 //
 // This is the only test that watches the browser link as the browser actually
-// uses it. The Rust e2e tests drive a raw WebSocket client, and the Swift and
-// TypeScript unit tests parse frames they built themselves — so a gateway and an
+// uses it. The Rust e2e tests drive a raw WebSocket client, and the TypeScript
+// unit tests parse frames they built themselves — so a gateway and an
 // SPA could agree with their own test fixtures and disagree with each other, and
 // nothing would notice until a desktop came up blank.
 //

@@ -53,7 +53,7 @@ fn frame_buffer(target: &TargetConfig) -> usize {
 /// One message here is one of the remote's wave buffers — ~32 KB, or ~186 ms, from a
 /// Windows host at 44.1 kHz — so sixteen is about three seconds.
 ///
-/// It is not a play-out buffer and must not be read as one: both clients throw away
+/// It is not a play-out buffer and must not be read as one: the client throws away
 /// backlog past their own ceiling on arrival. The depth exists so that an ordinary
 /// socket write in flight never stalls the pump, because a stalled pump stops draining
 /// [`crate::audio::AUDIO_QUEUE_DEPTH`] and what gives way *there* is audible. That is
