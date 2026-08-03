@@ -155,14 +155,7 @@ export function targetNamePattern(name: string): RegExp {
 // — is reattached straight to it and never sees the picker. Requiring the picker
 // here made one abandoned run break every run after it.
 export async function logInAndConnect(page: Page): Promise<void> {
-  await logIn(page);
-  const picker = page.getByRole("heading", { name: "Pick a target" });
-  if (await picker.isVisible()) {
-    await page.getByRole("button", { name: targetNamePattern(TARGET) }).click();
-  }
-  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
-    timeout: 20_000,
-  });
+  await landOn(page, TARGET, true);
 }
 
 // Log in and land on *one named target*, whichever the run started on.
@@ -176,12 +169,31 @@ export async function logInAndConnectTo(
   page: Page,
   target: string,
 ): Promise<void> {
+  await landOn(page, target, false);
+}
+
+// Both of the above, differing only in what they do about a session that is already
+// on a desktop: `keepRunningSession` reattaches to it, and otherwise it is handed
+// back to the picker so `target` is the one actually connected. One implementation,
+// so the locators and the timeout cannot drift apart between them.
+async function landOn(
+  page: Page,
+  target: string,
+  keepRunningSession: boolean,
+): Promise<void> {
   await logIn(page);
-  const picker = page.getByRole("heading", { name: "Pick a target" });
-  if (!(await picker.isVisible())) {
-    await returnToPicker(page);
+  const onPicker = await page
+    .getByRole("heading", { name: "Pick a target" })
+    .isVisible();
+  // A landing on a desktop is either kept — the tolerance that makes an abandoned run
+  // harmless — or handed back to the picker, so the target chosen below is the one
+  // actually connected.
+  if (onPicker || !keepRunningSession) {
+    if (!onPicker) {
+      await returnToPicker(page);
+    }
+    await page.getByRole("button", { name: targetNamePattern(target) }).click();
   }
-  await page.getByRole("button", { name: targetNamePattern(target) }).click();
   await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
     timeout: 20_000,
   });

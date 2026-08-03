@@ -426,6 +426,13 @@ impl Stream {
                     &mut self.ctx,
                     &self.img,
                     pts,
+                    // Duration: one tick of `g_timebase`, so one millisecond — deliberately a
+                    // constant rather than the gap since the last frame. libvpx reads it for
+                    // rate control, and there is no rate control here to read it: `VPX_Q` with
+                    // `rc_min == rc_max` pins the quantizer, no bitrate is set, and
+                    // `rc_dropframe_thresh = 0` forbids the one decision a duration could
+                    // otherwise drive. What must stay true is `pts`, which is real elapsed
+                    // time — a decoder and a `VideoDecoder` timestamp read that, not this.
                     1,
                     flags,
                     vpx::VPX_DL_REALTIME as c_ulong,

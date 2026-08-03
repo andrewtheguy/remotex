@@ -10,20 +10,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-// Stubbed before the import, not after: `FloatingMenu` reaches `gateway.ts`, which
-// derives the gateway's origin from `window.location` at module load — and this runtime
-// is not a browser.
-const globals = globalThis as unknown as {
-  window?: unknown;
-  screen?: unknown;
-};
-globals.window = {
-  location: { origin: "https://gateway.test" },
-  isSecureContext: true,
-};
-// `useRemoteDesktop` reads `screen` at module load too, to decide a mobile guest size.
-globals.screen = { width: 1920, height: 1080 };
-const { videoLabel } = await import("./FloatingMenu.tsx");
+// An ordinary static import, which is the whole point of `videoLabel.ts` being its own
+// module: it touches no browser global, so this needs no fake `window` and no dynamic
+// import to sequence one before the module runs.
+import { videoLabel } from "./videoLabel.ts";
 
 test("a target that streams no video says so rather than showing nothing", () => {
   assert.equal(videoLabel(null, []), "None — this target sends tiles");

@@ -1084,7 +1084,9 @@ mod tests {
                 "rdp-pcm",
                 Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
             ),
-            // The one target the codec negotiation can refuse.
+            // The two that stream, in each codec. Nothing refuses either of them: the
+            // browser capability probe that could is gone, and a target's `video_codec`
+            // is answered by the client's own decoder rather than by this connect.
             video_target("video", None),
             video_target("video-h264", Some(VideoCodec::H264)),
         ];

@@ -876,6 +876,37 @@ mod tests {
         })
     }
 
+    /// The unit a decoder may start from, which the flags byte is the only record of.
+    fn keyframe_unit(stream: u8, bytes: usize) -> ServerMsg {
+        ServerMsg::Video(VideoUnit {
+            stream,
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 800,
+            keyframe: true,
+            data: vec![5u8; bytes],
+        })
+    }
+
+    /// The keyframe bit, written and read back at the offset the layout puts it — the one
+    /// field of a `VIDEO` record a client cannot recover from the payload, because VP9 has
+    /// no parameter sets to read it out of. A flags byte in the wrong place would still
+    /// parse: `stream` would read as a plausible id and the rectangle as plausible
+    /// coordinates, so the bit itself is what has to be asserted.
+    #[test]
+    fn a_keyframes_flag_survives_the_wire_and_a_delta_frames_absence_does_too() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![keyframe_unit(1, 700), region_unit(1, 0, 0, 1280, 800, 600)]);
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2);
+        assert_eq!((records[0].0, records[0].1), (batch::OP_VIDEO, 1));
+        assert_eq!(records[0].7, batch::VIDEO_KEYFRAME, "the keyframe bit did not survive");
+        assert_eq!(records[0].6, 700, "the payload length is where the flags byte leaves it");
+        assert_eq!(records[1].7, 0, "a delta frame must not claim a decoder can start there");
+        assert_eq!(records[1].6, 600);
+    }
+
     // Identical bytes are the cache's trigger, and two access units may be identical
     // by accident where two frames of a still screen encode the same. A reference
     // would tell the client to redraw a picture it does not have, from a payload

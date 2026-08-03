@@ -15,6 +15,7 @@ import type {
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
 import { densityLabel, type RemoteSize } from "./useRemoteDesktop.ts";
+import { videoLabel } from "./videoLabel.ts";
 
 // The floating chrome — a draggable ☰ button that toggles a toolbar drawer. The
 // drawer carries this project's controls (browser-swallowed keys, modifier taps,
@@ -311,33 +312,6 @@ function ScreenHelp({
       </dl>
     </>
   );
-}
-
-// What this session's moving pixels are being carried by, for the Help card.
-//
-// Worth showing because it is the one property of a session nothing else reveals: the
-// codec is the operator's, set per target, and a picture that decodes says nothing
-// about which one is decoding it. When one does *not* decode, this row and the error
-// are the only two places the answer appears.
-//
-// Three states, and they are genuinely different rather than degrees of the same one:
-// a target that streams nothing, one that is connected but has not yet produced a
-// frame, and one that is streaming. The last shows the exact `VideoDecoder.configure` strings
-// too, because the family alone hides the profile and level a decoder was built with —
-// which is what a "this browser cannot decode…" report turns on. A `motion` target runs
-// a stream per moving region and its regions differ in size, so there may be several.
-export function videoLabel(
-  codec: string | null,
-  decodeStrings: string[],
-): string {
-  if (!codec) {
-    return "None — this target sends tiles";
-  }
-  const family = codec.toUpperCase();
-  if (decodeStrings.length === 0) {
-    return `${family} — waiting for the first frame`;
-  }
-  return `${family} — ${decodeStrings.join(", ")}`;
 }
 
 // The direct audio toggle is also the user gesture required to create a

@@ -1270,6 +1270,22 @@ mod tests {
             Some(json) => assert!(json.contains(r#""video":"vp9""#), "{json}"),
             None => panic!("connected must be a text frame"),
         }
+        // How to decode one stream, which is the message a client cannot work out for
+        // itself: VP9 carries no parameter sets, so every field here is the gateway's
+        // answer and a renamed one is a decoder that never gets configured.
+        match (ServerMsg::VideoFormat {
+            stream: 3,
+            codec: "vp9",
+            decode: "vp09.00.40.08".to_owned(),
+        })
+        .text_frame()
+        {
+            Some(json) => assert_eq!(
+                json,
+                r#"{"type":"videoFormat","stream":3,"codec":"vp9","decode":"vp09.00.40.08"}"#
+            ),
+            None => panic!("videoFormat must be a text frame"),
+        }
         match (ServerMsg::Displays {
             active: 7,
             displays: vec![
