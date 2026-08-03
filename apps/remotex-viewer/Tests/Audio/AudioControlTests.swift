@@ -75,6 +75,43 @@ struct AudioControlTests {
         #expect(session.model.audio.isEnabled)
     }
 
+    /// Two opens in flight at once must leave exactly one live socket.
+    ///
+    /// Not hypothetical, and not a timing test: opening the socket suspends at the
+    /// upgrade, an actor runs other calls across that suspension, and the two callers
+    /// here are the real pair — a reconnect's own open and the `reassert` that the
+    /// `connected` after it triggers. Whichever resumed last used to win by
+    /// overwriting the fields, and the loser's transport was then unreachable by
+    /// anything, `stop()` included.
+    ///
+    /// The overlap is arranged rather than raced for: the gateway parks both opens
+    /// until they are demonstrably both in flight, so this fails deterministically
+    /// without the generation check and passes deterministically with it.
+    @Test
+    func twoOverlappingOpensLeaveOneLiveSocket() async throws {
+        let session = try await AttachedSession.attached(suite: "AudioControlTests")
+        session.connect(protocolName: "rdp", audio: true)
+
+        session.gateway.holdAudioOpens()
+        session.model.audio.setEnabled(true)
+        session.model.audio.reassert()
+        // Both are suspended at the upgrade before either can commit.
+        for _ in 0..<200 where session.gateway.parkedAudioOpens < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(session.gateway.parkedAudioOpens == 2, "both opens should be in flight")
+
+        session.gateway.releaseAudioOpens()
+        try await session.settle()
+
+        #expect(session.audioSocketsOpened == 2, "both opens really happened")
+        #expect(
+            session.liveAudioSockets == 1,
+            "the loser must cancel itself rather than leak a socket nothing can reach"
+        )
+        #expect(session.isSubscribedToAudio, "and the survivor is the one that won")
+    }
+
     /// A target switch clears the answer, because it was an answer about the target
     /// being left — the same rule the resize mode follows, and the picker is where
     /// both are forgotten.

@@ -105,6 +105,18 @@ actor GatewayConnection {
     private var audioTransport: (any WebSocketTransport)?
     private var audioTask: Task<Void, Never>?
     private var audioWanted = false
+    /// Bumped every time the audio socket is closed or a fresh open begins.
+    ///
+    /// Opening one suspends at the upgrade, and an actor lets other calls run during
+    /// that suspension — so two opens can be in flight at once, which is not
+    /// hypothetical: `openSocket` starts one on a reconnect and `AudioControl.reassert`
+    /// starts another from the `connected` that follows it. Whichever resumed *last*
+    /// used to win by overwriting the fields, leaving the other's transport and task
+    /// live with nothing holding them: not even `stop()` could reach them, and they
+    /// ended only when the gateway got round to superseding one of them. Capturing
+    /// this before the await and checking it after is what makes the loser cancel
+    /// itself instead.
+    private var audioGeneration = 0
 
     /// `policy` is a parameter so tests can collapse the backoff to nothing
     /// rather than waiting out a real one.
@@ -148,10 +160,13 @@ actor GatewayConnection {
     }
 
     private func openAudioSocket() async {
+        // Also the generation bump that invalidates any open still in flight, so this
+        // one supersedes it however the two resume.
         closeAudioSocket()
         guard running, audioWanted, let claimToken else {
             return
         }
+        let generation = audioGeneration
         let opened: any WebSocketTransport
         do {
             opened = try await gateway.openAudioSocket(sessionToken: claimToken)
@@ -162,7 +177,11 @@ actor GatewayConnection {
             log.warning("audio socket open failed: \(error.localizedDescription, privacy: .public)")
             return
         }
-        guard running, audioWanted else {
+        // The claim is compared as well as the generation, so this guard states the
+        // whole invariant rather than trusting every path that changes a claim to also
+        // have closed the socket.
+        guard generation == audioGeneration, running, audioWanted, self.claimToken == claimToken
+        else {
             opened.cancel()
             return
         }
@@ -173,6 +192,7 @@ actor GatewayConnection {
     }
 
     private func closeAudioSocket() {
+        audioGeneration &+= 1
         audioTask?.cancel()
         audioTask = nil
         audioTransport?.cancel()

@@ -167,6 +167,10 @@ final class FakeGateway: SessionGateway {
         var claimCalls: [(force: Bool, sessionId: String?)] = []
         var socketTokens: [String] = []
         var audioSocketTokens: [String] = []
+        /// Opens parked by `holdAudioOpens`, so a test can make two of them overlap
+        /// on purpose rather than hoping the scheduler does it.
+        var holdingAudio = false
+        var audioGates: [CheckedContinuation<Void, Never>] = []
     }
 
     private let state: Mutex<State>
@@ -215,13 +219,44 @@ final class FakeGateway: SessionGateway {
     }
 
     func openAudioSocket(sessionToken: String) async throws -> any WebSocketTransport {
-        try state.withLock { state in
+        // Suspend *before* handing a socket back, which is where the real one suspends
+        // too: `URLSession`'s upgrade is the await, and an actor runs other calls
+        // across it.
+        if state.withLock({ $0.holdingAudio }) {
+            await withCheckedContinuation { continuation in
+                state.withLock { $0.audioGates.append(continuation) }
+            }
+        }
+        return try state.withLock { state in
             state.audioSocketTokens.append(sessionToken)
             guard !state.audioSockets.isEmpty else {
                 throw FakeTransportError.refused
             }
             return state.audioSockets.removeFirst()
         }
+    }
+
+    /// Park every audio-socket open from here on.
+    func holdAudioOpens() {
+        state.withLock { $0.holdingAudio = true }
+    }
+
+    /// Let the parked opens finish, oldest first, and stop parking.
+    func releaseAudioOpens() {
+        let gates = state.withLock { state -> [CheckedContinuation<Void, Never>] in
+            state.holdingAudio = false
+            defer { state.audioGates = [] }
+            return state.audioGates
+        }
+        for gate in gates {
+            gate.resume()
+        }
+    }
+
+    /// How many opens are parked, so a test can wait for both to be in flight rather
+    /// than sleeping and hoping.
+    var parkedAudioOpens: Int {
+        state.withLock { $0.audioGates.count }
     }
 }
 
@@ -377,6 +412,12 @@ struct AttachedSession {
             return false
         }
         return !audioSockets[audioSocketsOpened - 1].wasCancelled
+    }
+
+    /// How many of the sockets handed out are still live. More than one means a
+    /// transport was dropped without being cancelled — a leak nothing can reach.
+    var liveAudioSockets: Int {
+        audioSockets.prefix(audioSocketsOpened).count { !$0.wasCancelled }
     }
 
     func connect(
