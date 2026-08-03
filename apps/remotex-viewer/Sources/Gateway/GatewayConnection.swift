@@ -96,6 +96,15 @@ actor GatewayConnection {
     private var claimTask: Task<Void, Never>?
     private var retryTask: Task<Void, Never>?
     private var running = false
+    /// The audio socket, and whether one is wanted.
+    ///
+    /// Two fields rather than one, because the socket cannot always be open when the
+    /// intent is on: there is no claim to attach it to until this connection has one.
+    /// The intent is what `openAudioSocket` consults each time a session socket comes
+    /// up, which is how sound follows a reconnect without the menu being touched.
+    private var audioTransport: (any WebSocketTransport)?
+    private var audioTask: Task<Void, Never>?
+    private var audioWanted = false
 
     /// `policy` is a parameter so tests can collapse the backoff to nothing
     /// rather than waiting out a real one.
@@ -121,6 +130,86 @@ actor GatewayConnection {
     /// the browser drops sends on a closed WebSocket.
     nonisolated func send(_ message: ClientMessage) {
         outbound.enqueue(message)
+    }
+
+    /// Subscribe to the remote's sound, or stop. Opening `/ws/audio` is the whole of
+    /// the request and closing it is the whole of the cancellation — there is no
+    /// message for either.
+    ///
+    /// Idempotent, and safe before a claim exists: the intent is remembered and acted
+    /// on when a session socket next comes up.
+    func setAudio(_ on: Bool) async {
+        audioWanted = on
+        if on {
+            await openAudioSocket()
+        } else {
+            closeAudioSocket()
+        }
+    }
+
+    private func openAudioSocket() async {
+        closeAudioSocket()
+        guard running, audioWanted, let claimToken else {
+            return
+        }
+        let opened: any WebSocketTransport
+        do {
+            opened = try await gateway.openAudioSocket(sessionToken: claimToken)
+        } catch {
+            // No retry and no alert. Sound is the one part of a session whose absence
+            // is indistinguishable from a quiet remote, so a failure here is a log
+            // line; the next `connected` tries again.
+            log.warning("audio socket open failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard running, audioWanted else {
+            opened.cancel()
+            return
+        }
+        audioTransport = opened
+        audioTask = Task { [weak self] in
+            await self?.audioLoop(opened)
+        }
+    }
+
+    private func closeAudioSocket() {
+        audioTask?.cancel()
+        audioTask = nil
+        audioTransport?.cancel()
+        audioTransport = nil
+    }
+
+    /// The audio socket's only consumer. It carries exactly two things — the format,
+    /// as a control message, and packets, as binary frames — so anything else is a
+    /// gateway that has changed under this build.
+    ///
+    /// Both go to the canvas page, which decodes them with the same
+    /// `frontend/src/audioPlayer.ts` the browser SPA uses. Nothing is decoded here.
+    private func audioLoop(_ transport: any WebSocketTransport) async {
+        while !Task.isCancelled {
+            let frame: WebSocketFrame
+            do {
+                frame = try await transport.receive()
+            } catch {
+                return
+            }
+            switch frame {
+            case .text(let text):
+                guard let message = try? ServerMessage.decode(text) else {
+                    log.warning("undecodable audio control frame")
+                    continue
+                }
+                await publish(.control(message))
+            case .binary(let data):
+                guard data.first == AudioFrame.frameKind else {
+                    log.warning(
+                        "audio socket sent a frame of kind \(data.first ?? 0, privacy: .public)"
+                    )
+                    continue
+                }
+                await publish(.frame(data))
+            }
+        }
     }
 
     /// Forget the queue's viewport dedupe. Needed on every `connected`, not only
@@ -163,6 +252,8 @@ actor GatewayConnection {
         drainTask = nil
         transport?.cancel()
         transport = nil
+        audioWanted = false
+        closeAudioSocket()
         outbound.finish()
     }
 
@@ -312,6 +403,11 @@ actor GatewayConnection {
         receiveTask = Task { [weak self] in
             await self?.receiveLoop(opened)
         }
+        // Sound follows the session back. The gateway would hold the subscription
+        // across a reattach on its own — it belongs to the claim now — but this end's
+        // socket died with the network, so it is reopened here rather than waiting for
+        // the menu to be touched.
+        await openAudioSocket()
     }
 
     private func closeTransport() {
@@ -319,6 +415,9 @@ actor GatewayConnection {
         receiveTask = nil
         transport?.cancel()
         transport = nil
+        // The audio socket goes with it: whatever took the session socket down took
+        // this one too, and `audioWanted` is what brings it back.
+        closeAudioSocket()
         outbound.discardPending()
     }
 

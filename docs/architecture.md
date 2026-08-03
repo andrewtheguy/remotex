@@ -12,7 +12,8 @@ gateway on loopback or connects to a deployed gateway (see
 ```text
 browser SPA, or remotex.app over loopback or the network
    │  /api: authentication, targets, session claim
-   │  /ws: JSON control/input, binary image batches, Opus audio
+   │  /ws: JSON control/input, binary image batches
+   │  /ws/audio: the audio format, then binary audio frames
    ▼
 axum server ── single session slot ── protocol engine
                                          ├─ RDP through IronRDP
@@ -462,11 +463,23 @@ does not reset the table.
 
 ### Audio frames
 
-RDP audio is opt-in per attachment. A client sends:
+RDP audio is opt-in, and it has a socket of its own. **Opening
+`/ws/audio?session=<token>` is the subscription** — there is no message that turns
+sound on, and closing the socket is the only way to stop.
 
-```json
-{"type":"audio","enabled":true}
-```
+The separation is the point. Sound and pictures used to share the session socket and
+the bounded queue behind it, which is four frames deep on `render_type = "video"`; an
+audio pump waiting behind a video backlog stops draining the bridge, and what the
+bridge then drops is wave buffers. A lost tile is replaced by the next repaint, and a
+lost wave buffer is a hole. Every reference client that does not stutter keeps the two
+apart — see [`rdp-audio-prior-art.md`](rdp-audio-prior-art.md).
+
+The socket is bound to the *claim*, not to an attachment, so it survives a session
+socket reconnecting and a target switch: the gateway re-announces the format when it
+arms the next engine. It ends when the claim does — a takeover, or a log out — and is
+superseded by a newer audio socket on the same claim. Its refusals mirror the session
+socket's: 401 before the upgrade without a login, close code 4000 for a token that is
+not the current claim, 4001 on eviction.
 
 The gateway answers with `audioFormat` — the codec string, the decoder
 configuration, and the samples in one packet — followed by binary frames:
@@ -515,12 +528,16 @@ result; under `pcm` it does neither, and the buffer is only cut on a frame
 boundary so a split sample cannot transpose the channels.
 
 The queue never blocks the RDP read loop. A slow consumer loses old buffers
-instead of accumulating latency, and no receiver means audio is discarded.
-Audio frames bypass a tile batch still being collected, although a batch already
-being written may delay them.
+instead of accumulating latency, and no receiver means audio is discarded. Between the
+bridge and the socket sits a second, shallower queue (`AUDIO_SOCKET_BUFFER`, sixteen
+wave buffers — about three seconds) whose only job is to absorb a socket write in
+flight: losses belong at the bridge, which drops its *oldest* and keeps sound that is
+still live, rather than here, which is FIFO and would deliver stale audio faithfully.
 
-Both clients own their playback schedule, and it is the same code: a 0.1-second
-cushion, and backlog beyond a 0.3-second ceiling discarded. What reaches that
+Both clients own their playback schedule, and it is the same code: a 0.5-second
+cushion, and backlog beyond a 1.5-second ceiling discarded. Those numbers are a jitter
+budget rather than a latency target, and they are deliberately generous — audio trails
+video by roughly the cushion, which is the trade Myrtille and FreeRDP both make. What reaches that
 schedule differs by codec, and only there. Neither client decodes anything
 itself: an *encoded* stream goes to WebCodecs — `remotex.app` through its canvas
 page — so a codec a browser will not take surfaces as a decoder error naming it

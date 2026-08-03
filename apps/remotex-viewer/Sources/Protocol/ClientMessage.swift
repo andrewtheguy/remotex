@@ -97,8 +97,6 @@ enum ClientMessage: Sendable, Equatable {
     /// back, and miss again. This is handled by the socket's own bridge, which
     /// empties the table and asks for the repaint itself.
     case cacheReset
-    /// Start or stop this attachment's audio. Reconnects require reassertion.
-    case audio(enabled: Bool)
 
     /// The `type` tag this encodes as. Public so the wire-contract test can
     /// compare the whole set against the Rust enum.
@@ -118,7 +116,6 @@ enum ClientMessage: Sendable, Equatable {
         case .selectDisplay: "selectDisplay"
         case .hostScale: "hostScale"
         case .cacheReset: "cacheReset"
-        case .audio: "audio"
         }
     }
 
@@ -126,16 +123,17 @@ enum ClientMessage: Sendable, Equatable {
     static let allTags: Set<String> = [
         "mouseMove", "mouseButton", "wheel", "key", "viewport", "defaultSize",
         "refresh", "connect", "disconnect", "clipboard", "clipboardRequest",
-        "selectDisplay", "hostScale", "cacheReset", "audio",
+        "selectDisplay", "hostScale", "cacheReset",
     ]
 
     /// Tags this build knows exist and deliberately never sends.
     ///
-    /// Empty, and kept rather than deleted: `audio` was here for as long as the
-    /// gateway had sound and the viewer did not, and what the entry recorded was a
-    /// *decision* — the wire-contract test asks whether somebody has considered each
-    /// message, and an empty set is the answer "all of them are implemented" rather
-    /// than the absence of the question.
+    /// Empty, and kept rather than deleted: the wire-contract test asks whether
+    /// somebody has considered each message, and an empty set is the answer "all of
+    /// them are implemented" rather than the absence of the question. `audio` was here
+    /// once, for as long as the gateway had sound and the viewer did not; it is not
+    /// here now because there is no such message on either side — subscribing is
+    /// opening `/ws/audio`.
     static let unsentTags: Set<String> = []
 }
 
@@ -175,11 +173,6 @@ extension ClientMessage: Encodable {
             try container.encode(id, forKey: .id)
         case .hostScale(let scale):
             try container.encode(scale, forKey: .scale)
-        case .audio(let enabled):
-            // Never defaulted on the gateway's side either: `{"type":"audio"}` with
-            // nothing said about it is rejected there rather than read as one of the
-            // two answers (`src/protocol.rs`).
-            try container.encode(enabled, forKey: .enabled)
         case .defaultSize, .refresh, .disconnect, .clipboardRequest, .cacheReset:
             break
         }

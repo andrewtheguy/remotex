@@ -105,13 +105,13 @@ struct ClientMessageTests {
         #expect(ClientMessage.wheel(dx: -.infinity, dy: 3, unit: .pixel).jsonText() == nil)
     }
 
-    /// Both answers explicitly, because the gateway refuses `{"type":"audio"}` with no
-    /// `enabled` rather than defaulting it — so an encoder that dropped the field for
-    /// `false` would look like it worked and mute nothing.
+    /// There is no audio message to encode. Subscribing is opening `/ws/audio` and
+    /// stopping is closing it, so the tag is gone from both ends — which the contract
+    /// test below enforces against the Rust enum rather than trusting this comment.
     @Test
-    func audioCarriesBothAnswers() throws {
-        try expectEncoding(.audio(enabled: true), ["type": "audio", "enabled": true])
-        try expectEncoding(.audio(enabled: false), ["type": "audio", "enabled": false])
+    func thereIsNoAudioMessage() {
+        #expect(!ClientMessage.allTags.contains("audio"))
+        #expect(!ClientMessage.unsentTags.contains("audio"))
     }
 
     @Test
@@ -131,7 +131,6 @@ struct ClientMessageTests {
             .selectDisplay(id: 1),
             .hostScale(scale: 200),
             .cacheReset,
-            .audio(enabled: true),
         ]
         #expect(Set(messages.map(\.tag)) == ClientMessage.allTags)
         #expect(messages.count == ClientMessage.allTags.count)

@@ -564,6 +564,14 @@ export function useRemoteDesktop(
   // "Resize to window", and switching auto on — can push the current viewport.
   const resizeToWindowRef = useRef<(() => void) | null>(null);
 
+  // Open and close the audio socket from outside the connection effect, which is
+  // where the toggle lives. A ref rather than state for the same reason `startRef` is
+  // one: the effect owns the sockets, and everything else only asks it to act.
+  const audioSocketRef = useRef<{
+    open: () => void;
+    close: () => void;
+  } | null>(null);
+
   // Switch between the two modes. Both the toolbar's toggle and every `connected`
   // come through here, so the ref the sender reads can never disagree with the
   // label the user is looking at.
@@ -666,6 +674,12 @@ export function useRemoteDesktop(
 
     let disposed = false;
     let ws: WebSocket | null = null;
+    // Sound has a socket of its own, so that it never queues behind a picture — see
+    // src/ws.rs. Opening it *is* the subscription; there is no message for audio.
+    let audioWs: WebSocket | null = null;
+    // The claim the sockets attach with, kept so audio can be opened and closed at any
+    // point in the session rather than only when the session socket is built.
+    let session: string | null = null;
     // The slot table, the video decoders and the batch draw loop, shared with the
     // macOS viewer's canvas page — see tilePainter.ts.
     const painter = createTilePainter({
@@ -701,11 +715,13 @@ export function useRemoteDesktop(
       // reference always follows the tile that filled its slot on the same
       // socket.)
       painter.clear();
-      // The socket carrying the audio is going away, and a subscription belongs to
-      // one attachment: the gateway has already stopped this one, so holding a
-      // decoder open would only be holding the audio hardware. The next `connected`
-      // starts from off, and getting it back is a click (see `setAudio`).
+      // Sound's own socket goes with this one. The gateway would keep the
+      // subscription alive across a reattach — it belongs to the claim now — but this
+      // browser cannot: rebuilding a decoder needs an AudioContext, and a context
+      // built outside a gesture is the thing iOS Safari suspends with no way back. So
+      // the next `connected` starts from off, and getting it back is a click.
       releaseAudio();
+      closeAudioSocket();
       setAudioEnabled(false);
       syncCursor();
     };
@@ -887,11 +903,14 @@ export function useRemoteDesktop(
       sendRef.current({ type: "hostScale", scale });
     };
 
-    const open = (sessionId: string) => {
+    const socketUrl = (path: string, sessionId: string) => {
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(
-        `${proto}//${window.location.host}/ws?session=${encodeURIComponent(sessionId)}`,
-      );
+      return `${proto}//${window.location.host}${path}?session=${encodeURIComponent(sessionId)}`;
+    };
+
+    const open = (sessionId: string) => {
+      session = sessionId;
+      const socket = new WebSocket(socketUrl("/ws", sessionId));
       socket.binaryType = "arraybuffer";
       ws = socket;
       wsRef.current = socket;
@@ -950,42 +969,98 @@ export function useRemoteDesktop(
       if (!(data instanceof ArrayBuffer)) {
         return;
       }
-      // Read the kind before either parser: a batch parser handed audio would spend
-      // its way through an Opus packet looking for tile records.
-      switch (binaryFrameKind(data)) {
-        case "batch":
-          await painter.draw(data);
-          break;
-        case "audio":
-          playAudio(data);
-          break;
-        default:
-          break;
+      // Sound is on its own socket now, so this one carries batches and nothing else.
+      // The kind is still read rather than assumed: a batch parser handed anything
+      // else would spend its way through the bytes looking for tile records.
+      if (binaryFrameKind(data) === "batch") {
+        await painter.draw(data);
       }
     };
 
-    // Audio rides the same promise queue as tiles, which is worth a word because it
-    // sounds wrong: a decode that awaited behind a repaint would be exactly the
-    // head-of-line delay this design is meant to avoid. It does not await — the
-    // packets are handed to WebCodecs, which decodes off-thread and calls back — so
-    // what queues here is a few microseconds of copying, not a decode.
-    const playAudio = (data: ArrayBuffer) => {
+    // Sound arrives on its own socket, so nothing it does can be delayed by a repaint
+    // and nothing it does can delay one. No promise queue either, unlike the messages
+    // above: there is nothing here to keep in order with a tile draw, and the packets
+    // are handed straight to WebCodecs, which decodes off-thread and calls back.
+    // The only control message this socket carries. Anything else is a gateway that
+    // has changed under this build.
+    const handleAudioControl = (text: string) => {
+      let msg: ControlMsg;
+      try {
+        msg = JSON.parse(text) as ControlMsg;
+      } catch {
+        return;
+      }
+      if (msg.type === "audioFormat") {
+        startAudio(msg);
+      }
+    };
+
+    const handleAudioFrame = (data: ArrayBuffer) => {
+      if (binaryFrameKind(data) !== "audio") {
+        return;
+      }
       const packets = decodeAudioFrame(data);
       if (packets) {
         audioPlayerRef.current?.push(packets);
       }
     };
 
-    // Build the decoder the format describes, around the context the click made.
-    //
-    // Arriving without a context means audio was turned off between the request and
-    // this answer, or that the gateway sent it unasked; either way there is nothing
-    // to build and nothing to report.
-    const startAudio = (msg: Extract<ControlMsg, { type: "audioFormat" }>) => {
-      const context = audioContextRef.current;
-      if (!context) {
+    const handleAudioMessage = (data: unknown) => {
+      if (typeof data === "string") {
+        handleAudioControl(data);
+      } else if (data instanceof ArrayBuffer) {
+        handleAudioFrame(data);
+      }
+    };
+
+    // Subscribe to the remote's sound by opening its socket, and unsubscribe by
+    // closing it. Idempotent in both directions, because every caller is some form of
+    // "make it so" rather than "toggle".
+    const openAudioSocket = () => {
+      closeAudioSocket();
+      if (disposed || !session) {
         return;
       }
+      const socket = new WebSocket(socketUrl("/ws/audio", session));
+      socket.binaryType = "arraybuffer";
+      audioWs = socket;
+      socket.onmessage = (ev) => {
+        if (audioWs === socket) {
+          handleAudioMessage(ev.data);
+        }
+      };
+      // Nothing to do on close, and deliberately nothing: the session socket owns
+      // reconnection, and it will reopen this one through `seedAudioForAttachment`
+      // when it comes back. Retrying here as well would race that.
+      socket.onclose = () => {
+        if (audioWs === socket) {
+          audioWs = null;
+        }
+      };
+    };
+
+    const closeAudioSocket = () => {
+      const socket = audioWs;
+      audioWs = null;
+      socket?.close();
+    };
+
+    // Build the decoder the format describes, around the context the click made.
+    //
+    // A *second* format on the same socket is a new desktop — the audio socket
+    // outlives a target switch, and the gateway re-announces when it arms the next
+    // engine. The decoder built for the previous stream describes something that has
+    // ended, so it goes, and its timeline starts over with it.
+    const startAudio = (msg: Extract<ControlMsg, { type: "audioFormat" }>) => {
+      if (audioPlayerRef.current) {
+        releaseAudio();
+      }
+      // The click's context when there is one, which is the first format after the
+      // toggle. Otherwise a fresh one, which is only safe because this socket was
+      // opened by a click in the first place: the page has certainly been interacted
+      // with by the time a second format arrives, so the context resumes.
+      const context = audioContextRef.current ?? createAudioContext();
+      audioContextRef.current = context;
       try {
         const player = createAudioPlayer(
           {
@@ -1002,8 +1077,8 @@ export function useRemoteDesktop(
               setAudioEnabled(false);
               setAudioError(reason);
               // And stop the packets, which would otherwise keep arriving for a
-              // decoder that has gone.
-              sendRef.current({ type: "audio", enabled: false });
+              // decoder that has gone. Closing the socket is how that is said.
+              closeAudioSocket();
             },
             // Only the trims, and they earn a warning: audio was thrown away to
             // stay near live, which is the ceiling doing its job and also the one
@@ -1032,7 +1107,7 @@ export function useRemoteDesktop(
             ? e.message
             : "this browser cannot play remote audio",
         );
-        sendRef.current({ type: "audio", enabled: false });
+        closeAudioSocket();
       }
     };
 
@@ -1088,9 +1163,10 @@ export function useRemoteDesktop(
       setAudioError(null);
       if (audioByDefaultRef.current && hasAudio && audioContextRef.current) {
         setAudioEnabled(true);
-        sendRef.current({ type: "audio", enabled: true });
+        openAudioSocket();
       } else {
         releaseAudio();
+        closeAudioSocket();
         setAudioEnabled(false);
       }
     };
@@ -1263,6 +1339,7 @@ export function useRemoteDesktop(
           // offering a control that would be answered with a warning in the log.
           setCanAudio(false);
           releaseAudio();
+          closeAudioSocket();
           setAudioEnabled(false);
           setAudioError(null);
           // The stream itself goes with `clearDesktop` below; what has to be said
@@ -1306,6 +1383,7 @@ export function useRemoteDesktop(
       void connect(force);
     };
     startRef.current = start;
+    audioSocketRef.current = { open: openAudioSocket, close: closeAudioSocket };
     start(false);
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
@@ -1351,6 +1429,8 @@ export function useRemoteDesktop(
       disposed = true;
       startRef.current = null;
       resizeToWindowRef.current = null;
+      audioSocketRef.current = null;
+      audioWs?.close();
       // The socket is going away, so nothing will answer a pending fetch.
       settleClipboardWaiters(null);
       clearTimeout(retryTimer);
@@ -1433,9 +1513,10 @@ export function useRemoteDesktop(
   // arrived yet — so the context is what the gesture is spent on, and `startAudio`
   // wraps a decoder around it a round trip later.
   //
-  // Optimistic, unlike `selectDisplay` next door: nothing acknowledges this, and the
-  // honest reading of "enabled" is that this browser asked and is holding a context
-  // open for the answer. A gateway that has nothing to send simply sends nothing.
+  // Opening the socket is the whole of the request; there is no message for audio any
+  // more, and there is nothing to acknowledge one. The honest reading of "enabled" is
+  // that this browser asked and is holding a context open for the answer. A gateway
+  // with nothing to send simply sends nothing on a socket that stays open.
   const setAudio = useCallback(
     (enabled: boolean) => {
       // The live control also writes the remembered default, so a choice made
@@ -1455,8 +1536,10 @@ export function useRemoteDesktop(
         // the question can be asked, and its catch reports the same two reasons —
         // a browser with no decoder, or an insecure origin — a round trip later.
         audioContextRef.current = createAudioContext();
+        audioSocketRef.current?.open();
+      } else {
+        audioSocketRef.current?.close();
       }
-      sendRef.current({ type: "audio", enabled });
     },
     [releaseAudio],
   );

@@ -161,18 +161,31 @@ async fn websocket_upgrade_without_a_login_fails_with_401() {
     }
 }
 
-// Audio has no endpoint of its own to guard any more: it travels on `/ws`, so its
-// guard is the socket's. An endpoint's three refusals used to be tested here, and each
-// one still is, somewhere it can be:
+/// Audio has an endpoint of its own again, and it is guarded by the same layer — so
+/// the login check still happens before the upgrade rather than inside it, and an
+/// unauthenticated attempt never reaches a session at all.
+#[tokio::test]
+async fn audio_websocket_upgrade_without_a_login_fails_with_401() {
+    let addr = spawn_app().await;
+
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/audio?session=whatever"))
+        .await
+        .expect_err("the unauthenticated upgrade must be refused");
+    match err {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 401)
+        }
+        other => panic!("expected an HTTP 401 handshake failure, got: {other:?}"),
+    }
+}
+
+// The audio endpoint's other two refusals cannot be HTTP assertions, and are tested
+// where they can be:
 //
-// - **401 without a login** — `websocket_upgrade_without_a_login_fails_with_401`
-//   above, since the cookie is checked before the upgrade;
-// - **403 for a token that is not the claim** — now close code 4000 rather than a
-//   status, in `protocol_e2e::websocket_without_a_valid_token_is_closed_with_4000`;
-// - **503 for a session with no audio source** — now a no-op subscription, in
-//   `session::tests::asking_for_audio_without_a_source_changes_nothing`.
-//
-// None of them can be an HTTP assertion any more, so none of them is one.
+// - **a token that is not the claim** — close code 4000, in
+//   `protocol_e2e::an_audio_socket_without_a_valid_token_is_closed_with_4000`;
+// - **a session with no audio source** — accepted and silent by design, in
+//   `session::tests::an_audio_socket_with_no_source_is_accepted_and_silent`.
 
 #[tokio::test]
 async fn logout_invalidates_the_session_and_clears_the_cookie() {

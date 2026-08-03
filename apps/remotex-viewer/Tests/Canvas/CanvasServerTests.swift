@@ -160,6 +160,50 @@ struct CanvasServerTests {
         client.close()
     }
 
+    /// Sound is a frame envelope, but it is not a picture, and the backlog ceiling has
+    /// to know the difference.
+    ///
+    /// A dropped tile is replaced by the repaint the re-prime asks for; a dropped wave
+    /// buffer is a hole nothing asks for again. So a client that never reads is given
+    /// far more than the ceiling in tiles — every one of which may be dropped — and the
+    /// audio frame behind them still arrives. Without the exemption this is the same
+    /// bug on this side of the app that giving audio its own gateway socket fixed on
+    /// the other.
+    @Test
+    func audioIsNotDroppedBehindABacklogOfTiles() async throws {
+        let scratch = try ScratchDirectory()
+        let attached = Attached()
+        let (server, address) = try await Self.started(scratch) { attached.signal() }
+        defer { server.stop() }
+
+        let client = RawClient(port: address.port)
+        try await client.get("/\(address.token)/frames")
+        #expect(await attached.wait(), "the server never accepted the stream")
+        _ = try await client.readHead()
+
+        // Well past `maxPendingFrameBytes` (2 MiB) without reading any of it.
+        let tile = Data([BatchFrame.frameKind]) + Data(repeating: 0, count: 256 * 1024)
+        for _ in 0..<24 {
+            server.send(frame: tile)
+        }
+        let audio = Data([AudioFrame.frameKind, 0x00, 0x01, 0x00])
+        server.send(frame: audio)
+
+        // Read until the audio envelope shows up. It is behind however many tiles the
+        // ceiling let through, and the count of those is exactly what this test must
+        // not assert on — it depends on how fast the socket drains.
+        var found = false
+        for _ in 0..<64 {
+            let chunk = try await client.readChunk()
+            if chunk == Data([CanvasServer.Envelope.frame]) + audio {
+                found = true
+                break
+            }
+        }
+        #expect(found, "the audio envelope should have survived the tile backlog")
+        client.close()
+    }
+
     /// A reload is the ordinary way a second stream appears, and there is one page:
     /// the newer attachment is the live one, and the app re-primes it from scratch.
     @Test

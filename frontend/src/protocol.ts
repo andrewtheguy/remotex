@@ -68,9 +68,10 @@ export type ClientMsg =
   // server empties its slot table and repaints; deliberately not "refresh",
   // which is routed to the engine and would leave the table intact — the repaint
   // would come back as the same references and miss again.
-  | { type: "cacheReset" }
-  // Start or stop audio on this attachment. The UI click also authorizes playback.
-  | { type: "audio"; enabled: boolean };
+  // There is no audio message. Subscribing is opening `/ws/audio`, and stopping is
+  // closing it — see useRemoteDesktop's `setAudio`. The UI click that does it also
+  // authorizes playback, which is why it has to be a click either way.
+  | { type: "cacheReset" };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
 // src/protocol.rs. The backend refuses anything over it in either direction;

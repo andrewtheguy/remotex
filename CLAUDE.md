@@ -107,6 +107,10 @@ For counts, assert invariant relationships such as `records > frames`.
 - A wire-format spec must use its own parser, not the SPA's. Rust e2e drives a raw
   WebSocket, while Swift and TS unit tests parse self-built frames; this is the
   independent check that both wire ends agree.
+- `audio-socket.spec.ts` needs a gateway serving audio rather than a live Mac, so it
+  opts in separately with `REMOTEX_PLAYWRIGHT_AUDIO_TARGET=<target>`. The tone harness
+  supplies one with no remote at all: `cargo test --lib serve_a_test_tone -- --ignored
+  --nocapture`, then point `REMOTEX_PLAYWRIGHT_BASE_URL` at the address it prints.
 
 ## remotex.app
 
@@ -185,6 +189,20 @@ origin — WebCodecs needs a secure context and Web Audio does not.
 does not go through it and must not start: resampling is the thing it exists not
 to do. Do not tie the group size to a packet size either; the ratio is what makes
 882-to-960 exact.
+
+Audio has **its own WebSocket and its own queue**, `/ws/audio`. Opening it is the
+subscription — there is no `ClientMsg` for audio, and closing it is the only way to
+stop. Do not put sound back on the session socket: that queue is four frames deep on
+`render_type = "video"`, and a pump waiting behind a video backlog stops draining the
+bridge, which then drops wave buffers. A lost tile is repainted; a lost wave buffer is
+a hole. `remotex.app` keeps the same separation on its own side, where `CanvasServer`
+exempts audio envelopes from the tile-backlog ceiling.
+
+The audio socket is bound to the **claim**, not to an attachment, so it survives a
+reattach and a target switch — `SessionManager::arm_audio` re-arms it from `connect`.
+It is closed only where the claim changes (`evict_audio`), and that eviction is
+load-bearing rather than tidy: without it the next `connect` re-arms an evicted
+browser onto the new holder's desktop.
 
 After Swift changes:
 

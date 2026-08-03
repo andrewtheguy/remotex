@@ -33,30 +33,32 @@ struct AudioControlTests {
 
         session.model.audio.setEnabled(true)
         try await session.settle()
-        #expect(session.audioMessages == [true])
+        #expect(session.audioSocketsOpened == 1)
+        #expect(session.isSubscribedToAudio)
 
         session.model.audio.setEnabled(false)
         try await session.settle()
-        #expect(session.audioMessages == [true, false])
+        #expect(session.audioSocketsOpened == 1, "unsubscribing closes, it does not reopen")
+        #expect(!session.isSubscribedToAudio)
     }
 
-    /// Pressing an already-on toggle must not re-subscribe. The gateway replaces the
-    /// subscription rather than adding one, so the cost is a fresh encoder and a fresh
+    /// Pressing an already-on toggle must not re-subscribe. A second socket supersedes
+    /// the first at the gateway, so the cost is a fresh encoder and a fresh
     /// `audioFormat` mid-stream — a gap in the sound for no reason.
     @Test
-    func askingTwiceForTheSameAnswerSendsNothing() async throws {
+    func askingTwiceForTheSameAnswerOpensOneSocket() async throws {
         let session = try await AttachedSession.attached(suite: "AudioControlTests")
         session.connect(protocolName: "rdp", audio: true)
 
         session.model.audio.setEnabled(true)
         session.model.audio.setEnabled(true)
         try await session.settle()
-        #expect(session.audioMessages == [true])
+        #expect(session.audioSocketsOpened == 1)
     }
 
-    /// The gateway's subscription belongs to an attachment, so a reconnect arrives with
-    /// audio off while this side still says on. The viewer re-asserts, which is a
-    /// deliberate difference from the SPA — there a reconnect needs a fresh click,
+    /// The gateway keeps its half across a reattach — the subscription belongs to the
+    /// claim — but this end's socket died with the network, so the viewer reopens it.
+    /// A deliberate difference from the SPA, where a reconnect needs a fresh click,
     /// because a browser's audio context needs a user gesture and this does not.
     @Test
     func aReconnectResubscribesWithoutBeingAskedAgain() async throws {
@@ -68,7 +70,8 @@ struct AudioControlTests {
         // What a reattach looks like from here: the same target's `connected` again.
         session.connect(protocolName: "rdp", audio: true)
         try await session.settle()
-        #expect(session.audioMessages == [true, true])
+        #expect(session.audioSocketsOpened == 2)
+        #expect(session.isSubscribedToAudio)
         #expect(session.model.audio.isEnabled)
     }
 
@@ -91,7 +94,8 @@ struct AudioControlTests {
         session.connect(protocolName: "rdp", audio: true)
         try await session.settle()
         #expect(!session.model.audio.isEnabled, "the new target starts silent")
-        #expect(session.audioMessages == [true], "nothing was re-asserted for a fresh target")
+        #expect(session.audioSocketsOpened == 1, "nothing was re-asserted for a fresh target")
+        #expect(!session.isSubscribedToAudio)
     }
 
     /// A reconnection in progress greys the item — there is no attachment to subscribe
@@ -145,11 +149,11 @@ struct AudioControlTests {
         session.connect(protocolName: "rdp", audio: true)
         session.model.audio.setEnabled(true)
         try await session.settle()
-        #expect(session.audioMessages == [true])
+        #expect(session.audioSocketsOpened == 1)
 
         session.model.attach(canvas: FakeCanvas())
         try await session.settle()
-        #expect(session.audioMessages == [true, true], "the reattached page gets a format")
+        #expect(session.audioSocketsOpened == 2, "the reattached page gets a format")
         #expect(session.model.audio.isEnabled, "and the answer it was playing under")
     }
 
@@ -164,7 +168,7 @@ struct AudioControlTests {
 
         session.model.attach(canvas: FakeCanvas())
         try await session.settle()
-        #expect(session.audioMessages.isEmpty)
+        #expect(session.audioSocketsOpened == 0)
     }
 
     /// A failure reported for a subscription that is already off is not the
@@ -181,7 +185,7 @@ struct AudioControlTests {
         try await session.settle()
 
         #expect(session.model.actionError == nil)
-        #expect(session.audioMessages.isEmpty, "nothing to unsubscribe from")
+        #expect(session.audioSocketsOpened == 0, "nothing to unsubscribe from")
     }
 
     /// A page that cannot play what arrived says so, and the alert is how that
@@ -202,17 +206,9 @@ struct AudioControlTests {
         #expect(reported.contains("vorbis"), "the alert should name what arrived: \(reported)")
         #expect(!session.model.audio.isEnabled)
         #expect(
-            session.sent(ofType: "audio").last?["enabled"] as? Bool == false,
-            "the gateway is told to stop sending what nothing will decode"
+            !session.isSubscribedToAudio,
+            "the socket closes, so the gateway stops sending what nothing will decode"
         )
     }
 }
 
-extension AttachedSession {
-    /// The `enabled` of every `audio` message sent, in order.
-    var audioMessages: [Bool] {
-        sent.compactMap { frame in
-            frame["type"] as? String == "audio" ? frame["enabled"] as? Bool : nil
-        }
-    }
-}

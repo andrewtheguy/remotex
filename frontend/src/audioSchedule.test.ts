@@ -114,3 +114,19 @@ test("the cushion sits under the ceiling", () => {
   // would begin with a trim.
   assert.ok(START_LEAD_S < MAX_LEAD_S);
 });
+
+test("the budget absorbs whole wave buffers, not fractions of one", () => {
+  // The unit the gateway actually delivers in is a wave buffer, so a cushion smaller
+  // than a couple of them cannot absorb one late arrival — which is what the old
+  // 0.1s did, and why this comparison is written against BUFFER_S rather than as a
+  // bare number. The ceiling is sized to survive a stall of several, in the same
+  // spirit as Myrtille's ~1s of deliberate buffering.
+  assert.ok(
+    START_LEAD_S >= 2 * BUFFER_S,
+    "the start cushion should hold at least two wave buffers",
+  );
+  assert.ok(
+    MAX_LEAD_S >= 5 * BUFFER_S,
+    "the ceiling should tolerate a stall of several wave buffers",
+  );
+});

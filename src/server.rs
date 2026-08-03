@@ -132,6 +132,9 @@ pub(crate) fn router_with_sessions(
         .merge(
             Router::new()
                 .route("/ws", any(ws::handler))
+                // Sound, on a socket of its own so it never queues behind a picture.
+                // Same guard, same credential kinds; only the payload differs.
+                .route("/ws/audio", any(ws::audio_handler))
                 .route_layer(require_auth),
         );
 

@@ -163,14 +163,20 @@ final class FakeGateway: SessionGateway {
     private struct State {
         var claims: [ClaimOutcome]
         var sockets: [FakeWebSocketTransport]
+        var audioSockets: [FakeWebSocketTransport] = []
         var claimCalls: [(force: Bool, sessionId: String?)] = []
         var socketTokens: [String] = []
+        var audioSocketTokens: [String] = []
     }
 
     private let state: Mutex<State>
 
-    init(claims: [ClaimOutcome], sockets: [FakeWebSocketTransport]) {
-        state = Mutex(State(claims: claims, sockets: sockets))
+    init(
+        claims: [ClaimOutcome],
+        sockets: [FakeWebSocketTransport],
+        audioSockets: [FakeWebSocketTransport] = []
+    ) {
+        state = Mutex(State(claims: claims, sockets: sockets, audioSockets: audioSockets))
     }
 
     var claimCalls: [(force: Bool, sessionId: String?)] {
@@ -179,6 +185,13 @@ final class FakeGateway: SessionGateway {
 
     var socketTokens: [String] {
         state.withLock { $0.socketTokens }
+    }
+
+    /// Which claims the audio socket was opened with, separately from the session
+    /// socket's — the two are the same token, and a test that could not tell them
+    /// apart could not show that.
+    var audioSocketTokens: [String] {
+        state.withLock { $0.audioSocketTokens }
     }
 
     func claimSession(force: Bool, sessionId: String?) async throws -> ClaimOutcome {
@@ -198,6 +211,16 @@ final class FakeGateway: SessionGateway {
                 throw FakeTransportError.refused
             }
             return state.sockets.removeFirst()
+        }
+    }
+
+    func openAudioSocket(sessionToken: String) async throws -> any WebSocketTransport {
+        try state.withLock { state in
+            state.audioSocketTokens.append(sessionToken)
+            guard !state.audioSockets.isEmpty else {
+                throw FakeTransportError.refused
+            }
+            return state.audioSockets.removeFirst()
         }
     }
 }
@@ -281,6 +304,11 @@ final class RecordingSink: GatewaySessionSink {
 struct AttachedSession {
     let model: AppModel
     let socket: FakeWebSocketTransport
+    /// The audio sockets this session may open, in order, and the gateway that hands
+    /// them out. Sound has a socket of its own, so "did it subscribe" is a question
+    /// about *sockets* now rather than about a message on the session socket.
+    let audioSockets: [FakeWebSocketTransport]
+    let gateway: FakeGateway
     /// The synchronizer's pasteboard, so a test can put something on it to be
     /// pushed. Its own, never the user's.
     let pasteboard: NSPasteboard
@@ -292,6 +320,10 @@ struct AttachedSession {
         audio: AudioControl = AudioControl()
     ) async throws -> AttachedSession {
         let socket = FakeWebSocketTransport(closeAfterDraining: false)
+        // More than any test uses, so running out is never what a failure means.
+        let audioSockets = (0..<8).map { _ in
+            FakeWebSocketTransport(closeAfterDraining: false)
+        }
         let pasteboard = NSPasteboard.withUniqueName()
         // No gateway and no preferences file: the subject of every suite that uses
         // this is what reaches the wire, and the socket under it is scripted — so
@@ -305,9 +337,12 @@ struct AttachedSession {
             ),
             audio: audio
         )
-        await model.beginSession(
-            over: FakeGateway(claims: [.claimed("tok")], sockets: [socket])
+        let gateway = FakeGateway(
+            claims: [.claimed("tok")],
+            sockets: [socket],
+            audioSockets: audioSockets
         )
+        await model.beginSession(over: gateway)
         // `start` returns once the claim is under way, not once the socket is up,
         // and opening one discards whatever was queued before it. Waiting here is
         // what keeps a test measuring its own subject rather than that race.
@@ -322,9 +357,26 @@ struct AttachedSession {
         return AttachedSession(
             model: model,
             socket: socket,
+            audioSockets: audioSockets,
+            gateway: gateway,
             pasteboard: pasteboard,
             canvas: canvas
         )
+    }
+
+    /// How many times this session has opened the audio socket. One per subscription,
+    /// because closing and reopening is the only way to resubscribe.
+    var audioSocketsOpened: Int {
+        gateway.audioSocketTokens.count
+    }
+
+    /// Whether the most recently opened audio socket is still open — the observable
+    /// form of "is this session subscribed to sound right now".
+    var isSubscribedToAudio: Bool {
+        guard audioSocketsOpened > 0 else {
+            return false
+        }
+        return !audioSockets[audioSocketsOpened - 1].wasCancelled
     }
 
     func connect(

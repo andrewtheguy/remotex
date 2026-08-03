@@ -377,7 +377,21 @@ struct GatewayClient: Sendable, SessionGateway {
         )
     }
 
-    /// The upgrade request for `/ws?session=<token>`.
+    /// The audio socket, `/ws/audio`. Opening it is the subscription — there is no
+    /// message that turns sound on — and closing it is how it stops.
+    ///
+    /// Same credential, same claim token, same refusals; only the path differs. That
+    /// sameness is deliberate: a second endpoint that took its credential differently
+    /// would be a second thing to get wrong.
+    func openAudioSocket(sessionToken: String) async throws -> any WebSocketTransport {
+        URLSessionWebSocketTransport(
+            task: session.webSocketTask(
+                with: try webSocketRequest(sessionToken: sessionToken, path: "/ws/audio")
+            )
+        )
+    }
+
+    /// The upgrade request for `/ws?session=<token>`, or `/ws/audio`.
     ///
     /// Two different tokens meet here and they are not interchangeable: the query's
     /// is the *session claim*, which decides whose turn it is, and the credential
@@ -390,8 +404,9 @@ struct GatewayClient: Sendable, SessionGateway {
     /// `GatewayCredential.session` — and behind a TLS proxy this URL's scheme is
     /// `wss`, which is where URLSession's own machinery would drop a `Secure` cookie
     /// and leave nothing to explain the 401.
-    func webSocketRequest(sessionToken: String) throws -> URLRequest {
+    func webSocketRequest(sessionToken: String, path: String = "/ws") throws -> URLRequest {
         var components = try socketComponents()
+        components.path = path
         components.queryItems = [URLQueryItem(name: "session", value: sessionToken)]
         guard let url = components.url else {
             throw GatewayClientError.badAddress("could not build the session URL")

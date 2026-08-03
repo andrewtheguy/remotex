@@ -319,7 +319,9 @@ pub struct Totals {
     /// every ratio the cache is judged by.
     pub video: u64,
     pub video_bytes: u64,
-    /// Opus packets and their binary-frame bytes, separate from tile traffic.
+    /// Audio packets and their binary-frame bytes. Separate from tile traffic, and now
+    /// on a separate socket too — so on any one `Wire` these and the tile counters are
+    /// mutually exclusive.
     pub audio_frames: u64,
     pub audio_packets: u64,
     pub audio_bytes: u64,
@@ -589,39 +591,31 @@ mod tests {
         assert_eq!(records(binary(&frames)[1]).len(), 1);
     }
 
-    /// Audio is the exception to the rule above, and this is the assertion that
-    /// keeps it one: sound has no ordering relationship with pixels, so an audio
-    /// frame goes out **without** flushing a batch that is still filling. Making it
-    /// wait would add latency to the one thing on this socket that cannot buy any
-    /// back — a scheduler starves while a full repaint drains.
+    /// Audio through the same encoder, which is why it is still encoded here at all:
+    /// one place turns a [`ServerMsg`] into a frame, so the two sockets cannot come to
+    /// disagree about a layout, and `Totals` keeps counting audio bytes where the
+    /// field measurement already reads them.
+    ///
+    /// A `Wire` never sees sound and pixels together any more — they are on different
+    /// sockets — so what is pinned is the audio path alone: one binary frame per
+    /// message, carrying its packets, and no batch invented around it.
     #[test]
-    fn an_audio_frame_neither_flushes_a_pending_batch_nor_disturbs_it() {
+    fn audio_alone_through_the_wire_is_one_binary_frame_and_no_batch() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![
-            tile(0, 50),
-            ServerMsg::Audio(vec![vec![1, 2, 3], vec![4, 5]]),
-            tile(64, 50),
-        ]);
+        let frames = wire.encode(vec![ServerMsg::Audio(vec![vec![1, 2, 3], vec![4, 5]])]);
 
-        // Audio first, then one batch holding both tiles — not two batches with the
-        // audio between them.
-        assert_eq!(frames.len(), 2);
+        assert_eq!(frames.len(), 1, "no batch is flushed around it");
         let binary = binary(&frames);
         assert_eq!(binary[0][0], protocol::audio::FRAME_KIND);
         assert_eq!(packets(binary[0]), vec![vec![1, 2, 3], vec![4, 5]]);
-        assert_eq!(binary[1][0], batch::FRAME_KIND);
-        assert_eq!(
-            records(binary[1]).len(),
-            2,
-            "both tiles should still share one batch"
-        );
 
         assert_eq!(wire.totals.audio_frames, 1);
         assert_eq!(wire.totals.audio_packets, 2);
         assert_eq!(
-            wire.totals.binary_frames, 2,
+            wire.totals.binary_frames, 1,
             "an audio frame is a binary frame too, for the message-size ceiling"
         );
+        assert_eq!(wire.totals.tiles, 0, "sound is not pixels");
     }
 
     /// A frame with no packets is still a frame a client must be able to read
