@@ -54,12 +54,10 @@ if [ "$configuration" = debug ]; then
   cargo_flags=()
 fi
 
-# The same `CEF_PATH` every cargo invocation below sees. `cef-dll-sys` rebuilds
-# whenever this variable changes, so a script that sets it for one build and not
-# the next pays for a full Chromium-bindings rebuild on every run.
-export CEF_PATH="${CEF_PATH:-$HOME/.local/share/cef}"
-
-# Builds both Rust crates and stages what the Swift app links against.
+# Builds both Rust crates and stages what the Swift app links against. Where CEF
+# comes from is that script's to decide, and this one must not have a second
+# opinion: `cef-dll-sys` rebuilds the whole binding graph whenever `CEF_PATH`
+# changes under it.
 packaging/macos-viewer/stage-cef.sh "$cargo_profile"
 cef_helper="target/$cargo_profile/remotex-cef-helper"
 
