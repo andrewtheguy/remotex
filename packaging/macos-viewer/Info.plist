@@ -14,6 +14,14 @@
 	<string>remotex</string>
 	<key>CFBundleExecutable</key>
 	<string>remotex-viewer</string>
+	<!-- Chromium will not run under a plain NSApplication: it asks the running app
+	     whether it is inside -sendEvent:, which only NSApp itself can answer. The
+	     subclass is named here rather than installed at startup because
+	     NSApplication.shared reads this key, and by then the instance exists. The
+	     module prefix is the Swift target's, which is how the Objective-C runtime
+	     spells a Swift class. -->
+	<key>NSPrincipalClass</key>
+	<string>RemotexViewer.ViewerApplication</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>

@@ -52,6 +52,30 @@ socket drains. So this wants a client-reported measurement — bytes received an
 arrival timing as a new `ClientMsg` — and work in both clients. A separate feature,
 and one whose value should be argued from `video`'s measurements rather than assumed.
 
+### A video codec every engine has
+
+`render_type = "video"` and `render_motion_subtype = "h264"` both carry H.264, and
+H.264 is the one codec a browser is not guaranteed to have. `remotex.app` is now the
+proof: it embeds Chromium, stock CEF ships without proprietary codecs, and the
+fastest client remotex has cannot decode its fastest render mode — see
+[`known-issues.md`](known-issues.md). A licence-free codec would end that class of
+failure rather than route around it: both VP9 and AV1 are carried by a stock CEF
+build, which H.264 is not. Neither is universal — AV1 is refused by engines with no
+hardware path for it — so the client's own `isConfigSupported` probe stays the thing
+that decides, and a negotiation is part of the work below rather than an assumption
+underneath it.
+
+The work is on the sending side and is not small: an encoder per stream in the
+gateway, a `ServerMsg::VideoFormat` that names the codec and its decoder
+configuration the way `AudioFormat` already does for sound, and a negotiation that
+picks one rather than assuming. The client changes least — it hands encoded packets
+to WebCodecs and reports what it refuses.
+
+Which of the two is a measurement, not a preference: AV1 is the better codec and the
+more expensive encode, and this gateway encodes in real time on whatever machine it
+is running on. The dial's existing numbers were settled by measuring, and so should
+this be.
+
 ### Apple Screen Sharing display modes
 
 - **Make Standard mode's All Displays view point-correct on mixed-density Macs.**

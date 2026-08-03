@@ -131,6 +131,17 @@ struct RemoteCommands: Commands {
                 Task { await model.relaunchGateway() }
             }
             .disabled(!model.canRestartGateway)
+
+            Divider()
+
+            // Chromium's own inspector, on the client. Present in the shipped app
+            // rather than a debug build, because the shipped app is the one there
+            // is to look at — and because the alternative to reading a console
+            // error here is guessing at it from the outside.
+            Button("Developer Tools") {
+                model.showDevTools()
+            }
+            .disabled(!model.canShowDevTools)
         }
 
         CommandMenu("Display") {

@@ -45,6 +45,29 @@ private final class ViewerApplicationDelegate: NSObject, NSApplicationDelegate {
     /// `resizeMenuTarget` is: the delegate exists before there is a model.
     private var gateway: EmbeddedGateway?
 
+    /// Refuse the first quit, and mean the second one.
+    ///
+    /// Not a veto: the engine cannot be taken down from here, because a ⌘Q is
+    /// delivered from *inside* one of Chromium's own pump slices and nothing asked of
+    /// CEF on that stack is done. `ChromiumHost.stopThenQuit` steps off it, closes
+    /// the browsers, shuts the engine down and calls `terminate` again — which
+    /// arrives here with the engine already gone and is allowed straight through.
+    ///
+    /// `terminateLater` looks like the mechanism for this and is not: AppKit waits
+    /// for the reply on the same stack, so the slice being waited for is the one the
+    /// waiting is inside. That was measured, twice.
+    ///
+    /// What it costs to get wrong is a Chromium profile that is never shut down
+    /// cleanly, which the *following* launch reports as a crash — the fault showing
+    /// itself one launch after the one that caused it.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard ChromiumHost.isRunning else {
+            return .terminateNow
+        }
+        ChromiumHost.stopThenQuit { sender.terminate(nil) }
+        return .terminateCancel
+    }
+
     /// Stop the gateway on the way out.
     ///
     /// Belt on top of braces. The guarantee is the liveness pipe — the kernel closes
@@ -131,6 +154,49 @@ enum ViewerMain {
         if CommandLine.arguments.contains("--version") {
             print("remotex-viewer \(ProductInfo.version)")
             Foundation.exit(EXIT_SUCCESS)
+        }
+
+        // Chromium, before the window that shows it — and `NSApp` before Chromium,
+        // because CEF sends `isHandlingSendEvent` to whatever application object it
+        // finds and there is no second chance to replace it.
+        //
+        // Sent to `ViewerApplication` rather than to `NSApplication`, and that is the
+        // whole of it: `shared` is `+[NSApplication sharedApplication]`, which builds
+        // an instance of the class it was sent to. `NSPrincipalClass` is read by
+        // `NSApplicationMain` alone, which SwiftUI reaches long after this — so the
+        // plist entry never had a chance to matter and `NSApplication.shared` here
+        // quietly made a plain one. What that looked like was not a bad application
+        // object: it was an uncaught `unrecognized selector` the moment Chromium
+        // handled an event, i.e. a window that came up and died at the first click.
+        _ = ViewerApplication.shared
+
+        // An unbundled build has no SPA and no engine to point at one. It is not an
+        // error to skip: `swift test` and `--version` both take this path, and the
+        // window's own launch screen already says what a bundle-less build cannot do.
+        if let webRoot = GatewayBinary.webRootInBundle() {
+            let instance = InstanceDirectory.resolved()
+            // Before the engine, because the engine's profile is *inside* this
+            // directory and creating a child creates the parent as a side effect —
+            // with the process umask rather than the `0700` this one has to have.
+            // `remotex.toml` beside it holds the credentials of every machine this
+            // app can reach, and `create` does not tighten a directory that already
+            // exists, so the order here is the only thing that sets the mode.
+            try? instance.create()
+            guard ChromiumHost.start(webRoot: webRoot, profile: instance.browserProfile) else {
+                // Terminal. There is no second engine to fall back to, and every
+                // screen this app has is drawn by the page that engine would show —
+                // so continuing would open a window that can never paint anything.
+                FileHandle.standardError.write(Data(
+                    """
+                    remotex-viewer: Chromium refused to start; \
+                    nothing can be displayed. Run \
+                    \(Bundle.main.executablePath ?? "remotex-viewer") \
+                    with REMOTEX_CEF_TRACE=1 to see how far it got.
+
+                    """.utf8
+                ))
+                Foundation.exit(EXIT_FAILURE)
+            }
         }
 
         NSWindow.allowsAutomaticWindowTabbing = false

@@ -1,0 +1,10 @@
+// The C ABI of `crates/remotex-cef`, as Swift sees it.
+//
+// The header is read from the crate rather than copied here, so there is one
+// declaration of the seam and not two that can disagree. The library itself is
+// found through the `-L` in Package.swift; see the note there about where it
+// comes from.
+module CRemotexCEF {
+    header "../../../../crates/remotex-cef/include/remotex_cef.h"
+    export *
+}

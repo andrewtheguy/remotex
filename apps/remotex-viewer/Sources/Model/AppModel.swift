@@ -48,12 +48,6 @@ final class AppModel {
     let gateway: EmbeddedGateway?
     @ObservationIgnored
     let config: GatewayConfigStore?
-    /// Which WebKit data store the page gets, so its `localStorage` — where the
-    /// client keeps its three remembered preferences — survives a relaunch and
-    /// still belongs to this instance alone. `nil` in a test, which has no page.
-    @ObservationIgnored
-    let dataStoreIdentifier: UUID?
-
     /// The page, while one is up.
     @ObservationIgnored
     private weak var bridge: (any CommandSink)?
@@ -75,13 +69,11 @@ final class AppModel {
     init(
         gateway: EmbeddedGateway? = nil,
         config: GatewayConfigStore? = nil,
-        clipboard: ClipboardSynchronizer = ClipboardSynchronizer(),
-        dataStoreIdentifier: UUID? = nil
+        clipboard: ClipboardSynchronizer = ClipboardSynchronizer()
     ) {
         self.gateway = gateway
         self.config = config
         self.clipboard = clipboard
-        self.dataStoreIdentifier = dataStoreIdentifier
         clipboard.sendText = { [weak self] text in
             self?.send(.clipboardLocal(text))
         }
@@ -100,8 +92,7 @@ final class AppModel {
         }
         return AppModel(
             gateway: gateway,
-            config: binary.map { GatewayConfigStore.overBinary(instance: instance, binary: $0) },
-            dataStoreIdentifier: instance.dataStoreIdentifier
+            config: binary.map { GatewayConfigStore.overBinary(instance: instance, binary: $0) }
         )
     }
 
@@ -423,6 +414,26 @@ final class AppModel {
 
     func openClipboardPanel() {
         send(.openClipboard)
+    }
+
+    /// Whether there is a page for the inspector to open on.
+    ///
+    /// Every other item in that menu greys where it cannot act, and this one could
+    /// not: pressed on the launch screen it reached a bridge that is not there and
+    /// did nothing, silently. The `screen` test is also what makes this observable —
+    /// `bridge` is deliberately outside Observation, so a menu derived from it alone
+    /// would not be rebuilt when the page comes and goes.
+    var canShowDevTools: Bool {
+        if case .ready = screen {
+            return bridge != nil
+        }
+        return false
+    }
+
+    /// Chromium's inspector, on this page. The one menu item that does not go
+    /// through `send`, because it asks the engine rather than the client.
+    func showDevTools() {
+        bridge?.showDevTools()
     }
 
     func setAudioEnabled(_ enabled: Bool) {

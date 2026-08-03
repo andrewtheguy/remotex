@@ -2,9 +2,10 @@
 ///
 /// A browser loads this page *from* its gateway, so the gateway is wherever the
 /// document came from and every path can be relative. `remotex.app` loads the same
-/// page from `file://` inside its own bundle, where there is no origin to be
-/// relative to — so it tells the page where its gateway is, once, before the
-/// document runs (`window.__remotexGateway`, set from a `WKUserScript`).
+/// page as `remotex://app` out of its own bundle, which is a real origin but not
+/// the gateway's — so it tells the page where the gateway is, once, before the
+/// document runs: `window.__remotexGateway`, injected into `index.html` by the
+/// scheme handler as it is served, ahead of the client's own script.
 ///
 /// One code path, not two: the browser simply has no global set and falls through
 /// to its own origin, which is what it always did. Nothing here branches on
@@ -18,18 +19,19 @@ declare global {
   }
 }
 
-/// Read once, at module load. The shell's user script runs at document start —
-/// before any module is evaluated — so this cannot race it, and a value that
-/// changed later would leave sockets and fetches pointing at different gateways.
+/// Read once, at module load. The injected script is in the document ahead of this
+/// one — it is written into `index.html` as the page is served — so this cannot
+/// race it, and a value that changed later would leave sockets and fetches pointing
+/// at different gateways.
 const CONFIGURED =
   typeof window === "undefined" ? undefined : window.__remotexGateway;
 
 /// The gateway's origin, with no trailing slash.
 ///
-/// `location.origin` is the browser's answer. On a `file://` document it is the
-/// string `"null"`, which is not an origin anything can be fetched from — so if the
-/// shell ever failed to set the global, every call below fails loudly at the first
-/// request rather than quietly resolving to something wrong.
+/// `location.origin` is the browser's answer, and the fallback. In the shell it is
+/// `remotex://app`, which serves the client and nothing else — so if the shell ever
+/// failed to set the global, every call below fails loudly at the first request
+/// rather than quietly resolving to something wrong.
 export const GATEWAY_ORIGIN = (CONFIGURED ?? window.location.origin).replace(
   /\/$/,
   "",

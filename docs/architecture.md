@@ -377,15 +377,17 @@ picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 `VideoDecoder`, reached through `frontend/src/videoDecoder.ts` and driven from
 `tilePainter.ts` — the shared batch loop, which keys a decoder per `stream` id and
 replaces one whose region has restarted on a different size. `remotex.app` shows
-this same client in a `WKWebView`, so video was not a second implementation there
-and could not have been.
+this same client in an embedded Chromium, so video was not a second implementation
+there and could not have been.
 
 `VideoDecoder` is secure-context only — the same limit remote audio already has, but a
 worse one to hit, since no audio decoder means silence beside a working desktop and no
 video decoder means no desktop. So a failure is *said* rather than logged: a banner
-that stays up. `remotex.app` is served from `http://127.0.0.1`, which is a secure
-context whatever else is true, so in practice only a browser can land on the
-insecure-origin half of that.
+that stays up. `remotex.app` loads the page from `remotex://app`, registered as a
+secure scheme, so it cannot land on the insecure-origin half of that — but it lands
+on the other half instead: stock CEF ships without proprietary codecs, so H.264
+does not decode in the app at all and a `video` target reports exactly that banner.
+See [`known-issues.md`](known-issues.md).
 
 ## Session lifecycle
 
@@ -545,7 +547,7 @@ client turns the packet into an `AudioBuffer` and schedules it directly.
 The secure-context requirement belongs to that first path alone. WebCodecs is
 unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
 localhost, while passthrough plays anywhere. `remotex.app` is unaffected either
-way: it loads the page from `file://`, which WebKit treats as a secure context.
+way: it loads the page from `remotex://app`, a scheme it registers as secure.
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
@@ -764,24 +766,27 @@ reclaim actions.
 ### remotex.app, the native macOS shell
 
 `remotex.app` is not a second client. It starts the gateway in its own bundle,
-shows **the SPA above** in a `WKWebView`, and owns what a page cannot: the menu
-bar, keyboard capture ahead of it, `NSPasteboard`, and the window.
+shows **the SPA above** in an embedded Chromium, and owns what a page cannot: the
+menu bar, keyboard capture ahead of it, `NSPasteboard`, and the window. The engine
+is `crates/remotex-cef`, a C ABI over `cef-rs`, and it is the piece a shell on
+another OS would reuse.
 
-Nothing about the session is the app's. The page is loaded from `file://` inside
-the bundle and talks to the gateway beside it on `http://127.0.0.1` itself — same
-claim, same `/ws`, same `/ws/audio` — and this app holds no socket, no claim and no
-wire format. A protocol change is a change to one client, in one language.
+Nothing about the session is the app's. The page is loaded as `remotex://app` out
+of the bundle and talks to the gateway beside it on `http://127.0.0.1` itself —
+same claim, same `/ws`, same `/ws/audio` — and this app holds no socket, no claim
+and no wire format. A protocol change is a change to one client, in one language.
 
-Loading from a file is what gives the page an origin that survives a relaunch, and
+A scheme of its own is what gives the page an origin that survives a relaunch, and
 `localStorage` is keyed by origin: on the gateway's ephemeral port the client's
-remembered preferences went into a new bucket every time. The cost is that a
-`file://` origin serializes to `null`, so those calls are cross-origin and the
+remembered preferences went into a new bucket every time. The cost is that
+`remotex://app` is not the gateway's origin, so those calls are cross-origin and the
 embedded gateway answers that one origin with credentials — narrowly, and only
-where the credential is a per-launch token. A `file://` document is a secure
-context in WebKit, so WebCodecs is available for Opus and H.264 as before.
+where the credential is a per-launch token. The scheme is registered secure, so
+WebCodecs is available; Opus decodes and H.264 does not, because the engine ships
+without proprietary codecs.
 
-Two things cross the boundary, over one `WKScriptMessageHandler` and one
-`evaluateJavaScript` call (`frontend/src/nativeHost.ts`): the page reports one
+Two things cross the boundary, over one message-router query function and one
+`ExecuteJavaScript` call (`frontend/src/nativeHost.ts`): the page reports one
 state object the menus are derived from, and the app sends the keys a browser is
 never given, the Mac's pasteboard, and the menu commands standing in for the
 floating menu it hides. See [`macos-viewer.md`](macos-viewer.md#the-bridge).
@@ -789,8 +794,8 @@ floating menu it hides. See [`macos-viewer.md`](macos-viewer.md#the-bridge).
 The gateway it starts is `serve-embedded`: an ephemeral loopback port, the SPA out
 of `Contents/Resources/web` — the same directory the window loads its document
 from, so a browser opened on that port gets the same client — and a random token
-minted per launch that the app puts in the web view's cookie store instead of a
-login. It dies with the app. Reaching a gateway elsewhere is a browser's job.
+minted per launch that the app puts in Chromium's cookie jar instead of a login. It
+dies with the app. Reaching a gateway elsewhere is a browser's job.
 
 That path is the one place `GatewayAuth` (in `src/auth.rs`, of which exactly one is
 active per process) and `config::Audience` differ from a served gateway, because the

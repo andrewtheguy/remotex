@@ -1,129 +1,94 @@
-import WebKit
+import AppKit
+import CRemotexCEF
+import Foundation
 
-/// The web view's two ends of the seam: the handler the page posts to, and the
-/// navigation policy around it.
+/// The app's two ends of the seam: what the page posts here, and what this sends
+/// back to the page.
 ///
-/// One `WKScriptMessageHandler` and one `evaluateJavaScript` call, which is the
-/// whole of the app-to-client protocol. There is no frame stream, no envelope
-/// framing and no loopback file server here any more: the page is served by the
-/// gateway on the same origin it talks to, so everything about the session is a
-/// conversation this app is not part of.
+/// One query function and one `ExecuteJavaScript` call, which is the whole of the
+/// app-to-client protocol. There is no frame stream, no envelope framing and no
+/// loopback file server here: the page holds the session and this app is not part
+/// of that conversation.
+///
+/// What used to be two more jobs on this class are gone from Swift entirely.
+/// Deciding which navigations are allowed and telling the page where its gateway
+/// is are both the engine's now — `client::permits` and the scheme handler in
+/// `crates/remotex-cef` — because both are about a URL, and the page's URL is
+/// something Chromium sees before this side hears about it.
 @MainActor
 final class NativeBridge: NSObject, CommandSink {
-    /// The name the page posts to: `window.webkit.messageHandlers.remotexNative`.
-    /// Its presence is also how the page knows it is not in a browser.
-    static let handlerName = "remotexNative"
-
     private weak var model: AppModel?
-    /// The view commands are evaluated against. Weak: the bridge is retained by the
-    /// web view's user-content controller, which the view owns.
-    weak var webView: WKWebView?
-    /// The origin the page was loaded from. Any navigation elsewhere is refused.
-    private let origin: URL
+    /// The browser commands are evaluated against, once there is one.
+    private var browser: OpaquePointer?
 
-    init(model: AppModel, origin: URL) {
+    init(model: AppModel) {
         self.model = model
-        self.origin = origin
+    }
+
+    /// Show the client in `view`, and start listening to it.
+    ///
+    /// The unretained pointer handed across is this object, and it is safe for the
+    /// same reason it is unusual: `detach()` closes the browser before this is
+    /// released, so nothing can call back into a freed bridge.
+    func attach(to view: NSView, gateway: GatewayEndpoint) {
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        browser = gateway.origin.withCString { origin in
+            remotex_cef_create(
+                Unmanaged.passUnretained(view).toOpaque(),
+                origin,
+                { json, context in
+                    guard let json, let context else {
+                        return
+                    }
+                    // CEF delivers this on its UI thread, which in this process is
+                    // the main thread — the same one AppKit is on. `assumeIsolated`
+                    // is the assertion of that, not a way around it.
+                    MainActor.assumeIsolated {
+                        Unmanaged<NativeBridge>.fromOpaque(context)
+                            .takeUnretainedValue()
+                            .receive(String(cString: json))
+                    }
+                },
+                context
+            )
+        }
+        if browser == nil {
+            model?.pageFailedToLoad("Chromium would not open the client.")
+        }
+    }
+
+    func detach() {
+        if let browser {
+            remotex_cef_close(browser)
+        }
+        browser = nil
+    }
+
+    /// Open Chromium's inspector on the page.
+    func showDevTools() {
+        guard let browser else {
+            return
+        }
+        remotex_cef_show_dev_tools(browser)
     }
 
     /// Send one command to the page. Dropped silently before the first load, which
     /// is a menu item pressed while the window is still empty.
     func send(_ command: NativeCommand) {
-        guard let webView, let script = command.javaScript() else {
+        guard let browser, let script = command.javaScript() else {
             return
         }
-        webView.evaluateJavaScript(script)
-    }
-}
-
-extension NativeBridge: WKScriptMessageHandler {
-    nonisolated func userContentController(
-        _ controller: WKUserContentController,
-        didReceive message: WKScriptMessage
-    ) {
-        // Inside the hop, all of it: `WKScriptMessage.body` is main-actor isolated,
-        // so reading it out here to decode first is a concurrency violation rather
-        // than a saving. WebKit delivers this on the main thread, which is what
-        // `assumeIsolated` asserts.
-        MainActor.assumeIsolated {
-            guard let event = NativeEvent.decode(message.body) else {
-                return
-            }
-            model?.apply(event)
-        }
-    }
-}
-
-extension NativeBridge: WKNavigationDelegate {
-    /// The page may talk to its own gateway and nowhere else.
-    ///
-    /// A remote desktop is a stream of somebody else's pixels and text, and the
-    /// clipboard bridge carries their strings into this process. None of it should
-    /// be able to send this window somewhere — so a navigation off the origin is
-    /// refused rather than opened, here and not in a browser's tab-level policy,
-    /// because there is no tab and no address bar to notice with.
-    nonisolated func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
-    ) {
-        MainActor.assumeIsolated {
-            decisionHandler(permits(navigationAction.request.url) ? .allow : .cancel)
-        }
+        script.withCString { remotex_cef_execute(browser, $0) }
     }
 
-    /// Whether `url` is the client itself.
-    ///
-    /// The client is a `file://` document now, and the scheme/host/port comparison
-    /// this used to make is worthless there: a file URL has no host and no port, so
-    /// every one of them matched every other, and any path on the disk would have
-    /// been allowed to replace the page. The test is therefore about the *path* —
-    /// this document, or something inside the directory it was loaded from.
-    ///
-    /// Standardized before comparing, so `web/../../../etc/passwd` is resolved
-    /// rather than compared as written.
-    func permits(_ url: URL?) -> Bool {
-        Self.permits(url, from: origin)
-    }
-
-    /// The rule itself, as a function of its two inputs so it can be tested without
-    /// a model, a web view or a running gateway.
-    static func permits(_ url: URL?, from origin: URL) -> Bool {
-        guard let url, url.scheme == origin.scheme else {
-            return false
-        }
-        guard url.isFileURL else {
-            // Kept for a gateway-served origin, which is what this was before and
-            // what a future custom scheme would be again.
-            return url.host == origin.host && url.port == origin.port
-        }
-        let root = origin.deletingLastPathComponent().standardizedFileURL.path
-        let target = url.standardizedFileURL.path
-        return target == origin.standardizedFileURL.path
-            || target.hasPrefix(root.hasSuffix("/") ? root : root + "/")
-    }
-
-    /// A load that never started. Reported, because on loopback it means the
-    /// gateway stopped answering between the handshake and the request — except
-    /// when it is a cancellation, which is not a failure at all.
-    ///
-    /// Cancellations are routine here and one of them is this class's own doing:
-    /// the policy above answers `.cancel` for a navigation off the origin, and
-    /// WebKit delivers that refusal back through this callback. Reporting it would
-    /// put "the gateway stopped answering" on screen for a page that is loaded and
-    /// working. A load superseded by the next one — a relaunch, a redirect — comes
-    /// through the same way.
-    nonisolated func webView(
-        _ webView: WKWebView,
-        didFailProvisionalNavigation navigation: WKNavigation!,
-        withError error: any Error
-    ) {
-        let failure = error as NSError
-        if failure.domain == NSURLErrorDomain, failure.code == NSURLErrorCancelled {
+    /// One `NativeEvent`, exactly as `nativeHost.ts` posted it.
+    private func receive(_ json: String) {
+        guard
+            let body = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
+            let event = NativeEvent.decode(body)
+        else {
             return
         }
-        MainActor.assumeIsolated {
-            model?.pageFailedToLoad(error.localizedDescription)
-        }
+        model?.apply(event)
     }
 }

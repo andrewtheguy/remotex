@@ -25,9 +25,9 @@
 # the two is not a working app.
 #
 # It also carries `Contents/Resources/web`, which **is** the SPA — the same build a
-# browser gets. The bundled gateway serves it on loopback and the app shows that
-# page in a WKWebView, so the client has one implementation and the app is the
-# native shell around it.
+# browser gets. The Chromium in `Contents/Frameworks` serves it to itself as
+# `remotex://app`, and the gateway beside it serves the same directory on loopback,
+# so the client has one implementation and the app is the native shell around it.
 #
 # Builds are ad-hoc signed by default. Set CODESIGN_IDENTITY explicitly to use
 # another identity; Developer ID distribution also requires notarization.
@@ -79,12 +79,49 @@ version="$(
 # Info.plist and reports `0.0.0-unbundled` rather than a second copy of this that
 # a bump could leave behind.
 
+# Chromium, before the app that links it. `stage-cef.sh` builds `remotex-cef` and
+# puts its archive — and the `libcef_sandbox.dylib` a staticlib forces the app to
+# resolve — where `Package.swift` looks for them. Nothing below can link without it.
+cargo_profile=release
+cargo_flags=(--release)
+if [ "$configuration" = debug ]; then
+  cargo_profile=debug
+  cargo_flags=()
+fi
+# The same `CEF_PATH` every cargo invocation below sees. `cef-dll-sys` rebuilds
+# whenever this variable changes, so a script that sets it for one build and not
+# the next pays for a full Chromium-bindings rebuild on every run.
+export CEF_PATH="${CEF_PATH:-$HOME/.local/share/cef}"
+
+packaging/macos-viewer/stage-cef.sh "$cargo_profile"
+cef_helper="target/$cargo_profile/remotex-cef-helper"
+[ -x "$cef_helper" ] || {
+  echo "helper binary missing at $cef_helper" >&2
+  exit 1
+}
+
+# Where CEF actually is. Asked for rather than assumed: `CEF_PATH` names one place
+# and `cef-dll-sys`'s own download is another, under a hashed `OUT_DIR` no script
+# should be reconstructing.
+cef_dir="$(cargo run -q -p remotex-cef --bin cef-dir)"
+cef_framework="$cef_dir/Chromium Embedded Framework.framework"
+[ -d "$cef_framework" ] || {
+  echo "no Chromium Embedded Framework at $cef_framework" >&2
+  exit 1
+}
+
 echo ">> building remotex-viewer ($configuration)"
-swift build --package-path apps/remotex-viewer -c "$configuration"
 bin_dir="$(
   swift build --package-path apps/remotex-viewer -c "$configuration" --show-bin-path
 )"
 binary="$bin_dir/remotex-viewer"
+# SwiftPM has no dependency on `libremotex_cef.a` — it is found through a linker
+# flag, not a target. So a change to `crates/remotex-cef` with no Swift source
+# touched is answered with "Build complete" and the previous link, and the app
+# ships Chromium host code that is one edit old. Deleting the product forces the
+# link; the Swift compile itself is still incremental.
+rm -f "$binary"
+swift build --package-path apps/remotex-viewer -c "$configuration"
 [ -x "$binary" ] || {
   echo "viewer binary missing at $binary" >&2
   exit 1
@@ -92,12 +129,6 @@ binary="$bin_dir/remotex-viewer"
 
 # The gateway the app runs. Built at the same configuration as the app, so a debug
 # build is debuggable all the way down rather than half-release.
-cargo_profile=release
-cargo_flags=(--release)
-if [ "$configuration" = debug ]; then
-  cargo_profile=debug
-  cargo_flags=()
-fi
 echo ">> building the remotex gateway ($cargo_profile)"
 # No libopus env coaxing: remote audio links `opus-prebuilt` (a prebuilt static
 # archive, no vendored cmake build — see the root Cargo.toml), so the gateway that
@@ -145,6 +176,64 @@ cp packaging/macos-viewer/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 sed -e "s|<string>0\\.0\\.0</string>|<string>${version}</string>|g" \
   packaging/macos-viewer/Info.plist > "$app/Contents/Info.plist"
 
+# Chromium, and the five bundles that run its subprocesses.
+#
+# One binary, wrapped five times. macOS gives a process the identity of the bundle
+# it was launched from — its name in Activity Monitor, its Info.plist, and which
+# TCC prompts it can raise — and Chromium wants those to differ per subprocess
+# even though the code does not. So the same `remotex-cef-helper` is copied into
+# each.
+#
+# The names are **not ours to choose**. CEF derives each role's bundle from the
+# main executable's name, so these must be `remotex-viewer Helper (GPU).app` and
+# not `remotex Helper (GPU).app` — even though the product is called remotex and
+# every other name in this script is. `browser_subprocess_path` does not buy a way
+# out: it names the plain helper only, and the four suffixed ones are still
+# derived. Getting it wrong does not report a missing file; the browser process
+# fails to launch each child with "Sandbox setup failed", loses the GPU process,
+# and aborts.
+mkdir -p "$app/Contents/Frameworks"
+/usr/bin/ditto "$cef_framework" \
+  "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+
+helpers=("Helper" "Helper (GPU)" "Helper (Renderer)" "Helper (Plugin)" "Helper (Alerts)")
+for role in "${helpers[@]}"; do
+  helper_app="$app/Contents/Frameworks/remotex-viewer $role.app"
+  mkdir -p "$helper_app/Contents/MacOS"
+  cp "$cef_helper" "$helper_app/Contents/MacOS/remotex-viewer $role"
+  chmod +x "$helper_app/Contents/MacOS/remotex-viewer $role"
+  # `LSUIElement` so five extra icons do not appear in the Dock beside the app's,
+  # and an identifier suffixed per role because two bundles may not share one.
+  cat > "$helper_app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.remotex.viewer.$(echo "$role" | tr -dc '[:alnum:]' | tr '[:upper:]' '[:lower:]')</string>
+	<key>CFBundleName</key>
+	<string>remotex-viewer $role</string>
+	<key>CFBundleDisplayName</key>
+	<string>remotex-viewer $role</string>
+	<key>CFBundleExecutable</key>
+	<string>remotex-viewer $role</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>${version}</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${version}</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+done
+
 identity="${CODESIGN_IDENTITY:--}"
 echo ">> signing as: $identity"
 
@@ -153,12 +242,34 @@ if [ "$identity" = "-" ]; then
   timestamp_flag=(--timestamp=none)
 fi
 # Inner code first, then the bundle. A nested executable signed *after* its bundle
-# invalidates the outer signature, and `--verify --deep` is what catches it.
-codesign --force --sign "$identity" --options runtime "${timestamp_flag[@]}" \
-  "$app/Contents/MacOS/remotex-gateway"
-codesign --force --sign "$identity" --options runtime "${timestamp_flag[@]}" \
-  "$app/Contents/MacOS/remotex-viewer"
-codesign --force --sign "$identity" --options runtime "${timestamp_flag[@]}" "$app"
+# invalidates the outer signature, and `--verify --deep` is what catches it. With
+# Chromium inside, "inner" is four layers rather than one, and getting the order
+# wrong is the usual reason a CEF app builds and then will not launch.
+sign() {
+  codesign --force --sign "$identity" --options runtime "${timestamp_flag[@]}" "$@"
+}
+
+# 1. The framework's own nested libraries, then the framework. `--deep` is not a
+#    substitute: it signs what it finds with the *outer* arguments, which would
+#    give a library the app's entitlements.
+for library in "$app/Contents/Frameworks/Chromium Embedded Framework.framework/Libraries/"*.dylib; do
+  [ -f "$library" ] && sign "$library"
+done
+sign "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+
+# 2. The helpers, each with the JIT entitlements V8 needs. Without these a
+#    renderer is killed the moment it compiles JavaScript, which looks like a
+#    window that never paints rather than like a signing problem.
+for helper_app in "$app/Contents/Frameworks/"*Helper*.app; do
+  sign --entitlements packaging/macos-viewer/helper.entitlements "$helper_app"
+done
+
+# 3. The gateway, which is an ordinary executable and wants none of this.
+sign "$app/Contents/MacOS/remotex-gateway"
+
+# 4. The app itself, entitled only to load a library it signed. It runs none of
+#    the page's JavaScript, so it is not given the means to.
+sign --entitlements packaging/macos-viewer/app.entitlements "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 
 if [ "$make_dmg" -eq 0 ]; then

@@ -22,7 +22,7 @@ async fn spawn_app() -> SocketAddr {
         auth: common::test_auth(),
         branding: "remotex".to_owned(),
         dev_hostname: None,
-            allow_opaque_origin: false,
+            allow_shell_origin: false,
         targets: vec![TargetConfig {
             name: "unreachable".to_owned(),
             protocol: Protocol::Vnc,
