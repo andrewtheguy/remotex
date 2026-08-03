@@ -33,10 +33,21 @@ struct RemoteWebHost: NSViewRepresentable {
         // activation as far as WebKit is concerned, and without this the page's
         // `AudioContext` would come up suspended with nothing on screen to say so.
         configuration.mediaTypesRequiringUserActionForPlayback = []
-        // Nothing here outlives the launch. The credential is a token minted for
-        // this process, the claim lives in `sessionStorage`, and a persistent store
-        // would only keep a cookie the next gateway will refuse.
-        configuration.websiteDataStore = .nonPersistent()
+        // A store of this instance's own, and a *persistent* one: the client keeps
+        // its three remembered preferences in `localStorage`, so a non-persistent
+        // store forgets the Command-translation override and both "if compatible"
+        // defaults at every launch — silently, since nothing on screen says a
+        // preference was dropped.
+        //
+        // The cookie in it is replaced at every launch by the token this launch
+        // minted, and the claim lives in `sessionStorage`, which is per web view
+        // whatever the store does. So persistence costs nothing and buys the
+        // preferences. Keyed off the instance directory, which is what keeps
+        // `--instance-dir` isolating these too — WebKit keeps the store in this
+        // app's container rather than in that directory.
+        if let identifier = model.dataStoreIdentifier {
+            configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: identifier)
+        }
         let webView = RemoteWebView(frame: .zero, configuration: configuration)
         webView.allowsMagnification = false
         webView.allowsBackForwardNavigationGestures = false

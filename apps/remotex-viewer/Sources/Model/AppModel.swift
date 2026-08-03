@@ -49,6 +49,11 @@ final class AppModel {
     let gateway: EmbeddedGateway?
     @ObservationIgnored
     let config: GatewayConfigStore?
+    /// Which WebKit data store the page gets, so its `localStorage` — where the
+    /// client keeps its three remembered preferences — survives a relaunch and
+    /// still belongs to this instance alone. `nil` in a test, which has no page.
+    @ObservationIgnored
+    let dataStoreIdentifier: UUID?
 
     /// The page, while one is up.
     @ObservationIgnored
@@ -71,11 +76,13 @@ final class AppModel {
     init(
         gateway: EmbeddedGateway? = nil,
         config: GatewayConfigStore? = nil,
-        clipboard: ClipboardSynchronizer = ClipboardSynchronizer()
+        clipboard: ClipboardSynchronizer = ClipboardSynchronizer(),
+        dataStoreIdentifier: UUID? = nil
     ) {
         self.gateway = gateway
         self.config = config
         self.clipboard = clipboard
+        self.dataStoreIdentifier = dataStoreIdentifier
         clipboard.sendText = { [weak self] text in
             self?.send(.clipboardLocal(text))
         }
@@ -94,7 +101,8 @@ final class AppModel {
         }
         return AppModel(
             gateway: gateway,
-            config: binary.map { GatewayConfigStore.overBinary(instance: instance, binary: $0) }
+            config: binary.map { GatewayConfigStore.overBinary(instance: instance, binary: $0) },
+            dataStoreIdentifier: instance.dataStoreIdentifier
         )
     }
 

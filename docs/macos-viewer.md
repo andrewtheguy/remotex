@@ -67,9 +67,17 @@ login gateway, a constant-time compare against the launch token here.
 An answer of "no" means the gateway and the app disagree about the token, which
 no login form can fix — the page reports it and the app takes the screen back.
 
-The web view uses a **non-persistent** data store. The token is per launch, the
-claim lives in `sessionStorage`, and a persistent store would only keep a cookie
-the next gateway refuses.
+The web view gets a data store of this instance's own — `WKWebsiteDataStore(forIdentifier:)`,
+keyed off a UUID derived from the instance directory — and a **persistent** one.
+The client keeps its three remembered preferences in `localStorage`, so a
+non-persistent store forgets the Command-translation override and both "if
+compatible" defaults at every launch, silently. WebKit keeps that store in the
+app's container rather than in the instance directory, which is why the
+identifier has to come from the directory: it is what makes `--instance-dir`
+isolate preferences the way it isolates the config and the log.
+
+The cookie in it is replaced at every launch by that launch's token, and the claim
+lives in `sessionStorage`, which is per web view whatever the store does.
 
 ### Process pipes
 
@@ -112,7 +120,7 @@ directory; `/opt/remotex` is never consulted.
 
 There is no `viewer.json` any more. The three remembered preferences — the
 Command-translation override and the two "if compatible" defaults — belong to the
-client and live in the store the page already keeps them in.
+client, in its own `localStorage`, in the per-instance data store described above.
 
 A first launch writes a commented zero-target template, which is valid; the
 picker states that there is nothing to connect to.

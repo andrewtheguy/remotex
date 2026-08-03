@@ -128,8 +128,13 @@ line, and keeps it in memory. The app puts it in the web view's cookie store as
 `remotex_session` before the first load. It must be a **cookie**: the page issues
 its own `fetch` calls and opens its own `ws://` sockets, and neither can be given
 a header from outside the document. `require_auth` reads that cookie on both
-kinds of gateway and differs only in what makes the value valid. Use a
-non-persistent data store — the token is per launch.
+kinds of gateway and differs only in what makes the value valid.
+
+The web view's data store must be **persistent and per instance**
+(`WKWebsiteDataStore(forIdentifier:)`, keyed off `InstanceDirectory.dataStoreIdentifier`).
+The client's three remembered preferences live in its `localStorage`, so a
+non-persistent store drops them at every launch without saying so, and a shared
+one would leak a QA instance's into the real one.
 
 The app holds **no session**: no claim, no socket, no wire format, no protocol
 version. Do not put any of it back. Everything about the session is the client's,
@@ -154,10 +159,10 @@ menu drive the page's panels rather than reimplementing them; a native
 now.
 
 `--instance-dir` is the only GUI-launch argument; `--version` is the only other
-CLI path. There are no preferences in the instance directory any more — the three
-remembered defaults belong to the client, in the store the page already keeps them
-in. Do not add `UserDefaults`: a defaults suite lives in the user's Preferences
-directory regardless of `--instance-dir`.
+CLI path. There is no preferences file in the instance directory any more — the
+three remembered defaults belong to the client. Do not add `UserDefaults`: a
+defaults suite lives in the user's Preferences directory regardless of
+`--instance-dir`.
 
 The embedded gateway's lifetime is guaranteed by its stdin pipe. The app holds
 the write end and sends nothing; clean quit, crash, Force Quit, or `kill -9`
