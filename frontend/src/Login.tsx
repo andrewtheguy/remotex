@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from "react";
+import { gatewayFetch } from "./gateway.ts";
 
 // The web-login gate: one user, POST /api/auth/login sets the
 // session cookie. Shown while the mount-time auth check runs and whenever the
@@ -24,7 +25,7 @@ export default function Login({
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await gatewayFetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),

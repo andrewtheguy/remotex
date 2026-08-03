@@ -32,6 +32,10 @@ final class EmbeddedGateway {
     enum LaunchFailure: LocalizedError, Equatable {
         /// No `remotex-gateway` in this bundle — an unbundled or half-built app.
         case executableMissing
+        /// No client in this bundle: `Contents/Resources/web/index.html` is missing.
+        /// Distinct from `executableMissing` because the two halves are copied in by
+        /// different steps of the build, and either can be the one that failed.
+        case clientMissing
         /// The instance directory could not be created or read.
         case instanceUnavailable(String)
         /// The process could not be started at all (permissions, a bad architecture).
@@ -51,6 +55,8 @@ final class EmbeddedGateway {
             switch self {
             case .executableMissing:
                 "This copy of remotex is incomplete: it has no gateway to run."
+            case .clientMissing:
+                "This copy of remotex is incomplete: it has no client to show."
             case .instanceUnavailable(let reason):
                 "The remotex folder could not be opened: \(reason)"
             case .notStarted(let reason):

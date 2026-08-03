@@ -314,6 +314,15 @@ final class AppModel {
         screen = .launching
     }
 
+    /// The bundle has a gateway but no client to show in the window.
+    ///
+    /// Reported from the web host rather than from `launch()`, because that is where
+    /// it is discovered: the gateway starts fine — it is serving the same directory
+    /// — and the missing piece only surfaces when there is a page to load.
+    func reportClientMissing() {
+        fail(with: EmbeddedGateway.LaunchFailure.clientMissing)
+    }
+
     private func gatewayDied(_ failure: EmbeddedGateway.LaunchFailure) {
         state = NativeState()
         fail(with: failure)

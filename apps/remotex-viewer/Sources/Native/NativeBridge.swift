@@ -68,13 +68,39 @@ extension NativeBridge: WKNavigationDelegate {
         decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
     ) {
         MainActor.assumeIsolated {
-            let url = navigationAction.request.url
-            let sameOrigin =
-                url?.scheme == origin.scheme
-                    && url?.host == origin.host
-                    && url?.port == origin.port
-            decisionHandler(sameOrigin ? .allow : .cancel)
+            decisionHandler(permits(navigationAction.request.url) ? .allow : .cancel)
         }
+    }
+
+    /// Whether `url` is the client itself.
+    ///
+    /// The client is a `file://` document now, and the scheme/host/port comparison
+    /// this used to make is worthless there: a file URL has no host and no port, so
+    /// every one of them matched every other, and any path on the disk would have
+    /// been allowed to replace the page. The test is therefore about the *path* —
+    /// this document, or something inside the directory it was loaded from.
+    ///
+    /// Standardized before comparing, so `web/../../../etc/passwd` is resolved
+    /// rather than compared as written.
+    func permits(_ url: URL?) -> Bool {
+        Self.permits(url, from: origin)
+    }
+
+    /// The rule itself, as a function of its two inputs so it can be tested without
+    /// a model, a web view or a running gateway.
+    static func permits(_ url: URL?, from origin: URL) -> Bool {
+        guard let url, url.scheme == origin.scheme else {
+            return false
+        }
+        guard url.isFileURL else {
+            // Kept for a gateway-served origin, which is what this was before and
+            // what a future custom scheme would be again.
+            return url.host == origin.host && url.port == origin.port
+        }
+        let root = origin.deletingLastPathComponent().standardizedFileURL.path
+        let target = url.standardizedFileURL.path
+        return target == origin.standardizedFileURL.path
+            || target.hasPrefix(root.hasSuffix("/") ? root : root + "/")
     }
 
     /// A load that never started. Reported, because on loopback it means the

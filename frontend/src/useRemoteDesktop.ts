@@ -12,6 +12,7 @@ import {
   type RemoteCursor,
 } from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
+import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
@@ -298,7 +299,7 @@ async function postClaim(
   force: boolean,
 ): Promise<Response | { failure: ClaimFailure }> {
   try {
-    return await fetch("/api/session", {
+    return await gatewayFetch("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -912,14 +913,9 @@ export function useRemoteDesktop(
       sendRef.current({ type: "hostScale", scale });
     };
 
-    const socketUrl = (path: string, sessionId: string) => {
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      return `${proto}//${window.location.host}${path}?session=${encodeURIComponent(sessionId)}`;
-    };
-
     const open = (sessionId: string) => {
       session = sessionId;
-      const socket = new WebSocket(socketUrl("/ws", sessionId));
+      const socket = new WebSocket(gatewaySocketUrl("/ws", sessionId));
       socket.binaryType = "arraybuffer";
       ws = socket;
       wsRef.current = socket;
@@ -1030,7 +1026,7 @@ export function useRemoteDesktop(
       if (disposed || !session) {
         return;
       }
-      const socket = new WebSocket(socketUrl("/ws/audio", session));
+      const socket = new WebSocket(gatewaySocketUrl("/ws/audio", session));
       socket.binaryType = "arraybuffer";
       audioWs = socket;
       socket.onmessage = (ev) => {

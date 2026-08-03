@@ -105,7 +105,8 @@ struct RemoteWebHost: NSViewRepresentable {
             load(into: webView)
         }
 
-        /// Put the launch token in the cookie store, then load the page.
+        /// Put the launch token in the cookie store, then load the client out of
+        /// the bundle.
         ///
         /// The order is the whole of it, and the wait is not optional: the store is
         /// written asynchronously, and a document loaded before the cookie is in it
@@ -116,24 +117,67 @@ struct RemoteWebHost: NSViewRepresentable {
         /// because the requests that matter are not this app's: the page issues its
         /// own `fetch` calls and opens its own `ws://` sockets, and neither can be
         /// given a header from out here. See `src/auth.rs`.
+        ///
+        /// The page is loaded from `file://` rather than from the gateway, and that
+        /// is what makes the client's remembered preferences survive a relaunch:
+        /// `localStorage` is keyed by *origin*, and this one is a property of the
+        /// bundle rather than of whichever port the kernel handed out this time.
+        /// The gateway is then only a backend, and the page is told where it is —
+        /// see `gatewayScript`.
         private func load(into webView: WKWebView) {
-            let bridge = NativeBridge(model: model, origin: gateway.url)
+            guard let index = GatewayBinary.clientIndexInBundle() else {
+                model.reportClientMissing()
+                return
+            }
+            let bridge = NativeBridge(model: model, origin: index)
             bridge.webView = webView
             self.bridge = bridge
             webView.configuration.userContentController
                 .add(bridge, name: NativeBridge.handlerName)
+            // At document start, so it is set before any module of the client is
+            // evaluated — `gateway.ts` reads it once, at load.
+            webView.configuration.userContentController.addUserScript(
+                WKUserScript(
+                    source: Self.gatewayScript(for: gateway),
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: true
+                )
+            )
             webView.navigationDelegate = bridge
             model.attach(bridge: bridge)
 
             let store = webView.configuration.websiteDataStore.httpCookieStore
-            store.setCookie(gateway.cookie) { [weak self, weak webView] in
+            store.setCookie(gateway.cookie) { [weak webView] in
                 MainActor.assumeIsolated {
-                    guard let self, let webView else {
+                    guard let webView else {
                         return
                     }
-                    webView.load(URLRequest(url: self.gateway.url))
+                    // Read access to the whole web root, not just the file: the
+                    // document asks for `./assets/…` beside itself.
+                    webView.loadFileURL(
+                        index,
+                        allowingReadAccessTo: index.deletingLastPathComponent()
+                    )
                 }
             }
+        }
+
+        /// Tell the page where its gateway is.
+        ///
+        /// A browser needs no equivalent — it was loaded *from* its gateway, so
+        /// every path can be relative. This page was not, so the one thing it cannot
+        /// work out for itself is handed to it, as an origin and nothing more: no
+        /// token, no config, no session. Encoded through `JSONSerialization` rather
+        /// than interpolated, for the reason every other command is (see
+        /// `NativeCommand`) — a string going into a JavaScript source text is data,
+        /// however certain we are of its shape.
+        static func gatewayScript(for gateway: GatewayEndpoint) -> String {
+            let origin = gateway.url.absoluteString.hasSuffix("/")
+                ? String(gateway.url.absoluteString.dropLast())
+                : gateway.url.absoluteString
+            let encoded = (try? JSONSerialization.data(withJSONObject: [origin]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
+            return "window.__remotexGateway = \(encoded)[0];"
         }
 
         /// Size the window so the desktop fits it exactly.
