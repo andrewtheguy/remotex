@@ -9,6 +9,29 @@ An issue leaves this file in one of two ways: it is fixed, or it turns out to be
 something remotex is doing wrong, in which case it becomes work rather than a
 note.
 
+## remotex.app: H.264 does not decode
+
+`render_type = "video"` (and `render_motion_subtype = "h264"` under `mixed`) plays
+in a browser and not in `remotex.app`. What the user sees is the client's own
+banner — "this browser cannot decode…" — over a desktop that never paints.
+
+Unlike everything else in this file, the cause is not open: the app embeds
+Chromium, and the CEF binaries it is built from are the stock ones, which ship
+**without proprietary codecs**. `VideoDecoder.isConfigSupported('avc1…')` answers no,
+and the client reports that the way it reports any unsupported codec. Nothing is
+wrong with the stream, the gateway, or the client.
+
+It is here rather than fixed because the fix is not a change to remotex: it is
+building Chromium with `proprietary_codecs=true` and `ffmpeg_branding=Chrome`,
+which is hours of build for a licence question that has not been answered. The app
+holds no codec logic of its own and must not grow any — no check, no gate, no
+fallback path. A `video` target failing in the app looks exactly like the same
+target failing in a browser without the codec, which is the right shape for it.
+
+What would move it: either a CEF build with the codecs, or VP9/AV1 as a render
+subtype — every engine has those, and it is on the roadmap.
+
+
 ## RDP: the reactivation a size change triggers can fail
 
 When a resize actually changes the desktop size, the server answers

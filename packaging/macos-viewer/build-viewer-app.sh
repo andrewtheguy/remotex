@@ -25,9 +25,9 @@
 # the two is not a working app.
 #
 # It also carries `Contents/Resources/web`, which **is** the SPA — the same build a
-# browser gets. The bundled gateway serves it on loopback and the app shows that
-# page in a WKWebView, so the client has one implementation and the app is the
-# native shell around it.
+# browser gets. The Chromium in `Contents/Frameworks` serves it to itself as
+# `remotex://app`, and the gateway beside it serves the same directory on loopback,
+# so the client has one implementation and the app is the native shell around it.
 #
 # Builds are ad-hoc signed by default. Set CODESIGN_IDENTITY explicitly to use
 # another identity; Developer ID distribution also requires notarization.

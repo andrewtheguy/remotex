@@ -4,11 +4,12 @@
 gateway in its own bundle, shows the SPA, and owns everything around it: the menu
 bar, keyboard capture, pasteboard synchronization, and the window.
 
-Inside the window is a `WKWebView` and nothing else. The page is
+Inside the window is an embedded **Chromium** and nothing else. The page is
 `frontend/dist` — the same build a browser loads — copied into the bundle and
-opened from `file://`, with `Contents/MacOS/remotex-gateway` behind it on loopback
-for everything the page asks for. So the client has one implementation, in one
-language, and this app is what a browser cannot be:
+opened as `remotex://app`, with `Contents/MacOS/remotex-gateway` behind it on
+loopback for everything the page asks for. So the client has one implementation,
+in one language, running on the engine it is fastest on, and this app is what a
+browser cannot be:
 
 | what it adds | why a page cannot |
 |---|---|
@@ -16,18 +17,21 @@ language, and this app is what a browser cannot be:
 | `NSPasteboard` in both directions | reading on a timer and writing without a gesture are both refused |
 | **Resize to Display** | a page cannot size the window it is in |
 | a real menu bar | — |
-| sound with no click in the page first | `mediaTypesRequiringUserActionForPlayback` is the app's to set |
+| sound with no click in the page first | `--autoplay-policy=no-user-gesture-required` is the embedder's to pass |
+| no right-click menu at all | a page can `preventDefault` its own `contextmenu`; the browser's answer to the native event is the embedder's |
 
 There is one gateway, in this bundle. A gateway elsewhere is reached with a
 browser, which is what a browser is for.
 
-The bundle holds two executables and the client:
+The bundle holds the engine, two executables and the client:
 
 | path | what it is |
 |---|---|
 | `Contents/MacOS/remotex-viewer` | the Swift app (`CFBundleExecutable`) |
 | `Contents/MacOS/remotex-gateway` | a copy of the `remotex` gateway binary |
-| `Contents/Resources/web` | the built SPA: the web view opens `index.html` here, and the gateway serves the same directory |
+| `Contents/Resources/web` | the built SPA: Chromium serves `index.html` from here as `remotex://app`, and the gateway serves the same directory |
+| `Contents/Frameworks/Chromium Embedded Framework.framework` | the engine, ~317 MB of it |
+| `Contents/Frameworks/remotex-viewer Helper*.app` | five wrappers around one `remotex-cef-helper` binary — Chromium's subprocesses. The names are CEF's to derive, not ours to choose |
 
 `CFBundleIdentifier` remains `dev.remotex.viewer`; TCC grants and saved window
 state are keyed to it.
@@ -52,53 +56,92 @@ prefix or a cwd-relative checkout, and inside `Contents/MacOS` neither applies.
 
 ### The origin
 
-The window loads `Contents/Resources/web/index.html` from `file://`. The gateway
-serves that same directory, but the page in this app never asks it for the
-document — only for `/api/*` and `/ws`.
+The window loads `remotex://app/index.html`, which `crates/remotex-cef/src/scheme.rs`
+answers out of `Contents/Resources/web`. The gateway serves that same directory,
+but the page in this app never asks it for the document — only for `/api/*` and
+`/ws`.
 
 This is about **`localStorage`**, which is keyed by origin. A gateway on an
 ephemeral port is a different origin at every launch, so the client's three
 remembered preferences were written to a bucket nothing would ever read again: the
 Command-translation override and both "if compatible" defaults came back off at
-every launch, and quitting was the only way to see it. A file inside the bundle is
-the same origin forever, however the port lands.
+every launch, and quitting was the only way to see it. `remotex://app` is the same
+origin forever, however the port lands.
 
-It cost one thing, and it is paid in the gateway. A `file://` document's origin
-serializes to `null`, so the page calls its own gateway **cross-origin**:
+The scheme is registered **standard, secure, CORS-enabled and fetch-enabled**, in
+*every* process — a renderer that has not been told would disagree with the browser
+process about what the page's origin even is. Each of the four is load bearing:
+
+| option | what it buys |
+|---|---|
+| standard | an origin at all, rather than an opaque one. This is what `localStorage` is keyed by |
+| secure | a secure context, which is what WebCodecs requires — the client decodes audio and video through it |
+| CORS-enabled | the page may make cross-origin requests, which every call to the gateway is |
+| fetch-enabled | `fetch` may be used for them, which is what `gateway.ts` uses |
+
+It costs one thing, paid in the gateway: `remotex://app` is not
+`http://127.0.0.1:<port>`, so the page calls its own gateway **cross-origin**:
 
 | header | why |
 |---|---|
-| `Access-Control-Allow-Origin: null` | names the one caller. Never echoed from the request — `null` is also every sandboxed frame on the web |
+| `Access-Control-Allow-Origin: remotex://app` | names the one caller. Never echoed from the request |
 | `Access-Control-Allow-Credentials: true` | what lets the `remotex_session` cookie travel. Without it the call succeeds *unauthenticated*, which reads as a mysterious 401 rather than as a CORS error |
 | `Vary: Origin` | so no cache serves one origin's answer to another |
 
-`opaque_origin_cors` (`src/server.rs`) answers this only where both halves of an
-embedded gateway hold — `allow_opaque_origin` **and** `GatewayAuth::Token` — because
+`shell_origin_cors` (`src/server.rs`) answers this only where both halves of an
+embedded gateway hold — `allow_shell_origin` **and** `GatewayAuth::Token` — because
 the credential is what the second header puts at stake. A served gateway is
-reachable from a network and its cookie is behind a typed password; there, these
-headers would let any sandboxed frame somebody visited make credentialed calls.
-WebSockets do no preflight and carry the cookie on the upgrade, so `/ws` needs
-nothing beyond this.
+reachable from a network and its cookie is behind a typed password. The named
+origin is strictly safer than the `null` this replaced: `null` is also every
+sandboxed frame on the web, and `remotex://app` is nobody else. WebSockets do no
+preflight and carry the cookie on the upgrade, so `/ws` needs nothing beyond this.
+
+There is a second gate in front of all of it, and it is Chromium's rather than
+ours. Chromium 151 checks **Local Network Access** — a request from a public origin
+to a loopback or private address needs a permission — and `remotex://app` is a
+public origin talking to `127.0.0.1`. With no browser UI to ask and no permission
+handler to answer, such a request is neither sent nor refused: it hangs. What that
+looked like was a black window with an empty `#root`, no console error and no
+failed request, because the client renders nothing until `/api/auth/status`
+settles. `--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets`
+turns it off, and the reasoning is in `crates/remotex-cef/src/app.rs`: the page,
+the address and the gateway all ship in this one bundle, so a prompt could only
+ever be answered one way.
 
 The client reaches all of it through `frontend/src/gateway.ts`, which is the only
-module that knows an origin: `window.__remotexGateway`, injected as a
-`WKUserScript` at document start, or `location.origin` in a browser. `gatewayFetch`
-sets `credentials: "include"`, which a cross-origin `fetch` needs and a same-origin
-one does not mind.
+module that knows an origin: `window.__remotexGateway`, injected into `index.html`
+by the scheme handler as it is served — before any of the client's own script — or
+`location.origin` in a browser. `gatewayFetch` sets `credentials: "include"`, which
+a cross-origin `fetch` needs and a same-origin one does not mind.
 
-The bundle has to be a **classic, deferred** script for any of this to load at all,
-which is `classicScriptTag` in `frontend/vite.config.ts`. A module script is always
-fetched with CORS and an opaque origin cannot, so `type="module"` is a blank window
-with two message-less errors; and a classic script is not deferred by definition
-the way a module is, so without `defer` it runs inside `<head>` and throws "Root
-element not found". One build serves both clients, and there is nowhere to put a
-second — this directory is `file://` and `http://` at the same time.
+The bundle stays a **classic, deferred** script, which is `classicScriptTag` in
+`frontend/vite.config.ts`. A module script would now work — `remotex://app` is a
+real origin and CORS-enabled — but there is no reason for one build to behave
+differently from the other, and `defer` is still what keeps the script from running
+inside `<head>` and throwing "Root element not found". One build serves both
+clients, and there is nowhere to put a second: this directory is `remotex://` and
+`http://` at the same time.
 
 ### The cookie
 
-The app puts the launch token in the web view's cookie store before the first
-load, and waits for the store to answer before loading — a document that arrives
-first arrives unauthenticated.
+The app puts the launch token in Chromium's cookie jar before the first load — a
+document that arrives first arrives unauthenticated. The write is queued on
+Chromium's IO thread and every read of the jar goes through that same queue, so the
+load cannot overtake it.
+
+It is written `SameSite=None; Secure`, and neither half is optional. `remotex://app`
+and `http://127.0.0.1:<port>` are different sites, so a `Lax` cookie is simply not
+sent on the page's own `fetch` and `ws://` calls, and the request then arrives
+*unauthenticated* — a mysterious 401 rather than anything about cookies. `None`
+requires `Secure`, and Chromium allows a `Secure` cookie here because a loopback
+address is a trustworthy origin even over plain HTTP.
+
+The expiry is a `cef_basetime_t`, which is microseconds since **base::Time's** epoch
+and not the Unix one; the two are 369 years apart. A Unix timestamp handed over as
+one is a date in the seventeenth century, and a cookie that expired in 1657 is not
+refused loudly — it is accepted, dropped, and the jar is empty afterwards, which
+reads exactly like a cookie that was never set. `expiry_in_days` counts from CEF's
+own `basetime_now()` for that reason.
 
 A cookie and not the `Authorization` header this app used to send, because the
 requests that matter are not the app's. The page issues its own `fetch` calls and
@@ -111,21 +154,21 @@ login gateway, a constant-time compare against the launch token here.
 An answer of "no" means the gateway and the app disagree about the token, which
 no login form can fix — the page reports it and the app takes the screen back.
 
-The web view gets a data store of this instance's own — `WKWebsiteDataStore(forIdentifier:)`,
-keyed off a UUID derived from the instance directory — and a **persistent** one.
-The client keeps its three remembered preferences in `localStorage`, so a
-non-persistent store forgets the Command-translation override and both "if
-compatible" defaults at every launch, silently. WebKit keeps that store in the
-app's container rather than in the instance directory, which is why the
-identifier has to come from the directory: it is what makes `--instance-dir`
-isolate preferences the way it isolates the config and the log.
+Chromium keeps this instance's profile — the `localStorage` the client's three
+remembered preferences live in, and the cookie jar above — under
+`<instance-dir>/chromium`, named by `cache_path` and `root_cache_path` at startup.
+That is what makes `--instance-dir` isolate preferences the way it isolates the
+config and the log, and it is better than the app-container store it replaced: the
+state is under the directory that names the instance rather than beside it.
 
-Persistent is necessary and not sufficient — a stable [origin](#the-origin) is the
-other half. Either one alone looks exactly like working until the app is quit and
-launched again, which is how this shipped twice as fixed and was not.
+A profile on disk is necessary and not sufficient — a stable [origin](#the-origin)
+is the other half. Either one alone looks exactly like working until the app is quit
+and launched again, which is how this shipped twice as fixed and was not.
 
-The cookie in it is replaced at every launch by that launch's token, and the claim
-lives in `sessionStorage`, which is per web view whatever the store does.
+`persist_session_cookies` is deliberately off: it governs cookies with no expiry,
+the launch token is written with one, and the gateway that minted it is gone by the
+next launch anyway. The claim lives in `sessionStorage`, which is per browser
+whatever the profile does.
 
 ### Process pipes
 
@@ -264,9 +307,16 @@ anything about.
 
 ## The bridge
 
-One `WKScriptMessageHandler` named `remotexNative`, and one `evaluateJavaScript`
-call. That is the whole app-to-client protocol; `frontend/src/nativeHost.ts` is
-its other half, and `NativeBridgeTests` pins the JSON both ways.
+One query function named `remotexNative`, and one `ExecuteJavaScript` call. That is
+the whole app-to-client protocol; `frontend/src/nativeHost.ts` is its other half,
+and `NativeBridgeTests` pins the JSON both ways.
+
+The query function is CEF's message router, configured once in
+`crates/remotex-cef/src/app.rs` and installed in every frame's V8 context as it is
+created — which is why `NATIVE_HOST` can be read at module load and never be wrong.
+The page posts and does not wait: the router's reply is a receipt, because a query
+left unanswered leaks on both sides of the IPC, and everything the app has to say
+goes the other way.
 
 **Page → app** — `state`, `clipboardFromRemote`, `unauthenticated`.
 
@@ -297,24 +347,33 @@ The call is a `?.` chain, because the page installs its entry point when the
 desktop mounts and removes it when that unmounts — a menu item pressed a moment
 either side of a target switch has to find nothing and do nothing.
 
-The document is a `file://` URL, and it is a **secure context** in WebKit, so
-WebCodecs is available and Opus and H.264 decode. Nothing about the session passes
-through this app either way: the page talks to the gateway itself, over the
-cross-origin path [above](#the-origin).
+The document is `remotex://app/index.html`, a **secure context** because the scheme
+was registered as one, so WebCodecs is available and Opus decodes. H.264 does not:
+stock CEF ships without proprietary codecs, and a `render_type = "video"` target
+therefore fails here through the client's own "this browser cannot decode…" path —
+see [`known-issues.md`](known-issues.md). Nothing about the session passes through
+this app either way: the page talks to the gateway itself, over the cross-origin
+path [above](#the-origin).
 
-`WKNavigationDelegate` refuses a navigation anywhere else, and for a file URL that
-is a **path** test (`NativeBridge.permits`): this document, or something inside the
-directory it was loaded from, standardized first so `web/../../etc/passwd` is
-resolved rather than compared as written. The scheme/host/port comparison it
-replaced was worthless here — a file URL has neither host nor port, so every one of
-them matched every other and any path on the disk could have replaced the page.
-This matters because the window shows somebody else's pixels and carries their
-clipboard strings, and there is no address bar to notice with.
+Navigation anywhere else is refused, in Rust now rather than in Swift, and it is a
+scheme-and-host test again (`client::permits`) — the thing a `file://` document
+could not have, since a file URL has neither host nor port and every one of them
+therefore matched every other. This matters because the window shows somebody
+else's pixels and carries their clipboard strings, and there is no address bar to
+notice with. Popups are refused for the same reason, in the same place.
 
-`mediaTypesRequiringUserActionForPlayback` is set to nothing, which is what lets
-**Remote › Enable Audio** start sound: a menu press is not a user activation as
-far as WebKit is concerned, and without it the page's `AudioContext` would come
-up suspended with nothing on screen to say so.
+There is **no context menu**. `on_before_context_menu` clears the model, which is
+what stops Chromium showing one at all. A browser's menu — Back, Reload, View Page
+Source — means nothing here, and a right-click is something the guest wants: the
+desktop surface calls `preventDefault` on `contextmenu`, but that covers the canvas
+only, and even there the menu is Chromium's answer to the *native* event rather than
+to the DOM one. What a right-click ought to offer is on the menu bar, which is the
+shell's and is already on screen.
+
+`--autoplay-policy=no-user-gesture-required` is what lets **Remote › Enable Audio**
+start sound: a menu press is not a user activation as far as the engine is
+concerned, and without it the page's `AudioContext` would come up suspended with
+nothing on screen to say so.
 
 ## Display and resize behavior
 
@@ -343,8 +402,8 @@ The three View menu items are one decision:
 - **Resize to Window** asks the remote to adopt the viewer's available size, once.
 - **Resize to Display** changes the local window so the current remote desktop
   fits at its point size; it sends nothing to the gateway. The arithmetic is
-  `RemoteGeometry.windowFrame` and the measurement is the web view's own bounds —
-  a page scrolls inside them and cannot change them.
+  `RemoteGeometry.windowFrame` and the measurement is the container view's own
+  bounds — a page scrolls inside them and cannot change them.
 
 All three remain in the menu and are disabled when they do not apply. The two
 one-shots are disabled while **Auto Resize** is on: one is what it does
@@ -376,10 +435,11 @@ Remote-menu commands therefore have no keyboard shortcuts. macOS-global
 shortcuts such as Command-Tab and Command-Space remain local because the
 application never receives them.
 
-The monitor is the reason this app exists around the page. It sits outside the
-web view and swallows what it consumes, so WebKit never sees a key event — which
-is what lets ⌘Q and ⌘W reach the guest instead of this application. The page's own
-key listeners never fire here; the keys arrive over the bridge instead.
+The monitor is the reason this app exists around the page. It sits outside
+Chromium's view and swallows what it consumes, so the engine never sees a key
+event — which is what lets ⌘Q and ⌘W reach the guest instead of this application.
+The page's own key listeners never fire here; the keys arrive over the bridge
+instead.
 
 What a chord *means* is the client's. `KeyboardCodes` maps a macOS virtual
 keycode to a DOM `code` and sends it; `frontend/src/macKeys.ts` owns the
@@ -425,7 +485,9 @@ permission, while `clipboard = true` remains the boundary.
 
 The gateway uses plain HTTP on loopback. Because ATS treats `ws://` as `http://`,
 the bundle sets `NSAllowsArbitraryLoads`; that covers the `fetch` calls and socket
-upgrades the page makes to loopback from its `file://` document.
+upgrades the page makes to loopback from its `remotex://app` document. Chromium's
+own gate on the same traffic is [Local Network Access](#the-origin), which is a
+separate thing and is disabled by switch.
 
 ### Local network permission
 
@@ -454,6 +516,7 @@ Run the tests, build the packaged app, and launch QA against a throwaway instanc
 
 ```sh
 (cd frontend && bun run check && bun test src)
+packaging/macos-viewer/stage-cef.sh          # only before a bare `swift test`
 swift test --package-path apps/remotex-viewer
 packaging/macos-viewer/build-viewer-app.sh
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
@@ -463,9 +526,48 @@ The build script builds the SPA itself, so `bun` is required for it. The first
 line is separate because it is the client's *own* checks — a bundle whose page
 builds but whose tile painter is wrong looks fine until pixels land.
 
+`stage-cef.sh` is what `Package.swift` links against: it builds `remotex-cef` and
+puts `libremotex_cef.a` and CEF's `libcef_sandbox.dylib` under `target/cef-link`.
+`build-viewer-app.sh` runs it itself; a bare `swift build` or `swift test` does not,
+and fails to link without it. CEF itself is expected at `$CEF_PATH`, default
+`~/.local/share/cef`; export one with
+`cargo run -p export-cef-dir -- --force "$HOME/.local/share/cef"`.
+
+An edit to the shell or the Chromium host does not need the whole build:
+`packaging/macos-viewer/refresh-viewer-app.sh` replaces just those two in the
+bundle that is already there, re-signs it inner-first, and takes seconds rather
+than a minute. It is not a build — trust a result from the bare build script.
+
 `--instance-dir` is the only GUI-launch argument and is the whole of the
 isolation: config and log are under the directory it names, so QA cannot touch
 `~/Library/Application Support/remotex`. Delete the QA directory for a clean run.
+
+**Ask the app rather than clicking at it.** No AppleScript, no synthetic clicks, no
+screenshot loops; four ways in, in the order they cost:
+
+1. Run the bundled binary directly rather than through `open`, so its stderr is
+   yours: `REMOTEX_CEF_TRACE=1 dist/remotex.app/Contents/MacOS/remotex-viewer
+   --instance-dir "$PWD/tmp/app-trace" 2> trace.log`. The trace names the scheme
+   requests, the browser, the cookie write, the load result, and every navigation
+   the policy refused.
+2. `REMOTEX_CHROMIUM_SWITCHES` replaces the switch list at startup, so trying one is
+   a relaunch rather than a rebuild — including `--remote-debugging-port=9222`,
+   which makes the page answerable over CDP from a `uv` script: the live DOM, the
+   console and exception streams, `Network.*` events, and the cookie jar.
+3. `REMOTEX_STARTUP_PAGE=grid` opens a page with no script in it at all. If the grid
+   fills the window, the engine, the view and the compositor are sound and the fault
+   is the client's — one relaunch, half the search gone.
+4. **Remote › Developer Tools**, for the times a person is already looking.
+
+Four things this engine specifically puts at risk, beyond the list above:
+
+- **Preferences survive a relaunch** — see below.
+- **Auth travels on a cold launch.** Delete the QA instance directory first; a
+  cookie that never arrives surfaces as a 401, not as a CORS error.
+- **⌘Q and ⌘W reach the guest.** The `NSEvent` monitor must still win over
+  Chromium's view.
+- **No orphaned helpers.** After Force Quit, `pgrep -f "remotex-viewer Helper"`
+  must print nothing, and neither must `pgrep -f remotex-gateway`.
 
 **Quit and launch again as part of every QA pass.** Change a remembered preference
 — the Command-translation override, or either "if compatible" default — then ⌘Q and
@@ -492,7 +594,9 @@ enablement against a recorded page, the pasteboard rules, the window-fitting
 arithmetic, the menu-bar rules, and the gateway process contract. Everything
 below the bridge is the client's, and is tested in `bun test` and
 `tests/playwright` where the code is. Sound and anything about pixels still
-require manual QA; the Web Inspector is available on the page in a debug build.
+require manual QA; **Remote › Developer Tools** opens Chromium's inspector on the
+page, in the shipped app rather than only in a debug build — the shipped app is the
+one there is to look at.
 
 The in-process tone harness (`cargo test --lib serve_a_test_tone -- --ignored`)
 serves a login gateway for testing the client's playback path in a browser. To
