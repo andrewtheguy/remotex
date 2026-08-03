@@ -35,14 +35,20 @@ extension AppModel {
     /// `remotex-gateway` beside a test binary, and nothing here needs one — the page
     /// is what the menus talk to and the page is the sink.
     static func underTest(sink: RecordingSink) -> AppModel {
-        let model = AppModel(
+        let model = withoutPage()
+        model.showPage(sink: sink)
+        return model
+    }
+
+    /// The same model before there is a page in the window — the launch screen,
+    /// where a menu has nothing to talk to.
+    static func withoutPage() -> AppModel {
+        AppModel(
             clipboard: ClipboardSynchronizer(
                 pasteboard: NSPasteboard.withUniqueName(),
                 startsPolling: false
             )
         )
-        model.showPage(sink: sink)
-        return model
     }
 
     /// Put the model on the screen a page occupies, with that page attached.

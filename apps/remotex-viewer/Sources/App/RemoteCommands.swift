@@ -141,6 +141,7 @@ struct RemoteCommands: Commands {
             Button("Developer Tools") {
                 model.showDevTools()
             }
+            .disabled(!model.canShowDevTools)
         }
 
         CommandMenu("Display") {

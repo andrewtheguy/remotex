@@ -11,7 +11,7 @@ import Testing
 /// as an identifier just to make `--instance-dir` isolate preferences the way it
 /// isolates the config and the log. Chromium takes a path, so the whole mechanism
 /// is a subdirectory now, and these tests are what say so.
-struct InstanceDataStoreTests {
+struct InstanceProfileTests {
     /// Inside the instance, which is what makes `--instance-dir` isolate the
     /// preferences at all.
     @Test
@@ -37,7 +37,7 @@ struct InstanceDataStoreTests {
     /// Different per instance: a QA run must not read or write the real instance's
     /// preferences.
     @Test
-    func adifferentDirectoryGetsADifferentProfile() {
+    func aDifferentDirectoryGetsADifferentProfile() {
         let real = InstanceDirectory(url: URL(fileURLWithPath: "/tmp/remotex"))
         let qa = InstanceDirectory(url: URL(fileURLWithPath: "/tmp/remotex-qa"))
 

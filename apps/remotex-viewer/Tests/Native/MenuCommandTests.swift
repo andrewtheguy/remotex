@@ -31,6 +31,19 @@ struct MenuCommandTests {
         #expect(model.takeOverTitle == nil)
     }
 
+    /// The inspector needs a page, and the launch screen is the case: nothing is
+    /// attached there, and an item that greys is the difference between "not now"
+    /// and an item that appears to do nothing.
+    @Test
+    func theInspectorIsDeadWithoutAPage() {
+        let model = AppModel.withoutPage()
+        #expect(!model.canShowDevTools)
+
+        let sink = RecordingSink()
+        model.showPage(sink: sink)
+        #expect(model.canShowDevTools)
+    }
+
     /// Capability flags come from the target, and each one gates exactly its own
     /// item. Checked together because the failure they guard against is one flag
     /// enabling the wrong item, which no single case can see.

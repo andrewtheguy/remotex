@@ -416,6 +416,20 @@ final class AppModel {
         send(.openClipboard)
     }
 
+    /// Whether there is a page for the inspector to open on.
+    ///
+    /// Every other item in that menu greys where it cannot act, and this one could
+    /// not: pressed on the launch screen it reached a bridge that is not there and
+    /// did nothing, silently. The `screen` test is also what makes this observable —
+    /// `bridge` is deliberately outside Observation, so a menu derived from it alone
+    /// would not be rebuilt when the page comes and goes.
+    var canShowDevTools: Bool {
+        if case .ready = screen {
+            return bridge != nil
+        }
+        return false
+    }
+
     /// Chromium's inspector, on this page. The one menu item that does not go
     /// through `send`, because it asks the engine rather than the client.
     func showDevTools() {
