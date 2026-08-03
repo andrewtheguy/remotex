@@ -968,6 +968,33 @@ async fn websocket_without_a_valid_token_is_closed_with_4000() {
     assert_eq!(expect_close(&mut ws).await, Some(4000));
 }
 
+/// The audio endpoint answers a bad token the same way, and that sameness is the
+/// point: two sockets with one credential and one refusal, so a client has one thing
+/// to handle rather than two.
+#[tokio::test]
+async fn an_audio_socket_without_a_valid_token_is_closed_with_4000() {
+    let addr = spawn_app_dead_rdp().await;
+    let cookie = common::login(addr).await;
+
+    let mut ws = common::connect_audio_ws(addr, "", &cookie).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4000));
+
+    let mut ws = common::connect_audio_ws(addr, "not-a-real-token", &cookie).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4000));
+
+    // And a *real* claim is accepted, so the refusals above are about the token and
+    // not about the endpoint being unreachable. It stays silent — this target has no
+    // audio — which is exactly what makes it safe to open before picking one.
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_audio_ws(addr, &token, &cookie).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(250), expect_close(&mut ws))
+            .await
+            .is_err(),
+        "a valid claim's audio socket should stay open"
+    );
+}
+
 #[tokio::test]
 async fn takeover_evicts_the_attached_browser_and_repaints_for_the_new_one() {
     let vnc_port = spawn_fake_vnc().await;

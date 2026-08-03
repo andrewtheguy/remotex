@@ -1,11 +1,22 @@
-// Pure scheduling policy for decoded remote-audio buffers. It maintains a small
-// start cushion and discards excess lead rather than accumulating latency.
+// Pure scheduling policy for decoded remote-audio buffers. It maintains a start
+// cushion and discards excess lead rather than accumulating latency.
+//
+// The two numbers below are the jitter budget, and they were raised roughly fivefold
+// after comparing this against every remote-desktop client that does not stutter.
+// Myrtille coalesces six ~186 ms blocks (or 1000 ms, whichever comes first) before it
+// sends anything, and invalidates at 2000 ms; FreeRDP and Remmina hand sound to
+// PulseAudio's default buffer, which is hundreds of milliseconds, behind an *unbounded*
+// queue. All of them buy continuity with latency, and all of them discard on elapsed
+// time rather than on a queue depth.
+//
+// The cost is real and is not hidden: audio trails video by roughly the start cushion,
+// and nothing here corrects for that. Myrtille accepts the same skew at about a second.
 
 /// Furthest ahead of the audio clock the schedule may run.
-export const MAX_LEAD_S = 0.3;
+export const MAX_LEAD_S = 1.5;
 
 /// Cushion used for a first buffer or recovery from underrun.
-export const START_LEAD_S = 0.1;
+export const START_LEAD_S = 0.5;
 
 export interface Scheduled {
   /** When to start this buffer, on the audio context's clock. */

@@ -330,6 +330,24 @@ pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
     ws
 }
 
+/// Open the audio WebSocket with a claim token and the login cookie.
+///
+/// The same shape as [`connect_ws`] and deliberately so — a second endpoint that took
+/// its credential differently would be a second thing to get wrong.
+#[allow(dead_code)]
+pub async fn connect_audio_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let mut request = format!("ws://{addr}/ws/audio?session={token}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Cookie", cookie.parse().unwrap());
+    let (ws, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws
+}
+
 /// Pick a target from the picker over an attached WebSocket, starting its
 /// engine. A fresh attach lands on the picker (no engine); the browser sends
 /// this `connect` to begin a session. Reattach/takeover to a running engine

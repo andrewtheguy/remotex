@@ -241,7 +241,7 @@ final class CanvasServer: Sendable {
     /// byte included, because the page parses it with the same code the browser
     /// SPA uses.
     func send(frame: Data) {
-        send(kind: Envelope.frame, payload: frame)
+        send(kind: Envelope.frame, payload: frame, droppable: frame.first != AudioFrame.frameKind)
     }
 
     /// Most unwritten frame bytes to hold before dropping more.
@@ -253,13 +253,24 @@ final class CanvasServer: Sendable {
     /// less than a leak.
     private static let maxPendingFrameBytes = 8 * 256 * 1024
 
-    private func send(kind: UInt8, payload: Data) {
+    private func send(kind: UInt8, payload: Data, droppable: Bool = false) {
         let chunk = Self.chunk(kind: kind, payload: payload)
         // Control envelopes are never dropped. They are small, and each one is a
         // fact the page cannot be told twice — a `resize` or a `clear` skipped
         // here leaves it drawing into the wrong geometry with nothing to correct
         // it.
-        let isFrame = kind == Envelope.frame
+        //
+        // Neither is audio, which is a frame envelope but not a picture. A dropped
+        // tile is replaced by the next repaint, and the re-prime below is what asks
+        // for one; a dropped wave buffer is a hole in the sound that nothing asks for
+        // again. Sound is also the one thing here that cannot run away — 1.41 Mbit/s
+        // at its very worst, uncompressed — so exempting it costs a bounded amount of
+        // backlog and buys the app the same separation the two gateway sockets buy.
+        //
+        // Metered and droppable are the same set on purpose: what is not counted
+        // towards the ceiling must not be subtracted from it either, or a late
+        // completion would walk the backlog below zero.
+        let metered = droppable
 
         enum Outcome {
             case send(NWConnection)
@@ -270,13 +281,13 @@ final class CanvasServer: Sendable {
             guard let stream = state.stream else {
                 return .none
             }
-            if isFrame, state.pendingFrameBytes > Self.maxPendingFrameBytes {
+            if metered, state.pendingFrameBytes > Self.maxPendingFrameBytes {
                 // Dropped pixels are only recoverable because something asks for
                 // them again; see the re-prime below.
                 state.droppedFrames = true
                 return .drop
             }
-            if isFrame {
+            if metered {
                 state.pendingFrameBytes += chunk.count
             }
             return .send(stream)
@@ -292,7 +303,7 @@ final class CanvasServer: Sendable {
             // from overtaking tiles drawn in the space it replaces.
             stream.send(
                 content: chunk,
-                completion: isFrame
+                completion: metered
                     ? .contentProcessed { [weak self] _ in
                         self?.frameWritten(chunk.count, on: stream)
                     }

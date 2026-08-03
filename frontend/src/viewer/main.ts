@@ -6,6 +6,7 @@
 
 import {
   applyCursorCss,
+  bareCursorCss,
   cursorImage,
   type RemoteCursor,
 } from "../cursorCss.ts";
@@ -70,7 +71,9 @@ attachInput({
 function paintCursor() {
   const image = cursorImage(cursor);
   if (!image) {
-    overlay.style.cursor = "none";
+    // `size` is the desktop: `clear` drops it on the way to the picker, and this
+    // page stays mounted under that picker. See `bareCursorCss`.
+    overlay.style.cursor = bareCursorCss(size !== null);
     return;
   }
   const rect = canvas.getBoundingClientRect();

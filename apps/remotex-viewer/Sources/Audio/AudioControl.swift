@@ -9,9 +9,10 @@ import OSLog
 /// carry it, and what to say when the page reports it cannot play what arrived.
 ///
 /// The split is not new: even with an `AVAudioEngine` behind it, this type never
-/// did more in the "on" direction than put `{"type":"audio"}` on the wire, and
-/// the gateway's `audioFormat` was what built anything. The engine went to the
-/// page; this did not have to move.
+/// did more in the "on" direction than ask the gateway for sound, and the gateway's
+/// `audioFormat` was what built anything. The engine went to the page; this did not
+/// have to move. What it asks *with* has changed — a socket rather than a message —
+/// and that did not have to move it either.
 @MainActor
 @Observable
 final class AudioControl {
@@ -26,15 +27,21 @@ final class AudioControl {
     /// sound.
     private(set) var isAvailable = false
 
-    /// Set by `AppModel` for as long as a session is attached.
+    /// Open or close the gateway's audio socket. Set by `AppModel` for as long as a
+    /// session is attached.
+    ///
+    /// A callback rather than a `ClientMessage`, because there is no message: opening
+    /// `/ws/audio` *is* the subscription and closing it is the only way to stop. What
+    /// this type does in the "on" direction is still exactly one thing, which is why
+    /// the shape of everything below is unchanged.
     @ObservationIgnored
-    var send: (@MainActor (ClientMessage) -> Void)?
+    var subscribe: (@MainActor (Bool) -> Void)?
 
     /// One-shot error reporting avoids stale observable state across sessions.
     @ObservationIgnored
     var report: (@MainActor (String) -> Void)?
 
-    /// Tells the page to drop its decoder. Set alongside `send`.
+    /// Tells the page to drop its decoder. Set alongside `subscribe`.
     @ObservationIgnored
     var stopPlayback: (@MainActor () -> Void)?
 
@@ -45,9 +52,9 @@ final class AudioControl {
 
     /// The Remote menu's toggle.
     ///
-    /// Sending the message is all this does in the "on" direction: the gateway
-    /// answers with an `audioFormat`, and that is what builds a decoder — so there
-    /// is nothing to set up until it arrives, and nothing to undo if it never does.
+    /// Opening the socket is all this does in the "on" direction: the gateway answers
+    /// with an `audioFormat`, and that is what builds a decoder — so there is nothing
+    /// to set up until it arrives, and nothing to undo if it never does.
     func setEnabled(_ enabled: Bool) {
         guard enabled != isEnabled else {
             return
@@ -56,7 +63,7 @@ final class AudioControl {
         if !enabled {
             stopPlayback?()
         }
-        send?(.audio(enabled: enabled))
+        subscribe?(enabled)
     }
 
     /// Called as the session moves: a desktop, connected, on a target that carries
@@ -74,25 +81,32 @@ final class AudioControl {
 
     /// Forget the user's answer. For a target switch, where the answer was about
     /// the target being left.
+    ///
+    /// Unsubscribing is part of forgetting, and it did not use to be: the gateway used
+    /// to end the subscription with the engine, so clearing the flag here was enough.
+    /// It keeps the socket now — that is what lets a target switch resume sound without
+    /// asking again — so a switch that means to go silent has to say so, or the next
+    /// `connect` arms a stream nobody wants.
     func reset() {
         isEnabled = false
         isAvailable = false
         stopPlayback?()
+        subscribe?(false)
     }
 
     /// Re-subscribe on a fresh attachment.
     ///
-    /// The gateway's subscription belongs to an *attachment*, so a reconnect
-    /// arrives with audio off while this side still says on. Re-sent from
-    /// `connected` for the same reason the viewport and the host scale are: a
-    /// freshly started engine knows nothing about this client.
+    /// The gateway keeps its half across a reattach now — the subscription belongs to
+    /// the claim — but this end's socket died with the network, so it is reopened
+    /// here. Driven from `connected` for the same reason the viewport and the host
+    /// scale are: a freshly started engine knows nothing about this client.
     func reassert() {
         guard isEnabled else {
             return
         }
         // The old stream's decoder and timeline belong to the attachment that ended.
         stopPlayback?()
-        send?(.audio(enabled: true))
+        subscribe?(true)
     }
 
     // MARK: - What the page reports back
@@ -115,6 +129,6 @@ final class AudioControl {
         }
         report?(reason)
         isEnabled = false
-        send?(.audio(enabled: false))
+        subscribe?(false)
     }
 }

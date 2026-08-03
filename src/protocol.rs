@@ -16,7 +16,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// viewer requires an exact match. Bump it when an older peer would otherwise
 /// fail without a useful compatibility error; clients ignore additive control
 /// tags they do not know.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -239,8 +239,6 @@ pub enum ClientMsg {
     /// message for this. A client that never receives [`ServerMsg::Displays`] never
     /// has an id to name here, which is how the panel stays hidden on those engines.
     SelectDisplay { id: u32 },
-    /// Start or stop audio delivery for this attachment.
-    Audio { enabled: bool },
 }
 
 /// The layout of a server -> client binary frame: a **batch** of records.
@@ -1085,20 +1083,11 @@ mod tests {
             ClientMsg::SelectDisplay { id: u32::MAX }
         ));
         assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"selectDisplay","id":-1}"#).is_err());
-        // The audio subscription, which is also each client's enable/disable control.
-        // Both directions matter: a client that never sends it hears nothing, and one
-        // that never sends it is why [`PROTOCOL_VERSION`] did not have to move.
-        assert!(matches!(
-            serde_json::from_str::<ClientMsg>(r#"{"type":"audio","enabled":true}"#).unwrap(),
-            ClientMsg::Audio { enabled: true }
-        ));
-        assert!(matches!(
-            serde_json::from_str::<ClientMsg>(r#"{"type":"audio","enabled":false}"#).unwrap(),
-            ClientMsg::Audio { enabled: false }
-        ));
-        // No default: "audio" with nothing said about it would otherwise mean
-        // whichever of on and off serde picked.
-        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"audio"}"#).is_err());
+        // There is no audio message. Subscribing is opening the audio socket, and the
+        // one thing that could be said here is refused rather than ignored, so a client
+        // still sending the deleted message learns it on the first attempt instead of
+        // going quietly silent.
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"audio","enabled":true}"#).is_err());
     }
 
     /// The audio pair, which is one text frame and one binary frame — and the split

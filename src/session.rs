@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use log::{debug, info, warn};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::audio::AudioBridge;
@@ -47,6 +47,25 @@ fn frame_buffer(target: &TargetConfig) -> usize {
         crate::config::RenderPlan::Tiles { .. } => FRAME_BUFFER,
     }
 }
+
+/// How deep the audio socket's outbound queue is, in wave buffers.
+///
+/// One message here is one of the remote's wave buffers — ~32 KB, or ~186 ms, from a
+/// Windows host at 44.1 kHz — so sixteen is about three seconds.
+///
+/// It is not a play-out buffer and must not be read as one: both clients throw away
+/// backlog past their own ceiling on arrival. The depth exists so that an ordinary
+/// socket write in flight never stalls the pump, because a stalled pump stops draining
+/// [`crate::audio::AUDIO_QUEUE_DEPTH`] and what gives way *there* is audible. That is
+/// the asymmetry that makes this deeper than [`VIDEO_FRAME_BUFFER`]'s four (744 ms of
+/// sound): a dropped video frame is replaced by the next one, and a dropped wave buffer
+/// is a hole.
+///
+/// Shallower than the bridge's sixty-four, equally deliberately. This queue is FIFO, so
+/// depth here is stale sound faithfully delivered and then discarded; the bridge drops
+/// its *oldest* and keeps sound that is still live. Losses on a slow link belong there,
+/// which means this one only has to be deep enough to absorb a write.
+const AUDIO_SOCKET_BUFFER: usize = 16;
 
 /// How long an engine remains available for a browser to reattach after its
 /// WebSocket disappears. Applies equally to RDP and VNC.
@@ -102,6 +121,27 @@ pub struct Attachment {
     pub events: mpsc::Receiver<AttachEvent>,
 }
 
+/// One audio WebSocket's live handle on the session, returned by
+/// [`SessionManager::attach_audio`].
+///
+/// Audio has its own socket because it had no business sharing the other one: on a
+/// `render_type = "video"` target that queue is four deep, and an audio pump waiting
+/// behind a video backlog stops draining the bridge, which then drops wave buffers.
+/// Every reference client this was checked against — Myrtille, FreeRDP, Guacamole —
+/// keeps sound off the path that carries pictures.
+pub struct AudioAttachment {
+    /// Identifies this socket for [`SessionManager::detach_audio`], so a socket
+    /// closing *after* it was superseded cannot clear its replacement.
+    pub id: u64,
+    /// [`ServerMsg::AudioFormat`], then [`ServerMsg::Audio`]. Nothing else is ever
+    /// sent here, and the format arrives again whenever a new engine is armed.
+    pub packets: mpsc::Receiver<ServerMsg>,
+    /// Resolves when the session drops this socket — a takeover, a log out, or a
+    /// newer audio socket. Both outcomes mean the same thing, so the caller does not
+    /// inspect it.
+    pub evicted: oneshot::Receiver<()>,
+}
+
 /// Spawns a protocol engine. Injectable so the manager's unit tests can run
 /// against a scripted fake instead of a real RDP/VNC connect.
 ///
@@ -124,7 +164,7 @@ struct EngineSlot {
     generation: u64,
     /// Where this engine puts redirected audio, for an audio target. It lives on
     /// the engine slot because that is the lifetime audio has: a subscription
-    /// ([`SessionManager::set_audio`]) finds it here, and every way an engine ends
+    /// ([`SessionManager::arm_audio`]) finds it here, and every way an engine ends
     /// takes it with it.
     ///
     /// Dropping this is not what stops the sound, and it cannot be — the engine
@@ -141,6 +181,25 @@ struct ClientSlot {
     event_tx: mpsc::Sender<AttachEvent>,
 }
 
+/// The dedicated audio WebSocket, while one is open.
+///
+/// Bound to the *claim*, not to a [`ClientSlot`]: a main-socket reattach, a target
+/// switch and an engine death all leave it alone, and only a change of claim ends it.
+/// That one sentence is its whole lifetime rule, and every teardown path below is that
+/// sentence applied. It is a field of [`State`] rather than of `ClientSlot` for the same
+/// reason — `ClientSlot` is destroyed by exactly the events audio now has to survive,
+/// and audio playing with no main socket attached (mid-blip, inside the reattach grace)
+/// is a state that has to be representable.
+struct AudioSlot {
+    id: u64,
+    packets: mpsc::Sender<ServerMsg>,
+    /// Held, never sent on: dropping this slot resolves the socket's receiver, which
+    /// is what closes it. A signal rather than closing `packets`, because a browser
+    /// that has been taken over must stop hearing the session *now* rather than after
+    /// however much sound is still queued for it.
+    _close: oneshot::Sender<()>,
+}
+
 #[derive(Default)]
 struct State {
     /// The current claim token. Persists across WebSocket closes so the same
@@ -154,15 +213,19 @@ struct State {
     engine: Option<EngineSlot>,
     /// The attached WebSocket, if any.
     client: Option<ClientSlot>,
+    /// The attached *audio* WebSocket, if any. See [`AudioSlot`].
+    audio: Option<AudioSlot>,
+    next_audio_id: u64,
     /// Changes whenever the browser attachment changes. Detached-engine timers
     /// capture this value so a timer from an earlier detach cannot expire a
     /// session that reattached and later detached again.
     attachment_epoch: u64,
     next_attach_id: u64,
     next_generation: u64,
-    /// The task forwarding this attachment's audio, while it has asked for any.
+    /// The task forwarding audio to [`Self::audio`], while there is both a socket to
+    /// send to and an engine producing any.
     ///
-    /// One handle, not a set: one session, one attachment, one subscription (see
+    /// One handle, not a set: one session, one audio socket, one subscription (see
     /// CLAUDE.md). Holding it is what makes stopping audio *immediate* rather than
     /// eventual — the pump would otherwise sit in `recv()` until the remote's next
     /// wave buffer, which on a quiet desktop is never.
@@ -171,10 +234,9 @@ struct State {
     /// state lock was released can tell whether it is still the one wanted.
     ///
     /// The same device as [`Self::attachment_epoch`], and needed for the same reason:
-    /// [`SessionManager::set_audio`] does its expensive work — an Opus encoder and an
-    /// FFT plan — outside the lock, and "is this still the current attachment" is not
-    /// enough to check afterwards, because a *disable* leaves the attachment exactly as
-    /// it was.
+    /// [`SessionManager::arm_audio`] does its expensive work — an Opus encoder and an
+    /// FFT plan — outside the lock. Comparing the socket's id afterwards is not enough
+    /// on its own, because a target switch re-arms the *same* socket.
     audio_epoch: u64,
 }
 
@@ -201,6 +263,19 @@ impl State {
         if let Some(pump) = self.audio_pump.take() {
             debug!("session: stopping this attachment's audio");
             pump.abort();
+        }
+    }
+
+    /// End the audio socket outright: the claim it attached to is no longer its claim.
+    ///
+    /// Stopping the pump is *not* enough on its own. The slot would survive, and the
+    /// next [`SessionManager::connect`] would re-arm it — so a browser that had been
+    /// shown a takeover screen would start hearing the new holder's desktop. Closing
+    /// the socket is the only thing that ends that.
+    fn evict_audio(&mut self) {
+        self.stop_audio();
+        if self.audio.take().is_some() {
+            info!("session: closing the audio socket; the claim changed under it");
         }
     }
 
@@ -264,12 +339,15 @@ impl SessionManager {
             }
             let id = Uuid::new_v4().to_string();
             st.claim = Some(id.clone());
-            // Audio belongs to the claim, and this claim has just replaced it. The
-            // engine keeps running for whoever claimed — which is exactly why this is
-            // here and not on the engine's own teardown paths: nothing else about a
-            // takeover would end the previous browser's sound, and it is listening on
-            // a claim it no longer owns.
-            st.stop_audio();
+            // Audio belongs to the claim, and this claim has just replaced it — unless
+            // it is the same browser reclaiming, which is what `owns` is for and what
+            // lets sound survive a reconnect. The condition is `!owns` rather than
+            // `force` on purpose: a plain claim succeeds whenever no socket is attached,
+            // so a second browser arriving during a detach gets the slot with no
+            // takeover prompt anywhere — and must not inherit somebody else's ears.
+            if !owns {
+                st.evict_audio();
+            }
             let evicted = st.client.take();
             let expiry = if evicted.is_some() {
                 st.bump_epoch_for_detach()
@@ -310,8 +388,9 @@ impl SessionManager {
             info!("session: superseding the previous attachment");
             let _ = old.event_tx.try_send(AttachEvent::Evicted);
         }
-        // Audio is per attachment and starts disabled until the client asks.
-        st.stop_audio();
+        // Audio is deliberately *not* touched here. It belongs to the claim, not to
+        // this socket, so a browser that dropped and came back is still listening —
+        // which is the whole point of giving it a socket of its own.
 
         // Sized for whatever is selected, because both queues are in series between
         // the engine and the socket: leaving this one deep would put the buffering
@@ -357,32 +436,78 @@ impl SessionManager {
         Ok(Attachment { id, events })
     }
 
-    /// Start or stop audio for the current authenticated attachment. Enabling
-    /// replaces any existing pump; sessions without an audio source ignore it.
-    pub fn set_audio(&self, attach_id: u64, enabled: bool) {
+    /// Attach the audio WebSocket holding `token`. Opening the socket *is* the
+    /// subscription, and closing it is the only way to stop.
+    ///
+    /// Accepted in every session state, including the picker and a target that carries
+    /// no sound: the socket is bound to the claim rather than to a source, so a session
+    /// with nothing to send is silent, not refused. That is what lets [`Self::connect`]
+    /// re-arm the same socket when a target is picked.
+    pub fn attach_audio(self: &Arc<Self>, token: &str) -> Result<AudioAttachment, InvalidToken> {
+        let attachment = {
+            let mut st = self.state.lock().unwrap();
+            if st.claim.as_deref() != Some(token) {
+                return Err(InvalidToken);
+            }
+            // Supersede is evict-then-install, so there is one code path for both: a
+            // second socket on the same claim closes the first.
+            st.evict_audio();
+            let (packets_tx, packets) = mpsc::channel(AUDIO_SOCKET_BUFFER);
+            let (close_tx, evicted) = oneshot::channel();
+            st.next_audio_id += 1;
+            let id = st.next_audio_id;
+            st.audio = Some(AudioSlot { id, packets: packets_tx, _close: close_tx });
+            info!("session: an audio socket attached");
+            AudioAttachment { id, packets, evicted }
+        };
+        // Outside the lock, and unconditional: an engine may already be running, in
+        // which case this socket has sound waiting for it.
+        self.arm_audio();
+        Ok(attachment)
+    }
+
+    /// The audio socket `id` went away. No grace period — unlike an engine there is
+    /// nothing here worth preserving, and a pump writing into a socket that has gone is
+    /// the exact stall this endpoint exists to remove.
+    pub fn detach_audio(&self, id: u64) {
+        let mut st = self.state.lock().unwrap();
+        if st.audio.as_ref().is_none_or(|slot| slot.id != id) {
+            return;
+        }
+        st.stop_audio();
+        st.audio = None;
+        info!("session: the audio socket went away");
+    }
+
+    /// Install the audio pump if — and only if — there is both a socket to send to and
+    /// an engine producing sound.
+    ///
+    /// Called from exactly two places, because only two things can make that conjunction
+    /// become true: [`Self::attach_audio`], where the socket appears, and
+    /// [`Self::connect`], where the engine does. The second of those is the target
+    /// switch: the socket outlives the engine, so picking a new desktop has to hand it
+    /// the new engine's queue.
+    fn arm_audio(&self) {
         // What the construction below needs, taken under the lock and used without it.
         // Building an encoder means allocating a codec *and* planning an FFT for the
         // resampler, which is real work — and this mutex is the one every mouse move
         // goes through (`forward_input`), so the rule this module states for itself is
         // that critical sections stay short. `audio_epoch` is what makes letting go
         // safe.
-        let (bridge, events, epoch, codec) = {
+        let (bridge, out, audio_id, epoch, codec) = {
             let mut st = self.state.lock().unwrap();
-            if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
-                return;
-            }
-            // Unconditional, and before the enable path: this is also how "replace the
-            // previous subscription" is expressed.
+            // Unconditional, and first: this is also how "replace the previous pump" is
+            // expressed, and it is what tells a build already in flight to stand down.
             st.stop_audio();
-            if !enabled {
-                info!("session: audio disabled by the browser");
-                return;
-            }
-            let Some(bridge) = st.engine.as_ref().and_then(|engine| engine.audio.clone()) else {
-                warn!("session: audio was asked for, but this session has no audio source");
+            let Some((audio_id, out)) =
+                st.audio.as_ref().map(|slot| (slot.id, slot.packets.clone()))
+            else {
+                // Nobody is listening. Not a fault: the ordinary state of a session
+                // whose browser never asked for sound.
                 return;
             };
-            let Some(events) = st.client.as_ref().map(|client| client.event_tx.clone()) else {
+            let Some(bridge) = st.engine.as_ref().and_then(|engine| engine.audio.clone()) else {
+                debug!("session: an audio socket is open, but this session has no audio source");
                 return;
             };
             // The target's, not a session setting: the codec is a property of the
@@ -392,7 +517,7 @@ impl SessionManager {
                 .as_ref()
                 .and_then(|target| target.audio_codec)
                 .unwrap_or_default();
-            (bridge, events, st.audio_epoch, codec)
+            (bridge, out, audio_id, st.audio_epoch, codec)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
@@ -406,7 +531,7 @@ impl SessionManager {
         // visible at all — nothing branches on it.
         let negotiated = bridge.negotiated_format();
         info!(
-            "session: audio enabled, the remote's audio channel is {}",
+            "session: arming audio, the remote's audio channel is {}",
             if negotiated.is_some() { "up" } else { "not up yet" }
         );
         let format = negotiated.unwrap_or(crate::audio::PCM_CD_QUALITY);
@@ -421,13 +546,11 @@ impl SessionManager {
 
         let mut st = self.state.lock().unwrap();
         // Anything that touched audio while the lock was down wins, and the epoch is
-        // what says so: a disable, a takeover, a reattach and a second enable all bump
-        // it. Checking the attachment alone would miss the first of those, which keeps
-        // the same `attach_id`. Dropping the stream here unsubscribes the listener that
-        // was just taken, so nothing is left reading the queue.
-        if st.audio_epoch != epoch
-            || st.client.as_ref().map(|c| c.attach_id) != Some(attach_id)
-        {
+        // what says so. The socket id alone would not be enough: a target switch re-arms
+        // the *same* socket, so two `arm_audio` calls racing over one id resolve by
+        // whichever bumped the epoch last. Dropping the stream here unsubscribes the
+        // listener that was just taken, so nothing is left reading the queue.
+        if st.audio_epoch != epoch || st.audio.as_ref().map(|slot| slot.id) != Some(audio_id) {
             debug!("session: discarding an audio subscription that was superseded while it was set up");
             return;
         }
@@ -442,7 +565,7 @@ impl SessionManager {
             // Sent before any packet, and awaited rather than tried: a decoder
             // configured *after* the audio it was meant to decode has already thrown
             // that audio away.
-            if events.send(AttachEvent::Msg(announce)).await.is_err() {
+            if out.send(announce).await.is_err() {
                 return;
             }
             let mut packets = std::pin::pin!(encoded.packets);
@@ -450,8 +573,9 @@ impl SessionManager {
                 // Awaiting here is the backpressure, and it is the right shape: a
                 // browser that cannot keep up stops this task reading the queue, and
                 // the queue then drops its *oldest* buffers rather than growing a
-                // delay (see [`crate::audio`]).
-                if events.send(AttachEvent::Msg(ServerMsg::Audio(packets))).await.is_err() {
+                // delay (see [`crate::audio`]). What it no longer waits behind is a
+                // video frame.
+                if out.send(ServerMsg::Audio(packets)).await.is_err() {
                     break;
                 }
             }
@@ -482,6 +606,9 @@ impl SessionManager {
         attach_id: u64,
         target_name: &str,
     ) -> Result<(), ConnectError> {
+        // Scoped so the lock is released before the re-arm below: every refusal returns
+        // from inside it, so only the success path falls through.
+        {
         let mut st = self.state.lock().unwrap();
         if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
             return Err(ConnectError::NotCurrent);
@@ -509,12 +636,12 @@ impl SessionManager {
         let (frame_tx, frame_rx) = mpsc::channel(frame_buffer(&target));
         st.next_generation += 1;
         let generation = st.next_generation;
-        // Audio does not travel on `frame_tx`, even though it ends up on the same
-        // socket: that queue is the engine's, and its capacity is what backpressures
-        // an engine drawing faster than a browser can paint. Sound belongs to a
-        // listener rather than to the engine — it is discarded outright while nobody
-        // is subscribed — so it gets a queue of its own, which [`Self::set_audio`]
-        // reads (see [`crate::audio`]).
+        // Audio travels on neither `frame_tx` nor the socket it feeds: that queue is
+        // the engine's, and its capacity is what backpressures an engine drawing faster
+        // than a browser can paint. Sound belongs to a listener rather than to the
+        // engine — it is discarded outright while nobody is subscribed — so it gets a
+        // queue of its own, which [`Self::arm_audio`] reads (see [`crate::audio`]), and
+        // a socket of its own beyond that.
         let audio = target.audio.then(|| Arc::new(AudioBridge::new()));
         st.engine = Some(EngineSlot {
             input_tx,
@@ -546,6 +673,11 @@ impl SessionManager {
                 audio,
             }));
         }
+        }
+        // The engine that just appeared is the half an already-open audio socket was
+        // missing. This is the target switch: the socket outlived the previous desktop,
+        // so it is handed this one without the browser asking again.
+        self.arm_audio();
         Ok(())
     }
 
@@ -620,6 +752,9 @@ impl SessionManager {
         let evicted = {
             let mut st = self.state.lock().unwrap();
             st.claim = None;
+            // The claim is gone, so the socket bound to it goes with it — the same
+            // reasoning as the main socket's eviction below.
+            st.evict_audio();
             // Same reason as every other path that changes the attachment: a
             // detached-engine timer from an earlier close must not act on what is
             // left here.
@@ -1042,8 +1177,8 @@ mod tests {
         mgr.connect(att.id, "vnc-clip").unwrap();
         expect_connected_meta(&mut att.events, "vnc-clip", Meta::of(Protocol::Vnc).clipboard()).await;
 
-        // And so does audio, which is what tells the browser to offer the panel
-        // that points at /api/session/audio.
+        // And so does audio, which is what tells the browser it may offer the toggle
+        // that opens the audio socket.
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
@@ -1395,7 +1530,7 @@ mod tests {
     async fn connected_audio_session(
         mgr: &Arc<SessionManager>,
         hooks: &std_mpsc::Receiver<EngineEnds>,
-    ) -> (Attachment, Arc<AudioBridge>, EngineEnds) {
+    ) -> (String, Attachment, Arc<AudioBridge>, EngineEnds) {
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
@@ -1406,7 +1541,15 @@ mod tests {
             .2
             .clone()
             .expect("an audio target's engine is given a bridge");
-        (att, audio, ends)
+        (token, att, audio, ends)
+    }
+
+    /// The next message on an audio socket, or a failure naming the wait.
+    async fn recv_audio(packets: &mut mpsc::Receiver<ServerMsg>) -> ServerMsg {
+        tokio::time::timeout(Duration::from_secs(5), packets.recv())
+            .await
+            .expect("timed out waiting for audio")
+            .expect("the audio socket ended unexpectedly")
     }
 
     /// Assert the next event configures a decoder, and that it says what a decoder
@@ -1414,15 +1557,15 @@ mod tests {
     ///
     /// Encoded targets only — passthrough announces none of this, which is what
     /// `a_pcm_target_is_announced_as_the_remotes_own_bytes` is for.
-    async fn expect_audio_format(events: &mut mpsc::Receiver<AttachEvent>) -> &'static str {
-        match recv(events).await {
-            AttachEvent::Msg(ServerMsg::AudioFormat {
+    async fn expect_audio_format(packets: &mut mpsc::Receiver<ServerMsg>) -> &'static str {
+        match recv_audio(packets).await {
+            ServerMsg::AudioFormat {
                 codec,
                 sample_rate,
                 channels,
                 packet_frames,
                 head,
-            }) => {
+            } => {
                 // The *stream's* rate, not the 44100 the remote negotiated: an
                 // encoded stream is resampled to 48 kHz on the way in.
                 assert_eq!(sample_rate, 48_000);
@@ -1436,14 +1579,14 @@ mod tests {
     }
 
     /// The same, for the default target, which is Opus.
-    async fn expect_opus_format(events: &mut mpsc::Receiver<AttachEvent>) {
-        assert_eq!(expect_audio_format(events).await, "opus");
+    async fn expect_opus_format(packets: &mut mpsc::Receiver<ServerMsg>) {
+        assert_eq!(expect_audio_format(packets).await, "opus");
     }
 
-    /// Assert the next event is audio, returning how many packets it carried.
-    async fn expect_audio(events: &mut mpsc::Receiver<AttachEvent>) -> usize {
-        match recv(events).await {
-            AttachEvent::Msg(ServerMsg::Audio(packets)) => packets.len(),
+    /// Assert the next message is audio, returning how many packets it carried.
+    async fn expect_audio(packets: &mut mpsc::Receiver<ServerMsg>) -> usize {
+        match recv_audio(packets).await {
+            ServerMsg::Audio(packets) => packets.len(),
             other => panic!("expected audio packets, got {other:?}"),
         }
     }
@@ -1474,18 +1617,18 @@ mod tests {
     /// decoder configured after the audio it was meant to decode has already thrown
     /// that audio away, and nothing downstream could recover it.
     #[tokio::test]
-    async fn enabling_audio_forwards_the_engines_queue_behind_its_format() {
+    async fn opening_the_audio_socket_forwards_the_engines_queue_behind_its_format() {
         let (mgr, hooks) = manager_with_fake_engine();
-        let (mut att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+        let (token, _att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
 
-        mgr.set_audio(att.id, true);
+        let mut sound = mgr.attach_audio(&token).unwrap();
         audio.wave(one_frame_of_pcm());
 
-        expect_opus_format(&mut att.events).await;
-        assert_eq!(expect_audio(&mut att.events).await, 1, "one frame in, one packet out");
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1, "one frame in, one packet out");
 
         audio.wave(one_frame_of_pcm());
-        assert_eq!(expect_audio(&mut att.events).await, 1, "and it keeps going");
+        assert_eq!(expect_audio(&mut sound.packets).await, 1, "and it keeps going");
     }
 
     /// The target's `audio_codec` is what the client is told, and the whole
@@ -1526,15 +1669,15 @@ mod tests {
             .clone()
             .expect("an audio target's engine is given a bridge");
 
-        mgr.set_audio(att.id, true);
-        match recv(&mut att.events).await {
-            AttachEvent::Msg(ServerMsg::AudioFormat {
+        let mut sound = mgr.attach_audio(&token).unwrap();
+        match recv_audio(&mut sound.packets).await {
+            ServerMsg::AudioFormat {
                 codec,
                 sample_rate,
                 packet_frames,
                 head,
                 ..
-            }) => {
+            } => {
                 assert_eq!(codec, "pcm-s16le");
                 assert_eq!(sample_rate, 44_100, "the remote's rate, because nothing resampled");
                 assert_eq!(packet_frames, 0, "each packet's length is its own");
@@ -1546,138 +1689,254 @@ mod tests {
         // Not silence: a buffer whose bytes can be told apart from any other.
         let wave: Vec<u8> = (0..2_048u32).map(|byte| byte as u8).collect();
         audio.wave(wave.clone());
-        match recv(&mut att.events).await {
-            AttachEvent::Msg(ServerMsg::Audio(packets)) => {
+        match recv_audio(&mut sound.packets).await {
+            ServerMsg::Audio(packets) => {
                 assert_eq!(packets, vec![wave], "the wave buffer, unaltered");
             }
             other => panic!("expected audio packets, got {other:?}"),
         }
     }
 
-    /// A repeated request must not leave two pumps on one queue: every packet would
-    /// arrive twice, which is a decoder fault rather than a duplicate.
+    /// A second socket on one claim must not leave two pumps on one queue: every
+    /// packet would arrive twice, which is a decoder fault rather than a duplicate.
     ///
     /// Counted on the queue's subscribers rather than on the socket, because that is
     /// where the invariant lives — and because two pumps racing to send would not
     /// reliably show up as two frames in a row.
     #[tokio::test]
-    async fn enabling_audio_twice_leaves_one_pump() {
+    async fn a_second_audio_socket_supersedes_the_first() {
         let (mgr, hooks) = manager_with_fake_engine();
-        let (mut att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+        let (token, _att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
 
-        mgr.set_audio(att.id, true);
+        let first = mgr.attach_audio(&token).unwrap();
         expect_listeners(&audio, 1).await;
-        mgr.set_audio(att.id, true);
+        let mut second = mgr.attach_audio(&token).unwrap();
         expect_listeners(&audio, 1).await;
 
-        // And the surviving one works: the replacement is a live subscription, not a
-        // handle to a task that was aborted with it.
+        // The first is told, rather than left holding a socket nothing will ever
+        // write to.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), first.evicted)
+                .await
+                .is_ok(),
+            "the superseded socket should have been closed"
+        );
+
+        // And the survivor works: the replacement is a live subscription, not a handle
+        // to a task that was aborted with it.
         audio.wave(one_frame_of_pcm());
-        loop {
-            match recv(&mut att.events).await {
-                // The first pump's format, if it got one out before being aborted.
-                AttachEvent::Msg(ServerMsg::AudioFormat { .. }) => continue,
-                AttachEvent::Msg(ServerMsg::Audio(packets)) => {
-                    assert_eq!(packets.len(), 1);
-                    break;
-                }
-                other => panic!("unexpected {other:?}"),
-            }
-        }
+        expect_opus_format(&mut second.packets).await;
+        assert_eq!(expect_audio(&mut second.packets).await, 1);
     }
 
-    /// Disabling means it: the desktop carries on and the sound stops, which is the
-    /// whole of the FAB's toggle.
+    /// Closing the socket means it: the desktop carries on and the sound stops, which
+    /// is the whole of each client's toggle now that there is no message for it.
     #[tokio::test]
-    async fn disabling_audio_stops_it_with_the_engine_still_running() {
+    async fn closing_the_audio_socket_stops_it_with_the_engine_still_running() {
         let (mgr, hooks) = manager_with_fake_engine();
-        let (mut att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+        let (token, _att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
 
-        mgr.set_audio(att.id, true);
+        let mut sound = mgr.attach_audio(&token).unwrap();
         audio.wave(one_frame_of_pcm());
-        expect_opus_format(&mut att.events).await;
-        assert_eq!(expect_audio(&mut att.events).await, 1);
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
 
-        mgr.set_audio(att.id, false);
+        mgr.detach_audio(sound.id);
         expect_listeners(&audio, 0).await;
 
-        // Nothing sent while off reaches the browser, and this says so without
-        // waiting on an absence: the channel is ordered, so if that buffer had been
-        // forwarded it would arrive *before* the next subscription's format.
+        // Nothing sent while there is no socket reaches the next one, and this says so
+        // without waiting on an absence: a fresh socket's channel starts empty, so a
+        // buffer that had been forwarded would arrive *before* its format.
         audio.wave(one_frame_of_pcm());
-        mgr.set_audio(att.id, true);
-        expect_opus_format(&mut att.events).await;
+        let mut again = mgr.attach_audio(&token).unwrap();
+        expect_opus_format(&mut again.packets).await;
 
         // The engine never noticed any of this.
         assert!(mgr.state.lock().unwrap().engine.is_some());
     }
 
-    /// Nothing to listen to is a no-op rather than an error, on both of its paths:
-    /// the picker has no engine, and a target that did not opt in has no queue. The
-    /// SPA and the viewer both only offer the control when `connected` said `audio`,
-    /// so getting here is a client bug — and one that must not cost the socket anything.
+    /// Nothing to listen to is accepted and silent rather than refused, on both of its
+    /// paths: the picker has no engine, and a target that did not opt in has no queue.
+    ///
+    /// Accepting is the decision being pinned. The socket is bound to the claim, not to
+    /// a source, which is exactly what lets `connect` hand it an engine later — so
+    /// refusing here would make a client that opened audio before picking a target have
+    /// to notice and try again.
     #[tokio::test]
-    async fn asking_for_audio_without_a_source_changes_nothing() {
+    async fn an_audio_socket_with_no_source_is_accepted_and_silent() {
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token).unwrap();
         expect_picker(&mut att.events).await;
 
-        mgr.set_audio(att.id, true);
-        assert!(
-            mgr.state.lock().unwrap().audio_pump.is_none(),
-            "the picker has no audio to subscribe to"
-        );
+        let sound = mgr.attach_audio(&token).unwrap();
+        {
+            let st = mgr.state.lock().unwrap();
+            assert!(st.audio.is_some(), "the socket is held even with nothing to send");
+            assert!(st.audio_pump.is_none(), "the picker has no audio to subscribe to");
+        }
 
         mgr.connect(att.id, "fake").unwrap();
         expect_connected(&mut att.events, "fake").await;
-        mgr.set_audio(att.id, true);
         assert!(
             mgr.state.lock().unwrap().audio_pump.is_none(),
             "a target that did not opt into audio has none to send"
         );
+        drop(sound);
     }
 
-    /// A stale attachment cannot subscribe, for the same reason it cannot inject
-    /// input: an evicted-but-lingering socket must not be able to act on the slot.
+    /// A superseded claim cannot open one, for the same reason a superseded attachment
+    /// cannot inject input: the token is no longer this session's.
     #[tokio::test]
-    async fn a_superseded_attachment_cannot_enable_audio() {
+    async fn an_audio_socket_opened_with_a_superseded_token_is_refused() {
         let (mgr, hooks) = manager_with_fake_engine();
-        let (mut old, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+        let (token_a, mut old, _audio, _engine) = connected_audio_session(&mgr, &hooks).await;
 
-        // A takeover, then the new browser attaching in its place.
-        let token_b = mgr.claim(true, None).unwrap();
+        let _token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut old.events).await, AttachEvent::Evicted));
-        let mut new = mgr.attach(&token_b).unwrap();
-        expect_connected_meta(&mut new.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
 
-        mgr.set_audio(old.id, true);
         assert!(
-            mgr.state.lock().unwrap().audio_pump.is_none(),
-            "the superseded attachment should not have subscribed anything"
+            mgr.attach_audio(&token_a).is_err(),
+            "the old claim should not be able to open an audio socket"
+        );
+    }
+
+    /// The headline behaviour of giving audio its own socket: it outlives the engine,
+    /// so picking a new target hands the same socket the new desktop's sound without
+    /// the browser asking again.
+    ///
+    /// Both bridges are checked, because the failure that matters is not silence but
+    /// *staleness* — a socket left subscribed to the desktop that was switched away
+    /// from would keep playing it.
+    #[tokio::test]
+    async fn a_target_switch_rearms_the_open_audio_socket() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, mut att, first_bridge, _engine) = connected_audio_session(&mgr, &hooks).await;
+
+        let mut sound = mgr.attach_audio(&token).unwrap();
+        first_bridge.wave(one_frame_of_pcm());
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
+
+        mgr.disconnect(att.id);
+        expect_picker(&mut att.events).await;
+        expect_listeners(&first_bridge, 0).await;
+
+        mgr.connect(att.id, "rdp-audio").unwrap();
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        // Held, not dropped: letting the ends go is how a fake engine dies, and this
+        // one has to outlive the assertions below.
+        let second_ends = hooks.try_recv().unwrap();
+        let second_bridge = second_ends
+            .2
+            .clone()
+            .expect("the second engine is given a bridge too");
+
+        // The same socket, a fresh format, and sound off the *new* engine's queue.
+        second_bridge.wave(one_frame_of_pcm());
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
+        expect_listeners(&first_bridge, 0).await;
+        expect_listeners(&second_bridge, 1).await;
+    }
+
+    /// The other half of that lifetime: the audio socket belongs to the claim, so a
+    /// browser whose session socket dropped and came back is still listening.
+    ///
+    /// This is what `attach` no longer calling `stop_audio` buys, and it is why a
+    /// reclaim with the browser's own token must not evict.
+    #[tokio::test]
+    async fn audio_survives_a_main_socket_reattach() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+
+        let mut sound = mgr.attach_audio(&token).unwrap();
+        audio.wave(one_frame_of_pcm());
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
+
+        // The browser's session socket goes and comes back on its own token.
+        mgr.detach(att.id);
+        audio.wave(one_frame_of_pcm());
+        let token_again = mgr.claim(false, Some(&token)).unwrap();
+        let mut back = mgr.attach(&token_again).unwrap();
+        expect_connected_meta(&mut back.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+
+        // Never interrupted: one listener throughout, and the buffer sent while the
+        // session socket was down still arrives.
+        expect_listeners(&audio, 1).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
+    }
+
+    /// The sneaky one. A plain claim succeeds whenever no session socket is attached,
+    /// so a *different* browser can take the slot with no takeover prompt anywhere —
+    /// and it must not inherit the previous one's ears.
+    ///
+    /// Stopping the pump would not be enough: the slot would survive and the next
+    /// `connect` would re-arm it, so the browser that lost the session would start
+    /// hearing the new holder's desktop.
+    #[tokio::test]
+    async fn a_claim_by_a_different_browser_takes_the_audio_socket_with_the_slot() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token_a, att_a, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+
+        let sound_a = mgr.attach_audio(&token_a).unwrap();
+        audio.wave(one_frame_of_pcm());
+        expect_listeners(&audio, 1).await;
+
+        // No force and no token: legal only because the session socket is down.
+        mgr.detach(att_a.id);
+        let token_b = mgr.claim(false, None).unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), sound_a.evicted)
+                .await
+                .is_ok(),
+            "the previous claim's audio socket should have been closed"
         );
         expect_listeners(&audio, 0).await;
+        assert!(mgr.state.lock().unwrap().audio.is_none());
+
+        // And it stays gone across a reconnect, which is where a surviving slot would
+        // have shown itself.
+        let mut att_b = mgr.attach(&token_b).unwrap();
+        expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
+            .await;
+        mgr.disconnect(att_b.id);
+        expect_picker(&mut att_b.events).await;
+        mgr.connect(att_b.id, "rdp-audio").unwrap();
+        expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
+            .await;
+        assert!(
+            mgr.state.lock().unwrap().audio_pump.is_none(),
+            "a closed socket must not be re-armed by the next connect"
+        );
     }
 
-    /// The one lifecycle case the engine's own lifetime cannot express: a takeover
-    /// keeps the desktop running for the new browser, so the previous browser's audio
-    /// has to be ended on purpose.
+    /// A takeover is the same rule with the prompt: the desktop keeps running for the
+    /// new browser, and the previous one stops hearing it.
     #[tokio::test]
     async fn a_takeover_ends_the_audio_while_the_engine_carries_on() {
         let (mgr, hooks) = manager_with_fake_engine();
-        let (mut att_a, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+        let (token_a, mut att_a, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
 
-        mgr.set_audio(att_a.id, true);
+        let mut sound_a = mgr.attach_audio(&token_a).unwrap();
         audio.wave(one_frame_of_pcm());
-        expect_opus_format(&mut att_a.events).await;
+        expect_opus_format(&mut sound_a.packets).await;
         assert_eq!(
-            expect_audio(&mut att_a.events).await,
+            expect_audio(&mut sound_a.packets).await,
             1,
             "this browser's audio should be live before the takeover"
         );
 
         let token_b = mgr.claim(true, None).unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), sound_a.evicted)
+                .await
+                .is_ok(),
+            "the taken-over browser's audio socket should have been closed"
+        );
         expect_listeners(&audio, 0).await;
         assert!(
             mgr.state.lock().unwrap().engine.is_some(),
@@ -1685,31 +1944,30 @@ mod tests {
         );
 
         // The new holder inherits the desktop, and gets audio off the same live queue
-        // once it asks — which it must do for itself: a subscription belongs to an
-        // attachment, and this is a different browser.
+        // once it opens a socket of its own — which it must, on its own claim.
         let mut att_b = mgr.attach(&token_b).unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
             .await;
-        mgr.set_audio(att_b.id, true);
+        let mut sound_b = mgr.attach_audio(&token_b).unwrap();
         audio.wave(one_frame_of_pcm());
-        expect_opus_format(&mut att_b.events).await;
-        assert_eq!(expect_audio(&mut att_b.events).await, 1);
+        expect_opus_format(&mut sound_b.packets).await;
+        assert_eq!(expect_audio(&mut sound_b.packets).await, 1);
     }
 
     /// Every way an engine ends takes its audio with it, with nothing in those paths
     /// having to know about audio: they all go through `take_engine`, which stops the
-    /// pump.
+    /// pump. The *socket* stays, because the claim did — that is what
+    /// `a_target_switch_rearms_the_open_audio_socket` then goes on to use.
     ///
     /// The subscriber count is the assertion rather than a silent socket, and for a
     /// reason worth keeping: the queue outlives the slot by however long the engine
     /// takes to notice its input channel closed, so "the bridge was dropped" would be
     /// testing something that has not happened yet.
     #[tokio::test]
-    async fn ending_the_engine_ends_the_audio() {
+    async fn ending_the_engine_ends_the_audio_but_not_the_socket() {
         #[allow(clippy::type_complexity)]
-        let ways: [(&str, Box<dyn Fn(&Arc<SessionManager>, u64)>); 3] = [
+        let ways: [(&str, Box<dyn Fn(&Arc<SessionManager>, u64)>); 2] = [
             ("switch target", Box::new(|mgr: &Arc<SessionManager>, id| mgr.disconnect(id))),
-            ("log out", Box::new(|mgr: &Arc<SessionManager>, _| mgr.log_out())),
             (
                 "heartbeat expiry",
                 Box::new(|mgr: &Arc<SessionManager>, id| mgr.expire_attachment(id)),
@@ -1717,22 +1975,77 @@ mod tests {
         ];
         for (what, end_it) in ways {
             let (mgr, hooks) = manager_with_fake_engine();
-            let (mut att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
-            mgr.set_audio(att.id, true);
+            let (token, att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+            let mut sound = mgr.attach_audio(&token).unwrap();
             audio.wave(one_frame_of_pcm());
-            expect_opus_format(&mut att.events).await;
+            expect_opus_format(&mut sound.packets).await;
             assert_eq!(
-                expect_audio(&mut att.events).await,
+                expect_audio(&mut sound.packets).await,
                 1,
                 "{what}: the audio should be live before the engine ends"
             );
 
             end_it(&mgr, att.id);
             expect_listeners(&audio, 0).await;
+            let st = mgr.state.lock().unwrap();
+            assert!(st.audio_pump.is_none(), "{what} left the audio pump behind");
             assert!(
-                mgr.state.lock().unwrap().audio_pump.is_none(),
-                "{what} left the audio pump behind"
+                st.audio.is_some(),
+                "{what} closed the audio socket, which belongs to the claim and not the engine"
             );
         }
+    }
+
+    /// The one way that *does* take the socket, because it is the one that ends the
+    /// claim the socket attached to.
+    #[tokio::test]
+    async fn logging_out_closes_the_audio_socket() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, _att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
+        let mut sound = mgr.attach_audio(&token).unwrap();
+        audio.wave(one_frame_of_pcm());
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
+
+        mgr.log_out();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), sound.evicted)
+                .await
+                .is_ok(),
+            "a log out closes the audio socket"
+        );
+        expect_listeners(&audio, 0).await;
+        let st = mgr.state.lock().unwrap();
+        assert!(st.audio_pump.is_none());
+        assert!(st.audio.is_none());
+    }
+
+    /// An engine that died on its own leaves the socket armable: the browser is still
+    /// there, still holds the claim, and picking another target resumes its sound.
+    #[tokio::test]
+    async fn engine_death_leaves_the_audio_socket_armable() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let (token, mut att, audio, engine) = connected_audio_session(&mgr, &hooks).await;
+        let mut sound = mgr.attach_audio(&token).unwrap();
+        audio.wave(one_frame_of_pcm());
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
+
+        // The engine ends of its own accord: dropping its channel ends is how the fake
+        // one dies, and the pump notices and returns the slot to the picker.
+        drop(engine);
+        expect_picker(&mut att.events).await;
+        expect_listeners(&audio, 0).await;
+
+        mgr.connect(att.id, "rdp-audio").unwrap();
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        let revived_ends = hooks.try_recv().unwrap();
+        let revived = revived_ends
+            .2
+            .clone()
+            .expect("the replacement engine is given a bridge");
+        revived.wave(one_frame_of_pcm());
+        expect_opus_format(&mut sound.packets).await;
+        assert_eq!(expect_audio(&mut sound.packets).await, 1);
     }
 }

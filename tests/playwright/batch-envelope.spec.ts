@@ -108,6 +108,13 @@ test.describe("v3 batch envelope", () => {
     const badKinds: number[] = [];
 
     page.on("websocket", (ws) => {
+      // The page opens two sockets, and only one of them carries pixels: sound has
+      // `/ws/audio` to itself. Watching both would fail the assertion below on an
+      // audio frame's 0x03, which would be the wrong reading entirely — audio never
+      // appearing here is precisely what this change bought.
+      if (new URL(ws.url()).pathname !== "/ws") {
+        return;
+      }
       ws.on("framereceived", ({ payload }) => {
         // Text frames are the control channel and stay JSON; only binary frames
         // are the envelope under test.

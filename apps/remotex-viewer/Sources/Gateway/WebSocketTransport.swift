@@ -24,6 +24,9 @@ protocol WebSocketTransport: Sendable {
 protocol SessionGateway: Sendable {
     func claimSession(force: Bool, sessionId: String?) async throws -> ClaimOutcome
     func openSocket(sessionToken: String) async throws -> any WebSocketTransport
+    /// Sound, on a socket of its own so it never queues behind a picture. Opening it
+    /// *is* the subscription — see `/ws/audio` in src/ws.rs.
+    func openAudioSocket(sessionToken: String) async throws -> any WebSocketTransport
 }
 
 /// `URLSessionWebSocketTask` behind the protocol.

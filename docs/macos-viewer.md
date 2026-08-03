@@ -464,6 +464,13 @@ boundary — set per target on the gateway currently in use.
 gateway owns the wire format and bounded audio queue; the app owns the
 *subscription* (`AudioControl`) and the canvas page owns decoding and playback.
 
+The subscription is a **second WebSocket**, `/ws/audio`, not a message: opening it
+subscribes and closing it stops, exactly as in the browser client. Sound never queues
+behind pictures on the way in as a result — and it does not on the way to the page
+either, because `CanvasServer` exempts audio envelopes from the frame-backlog ceiling
+that drops tiles. A dropped tile is replaced by the re-prime; a dropped wave buffer is
+a hole nothing asks for again.
+
 Like **Auto Resize**, the toggle writes a **remembered** default — the same value
 the picker's *Play the remote's sound, if compatible* toggle edits
 (`ViewerPreferences.audioByDefault`). When it is on, a pick or takeover of a
@@ -479,7 +486,7 @@ browser does the same on its tab title, but at the front, where a truncated-from
 the-right tab title keeps it visible.
 
 Decoding is WebCodecs, through the browser client's own `audioPlayer.ts` and
-`audioSchedule.ts` — the same 0.1-second start cushion and 0.3-second latency
+`audioSchedule.ts` — the same 0.5-second start cushion and 1.5-second latency
 ceiling, and the same trim when the ceiling is exceeded. The `audioFormat`
 control message is forwarded to the page whole, `OpusHead` included, because that
 is where the pre-skip is. Nothing on the Swift side reads the codec: it has no
@@ -491,7 +498,11 @@ from `connected`. This is also the one place the secure-context requirement in
 [The canvas](#the-canvas) is load-bearing: without it there is no `AudioDecoder`,
 and the failure is silence.
 
-An ordinary reconnect reasserts the subscription; a target switch clears it.
+An ordinary reconnect reopens the audio socket without being asked; a target switch
+clears the answer and closes it. Closing matters more than it used to: the gateway
+keeps its half of the subscription across a target switch — it belongs to the claim
+now — so a switch that means to go silent has to say so, or the next `connect` arms a
+stream nobody wants.
 
 A page that cannot play what arrived reports it, which raises the alert and
 unsubscribes — packets decoded by nothing are bytes spent on nothing. Neither

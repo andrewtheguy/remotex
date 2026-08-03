@@ -669,8 +669,8 @@ final class AppModel: GatewaySessionSink {
         clipboard.send = { [weak connection] message in
             connection?.send(message)
         }
-        audio.send = { [weak connection] message in
-            connection?.send(message)
+        audio.subscribe = { [weak connection] on in
+            Task { await connection?.setAudio(on) }
         }
         // The local audio device refusing is worth an alert: the user pressed Enable
         // Audio and nothing happened, and this is the only failure on that path a
@@ -698,7 +698,7 @@ final class AppModel: GatewaySessionSink {
         connection = nil
         clipboard.send = nil
         clipboard.update(enabled: false)
-        audio.send = nil
+        audio.subscribe = nil
         audio.report = nil
         audio.reset()
         audio.stopPlayback = nil

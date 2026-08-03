@@ -86,6 +86,22 @@ export function cursorImage(remote: RemoteCursor | null): CursorImage | null {
   return remote.image ?? fallbackCursor();
 }
 
+/// The CSS `cursor` for a surface with no cursor image to draw — which is two
+/// different situations that must not be answered the same way.
+///
+/// **With a desktop on screen**, `none` is right: RDP and any VNC server that
+/// ignores the Cursor pseudo-encoding composite their pointer into the framebuffer,
+/// so showing the local one too would draw two.
+///
+/// **With no desktop**, hiding it is a bug, and one that outlives the desktop: the
+/// macOS viewer keeps its web view mounted under the target picker so the framebuffer
+/// survives a trip there and back, so a page still claiming `none` leaves the person
+/// choosing a target with no pointer at all. The pointer belongs to whatever is drawn
+/// over the page, and it has to be given back.
+export function bareCursorCss(hasDesktop: boolean): string {
+  return hasDesktop ? "none" : "default";
+}
+
 // Scale a framebuffer-pixel cursor with image-set resolution. Keep a plain URL
 // fallback because unsupported image-set values are rejected as a whole.
 export function applyCursorCss(
