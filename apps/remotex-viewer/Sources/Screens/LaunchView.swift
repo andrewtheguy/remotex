@@ -69,15 +69,6 @@ struct LaunchView: View {
             HStack {
                 Button("Configuration…", action: editConfiguration)
                     .disabled(!model.canEditConfiguration)
-                // The other fix, and for some failures the only one: a gateway in
-                // this bundle that will not start is not a reason to be stuck, when
-                // there may be one elsewhere that works. Escape, as going back a step
-                // is everywhere else in the app.
-                Button("Change Gateway…") {
-                    Task { await model.changeGateway() }
-                }
-                .keyboardShortcut(.cancelAction)
-                .disabled(!model.canChangeGateway)
                 Spacer()
                 Button(model.isBusy ? "Starting…" : "Try Again") {
                     Task { await model.relaunchGateway() }

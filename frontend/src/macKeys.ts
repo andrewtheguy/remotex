@@ -11,16 +11,17 @@
 //
 // What differs from the viewer, and why:
 //
-//   - **Five chords are missing from the table.** The viewer also maps Command
-//     plus L, N, O, T and W, because `NSEvent.addLocalMonitorForEvents` sees
-//     every chord the app is given. A web page does not: Command-W closes the
-//     tab, Command-T and Command-N open one, Command-L goes to the address bar
-//     and Command-O opens a file dialog, and `preventDefault()` does not reach
-//     any of them in either Chrome or Safari. Mapping them would not send
-//     Control-W to the guest, it would end the session — strictly worse than
-//     leaving them alone. Command-R is preventable and was still left out: it
-//     would work until some browser version where it doesn't, and the failure is
-//     the SPA reloading out from under a live session.
+//   - **Six chords are only in the table for one host.** Command plus L, N, O,
+//     R, T and W are mapped when this page runs inside `remotex.app`, whose
+//     AppKit local monitor sees every chord the app is given, and not when it runs
+//     in a browser. A browser does not get them: Command-W closes the tab,
+//     Command-T and Command-N open one, Command-L goes to the address bar and
+//     Command-O opens a file dialog, and `preventDefault()` does not reach any of
+//     them in either Chrome or Safari. Mapping them there would not send Control-W
+//     to the guest, it would end the session — strictly worse than leaving them
+//     alone. Command-R is preventable and is still left out of the browser's set:
+//     it would work until some browser version where it doesn't, and the failure
+//     is the SPA reloading out from under a live session. See the constructor.
 //   - **Shift, Control and Option are told apart from ordinary keys.** AppKit
 //     reports them as `flagsChanged`, a branch that never reaches the viewer's
 //     `translateKey`; a browser reports them as ordinary key events. Without the
@@ -66,6 +67,25 @@ const COMMAND_MAPS_TO_CONTROL: ReadonlySet<string> = new Set([
   "KeyV", // paste
   "KeyX", // cut
   "KeyZ", // undo
+]);
+
+// The six the header says a browser never receives, added back for the one host
+// that does receive them.
+//
+// `remotex.app` captures keys with an AppKit local monitor ahead of the menu bar,
+// so ⌘W does not close anything and ⌘L does not go anywhere — the app is given the
+// chord and hands it here. That is the whole difference between the two clients'
+// keyboards, and it is why this is one set rather than a second translator: the
+// state machine, the bare-Command tap and the release bookkeeping are all the same
+// code, tested once.
+const COMMAND_MAPS_TO_CONTROL_NATIVE: ReadonlySet<string> = new Set([
+  ...COMMAND_MAPS_TO_CONTROL,
+  "KeyL", // address bar in a browser; focus/lock in a guest
+  "KeyN", // new window
+  "KeyO", // open
+  "KeyR", // reload
+  "KeyT", // new tab
+  "KeyW", // close
 ]);
 
 const META_CODES: ReadonlySet<string> = new Set(["MetaLeft", "MetaRight"]);
@@ -117,6 +137,18 @@ export class MacKeyboardTranslator {
   // sent for the same code and the synthetic Control is lifted after the last.
   private translatedCommandKeys = new Set<string>();
   private syntheticControlHeld = false;
+  private readonly mappedChords: ReadonlySet<string>;
+
+  /// `capturesEveryChord` is the host's answer to "am I given ⌘W?" — false for a
+  /// browser, true for `remotex.app`, which takes keys before the menu bar. It
+  /// selects the chord table and changes nothing else: a chord outside the table is
+  /// forwarded as Meta either way, so the two hosts differ in what they can offer
+  /// rather than in how they behave.
+  constructor(capturesEveryChord = false) {
+    this.mappedChords = capturesEveryChord
+      ? COMMAND_MAPS_TO_CONTROL_NATIVE
+      : COMMAND_MAPS_TO_CONTROL;
+  }
 
   /// Translate one event into what should go on the wire, in order.
   ///
@@ -222,7 +254,7 @@ export class MacKeyboardTranslator {
     if (CHORD_MODIFIERS.has(code)) {
       return [{ code, pressed, caps }];
     }
-    if (pressed && meta && COMMAND_MAPS_TO_CONTROL.has(code)) {
+    if (pressed && meta && this.mappedChords.has(code)) {
       return this.beginTranslatedChord(code, caps);
     }
     if (!pressed && this.translatedCommandKeys.delete(code)) {

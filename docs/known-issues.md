@@ -51,6 +51,41 @@ drag that used to walk into it repeatedly now cannot.
 What would move it: a packet capture of a failing sequence, to say what actually
 arrived where the expected PDU should have been.
 
+## RDP: the remote's audio channel can drop and come back on its own
+
+Seen once, on a Mac VM with no audio hardware, against an `audio = true` RDP
+target with nobody subscribed:
+
+```text
+04:29:09  audio: negotiated 44100 Hz, 2 channel(s), 16-bit PCM
+04:29:10  rdp: the remote is redirecting audio over the static channel
+04:30:39  audio: negotiated 44100 Hz, 2 channel(s), 16-bit PCM
+04:30:39  rdp: the remote is redirecting audio over the static channel
+```
+
+Both lines log only on a *change* — `publish_format` compares before it says
+anything, and `clear_format` is what puts the format back to `None` — so this is
+the channel genuinely going away and being re-established ninety seconds later,
+not one event logged twice.
+
+**It costs nothing today, which is why it is a note rather than work.** No client
+was listening, and one that had been would have seen the same format announced
+again; `arm_audio` is not re-run and the decoder it configured still describes
+what arrives.
+
+What it is not: a client bug. `session: an audio socket attached` never appeared
+in that run, so nothing had subscribed — and the gateway installs no pump without
+a subscriber (`arm_audio`), so no sound crossed the client link either way. What
+the remote sends the *gateway* is a different question: MS-RDPEA is negotiated at
+connect whenever the target says `audio = true`, so a remote redirects its sound
+into a gateway that discards it until somebody asks. That is bandwidth on the
+remote link, and it is deliberate only in the sense that nobody has needed it
+otherwise.
+
+What would move it: the same target on a host that *has* an audio device, to say
+whether the flap is about the missing hardware or about the channel; and a
+subscriber attached across one, to say whether a listener notices.
+
 ## Apple High Performance: a resize can leave the screen wrong
 
 `subtype = "ard-high-performance"` with `resize = true` renegotiates the virtual

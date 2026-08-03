@@ -627,9 +627,9 @@ pub const DEFAULT_BRANDING: &str = "remotex";
 /// - a [`Self::Served`] gateway is useless without a target to offer and a
 ///   credential to guard it, and it is told where to listen;
 /// - an [`Self::Embedded`] one is started by `remotex.app` with the port, the
-///   secret and the (absent) web root decided by the app, so a `[server]` block
-///   could only contradict it — and it must come up with **no targets at all**,
-///   because that is what a first launch has and the picker's job is to say so.
+///   secret and the web root decided by the app, so a `[server]` block could only
+///   contradict it — and it must come up with **no targets at all**, because that
+///   is what a first launch has and the picker's job is to say so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Audience {
     /// `remotex serve`: a browser's gateway, and the macOS agent's peer.
@@ -676,13 +676,12 @@ pub struct AppConfig {
     /// the listener and told to its client, never guessed.
     pub port: u16,
     /// Directory holding the built frontend (index.html + assets), served from
-    /// disk. Defaults to [`default_static_dir`].
+    /// disk. Defaults to [`default_static_dir`] for a served gateway; an embedded
+    /// one is told where its bundle keeps it (`--web-root`).
     ///
-    /// `None` means **there is no web UI**, and it is not a fallback for a
-    /// directory that turned out to be missing: an embedded gateway ships no SPA
-    /// on purpose, so it serves none rather than 404ing its way through one. Every
-    /// path outside `/api` and `/ws` is a 404 (see [`crate::server::router`]).
-    pub static_dir: Option<PathBuf>,
+    /// Every gateway has one, because every client is the same SPA: the browser
+    /// loads it over the network and `remotex.app` loads it from loopback.
+    pub static_dir: PathBuf,
     /// Every target profile this process serves; the post-login picker selects
     /// one. Non-empty for [`Audience::Served`]; possibly empty for an embedded
     /// gateway, whose client shows "no targets are configured" instead.
@@ -1025,21 +1024,26 @@ impl ConfigFile {
     }
 
     /// Resolve the runtime configuration of the gateway inside `remotex.app`:
-    /// loopback, an ephemeral port, no web UI, and a freshly minted token.
+    /// loopback, an ephemeral port, the SPA out of the app's bundle, and a freshly
+    /// minted token.
     ///
-    /// Every one of those is a constant here rather than a default that
+    /// Every one of those is an argument here rather than a default that
     /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
     /// the way in. `branding` is the one thing such a config *may* say about the
     /// gateway itself, because it is about the app rather than about the server: it
     /// names a window, not a deployment, and two instances on one Mac are easier to
     /// tell apart if they can be called different things.
-    pub fn resolve_embedded(self, token: EmbeddedToken) -> anyhow::Result<AppConfig> {
+    pub fn resolve_embedded(
+        self,
+        token: EmbeddedToken,
+        web_root: PathBuf,
+    ) -> anyhow::Result<AppConfig> {
         Ok(AppConfig {
             // Not `localhost`: that name resolves to both loopbacks and the client
             // is told one port on one address. The app connects to 127.0.0.1.
             host: "127.0.0.1".to_owned(),
             port: 0,
-            static_dir: None,
+            static_dir: web_root,
             targets: self.targets,
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_deref()),
@@ -1078,7 +1082,7 @@ impl ConfigFile {
         Ok(AppConfig {
             host: server.host.unwrap_or_else(|| "127.0.0.1".to_owned()),
             port: server.port.unwrap_or(52380),
-            static_dir: Some(server.static_dir.unwrap_or_else(default_static_dir)),
+            static_dir: server.static_dir.unwrap_or_else(default_static_dir),
             // Non-empty is guaranteed by `parse`.
             targets: self.targets,
             auth: GatewayAuth::Login(site_passwd),
@@ -1177,6 +1181,30 @@ fn installed_etc_dir() -> Option<PathBuf> {
         return None;
     }
     Some(versions_dir.parent()?.join("etc"))
+}
+
+/// Say so, before binding, when the web root is not one.
+///
+/// The SPA handler still answers per request, so this changes nothing about what
+/// happens — it changes whether anyone can tell *why*. A gateway with no page to
+/// serve is a browser tab showing a 404, or `remotex.app` showing a blank window,
+/// and neither says which of the two ends is wrong.
+///
+/// `hint` is the half that differs: a served gateway is told where to look in its
+/// config, and an embedded one is told this path came from its own bundle — the
+/// config it reads has no key for it and `[server]` is refused there.
+pub fn warn_if_no_web_root(static_dir: &Path, hint: &str) {
+    if !static_dir.is_dir() {
+        log::warn!(
+            "static dir {} not found — the web UI will 404 ({hint})",
+            static_dir.display()
+        );
+    } else if !static_dir.join("index.html").is_file() {
+        log::warn!(
+            "no index.html in static dir {} — the web UI will 404 ({hint})",
+            static_dir.display()
+        );
+    }
 }
 
 /// Default location of the built frontend.
@@ -1399,7 +1427,7 @@ mod tests {
         let config = config.resolve().unwrap();
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 8080);
-        assert_eq!(config.static_dir, Some(PathBuf::from("/srv/web")));
+        assert_eq!(config.static_dir, PathBuf::from("/srv/web"));
         // Every profile is carried over, in file order, for the picker.
         assert_eq!(config.targets.len(), 2);
         let win = &config.targets[0];

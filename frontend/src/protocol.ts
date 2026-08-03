@@ -63,6 +63,10 @@ export type ClientMsg =
   | { type: "clipboardRequest" }
   // Select an opaque id from the latest `displays` message.
   | { type: "selectDisplay"; id: number }
+  // Re-announce the desktop size and repaint everything. A recovery command for
+  // a canvas that has gone wrong, offered by `remotex.app`'s Remote menu; the
+  // browser has no button for it, since there is a reload right there.
+  | { type: "refresh" }
   // "I lost the tiles you told me to remember." Sent when a cached tile will not
   // decode, or when a reference names a slot this client does not hold. The
   // server empties its slot table and repaints; deliberately not "refresh",

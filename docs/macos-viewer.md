@@ -1,65 +1,83 @@
 # remotex.app
 
-`remotex.app` is a native macOS 26 client. It can start its bundled gateway or
-connect to a remote one. It owns the gateway session — target selection, the
-claim, reconnection, takeover — plus the menu bar, keyboard capture, pasteboard
-synchronization, and the window.
+`remotex.app` is a native macOS 26 client, and it is a **shell**. It starts the
+gateway in its own bundle, shows the SPA that gateway serves, and owns everything
+around it: the menu bar, keyboard capture, pasteboard synchronization, and the
+window.
 
-The remote surface inside that window is a `WKWebView`, and only that. See
-[The canvas](#the-canvas): the app hands it wire frames and it draws them,
-sharing the browser client's decoding rather than reimplementing it. Everything
-above the surface is native; nothing about the session is the page's.
+Inside the window is a `WKWebView` and nothing else. The page is
+`frontend/dist` — the same build a browser loads — served over loopback by
+`Contents/MacOS/remotex-gateway`. So the client has one implementation, in one
+language, and this app is what a browser cannot be:
 
-The two gateways are the app's first question, asked on the `home` screen at every
-launch with the last answer preselected:
+| what it adds | why a page cannot |
+|---|---|
+| every ⌘ chord, ⌘Q and ⌘W included | a browser keeps them; `preventDefault()` does not reach them |
+| `NSPasteboard` in both directions | reading on a timer and writing without a gesture are both refused |
+| **Resize to Display** | a page cannot size the window it is in |
+| a real menu bar | — |
+| sound with no click in the page first | `mediaTypesRequiringUserActionForPlayback` is the app's to set |
 
-| | the embedded gateway | a remote gateway |
-|---|---|---|
-| where it runs | in this bundle, started at launch | wherever it was installed |
-| address | an ephemeral loopback port it picks | typed, and remembered once it answers |
-| credential | a bearer token nobody types | a persisted login cookie obtained from a username and password |
-| who reaches the target | this Mac | that gateway |
-| **Configuration…** | edits this instance's config | not shown — it is that gateway's |
+There is one gateway, in this bundle. A gateway elsewhere is reached with a
+browser, which is what a browser is for.
 
-Use the embedded gateway when this Mac directly reaches the targets. Across a
-slow link, run the gateway near the targets and choose the remote gateway.
-
-Both choices use the same `/api/config`, `/api/targets`, `/api/session`, and `/ws`
-contracts. Only the credential header differs; see `GatewayCredential`. Any
-other behavioral difference between them is a bug.
-
-The client has no RDP or VNC implementation. Engine-specific behavior is
-reported by the gateway, with resize policy as the only client-side branch.
-Whether the remote is a Mac is likewise discovered from the gateway's
-`remoteOs` message and affects only keyboard conventions.
-
-The bundle holds two executables and the remote surface:
+The bundle holds two executables and the client:
 
 | path | what it is |
 |---|---|
 | `Contents/MacOS/remotex-viewer` | the Swift app (`CFBundleExecutable`) |
 | `Contents/MacOS/remotex-gateway` | a copy of the `remotex` gateway binary |
-| `Contents/Resources/canvas` | the canvas page — see [The canvas](#the-canvas) |
-
-`canvas` is not the SPA and not a web UI: the embedded gateway still serves
-nothing, and an `index.html` in this bundle would mean it had started to (which
-`release.yml` checks).
+| `Contents/Resources/web` | the built SPA, served by the gateway above |
 
 `CFBundleIdentifier` remains `dev.remotex.viewer`; TCC grants and saved window
 state are keyed to it.
 
 ## The embedded gateway
 
-`remotex serve-embedded --instance-dir <dir>` serves only its parent app and dies
-with it. `src/embedded.rs` and `config::Audience` fix its server settings:
+`remotex serve-embedded --instance-dir <dir> --web-root <dir>` serves only its
+parent app and dies with it. `src/embedded.rs` and `config::Audience` fix its
+server settings:
 
 | | |
 |---|---|
 | address | `127.0.0.1`, one socket |
 | port | `0`, read back off the socket after binding |
-| web UI | none. No `ServeDir`, no index handler; `/` is a 404 |
-| login | refused. `/api/auth/*` answers 403 |
-| credential | a random bearer token minted per launch, held only by the app and gateway in memory |
+| web UI | the SPA in this bundle, named by `--web-root` |
+| login | refused. `/api/auth/login` and `/api/auth/logout` answer 403 |
+| credential | a random token minted per launch, presented as the `remotex_session` cookie |
+
+`--web-root` is passed rather than derived because nothing about a bundle's
+layout is the gateway binary's to know: `default_static_dir()` finds an installed
+prefix or a cwd-relative checkout, and inside `Contents/MacOS` neither applies.
+
+### The cookie
+
+The app puts the launch token in the web view's cookie store before the first
+load, and waits for the store to answer before loading — a document that arrives
+first arrives unauthenticated.
+
+A cookie and not the `Authorization` header this app used to send, because the
+requests that matter are not the app's. The page issues its own `fetch` calls and
+opens its own `ws://` sockets, and neither can be given a header from outside the
+document. `require_auth` therefore reads the same cookie on both kinds of
+gateway and differs only in what makes the value valid: a session lookup for a
+login gateway, a constant-time compare against the launch token here.
+
+`/api/auth/status` answers on both, because the same SPA asks it first on both.
+An answer of "no" means the gateway and the app disagree about the token, which
+no login form can fix — the page reports it and the app takes the screen back.
+
+The web view gets a data store of this instance's own — `WKWebsiteDataStore(forIdentifier:)`,
+keyed off a UUID derived from the instance directory — and a **persistent** one.
+The client keeps its three remembered preferences in `localStorage`, so a
+non-persistent store forgets the Command-translation override and both "if
+compatible" defaults at every launch, silently. WebKit keeps that store in the
+app's container rather than in the instance directory, which is why the
+identifier has to come from the directory: it is what makes `--instance-dir`
+isolate preferences the way it isolates the config and the log.
+
+The cookie in it is replaced at every launch by that launch's token, and the claim
+lives in `sessionStorage`, which is per web view whatever the store does.
 
 ### Process pipes
 
@@ -99,14 +117,13 @@ directory; `/opt/remotex` is never consulted.
 |---|---|
 | `remotex.toml` | the only thing a user edits, mode `0600` |
 | `gateway.log` | the gateway's stderr, appended across launches |
-| `viewer.json` | client preferences |
 
-Preferences use `viewer.json`, not `UserDefaults`, so `--instance-dir` isolates
-them during QA. A `UserDefaults` suite remains in the user's Preferences directory
-regardless of the supplied instance directory.
+There is no `viewer.json` any more. The three remembered preferences — the
+Command-translation override and the two "if compatible" defaults — belong to the
+client, in its own `localStorage`, in the per-instance data store described above.
 
-A first launch writes a commented zero-target template, which is valid; the picker
-states that there is nothing to connect to.
+A first launch writes a commented zero-target template, which is valid; the
+picker states that there is nothing to connect to.
 
 ### Configuration
 
@@ -127,8 +144,12 @@ screen. It is the one shared spelling for embedded and served gateways;
 
 Because `commandsReplaced` removes the standard app menu, `RemoteCommands`
 restores **About** explicitly. It uses the configured branding and shows
-`CFBundleShortVersionString`, the wire protocol version, and the instance
-directory, with Reveal in Finder.
+`CFBundleShortVersionString` and the instance directory, with Reveal in Finder.
+
+There is no wire-protocol version in it. The client and the gateway are built
+together and shipped in one bundle, so there is no pair of versions that could
+disagree — the check that used to run before every session is gone with the
+session this app used to own.
 
 ## Running more than one instance
 
@@ -146,9 +167,9 @@ own bundle identifier, name, icon, and default instance directory.
 LaunchServices supplies no arguments on double-click, and `open` without `-n`
 discards `--args` when reactivating an app. Reading the instance directory from
 `CFBundleName` (`InstanceDirectory.defaultURL`) therefore makes each variant
-independently launchable. A wrapper
-could carry `--instance-dir`, but the Dock would show the base app rather than the
-instance. Keep `--instance-dir` only as a QA override.
+independently launchable. A wrapper could carry `--instance-dir`, but the Dock
+would show the base app rather than the instance. Keep `--instance-dir` only as a
+QA override.
 
 ### What a variant costs
 
@@ -176,225 +197,120 @@ branding = "Work"
 The bundle name identifies the app; `branding` identifies its content.
 
 Each instance starts with an independent empty configuration and an isolated
-port, log, and preference file.
-
-## Protocol compatibility
-
-Before opening a session, the client requires `GET /api/config`'s
-`protocolVersion` to match `PROTOCOL_VERSION` in `src/protocol.rs`. A mismatch is
-reported on the launch screen. For an embedded gateway it indicates a broken build.
-
-The version covers client messages, control messages, and binary frame layouts.
-Unknown additive control messages are ignored, but a change that makes an older
-peer fail without a useful error requires a version bump.
-
-Contract tests protect both sides:
-
-- `ProductInfoTests` compares the Swift protocol version with the Rust constant;
-- `WireContractTests` compares the Rust message tags with the tags handled by
-  the viewer;
-- `ServerMessage` tests reuse the JSON literals pinned by the Rust protocol
-  tests.
+port and log.
 
 ## Entry and session lifecycle
 
-`ViewerScreen` has `home`, `login`, `launching`, `picker`, and `desktop` states.
+`ViewerScreen` has two cases, and the second one is a web view.
 
-The embedded branch is `home` → `launching` → `picker`. `launching` shows a
-spinner or gateway stderr with **Configuration…**, **Change Gateway…**, and
-**Try Again**. An unexpected gateway exit returns there without an automatic
-restart loop.
+`launching` is a spinner that occasionally becomes a message: the gateway's
+stderr with **Configuration…** and **Try Again**. Everything else — the login the
+gateway refuses, the target picker, the desktop, the takeover interstitial, the
+reconnect backoff — belongs to the client, which is the same client a browser
+runs and is documented in [`architecture.md`](architecture.md).
 
-The remote branch is `home` → `login` → `picker`, skipping `login` for a valid
-stored cookie. `home` verifies reachability and protocol compatibility. A `403`
-from `/api/auth/status` identifies an embedded gateway and is rejected instead
-of presenting an unusable login form.
+The app returns to `launching` from exactly three places: the gateway failing to
+start, the gateway exiting while it was in use, and the page reporting that the
+gateway would not take the launch token. All three are conditions no page can do
+anything about.
 
-**Change Gateway…** returns to `home`; for a remote gateway it also logs out and
-releases the session slot.
+## The bridge
 
-Authentication and session ownership stay separate, as before:
+One `WKScriptMessageHandler` named `remotexNative`, and one `evaluateJavaScript`
+call. That is the whole app-to-client protocol; `frontend/src/nativeHost.ts` is
+its other half, and `NativeBridgeTests` pins the JSON both ways.
 
-- the credential authorizes this client to the gateway;
-- the claim token owns the program's one active session slot.
+**Page → app** — `state`, `clipboardFromRemote`, `unauthenticated`.
 
-A remote `401` drops the stored cookie and returns to `login`. An embedded token
-is valid for the lifetime of the process that minted it, so an embedded `401`
-means the process no longer recognizes its launch token; the app restarts it once,
-then returns to `launching` rather than looping.
+`state` is one object carrying the mode, the connection status, whether a frame
+has arrived, the remote's size and density, the capability flags, the display
+list, and the keyboard-override verdict. Every menu title, tick and enabled state
+is derived from it and from nothing else. Nothing in the app is ever set
+optimistically: a tick moves when the client says the thing changed, not when the
+item was pressed, so a menu cannot claim a capability the thing on screen does
+not have.
 
-`SessionStateMachine` implements claim, attach, reconnect and takeover as a pure state
-machine. Network reconnects use capped exponential backoff up to 15 seconds. A busy
-slot and a session taken over by another client wait for an explicit user decision
-because resolving either case may evict the current owner.
+It decodes field by field with defaults rather than through the synthesized
+decoder, because a page part way through a navigation posts what it has — and the
+answer to a missing field is "nothing is connected", not a decode failure that
+leaves the menus describing the session before it.
 
-The reconnect backoff resets after a control message proves that the connection
-is usable, not merely when the WebSocket opens. Any interruption clears the
-framebuffer and releases held input; the gateway requests a full repaint when a
-client attaches again.
+**App → page** — `key`, `releaseInput`, `clipboardLocal`, and the menu commands:
+`openClipboard`, `openDisplays`, `closePanel`, `resizeToWindow`, `setAutoResize`,
+`selectDisplay`, `setAudio`, `setMacKeyOverrides`, `refresh`, `switchTarget`,
+`takeOver`, `sendKeyCombo`.
 
-## The canvas
+Commands are JSON, encoded and never interpolated. Text copied off a remote
+desktop reaches this app through the clipboard bridge and then goes into a
+JavaScript call; a remote that copies a closing paren is not entitled to run
+anything in this window.
 
-The remote surface is a web page — `frontend/src/viewer`, built by
-`bun run build:viewer` into `Contents/Resources/canvas` — shown in a `WKWebView`.
-It draws tiles to a 2D canvas, wears the remote cursor as a CSS cursor, decodes
-Opus and H.264 with WebCodecs, and scrolls an oversized desktop with the browser's
-own scrollbars. It shares `protocol.ts`, `tilePainter.ts`, `cursorCss.ts`,
-`videoDecoder.ts` and `audioPlayer.ts` with the browser client, so the wire format
-has one implementation and both clients read it.
+The call is a `?.` chain, because the page installs its entry point when the
+desktop mounts and removes it when that unmounts — a menu item pressed a moment
+either side of a target switch has to find nothing and do nothing.
 
-It owns nothing else. There is no session, no gateway socket and no claim in the
-page; it is handed frames and it reports pointer input.
+The document's origin is `http://127.0.0.1:<port>`, which is what makes WebCodecs
+available: loopback is potentially trustworthy, so the page is a **secure
+context** and Opus and H.264 decode. It is also the gateway's own origin, so the
+page talks to it directly and nothing about the session passes through this app.
+`WKNavigationDelegate` refuses a navigation anywhere else.
 
-### The loopback bridge
-
-`CanvasServer` is an `NWListener` bound to `127.0.0.1` on an ephemeral port, with
-a random path prefix minted per launch — the same split as the embedded gateway's
-bearer token, and for the same reason: the port is not a secret and the token is.
-It serves the page and one held-open `GET /<token>/frames`.
-
-The document's origin is therefore `http://127.0.0.1:<port>`, which is what makes
-this work at all. Loopback is potentially trustworthy, so the page is a **secure
-context** and WebCodecs is available against *any* gateway — embedded or remote,
-HTTP or HTTPS. A `file:` URL or a custom scheme is not reliably trustworthy in
-WebKit, and without a secure context `AudioDecoder` is simply absent and remote
-sound disappears with nothing in any log to say why. The page reports
-`isSecureContext` and whether it found a decoder in its first message; the app
-raises an alert if either is wrong, because both fail silently on their own.
-
-Everything from the app rides that one stream, in order:
-
-```text
-[u32 be length][u8 kind][payload]        length counts the kind byte
-  kind 0x00 — a JSON control command
-  kind 0x01 — a gateway binary frame, its own 0x02/0x03 kind byte included
-```
-
-Ordering is the point of using one channel for both. Tiles carry no delta state
-and overwrite their rectangles, so a `resize` that overtook the tiles queued ahead
-of it would paint stale pixels into a freshly sized canvas; an `audioFormat` that
-arrived after the packets it configures configures nothing. The commands are
-`resize`, `clear`, `cursor`, `audioFormat`, `audioStop` and `input`.
-
-Binary frames are forwarded byte for byte. The 256-slot tile cache, the image
-decode, `cacheReset`, the audio decoder and the H.264 video decoder are all the
-page's, which is why `render_type = "video"` reached this client as a frontend
-change rather than as a second implementation of a format only one side reads.
-
-A page that stops draining the stream costs frames rather than memory:
-`CanvasServer` drops binary envelopes once ~2 MB is unwritten and asks the gateway
-for a full repaint when the backlog clears, since nothing else would ever repaint
-what went missing. That guard meets `render_type = "video"` badly and recovers
-anyway: the access units after a dropped one refer to a frame the decoder never
-saw, so it errors, and the repaint the re-prime asks for is the IDR that starts it
-again. The visible cost is one `videoState` alert for a stream that is about to
-work — which is why the alert is worth having only for a page that is genuinely
-wedged, and why the drop is logged.
-
-The page reports back over one `WKScriptMessageHandler`: `ready`, `pointer`,
-`button`, `wheel`, `cacheReset`, `audioState` and `videoState`. It holds no
-protocol state —
-the app builds every `ClientMsg` and `PressedInput` still answers for releasing
-what was held on a target switch, a takeover or a dropped socket. Keyboard events
-never reach the page at all; see [Keyboard and pointer input](#keyboard-and-pointer-input).
-
-A reloaded page reattaches its stream, and the app re-primes it from scratch:
-the current size, the current cursor, and a `refresh` for the pixels.
-
-### Presentation
-
-The canvas bitmap is the remote's framebuffer, pixel for pixel, and its CSS box
-is that divided by the remote's own density:
-
-```text
-CSS size = framebuffer pixels / remote backing scale
-```
-
-The window's screen then rasterizes that box at its own backing scale. A remote
-larger than the window scrolls; the viewer does not zoom or fit the framebuffer
-to the window.
-
-`REMOTEX_VIEWER_DEV_URL` points the web view at `bun run dev` instead of the
-bundled page, keeping the stream — the same shape as `REMOTEX_DEV_BACKEND` for
-the SPA.
+`mediaTypesRequiringUserActionForPlayback` is set to nothing, which is what lets
+**Remote › Enable Audio** start sound: a menu press is not a user activation as
+far as WebKit is concerned, and without it the page's `AudioContext` would come
+up suspended with nothing on screen to say so.
 
 ## Display and resize behavior
 
-`ViewportPolicy` separates gateway-granted resize permission from whether the
-viewer actively reports window changes.
-
-Both permissions come from the `connected` message, and they are two:
+The client decides what it may ask for; the menu asks. Both permissions come from
+the gateway's `connected` message and reach the menu bar in the bridge's `state`:
 
 | Target | May resize | Window may drive it |
 |---|---|---|
 | Plain `vnc` with `resize` | yes | yes |
 | RDP or an Apple subtype with `resize` | yes | no |
-| Any other case | no — no viewport request is ever sent | no |
+| Any other case | no | no |
 
 The second column is `resize`, the operator's. The third is `autoResize`, and the
 gateway decides that one on its own: RDP renegotiates with a
 Deactivation-Reactivation Sequence and Apple High Performance replaces a virtual
 display, and both have a fault in [`known-issues.md`](known-issues.md) that a
-window drag reaches far more often than a menu item does. The client
-argues with neither — `ViewportPolicy.setAutoFollows` refuses the mode rather
-than the menu merely hiding it, so a remembered default cannot turn it on behind
-the item's back.
+window drag reaches far more often than a menu item does.
 
 The three View menu items are one decision:
 
-- **Auto Resize** sends debounced, deduplicated window changes. Its remembered
-  value is shared with the picker's *Auto-resize the remote to the window, if
-  compatible* toggle. It defaults off until chosen, and *if compatible* covers
-  both permissions: a target with no resize at all, and one that resizes only
-  when asked. See `ViewerPreferences.autoResizeByDefault`.
-
-  Where the mode is refused but resizing is not, the item reads **Auto Resize
-  (Not Applicable)** and greys, with **Resize to Window** live beneath it —
-  greying alone would read as "this session cannot resize", which the item below
-  disproves.
+- **Auto Resize** asks the client to follow the window. Where the mode is refused
+  the item reads **Auto Resize (Not Applicable)** and greys, with **Resize to
+  Window** live beneath it — greying alone would read as "this session cannot
+  resize", which the item below disproves. The model refuses the command as well
+  as greying the item.
 - **Resize to Window** asks the remote to adopt the viewer's available size, once.
 - **Resize to Display** changes the local window so the current remote desktop
-  fits at its point size; it sends nothing to the gateway.
+  fits at its point size; it sends nothing to the gateway. The arithmetic is
+  `RemoteGeometry.windowFrame` and the measurement is the web view's own bounds —
+  a page scrolls inside them and cannot change them.
 
 All three remain in the menu and are disabled when they do not apply. The two
 one-shots are disabled while **Auto Resize** is on: one is what it does
 continuously, and the other cannot fit a window to a desktop that is already
 fitting itself to the window.
 
-Apple Screen Sharing Standard mode (`subtype = "ard"`, RFB 3.8) fills the Display
-menu with physical screens and *All Displays*; choosing one narrows the framebuffer
-to that screen's own pixels.
-`subtype = "ard-high-performance"` (experimental — see
-[apple-vnc-889.md](apple-vnc-889.md)) instead requests one virtual display at the
-configured size. It disables the remote physical displays and moves the Mac's
-windows to that virtual display. With `resize = true`, viewport reports replace
-its mode through Apple dynamic resolution. Apple's client supports up to two
-virtual displays; Remotex always requests one. RDP and generic VNC expose one
-combined framebuffer, so the menu reads *No Displays to Choose From*.
+The viewport itself is measured and reported by the client, from the window it is
+in. Nothing about it passes through this app.
 
-The checkmark moves only when the Mac confirms the selection in a display layout.
-A mixed-density combined framebuffer has no valid scale and is shown at its pixel
-size; a selected Retina display uses its reported scale and renders at 100%. See
-[`apple-vnc-889.md`](apple-vnc-889.md).
-
-### Viewport measurement
-
-The viewer reports the web view's own bounds, as its frame changes. That is the
-whole measurement: a page scrolls inside those bounds and cannot change them, so
-the scrollbar-driven resize oscillation the native surface had to discount
-cannot arise. Nothing about the viewport goes through the page.
-
-Reports are not sent before initial layout or while the target picker is active.
-Each axis is clamped to `1...u16.max`. Starting a new target clears both the
-policy and outbound-queue deduplication so the first `connected` event can resend
-an already measured viewport.
+The Display menu lists what the client reports. Apple Screen Sharing Standard
+mode (`subtype = "ard"`) fills it with physical screens and *All Displays*;
+`ard-high-performance` requests one virtual display; RDP and generic VNC expose
+one combined framebuffer, so the menu reads *No Displays to Choose From*. The
+checkmark moves only when the Mac confirms the selection.
 
 ### Window chrome
 
-The desktop toolbar is hidden while a remote is displayed. The remote surface
-stays inside the window's safe area so the title bar never overlaps interactive
-remote content. The window remains titled because an untitled window cannot
-become key and accept keyboard input; full screen is the chrome-free mode.
+The desktop toolbar is hidden while a remote is displayed. The window remains
+titled because an untitled window cannot become key and accept keyboard input;
+full screen is the chrome-free mode. The title gains a trailing 🔊 while sound is
+playing — the one persistent surface that can show it, since the toggle is a menu
+item.
 
 ## Keyboard and pointer input
 
@@ -404,142 +320,56 @@ Remote-menu commands therefore have no keyboard shortcuts. macOS-global
 shortcuts such as Command-Tab and Command-Space remain local because the
 application never receives them.
 
-The monitor is why keyboard input is the one thing that did **not** move to the
-canvas page. It sits outside the web view and swallows what it consumes, so
-WebKit never sees a key event — which is what lets ⌘Q and ⌘W reach the guest
-instead of this application. The page has no keyboard handling in it at all.
+The monitor is the reason this app exists around the page. It sits outside the
+web view and swallows what it consumes, so WebKit never sees a key event — which
+is what lets ⌘Q and ⌘W reach the guest instead of this application. The page's own
+key listeners never fire here; the keys arrive over the bridge instead.
+
+What a chord *means* is the client's. `KeyboardCodes` maps a macOS virtual
+keycode to a DOM `code` and sends it; `frontend/src/macKeys.ts` owns the
+Command-to-Control translation, the bare-Command tap, and the record of what is
+held. One implementation, shared with the browser, tested once — and the one
+difference between the two hosts is a table: the six chords a browser never
+receives (⌘L, ⌘N, ⌘O, ⌘R, ⌘T, ⌘W) are mapped only when the host is this app.
+
+Capture is gated on a live desktop with a first frame, read out of the bridge's
+`state`, and on the first responder being the surface — which is what keeps
+typing in the clipboard panel from reaching the remote.
+
+Command-V pushes the local pasteboard before the keystroke, where the chord will
+arrive as a paste. Pointer input is the page's throughout.
 
 The Edit menu remains available for text fields and supplies the standard
 copy/paste/cut/select-all actions through the responder chain. `ViewerMenus`
-restores it when SwiftUI rebuilds the main menu.
-
-Keyboard translation depends on `remoteOs`:
-
-- for a non-Mac remote, standard Command shortcuts become remote Control
-  shortcuts, a bare Command taps remote Meta, and other Command chords remain
-  Meta chords;
-- for a Mac remote, Command remains remote Meta for every chord.
-
-The default-on **Enable macOS Keyboard Overrides** preference disables the
-Command-to-Control translation when turned off. `PressedInput` tracks every
-pressed code and releases them on focus loss, window deactivation, target
-switch, socket closure, takeover, or teardown.
-
-Pointer input, by contrast, is the page's: it is the only side that knows where
-the canvas sits after a scroll, so it maps and clamps positions to remote pixels
-itself (`remotePoint` in `frontend/src/viewer/input.ts`) and reports them. A
-press is preceded by its own position, so a click never lands where the pointer
-used to be. Wheel deltas come from the DOM already signed and already carrying
-their `deltaMode`, so nothing converts them.
-
-Before the first `cursor` message the pointer is hidden, because an engine may
-already composite its own into the framebuffer. After one, the page wears the
-remote shape as a CSS cursor; a null image uses a drawn arrow so the pointer
-remains visible. Hotspots arrive in remote pixels and are scaled by whatever the
-desktop is currently drawn at.
+restores it when SwiftUI rebuilds the main menu, and strips every key equivalent
+outside it.
 
 ## Clipboard
 
 For a connected target with `clipboard`, the viewer polls
 `NSPasteboard.changeCount`:
 
-- local text changes send the ordinary `clipboard` message;
-- unsolicited remote changes write to `NSPasteboard`;
-- echo guards prevent either direction from bouncing the same value back.
+- local text changes are sent to the client, which forwards them if its own echo
+  guards agree;
+- unsolicited remote changes arrive as `clipboardFromRemote` and are written to
+  `NSPasteboard`;
+- echo guards on both sides prevent either direction from bouncing the same value
+  back, and a newer local value wins over an older remote one.
 
-A response to an explicit **Clipboard…** fetch fills the panel but does not
-write to the local pasteboard. The panel's Copy action is the consent boundary.
-The synchronizer uses a local request token so a late response cannot populate a
-closed or replaced panel.
+The *panel* is the client's — **Remote › Clipboard…** opens the page's own
+clipboard panel, where Copy is still the only thing that writes a fetched value
+to this Mac. Rebuilding it in AppKit would be two clipboard editors to keep in
+step and two places for that consent boundary to live.
 
 Clipboard values are capped at 64 KiB in either direction and refused rather
-than truncated. Command-V queues the current local pasteboard value before
-sending the translated remote paste chord. Programmatic reads follow macOS's
-**Paste from Other Apps** permission, while `clipboard = true` remains the
-boundary — set per target on the gateway currently in use.
-
-## Audio
-
-**Remote → Enable Audio** is available when `connected.audio` is true. The
-gateway owns the wire format and bounded audio queue; the app owns the
-*subscription* (`AudioControl`) and the canvas page owns decoding and playback.
-
-The subscription is a **second WebSocket**, `/ws/audio`, not a message: opening it
-subscribes and closing it stops, exactly as in the browser client. Sound never queues
-behind pictures on the way in as a result — and it does not on the way to the page
-either, because `CanvasServer` exempts audio envelopes from the frame-backlog ceiling
-that drops tiles. A dropped tile is replaced by the re-prime; a dropped wave buffer is
-a hole nothing asks for again.
-
-Like **Auto Resize**, the toggle writes a **remembered** default — the same value
-the picker's *Play the remote's sound, if compatible* toggle edits
-(`ViewerPreferences.audioByDefault`). When it is on, a pick or takeover of a
-target that carries audio subscribes on its own, without the menu being touched;
-a target with no audio starts silent, and a *silent reattach* — a reconnect the
-user did not ask for — is left as it was rather than re-seeded, so a mid-session
-mute survives a dropped socket. On the macOS side there is no browser-style
-gesture requirement, so the subscription is asserted straight from `connected`.
-
-While sound is playing the window title gains a trailing `🔊` (`windowTitle`) —
-the one persistent surface that can show it, since the toggle is a menu item. The
-browser does the same on its tab title, but at the front, where a truncated-from-
-the-right tab title keeps it visible.
-
-Decoding is WebCodecs, through the browser client's own `audioPlayer.ts` and
-`audioSchedule.ts` — the same 0.5-second start cushion and 1.5-second latency
-ceiling, and the same trim when the ceiling is exceeded. The `audioFormat`
-control message is forwarded to the page whole, `OpusHead` included, because that
-is where the pre-skip is. Nothing on the Swift side reads the codec: it has no
-decoder to choose and would only be a second opinion about one.
-
-`mediaTypesRequiringUserActionForPlayback` is set to nothing, so unlike a browser
-tab there is no gesture requirement and the subscription is asserted straight
-from `connected`. This is also the one place the secure-context requirement in
-[The canvas](#the-canvas) is load-bearing: without it there is no `AudioDecoder`,
-and the failure is silence.
-
-An ordinary reconnect reopens the audio socket without being asked; a target switch
-clears the answer and closes it. Closing matters more than it used to: the gateway
-keeps its half of the subscription across a target switch — it belongs to the claim
-now — so a switch that means to go silent has to say so, or the next `connect` arms a
-stream nobody wants.
-
-A page that cannot play what arrived reports it, which raises the alert and
-unsubscribes — packets decoded by nothing are bytes spent on nothing. Neither
-side can distinguish a quiet remote from an RDP server that never opens its audio
-channel; the gateway log carries that diagnosis.
+than truncated. Programmatic reads follow macOS's **Paste from Other Apps**
+permission, while `clipboard = true` remains the boundary.
 
 ## Networking
 
-The embedded gateway uses plain HTTP on loopback, and remote gateways may also use
-HTTP. Because ATS treats `ws://` as `http://`, the bundle sets
-`NSAllowsArbitraryLoads`. That covers the canvas page's own loopback origin too,
-which is plain HTTP for the same reason.
-
-Every request, including `/api/config` and the WebSocket upgrade, carries the
-credential. `/api/config` is public, but sending the credential uniformly avoids
-route-specific authentication assumptions. `require_auth` runs before the upgrade,
-so a missing credential produces HTTP 401 before a socket exists.
-
-The headers are not interchangeable:
-
-| gateway | header |
-|---|---|
-| embedded | `Authorization: Bearer <token>` |
-| remote, signed in | `Cookie: remotex_session=<token>` |
-| remote, not yet | none. The public routes are what the `home` screen asks |
-
-`httpShouldHandleCookies` is always off. The client manually stores the session
-cookie in `viewer.json` (mode `0600`) because `HTTPCookieStorage` drops a `Secure`
-cookie when matching it against `wss` rather than `https` behind a TLS-terminating
-proxy, and matches hosts without considering the port, which would mix same-host
-gateway logins. Manual persistence also keeps the login across app restarts.
-
-On upgrade, the query `session` token owns the slot; the header credential
-authorizes the client. They are independent.
-
-`URLSessionWebSocketTask.maximumMessageSize` is set to 16 MiB. Exceeding the
-limit ends the socket rather than dropping one frame.
+The gateway uses plain HTTP on loopback. Because ATS treats `ws://` as `http://`,
+the bundle sets `NSAllowsArbitraryLoads`; that covers the page's own loopback
+origin too.
 
 ### Local network permission
 
@@ -573,31 +403,18 @@ packaging/macos-viewer/build-viewer-app.sh
 open -n dist/remotex.app --args --instance-dir "$PWD/tmp/app-instance"
 ```
 
-The build script builds the canvas page itself, so `bun` is required for it. The
-first line is separate because it is the page's *own* checks — a bundle whose
-page builds but whose tile painter is wrong looks fine until pixels land.
+The build script builds the SPA itself, so `bun` is required for it. The first
+line is separate because it is the client's *own* checks — a bundle whose page
+builds but whose tile painter is wrong looks fine until pixels land.
 
-`--instance-dir` is the only GUI-launch argument and is the whole of the isolation:
-config, log, and preferences are all under the directory it names, so QA cannot
-touch `~/Library/Application Support/remotex`. Delete the QA directory for a clean
-run. Gateway selection belongs to the `home` screen, so a launcher can isolate an
-instance but cannot choose its gateway.
+`--instance-dir` is the only GUI-launch argument and is the whole of the
+isolation: config and log are under the directory it names, so QA cannot touch
+`~/Library/Application Support/remotex`. Delete the QA directory for a clean run.
 
 Always validate the packaged `.app`; `swift run`, standalone `swift build`, and
 the executable under `.build` bypass bundle menus, `Info.plist` behavior, and the
 bundled gateway (`Bundle.main.url(forAuxiliaryExecutable:)` finds nothing, so the app
 comes up saying it is incomplete).
-
-For socket-level diagnostics, `--probe` starts the embedded gateway and prints
-received control and frame information. It takes no address or credentials — it is a
-diagnostic for the embedded path only, and a remote gateway's socket is that
-deployment's own to measure:
-
-```sh
-dist/remotex.app/Contents/MacOS/remotex-viewer \
-  --probe --instance-dir "$PWD/tmp/app-instance" \
-  --probe-target mac --probe-seconds 90
-```
 
 The bundled gateway is also a full `remotex` binary, which is how an instance's
 configuration is checked from a terminal:
@@ -607,19 +424,18 @@ dist/remotex.app/Contents/MacOS/remotex-gateway check-config --embedded \
   --config ~/Library/Application\ Support/remotex/remotex.toml
 ```
 
-Automated tests cover message decoding, frame parsing, arrival ordering,
-geometry, the bridge's JSON both ways, and the loopback listener over a real
-socket. What the page does with what it is handed — the slot table, the draw
-order, the envelope reassembler, pointer mapping — is checked in `bun test`,
-where the code is. Audio playback and anything about pixels still require manual
-QA; the Web Inspector is available on the canvas in a debug build.
+Automated tests cover the bridge's JSON in both directions, the menus' titles and
+enablement against a recorded page, the pasteboard rules, the window-fitting
+arithmetic, the menu-bar rules, and the gateway process contract. Everything
+below the bridge is the client's, and is tested in `bun test` and
+`tests/playwright` where the code is. Sound and anything about pixels still
+require manual QA; the Web Inspector is available on the page in a debug build.
 
 The in-process tone harness (`cargo test --lib serve_a_test_tone -- --ignored`)
-serves a login gateway. Test it in the app by choosing **Somewhere Else**, entering
-the printed loopback address, and signing in with the printed credentials. It
-checks the client playback path with a scripted engine. To include RDP negotiation,
-configure an `audio = true` RDP target; verify start/stop/resume, and use a source
-that announces left and right channels when checking stereo order.
+serves a login gateway for testing the client's playback path in a browser. To
+include RDP negotiation, configure an `audio = true` RDP target; verify
+start/stop/resume, and use a source that announces left and right channels when
+checking stereo order.
 
 See
 [`packaging/macos-viewer/README.md`](../packaging/macos-viewer/README.md)

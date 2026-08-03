@@ -1,6 +1,6 @@
 //! End-to-end tests of the gateway inside `remotex.app`: the handshake it prints,
-//! the token it takes, the login it refuses, the SPA it does not serve, and the way
-//! it dies with whatever started it.
+//! the token it takes in a cookie, the login it refuses, the SPA it serves out of
+//! the app's bundle, and the way it dies with whatever started it.
 //!
 //! The real binary, spawned as a child the way the app spawns it — because every
 //! one of those is a property of the *process*, not of a router built in-process.
@@ -39,10 +39,13 @@ impl Embedded {
     fn start(config: &str) -> Self {
         let dir = common::ScratchDir::new("embedded");
         dir.write("remotex.toml", config);
+        let web = web_root(&dir);
         let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
             .arg("serve-embedded")
             .arg("--instance-dir")
             .arg(dir.path())
+            .arg("--web-root")
+            .arg(&web)
             // stdin is the liveness pipe: closing our end is how the app tells this
             // process to stop, so it must be a pipe and not this test's terminal.
             .stdin(Stdio::piped())
@@ -86,10 +89,10 @@ impl Embedded {
         }
     }
 
-    /// A `GET`, with the bearer token unless `authorization` says otherwise.
-    async fn get(&self, path: &str, authorization: Option<&str>) -> (u16, String) {
-        let header = match authorization {
-            Some(value) => format!("Authorization: {value}\r\n"),
+    /// A `GET` carrying `cookie` verbatim as the `Cookie` header, or none.
+    async fn get(&self, path: &str, cookie: Option<&str>) -> (u16, String) {
+        let header = match cookie {
+            Some(value) => format!("Cookie: {value}\r\n"),
             None => String::new(),
         };
         let req = format!(
@@ -100,8 +103,14 @@ impl Embedded {
         (status, body)
     }
 
+    /// The cookie the app puts in its web view's store, spelled the way a browser
+    /// sends it back.
+    fn cookie(&self) -> String {
+        format!("remotex_session={}", self.token)
+    }
+
     async fn get_authorized(&self, path: &str) -> (u16, String) {
-        self.get(path, Some(&format!("Bearer {}", self.token))).await
+        self.get(path, Some(&self.cookie())).await
     }
 
     /// Close our end of the liveness pipe: the app quitting, as the child sees it.
@@ -121,6 +130,16 @@ impl Embedded {
         }
         false
     }
+}
+
+/// A stand-in for `Contents/Resources/web`: an `index.html` and one asset beside
+/// it, which is the whole shape the gateway cares about.
+fn web_root(dir: &common::ScratchDir) -> std::path::PathBuf {
+    let web = dir.path().join("web");
+    std::fs::create_dir_all(web.join("assets")).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html><title>spa</title>").unwrap();
+    std::fs::write(web.join("assets").join("index-abc123.js"), "export {}\n").unwrap();
+    web
 }
 
 /// One VNC target pointing at the discard port. Never dialed.
@@ -151,31 +170,38 @@ async fn the_handshake_names_a_port_that_answers_and_a_token_that_works() {
     assert!(body.contains("\"unreachable\""), "{body}");
 }
 
-/// The token is the only way in. A cookie is not a second one — this gateway never
-/// issues one, so a request carrying one is either confusion or a guess.
+/// The launch token is the only way in, and only in the cookie a browser would
+/// have been given by a login. A header is not a second way: the page makes these
+/// requests, and a page cannot set one.
 #[tokio::test]
 async fn nothing_but_the_token_gets_past_the_guard() {
     let embedded = Embedded::start(one_target());
 
-    for authorization in [
+    for cookie in [
         None,
-        Some("Bearer "),
-        Some("Bearer not-the-token"),
-        // The right value under the wrong scheme.
-        Some(&format!("Basic {}", embedded.token) as &str),
+        Some("remotex_session="),
+        Some("remotex_session=not-the-token"),
+        // The right value under the wrong name.
+        Some(&format!("session={}", embedded.token) as &str),
     ] {
-        let (status, _) = embedded.get("/api/targets", authorization).await;
-        assert_eq!(status, 401, "must refuse {authorization:?}");
+        let (status, _) = embedded.get("/api/targets", cookie).await;
+        assert_eq!(status, 401, "must refuse {cookie:?}");
     }
 
-    // A cookie, which is what the browser gateway would take.
+    // Among other cookies is still found, which is what a real web view sends.
+    let (status, _) = embedded
+        .get("/api/targets", Some(&format!("other=1; {}", embedded.cookie())))
+        .await;
+    assert_eq!(status, 200);
+
+    // The header the app used to send is not accepted any more.
     let req = format!(
-        "GET /api/targets HTTP/1.1\r\nHost: {}\r\nCookie: remotex_session={}\r\n\
+        "GET /api/targets HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
          Connection: close\r\n\r\n",
         embedded.addr, embedded.token
     );
     let (status, _, _) = common::http_request(embedded.addr, &req).await;
-    assert_eq!(status, 401, "an embedded gateway has no cookies to accept");
+    assert_eq!(status, 401, "the credential lives in the cookie now");
 }
 
 /// There is no login here, and saying so is not the same as pretending the route
@@ -199,29 +225,42 @@ async fn the_login_routes_refuse_rather_than_vanish() {
         "and certainly no cookie: {head}"
     );
 
-    let (status, _) = embedded.get("/api/auth/status", None).await;
-    assert_eq!(status, 403);
-    // Even holding the token, which is the point: the token is not a login.
-    let (status, _) = embedded.get_authorized("/api/auth/status").await;
-    assert_eq!(status, 403);
-
     // The one public route that does still answer.
     let (status, body) = embedded.get("/api/config", None).await;
     assert_eq!(status, 200, "the protocol version is still readable: {body}");
     assert!(body.contains("protocolVersion"), "{body}");
 }
 
-/// The token has to work on the upgrade too, which is the one request that is not
-/// an ordinary HTTP call: `require_auth` runs before the handshake, so getting this
-/// wrong is a bare 401 with a desktop that never appears.
+/// `status` is the exception among the auth routes, and it has to be: the SPA asks
+/// it before it renders anything, and on this gateway the honest answer is yes —
+/// the app put the launch token in the cookie store before the first load. A 403
+/// here would put a login form in front of somebody with nothing to type into it.
 #[tokio::test]
-async fn the_socket_upgrade_takes_the_token() {
+async fn the_status_route_answers_for_the_token() {
+    let embedded = Embedded::start(one_target());
+
+    let (status, body) = embedded.get_authorized("/api/auth/status").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("\"authenticated\":true"), "{body}");
+
+    let (status, body) = embedded.get("/api/auth/status", None).await;
+    assert_eq!(status, 200, "the question is public; the answer is not yes");
+    assert!(body.contains("\"authenticated\":false"), "{body}");
+}
+
+/// The cookie has to work on the upgrade too, which is the one request that is not
+/// an ordinary HTTP call: `require_auth` runs before the handshake, so getting this
+/// wrong is a bare 401 with a desktop that never appears. It is also why the
+/// credential is a cookie at all — the page opens this socket, and a page cannot
+/// put a header on it.
+#[tokio::test]
+async fn the_socket_upgrade_takes_the_cookie() {
     let embedded = Embedded::start(one_target());
     let url = format!("ws://{}/ws?session=not-a-claim", embedded.addr);
 
     let err = tokio_tungstenite::connect_async(&url)
         .await
-        .expect_err("an upgrade with no token must be refused");
+        .expect_err("an upgrade with no credential must be refused");
     match err {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
             assert_eq!(response.status(), 401)
@@ -229,34 +268,44 @@ async fn the_socket_upgrade_takes_the_token() {
         other => panic!("expected an HTTP 401 handshake failure, got: {other:?}"),
     }
 
-    // With the token the upgrade completes. The session token is nonsense, so the
+    // With the cookie the upgrade completes. The session token is nonsense, so the
     // gateway closes it immediately afterwards (4000) — which is a *session*
     // refusal, past the door this test is about.
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     let mut request = url.into_client_request().unwrap();
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {}", embedded.token).parse().unwrap(),
-    );
+    request
+        .headers_mut()
+        .insert("Cookie", embedded.cookie().parse().unwrap());
     let (_socket, response) = tokio_tungstenite::connect_async(request)
         .await
         .expect("the token must get the upgrade past require_auth");
     assert_eq!(response.status(), 101);
 }
 
-/// No frontend ships in the bundle, so there is no web UI to find — not a broken
-/// one. Every path outside the API is a 404, including the ones an SPA would own.
+/// The SPA is what `remotex.app` shows, so this gateway serves it: real files as
+/// themselves, unknown paths as the index, and — the part worth pinning — the
+/// document itself without any credential, because a web view has to be able to
+/// load the page before its own scripts can present the cookie to anything.
 #[tokio::test]
-async fn there_is_no_web_ui_at_all() {
+async fn the_spa_is_served_and_unknown_api_paths_are_not() {
     let embedded = Embedded::start(one_target());
 
-    for path in ["/", "/index.html", "/assets/index-abc123.js", "/login"] {
-        let (status, _) = embedded.get_authorized(path).await;
-        assert_eq!(status, 404, "{path} must not be served");
-    }
-    // And an unknown API path is still an honest 404 rather than an SPA shell.
-    let (status, _) = embedded.get_authorized("/api/nope").await;
+    let (status, body) = embedded.get("/", None).await;
+    assert_eq!(status, 200, "the document is public");
+    assert!(body.contains("<title>spa</title>"), "{body}");
+
+    let (status, body) = embedded.get_authorized("/assets/index-abc123.js").await;
+    assert_eq!((status, body.as_str()), (200, "export {}\n"));
+
+    // A client-side route is the index with a 200, not a 404.
+    let (status, body) = embedded.get_authorized("/login").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("<title>spa</title>"), "{body}");
+
+    // But an unknown API path is still an honest 404 rather than an SPA shell.
+    let (status, body) = embedded.get_authorized("/api/nope").await;
     assert_eq!(status, 404);
+    assert!(!body.contains("<title>"), "{body}");
 }
 
 /// The guarantee the whole arrangement rests on: when the process that started this
@@ -299,10 +348,13 @@ fn a_server_block_refuses_the_start() {
         &format!("[server]\nport = 1234\n{}", one_target()),
     );
 
+    let web = web_root(&dir);
     let output = Command::new(env!("CARGO_BIN_EXE_remotex"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir.path())
+        .arg("--web-root")
+        .arg(&web)
         .stdin(Stdio::null())
         .output()
         .unwrap();

@@ -31,16 +31,17 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     /// Live auth sessions behind the login cookie. Only a
     /// [`GatewayAuth::Login`] gateway mints or validates one — an embedded
-    /// gateway's client presents a token on every request and never gets a
-    /// cookie, so this stays empty there.
+    /// gateway's client carries the launch token in that same cookie and there is
+    /// no session to look up, so this stays empty there.
     pub auth: Arc<AuthSessions>,
 }
 
 /// Build the axum router.
 ///
 /// - `/api/auth/*` + `/api/health` — public: the login flow itself and the
-///   liveness probe. On an embedded gateway the login routes answer 403 instead:
-///   see [`no_login_handler`].
+///   liveness probe. On an embedded gateway `login` and `logout` answer 403
+///   instead (see [`no_login_handler`]), while `status` stays real — the same SPA
+///   runs there and asks it first.
 /// - the rest of `/api/*` and `/ws` — refuse requests that do not carry whatever
 ///   this gateway's [`GatewayAuth`] asks for; unknown `/api/*` paths return 404
 ///   rather than the SPA, so API clients get an honest error.
@@ -49,8 +50,8 @@ pub struct AppState {
 ///   files are served by [`ServeDir`]; any unknown path returns `index.html`
 ///   with a 200 so client-side routes resolve (matching an SPA's expectations).
 ///   The static shell stays public — it renders the login screen and holds no
-///   secrets; everything it talks to is behind the cookie. With no `static_dir` at
-///   all (an embedded gateway ships no SPA) the fallback is a plain 404.
+///   secrets; everything it talks to is behind the cookie. An embedded gateway
+///   serves the same SPA out of `remotex.app`'s bundle.
 pub fn router(config: AppConfig) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     router_with_sessions(config, sessions)
@@ -67,7 +68,8 @@ pub(crate) fn router_with_sessions(
 ) -> Router {
     // Use `.fallback` (returns the fallback response as-is) rather than
     // `.not_found_service` (which forces a 404 status), so SPA routes get 200.
-    let spa = config.static_dir.clone().map(|static_dir| {
+    let spa = {
+        let static_dir = config.static_dir.clone();
         let index_path = static_dir.join("index.html");
         let spa_index = service_fn(move |_req| {
             let index_path = index_path.clone();
@@ -83,24 +85,26 @@ pub(crate) fn router_with_sessions(
             }
         });
         ServeDir::new(&static_dir).fallback(spa_index)
-    });
+    };
 
     // Two shapes of the same three routes, and which one is registered is decided
     // here rather than inside the handlers. An embedded gateway *has* no login —
     // its client was given a token before it made its first request — so the
     // honest answer to one is a refusal, and a refusal is easier to read at the
-    // router than three handlers that each begin by asking what kind of gateway
-    // they are on.
+    // router than a handler that begins by asking what kind of gateway it is on.
+    //
+    // `status` is the exception, and registering it either way is the point: the
+    // page asks the same question on both, and there it answers yes because the
+    // app already put the launch token in the cookie store.
     let auth_routes = match config.auth {
         GatewayAuth::Login(_) => Router::new()
             .route("/auth/login", post(login_handler))
-            .route("/auth/logout", post(logout_handler))
-            .route("/auth/status", get(status_handler)),
+            .route("/auth/logout", post(logout_handler)),
         GatewayAuth::Token(_) => Router::new()
             .route("/auth/login", post(no_login_handler))
-            .route("/auth/logout", post(no_login_handler))
-            .route("/auth/status", get(no_login_handler)),
-    };
+            .route("/auth/logout", post(no_login_handler)),
+    }
+    .route("/auth/status", get(status_handler));
 
     let state = AppState {
         config,
@@ -138,21 +142,16 @@ pub(crate) fn router_with_sessions(
                 .route_layer(require_auth),
         );
 
-    match spa {
-        Some(spa) => routed.fallback_service(spa),
-        // No SPA was shipped, so there is nothing to look for and nothing to fall
-        // back to: `remotex.app` bundles this binary without a web root on purpose
-        // (see `AppConfig::static_dir`). A 404 is the whole answer.
-        None => routed.fallback(|| async { AppError::NotFound }),
-    }
-    // Outermost, so it sees the request before routing does: what it acts on is
-    // the `Host` a browser arrived under, not which handler would answer.
-    // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
-    .layer(middleware::from_fn_with_state(
-        state.clone(),
-        dev_hostname_redirect,
-    ))
-    .with_state(state)
+    routed
+        .fallback_service(spa)
+        // Outermost, so it sees the request before routing does: what it acts on
+        // is the `Host` a browser arrived under, not which handler would answer.
+        // Inert unless `[server].dev_subdomain` is set *and* that host is loopback.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            dev_hostname_redirect,
+        ))
+        .with_state(state)
 }
 
 /// Whether `name` — a `Host` header with its port and brackets already stripped —
@@ -265,24 +264,32 @@ async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next
 /// Middleware guarding everything session-related: whatever this gateway's
 /// [`GatewayAuth`] asks for, or no service.
 ///
-/// The two ways in are exclusive, which is what the match expresses. A login
-/// gateway accepts a cookie and knows nothing about tokens; an embedded one
-/// accepts its token and **not** a cookie, since it never issues one — a request
-/// bearing a `remotex_session` there is either confusion or somebody's guess, and
-/// either way it is not the client this gateway was started for.
+/// Both modes read the same `remotex_session` cookie and differ only in what
+/// makes it valid — a login gateway looks the value up in [`AuthSessions`], an
+/// embedded one compares it against the token it minted at startup. One carrier
+/// for both, because a cookie is the only credential a *document* can carry: the
+/// SPA's `fetch` calls and its `ws://` upgrades are issued by the page, not by
+/// the client that opened it, and neither can be given a header.
 async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let authenticated = match &state.config.auth {
-        // Validation also refreshes the session's sliding expiry.
-        GatewayAuth::Login(_) => auth::token_from_headers(req.headers())
-            .is_some_and(|token| state.auth.validate(&token)),
-        GatewayAuth::Token(expected) => {
-            auth::bearer_from_headers(req.headers()).is_some_and(|token| expected.matches(token))
-        }
-    };
+    let authenticated = authenticate(&state, req.headers());
     if !authenticated {
         return AppError::Unauthorized.into_response();
     }
     next.run(req).await
+}
+
+/// Whether these headers carry this gateway's credential. Shared by
+/// [`require_auth`] and [`status_handler`] so the guard and the answer about the
+/// guard cannot drift apart.
+fn authenticate(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(presented) = auth::token_from_headers(headers) else {
+        return false;
+    };
+    match &state.config.auth {
+        // Validation also refreshes the session's sliding expiry.
+        GatewayAuth::Login(_) => state.auth.validate(&presented),
+        GatewayAuth::Token(expected) => expected.matches(&presented),
+    }
 }
 
 /// `Set-Cookie` attributes for the session cookie. `Secure` cookies set over
@@ -408,10 +415,16 @@ struct StatusResponse {
 
 /// Whether the caller holds a live session — the SPA asks on load to decide
 /// between the login screen and the desktop.
+///
+/// This route exists on an embedded gateway too, unlike the two beside it: the
+/// same SPA runs there, asks the same question first, and the answer is yes as
+/// soon as `remotex.app` has put the launch token in its web view's cookie store.
+/// A no there means the client and the gateway disagree about the token, which is
+/// the app's problem to report — it is not something a login form could fix.
 async fn status_handler(State(state): State<AppState>, headers: HeaderMap) -> Json<StatusResponse> {
-    let authenticated = auth::token_from_headers(&headers)
-        .is_some_and(|token| state.auth.validate(&token));
-    Json(StatusResponse { authenticated })
+    Json(StatusResponse {
+        authenticated: authenticate(&state, &headers),
+    })
 }
 
 #[derive(Serialize)]
@@ -478,7 +491,7 @@ mod tests {
         let config = AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 52675,
-            static_dir: Some("frontend/dist".into()),
+            static_dir: "frontend/dist".into(),
             // Never dialed: no test here starts a session.
             targets: vec![crate::config::TargetConfig {
                 name: "unreachable".to_owned(),
@@ -827,7 +840,7 @@ mod tests {
         let config = AppConfig {
             host: "127.0.0.1".to_owned(),
             port: 0,
-            static_dir: Some("frontend/dist".into()),
+            static_dir: "frontend/dist".into(),
             targets: vec![target],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(

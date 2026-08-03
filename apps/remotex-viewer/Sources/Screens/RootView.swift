@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// Which screen is showing, plus the chrome that outlives all of them: the
-/// clipboard card, the window title, and the alert.
+/// Which screen is showing, plus the chrome that outlives both: the window title,
+/// the sheets, and the alert.
 ///
-/// No toolbar. The window's title bar carries nothing but the title: every
-/// action it could hold already lives in a menu — the clipboard card is opened
-/// from **Remote › Clipboard…** — and a button duplicated into the title bar is
-/// one more thing to keep in step with the state that enables it.
+/// Two screens. Either the gateway is coming up — or explaining why it did not —
+/// or the client is on screen and owns everything inside it.
+///
+/// No toolbar. The window's title bar carries nothing but the title: every action
+/// it could hold already lives in a menu, and a button duplicated into the title
+/// bar is one more thing to keep in step with the state that enables it.
 struct RootView: View {
     let model: AppModel
 
@@ -21,23 +23,30 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            switch model.session.screen {
-            case .home:
-                HomeView(model: model)
-            case .login:
-                LoginView(model: model)
+            switch model.screen {
             case .launching:
                 LaunchView(model: model) { isEditingConfiguration = true }
-            case .picker, .desktop:
-                DesktopScreen(model: model)
+            case .ready(let gateway):
+                RemoteWebHost(
+                    model: model,
+                    gateway: gateway,
+                    // The toolbar gives way once there is a desktop behind it, and
+                    // not before: the picker is an ordinary page and wants the
+                    // window to look like a window.
+                    hidesToolbar: model.state.mode == .desktop
+                )
+                .ignoresSafeArea(edges: .bottom)
+                // The endpoint is read once, when the coordinator is built, and a
+                // restarted gateway is a different port and a different token. Every
+                // route to one goes through `.launching` first, which tears this
+                // down — so this is not a fault being fixed but an invariant being
+                // written down, in the one place a future `.ready` → `.ready` would
+                // otherwise leave a web view pointed at a gateway that has gone.
+                .id(gateway.port)
             }
         }
         .sheet(isPresented: $isEditingConfiguration) {
-            // `canEditConfiguration` and not merely `config != nil`: this panel edits
-            // the file `serve-embedded` reads, and Save restarts that gateway. Against
-            // a remote one it would be editing a config nothing on screen is running
-            // from — see `AppModel.canEditConfiguration`.
-            if model.canEditConfiguration, let config = model.config {
+            if let config = model.config {
                 ConfigurationPanel(store: config) {
                     Task { await model.relaunchGateway() }
                 }
@@ -53,22 +62,10 @@ struct RootView: View {
         // the previous one's result, which is what keeps two presentations on one view
         // from contending for the same slot.
         .sheet(isPresented: $isShowingAbout) {
-            // The instance is a fact about this app whichever gateway it is talking
-            // to — it is where these preferences and this log live — so it is always
-            // shown.
-            AboutPanel(
-                branding: model.branding,
-                store: model.config
-            )
+            AboutPanel(branding: model.branding, store: model.config)
         }
         .onChange(of: model.aboutRequests) { _, _ in
             isShowingAbout = true
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if model.clipboard.isPresented {
-                ClipboardCard(clipboard: model.clipboard)
-                    .padding(20)
-            }
         }
         .navigationTitle(model.windowTitle)
         .alert(
@@ -90,7 +87,10 @@ struct RootView: View {
                 Text(model.actionError ?? "")
             }
         )
-        // No launch `.task` here: the gateway is started by the scene
-        // (`RemotexViewerApp`), which is where the model's lifetime is.
+        // The gateway comes up with the window. There is nothing to ask first any
+        // more — one gateway, in this bundle, with a token nobody types.
+        .task {
+            await model.launch()
+        }
     }
 }

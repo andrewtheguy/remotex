@@ -112,7 +112,8 @@ struct EmbeddedGatewayTests {
         let directory = try ScratchDirectory()
         let gateway = EmbeddedGateway(
             instance: directory.instance,
-            binary: GatewayBinary(executable: directory.url.appending(path: "not-here"))
+            binary: GatewayBinary(executable: directory.url.appending(path: "not-here")),
+            webRoot: directory.url.appending(path: "web")
         )
 
         let failure = await failure(of: gateway)
@@ -223,7 +224,11 @@ struct EmbeddedGatewayTests {
         )
         return EmbeddedGateway(
             instance: directory.instance,
-            binary: GatewayBinary(executable: executable)
+            binary: GatewayBinary(executable: executable),
+            // The fake gateways below never read it; the real one is told where the
+            // bundle keeps the SPA, since nothing about a bundle's layout is the
+            // gateway binary's to guess.
+            webRoot: directory.url.appending(path: "web")
         )
     }
 

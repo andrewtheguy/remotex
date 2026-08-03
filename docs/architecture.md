@@ -376,17 +376,16 @@ picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 **Both clients decode it, with one decoder between them.** It is WebCodecs
 `VideoDecoder`, reached through `frontend/src/videoDecoder.ts` and driven from
 `tilePainter.ts` — the shared batch loop, which keys a decoder per `stream` id and
-replaces one whose region has restarted on a different size. `remotex.app` draws
-into a `WKWebView` running that same page, so video was not a second implementation
-there; it was the record type arriving in a module both clients already used.
+replaces one whose region has restarted on a different size. `remotex.app` shows
+this same client in a `WKWebView`, so video was not a second implementation there
+and could not have been.
 
 `VideoDecoder` is secure-context only — the same limit remote audio already has, but a
 worse one to hit, since no audio decoder means silence beside a working desktop and no
-video decoder means no desktop. So a failure is *said* rather than logged: the SPA
-raises a banner that stays up, and the canvas page reports `videoState` to the app,
-which raises it as an error. The app's page is served from `http://127.0.0.1`, which
-is a secure context whatever scheme its gateway is on, so in practice only the browser
-can land on the insecure-origin half of that.
+video decoder means no desktop. So a failure is *said* rather than logged: a banner
+that stays up. `remotex.app` is served from `http://127.0.0.1`, which is a secure
+context whatever else is true, so in practice only a browser can land on the
+insecure-origin half of that.
 
 ## Session lifecycle
 
@@ -538,16 +537,15 @@ Both clients own their playback schedule, and it is the same code: a 0.5-second
 cushion, and backlog beyond a 1.5-second ceiling discarded. Those numbers are a jitter
 budget rather than a latency target, and they are deliberately generous — audio trails
 video by roughly the cushion, which is the trade Myrtille and FreeRDP both make. What reaches that
-schedule differs by codec, and only there. Neither client decodes anything
-itself: an *encoded* stream goes to WebCodecs — `remotex.app` through its canvas
-page — so a codec a browser will not take surfaces as a decoder error naming it
-rather than as silence. A `pcm-s16le` stream reaches no decoder at all; the
+schedule differs by codec, and only there. The client does not decode anything
+itself: an *encoded* stream goes to WebCodecs, so a codec a browser will not take
+surfaces as a decoder error naming it rather than as silence. A `pcm-s16le` stream reaches no decoder at all; the
 client turns the packet into an `AudioBuffer` and schedules it directly.
 
 The secure-context requirement belongs to that first path alone. WebCodecs is
 unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
 localhost, while passthrough plays anywhere. `remotex.app` is unaffected either
-way: it serves its canvas page from `127.0.0.1`, which is always a secure
+way: its gateway serves the page from `127.0.0.1`, which is always a secure
 context.
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
@@ -764,40 +762,37 @@ Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.
 
-### remotex.app, the native macOS client
+### remotex.app, the native macOS shell
 
-`remotex.app` is a separate native client of the same HTTP and WebSocket protocol,
-with its own session state machine, menu bar, keyboard capture and pasteboard
-synchronization.
+`remotex.app` is not a second client. It starts the gateway in its own bundle,
+shows **the SPA above** in a `WKWebView`, and owns what a page cannot: the menu
+bar, keyboard capture ahead of it, `NSPasteboard`, and the window.
 
-Its *remote surface* is a `WKWebView`, and only that. The app serves it a small
-page from its own `127.0.0.1` listener and pushes wire frames down one held-open
-response; the page draws tiles, wears the cursor, plays Opus through WebCodecs and
-scrolls with the browser's own scrollbars, sharing `protocol.ts`, `tilePainter.ts`,
-`cursorCss.ts`, `videoDecoder.ts` and `audioPlayer.ts` with the SPA. So the wire
-format has one implementation per language rather than one per client — which is
-what made `render_type = "video"` a frontend change once for both clients rather
-than a `VideoToolbox` decoder written a second time in Swift. The page owns no
-session: no claim, no gateway socket, no keyboard.
+Nothing about the session is the app's. The page is served by the gateway beside
+it on `http://127.0.0.1`, so it talks to that gateway directly — same claim, same
+`/ws`, same `/ws/audio` — and this app holds no socket, no claim and no wire
+format. A protocol change is a change to one client, in one language.
 
-The loopback origin is the load-bearing part, not an implementation detail:
-`http://127.0.0.1` is a secure context, so WebCodecs is available against every
-gateway the app can reach, including a plain-HTTP remote one. See
-[`macos-viewer.md`](macos-viewer.md#the-canvas).
+The loopback origin is load-bearing rather than incidental: it is a secure
+context, so WebCodecs is available for Opus and H.264 whatever the app is showing.
 
-The first screen chooses its gateway. **On This Mac** starts the bundled binary via
-`serve-embedded`: an ephemeral loopback port, no web UI, and a random bearer token
-instead of a login. The gateway dies with the app. **Somewhere Else** connects to a
-deployed gateway with its address and login. Both expose the same config, target,
-session, and WebSocket APIs; only the credential header on protected requests
-differs.
+Two things cross the boundary, over one `WKScriptMessageHandler` and one
+`evaluateJavaScript` call (`frontend/src/nativeHost.ts`): the page reports one
+state object the menus are derived from, and the app sends the keys a browser is
+never given, the Mac's pasteboard, and the menu commands standing in for the
+floating menu it hides. See [`macos-viewer.md`](macos-viewer.md#the-bridge).
 
-The embedded path adds a second authentication mode (`GatewayAuth`, in
-`src/auth.rs`, of which exactly one is active per process) and different config
-rules (`config::Audience`) because the app decides everything `[server]` would say.
+The gateway it starts is `serve-embedded`: an ephemeral loopback port, the SPA out
+of `Contents/Resources/web`, and a random token minted per launch that the app puts
+in the web view's cookie store instead of a login. It dies with the app. Reaching
+a gateway elsewhere is a browser's job.
 
-See [`macos-viewer.md`](macos-viewer.md) for the handshake, the shutdown contract, the
-instance directory, compatibility, resize behavior, and QA.
+That path is the one place `GatewayAuth` (in `src/auth.rs`, of which exactly one is
+active per process) and `config::Audience` differ from a served gateway, because the
+app decides everything `[server]` would say.
+
+See [`macos-viewer.md`](macos-viewer.md) for the handshake, the shutdown contract,
+the instance directory, the bridge, resize behavior, and QA.
 
 ## Configuration and testing
 

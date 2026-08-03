@@ -29,8 +29,9 @@ pub enum Commands {
         config: Option<PathBuf>,
     },
 
-    /// Start the gateway inside remotex.app: an ephemeral port on 127.0.0.1, no
-    /// web UI, and a token printed on stdout for the app that started it.
+    /// Start the gateway inside remotex.app: an ephemeral port on 127.0.0.1, the
+    /// SPA out of the app's bundle, and a token printed on stdout for the app
+    /// that started it.
     ///
     /// Not for interactive use. It serves the one client it was started by, reads
     /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
@@ -40,6 +41,11 @@ pub enum Commands {
         /// the viewer's own preferences. Nothing outside it is read.
         #[arg(long)]
         instance_dir: PathBuf,
+        /// Where the built SPA lives — Contents/Resources/web inside the app
+        /// bundle. Passed rather than derived: nothing about a bundle's layout
+        /// is this binary's to know.
+        #[arg(long)]
+        web_root: PathBuf,
     },
 
     /// Check a config file and say what is wrong with it, without starting
@@ -95,26 +101,53 @@ mod tests {
         assert!(Cli::try_parse_from(["remotex", "serve", "--target", "win"]).is_err());
     }
 
-    /// The app's own subcommand. `--instance-dir` is required and there is
-    /// deliberately nothing else to give it: the port, the secret and the absence
-    /// of a web UI are all decided by the gateway, not passed in.
+    /// The app's own subcommand. It takes the two paths only the app knows — the
+    /// instance it owns and where its bundle keeps the SPA — and nothing else: the
+    /// port and the secret are the gateway's to decide, not the app's to pass.
     #[test]
-    fn serve_embedded_takes_only_an_instance_dir() {
-        let cli =
-            Cli::try_parse_from(["remotex", "serve-embedded", "--instance-dir", "/i"]).unwrap();
-        let Commands::ServeEmbedded { instance_dir } = cli.command else {
+    fn serve_embedded_takes_the_two_paths_the_app_knows() {
+        let cli = Cli::try_parse_from([
+            "remotex",
+            "serve-embedded",
+            "--instance-dir",
+            "/i",
+            "--web-root",
+            "/w",
+        ])
+        .unwrap();
+        let Commands::ServeEmbedded {
+            instance_dir,
+            web_root,
+        } = cli.command
+        else {
             panic!("expected the serve-embedded subcommand");
         };
         assert_eq!(instance_dir, std::path::Path::new("/i"));
+        assert_eq!(web_root, std::path::Path::new("/w"));
 
-        assert!(
-            Cli::try_parse_from(["remotex", "serve-embedded"]).is_err(),
-            "there is no default instance directory: the app names the one it owns"
-        );
+        for missing in [
+            vec!["remotex", "serve-embedded"],
+            vec!["remotex", "serve-embedded", "--instance-dir", "/i"],
+            vec!["remotex", "serve-embedded", "--web-root", "/w"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&missing).is_err(),
+                "neither path has a default: the app names both {missing:?}"
+            );
+        }
         for rejected in ["--port", "--gateway", "--token"] {
             assert!(
-                Cli::try_parse_from(["remotex", "serve-embedded", "--instance-dir", "/i", rejected, "x"])
-                    .is_err(),
+                Cli::try_parse_from([
+                    "remotex",
+                    "serve-embedded",
+                    "--instance-dir",
+                    "/i",
+                    "--web-root",
+                    "/w",
+                    rejected,
+                    "x"
+                ])
+                .is_err(),
                 "{rejected} is not the app's to pass"
             );
         }

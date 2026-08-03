@@ -65,6 +65,17 @@ and one whose value should be argued from `video`'s measurements rather than ass
   pointer transforms. High Performance mode is unaffected because it uses one
   virtual display rather than a mosaic of physical displays.
 
+### remotex.app
+
+- **Native clipboard and display panels.** The app's **Remote › Clipboard…** and
+  **Display** menu items drive the client's own panels through the bridge rather
+  than presenting AppKit ones. That is right for now — one clipboard editor, one
+  consent boundary, one display list — but a Mac app whose only sheet is a web
+  panel is a compromise, not a design. Native versions are worth having once
+  there is a reason to touch that layout again; they were deliberately not done
+  in the shell refactor, where the cost was a regression risk in a docked-panel
+  layout that had already needed fixing once.
+
 ## Not planned
 
 ### Multiple sessions

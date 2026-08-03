@@ -9,12 +9,11 @@
   (`ServeDir` in `src/server.rs`); Biome, `tsc -b`, `bun test`, and backend tests
   do not detect a stale bundle. For source-based iteration, use
   `REMOTEX_DEV_BACKEND=<port> bun run dev`.
-- `frontend/src/viewer` is `remotex.app`'s remote surface, not part of the SPA.
-  It builds separately (`bun run build:viewer` → `dist-viewer/`) and is copied
-  into the bundle; `REMOTEX_VIEWER_DEV_URL` points the app's web view at
-  `bun run dev` instead. Shared modules (`protocol.ts`, `tilePainter.ts`,
-  `cursorCss.ts`, `audioPlayer.ts`) are used by both, so a change to one is a
-  change to both clients.
+- There is one client. `remotex.app` shows this same SPA in a `WKWebView`, served
+  by the gateway in its bundle, so a frontend change is a change to both — and
+  `NATIVE_HOST` in `frontend/src/nativeHost.ts` is the only thing that may differ
+  between them. Do not add a second implementation of anything the page already
+  does.
 - Put temporary files and test config under `tmp/`. Run efficient local Python
   one-offs with `uv` (GitHub Actions excluded).
 - Use `anyhow` for application errors and `thiserror` for typed API errors.
@@ -114,34 +113,56 @@ For counts, assert invariant relationships such as `records > frames`.
 
 ## remotex.app
 
-The first screen always asks which gateway to use, with the last choice
-preselected:
+It is a **shell**, not a second client. The bundle starts `remotex-gateway
+serve-embedded --instance-dir <dir> --web-root <dir>` on an ephemeral `127.0.0.1`
+port, and shows the SPA that gateway serves in a `WKWebView`. There is one
+gateway, in this bundle; a gateway elsewhere is reached with a browser.
 
-- **On This Mac:** the bundle starts `remotex-gateway serve-embedded
-  --instance-dir <dir>` on an ephemeral `127.0.0.1` port with no web UI. Each
-  launch mints a random bearer token, sends it only to the app in one stdout JSON
-  line, and keeps it in memory. The app is the only client that knows it.
-- **Somewhere Else:** the user enters a gateway address and login. This is the
-  correct placement across a slow link, where the gateway should be near targets.
+`dist/remotex.app` contains `Contents/MacOS/remotex-viewer`,
+`Contents/MacOS/remotex-gateway`, and `Contents/Resources/web` — the built SPA,
+named by `--web-root` because nothing about a bundle's layout is the gateway
+binary's to guess.
 
-The home screen appears on every launch; **Change Gateway…** returns to it.
+Each launch mints a random token, sends it only to the app in one stdout JSON
+line, and keeps it in memory. The app puts it in the web view's cookie store as
+`remotex_session` before the first load. It must be a **cookie**: the page issues
+its own `fetch` calls and opens its own `ws://` sockets, and neither can be given
+a header from outside the document. `require_auth` reads that cookie on both
+kinds of gateway and differs only in what makes the value valid.
 
-`dist/remotex.app` contains Swift client `Contents/MacOS/remotex-viewer` and
-gateway `Contents/MacOS/remotex-gateway`. Both gateway choices expose identical
-`/api/config`, `/api/targets`, `/api/session`, and `/ws` contracts. Only their
-credential header differs: embedded uses `Authorization: Bearer`; remote uses
-`Cookie: remotex_session`. `require_auth` accepts only the configured kind; any
-other behavioral difference is a bug. See `GatewayCredential` in
-`apps/remotex-viewer/Sources/Gateway/GatewayClient.swift`. The client manually
-stores the remote cookie in `viewer.json` (mode `0600`), so login survives app
-restarts, because `HTTPCookieStorage` mishandles `Secure` cookies on `wss` and
-ignores ports.
+The web view's data store must be **persistent and per instance**
+(`WKWebsiteDataStore(forIdentifier:)`, keyed off `InstanceDirectory.dataStoreIdentifier`).
+The client's three remembered preferences live in its `localStorage`, so a
+non-persistent store drops them at every launch without saying so, and a shared
+one would leak a QA instance's into the real one.
 
-Against a remote gateway, hide this bundle's **Configuration…** and **Restart
-Local Gateway** (`AppModel.canEditConfiguration` and `usesEmbeddedGateway`): its
-`remotex.toml` cannot configure remote targets. `--instance-dir` is the only
-GUI-launch argument; gateway selection belongs to the home screen. Diagnostic
-CLI paths additionally accept `--version` and the `--probe*` options.
+The app holds **no session**: no claim, no socket, no wire format, no protocol
+version. Do not put any of it back. Everything about the session is the client's,
+and it is the same client a browser runs.
+
+The seam is one `WKScriptMessageHandler` and one `evaluateJavaScript` call, mirrored
+in `frontend/src/nativeHost.ts`. The page posts one `state` object; every menu
+title, tick and enabled state derives from it. **Nothing in the app is ever set
+optimistically** — a tick moves when the client says the thing changed, not when
+the item was pressed. Commands go out as encoded JSON, never interpolated: remote
+clipboard text reaches this app and then goes into a JavaScript call.
+
+What stays native is what a page cannot do: the `NSEvent` local monitor (which is
+why ⌘Q and ⌘W reach the guest), `NSPasteboard` in both directions, **Resize to
+Display**, the menu bar, and the gateway process. What a chord *means* is the
+client's — `KeyboardCodes` sends DOM codes and `frontend/src/macKeys.ts` translates,
+for both clients, with one bigger chord table under `NATIVE_HOST`.
+
+The client's own panels stay the client's. **Remote › Clipboard…** and the Display
+menu drive the page's panels rather than reimplementing them; a native
+`ClipboardPanel`/`DisplayPanel` is on the roadmap and not worth the regression risk
+now.
+
+`--instance-dir` is the only GUI-launch argument; `--version` is the only other
+CLI path. There is no preferences file in the instance directory any more — the
+three remembered defaults belong to the client. Do not add `UserDefaults`: a
+defaults suite lives in the user's Preferences directory regardless of
+`--instance-dir`.
 
 The embedded gateway's lifetime is guaranteed by its stdin pipe. The app holds
 the write end and sends nothing; clean quit, crash, Force Quit, or `kill -9`
@@ -178,9 +199,9 @@ encoder whose licence is not OSI-approved was a real cost for it.
 
 The choice is per target, not per client, and the gateway names it on the wire —
 `ServerMsg::AudioFormat` carries the codec string, the decoder configuration and
-`packetFrames`. No client decodes anything itself: the SPA and `remotex.app`'s
-canvas page hand encoded packets to WebCodecs, so a codec a browser refuses
-surfaces as a named decoder error rather than as silence. Passthrough reaches no
+`packetFrames`. The client does not decode anything itself: it hands encoded
+packets to WebCodecs, so a codec a browser refuses surfaces as a named decoder
+error rather than as silence. Passthrough reaches no
 decoder at all, which is why it is the one option that plays on a plain `http://`
 origin — WebCodecs needs a secure context and Web Audio does not.
 
@@ -195,8 +216,7 @@ subscription — there is no `ClientMsg` for audio, and closing it is the only w
 stop. Do not put sound back on the session socket: that queue is four frames deep on
 `render_type = "video"`, and a pump waiting behind a video backlog stops draining the
 bridge, which then drops wave buffers. A lost tile is repainted; a lost wave buffer is
-a hole. `remotex.app` keeps the same separation on its own side, where `CanvasServer`
-exempts audio envelopes from the tile-backlog ceiling.
+a hole.
 
 The audio socket is bound to the **claim**, not to an attachment, so it survives a
 reattach and a target switch — `SessionManager::arm_audio` re-arms it from `connect`.
@@ -207,17 +227,14 @@ browser onto the new holder's desktop.
 After Swift changes:
 
 1. Run `swift test --package-path apps/remotex-viewer`.
-2. Run `packaging/macos-viewer/build-viewer-app.sh`; this also rebuilds
-   the bundled gateway **and the canvas page**, so `bun` is required. After a
-   change under `frontend/src/viewer`, run `bun run check` and `bun test src` in
-   `frontend/` too — the build only proves the page compiles.
+2. Run `packaging/macos-viewer/build-viewer-app.sh`; this also rebuilds the
+   bundled gateway **and the SPA it shows**, so `bun` is required. Run
+   `bun run check` and `bun test src` in `frontend/` too — the build only proves
+   the client compiles.
 3. Manually launch `open -n dist/remotex.app --args --instance-dir
    "$PWD/tmp/app-instance"`. All QA state remains under that directory; delete it
    for a clean run. Never launch QA bare: the real instance is
    `~/Library/Application Support/remotex`.
-
-Preferences must remain in the instance's JSON file, not `UserDefaults`: a defaults
-suite lives in the user's Preferences directory regardless of `--instance-dir`.
 
 Never validate with `swift run`, standalone `swift build`, or `.build` binaries;
 they lack the bundle menus, `Info.plist` metadata, and gateway. Run the build script

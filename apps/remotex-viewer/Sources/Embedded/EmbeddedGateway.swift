@@ -75,6 +75,11 @@ final class EmbeddedGateway {
 
     let instance: InstanceDirectory
     private let binary: GatewayBinary
+    /// Where this bundle keeps the SPA, handed to the gateway as `--web-root`.
+    ///
+    /// A stored property rather than a lookup at spawn time so a test can start a
+    /// gateway over a directory it made itself, the same way `instance` works.
+    private let webRoot: URL
 
     private var process: Process?
     private var standardInput: Pipe?
@@ -98,9 +103,10 @@ final class EmbeddedGateway {
     /// failure the app has to show rather than discover on the next request.
     var onUnexpectedExit: ((LaunchFailure) -> Void)?
 
-    init(instance: InstanceDirectory, binary: GatewayBinary) {
+    init(instance: InstanceDirectory, binary: GatewayBinary, webRoot: URL) {
         self.instance = instance
         self.binary = binary
+        self.webRoot = webRoot
     }
 
     /// Whether a gateway is running right now.
@@ -128,7 +134,11 @@ final class EmbeddedGateway {
 
         let process = Process()
         process.executableURL = binary.executable
-        process.arguments = ["serve-embedded", "--instance-dir", instance.url.path]
+        process.arguments = [
+            "serve-embedded",
+            "--instance-dir", instance.url.path,
+            "--web-root", webRoot.path,
+        ]
         let standardInput = Pipe()
         let standardOutput = Pipe()
         let standardError = Pipe()

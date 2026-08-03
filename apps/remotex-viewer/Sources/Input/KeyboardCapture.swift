@@ -4,7 +4,6 @@
 final class KeyboardCapture {
     private weak var model: AppModel?
     private weak var surface: NSView?
-    private var translator = KeyboardTranslator()
     private var monitor: Any?
     private var observers: [NSObjectProtocol] = []
     private var firstResponderObservation: NSKeyValueObservation?
@@ -127,10 +126,10 @@ final class KeyboardCapture {
             releaseAll()
             return false
         }
-        // Nothing to capture for: no desktop, or no first frame yet. Whatever the
-        // translator was part way through goes with it: a Command left pending, or
-        // the synthetic Control a mapped chord rides on, would otherwise be resumed
-        // against a remote whose releases have already been sent.
+        // Nothing to capture for: no desktop, or no first frame yet. Whatever was
+        // held goes with it — the page is told to let go, so a Command left pending
+        // or the synthetic Control a mapped chord rides on is not resumed against a
+        // remote whose releases have already been sent.
         guard model.canCaptureKeyboardNow else {
             releaseAll()
             return false
@@ -143,29 +142,27 @@ final class KeyboardCapture {
         // was, and Quit in particular was a keystroke that ended the session while
         // the user was typing at the guest. Moving focus off the desktop is the way
         // to get the whole keyboard back.
-        let mapCommandToControl = model.macOSKeyboardOverridesActive
+        // Command-V is about to reach the guest, so the guest is given this Mac's
+        // clipboard first. Only where the chord will arrive as a paste: with the
+        // overrides off against a non-Mac guest, ⌘V goes out as Meta-V and pastes
+        // nothing.
         if event.type == .keyDown,
-           KeyboardTranslator.domCode(for: event.keyCode) == "KeyV",
+           KeyboardCodes.domCode(for: event.keyCode) == "KeyV",
            event.modifierFlags.contains(.command),
-           mapCommandToControl || model.session.remoteIsMac
+           model.macOSKeyboardOverridesActive || model.state.remoteIsMac
         {
             model.clipboard.pushLocalClipboard(force: true)
         }
-        for translated in translator.translate(
-            event,
-            mapCommandToControl: mapCommandToControl
-        ) {
-            model.sendKey(
-                code: translated.code,
-                pressed: translated.pressed,
-                caps: translated.caps
-            )
+        // Straight to the page, in DOM spelling and otherwise untouched. What a
+        // chord *means* — Command to Control, the bare-Command tap, the record of
+        // what is held — is `frontend/src/macKeys.ts`, which both clients share.
+        for key in KeyboardCodes.events(for: event) {
+            model.sendKey(key)
         }
         return true
     }
 
     private func releaseAll() {
-        translator.reset()
         model?.releaseInput()
     }
 

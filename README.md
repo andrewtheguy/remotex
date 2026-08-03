@@ -17,10 +17,11 @@ Apple Screen Sharing do with a stream of them.
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing.
   `subtype = "ard"` selects Apple Screen Sharing's Standard mode over RFB 3.8
   with Apple Remote Desktop authentication.
-- The optional macOS 26 `remotex.app` is a self-contained native client with
-  Metal rendering, AppKit input, menus, clipboard access, and audio playback.
-  Choose its bundled loopback gateway with no login, or enter the address and
-  login for a remote gateway.
+- The optional macOS 26 `remotex.app` is a native shell around this same client:
+  it runs a gateway of its own on loopback with no login, shows the SPA that
+  gateway serves, and adds what a browser cannot — every ⌘ chord including ⌘Q and
+  ⌘W, pasteboard synchronization, a menu bar, and a window it can resize to the
+  remote.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design,
 [`docs/macos-viewer.md`](docs/macos-viewer.md) for the app, and
@@ -138,7 +139,7 @@ The main directories are:
 |---|---|
 | `src/` | gateway, session management, and RDP/VNC engines |
 | `frontend/` | React SPA |
-| `apps/remotex-viewer/` | `remotex.app`, the native macOS 26 SwiftUI/Metal client |
+| `apps/remotex-viewer/` | `remotex.app`, the native macOS 26 shell around the SPA |
 | `tests/` | protocol and engine end-to-end tests |
 | `packaging/` | release, install, container, and macOS bundle scripts |
 
@@ -218,4 +219,4 @@ bash packaging/build-tarball.sh
 Local Cargo builds automatically rebuild the frontend when its sources change.
 The tarball contains the gateway binary and built frontend. `remotex.app` is built
 by `packaging/macos-viewer/build-viewer-app.sh`, which bundles the gateway binary
-into the app rather than shipping the frontend.
+and the same built frontend into the app.

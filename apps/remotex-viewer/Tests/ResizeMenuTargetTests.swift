@@ -16,7 +16,7 @@ struct ResizeMenuTargetTests {
     /// `Selector(("…"))` there — so nothing but a test compares them.
     @Test
     func theTargetAnswersTheSelectorsTheMenuItemsSend() {
-        let target = ResizeMenuTarget(model: makeModel())
+        let target = ResizeMenuTarget(model: AppModel.underTest(sink: RecordingSink()))
 
         #expect(target.responds(to: ViewerMenus.autoResizeAction))
         #expect(target.responds(to: ViewerMenus.resizeToWindowAction))
@@ -27,13 +27,17 @@ struct ResizeMenuTargetTests {
     /// asks as the menu opens, so that is where the answer has to be right. A tick
     /// pushed on at click time instead would be correct only until something else
     /// changed the mode.
+    ///
+    /// The tick follows the *page*, not the click, which is the whole reason it is
+    /// read this way round: the client decides whether it is following the window,
+    /// and a menu that ticked itself would claim a mode the client had refused.
     @Test
     func theAutoResizeItemTogglesAndCarriesItsOwnTick() throws {
-        let model = makeModel()
-        model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "vnc", resize: true))))
-        model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
-        model.reportViewport(DisplayMode(w: 1600, h: 900))
+        let sink = RecordingSink()
+        let model = AppModel.underTest(sink: sink)
+        model.apply(
+            .state(AppModel.desktopState(canResize: true, canAutoResize: true))
+        )
         let target = ResizeMenuTarget(model: model)
         let auto = item(ViewerMenus.autoResizeAction)
 
@@ -42,7 +46,14 @@ struct ResizeMenuTargetTests {
 
         try #require(target.responds(to: ViewerMenus.autoResizeAction))
         target.perform(ViewerMenus.autoResizeAction, with: nil)
+        #expect(sink.sent(.setAutoResize(true)))
 
+        // The client did it, and says so; now the tick moves and the one-shots go.
+        model.apply(
+            .state(
+                AppModel.desktopState(canResize: true, canAutoResize: true, autoResize: true)
+            )
+        )
         #expect(model.autoResizes)
         #expect(target.validateMenuItem(auto))
         #expect(auto.state == .on)
@@ -53,10 +64,9 @@ struct ResizeMenuTargetTests {
         #expect(!target.validateMenuItem(item(ViewerMenus.resizeToDisplayAction)))
 
         // Sent again: the same item switches back, so the menu is never one-way.
+        sink.clear()
         target.perform(ViewerMenus.autoResizeAction, with: nil)
-        #expect(!model.autoResizes)
-        #expect(target.validateMenuItem(auto))
-        #expect(auto.state == .off)
+        #expect(sink.sent(.setAutoResize(false)))
     }
 
     /// The state this item exists in on RDP and Apple Screen Sharing: greyed while
@@ -65,13 +75,11 @@ struct ResizeMenuTargetTests {
     /// below it disproves.
     @Test
     func theAutoResizeItemIsGreyedAndLabelledWhereOnlyAskingIsAllowed() {
-        let model = makeModel()
-        model.apply(.status(.connected))
+        let sink = RecordingSink()
+        let model = AppModel.underTest(sink: sink)
         model.apply(
-            .control(.connected(connected(protocolName: "rdp", resize: true, autoResize: false)))
+            .state(AppModel.desktopState(canResize: true, canAutoResize: false))
         )
-        model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
-        model.reportViewport(DisplayMode(w: 1600, h: 900))
         let target = ResizeMenuTarget(model: model)
         let auto = item(ViewerMenus.autoResizeAction)
 
@@ -82,21 +90,18 @@ struct ResizeMenuTargetTests {
             "asking for one resize still works"
         )
 
-        // And clicking it anyway — a menu item cannot be, but the action can be
-        // sent — leaves the session manual rather than silently following, and does
-        // not rewrite the remembered default on the strength of a change that never
-        // happened.
+        // And sending the action anyway — a greyed menu item cannot be clicked, but
+        // the selector can be performed — asks the client for nothing, rather than
+        // leaving it to refuse a mode the gateway already withheld.
         target.perform(ViewerMenus.autoResizeAction, with: nil)
-        #expect(!model.autoResizes)
-        #expect(!model.autoResizeByDefault)
+        #expect(!sink.sent(.setAutoResize(true)))
     }
 
     /// And it is dead where a resize is not allowed at all, with the other two.
     @Test
     func theAutoResizeItemIsDeadWithoutThePermission() {
-        let model = makeModel()
-        model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
+        let model = AppModel.underTest(sink: RecordingSink())
+        model.apply(.state(AppModel.desktopState(canResize: false)))
         let target = ResizeMenuTarget(model: model)
 
         #expect(!target.validateMenuItem(item(ViewerMenus.autoResizeAction)))
@@ -107,14 +112,19 @@ struct ResizeMenuTargetTests {
     /// what forwarding means here.
     @Test
     func resizingToTheDisplayReachesTheModel() throws {
-        let model = makeModel()
+        let sink = RecordingSink()
+        let model = AppModel.underTest(sink: sink)
         var fitted = 0
         model.fitWindowToRemote = { fitted += 1 }
         let target = ResizeMenuTarget(model: model)
 
-        model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "vnc"))))
-        model.apply(.control(.resize(w: 3200, h: 2000, scale: 2)))
+        model.apply(
+            .state(
+                AppModel.desktopState(
+                    size: NativeState.RemoteSize(w: 3200, h: 2000, scale: 2)
+                )
+            )
+        )
         #expect(model.canResizeToDisplay)
 
         // Sent the way the menu sends it, rather than by calling the method: this
@@ -126,25 +136,21 @@ struct ResizeMenuTargetTests {
         target.perform(ViewerMenus.resizeToDisplayAction, with: nil)
 
         #expect(fitted == 1)
+        #expect(sink.commands.isEmpty, "and the remote is not told about it")
     }
 
-    /// And the other direction, which does go on the wire. Driven through the
-    /// shared attached-session harness so what is asserted is a real `viewport`
-    /// frame on a real socket.
+    /// And the other direction, which does reach the client: one request, now.
     @Test
-    func resizingToTheWindowReachesTheWire() async throws {
-        let session = try await AttachedSession.attached(suite: "ResizeMenuTargetTests")
-        session.connect(protocolName: "rdp", resize: true)
-        let target = ResizeMenuTarget(model: session.model)
-
-        session.model.reportViewport(DisplayMode(w: 1440, h: 900))
-        try await session.settle()
-        #expect(session.viewports.isEmpty, "measuring is not asking")
+    func resizingToTheWindowReachesThePage() throws {
+        let sink = RecordingSink()
+        let model = AppModel.underTest(sink: sink)
+        model.apply(.state(AppModel.desktopState(canResize: true)))
+        let target = ResizeMenuTarget(model: model)
 
         try #require(target.responds(to: ViewerMenus.resizeToWindowAction))
         target.perform(ViewerMenus.resizeToWindowAction, with: nil)
 
-        try await session.expectViewport(w: 1440, h: 900)
+        #expect(sink.commands == [.resizeToWindow])
     }
 
     /// Enablement comes from `validateMenuItem`, which AppKit calls as the menu
@@ -155,12 +161,9 @@ struct ResizeMenuTargetTests {
     func eachItemIsValidatedAgainstItsOwnProperty() {
         // The row where the two answers differ: a target without `resize` cannot be
         // asked to match the window, but its desktop holds still and can be fitted
-        // to. See `AppModelTests.aTargetThatWillNotResizeCanStillBeFittedTo`.
-        let model = makeModel()
-        model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "vnc", resize: false))))
-        model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
-        model.reportViewport(DisplayMode(w: 1600, h: 900))
+        // to.
+        let model = AppModel.underTest(sink: RecordingSink())
+        model.apply(.state(AppModel.desktopState(canResize: false)))
         #expect(!model.canResizeNow)
         #expect(model.canResizeToDisplay)
 
@@ -174,11 +177,8 @@ struct ResizeMenuTargetTests {
     /// at `false` cannot pass the test above by accident.
     @Test
     func bothItemsGoLiveOnATargetThatAllowsBoth() {
-        let model = makeModel()
-        model.apply(.status(.connected))
-        model.apply(.control(.connected(connected(protocolName: "rdp", resize: true))))
-        model.apply(.control(.resize(w: 1920, h: 1080, scale: 1)))
-        model.reportViewport(DisplayMode(w: 1600, h: 900))
+        let model = AppModel.underTest(sink: RecordingSink())
+        model.apply(.state(AppModel.desktopState(canResize: true)))
 
         let target = ResizeMenuTarget(model: model)
 
@@ -189,7 +189,7 @@ struct ResizeMenuTargetTests {
     /// Off a session both are dead, which is the state the menu bar comes up in.
     @Test
     func neitherItemIsLiveWithoutADesktop() {
-        let target = ResizeMenuTarget(model: makeModel())
+        let target = ResizeMenuTarget(model: AppModel.underTest(sink: RecordingSink()))
 
         #expect(!target.validateMenuItem(item(ViewerMenus.resizeToWindowAction)))
         #expect(!target.validateMenuItem(item(ViewerMenus.resizeToDisplayAction)))
@@ -200,7 +200,7 @@ struct ResizeMenuTargetTests {
     /// answering `false` by default would disable an item it knows nothing about.
     @Test
     func anItemThatIsNotOursIsLeftEnabled() {
-        let target = ResizeMenuTarget(model: makeModel())
+        let target = ResizeMenuTarget(model: AppModel.underTest(sink: RecordingSink()))
 
         #expect(target.validateMenuItem(item(#selector(NSWindow.toggleFullScreen(_:)))))
         #expect(target.validateMenuItem(NSMenuItem()))
@@ -208,34 +208,5 @@ struct ResizeMenuTargetTests {
 
     private func item(_ action: Selector) -> NSMenuItem {
         NSMenuItem(title: "", action: action, keyEquivalent: "")
-    }
-
-    private func makeModel() -> AppModel {
-        AppModel(
-            clipboard: ClipboardSynchronizer(
-                pasteboard: NSPasteboard.withUniqueName(),
-                startsPolling: false
-            )
-        )
-    }
-
-    /// `autoResize` defaults to what the gateway would actually send for this
-    /// protocol — plain `vnc` may be driven by the window and RDP may not — so a
-    /// case that is about the items rather than the permission that splits them is
-    /// never in a state the real gateway cannot produce. The cases that are about
-    /// that permission name it.
-    private func connected(
-        protocolName: String,
-        resize: Bool = false,
-        autoResize: Bool? = nil
-    ) -> ServerMessage.Connected {
-        ServerMessage.Connected(
-            name: "mac",
-            protocolName: protocolName,
-            resize: resize,
-            autoResize: resize && (autoResize ?? (protocolName == "vnc")),
-            clipboard: false,
-            audio: false
-        )
     }
 }

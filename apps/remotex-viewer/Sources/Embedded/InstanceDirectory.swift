@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Everything this launch reads or writes, in one directory.
@@ -36,6 +37,38 @@ struct InstanceDirectory: Equatable, Sendable {
             path: instanceName(ofBundleNamed: Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String),
             directoryHint: .isDirectory
         )
+    }
+
+    /// Which WebKit data store this instance's page gets
+    /// (`WKWebsiteDataStore(forIdentifier:)`).
+    ///
+    /// The client keeps its three remembered preferences in `localStorage` — the
+    /// Command-translation override and the two "if compatible" defaults — so the
+    /// store has to persist, or every launch forgets them. WebKit keeps it in this
+    /// app's container under the identifier below rather than in this directory,
+    /// which is why the identifier has to come *from* this directory: that is what
+    /// makes `--instance-dir` isolate the preferences too, the same way it isolates
+    /// the config and the log.
+    ///
+    /// Derived rather than stored: a UUID written into the instance would be a
+    /// fourth file to keep, and one that a copied directory would silently share.
+    /// The path is hashed because a `UUID` is 16 bytes and a path is not.
+    var dataStoreIdentifier: UUID {
+        // Standardized so `/tmp/x` and `/tmp/./x` are one instance, which is what
+        // they are to everything else here.
+        let path = url.standardizedFileURL.path
+        let digest = SHA256.hash(data: Data(path.utf8))
+        var bytes = [UInt8](digest.prefix(16))
+        // Version 4 / variant 1, so this is a well-formed UUID rather than 16 bytes
+        // that happen to print like one.
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     /// The directory name a bundle name maps to.

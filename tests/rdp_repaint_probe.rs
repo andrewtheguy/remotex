@@ -79,7 +79,7 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
 
     config.host = "127.0.0.1".to_owned();
     config.port = 0;
-    config.static_dir = Some("frontend/dist".into());
+    config.static_dir = "frontend/dist".into();
     config.auth = common::test_auth();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

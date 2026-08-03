@@ -1,4 +1,4 @@
-//! Who may talk to this gateway: the web login for a browser, or one bearer
+//! Who may talk to this gateway: the web login for a browser, or one minted
 //! token for the client an embedded gateway was started by.
 //!
 //! A process has exactly one of them ([`GatewayAuth`], chosen at startup), which
@@ -15,8 +15,11 @@
 //! **The token.** `remotex serve-embedded` has no user to ask and nowhere to keep
 //! a credential: it is started by `remotex.app`, which is its only client. So it
 //! mints an [`EmbeddedToken`], hands it over down a pipe (see [`crate::embedded`]),
-//! and takes it on the `Authorization` header. Such a gateway refuses
-//! `/api/auth/*` outright — there is no login to attempt.
+//! and takes it in the same `remotex_session` cookie a login would have set. The
+//! client puts it in its web view's cookie store, which is what lets one page load
+//! carry it to `/api/*` and to the WebSocket upgrades alike — a header cannot reach
+//! either from inside a document. Such a gateway still refuses `/api/auth/login`
+//! and `/api/auth/logout`: there is no credential to check and no session to end.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -95,8 +98,10 @@ pub enum GatewayAuth {
     /// A web login: the `[server].site_passwd` credential, the `remotex_session`
     /// cookie, and the [`AuthSessions`] behind it.
     Login(SitePasswd),
-    /// One bearer token, minted at startup and given to the client that started
-    /// this gateway. `/api/auth/*` refuses on such a gateway.
+    /// One token, minted at startup and given to the client that started this
+    /// gateway, which presents it as the same `remotex_session` cookie a login
+    /// would have set. `/api/auth/login` and `/api/auth/logout` refuse on such a
+    /// gateway: there is nothing to log in to and nothing to end.
     Token(EmbeddedToken),
 }
 
@@ -166,17 +171,6 @@ impl EmbeddedToken {
         }
         difference == 0
     }
-}
-
-/// The credential from an `Authorization: Bearer <token>` header.
-///
-/// The scheme is matched case-insensitively because RFC 9110 says it is, and
-/// exactly one space is expected after it — this is read from a client in the same
-/// bundle as the server, so there is no legacy shape to be lenient about.
-pub fn bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<&str> {
-    let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = value.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then_some(token)
 }
 
 /// Generate a `site_passwd` value (the `gen-passwd` subcommand; tests pass a
@@ -346,24 +340,6 @@ mod tests {
         assert!(GatewayAuth::Login(SitePasswd::parse(
             &generate("admin", "hunter2", TEST_COST).unwrap()
         ).unwrap()).token().is_none(), "a login gateway has no token");
-    }
-
-    #[test]
-    fn bearer_headers_are_read_and_the_rest_refused() {
-        let header = |value: &str| {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
-            headers
-        };
-        assert_eq!(bearer_from_headers(&header("Bearer tok-123")).unwrap(), "tok-123");
-        assert_eq!(
-            bearer_from_headers(&header("bearer tok-123")).unwrap(),
-            "tok-123",
-            "the scheme is case-insensitive"
-        );
-        assert_eq!(bearer_from_headers(&header("Basic tok-123")), None);
-        assert_eq!(bearer_from_headers(&header("tok-123")), None, "no scheme at all");
-        assert_eq!(bearer_from_headers(&HeaderMap::new()), None);
     }
 
     #[test]

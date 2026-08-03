@@ -1,5 +1,11 @@
-import { useEffect, useRef } from "react";
-import FloatingMenu from "./FloatingMenu.tsx";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import FloatingMenu, { type PanelControls } from "./FloatingMenu.tsx";
+import {
+  NATIVE_HOST,
+  type NativeCommandHandlers,
+  useNativeCommands,
+  useNativeState,
+} from "./nativeHost.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
   CAN_PINCH_ZOOM,
@@ -64,12 +70,83 @@ export default function RemoteDesktop({
     resizeToWindow,
     setAutoResize,
     selectDisplay,
+    refresh,
     setAudio,
     sendKeyCombo,
+    sendKey,
+    releaseKeys,
     requestClipboard,
     sendClipboard,
+    pushLocalClipboard,
     setBottomInset,
   } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
+
+  // The panel actions, published by FloatingMenu and called by the native menu
+  // bar. A ref because the menus reach in at any moment, not as part of a render.
+  const panelControlsRef = useRef<PanelControls | null>(null);
+  const onPanelControls = useCallback((controls: PanelControls | null) => {
+    panelControlsRef.current = controls;
+  }, []);
+
+  // Everything the shell's menus render themselves from. In a browser this object
+  // is built and dropped; `useNativeState` posts nothing.
+  useNativeState({
+    branding,
+    mode,
+    status,
+    ready: size !== null,
+    size,
+    canResize,
+    canAutoResize,
+    autoResize,
+    canClipboard,
+    canAudio,
+    audioEnabled,
+    audioError,
+    displays,
+    activeDisplayId,
+    macKeyOverridesEnabled,
+    macKeyOverridesActive,
+    remoteIsMac,
+  });
+
+  // The other direction. Every one of these is a control the shell hides: the
+  // menu item is the button, and this is the wire between them.
+  const nativeCommands: NativeCommandHandlers = useMemo(
+    () => ({
+      key: ({ code, pressed, caps, meta }) =>
+        sendKey(code, pressed, caps, meta),
+      releaseInput: () => releaseKeys(),
+      clipboardLocal: ({ text }) => pushLocalClipboard(text),
+      openClipboard: () => panelControlsRef.current?.openClipboard(),
+      openDisplays: () => panelControlsRef.current?.toggleDisplays(),
+      closePanel: () => panelControlsRef.current?.closePanel(),
+      resizeToWindow: () => resizeToWindow(),
+      setAutoResize: ({ enabled }) => setAutoResize(enabled),
+      selectDisplay: ({ id }) => selectDisplay(id),
+      setAudio: ({ enabled }) => setAudio(enabled),
+      setMacKeyOverrides: ({ enabled }) => setMacKeyOverridesEnabled(enabled),
+      refresh: () => refresh(),
+      switchTarget: () => switchTarget(),
+      takeOver: () => takeOver(),
+      sendKeyCombo: ({ codes }) => sendKeyCombo(codes),
+    }),
+    [
+      sendKey,
+      releaseKeys,
+      pushLocalClipboard,
+      resizeToWindow,
+      setAutoResize,
+      selectDisplay,
+      setAudio,
+      setMacKeyOverridesEnabled,
+      refresh,
+      switchTarget,
+      takeOver,
+      sendKeyCombo,
+    ],
+  );
+  useNativeCommands(nativeCommands);
 
   // A speaker on the tab title while sound is playing — the one place the desktop
   // has room to say so, since the toggle lives in the drawer. At the *front*, not
@@ -146,6 +223,8 @@ export default function RemoteDesktop({
           remoteIsMac={remoteIsMac}
           onMacKeyOverridesChange={setMacKeyOverridesEnabled}
           onLocalShortcut={onLocalShortcut}
+          chromeless={NATIVE_HOST}
+          onPanelControls={NATIVE_HOST ? onPanelControls : undefined}
         />
       )}
 

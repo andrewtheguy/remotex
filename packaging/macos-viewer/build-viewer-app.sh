@@ -24,10 +24,10 @@
 # loopback port at launch (see docs/macos-viewer.md), so a build with only one of
 # the two is not a working app.
 #
-# It also carries `Contents/Resources/canvas`, the remote surface — a web page the
-# app serves to its own WKWebView from its own loopback listener. That is not the
-# SPA and not a web UI: the embedded gateway still serves nothing, and an
-# `index.html` inside this bundle would mean it had started to.
+# It also carries `Contents/Resources/web`, which **is** the SPA — the same build a
+# browser gets. The bundled gateway serves it on loopback and the app shows that
+# page in a WKWebView, so the client has one implementation and the app is the
+# native shell around it.
 #
 # Builds are ad-hoc signed by default. Set CODESIGN_IDENTITY explicitly to use
 # another identity; Developer ID distribution also requires notarization.
@@ -110,31 +110,20 @@ gateway="target/$cargo_profile/remotex"
   exit 1
 }
 
-# The remote surface. Built from the same sources as the browser client — the wire
-# format has one implementation (frontend/src/protocol.ts) and both clients read
-# it — but to its own output directory, so an SPA `index.html` can never reach
-# this bundle.
-echo ">> building the canvas page"
+# The client itself. The very same `bun run build` a deployment ships, because it
+# is the very same client: the app's window is a web view onto this, served by the
+# gateway beside it on loopback.
+echo ">> building the SPA"
 command -v bun >/dev/null || {
-  echo "bun is required to build the viewer's canvas page" >&2
+  echo "bun is required to build the SPA the app shows" >&2
   exit 1
 }
-(cd frontend && bun install --frozen-lockfile && bun run build:viewer)
-canvas="frontend/dist-viewer"
-[ -f "$canvas/viewer.html" ] || {
-  echo "canvas page missing at $canvas/viewer.html" >&2
+(cd frontend && bun install --frozen-lockfile && bun run build)
+web="frontend/dist"
+[ -f "$web/index.html" ] || {
+  echo "SPA missing at $web/index.html" >&2
   exit 1
 }
-# The app serves this page under a per-launch random path, so every reference in
-# it has to be relative. An absolute `/assets/…` resolves a token away from where
-# it was served, 404s, and leaves a document with no script and no stylesheet —
-# which on screen is an unexplained blank desktop rather than an error. Checked
-# here because `vite build` succeeds either way and nothing downstream can tell.
-if grep -Eq '(src|href)="/' "$canvas/viewer.html"; then
-  echo "::error::the canvas page references absolute paths; vite base must stay './'" >&2
-  grep -Eo '(src|href)="/[^"]*"' "$canvas/viewer.html" >&2
-  exit 1
-fi
 
 app="dist/remotex.app"
 echo ">> assembling $app"
@@ -150,7 +139,9 @@ chmod +x "$app/Contents/MacOS/remotex-gateway"
 cp packaging/macos-viewer/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 # `ditto` rather than `cp -R`: the destination must be exactly this directory's
 # contents, and `cp -R` onto an existing directory nests instead of replacing.
-/usr/bin/ditto "$canvas" "$app/Contents/Resources/canvas"
+# `--web-root` names this path at launch; nothing about the layout is the
+# gateway's to guess.
+/usr/bin/ditto "$web" "$app/Contents/Resources/web"
 sed -e "s|<string>0\\.0\\.0</string>|<string>${version}</string>|g" \
   packaging/macos-viewer/Info.plist > "$app/Contents/Info.plist"
 
