@@ -108,9 +108,12 @@ body {
   /* Nothing here is text, and a drag must not select the page. */
   user-select: none;
   -webkit-user-select: none;
-  /* Default for engines that composite the cursor into the framebuffer (RDP,
-     and VNC servers that ignore the Cursor pseudo-encoding): hide the browser's
-     own cursor so only one pointer shows. A `cursor` command overrides this
-     inline with the remote shape — see main.ts. */
-  cursor: none;
+  /* An ordinary pointer until a desktop exists to hide it for. `paintCursor` in
+     main.ts owns this from the first `resize` onwards: `none` for engines that
+     composite the cursor into the framebuffer (RDP, and VNC servers that ignore
+     the Cursor pseudo-encoding) so only one pointer shows, the remote's shape
+     when a `cursor` command names one, and this again on `clear`. Defaulting to
+     `none` here hid the pointer over the target picker, which the macOS viewer
+     draws on top of this page rather than instead of it. */
+  cursor: default;
 }
