@@ -1,0 +1,199 @@
+// The seam between this SPA and `remotex.app`, which shows it in a WKWebView.
+//
+// The app is a *shell*: it owns the window, the menu bar, the macOS pasteboard and
+// keyboard capture, and nothing else. Everything below the title bar is this client,
+// the same build a browser loads, talking to the same gateway over the same socket.
+// So the seam carries only what a page cannot do for itself:
+//
+//   app → page   keys the browser is never given (⌘W, ⌘Q, ⌘T…), the local
+//                pasteboard, and the menu commands that stand in for the floating
+//                menu the shell hides;
+//   page → app   one state object the menus derive their titles, ticks and
+//                enablement from, plus the remote's clipboard when it changes.
+//
+// Nothing about the session crosses it. The app holds no claim, no socket and no
+// wire format — which is the point: a protocol change is a change to this client
+// and to nothing else.
+//
+// In a browser every export here is inert: `NATIVE_HOST` is false, `postToHost`
+// returns, and no command handler is ever installed.
+
+import { useEffect } from "react";
+import type { DisplayInfo } from "./protocol.ts";
+
+/// The remote framebuffer and its density, structurally the `RemoteSize` in
+/// useRemoteDesktop. Declared here rather than imported because that module
+/// imports this one, and a type-only cycle is still a cycle to read.
+interface HostRemoteSize {
+  w: number;
+  h: number;
+  scale: number;
+}
+
+/** The message handler `remotex.app` installs on its web view. */
+interface NativeWebkit {
+  messageHandlers?: {
+    remotexNative?: { postMessage: (body: unknown) => void };
+  };
+}
+
+/**
+ * Whether this page is running inside `remotex.app` rather than a browser.
+ *
+ * Read once: the handler is installed before the first load and cannot appear
+ * later, and a value that could change mid-session would put the FAB and the menu
+ * bar on screen at the same time.
+ */
+export const NATIVE_HOST: boolean =
+  typeof window !== "undefined" &&
+  !!(window as unknown as { webkit?: NativeWebkit }).webkit?.messageHandlers
+    ?.remotexNative;
+
+/** Everything the menu bar needs to render itself. Posted whenever it changes. */
+export interface NativeState {
+  /** Which screen the client is on: the menus are dead outside the desktop. */
+  mode: "picker" | "desktop";
+  /** The connection lifecycle, which decides Take Over's title and presence. */
+  status: string;
+  /** True once the first frame has arrived, which is when input may be captured. */
+  ready: boolean;
+  /** The remote framebuffer and its density, for **Resize to Display**. */
+  size: HostRemoteSize | null;
+  /** The two resize permissions and the client's per-session choice. */
+  canResize: boolean;
+  canAutoResize: boolean;
+  autoResize: boolean;
+  canClipboard: boolean;
+  canAudio: boolean;
+  audioEnabled: boolean;
+  audioError: string | null;
+  displays: DisplayInfo[];
+  activeDisplayId: number | null;
+  /** The Command-translation preference and whether it is doing anything. */
+  macKeyOverridesEnabled: boolean;
+  macKeyOverridesActive: boolean;
+  remoteIsMac: boolean;
+}
+
+/** What the page tells the app. */
+export type NativeEvent =
+  | { type: "state"; state: NativeState }
+  /**
+   * The remote's clipboard changed on its own. The app writes `NSPasteboard`;
+   * this is the one direction a web view cannot take itself, since writing the
+   * system pasteboard from a page needs a gesture it does not have.
+   */
+  | { type: "clipboardFromRemote"; text: string }
+  /**
+   * `/api/auth/status` said no, so the token the app put in the cookie store is
+   * not the one this gateway minted. A login form cannot fix that, so the app
+   * shows its own failure screen instead of letting one appear.
+   */
+  | { type: "unauthenticated" };
+
+/** What the app tells the page. */
+export type NativeCommand =
+  /** One key, already mapped from a macOS virtual keycode to a DOM `code`. */
+  | {
+      type: "key";
+      code: string;
+      pressed: boolean;
+      caps: boolean;
+      meta: boolean;
+    }
+  /** Let go of everything held — focus left the surface, or capture stopped. */
+  | { type: "releaseInput" }
+  /** The Mac's pasteboard changed; forward it to the remote. */
+  | { type: "clipboardLocal"; text: string }
+  /** Menu commands, each standing in for a control the shell hides. */
+  | { type: "openClipboard" }
+  | { type: "openDisplays" }
+  | { type: "closePanel" }
+  | { type: "resizeToWindow" }
+  | { type: "setAutoResize"; enabled: boolean }
+  | { type: "selectDisplay"; id: number }
+  | { type: "setAudio"; enabled: boolean }
+  | { type: "setMacKeyOverrides"; enabled: boolean }
+  | { type: "refresh" }
+  | { type: "switchTarget" }
+  | { type: "takeOver" }
+  | { type: "sendKeyCombo"; codes: string[] };
+
+/** Handlers for every command the app can send. */
+export type NativeCommandHandlers = {
+  [C in NativeCommand as C["type"]]: (command: C) => void;
+};
+
+/**
+ * Send one event to the app. A no-op in a browser, so callers never branch.
+ *
+ * Failures are swallowed: the page is the thing on screen, and an app that has
+ * stopped listening is not a reason for it to stop working.
+ */
+export function postToHost(event: NativeEvent): void {
+  if (!NATIVE_HOST) {
+    return;
+  }
+  try {
+    (
+      window as unknown as { webkit: NativeWebkit }
+    ).webkit.messageHandlers?.remotexNative?.postMessage(event);
+  } catch {
+    // The app is gone or refused the message; the page carries on regardless.
+  }
+}
+
+/**
+ * Post `state` to the app whenever it changes.
+ *
+ * Compared as JSON rather than field by field: it is a dozen values that change
+ * together, the object is rebuilt on every render, and the alternative is a
+ * dependency list that goes stale the first time a field is added.
+ */
+export function useNativeState(state: NativeState): void {
+  const encoded = JSON.stringify(state);
+  useEffect(() => {
+    if (!NATIVE_HOST) {
+      return;
+    }
+    postToHost({ type: "state", state: JSON.parse(encoded) as NativeState });
+  }, [encoded]);
+}
+
+/** The property the app calls into. Global because `evaluateJavaScript` has no
+ * other way in — it evaluates a string against the page's global object. */
+const COMMAND_PROPERTY = "__remotexNative";
+
+interface CommandTarget {
+  command: (command: NativeCommand) => void;
+}
+
+/**
+ * Install the command entry point for as long as the caller is mounted.
+ *
+ * Handlers are read through a ref-like closure over the latest object, because the
+ * app may call in at any moment and re-installing the global on every render would
+ * lose a command that arrived mid-swap.
+ */
+export function useNativeCommands(handlers: NativeCommandHandlers): void {
+  useEffect(() => {
+    if (!NATIVE_HOST) {
+      return;
+    }
+    const target = window as unknown as Record<string, CommandTarget>;
+    target[COMMAND_PROPERTY] = {
+      command: (command: NativeCommand) => {
+        // A command this build does not know is dropped rather than thrown: the
+        // app and the page ship together, so it can only mean a hand-typed one in
+        // the Web Inspector.
+        const handler = handlers[command.type] as
+          | ((c: NativeCommand) => void)
+          | undefined;
+        handler?.(command);
+      },
+    };
+    return () => {
+      delete target[COMMAND_PROPERTY];
+    };
+  }, [handlers]);
+}

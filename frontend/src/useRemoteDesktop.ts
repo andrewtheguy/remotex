@@ -13,6 +13,7 @@ import {
 } from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
+import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
 import {
   binaryFrameKind,
@@ -537,6 +538,14 @@ export function useRemoteDesktop(
   // effect, called by the toolbar. Null while nothing is subscribed, which is also
   // when there is no chord to unwind.
   const localShortcutRef = useRef<(() => void) | null>(null);
+  // One key from somewhere other than this document's keyboard events — which
+  // today means `remotex.app`'s AppKit monitor, the only thing that can be given
+  // ⌘W and ⌘Q. Set by the input effect so an injected key joins the same
+  // translator and the same held-key set as a typed one.
+  const injectKeyRef = useRef<
+    | ((code: string, pressed: boolean, caps: boolean, meta: boolean) => void)
+    | null
+  >(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   // Kept in a ref (not just state) so input handlers read the latest size
   // without re-subscribing.
@@ -1238,6 +1247,14 @@ export function useRemoteDesktop(
       if (alreadyMirrored || echoedFromHost) {
         return;
       }
+      // Inside `remotex.app` the app owns the pasteboard and writes it with
+      // AppKit. Not a preference: `navigator.clipboard.writeText` in a web view
+      // has no user gesture behind it, so it is refused, and the remote's copy
+      // would silently never arrive on the Mac.
+      if (NATIVE_HOST) {
+        postToHost({ type: "clipboardFromRemote", text });
+        return;
+      }
       void navigator.clipboard?.writeText?.(text).catch(() => {});
     };
 
@@ -1505,6 +1522,13 @@ export function useRemoteDesktop(
     sendRef.current({ type: "selectDisplay", id });
   }, []);
 
+  // Re-announce the size and repaint everything, for a canvas that has gone
+  // wrong. Only the native shell offers it — a browser has reload, which does
+  // this and more.
+  const refresh = useCallback(() => {
+    sendRef.current({ type: "refresh" });
+  }, []);
+
   // Start or stop the remote's sound (the floating menu's Audio button).
   //
   // **Must be called from a click**, and the AudioContext is why: a context created
@@ -1604,10 +1628,32 @@ export function useRemoteDesktop(
     sendRef.current({ type: "clipboard", text });
   }, []);
 
+  // The host's clipboard changed and something outside this page noticed. Only
+  // the native shell has such a thing — it polls `NSPasteboard.changeCount` —
+  // and it lands here rather than in `sendClipboard` so it passes the same echo
+  // guards the browser's own focus push does: a value that came *from* the remote
+  // a moment ago must not go straight back to it.
+  const pushLocalClipboard = useCallback((text: string) => {
+    if (
+      text === "" ||
+      overClipboardLimit(text) ||
+      text === lastFromRemoteRef.current ||
+      text === lastToRemoteRef.current
+    ) {
+      return;
+    }
+    lastToRemoteRef.current = text;
+    sendRef.current({ type: "clipboard", text });
+  }, []);
+
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
   // values are skipped locally; the explicit panel reports the limit.
+  //
+  // Not in the native shell, where the app polls `NSPasteboard.changeCount` and
+  // pushes what it finds: reading the pasteboard from a page there would ask macOS
+  // for permission a second time, on behalf of a "browser" the user cannot see.
   useEffect(() => {
-    if (mode !== "desktop" || !canClipboard) {
+    if (NATIVE_HOST || mode !== "desktop" || !canClipboard) {
       return;
     }
     const pushLocalClipboard = () => {
@@ -1668,6 +1714,23 @@ export function useRemoteDesktop(
     localShortcutRef.current?.();
   }, []);
 
+  // One key from the native shell's keyboard monitor. Unlike `sendKeyCombo` this
+  // is a real press or release: it can hold a modifier across events, which is the
+  // whole of what a keyboard does and what a combo cannot express.
+  const sendKey = useCallback(
+    (code: string, pressed: boolean, caps: boolean, meta: boolean) => {
+      injectKeyRef.current?.(code, pressed, caps, meta);
+    },
+    [],
+  );
+
+  // Let go of every key the remote was told about. The shell calls this where a
+  // browser gets a `blur`: the app deactivating, the window losing key, or capture
+  // ending because the desktop went away.
+  const releaseKeys = useCallback(() => {
+    releaseKeysRef.current?.();
+  }, []);
+
   // Capture input over the overlay element and forward it to the server,
   // scaling pointer coordinates from the displayed size to the remote size.
   useEffect(() => {
@@ -1684,7 +1747,8 @@ export function useRemoteDesktop(
     // Command chord sends ControlLeft and swallows Meta, so releasing what was
     // typed would leave the guest holding a Control it was never told about.
     const pressedKeys = new Set<string>();
-    const macKeys = new MacKeyboardTranslator();
+    // The native shell is given every Command chord, so it gets the fuller table.
+    const macKeys = new MacKeyboardTranslator(NATIVE_HOST);
 
     // Touch gestures, only on pinch-zoom-capable devices — they
     // drive the same view transform applyCanvasCss renders.
@@ -1808,15 +1872,24 @@ export function useRemoteDesktop(
       pressedButtons.clear();
       gestures?.release();
     };
-    // Every key event goes through the Command translator, which is a
-    // pass-through unless this is a Mac host driving a non-Mac guest. `pressedKeys`
-    // follows what it emits rather than what arrived, so releaseAll can undo a
-    // chord the guest was told about in different codes than the user typed.
-    const sendTranslated = (e: KeyboardEvent, pressed: boolean) => {
-      e.preventDefault();
-      const caps = e.getModifierState("CapsLock");
+    // Every key goes through the Command translator, which is a pass-through
+    // unless this is a Mac host driving a non-Mac guest. `pressedKeys` follows what
+    // it emits rather than what arrived, so releaseAll can undo a chord the guest
+    // was told about in different codes than the user typed.
+    //
+    // Taken apart from the DOM event because it has a second caller: inside
+    // `remotex.app` the keys arrive from an AppKit monitor over the native bridge,
+    // already carrying a DOM `code`, and they have to take this exact path — the
+    // same translator instance and the same held-key set — or a chord started at
+    // the keyboard could be released by the other half. See nativeHost.ts.
+    const emitKey = (
+      code: string,
+      pressed: boolean,
+      caps: boolean,
+      meta: boolean,
+    ) => {
       const translated = macKeys.translate(
-        { code: e.code, pressed, caps, meta: e.metaKey },
+        { code, pressed, caps, meta },
         macKeyOverridesActiveRef.current,
       );
       for (const key of translated) {
@@ -1828,10 +1901,15 @@ export function useRemoteDesktop(
         send({ type: "key", ...key });
       }
     };
+    const sendTranslated = (e: KeyboardEvent, pressed: boolean) => {
+      e.preventDefault();
+      emitKey(e.code, pressed, e.getModifierState("CapsLock"), e.metaKey);
+    };
     const onKeyDown = (e: KeyboardEvent) => sendTranslated(e, true);
     const onKeyUp = (e: KeyboardEvent) => sendTranslated(e, false);
     const onBlur = () => releaseAll();
     releaseKeysRef.current = releaseKeys;
+    injectKeyRef.current = emitKey;
     localShortcutRef.current = () => macKeys.noteCommandUsedLocally();
 
     el.addEventListener("mousemove", onMouseMove);
@@ -1848,6 +1926,7 @@ export function useRemoteDesktop(
     return () => {
       gestures?.detach();
       releaseKeysRef.current = null;
+      injectKeyRef.current = null;
       localShortcutRef.current = null;
       el.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
@@ -1902,10 +1981,16 @@ export function useRemoteDesktop(
     resizeToWindow,
     setAutoResize,
     selectDisplay,
+    refresh,
     setAudio,
     sendKeyCombo,
+    // The native shell's two input entry points; unused in a browser, where the
+    // document's own key events are the only source there is.
+    sendKey,
+    releaseKeys,
     requestClipboard,
     sendClipboard,
+    pushLocalClipboard,
     setBottomInset,
   };
 }
