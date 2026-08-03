@@ -1,11 +1,7 @@
 // The Command translator's state machine, which is pure logic and so is checked
 // here rather than through a browser. What a browser adds — which chords it hands
 // to the page at all — no unit test can answer; that is
-// tests/playwright/mac-keyboard.spec.ts and manual QA.
-//
-// Deliberately parallel to the viewer's KeyboardTranslatorTests.swift: the two
-// clients translate the same chords into the same codes, and a case that exists
-// there and not here is a place they could drift apart. Run with
+// tests/playwright/mac-keyboard.spec.ts and manual QA. Run with
 // `bun test src/macKeys.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -293,10 +289,9 @@ test("the two Command keys are tracked apart", () => {
   ]);
 });
 
-// The browser-specific half, and the reason this translator is not a straight
-// copy of the viewer's: macOS browsers can withhold `keyup` for a character key
-// while Command is held. Without the flush, the guest is left holding both the
-// letter and a Control it can never be told to release.
+// macOS browsers can withhold `keyup` for a character key while Command is held.
+// Without the flush, the guest is left holding both the letter and a Control it
+// can never be told to release.
 test("a keyup swallowed under Command is flushed when Command comes up", () => {
   const t = new MacKeyboardTranslator();
   t.translate(down("MetaLeft"), true);
@@ -379,53 +374,15 @@ test("a key with no Command involved is passed straight through", () => {
   assert.deepEqual(t.translate(up("KeyC"), true), [sent("KeyC", false)]);
 });
 
-// The one fork between the two hosts, and it is a table rather than a behaviour:
-// `remotex.app` takes keys with an AppKit monitor ahead of the menu bar, so ⌘W is
-// a chord it can offer; a browser never receives one and mapping it there would
-// close the tab. Everything else about the chord — the withheld Command, the
-// synthetic Control, the release — is the same code either way, which is what
-// these two cases are checking.
-test("a browser forwards Command-W, and the native host maps it", () => {
+// A browser is never given ⌘W — the tab closes first — so it is not in the table
+// and Command is forwarded as itself, which is what leaves the guest able to see
+// the chord it was actually sent. docs/roadmap.md's companion extension is what
+// would change that.
+test("a browser forwards Command-W rather than mapping it", () => {
   const browser = new MacKeyboardTranslator();
   assert.deepEqual(browser.translate(down("MetaLeft"), true), []);
   assert.deepEqual(browser.translate(down("KeyW", true), true), [
     sent("MetaLeft", true),
     sent("KeyW", true),
   ]);
-
-  const native = new MacKeyboardTranslator(true);
-  assert.deepEqual(native.translate(down("MetaLeft"), true), []);
-  assert.deepEqual(native.translate(down("KeyW", true), true), [
-    sent("ControlLeft", true),
-    sent("KeyW", true),
-  ]);
-  assert.deepEqual(native.translate(up("KeyW", true), true), [
-    sent("KeyW", false),
-    sent("ControlLeft", false),
-  ]);
-  // And Command itself was never sent, so its release has nothing to undo.
-  assert.deepEqual(native.translate(up("MetaLeft"), true), []);
-});
-
-test("the chords a browser does get mean the same thing on both hosts", () => {
-  for (const code of [
-    "KeyA",
-    "KeyC",
-    "KeyF",
-    "KeyP",
-    "KeyS",
-    "KeyV",
-    "KeyX",
-    "KeyZ",
-  ]) {
-    const browser = new MacKeyboardTranslator();
-    const native = new MacKeyboardTranslator(true);
-    browser.translate(down("MetaLeft"), true);
-    native.translate(down("MetaLeft"), true);
-    assert.deepEqual(
-      browser.translate(down(code, true), true),
-      native.translate(down(code, true), true),
-      `${code} must translate the same way on both hosts`,
-    );
-  }
 });

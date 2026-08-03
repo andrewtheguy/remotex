@@ -605,10 +605,10 @@ async fn active_loop(
     // used.
     let mut applied = Density::One;
     // The layout in flight — a size, a density, or both — and when to repeat it.
-    // A client states each *once per attach* and then dedupes it (a viewport, and
-    // `sendHostScale` in frontend/src/useRemoteDesktop.ts and the viewer's own in
-    // AppModel.swift), so nothing will ask again from the other end: every attempt
-    // after the first has to come from here. One slot, not one per kind, so a size
+    // The client states each *once per attach* and then dedupes it (a viewport,
+    // and `sendHostScale` in frontend/src/useRemoteDesktop.ts), so nothing will ask
+    // again from the other end: every attempt after the first has to come from
+    // here. One slot, not one per kind, so a size
     // and a density can only ever be pending as a single merged layout — see
     // [`PendingLayout`] for why one retry rather than two.
     let mut pending_layout: Option<PendingLayout> = None;
@@ -801,8 +801,8 @@ async fn active_loop(
                             }
                             // Refused, so the remote keeps whatever it had:
                             // advertising a partial copy would hand out a paste
-                            // that looks complete. Both clients refuse this and
-                            // say why before it reaches the gateway.
+                            // that looks complete. The client refuses this and
+                            // says why before it reaches the gateway.
                             None => warn!(
                                 "rdp: refusing {} bytes to the remote clipboard, over the {} byte limit",
                                 text.len(),

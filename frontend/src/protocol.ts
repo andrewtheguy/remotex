@@ -64,7 +64,7 @@ export type ClientMsg =
   // Select an opaque id from the latest `displays` message.
   | { type: "selectDisplay"; id: number }
   // Re-announce the desktop size and repaint everything. A recovery command for
-  // a canvas that has gone wrong, offered by `remotex.app`'s Remote menu; the
+  // a canvas that has gone wrong; the
   // browser has no button for it, since there is a reload right there.
   | { type: "refresh" }
   // "I lost the tiles you told me to remember." Sent when a cached tile will not

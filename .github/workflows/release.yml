@@ -1,4 +1,4 @@
-name: Release remotex and mac viewer
+name: Release remotex
 
 on:
   workflow_dispatch:
@@ -131,164 +131,8 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  mac-viewer:
-    needs: prepare
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # The bundle carries the remote surface as a web page, built from the same
-      # sources as the browser client.
-      - uses: oven-sh/setup-bun@v2
-
-      # This job builds the gateway binary too, since it goes inside the bundle — and
-      # without a cache that means compiling the whole graph, libopus through cmake
-      # included, on every release.
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Which CEF this build wants
-        id: cef
-        run: |
-          # From the lockfile, so the cache key follows the pinned engine and
-          # nothing else — a version bump in Cargo.toml must not throw away a
-          # 350 MB cache that is still correct.
-          version=$(python3 -c '
-          import tomllib
-          with open("Cargo.lock", "rb") as f:
-              lock = tomllib.load(f)
-          print(next(p["version"] for p in lock["package"] if p["name"] == "cef-dll-sys"))
-          ')
-          echo "Chromium Embedded Framework ${version}"
-          echo "version=${version//+/-}" >> "$GITHUB_OUTPUT"
-
-      # Chromium itself, which `stage-cef.sh` downloads here on a miss. Outside
-      # `target/`, so the Rust cache above does not cover it, and a miss costs the
-      # download *and* the cmake build of libcef_dll_wrapper that follows it.
-      - name: CEF cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/cef
-          key: cef-${{ runner.os }}-${{ runner.arch }}-${{ steps.cef.outputs.version }}
-
-      # Before the tests, not after. `Package.swift` links `-lremotex_cef` out of
-      # `target/cef-link` and this is the only thing that puts it there, so a test
-      # run on a fresh checkout does not fail — it fails to *link*.
-      - name: Stage the Chromium host crate
-        run: bash packaging/macos-viewer/stage-cef.sh
-
-      - name: Test the native viewer
-        run: swift test --package-path apps/remotex-viewer
-
-      # Deliberately bare: no flags and no environment, so this is character for
-      # character what a developer runs. Pinning CODESIGN_IDENTITY here would have
-      # set the same ad-hoc identity the script already defaults to, at the cost of
-      # being the one place the two could drift apart without anyone noticing.
-      - name: Build remotex.app and its disk image
-        run: bash packaging/macos-viewer/build-viewer-app.sh
-
-      - name: Verify the disk image
-        run: |
-          version="${{ needs.prepare.outputs.version }}"
-          dmg="dist/remotex-viewer-${version}-macos-arm64-unsigned.dmg"
-          mnt="$RUNNER_TEMP/viewer-dmg-mount"
-          mkdir -p "$mnt" "$RUNNER_TEMP/viewer-installed"
-          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
-          [ "$(readlink "$mnt/Applications")" = "/Applications" ] || {
-            echo "::error::the viewer image has no /Applications symlink"
-            exit 1
-          }
-          /usr/bin/ditto "$mnt/remotex.app" \
-            "$RUNNER_TEMP/viewer-installed/remotex.app"
-          hdiutil detach "$mnt"
-          app="$RUNNER_TEMP/viewer-installed/remotex.app"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          # Both executables, because an app with only one of them is not an app: the
-          # client cannot serve itself and the gateway has no window. Checked after the
-          # archive round-trip, which is where a lost execute bit would show up.
-          got=$("$app/Contents/MacOS/remotex-viewer" --version)
-          [ "$got" = "remotex-viewer ${version}" ] || {
-            echo "::error::expected 'remotex-viewer ${version}', got '${got}'"
-            exit 1
-          }
-          got=$("$app/Contents/MacOS/remotex-gateway" --version)
-          [ "$got" = "remotex ${version}" ] || {
-            echo "::error::expected 'remotex ${version}', got '${got}'"
-            exit 1
-          }
-          # The client: the embedded Chromium serves this document to itself as
-          # `remotex://app` and the bundled gateway serves the same directory to
-          # any browser opened on its port.
-          # Without it the app has nothing to show and says so at launch.
-          [ -f "$app/Contents/Resources/web/index.html" ] || {
-            echo "::error::remotex.app is missing the SPA it shows"
-            exit 1
-          }
-          # And the assets it references, since an index.html whose script 404s is a
-          # blank window rather than an error.
-          [ -d "$app/Contents/Resources/web/assets" ] || {
-            echo "::error::remotex.app ships an index.html with no assets beside it"
-            exit 1
-          }
-          # Every local file the document names, resolved under the web root. The
-          # directory check above is satisfied by an `assets/` that lost the one
-          # hashed script index.html asks for — and vite renames that file on every
-          # build, so "the directory is there" is the weakest form of this question.
-          python3 - "$app/Contents/Resources/web" <<'PY'
-          import html.parser, pathlib, sys, urllib.parse
-
-          root = pathlib.Path(sys.argv[1])
-
-          class Refs(html.parser.HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.refs = []
-
-              def handle_starttag(self, tag, attrs):
-                  for name, value in attrs:
-                      if name in ("src", "href") and value:
-                          self.refs.append(value)
-
-          parser = Refs()
-          parser.feed((root / "index.html").read_text(encoding="utf-8"))
-
-          missing = []
-          checked = 0
-          for ref in parser.refs:
-              parsed = urllib.parse.urlparse(ref)
-              # Somebody else's to serve (a scheme or a host), or not a file at all
-              # (a bare `#fragment`): either way not this bundle's to carry.
-              if parsed.scheme or parsed.netloc or not parsed.path:
-                  continue
-              checked += 1
-              # Resolved against the web root. Vite emits `./assets/…` (`base: "./"`,
-              # since the app's document is a file and not at an origin root), and
-              # index.html sits at that root, so document-relative and root-relative
-              # are the same thing here — `lstrip` keeps an absolute `/assets/…`
-              # working too if the base ever changes back.
-              if not (root / urllib.parse.unquote(parsed.path).lstrip("/")).is_file():
-                  missing.append(ref)
-
-          if missing:
-              print("::error::remotex.app references files it does not ship: " + ", ".join(missing))
-              sys.exit(1)
-          if not checked:
-              # A document naming nothing is a build that emitted no script, which
-              # would otherwise pass every check above and show a blank window.
-              print("::error::remotex.app ships an index.html that references nothing")
-              sys.exit(1)
-          print(f"index.html references {checked} bundled file(s), all present")
-          PY
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: remotex-viewer-macos-arm64
-          path: dist/*.dmg
-          if-no-files-found: error
-
   release:
-    needs: [prepare, build, mac-viewer]
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -304,12 +148,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        # Both globs, not `artifacts/*`: `merge-multiple` also drops the
+        # The glob, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .dmg is the macOS viewer app.
+        # release assets.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
-            artifacts/*.tar.gz artifacts/*.dmg --clobber
+            artifacts/*.tar.gz --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:
@@ -330,10 +174,6 @@ jobs:
   # These runners need no pinning (unlike the tarball builds above): the runner
   # only unpacks a tarball and drives docker, so all that matters is its arch —
   # the glibc that has to line up is the *base image*'s against the binary's.
-  #
-  # The image is the gateway alone. Nothing from `mac-viewer` goes into it: the
-  # viewer is a macOS app shipped as a DMG and never in a container. Its only
-  # relation to this job is that both hang off the same published release.
   docker:
     needs: [prepare, release]
     strategy:

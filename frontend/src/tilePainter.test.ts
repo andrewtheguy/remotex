@@ -4,7 +4,7 @@
 // test that produced its input with the same code that reads it would agree with
 // itself no matter what either did. The layout below is transcribed from
 // `batch` in `src/protocol.rs`, which is the contract both ends are checked
-// against (the Swift viewer's `TileFrameTests` does the same on its side).
+// against.
 //
 // Run with `bun test src/tilePainter.test.ts` from frontend/.
 import assert from "node:assert/strict";

@@ -12,11 +12,6 @@
 #   ├── install.sh
 #   └── uninstall.sh
 #
-# The gateway only. The macOS viewer app is a separate program with a separate
-# install story — a .dmg you drag into /Applications — built and shipped
-# separately by packaging/macos-viewer/build-viewer-app.sh and the mac-viewer
-# job in .github/workflows/release.yml. Nothing here needs a Swift toolchain.
-#
 # Run on each target platform you want to ship (macOS builds the mac tarball,
 # Linux builds the linux tarball) — this does not cross-compile.
 set -euo pipefail

@@ -2,15 +2,13 @@
 
 remotex is a single-user gateway for RDP and VNC targets, including Macs reached
 through their built-in Screen Sharing service. A Rust backend owns the remote
-protocol session and exposes one common HTTP/WebSocket interface to the React SPA
-and to `remotex.app`, the native macOS client. The app either starts its bundled
-gateway on loopback or connects to a deployed gateway (see
-[`macos-viewer.md`](macos-viewer.md)).
+protocol session and exposes one common HTTP/WebSocket interface to the React SPA,
+which is the only client.
 
 ## Data path
 
 ```text
-browser SPA, or remotex.app over loopback or the network
+browser SPA over loopback or the network
    │  /api: authentication, targets, session claim
    │  /ws: JSON control/input, binary image batches
    │  /ws/audio: the audio format, then binary audio frames
@@ -91,11 +89,9 @@ honest trade of a single fixed knob, and choosing `webp` over `jpeg` spends fewe
 bytes for the same visible result.
 
 The still dial costs no wire change. A tile record's first byte is already its format
-(`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and both clients decode all
-three through `createImageBitmap` from a MIME type — `remotex.app` draws on a web
-canvas too, so this is one implementation rather than two that could disagree
-about a format. What streams costs one: a `VIDEO` record, described under the
-client protocol below.
+(`Tile::FORMAT_PNG` / `FORMAT_JPEG` / `FORMAT_WEBP`) and the client decodes all
+three through `createImageBitmap` from a MIME type. What streams costs one: a
+`VIDEO` record, described under the client protocol below.
 
 The engines never see the config enums. The axes and the qualities collapse to one
 `RenderPlan` at the config boundary in `TargetConfig::render_plan`, which reaches
@@ -147,7 +143,7 @@ turn down.
 
 **`motion` is refused on `subtype = "ard-high-performance"`.** A resize under both
 corrupts the desktop until the whole gateway is restarted — a reconnect does not
-clear it, and both clients see it, so it is engine state rather than anything the
+clear it, and the client sees it, so it is engine state rather than anything the
 render dial owns. Neither half is proven at fault: High Performance is reverse
 engineered with no specification behind it (see [apple-vnc-889.md](apple-vnc-889.md)),
 and `motion` is the newer code. The pairing waits until one of them is understood
@@ -351,7 +347,7 @@ for the region streams above too, which is why they run the same code:
   the mirror is padded up with its edge repeated (black would be a seam the encoder
   paid for every frame). The record header carries the *true* rectangle and the
   client crops — reporting the padded size would push a paint past the framebuffer,
-  which the viewer's renderer drops outright rather than clamps.
+  which the renderer drops outright rather than clamps.
 
 `render_quality` maps to a constant quantizer (1 → 51, 100 → 12; the floor is
 openh264's own `GOM_MIN_QP_MODE`, and mapping past it would give a dial whose top
@@ -373,20 +369,15 @@ for tiles — a 1080p repaint is ~17 bands — but under `video` one message is 
 frame, and 64 of them in each of two queues in series is seconds of buffered
 picture. A video target gets `VIDEO_FRAME_BUFFER` (4) at both hops.
 
-**Both clients decode it, with one decoder between them.** It is WebCodecs
-`VideoDecoder`, reached through `frontend/src/videoDecoder.ts` and driven from
-`tilePainter.ts` — the shared batch loop, which keys a decoder per `stream` id and
-replaces one whose region has restarted on a different size. `remotex.app` shows
-this same client in an embedded Chromium, so video was not a second implementation
-there and could not have been.
+**The client decodes it with WebCodecs** `VideoDecoder`, reached through
+`frontend/src/videoDecoder.ts` and driven from `tilePainter.ts` — the shared batch
+loop, which keys a decoder per `stream` id and replaces one whose region has
+restarted on a different size.
 
 `VideoDecoder` is secure-context only — the same limit remote audio already has, but a
 worse one to hit, since no audio decoder means silence beside a working desktop and no
 video decoder means no desktop. So a failure is *said* rather than logged: a banner
-that stays up. `remotex.app` loads the page from `remotex://app`, registered as a
-secure scheme, so it cannot land on the insecure-origin half of that — but it lands
-on the other half instead: stock CEF ships without proprietary codecs, so H.264
-does not decode in the app at all and a `video` target reports exactly that banner.
+that stays up, naming the codec the browser would not take.
 See [`known-issues.md`](known-issues.md).
 
 ## Session lifecycle
@@ -416,9 +407,9 @@ logins.
 
 ## Client protocol
 
-`src/protocol.rs`, `frontend/src/protocol.ts`, and the viewer's `Protocol`
-sources define the client contract. `GET /api/config` publishes the protocol
-version so the independently shipped viewer can reject an incompatible gateway.
+`src/protocol.rs` and `frontend/src/protocol.ts` define the client contract.
+`GET /api/config` publishes the protocol version, so a client that did not ship
+with this gateway can reject one it cannot speak.
 
 Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
@@ -535,8 +526,7 @@ wave buffers — about three seconds) whose only job is to absorb a socket write
 flight: losses belong at the bridge, which drops its *oldest* and keeps sound that is
 still live, rather than here, which is FIFO and would deliver stale audio faithfully.
 
-Both clients own their playback schedule, and it is the same code: a 0.5-second
-cushion, and backlog beyond a 1.5-second ceiling discarded. Those numbers are a jitter
+The client owns its playback schedule: a 0.5-second cushion, and backlog beyond a 1.5-second ceiling discarded. Those numbers are a jitter
 budget rather than a latency target, and they are deliberately generous — audio trails
 video by roughly the cushion, which is the trade Myrtille and FreeRDP both make. What reaches that
 schedule differs by codec, and only there. The client does not decode anything
@@ -546,8 +536,7 @@ client turns the packet into an `AudioBuffer` and schedules it directly.
 
 The secure-context requirement belongs to that first path alone. WebCodecs is
 unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
-localhost, while passthrough plays anywhere. `remotex.app` is unaffected either
-way: it loads the page from `remotex://app`, a scheme it registers as secure.
+localhost, while passthrough plays anywhere.
 
 A quiet remote and one that never negotiates audio are indistinguishable to the
 client, so detailed negotiation status remains in the gateway log.
@@ -563,7 +552,7 @@ A target's `resize` is permission, not behavior: an engine that has it applies
 every `viewport` it is sent and an engine without it drops them all.
 
 *How often* a client sends one is governed by a second permission, `autoResize`
-on the `connected` message. Both clients offer two ways to drive a size: a manual
+on the `connected` message. The client offers two ways to drive a size: a manual
 "Resize to Window", and a mode that hands the size to the window so every change
 reports one. The manual control follows `resize`. The mode follows `autoResize`,
 which the gateway grants to plain `vnc` alone — its DesktopSize renegotiation
@@ -578,8 +567,7 @@ operator has no way to know which engines survive a stream of resizes.
 
 Within the mode, the client's own choice is remembered across connections and
 applied "if compatible" — which covers both a target that refuses resize and one
-that resizes only when asked.
-See [`macos-viewer.md`](macos-viewer.md) and `useRemoteDesktop.ts`.
+that resizes only when asked. See `useRemoteDesktop.ts`.
 
 What is engine-specific is the shape of the permission:
 
@@ -631,8 +619,8 @@ permission rules may prevent automatic access.
 
 ### Liveness
 
-The gateway sends a WebSocket ping every five seconds. Browsers and the viewer
-answer at the protocol layer, independent of application timers. About 60
+The gateway sends a WebSocket ping every five seconds. Browsers answer at the
+protocol layer, independent of application timers. About 60
 seconds without a pong ends the engine; an orderly close starts a fresh
 60-second reattach window.
 
@@ -763,63 +751,19 @@ Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or
 reclaim actions.
 
-### remotex.app, the native macOS shell
-
-`remotex.app` is not a second client. It starts the gateway in its own bundle,
-shows **the SPA above** in an embedded Chromium, and owns what a page cannot: the
-menu bar, keyboard capture ahead of it, `NSPasteboard`, and the window. The engine
-is `crates/remotex-cef`, a C ABI over `cef-rs`, and it is the piece a shell on
-another OS would reuse.
-
-Nothing about the session is the app's. The page is loaded as `remotex://app` out
-of the bundle and talks to the gateway beside it on `http://127.0.0.1` itself —
-same claim, same `/ws`, same `/ws/audio` — and this app holds no socket, no claim
-and no wire format. A protocol change is a change to one client, in one language.
-
-A scheme of its own is what gives the page an origin that survives a relaunch, and
-`localStorage` is keyed by origin: on the gateway's ephemeral port the client's
-remembered preferences went into a new bucket every time. The cost is that
-`remotex://app` is not the gateway's origin, so those calls are cross-origin and the
-embedded gateway answers that one origin with credentials — narrowly, and only
-where the credential is a per-launch token. The scheme is registered secure, so
-WebCodecs is available; Opus decodes and H.264 does not, because the engine ships
-without proprietary codecs.
-
-Two things cross the boundary, over one message-router query function and one
-`ExecuteJavaScript` call (`frontend/src/nativeHost.ts`): the page reports one
-state object the menus are derived from, and the app sends the keys a browser is
-never given, the Mac's pasteboard, and the menu commands standing in for the
-floating menu it hides. See [`macos-viewer.md`](macos-viewer.md#the-bridge).
-
-The gateway it starts is `serve-embedded`: an ephemeral loopback port, the SPA out
-of `Contents/Resources/web` — the same directory the window loads its document
-from, so a browser opened on that port gets the same client — and a random token
-minted per launch that the app puts in Chromium's cookie jar instead of a login. It
-dies with the app. Reaching a gateway elsewhere is a browser's job.
-
-That path is the one place `GatewayAuth` (in `src/auth.rs`, of which exactly one is
-active per process) and `config::Audience` differ from a served gateway, because the
-app decides everything `[server]` would say.
-
-See [`macos-viewer.md`](macos-viewer.md) for the handshake, the shutdown contract,
-the instance directory, the bridge, resize behavior, and QA.
-
 ## Configuration and testing
 
 Configuration is one TOML file with `[server]` and `[[targets]]` sections.
 Protocol-specific fields are validated at startup, including mutually exclusive
 credential fields and unsupported feature combinations.
 
-`config::Audience` names the two readers of that schema. A served gateway needs a
-target to offer and a credential to guard it, and is told where to listen. `remotex.app`'s
-gateway is told none of those — it refuses a `[server]` block, and comes up with no
-targets at all, which is what a first launch has. `remotex check-config [--embedded]`
-applies either set of rules without starting anything; the app's configuration editor
-calls it before writing, so what the editor accepts is what the gateway starts on.
+A gateway needs a target to offer and a credential to guard it, and is told where
+to listen. `remotex check-config` applies those rules to a file — or to text on
+stdin, which is what an unsaved edit is — without starting anything.
 
-`branding` is top-level for exactly that reason: it is the one setting both audiences
-share, and a key inside `[server]` could not name a gateway whose config has no
-`[server]` block. There is one place to write it and no second spelling.
+`branding` is top-level rather than a `[server]` key: it names the deployment
+rather than the server, and one value with two spellings is one of them going
+stale. There is one place to write it and no second spelling.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session

@@ -49,21 +49,19 @@ never a goal — but it means a link with room to spare is never discovered.
 Going further needs the receiver's view, which TCP hides: loss and jitter are behind
 retransmission, and the only thing the sending side can observe is how fast its own
 socket drains. So this wants a client-reported measurement — bytes received and
-arrival timing as a new `ClientMsg` — and work in both clients. A separate feature,
+arrival timing as a new `ClientMsg` — and work in the client. A separate feature,
 and one whose value should be argued from `video`'s measurements rather than assumed.
 
 ### A video codec every engine has
 
 `render_type = "video"` and `render_motion_subtype = "h264"` both carry H.264, and
-H.264 is the one codec a browser is not guaranteed to have. `remotex.app` is now the
-proof: it embeds Chromium, stock CEF ships without proprietary codecs, and the
-fastest client remotex has cannot decode its fastest render mode — see
-[`known-issues.md`](known-issues.md). A licence-free codec would end that class of
-failure rather than route around it: both VP9 and AV1 are carried by a stock CEF
-build, which H.264 is not. Neither is universal — AV1 is refused by engines with no
-hardware path for it — so the client's own `isConfigSupported` probe stays the thing
-that decides, and a negotiation is part of the work below rather than an assumption
-underneath it.
+H.264 is the one codec a browser is not guaranteed to have — a Chromium built
+without proprietary codecs refuses it, and so does a Firefox on a system with no
+system decoder. A licence-free codec would end that class of failure rather than
+route around it: VP9 and AV1 are both carried by builds that H.264 is not. Neither
+is universal — AV1 is refused by engines with no hardware path for it — so the
+client's own `isConfigSupported` probe stays the thing that decides, and a
+negotiation is part of the work below rather than an assumption underneath it.
 
 The work is on the sending side and is not small: an encoder per stream in the
 gateway, a `ServerMsg::VideoFormat` that names the codec and its decoder
@@ -89,16 +87,40 @@ this be.
   pointer transforms. High Performance mode is unaffected because it uses one
   virtual display rather than a mosaic of physical displays.
 
-### remotex.app
+### Companion Chrome extension
 
-- **Native clipboard and display panels.** The app's **Remote › Clipboard…** and
-  **Display** menu items drive the client's own panels through the bridge rather
-  than presenting AppKit ones. That is right for now — one clipboard editor, one
-  consent boundary, one display list — but a Mac app whose only sheet is a web
-  panel is a compromise, not a design. Native versions are worth having once
-  there is a reason to touch that layout again; they were deliberately not done
-  in the shell refactor, where the cost was a regression risk in a docked-panel
-  layout that had already needed fixing once.
+The native macOS shell is gone. It was one window around this same page, and it
+existed for two things a page genuinely cannot do for itself. Both survive it, and
+both were measured against stock Chrome plus a small MV3 extension before the shell
+was removed — the spike is a proof of viability, not a design:
+
+- **A clipboard that keeps syncing while the window is unfocused or minimized.**
+  `navigator.clipboard.readText()` is refused unless the document is focused, which
+  is why `pushBrowserClipboardOnFocus` in `useRemoteDesktop.ts` fires on focus and
+  nowhere else. An extension *offscreen document* with reason `CLIPBOARD` polls the
+  system clipboard regardless of focus. Confirmed on macOS in both directions:
+  a copy made while Chrome was minimized reached the page, and a push made while
+  Chrome was minimized reached the system pasteboard.
+- **⌘W and ⌘Q reaching the guest.** In a regular tab Chrome reserves them and the
+  page never sees a keydown, which is why `macKeys.ts` forwards Command as itself
+  there rather than mapping the chord. Two ways out, both confirmed: in an
+  **immersive** view — fullscreen plus `navigator.keyboard.lock(['KeyW','KeyQ'])` —
+  both arrive as ordinary keydowns; and in a **macOS installed-app window** no keys
+  are reserved at all, so the page sees every shortcut first and `preventDefault()`
+  captures ⌘W/⌘Q windowed. Held Esc always escapes the lock, by design, and is the
+  one chord a remote session can never have.
+
+Only those two. Everything else the shell owned was a menu bar standing in front of
+this client's own controls, and a browser needs none of it.
+
+The shape of the work: a `window.postMessage` handshake the page uses to notice the
+extension and degrade without it, `clipboard-changed` from the extension calling the
+same `sendClipboard` path a focus push takes (the echo guards `lastFromRemoteRef` and
+`lastToRemoteRef` already cover it), and the reverse direction replacing what
+`mirrorRemoteClipboard` used to hand the shell. The keyboard half restores the fuller
+Command chord table `macKeys.ts` used to select for the shell, gated on the extension
+being present rather than on a build flag. Distribution is "Load unpacked" for
+personal use, or a local `.crx` pinned through `ExtensionSettings` policy.
 
 ## Not planned
 

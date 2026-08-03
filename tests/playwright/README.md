@@ -21,8 +21,8 @@ frames` — not a number that depends on how long the run happened to watch.
 
 `batch-envelope.spec.ts` is the v3 binary envelope, read off the SPA's own socket.
 It exists because it is the only test that watches the browser link as the browser
-actually uses it — the Rust E2E tests drive a raw WebSocket client, and the Swift
-and TypeScript unit tests parse frames they built themselves, so both ends can
+actually uses it — the Rust E2E tests drive a raw WebSocket client, and the
+TypeScript unit tests parse frames they built themselves, so both ends can
 agree with their own fixtures and disagree with each other. Its frame parser is
 deliberately a second implementation rather than an import of the SPA's, because a
 wrong parser would otherwise agree with itself.
@@ -33,7 +33,7 @@ revealing the panel leave the local clipboard untouched until explicit Copy.
 
 `oversized-clipboard.spec.ts` covers the refusal path: a Mac pasteboard larger
 than `MAX_CLIPBOARD_BYTES` reaches the panel as its size, not as the first 64 KiB
-of itself. It is here rather than only in the Rust and Swift unit tests because
+of itself. It is here rather than only in the Rust unit tests because
 the claim spans macOS Screen Sharing, the gateway, the browser link and the panel,
 and the failure it guards against — a truncated value arriving *successfully* —
 is invisible to any one of them.

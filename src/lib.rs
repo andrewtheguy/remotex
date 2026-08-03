@@ -7,7 +7,6 @@ pub mod audio;
 pub mod auth;
 pub mod cli;
 pub mod config;
-pub mod embedded;
 pub mod encode;
 pub mod engine;
 pub mod error;
