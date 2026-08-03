@@ -43,6 +43,23 @@ struct GatewayBinary: Sendable {
         Bundle.main.url(forResource: webRootName, withExtension: nil)
     }
 
+    /// The client's own document inside this bundle — the `file://` URL the window
+    /// actually loads.
+    ///
+    /// Separate from [`webRootInBundle`], which answers where the *gateway* serves
+    /// from, because the two are used for different things now: the gateway is told
+    /// the directory, and the web view is given this file. Existence is checked, so
+    /// a bundle whose SPA failed to copy says so at launch rather than showing an
+    /// empty window.
+    static func clientIndexInBundle() -> URL? {
+        guard let index = webRootInBundle()?.appendingPathComponent("index.html"),
+              FileManager.default.fileExists(atPath: index.path)
+        else {
+            return nil
+        }
+        return index
+    }
+
     struct Output: Sendable {
         let status: Int32
         let standardOutput: String

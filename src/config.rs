@@ -697,6 +697,24 @@ pub struct AppConfig {
     /// validated it is the only place that builds it — a redirect target
     /// assembled at the point of use is one that can be assembled wrongly.
     pub dev_hostname: Option<String>,
+    /// Answer cross-origin requests from an **opaque** origin — `Origin: null`,
+    /// which is what a `file://` document sends — with credentials allowed.
+    ///
+    /// True for [`Audience::Embedded`] and false everywhere else, and the
+    /// difference is not a preference. `remotex.app` loads its client from
+    /// `file://` inside its own bundle, so every call the page makes to its gateway
+    /// is cross-origin and carries `Origin: null`; without this the page cannot
+    /// reach the backend it was shipped with.
+    ///
+    /// On a **served** gateway the same header would be a real hole: `null` is the
+    /// origin of every sandboxed iframe and `data:` URL on the web, so any page a
+    /// user visited could make credentialed calls to it. That gateway is reachable
+    /// by browsers on a network and has a login cookie worth stealing. An embedded
+    /// one is bound to loopback, serves the single client that started it, and its
+    /// credential is a token minted per launch and kept in that app's own cookie
+    /// store — so the audience that gets this header is the audience for which it
+    /// grants nothing anybody else can use.
+    pub allow_opaque_origin: bool,
 }
 
 impl ConfigFile {
@@ -1048,6 +1066,9 @@ impl ConfigFile {
             auth: GatewayAuth::Token(token),
             branding: Self::resolve_branding(self.branding.as_deref()),
             dev_hostname: None,
+            // The client is loaded from `file://` out of the bundle, so it talks to
+            // this gateway cross-origin. See the field.
+            allow_opaque_origin: true,
         })
     }
 
@@ -1095,6 +1116,8 @@ impl ConfigFile {
                 .map(dev_hostname)
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
+            // Never on a gateway browsers reach over a network. See the field.
+            allow_opaque_origin: false,
         })
     }
 }

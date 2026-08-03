@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { gatewayFetch } from "./gateway.ts";
 import { NATIVE_HOST } from "./nativeHost.ts";
 
 // The post-login target picker: the state where the user is authenticated and
@@ -53,7 +54,7 @@ export default function TargetPicker({
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/targets")
+    gatewayFetch("/api/targets")
       .then((res) => {
         if (res.status === 401) {
           onUnauthorized();
