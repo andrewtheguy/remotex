@@ -27,7 +27,8 @@ enum CanvasCommand: Equatable, Encodable {
     case input(enabled: Bool)
 
     private enum CodingKeys: String, CodingKey {
-        case type, w, h, scale, image, hx, hy, codec, sampleRate, channels, head, enabled
+        case type, w, h, scale, image, hx, hy, codec, sampleRate, channels, packetFrames, head,
+            enabled
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -52,6 +53,7 @@ enum CanvasCommand: Equatable, Encodable {
             try container.encode(format.codec, forKey: .codec)
             try container.encode(format.sampleRate, forKey: .sampleRate)
             try container.encode(format.channels, forKey: .channels)
+            try container.encode(format.packetFrames, forKey: .packetFrames)
             try container.encode(format.head, forKey: .head)
         case .audioStop:
             try container.encode("audioStop", forKey: .type)

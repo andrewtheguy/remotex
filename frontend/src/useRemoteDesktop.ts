@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AudioPlayer,
-  audioUnavailable,
   createAudioContext,
   createAudioPlayer,
   decodeAudioHead,
@@ -993,6 +992,7 @@ export function useRemoteDesktop(
             codec: msg.codec,
             sampleRate: msg.sampleRate,
             channels: msg.channels,
+            packetFrames: msg.packetFrames,
             head: decodeAudioHead(msg.head),
           },
           context,
@@ -1391,9 +1391,11 @@ export function useRemoteDesktop(
       // `connected` that decides whether the target actually carries audio arrives
       // a round trip later, long past any gesture, so it cannot make one then:
       // `handleConnected` either adopts this primed context or, when the target has
-      // no audio or the default is off, releases it. Skipped where WebCodecs cannot
-      // decode Opus at all, which is the one thing there is no gesture to fix.
-      if (audioByDefaultRef.current && !audioUnavailable()) {
+      // no audio or the default is off, releases it. Primed without asking whether
+      // this browser can decode: that depends on the target's codec, which the
+      // `audioFormat` a round trip later is the first thing to say — and a context
+      // that turns out unusable is released there at no cost.
+      if (audioByDefaultRef.current) {
         releaseAudio();
         audioContextRef.current = createAudioContext();
       }
@@ -1446,17 +1448,12 @@ export function useRemoteDesktop(
       setAudioEnabled(enabled);
       releaseAudio();
       if (enabled) {
-        // Said before the round trip rather than after it: there is no fallback
-        // representation, so nothing about the answer would change this. And it
-        // names which of the two reasons applies — a browser with no decoder, or an
-        // insecure origin, where WebCodecs does not exist however capable the
-        // browser is (see audioUnavailable).
-        const unavailable = audioUnavailable();
-        if (unavailable) {
-          setAudioEnabled(false);
-          setAudioError(unavailable);
-          return;
-        }
+        // Asked for without checking whether this browser can decode it, because
+        // that is not answerable yet: a passthrough target needs no decoder and
+        // plays where WebCodecs does not exist at all, and only the `audioFormat`
+        // that comes back says which kind of target this is. `startAudio` is where
+        // the question can be asked, and its catch reports the same two reasons —
+        // a browser with no decoder, or an insecure origin — a round trip later.
         audioContextRef.current = createAudioContext();
       }
       sendRef.current({ type: "audio", enabled });

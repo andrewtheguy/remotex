@@ -65,8 +65,9 @@ struct CanvasCommandTests {
         #expect(json["image"] is NSNull)
     }
 
-    /// `OpusHead` reaches the page as base64, which is what `decodeAudioHead`
-    /// reads and what the control message carried in the first place.
+    /// The decoder configuration reaches the page as base64, which is what
+    /// `decodeAudioHead` reads and what the control message carried in the first
+    /// place.
     @Test
     func anAudioFormatCarriesItsHeadAsBase64() throws {
         let head = try #require(Data(base64Encoded: "T3B1c0hlYWQBAjgBRKwAAAAAAA=="))
@@ -76,6 +77,7 @@ struct CanvasCommandTests {
                     codec: "opus",
                     sampleRate: 48_000,
                     channels: 2,
+                    packetFrames: 960,
                     head: head
                 )
             )
@@ -83,7 +85,34 @@ struct CanvasCommandTests {
         #expect(json["codec"] as? String == "opus")
         #expect(json["sampleRate"] as? Double == 48_000)
         #expect(json["channels"] as? Int == 2)
+        #expect(json["packetFrames"] as? Int == 960)
         #expect(json["head"] as? String == "T3B1c0hlYWQBAjgBRKwAAAAAAA==")
+    }
+
+    /// The same for a passthrough target, because this app plays neither kind and so
+    /// must forward both without interpreting either: a codec string WebCodecs does
+    /// not know, the remote's own rate, and no configuration at all.
+    ///
+    /// The empty `head` has to arrive at the page as an empty string rather than as
+    /// a missing key — the page reads it as "nothing to configure", and an absent
+    /// field would be an undefined it could not tell from a dropped one.
+    @Test
+    func aPassthroughFormatIsForwardedJustAsVerbatim() throws {
+        let json = try fields(
+            .audioFormat(
+                ServerMessage.AudioFormat(
+                    codec: "pcm-s16le",
+                    sampleRate: 44_100,
+                    channels: 2,
+                    packetFrames: 0,
+                    head: Data()
+                )
+            )
+        )
+        #expect(json["codec"] as? String == "pcm-s16le")
+        #expect(json["sampleRate"] as? Double == 44_100)
+        #expect(json["packetFrames"] as? Int == 0)
+        #expect(json["head"] as? String == "")
     }
 
     // MARK: - Events

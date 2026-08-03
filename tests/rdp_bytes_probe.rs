@@ -82,6 +82,7 @@ async fn spawn_app(rdp_port: u16) -> SocketAddr {
             resize: false,
             clipboard: false,
             audio: false,
+            audio_codec: None,
             render_type: remotex::config::RenderType::Full,
             render_subtype: remotex::config::RenderSubtype::Png,
             render_quality: None,

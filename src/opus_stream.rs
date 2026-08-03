@@ -1,19 +1,16 @@
 //! Convert live PCM wave buffers into bare 20 ms Opus packets.
 //!
-//! RDP's 44.1 kHz PCM is retained across buffers, resampled in exact groups to
-//! 48 kHz, and framed as 960-sample packets. Each listener owns fresh codec
-//! state downstream of the nonblocking RDP queue; quiet remotes emit nothing.
+//! The PCM arrives already deinterleaved and resampled to 48 kHz by
+//! [`crate::pcm48`]; this is only the codec. Each listener owns fresh codec state
+//! downstream of the nonblocking RDP queue; quiet remotes emit nothing.
 
 use opus::{Application, Bitrate, Channels, Encoder};
-use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
-use rubato::{Fft, FixedSync, Resampler};
 
 use crate::audio::PcmFormat;
+use crate::pcm48::{Pcm48, SAMPLE_RATE};
 
-/// The rate Opus encodes at. Not a preference — libopus rejects anything outside
-/// 8/12/16/24/48 kHz, and this is the only one of those that is not a downgrade
-/// from what RDP delivers.
-pub const OPUS_SAMPLE_RATE: u32 = 48_000;
+/// The WebCodecs codec string for what this produces.
+pub const OPUS_CODEC: &str = "opus";
 
 /// Frames per Opus packet, per channel: 20 ms at 48 kHz.
 ///
@@ -23,7 +20,8 @@ pub const FRAME_FRAMES: usize = 960;
 
 /// Target bitrate. Stereo desktop audio including music, so this is well clear of
 /// the ~64 kbps where stereo Opus starts to be audibly lossy, and still ~1/15th
-/// of the PCM it replaces.
+/// of the PCM it replaces — which is the whole of what the other option
+/// (`src/pcm_stream.rs`) gives back to avoid encoding at all.
 pub const OPUS_BITRATE_BPS: i32 = 96_000;
 
 /// Ceiling for one encoded packet. libopus documents 4000 bytes as the largest
@@ -33,31 +31,12 @@ const MAX_PACKET_BYTES: usize = 4000;
 /// Turns PCM buffers into Opus packets.
 pub struct OpusStream {
     encoder: Encoder,
-    channels: usize,
-    /// `None` when the input is already at [`OPUS_SAMPLE_RATE`].
-    resampler: Option<Fft<f32>>,
-    /// Input frames consumed per encoded packet: 882 at 44.1 kHz, 960 at 48 kHz.
-    frames_per_packet: usize,
-    /// Deinterleaved input awaiting a whole packet's worth, one `Vec` per channel.
-    /// Deinterleaved because that is what the resampler takes, and because
-    /// interpolating across interleaved samples would blend the channels into
-    /// each other.
-    pending: Vec<Vec<f32>>,
-    /// Scratch: the resampler's output, one `Vec` per channel.
-    resampled: Vec<Vec<f32>>,
+    /// Deinterleave and resample, which is codec-independent.
+    pcm: Pcm48,
     /// Scratch: one 20 ms frame, interleaved, as libopus wants it.
     frame: Vec<f32>,
     /// Scratch: one encoded packet.
     packet: Vec<u8>,
-    /// A trailing byte of a wave buffer that split a sample in half. RDP has no
-    /// reason to do this, but the queue carries bytes rather than samples, so
-    /// nothing in the types rules it out.
-    odd_byte: Option<u8>,
-    /// Which channel the next sample belongs to. State rather than a local,
-    /// because a buffer can end mid-frame — on an odd sample count the next
-    /// buffer's first sample is a right channel, and restarting at left here
-    /// would swap the channels for the rest of the session.
-    next_channel: usize,
     /// Frames encoded so far. Nothing branches on it; it is the number the
     /// per-buffer diagnostic in [`crate::audio`] compares against elapsed time,
     /// which is how a stream drifting from real time shows itself.
@@ -78,7 +57,7 @@ impl OpusStream {
         };
         let channel_count = usize::from(format.channels);
 
-        let mut encoder = Encoder::new(OPUS_SAMPLE_RATE, channels, Application::Audio)
+        let mut encoder = Encoder::new(SAMPLE_RATE, channels, Application::Audio)
             .map_err(|e| anyhow::anyhow!("create the opus encoder: {e}"))?;
         encoder
             .set_bitrate(Bitrate::Bits(OPUS_BITRATE_BPS))
@@ -91,38 +70,11 @@ impl OpusStream {
             .map_err(|e| anyhow::anyhow!("read the opus lookahead: {e}"))?
             .max(0) as u16;
 
-        let (resampler, frames_per_packet) = if format.sample_rate == OPUS_SAMPLE_RATE {
-            (None, FRAME_FRAMES)
-        } else {
-            // Exact by construction: 882 in, 960 out at 44.1 kHz. `FixedSync::Input`
-            // is what makes the input side the fixed one, so the caller controls
-            // how much it hands over and the packet size falls out.
-            let frames_in = (FRAME_FRAMES as u64 * u64::from(format.sample_rate)
-                / u64::from(OPUS_SAMPLE_RATE)) as usize;
-            let resampler = Fft::<f32>::new(
-                format.sample_rate as usize,
-                OPUS_SAMPLE_RATE as usize,
-                frames_in,
-                channel_count,
-                FixedSync::Input,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("build a {} Hz -> 48 kHz resampler: {e}", format.sample_rate)
-            })?;
-            (Some(resampler), frames_in)
-        };
-
         let stream = Self {
             encoder,
-            channels: channel_count,
-            resampler,
-            frames_per_packet,
-            pending: vec![Vec::new(); channel_count],
-            resampled: vec![vec![0.0; FRAME_FRAMES]; channel_count],
+            pcm: Pcm48::new(format)?,
             frame: vec![0.0; FRAME_FRAMES * channel_count],
             packet: vec![0; MAX_PACKET_BYTES],
-            odd_byte: None,
-            next_channel: 0,
             frames_encoded: 0,
         };
 
@@ -134,15 +86,18 @@ impl OpusStream {
     /// Empty when the buffer did not add up to a whole 20 ms frame, which is
     /// normal: the remainder is carried.
     pub fn push(&mut self, pcm: &[u8]) -> Result<Vec<Vec<u8>>, anyhow::Error> {
-        self.accumulate(pcm);
+        self.pcm.push(pcm)?;
         let mut packets = Vec::new();
-        // The shortest channel, not the first: a buffer ending mid-frame leaves
-        // left one sample ahead of right, and encoding then would read past the
-        // end of right's samples.
-        while self.buffered_frames() >= self.frames_per_packet {
+        while self.pcm.ready_frames() >= FRAME_FRAMES {
             packets.push(self.encode_one_frame()?);
         }
         Ok(packets)
+    }
+
+    /// Samples per packet at [`SAMPLE_RATE`], which is what the client turns into a
+    /// packet duration.
+    pub fn packet_frames(&self) -> u32 {
+        FRAME_FRAMES as u32
     }
 
     /// Frames encoded so far.
@@ -150,66 +105,8 @@ impl OpusStream {
         self.frames_encoded
     }
 
-    /// Splits interleaved little-endian 16-bit PCM into per-channel `f32`.
-    fn accumulate(&mut self, pcm: &[u8]) {
-        let mut bytes = pcm.iter().copied();
-        // A byte held back from last time pairs with the first byte of this buffer.
-        if let Some(low) = self.odd_byte.take() {
-            match bytes.next() {
-                Some(high) => self.push_sample(i16::from_le_bytes([low, high])),
-                None => {
-                    self.odd_byte = Some(low);
-                    return;
-                }
-            }
-        }
-        while let Some(low) = bytes.next() {
-            let Some(high) = bytes.next() else {
-                self.odd_byte = Some(low);
-                break;
-            };
-            self.push_sample(i16::from_le_bytes([low, high]));
-        }
-    }
-
-    /// Frames every channel has, which is what a packet can be cut from.
-    fn buffered_frames(&self) -> usize {
-        self.pending.iter().map(Vec::len).min().unwrap_or(0)
-    }
-
-    fn push_sample(&mut self, sample: i16) {
-        // i16::MIN maps to exactly -1.0; the asymmetry of two's complement means
-        // dividing by 32768 rather than 32767 is what keeps it in range.
-        self.pending[self.next_channel].push(f32::from(sample) / 32_768.0);
-        self.next_channel = (self.next_channel + 1) % self.channels;
-    }
-
     fn encode_one_frame(&mut self) -> Result<Vec<u8>, anyhow::Error> {
-        let taken = self.frames_per_packet;
-        if let Some(resampler) = &mut self.resampler {
-            let input = SequentialSliceOfVecs::new(&self.pending, self.channels, taken)
-                .map_err(|e| anyhow::anyhow!("wrap the resampler input: {e}"))?;
-            let mut output =
-                SequentialSliceOfVecs::new_mut(&mut self.resampled, self.channels, FRAME_FRAMES)
-                    .map_err(|e| anyhow::anyhow!("wrap the resampler output: {e}"))?;
-            resampler
-                .process_into_buffer(&input, &mut output, None)
-                .map_err(|e| anyhow::anyhow!("resample to 48 kHz: {e}"))?;
-        } else {
-            for (channel, out) in self.resampled.iter_mut().enumerate() {
-                out.copy_from_slice(&self.pending[channel][..FRAME_FRAMES]);
-            }
-        }
-        for pending in &mut self.pending {
-            pending.drain(..taken);
-        }
-
-        for frame in 0..FRAME_FRAMES {
-            for channel in 0..self.channels {
-                self.frame[frame * self.channels + channel] = self.resampled[channel][frame];
-            }
-        }
-
+        self.pcm.take_f32(FRAME_FRAMES, &mut self.frame);
         let len = self
             .encoder
             .encode_float(&self.frame, &mut self.packet)
@@ -281,7 +178,7 @@ mod tests {
         // 32768 bytes is what the tested Windows host sends: 8192 frames, which is
         // nine whole packets (7938 frames) with 254 left over.
         assert_eq!(stream.push(&silence(8192)).expect("push").len(), 9);
-        assert_eq!(stream.pending[0].len(), 8192 - 9 * 882);
+        assert_eq!(stream.pcm.carried_frames(), 8192 - 9 * 882);
         assert_eq!(stream.frames_encoded(), 10);
     }
 
@@ -293,51 +190,6 @@ mod tests {
         let packets = stream.push(&silence(882 * 3)).expect("push");
         assert_eq!(packets.len(), 3);
         assert!(packets.iter().all(|packet| !packet.is_empty()));
-    }
-
-    /// An odd byte count must not shift the channels against each other for the
-    /// rest of the stream, which is what dropping the leftover byte would do.
-    #[test]
-    fn a_half_sample_at_the_end_of_a_buffer_is_carried_not_dropped() {
-        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
-        stream.push(&[0, 0, 0]).expect("push");
-        assert_eq!(stream.odd_byte, Some(0), "the third byte is half a sample");
-        assert_eq!(stream.pending[0].len(), 1, "left got one sample");
-        assert_eq!(stream.pending[1].len(), 0, "right is waiting for its other half");
-        stream.push(&[0]).expect("push");
-        assert_eq!(stream.odd_byte, None);
-        assert_eq!(stream.pending[1].len(), 1);
-    }
-
-    /// The bug in the reference implementation this borrowed from
-    /// (`tmp/save_audio_stream`, whose resampler interpolates across interleaved
-    /// samples): with the channels blended, a hard-panned signal leaks across.
-    /// Pinned here because Opus would happily encode the wrong thing.
-    #[test]
-    fn resampling_does_not_blend_the_channels() {
-        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY).expect("an encoder");
-        // Left at full positive, right at full negative, for one packet.
-        let mut pcm = Vec::new();
-        for _ in 0..882 {
-            pcm.extend_from_slice(&i16::MAX.to_le_bytes());
-            pcm.extend_from_slice(&i16::MIN.to_le_bytes());
-        }
-        stream.push(&pcm).expect("push");
-
-        let left = &stream.resampled[0];
-        let right = &stream.resampled[1];
-        // The middle of the frame, past the resampler's edge transient.
-        let mid = FRAME_FRAMES / 2;
-        assert!(
-            left[mid] > 0.9,
-            "left should still be near +1.0, got {}",
-            left[mid]
-        );
-        assert!(
-            right[mid] < -0.9,
-            "right should still be near -1.0, got {}",
-            right[mid]
-        );
     }
 
     /// Encode a tone and decode it back, so the test fails if the bytes are
@@ -364,7 +216,7 @@ mod tests {
         let packets = stream.push(&pcm).expect("push");
         assert_eq!(packets.len(), 20);
 
-        let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
+        let mut decoder = opus::Decoder::new(SAMPLE_RATE, Channels::Stereo).expect("decoder");
         let mut decoded = vec![0i16; FRAME_FRAMES * 2];
         // Decode up to a packet in the middle: the first few are the encoder
         // settling, and a decoder needs the ones before it either way.
@@ -382,7 +234,7 @@ mod tests {
     /// resample, interleave, encode, decode — and not merely after the resampler.
     /// This is what catches a wrong channel count in `OpusHead` or a transposed
     /// interleave in the frame buffer, neither of which
-    /// [`resampling_does_not_blend_the_channels`] would see.
+    /// [`crate::pcm48`]'s blend test would see.
     ///
     /// It is also the answer to a real false alarm: a live capture from the test
     /// host decoded with an L/R correlation of exactly 1.0000, which looks like
@@ -401,7 +253,7 @@ mod tests {
         }
         let packets = stream.push(&pcm).expect("push");
 
-        let mut decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, Channels::Stereo).expect("decoder");
+        let mut decoder = opus::Decoder::new(SAMPLE_RATE, Channels::Stereo).expect("decoder");
         let mut decoded = vec![0i16; FRAME_FRAMES * 2];
         // Past the encoder settling, so the silence on the right is really silence.
         for packet in packets.iter().take(15) {
@@ -418,22 +270,6 @@ mod tests {
             right * 10.0 < left,
             "the right channel should be far quieter than the left, got {right} against {left}"
         );
-    }
-
-    #[test]
-    fn a_48_kilohertz_source_skips_the_resampler() {
-        let format = PcmFormat {
-            channels: 2,
-            sample_rate: 48_000,
-            bits_per_sample: 16,
-        };
-        let (mut stream, _head) = OpusStream::new(format).expect("an encoder");
-        assert!(stream.resampler.is_none());
-        assert_eq!(stream.frames_per_packet, FRAME_FRAMES);
-        let packets = stream
-            .push(&vec![0u8; FRAME_FRAMES * usize::from(format.block_align())])
-            .expect("push");
-        assert_eq!(packets.len(), 1);
     }
 
     #[test]

@@ -125,6 +125,7 @@ struct AudioControlTests {
             codec: "opus",
             sampleRate: 48_000,
             channels: 2,
+            packetFrames: 960,
             head: head
         )
         session.model.apply(.control(.audioFormat(format)))

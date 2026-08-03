@@ -493,6 +493,7 @@ mod tests {
                 resize: false,
                 clipboard: false,
                 audio: false,
+                audio_codec: None,
                 render_type: crate::config::RenderType::Full,
                 render_subtype: crate::config::RenderSubtype::Png,
                 render_quality: None,
@@ -676,11 +677,23 @@ mod tests {
     ///
     /// Then open the printed URL, log in, pick the target, and press ☰ → Enable
     /// audio. A 440 Hz tone means the whole browser-side path works, on that
-    /// browser — and **this is where Opus-only is settled**, because there is no
-    /// fallback: a browser whose `AudioDecoder` will not take Opus says so under the
-    /// button and plays nothing. Worth running on each browser that matters rather
-    /// than trusting a support table; the last representation needed Safari 18.4 and
-    /// plenty of published tables still said it was unsupported.
+    /// browser — and **this is where a codec's browser support is settled**,
+    /// because there is no fallback: a browser whose `AudioDecoder` will not take
+    /// what the gateway sends says so under the button and plays nothing. Worth
+    /// running on each browser that matters rather than trusting a support table;
+    /// the last representation needed Safari 18.4 and plenty of published tables
+    /// still said it was unsupported.
+    ///
+    /// Which of the two it serves comes from the environment, so both can be heard
+    /// against a deterministic source without a Windows host having to make a sound:
+    ///
+    /// ```sh
+    /// REMOTEX_TEST_TONE_CODEC=pcm cargo test --lib serve_a_test_tone -- --ignored --nocapture
+    /// ```
+    ///
+    /// The passthrough setting also answers a question the paragraph above cannot:
+    /// it reaches no `AudioDecoder` at all, so a browser that plays the tone under
+    /// `pcm` and not under `opus` has a WebCodecs problem rather than an audio one.
     #[tokio::test]
     #[ignore = "manual: serves a tone for a browser to play, and waits"]
     async fn serve_a_test_tone() {
@@ -710,6 +723,14 @@ mod tests {
             buf
         }
 
+        // Read once and reused below, so what the target actually serves and what
+        // the printed line claims it serves cannot drift apart.
+        let tone_codec = match std::env::var("REMOTEX_TEST_TONE_CODEC").as_deref() {
+            Ok("pcm") => Some(crate::config::AudioCodec::Pcm),
+            Ok("opus") | Err(_) => None,
+            Ok(other) => panic!("REMOTEX_TEST_TONE_CODEC is opus or pcm, not {other:?}"),
+        };
+
         let target = TargetConfig {
             name: "test-tone".to_owned(),
             protocol: Protocol::Rdp,
@@ -726,6 +747,7 @@ mod tests {
             resize: false,
             clipboard: false,
             audio: true,
+            audio_codec: tone_codec,
             render_type: crate::config::RenderType::Full,
             render_subtype: crate::config::RenderSubtype::Png,
             render_quality: None,
@@ -826,7 +848,19 @@ mod tests {
         println!("  Pick \"test-tone\", then ☰ → Enable audio. 440 Hz for 5s, quiet for 5s.");
         println!("  Press it during a quiet phase and then close the drawer: the tone");
         println!("  must arrive on its own, go away, and come back, untouched.");
-        println!("  A line under the button instead means this browser has no Opus decoder.");
+        // Two different things to watch for, so they are said separately rather
+        // than as one sentence that half applies.
+        match tone_codec {
+            Some(crate::config::AudioCodec::Pcm) => {
+                println!("  Serving passthrough PCM, which reaches no decoder at all: silence");
+                println!("  here is the schedule or the socket, never WebCodecs.");
+            }
+            _ => {
+                println!("  Serving Opus through WebCodecs. A line under the button instead");
+                println!("  means this browser has no decoder for it.");
+            }
+        }
+        println!("  Set REMOTEX_TEST_TONE_CODEC=pcm|opus to try the other.");
         // remotex.app can use this login gateway through Somewhere Else. A real
         // `audio = true` RDP target separately covers server negotiation.
         println!("  Ctrl-C when done; this waits 15 minutes.\n");

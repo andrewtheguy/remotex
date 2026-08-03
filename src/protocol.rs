@@ -16,7 +16,7 @@ pub const STRIP_ROWS: u16 = 64;
 /// viewer requires an exact match. Bump it when an older peer would otherwise
 /// fail without a useful compatibility error; clients ignore additive control
 /// tags they do not know.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -310,8 +310,8 @@ pub mod batch {
 /// offset 4: packets, each u16 length | length bytes  (little-endian throughout)
 /// ```
 ///
-/// Receivers reject nonzero flags. Packet lengths delimit multiple Opus packets
-/// within one WebSocket frame.
+/// Receivers reject nonzero flags. Packet lengths delimit multiple packets within
+/// one WebSocket frame — Opus packets, or one wave buffer's worth of PCM.
 pub mod audio {
     pub const FRAME_KIND: u8 = 0x03;
     pub const HEADER_LEN: usize = 4;
@@ -322,8 +322,10 @@ pub mod audio {
     ///
     /// Both `u16` fields are checked rather than truncated, and each panic names the
     /// invariant it belongs to, because silently wrapping either would produce a frame
-    /// a client parses successfully and wrongly. Neither is reachable from the encoder:
-    /// `opus_stream::MAX_PACKET_BYTES` caps a packet at 4000, and a wave buffer holding
+    /// a client parses successfully and wrongly. Neither is reachable: both streams
+    /// cap a packet below 65 535 bytes — `opus_stream`'s `MAX_PACKET_BYTES` at 4000,
+    /// and `pcm_stream`'s at the length field itself, which is the one place a
+    /// *remote's* buffer size could otherwise reach this — and a wave buffer holding
     /// 65 535 packets of 20 ms would be twenty minutes of audio in one buffer.
     pub fn frame(packets: &[Vec<u8>]) -> Vec<u8> {
         let len: usize = packets.iter().map(|p| PACKET_HEADER_LEN + p.len()).sum();
@@ -335,7 +337,7 @@ pub mod audio {
         frame.extend_from_slice(&count.to_le_bytes());
         for packet in packets {
             let size = u16::try_from(packet.len())
-                .expect("an opus packet is at most u16::MAX bytes");
+                .expect("an opus or pcm packet is at most u16::MAX bytes");
             frame.extend_from_slice(&size.to_le_bytes());
             frame.extend_from_slice(packet);
         }
@@ -790,15 +792,25 @@ pub enum ServerMsg {
         /// [`MAX_CLIPBOARD_BYTES`] — see [`ClipboardSnapshot::oversized_bytes`].
         oversized_bytes: Option<u64>,
     },
-    /// Audio decoder configuration, sent before the first packet. `head` is the
-    /// RFC 7845 `OpusHead`; the stream rate is 48 kHz regardless of remote PCM.
+    /// How to play what follows, sent before the first packet.
+    ///
+    /// `codec` is `opus` — a WebCodecs codec string, with the RFC 7845 `OpusHead`
+    /// in `head` and `sample_rate` the 48 kHz it was resampled to — or
+    /// `pcm-s16le`, which is not a WebCodecs codec at all: `head` is then empty,
+    /// `sample_rate` is the remote's own, and the packets are interleaved signed
+    /// 16-bit little-endian samples for the client to play directly.
+    ///
+    /// `packet_frames` is the one thing a client cannot work out for itself: 960
+    /// on Opus, and 0 on passthrough, whose packets are whatever length the
+    /// remote's buffers were and so carry their own.
     AudioFormat {
         codec: &'static str,
         sample_rate: u32,
         channels: u16,
+        packet_frames: u32,
         head: Vec<u8>,
     },
-    /// One wave buffer's worth of Opus packets, framed by [`audio::frame`].
+    /// One wave buffer's worth of audio packets, framed by [`audio::frame`].
     ///
     /// Like a tile, this has no text encoding and is not a control message: it is a
     /// binary frame, and [`crate::wire`] is what turns it into one.
@@ -857,8 +869,11 @@ enum ControlMsg<'a> {
         #[serde(rename = "sampleRate")]
         sample_rate: u32,
         channels: u16,
-        /// base64 `OpusHead`, for the same reason `cursor`'s PNG is base64: a text
-        /// frame cannot carry bytes, and this is 19 of them once a session.
+        #[serde(rename = "packetFrames")]
+        packet_frames: u32,
+        /// base64 decoder configuration, for the same reason `cursor`'s PNG is
+        /// base64: a text frame cannot carry bytes, and this is tens of them
+        /// once a session.
         head: String,
     },
 }
@@ -928,11 +943,13 @@ impl ServerMsg {
                 codec,
                 sample_rate,
                 channels,
+                packet_frames,
                 head,
             } => control(&ControlMsg::AudioFormat {
                 codec,
                 sample_rate: *sample_rate,
                 channels: *channels,
+                packet_frames: *packet_frames,
                 head: base64::engine::general_purpose::STANDARD.encode(head),
             }),
             ServerMsg::Displays { active, displays } => control(&ControlMsg::Displays {
@@ -1094,13 +1111,14 @@ mod tests {
             codec: "opus",
             sample_rate: 48_000,
             channels: 2,
+            packet_frames: 960,
             head: head.clone(),
         })
         .text_frame()
         .expect("the format must be a text frame");
         assert_eq!(
             json,
-            r#"{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}"#
+            r#"{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,"packetFrames":960,"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}"#
         );
         // And the base64 is really OpusHead, not a placeholder that happens to
         // decode: a client configures a decoder from these bytes.
@@ -1113,6 +1131,35 @@ mod tests {
         assert!(
             ServerMsg::Audio(vec![vec![1, 2, 3]]).text_frame().is_none(),
             "packets are a binary frame, like a tile"
+        );
+    }
+
+    /// The same message for passthrough, pinned separately because every field but
+    /// the shape of it differs: a codec string WebCodecs does not know, the
+    /// remote's own rate rather than 48 kHz, no decoder configuration, and no
+    /// packet length. Two clients parse this, and neither may assume Opus.
+    ///
+    /// The empty `head` is the load-bearing one. It is what a client reads as
+    /// "there is nothing to configure" — and an encoder is the only thing that
+    /// would ever put bytes there, so a non-empty one here would mean the
+    /// passthrough path had grown one.
+    #[test]
+    fn the_audio_format_describes_passthrough_without_a_decoder() {
+        let (_stream, head) =
+            crate::pcm_stream::PcmStream::new(crate::audio::PCM_CD_QUALITY).expect("a stream");
+        assert!(head.is_empty());
+        let json = (ServerMsg::AudioFormat {
+            codec: crate::pcm_stream::PCM_CODEC,
+            sample_rate: crate::audio::PCM_CD_QUALITY.sample_rate,
+            channels: 2,
+            packet_frames: 0,
+            head,
+        })
+        .text_frame()
+        .expect("the format must be a text frame");
+        assert_eq!(
+            json,
+            r#"{"type":"audioFormat","codec":"pcm-s16le","sampleRate":44100,"channels":2,"packetFrames":0,"head":""}"#
         );
     }
 

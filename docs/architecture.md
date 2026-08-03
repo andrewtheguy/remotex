@@ -468,19 +468,51 @@ RDP audio is opt-in per attachment. A client sends:
 {"type":"audio","enabled":true}
 ```
 
-The gateway answers with `audioFormat`, describing bare Opus packets at 48 kHz
-stereo and carrying `OpusHead`, followed by binary frames:
+The gateway answers with `audioFormat` — the codec string, the decoder
+configuration, and the samples in one packet — followed by binary frames:
 
 ```text
 u8 kind = 0x03 | u8 flags = 0 | u16 packet count
 repeated: u16 packet length | packet bytes
 ```
 
+There is no codec byte in the binary frame; the codec is named once, out of
+band, in `audioFormat`. Two options exist, chosen per target by `audio_codec`:
+
+| `audio_codec` | `codec` | bitrate | `sampleRate` | `packetFrames` | `head` |
+|---|---|---|---|---|---|
+| `opus` (default) | `opus` | 96 kbps | 48 000 | 960 (20 ms) | `OpusHead` |
+| `pcm` | `pcm-s16le` | 1.41 Mbps | the remote's | 0 (self-describing) | empty |
+
+`pcm` is passthrough: the remote's wave buffer becomes one packet, byte for
+byte, with no encoder in the gateway and no decoder in the client. `pcm-s16le`
+is deliberately not a WebCodecs codec string — the packets are interleaved
+signed 16-bit little-endian samples, which is what an `AudioBuffer` holds
+already, so the client builds one directly and schedules it on the same path an
+Opus packet reaches after decoding. That makes it the only option that plays
+without WebCodecs, and therefore the only one that works over plain `http://` to
+a host that is not `localhost`.
+
+It also makes it the only option whose `sampleRate` is not 48 000. An
+`AudioBuffer` carries its own rate, so a context built at 48 kHz before the
+format arrived simply resamples on playback, exactly as the OS mixer would for
+any buffer that is not at the device's rate.
+
+The bandwidth is the whole of the trade: 1.41 Mbit/s is fifteen times Opus, and
+is a local-network proposition only. It is not a quality argument — Opus at 96
+kbps is well clear of audible loss on this material. Guacamole carries desktop
+audio this way and only this way (its single encoder emits
+`audio/L16;rate=44100,channels=2`), which is where the option came from — see
+[`rdp-audio-prior-art.md`](rdp-audio-prior-art.md) for that measurement and for
+the other implementations worth comparing against.
+
 An audio-enabled RDP engine negotiates one 44.1 kHz, 16-bit stereo PCM format
 when it connects. Windows requires `rdpdr` to be advertised alongside the
 static `rdpsnd` or dynamic `AUDIO_PLAYBACK_DVC` channel; both audio transports
-feed the same bounded queue. The gateway resamples PCM to 48 kHz and encodes
-20 ms Opus packets.
+feed the same bounded queue. Under `opus` the gateway resamples that PCM to
+48 kHz in exact 882-to-960 groups (`src/pcm48.rs`) and cuts packets out of the
+result; under `pcm` it does neither, and the buffer is only cut on a frame
+boundary so a split sample cannot transpose the channels.
 
 The queue never blocks the RDP read loop. A slow consumer loses old buffers
 instead of accumulating latency, and no receiver means audio is discarded.
@@ -488,11 +520,21 @@ Audio frames bypass a tile batch still being collected, although a batch already
 being written may delay them.
 
 Both clients own their playback schedule, and it is the same code: a 0.1-second
-cushion, and backlog beyond a 0.3-second ceiling discarded. WebCodecs requires a
-secure context, so the browser needs HTTPS or localhost; `remotex.app` serves its
-canvas page from `127.0.0.1` and therefore always has one. A quiet remote and one
-that never negotiates audio are indistinguishable to the client, so detailed
-negotiation status remains in the gateway log.
+cushion, and backlog beyond a 0.3-second ceiling discarded. What reaches that
+schedule differs by codec, and only there. Neither client decodes anything
+itself: an *encoded* stream goes to WebCodecs — `remotex.app` through its canvas
+page — so a codec a browser will not take surfaces as a decoder error naming it
+rather than as silence. A `pcm-s16le` stream reaches no decoder at all; the
+client turns the packet into an `AudioBuffer` and schedules it directly.
+
+The secure-context requirement belongs to that first path alone. WebCodecs is
+unavailable on an insecure origin, so a browser playing Opus needs HTTPS or
+localhost, while passthrough plays anywhere. `remotex.app` is unaffected either
+way: it serves its canvas page from `127.0.0.1`, which is always a secure
+context.
+
+A quiet remote and one that never negotiates audio are indistinguishable to the
+client, so detailed negotiation status remains in the gateway log.
 
 ### Client input and display control
 

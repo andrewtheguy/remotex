@@ -15,7 +15,7 @@ private let connectedJSON = #"""
 /// from what the wire carries.
 private let audioFormatJSON = #"""
 {"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,\#
-"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}
+"packetFrames":960,"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}
 """#
 
 @MainActor

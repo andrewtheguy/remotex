@@ -164,6 +164,28 @@ a prebuilt static libopus archive. Its library name remains `opus`, so
 `LIBOPUS_NO_PKG`, or `CMAKE_POLICY_VERSION_MINIMUM` in
 `packaging/build-tarball.sh` or `packaging/macos-viewer/build-viewer-app.sh`.
 
+The only other option is `audio_codec = "pcm"` (`src/pcm_stream.rs`), and it adds
+no dependency at all: the remote's wave buffer goes to the socket as it arrived,
+one packet per buffer, unresampled and unencoded, at 1.41 Mbit/s. Do not add a
+second *encoder* here. HE-AAC was built and reverted on measurement — Guacamole
+carries this sound as raw `audio/L16` at the same 1.41 Mbit/s and does not
+stutter, so compressing harder was never the axis the problem was on, and an
+encoder whose licence is not OSI-approved was a real cost for it.
+
+The choice is per target, not per client, and the gateway names it on the wire —
+`ServerMsg::AudioFormat` carries the codec string, the decoder configuration and
+`packetFrames`. No client decodes anything itself: the SPA and `remotex.app`'s
+canvas page hand encoded packets to WebCodecs, so a codec a browser refuses
+surfaces as a named decoder error rather than as silence. Passthrough reaches no
+decoder at all, which is why it is the one option that plays on a plain `http://`
+origin — WebCodecs needs a secure context and Web Audio does not.
+
+`src/pcm48.rs` is the *encoded* front half — deinterleave and resample in exact
+882-to-960 groups — and a codec draws its own packet size out of it. Passthrough
+does not go through it and must not start: resampling is the thing it exists not
+to do. Do not tie the group size to a packet size either; the ratio is what makes
+882-to-960 exact.
+
 After Swift changes:
 
 1. Run `swift test --package-path apps/remotex-viewer`.

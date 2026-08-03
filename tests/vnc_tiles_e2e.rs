@@ -99,6 +99,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             resize: true,             // exercise the dynamic resize path
             clipboard: true,          // exercise the clipboard bridge
             audio: false,             // VNC has no audio channel at all
+            audio_codec: None,
             render_type: remotex::config::RenderType::Full,
             render_subtype: remotex::config::RenderSubtype::Png,
             render_quality: None,

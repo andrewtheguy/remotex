@@ -361,12 +361,12 @@ impl SessionManager {
     /// replaces any existing pump; sessions without an audio source ignore it.
     pub fn set_audio(&self, attach_id: u64, enabled: bool) {
         // What the construction below needs, taken under the lock and used without it.
-        // Building an encoder means allocating an Opus encoder *and* planning an FFT
-        // for the resampler, which is real work — and this mutex is the one every
-        // mouse move goes through (`forward_input`), so the rule this module states
-        // for itself is that critical sections stay short. `audio_epoch` is what makes
-        // letting go safe.
-        let (bridge, events, epoch) = {
+        // Building an encoder means allocating a codec *and* planning an FFT for the
+        // resampler, which is real work — and this mutex is the one every mouse move
+        // goes through (`forward_input`), so the rule this module states for itself is
+        // that critical sections stay short. `audio_epoch` is what makes letting go
+        // safe.
+        let (bridge, events, epoch, codec) = {
             let mut st = self.state.lock().unwrap();
             if st.client.as_ref().map(|c| c.attach_id) != Some(attach_id) {
                 return;
@@ -385,7 +385,14 @@ impl SessionManager {
             let Some(events) = st.client.as_ref().map(|client| client.event_tx.clone()) else {
                 return;
             };
-            (bridge, events, st.audio_epoch)
+            // The target's, not a session setting: the codec is a property of the
+            // link to this desktop, which is what the operator configured it from.
+            let codec = st
+                .selected
+                .as_ref()
+                .and_then(|target| target.audio_codec)
+                .unwrap_or_default();
+            (bridge, events, st.audio_epoch, codec)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
@@ -404,8 +411,8 @@ impl SessionManager {
         );
         let format = negotiated.unwrap_or(crate::audio::PCM_CD_QUALITY);
 
-        let (head, packets) = match bridge.take_listener().into_packets(format) {
-            Ok(pair) => pair,
+        let encoded = match bridge.take_listener().into_packets(format, codec) {
+            Ok(encoded) => encoded,
             Err(e) => {
                 warn!("session: no audio will be sent: {e:#}");
                 return;
@@ -425,19 +432,20 @@ impl SessionManager {
             return;
         }
         st.audio_pump = Some(tokio::spawn(async move {
-            let format = ServerMsg::AudioFormat {
-                codec: "opus",
-                sample_rate: crate::opus_stream::OPUS_SAMPLE_RATE,
-                channels: format.channels,
-                head,
+            let announce = ServerMsg::AudioFormat {
+                codec: encoded.codec,
+                sample_rate: encoded.sample_rate,
+                channels: encoded.channels,
+                packet_frames: encoded.packet_frames,
+                head: encoded.head,
             };
             // Sent before any packet, and awaited rather than tried: a decoder
             // configured *after* the audio it was meant to decode has already thrown
             // that audio away.
-            if events.send(AttachEvent::Msg(format)).await.is_err() {
+            if events.send(AttachEvent::Msg(announce)).await.is_err() {
                 return;
             }
-            let mut packets = std::pin::pin!(packets);
+            let mut packets = std::pin::pin!(encoded.packets);
             while let Some(packets) = futures_util::StreamExt::next(&mut packets).await {
                 // Awaiting here is the backpressure, and it is the right shape: a
                 // browser that cannot keep up stops this task reading the queue, and
@@ -791,6 +799,8 @@ mod tests {
         resize: bool,
         clipboard: bool,
         audio: bool,
+        /// `None` is the target saying nothing, which is Opus.
+        audio_codec: Option<crate::config::AudioCodec>,
     }
 
     impl Meta {
@@ -800,6 +810,7 @@ mod tests {
                 resize: false,
                 clipboard: false,
                 audio: false,
+                audio_codec: None,
             }
         }
 
@@ -815,6 +826,12 @@ mod tests {
 
         const fn audio(mut self) -> Self {
             self.audio = true;
+            self
+        }
+
+        const fn audio_codec(mut self, codec: crate::config::AudioCodec) -> Self {
+            self.audio = true;
+            self.audio_codec = Some(codec);
             self
         }
     }
@@ -843,6 +860,7 @@ mod tests {
             resize: meta.resize,
             clipboard: meta.clipboard,
             audio: meta.audio,
+            audio_codec: meta.audio_codec,
             render_type: crate::config::RenderType::Full,
             render_subtype: crate::config::RenderSubtype::Png,
             render_quality: None,
@@ -868,6 +886,10 @@ mod tests {
             fake_target_with("vnc-resize", Meta::of(Protocol::Vnc).resize()),
             fake_target_with("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
             fake_target_with("rdp-audio", Meta::of(Protocol::Rdp).audio()),
+            fake_target_with(
+                "rdp-pcm",
+                Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
+            ),
         ];
         (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
@@ -886,8 +908,8 @@ mod tests {
     /// ends — so a packet is only ever proof that sound reached the socket. The bytes
     /// themselves are [`crate::opus_stream`]'s business.
     fn one_frame_of_pcm() -> Vec<u8> {
-        let frames = crate::opus_stream::FRAME_FRAMES * PCM_CD_QUALITY.sample_rate as usize
-            / crate::opus_stream::OPUS_SAMPLE_RATE as usize;
+        let frames = crate::pcm48::group_frames_in(PCM_CD_QUALITY.sample_rate)
+            .expect("the negotiated rate makes whole groups");
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
     }
 
@@ -1388,24 +1410,34 @@ mod tests {
     }
 
     /// Assert the next event configures a decoder, and that it says what a decoder
-    /// needs.
-    async fn expect_audio_format(events: &mut mpsc::Receiver<AttachEvent>) {
+    /// needs. Returns the codec, for the one test that cares which one it got.
+    ///
+    /// Encoded targets only — passthrough announces none of this, which is what
+    /// `a_pcm_target_is_announced_as_the_remotes_own_bytes` is for.
+    async fn expect_audio_format(events: &mut mpsc::Receiver<AttachEvent>) -> &'static str {
         match recv(events).await {
             AttachEvent::Msg(ServerMsg::AudioFormat {
                 codec,
                 sample_rate,
                 channels,
+                packet_frames,
                 head,
             }) => {
-                assert_eq!(codec, "opus");
-                // The *stream's* rate, not the 44100 the remote negotiated: libopus
-                // encodes at 48 kHz and nothing else.
+                // The *stream's* rate, not the 44100 the remote negotiated: an
+                // encoded stream is resampled to 48 kHz on the way in.
                 assert_eq!(sample_rate, 48_000);
                 assert_eq!(channels, 2);
-                assert_eq!(&head[0..8], b"OpusHead");
+                assert!(packet_frames > 0, "a packet with no samples in it is not a packet");
+                assert!(!head.is_empty(), "a decoder cannot be configured from nothing");
+                codec
             }
             other => panic!("expected the audio format, got {other:?}"),
         }
+    }
+
+    /// The same, for the default target, which is Opus.
+    async fn expect_opus_format(events: &mut mpsc::Receiver<AttachEvent>) {
+        assert_eq!(expect_audio_format(events).await, "opus");
     }
 
     /// Assert the next event is audio, returning how many packets it carried.
@@ -1449,11 +1481,77 @@ mod tests {
         mgr.set_audio(att.id, true);
         audio.wave(one_frame_of_pcm());
 
-        expect_audio_format(&mut att.events).await;
+        expect_opus_format(&mut att.events).await;
         assert_eq!(expect_audio(&mut att.events).await, 1, "one frame in, one packet out");
 
         audio.wave(one_frame_of_pcm());
         assert_eq!(expect_audio(&mut att.events).await, 1, "and it keeps going");
+    }
+
+    /// The target's `audio_codec` is what the client is told, and the whole
+    /// difference reaches the socket.
+    ///
+    /// Asserted here rather than in `pcm_stream` because this is the seam that could
+    /// go wrong without either stream being at fault: a session that read the key and
+    /// then announced Opus anyway would send raw samples described as an encoded
+    /// stream, which is noise with no error anywhere.
+    ///
+    /// Passthrough end to end, which is the only place the claim can actually be
+    /// checked: the bytes the engine put on the queue are the bytes that reach the
+    /// socket, byte for byte, and the announcement tells the client to play them
+    /// rather than decode them.
+    ///
+    /// [`crate::pcm_stream`]'s own tests prove the stream does not alter a buffer.
+    /// This proves nothing between it and the client does either — a resample or a
+    /// re-frame quietly reintroduced anywhere on this path fails here and nowhere
+    /// else.
+    #[tokio::test]
+    async fn a_pcm_target_is_announced_as_the_remotes_own_bytes() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token).unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "rdp-pcm").unwrap();
+        expect_connected_meta(
+            &mut att.events,
+            "rdp-pcm",
+            Meta::of(Protocol::Rdp).audio_codec(crate::config::AudioCodec::Pcm),
+        )
+        .await;
+        // Held, not dropped: letting the engine's channel ends go ends the engine,
+        // and the session falls back to the picker before any audio is asked for.
+        let ends = hooks.try_recv().unwrap();
+        let audio = ends
+            .2
+            .clone()
+            .expect("an audio target's engine is given a bridge");
+
+        mgr.set_audio(att.id, true);
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::AudioFormat {
+                codec,
+                sample_rate,
+                packet_frames,
+                head,
+                ..
+            }) => {
+                assert_eq!(codec, "pcm-s16le");
+                assert_eq!(sample_rate, 44_100, "the remote's rate, because nothing resampled");
+                assert_eq!(packet_frames, 0, "each packet's length is its own");
+                assert!(head.is_empty(), "there is no decoder to configure");
+            }
+            other => panic!("expected the audio format, got {other:?}"),
+        }
+
+        // Not silence: a buffer whose bytes can be told apart from any other.
+        let wave: Vec<u8> = (0..2_048u32).map(|byte| byte as u8).collect();
+        audio.wave(wave.clone());
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Audio(packets)) => {
+                assert_eq!(packets, vec![wave], "the wave buffer, unaltered");
+            }
+            other => panic!("expected audio packets, got {other:?}"),
+        }
     }
 
     /// A repeated request must not leave two pumps on one queue: every packet would
@@ -1497,7 +1595,7 @@ mod tests {
 
         mgr.set_audio(att.id, true);
         audio.wave(one_frame_of_pcm());
-        expect_audio_format(&mut att.events).await;
+        expect_opus_format(&mut att.events).await;
         assert_eq!(expect_audio(&mut att.events).await, 1);
 
         mgr.set_audio(att.id, false);
@@ -1508,7 +1606,7 @@ mod tests {
         // forwarded it would arrive *before* the next subscription's format.
         audio.wave(one_frame_of_pcm());
         mgr.set_audio(att.id, true);
-        expect_audio_format(&mut att.events).await;
+        expect_opus_format(&mut att.events).await;
 
         // The engine never noticed any of this.
         assert!(mgr.state.lock().unwrap().engine.is_some());
@@ -1571,7 +1669,7 @@ mod tests {
 
         mgr.set_audio(att_a.id, true);
         audio.wave(one_frame_of_pcm());
-        expect_audio_format(&mut att_a.events).await;
+        expect_opus_format(&mut att_a.events).await;
         assert_eq!(
             expect_audio(&mut att_a.events).await,
             1,
@@ -1594,7 +1692,7 @@ mod tests {
             .await;
         mgr.set_audio(att_b.id, true);
         audio.wave(one_frame_of_pcm());
-        expect_audio_format(&mut att_b.events).await;
+        expect_opus_format(&mut att_b.events).await;
         assert_eq!(expect_audio(&mut att_b.events).await, 1);
     }
 
@@ -1622,7 +1720,7 @@ mod tests {
             let (mut att, audio, _engine) = connected_audio_session(&mgr, &hooks).await;
             mgr.set_audio(att.id, true);
             audio.wave(one_frame_of_pcm());
-            expect_audio_format(&mut att.events).await;
+            expect_opus_format(&mut att.events).await;
             assert_eq!(
                 expect_audio(&mut att.events).await,
                 1,

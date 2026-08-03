@@ -16,7 +16,7 @@ members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.96"
+version = "0.0.97"
 
 [package]
 name = "remotex"
@@ -87,6 +87,12 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # straight to a WebCodecs decoder — so an Ogg dependency would buy framing that is
 # already there. `OpusHead` is still built by hand in src/opus_stream.rs, because a
 # decoder needs it wherever it arrives from.
+#
+# The other audio option (`audio_codec = "pcm"`, src/pcm_stream.rs) needs no
+# dependency at all, which is most of its point: passthrough copies the remote's
+# bytes to the socket, so there is no encoder to link and no codec licence to
+# carry. A second *encoder* was tried here and removed — see the pcm_stream module
+# doc for why compressing harder was the wrong axis.
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.
