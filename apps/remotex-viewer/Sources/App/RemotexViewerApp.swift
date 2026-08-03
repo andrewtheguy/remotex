@@ -133,6 +133,22 @@ enum ViewerMain {
             Foundation.exit(EXIT_SUCCESS)
         }
 
+        // Chromium, before the window that shows it. Touching `NSApplication.shared`
+        // first is what instantiates `NSPrincipalClass`, and CEF asserts that the
+        // running app is that subclass — so the order here is the requirement, not a
+        // preference.
+        //
+        // An unbundled build has no SPA and no engine to point at one. It is not an
+        // error to skip: `swift test` and `--version` both take this path, and the
+        // window's own launch screen already says what a bundle-less build cannot do.
+        _ = NSApplication.shared
+        if let webRoot = GatewayBinary.webRootInBundle() {
+            ChromiumHost.start(
+                webRoot: webRoot,
+                profile: InstanceDirectory.resolved().browserProfile
+            )
+        }
+
         NSWindow.allowsAutomaticWindowTabbing = false
         RemotexViewerApp.main()
     }

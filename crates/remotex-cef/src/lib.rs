@@ -448,31 +448,12 @@ pub extern "C" fn remotex_cef_shutdown() {
     shutdown();
 }
 
-/// Run one of Chromium's subprocesses. The whole of `remotex-cef-helper`.
-///
-/// Kept here rather than in that binary so the two processes cannot disagree
-/// about the scheme or the message router — both come out of this crate.
-pub fn run_helper_process() {
-    let args = args::Args::new();
-
-    #[cfg(all(target_os = "macos", feature = "sandbox"))]
-    let _sandbox = {
-        let mut sandbox = cef::sandbox::Sandbox::new();
-        sandbox.initialize(args.as_main_args());
-        sandbox
-    };
-
-    let loader =
-        library_loader::LibraryLoader::new(&std::env::current_exe().unwrap_or_default(), true);
-    if !loader.load() {
-        return;
-    }
-    let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
-
-    let mut app = app::helper_app();
-    execute_process(
-        Some(args.as_main_args()),
-        Some(&mut app),
-        std::ptr::null_mut(),
-    );
-}
+// The subprocess's entry point is deliberately **not** here, even though it would
+// read better beside the rest. This crate is compiled as a `staticlib` and linked
+// into the Swift app, and a staticlib keeps every public symbol — so a public
+// `run_helper_process` would drag `cef::sandbox` into the app as well, and with it
+// an undefined `cef_sandbox_initialize` that the browser process has no business
+// resolving. The helper's `main.rs` therefore calls `app::helper_app` itself.
+//
+// What the two processes must agree about — the scheme and the message router's
+// configuration — is still shared, which was the point of putting it here.

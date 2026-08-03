@@ -11,18 +11,16 @@ publish = false
 [lib]
 crate-type = ["staticlib", "rlib"]
 
-[features]
-# Enter macOS's seatbelt before anything else runs. Off by default because the
-# browser process must not: it passes a null `sandbox_info` and only says
-# `no_sandbox = 0`. `remotex-cef-helper` turns this on for itself, which is what
-# makes `run_helper_process` link `cef_sandbox` in the one binary that needs it.
-sandbox = ["cef/sandbox"]
-
 [dependencies]
-# The engine. `default-features = false` drops `sandbox` and `build-util`:
-# the bundle is assembled by packaging/macos-viewer/build-viewer-app.sh rather
-# than by `bundle-cef-app`, and the sandbox is the helper binary's to enable.
-cef = { version = "151.2", default-features = false }
+# The engine. `build-util` is dropped — the bundle is assembled by
+# packaging/macos-viewer/build-viewer-app.sh rather than by `bundle-cef-app` — but
+# `sandbox` is not, and it is not a choice: `cef::sandbox` is compiled on macOS
+# whatever the feature says, so both binaries carry a reference to
+# `cef_sandbox_initialize` and both must link `libcef_sandbox`. The feature only
+# decides whether that link happens, so turning it off links neither binary. Which
+# process actually *enters* the seatbelt is decided in code, in
+# `run_helper_process`, and is the helper's alone.
+cef = { version = "151.2", default-features = false, features = ["sandbox"] }
 # Reading the request out of a message-router query and the state object back
 # into one is all JSON; the events themselves are the client's shapes, not this
 # crate's, so nothing here is typed beyond "a string that came from the page".

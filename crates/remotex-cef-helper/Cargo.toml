@@ -13,8 +13,7 @@ name = "remotex-cef-helper"
 path = "src/main.rs"
 
 [dependencies]
-# `sandbox` on, and only here. On macOS it is the helper that links
-# `cef_sandbox` and enters the seatbelt before anything else runs; the browser
-# process passes a null `sandbox_info` and merely says `no_sandbox = 0`. So the
-# Swift app links nothing extra for this.
-remotex-cef = { path = "../remotex-cef", features = ["sandbox"] }
+cef = { version = "151.2", default-features = false, features = ["sandbox"] }
+# For the two things both processes must agree about: the `remotex://` scheme and
+# the message router's configuration.
+remotex-cef = { path = "../remotex-cef" }
