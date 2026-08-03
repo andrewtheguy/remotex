@@ -30,6 +30,24 @@
   session. A force-claim evicts the current holder (`src/session.rs`) through the
   clients' **Take over** flow. Reconnects, target switches, and browser takeovers
   resume that same session without another prompt.
+- **No AppleScript, no synthetic clicks, no screenshot loops.** Do not drive the
+  app's UI to find out what it is doing; ask it, and ask the user for the one
+  thing only eyes can answer. Four ways in, in the order they cost:
+  - Run the bundled binary directly rather than through `open`, so its stderr is
+    yours: `REMOTEX_CEF_TRACE=1 dist/remotex.app/Contents/MacOS/remotex-viewer
+    --instance-dir "$PWD/tmp/app-trace" 2> trace.log`. The trace names the
+    scheme requests, the browser, the cookie write and the load result.
+  - `REMOTEX_CHROMIUM_SWITCHES` replaces the switch list at startup, so trying
+    one is a relaunch rather than a rebuild — including
+    `--remote-debugging-port=9222`, which makes the page answerable over CDP
+    from a `uv` script in `tmp/`: the live DOM, console and exception streams,
+    `Network.*` events, and the cookie jar. That is how the black window was
+    read.
+  - `REMOTEX_STARTUP_PAGE=grid` opens a page with no script in it at all. If the
+    grid fills the window, the engine, the view and the compositor are sound and
+    the fault is the client's — one relaunch, half the search gone.
+  - `packaging/macos-viewer/refresh-viewer-app.sh` rebuilds only the shell and
+    the Chromium host into the existing bundle, in seconds rather than a minute.
 
 ## SSH and tmux
 
@@ -38,12 +56,14 @@ existing tmux server keeps the environment and access of the user that started
 it, so arriving over SSH does not mean the session is headless or restricted.
 
 In particular this Mac has a **logged-in GUI session**, and the shell can use
-it: launching `.app` bundles, `screencapture`, `osascript`, `codesign`, and
-driving the UI all work. macOS GUI QA is therefore something to *do* here, not
-something to hand back — see the QA steps in
-[`docs/macos-viewer.md`](docs/macos-viewer.md). If a capability looks
-unavailable, test it with one command and read the error; do not assume it from
-the shape of the session.
+it: launching `.app` bundles, `codesign`, and reading what a running app says all
+work. macOS GUI QA is therefore something to *do* here, not something to hand
+back — see the QA steps in [`docs/macos-viewer.md`](docs/macos-viewer.md). If a
+capability looks unavailable, test it with one command and read the error; do not
+assume it from the shape of the session.
+
+Being *able* to drive the UI is not permission to. Launch it, instrument it, and
+read it — the four ways above — and leave clicking and looking to the user.
 
 ## Display geometry
 
