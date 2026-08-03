@@ -1,4 +1,5 @@
-// The seam between this SPA and `remotex.app`, which shows it in a WKWebView.
+// The seam between this SPA and `remotex.app`, which shows it in an embedded
+// Chromium.
 //
 // The app is a *shell*: it owns the window, the menu bar, the macOS pasteboard and
 // keyboard capture, and nothing else. Everything below the title bar is this client,
@@ -30,24 +31,27 @@ interface HostRemoteSize {
   scale: number;
 }
 
-/** The message handler `remotex.app` installs on its web view. */
-interface NativeWebkit {
-  messageHandlers?: {
-    remotexNative?: { postMessage: (body: unknown) => void };
-  };
-}
+/**
+ * The query function `remotex.app`'s embedded Chromium installs on `window`.
+ *
+ * One string in, nothing back. The app never answers — every command it has for
+ * the page goes the other way, through {@link useNativeCommands} — so the
+ * `onSuccess` and `onFailure` members the message router also accepts are left
+ * off, and this is a one-way post shaped like a query.
+ */
+type NativeQuery = (query: { request: string }) => number;
 
 /**
  * Whether this page is running inside `remotex.app` rather than a browser.
  *
- * Read once: the handler is installed before the first load and cannot appear
- * later, and a value that could change mid-session would put the FAB and the menu
- * bar on screen at the same time.
+ * Read once: the function is installed as each frame's V8 context is created,
+ * before any script in it runs, and cannot appear later — and a value that could
+ * change mid-session would put the FAB and the menu bar on screen at the same time.
  */
 export const NATIVE_HOST: boolean =
   typeof window !== "undefined" &&
-  !!(window as unknown as { webkit?: NativeWebkit }).webkit?.messageHandlers
-    ?.remotexNative;
+  typeof (window as unknown as { remotexNative?: NativeQuery })
+    .remotexNative === "function";
 
 /** Everything the menu bar needs to render itself. Posted whenever it changes. */
 export interface NativeState {
@@ -143,9 +147,12 @@ export function postToHost(event: NativeEvent): void {
     return;
   }
   try {
-    (
-      window as unknown as { webkit: NativeWebkit }
-    ).webkit.messageHandlers?.remotexNative?.postMessage(event);
+    // Serialized here rather than handed over as an object: the message router
+    // carries a string, and doing it on this side means the app decodes exactly
+    // what this file's types describe.
+    (window as unknown as { remotexNative: NativeQuery }).remotexNative({
+      request: JSON.stringify(event),
+    });
   } catch {
     // The app is gone or refused the message; the page carries on regardless.
   }
@@ -168,8 +175,8 @@ export function useNativeState(state: NativeState): void {
   }, [encoded]);
 }
 
-/** The property the app calls into. Global because `evaluateJavaScript` has no
- * other way in — it evaluates a string against the page's global object. */
+/** The property the app calls into. Global because executing JavaScript in a frame
+ * has no other way in — it evaluates a string against the page's global object. */
 const COMMAND_PROPERTY = "__remotexNative";
 
 interface CommandTarget {
