@@ -177,11 +177,19 @@ const OPAQUE_ORIGIN: &str = "null";
 /// cookie travel — without the second one the request succeeds and arrives
 /// *unauthenticated*, which is the confusing half of getting this wrong.
 ///
-/// Deliberately narrow in three ways:
+/// Deliberately narrow in four ways:
 ///
 /// - **Only when [`AppConfig::allow_opaque_origin`] is set**, which is only an
 ///   embedded gateway. On a served one these headers would let any sandboxed frame
 ///   on the web make credentialed calls; see that field.
+/// - **Only on a [`GatewayAuth::Token`] gateway**, and this is not the same
+///   condition said twice. The credential is what the second header lets travel, so
+///   what makes this safe is that it is a token minted for one launch and given to
+///   one page — not a login cookie a person typed a password for, which is what
+///   would be at stake if the two fields ever came apart. Checked here rather than
+///   trusted from [`crate::config::RawConfig::resolve_embedded`], because a
+///   middleware relying on a distant constructor to hold an invariant it depends on
+///   is one refactor from not holding it.
 /// - **Only for `Origin: null`.** Every other origin is either same-origin (a
 ///   browser opened on this gateway's own address, which needs no header at all) or
 ///   something this gateway has no business answering. Echoing back whatever
@@ -189,7 +197,9 @@ const OPAQUE_ORIGIN: &str = "null";
 /// - **`Vary: Origin`**, so nothing caches an answer made for one origin and
 ///   serves it to another.
 async fn opaque_origin_cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if !state.config.allow_opaque_origin {
+    let embedded = state.config.allow_opaque_origin
+        && matches!(state.config.auth, GatewayAuth::Token(_));
+    if !embedded {
         return next.run(req).await;
     }
     let opaque = req
@@ -612,9 +622,16 @@ mod tests {
     }
 
     /// `dev_router`, but answering an opaque origin the way an embedded gateway
-    /// does. The two differ in exactly the one field, which is the point.
+    /// does.
+    ///
+    /// Both halves of that shape, not just the flag: `resolve_embedded` mints a
+    /// token and sets the flag together, so a router carrying one without the other
+    /// is a gateway that cannot exist — and the tests below would then be asserting
+    /// credentialed CORS on top of a *login* cookie, which is the one combination
+    /// this must never produce.
     fn embedded_router() -> Router {
         let mut config = router_config(None);
+        config.auth = GatewayAuth::Token(crate::auth::EmbeddedToken::generate());
         config.allow_opaque_origin = true;
         router(config)
     }
@@ -703,6 +720,26 @@ mod tests {
             header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
             None,
             "but a browser may not read it cross-origin"
+        );
+        assert_eq!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            None
+        );
+    }
+
+    /// The credential is the other half of the condition. A login gateway's cookie
+    /// is a password somebody typed and a session that outlives the page; the flag
+    /// alone must not be enough to let `null` send one, however it came to be set.
+    #[tokio::test]
+    async fn the_flag_alone_does_not_open_a_login_gateway() {
+        let mut config = router_config(None);
+        config.allow_opaque_origin = true;
+        let response = response_for(router(config), "GET", "/api/health", Some("null")).await;
+
+        assert_eq!(
+            header_of(&response, header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            None,
+            "a login credential is never handed to the opaque origin"
         );
         assert_eq!(
             header_of(&response, header::ACCESS_CONTROL_ALLOW_CREDENTIALS),

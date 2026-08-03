@@ -55,6 +55,18 @@ function classicScriptTag() {
   };
 }
 
+// One build, not one per client, and deliberately so: `bun run build` runs once in
+// CI and the single `frontend/dist` it makes is what every consumer ships — the
+// tarball's `share/remotex/web`, the container image, and `remotex.app`'s
+// `Contents/Resources/web`. That last copy is both at once, loaded from `file://`
+// by the web view and served over `http://` by the embedded gateway beside it to
+// any browser pointed at the same port, so there is no directory a mode flag could
+// put a second build in.
+//
+// It costs the served client nothing measurable. There are no dynamic imports here
+// for `inlineDynamicImports` to inline and no router to split on, `modulePreload`
+// only emits a hint that is meaningless without modules, and a deferred classic
+// script runs the same bundle a module would.
 export default defineConfig({
   build: {
     rollupOptions: {
