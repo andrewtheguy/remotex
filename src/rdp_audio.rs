@@ -246,13 +246,13 @@ impl DvcProcessor for AudioPlaybackDvc {
                 if self.state == State::Training {
                     self.state = State::Ready;
                 }
-                // The confirmation echoes the timestamp and the size of what
-                // arrived; the payload itself is a bandwidth probe with no
+                // The confirmation echoes the timestamp and the size the server
+                // announced; the payload itself is a bandwidth probe with no
                 // meaning to a consumer.
                 vec![message(ClientAudioOutputPdu::TrainingConfirm(
                     TrainingConfirmPdu {
                         timestamp: training.timestamp,
-                        pack_size: u16::try_from(training.data.len()).unwrap_or(u16::MAX),
+                        pack_size: training_pack_size(training.data.len()),
                     },
                 ))]
             }
@@ -306,6 +306,44 @@ impl DvcProcessor for AudioPlaybackDvc {
 }
 
 impl DvcClientProcessor for AudioPlaybackDvc {}
+
+/// MS-RDPEA's `wPackSize` for a training PDU whose padding was `data_len` bytes.
+///
+/// [2.2.3.3][spec] requires the Training Confirm to repeat the Training PDU's
+/// `wPackSize` unchanged, and that field counts the *whole* PDU — the four-byte
+/// prolog and the four-byte body prefix as well as the padding. IronRDP decodes the
+/// field away, subtracting both from it and keeping only the payload, so the number
+/// to echo is reconstructed here rather than read. Sending `data.len()` instead —
+/// which this did, and which `ironrdp-rdpsnd`'s own static-channel client still does
+/// in `Rdpsnd::training_confirm`, out of reach of the handler above — answers the
+/// probe with a number eight short of the one that was asked.
+///
+/// Zero means "not set" and is echoed as zero. The one ambiguity is inherited and
+/// cannot be resolved from here: a training PDU carrying no padding would have
+/// announced 8, and decodes to the same empty payload as one announcing 0. No server
+/// sends one, because the padding is the entire point of a bandwidth probe.
+///
+/// [spec]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpea/2c8b4b45-c0c3-4f0b-83a1-a01a0ec93e0d
+const fn training_pack_size(data_len: usize) -> u16 {
+    /// The prolog and the body prefix IronRDP subtracted: `SNDPROLOG` is
+    /// `msgType`, `bPad` and `BodySize`; the body opens with `wTimeStamp` and
+    /// `wPackSize` itself.
+    const HEADERS: usize = 4 + 4;
+
+    if data_len == 0 {
+        return 0;
+    }
+    let size = data_len + HEADERS;
+    if size > u16::MAX as usize {
+        // Unreachable from a decoded PDU — `wPackSize` was a `u16` on the wire, so
+        // the payload it produced is smaller than this. Saturating rather than
+        // wrapping, because a truncated echo is a wrong answer and a clamped one is
+        // at least a large answer.
+        u16::MAX
+    } else {
+        size as u16
+    }
+}
 
 /// One outgoing client PDU as a [`DvcMessage`].
 ///
@@ -663,6 +701,60 @@ mod tests {
             None,
             "nothing was negotiated, so nothing may be published"
         );
+    }
+
+    /// The training confirm has to repeat the *server's* `wPackSize` — the size of
+    /// the whole PDU, not of its padding.
+    ///
+    /// Both numbers are read off the wire by hand rather than taken from the typed
+    /// PDUs, because the typed form is exactly what loses the field: IronRDP's
+    /// decoder subtracts the two headers and keeps only the payload, so a test that
+    /// asked `TrainingPdu` what the server said would be asking the wrong witness.
+    /// Reading the bytes is what makes this fail if [`training_pack_size`] and that
+    /// subtraction ever stop agreeing.
+    #[tokio::test]
+    async fn a_training_confirm_repeats_the_size_the_server_announced() {
+        let bridge = Arc::new(AudioBridge::new());
+        let mut dvc = AudioPlaybackDvc::new(Arc::clone(&bridge));
+        dvc.process(1, &server_formats(&[audio_format(PCM_CD_QUALITY)]))
+            .expect("the formats are answered");
+
+        let padding = 1_000;
+        let training = encode_server(ServerAudioOutputPdu::Training(TrainingPdu {
+            timestamp: 0xBEEF,
+            data: vec![0x5A; padding],
+        }));
+        // msgType, bPad, BodySize, then the body: wTimeStamp, wPackSize.
+        let announced = u16::from_le_bytes([training[6], training[7]]);
+        assert_eq!(
+            usize::from(announced),
+            padding + 8,
+            "the prolog and the body prefix count towards wPackSize"
+        );
+
+        let reply = dvc.process(1, &training).expect("the client confirms training");
+        assert_eq!(reply.len(), 1);
+        let bytes = encode_vec(reply[0].as_ref()).expect("the confirm encodes");
+        assert_eq!(bytes[0], 0x06, "SNDC_TRAINING");
+        assert_eq!(
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            0xBEEF,
+            "the timestamp is echoed"
+        );
+        assert_eq!(
+            u16::from_le_bytes([bytes[6], bytes[7]]),
+            announced,
+            "the confirm must repeat wPackSize, not the length of the padding"
+        );
+    }
+
+    /// A server that set no `wPackSize` is answered with none, rather than with the
+    /// eight bytes of header the reconstruction would otherwise invent.
+    #[test]
+    fn a_training_pdu_that_announced_no_size_is_confirmed_with_none() {
+        assert_eq!(training_pack_size(0), 0);
+        assert_eq!(training_pack_size(1), 9);
+        assert_eq!(training_pack_size(1_000), 1_008);
     }
 
     /// The guard against two transports feeding one queue. A server driving both
