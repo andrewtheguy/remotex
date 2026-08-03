@@ -63,6 +63,26 @@ pub const DEFAULT_SWITCHES: &[&str] = &[
     // rules. A pinch that quietly scaled the canvas would make the pixel the
     // client reports and the pixel the user touched two different things.
     "--disable-pinch",
+    // **Local Network Access, and the black window it made.** Chromium 151 gates a
+    // request from a public origin to a loopback or private address behind a
+    // permission — and `remotex://app` is a public origin, while the gateway in this
+    // same bundle is `http://127.0.0.1:<port>`, so every call the client makes is
+    // one of those requests. There is no browser UI here to grant it and no
+    // permission handler to answer for it, so the request is neither sent nor
+    // refused: it hangs, for ever.
+    //
+    // What that looked like was not a network error. `GET /api/auth/status` never
+    // settled, so the client stayed in its `checking` state, and inside `remotex.app`
+    // an unauthenticated client renders nothing on purpose — the app has a screen for
+    // that. So: a black window, an empty `#root`, no console message, no failed
+    // request, and a page that was in fact running perfectly.
+    //
+    // Turned off rather than answered because there is nobody to ask. The page is
+    // this bundle's own client, the address is this bundle's own gateway on
+    // loopback, and the two were shipped together; a prompt could only ever be
+    // answered one way. The socket half is a separate feature and the client opens
+    // `ws://` to the same gateway, so both go.
+    "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets",
 ];
 
 /// The environment variable that replaces [`DEFAULT_SWITCHES`] wholesale.
