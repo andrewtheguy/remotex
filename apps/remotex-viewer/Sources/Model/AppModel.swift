@@ -289,7 +289,11 @@ final class AppModel {
         do {
             let handshake = try await gateway.start()
             screen = .ready(
-                GatewayEndpoint(port: handshake.port, token: handshake.token)
+                GatewayEndpoint(
+                    host: handshake.host,
+                    port: handshake.port,
+                    token: handshake.token
+                )
             )
         } catch {
             fail(with: error)

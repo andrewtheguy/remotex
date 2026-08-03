@@ -213,14 +213,30 @@ struct RemoteWebHost: NSViewRepresentable {
 }
 
 /// Where the page is and what gets it past the door.
+///
+/// `host` is a `<label>.localhost` name the gateway derived from its instance
+/// directory, not `127.0.0.1`, and the difference is the whole reason it is here.
+/// The page's `localStorage` — which is where the client keeps its three remembered
+/// preferences — is keyed by *origin*, and an origin includes the port; a
+/// kernel-assigned port therefore handed every launch an empty storage area, and the
+/// persistent data store underneath it had nothing to persist. A fixed port fixes
+/// that, and a name of this instance's own is what then keeps two instances from
+/// sharing the one origin a fixed port would otherwise give them — including the
+/// cookie below, which ignores the port entirely.
+///
+/// Both `.localhost` and `<label>.localhost` resolve to loopback (RFC 6761), and
+/// WebKit treats them as potentially trustworthy, so the page is still a secure
+/// context and WebCodecs still decodes the remote's audio and video.
 struct GatewayEndpoint: Equatable {
+    let host: String
     let port: UInt16
     let token: String
 
     var url: URL {
-        // Force-unwrapped over a literal with a `UInt16` in it: there is no port
-        // this cannot spell, and an optional here would be a branch with no case.
-        URL(string: "http://127.0.0.1:\(port)/")!
+        // Force-unwrapped over a `UInt16` and a name the gateway validated as a
+        // single DNS label before it announced it; an optional here would be a
+        // branch with no case.
+        URL(string: "http://\(host):\(port)/")!
     }
 
     /// The `remotex_session` cookie the gateway checks, spelled the way a login
@@ -231,7 +247,7 @@ struct GatewayEndpoint: Equatable {
         HTTPCookie(properties: [
             .name: "remotex_session",
             .value: token,
-            .domain: "127.0.0.1",
+            .domain: host,
             .path: "/",
         ])!
     }

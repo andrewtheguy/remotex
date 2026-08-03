@@ -1,9 +1,9 @@
 # remotex.app for macOS
 
 `remotex.app` is a native macOS 26 **shell** around the browser client. It starts
-`Contents/MacOS/remotex-gateway` on an ephemeral loopback port, authenticates with
-a random token delivered through a private pipe, shows the SPA that gateway serves
-in a `WKWebView`, and stops the gateway when the app quits.
+`Contents/MacOS/remotex-gateway` on a fixed loopback port, authenticates with a
+random token delivered through a private pipe, shows the SPA that gateway serves in
+a `WKWebView`, and stops the gateway when the app quits.
 
 There is one gateway, in this bundle. A gateway elsewhere is reached with a
 browser.

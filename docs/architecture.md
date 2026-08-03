@@ -782,10 +782,12 @@ state object the menus are derived from, and the app sends the keys a browser is
 never given, the Mac's pasteboard, and the menu commands standing in for the
 floating menu it hides. See [`macos-viewer.md`](macos-viewer.md#the-bridge).
 
-The gateway it starts is `serve-embedded`: an ephemeral loopback port, the SPA out
-of `Contents/Resources/web`, and a random token minted per launch that the app puts
-in the web view's cookie store instead of a login. It dies with the app. Reaching
-a gateway elsewhere is a browser's job.
+The gateway it starts is `serve-embedded`: a fixed loopback port under a
+`remotex-<hash>.localhost` name derived from the instance directory, the SPA out of
+`Contents/Resources/web`, and a random token minted per launch that the app puts in
+the web view's cookie store instead of a login. The origin is fixed because the
+client's remembered preferences live in `localStorage`, which is keyed by it. It
+dies with the app. Reaching a gateway elsewhere is a browser's job.
 
 That path is the one place `GatewayAuth` (in `src/auth.rs`, of which exactly one is
 active per process) and `config::Audience` differ from a served gateway, because the

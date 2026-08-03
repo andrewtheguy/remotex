@@ -17,19 +17,35 @@ struct EmbeddedGatewayTests {
     /// `JSONDecoder` and fail later as a connection refused.
     @Test
     func aHandshakeIsParsedAndNonsenseIsNot() {
-        let handshake = EmbeddedGateway.decode(line: #"{"port":49213,"token":"abc"}"#)
-        #expect(handshake == EmbeddedGateway.Handshake(port: 49213, token: "abc"))
+        let handshake = EmbeddedGateway.decode(
+            line: #"{"host":"remotex-abc.localhost","port":49213,"token":"abc"}"#
+        )
+        #expect(
+            handshake
+                == EmbeddedGateway.Handshake(
+                    host: "remotex-abc.localhost",
+                    port: 49213,
+                    token: "abc"
+                )
+        )
         // Trailing newline and whitespace, which is how it actually arrives.
-        #expect(EmbeddedGateway.decode(line: "{\"port\":1,\"token\":\"t\"}\n")?.port == 1)
+        #expect(
+            EmbeddedGateway.decode(line: "{\"host\":\"h.localhost\",\"port\":1,\"token\":\"t\"}\n")?
+                .port == 1
+        )
 
         for rubbish in [
             "",
             "not json",
-            #"{"port":49213}"#,
-            #"{"token":"abc"}"#,
+            #"{"host":"h.localhost","port":49213}"#,
+            #"{"host":"h.localhost","token":"abc"}"#,
+            // The origin is half the launch: without a name there is nothing to
+            // load, and the port alone would put the page back on a moving origin.
+            #"{"port":49213,"token":"abc"}"#,
+            #"{"host":"","port":49213,"token":"abc"}"#,
             // Both of these decode and neither is usable.
-            #"{"port":0,"token":"abc"}"#,
-            #"{"port":49213,"token":""}"#,
+            #"{"host":"h.localhost","port":0,"token":"abc"}"#,
+            #"{"host":"h.localhost","port":49213,"token":""}"#,
         ] {
             #expect(EmbeddedGateway.decode(line: rubbish) == nil, "accepted \(rubbish)")
         }
@@ -43,7 +59,7 @@ struct EmbeddedGatewayTests {
         let gateway = try fakeGateway(
             in: directory,
             script: """
-                echo '{"port":49213,"token":"tok-abc"}'
+                echo '{"host":"remotex-fake.localhost","port":49213,"token":"tok-abc"}'
                 # Stay alive, and stop when stdin closes — the real gateway's contract.
                 cat > /dev/null
                 """
@@ -51,7 +67,14 @@ struct EmbeddedGatewayTests {
 
         let handshake = try await gateway.start()
 
-        #expect(handshake == EmbeddedGateway.Handshake(port: 49213, token: "tok-abc"))
+        #expect(
+            handshake
+                == EmbeddedGateway.Handshake(
+                    host: "remotex-fake.localhost",
+                    port: 49213,
+                    token: "tok-abc"
+                )
+        )
         #expect(gateway.isRunning)
         await gateway.stop()
         #expect(!gateway.isRunning)
@@ -133,7 +156,7 @@ struct EmbeddedGatewayTests {
         let gateway = try fakeGateway(
             in: directory,
             script: """
-                echo '{"port":49213,"token":"tok-abc"}'
+                echo '{"host":"remotex-fake.localhost","port":49213,"token":"tok-abc"}'
                 echo 'the engine crashed' >&2
                 exit 3
                 """
@@ -163,7 +186,7 @@ struct EmbeddedGatewayTests {
         let gateway = try fakeGateway(
             in: directory,
             script: """
-                echo '{"port":49213,"token":"tok-abc"}'
+                echo '{"host":"remotex-fake.localhost","port":49213,"token":"tok-abc"}'
                 cat > /dev/null
                 """
         )
@@ -189,7 +212,7 @@ struct EmbeddedGatewayTests {
             in: directory,
             script: """
                 trap '' TERM
-                echo '{"port":49213,"token":"tok-abc"}'
+                echo '{"host":"remotex-fake.localhost","port":49213,"token":"tok-abc"}'
                 cat > /dev/null
                 echo 'stdin closed' >&2
                 """

@@ -67,29 +67,60 @@ login gateway, a constant-time compare against the launch token here.
 An answer of "no" means the gateway and the app disagree about the token, which
 no login form can fix — the page reports it and the app takes the screen back.
 
-The web view gets a data store of this instance's own — `WKWebsiteDataStore(forIdentifier:)`,
-keyed off a UUID derived from the instance directory — and a **persistent** one.
-The client keeps its three remembered preferences in `localStorage`, so a
-non-persistent store forgets the Command-translation override and both "if
-compatible" defaults at every launch, silently. WebKit keeps that store in the
-app's container rather than in the instance directory, which is why the
-identifier has to come from the directory: it is what makes `--instance-dir`
-isolate preferences the way it isolates the config and the log.
+### Keeping the client's preferences
 
-The cookie in it is replaced at every launch by that launch's token, and the claim
-lives in `sessionStorage`, which is per web view whatever the store does.
+The client keeps three remembered preferences — the Command-translation override
+and both "if compatible" defaults — in `localStorage`. `localStorage` is keyed by
+**origin**, so keeping them is a matter of the origin holding still across
+launches, and three separate things have to be true for that.
+
+**A persistent, per-instance data store.** `WKWebsiteDataStore(forIdentifier:)`,
+keyed off a UUID derived from the instance directory. A non-persistent store
+forgets everything at every launch; WebKit keeps this one in the app's container
+rather than in the instance directory, which is why the identifier has to come
+from the directory — it is what makes `--instance-dir` isolate preferences the
+way it isolates the config and the log.
+
+**A fixed port.** `embedded::DEFAULT_PORT` is 45380, and the instance's config may
+set `port` (or `--port` on the command line) if that one is taken. This was the
+bug the persistent store on its own did not fix: an origin includes its port, so
+the ephemeral port the gateway used to take handed every launch a brand-new,
+empty storage area — and the store dutifully persisted it. A port that cannot be
+bound refuses the start and says why, because falling back to an ephemeral one
+would be the same silent loss again.
+
+**A derived host.** The gateway builds `remotex-<hash>.localhost` from the
+instance directory (`Instance::origin_label`, xxh3 over the canonicalized path)
+and announces it on the handshake; the app loads that name and never works one
+out for itself. With the port now fixed, this is what keeps two instances from
+sharing one origin — which would mean one instance's preferences appearing in the
+other's window, and, because cookies ignore the port entirely, one instance's
+launch token being sent to the other's gateway by any browser that had visited
+both. Anything that still arrives on the bare `127.0.0.1` address is redirected
+to this name, so there is one origin and one jar.
+
+`<label>.localhost` is loopback by RFC 6761, macOS resolves it (to `::1` and
+`127.0.0.1` both, and a client that tries `::1` first falls straight back), and
+WebKit treats it as potentially trustworthy — so the page is still a **secure
+context** and WebCodecs still decodes the remote's audio and video.
+
+The cookie in the store is replaced at every launch by that launch's token, and
+the claim lives in `sessionStorage`, which is per web view whatever the store
+does.
 
 ### Process pipes
 
 After binding, the gateway writes exactly one JSON line to stdout:
 
 ```json
-{"port":49213,"token":"…"}
+{"host":"remotex-3f2a9c1b04d5e678.localhost","port":45380,"token":"…"}
 ```
 
-The app is the token's only client-side holder. Logging goes to stderr. The
-private stdout pipe keeps the token out of `argv`, the environment, and
-persistent files.
+`host` and `port` together are the origin the app must load, announced rather
+than assembled on the app's side: the origin is one decision, and a second
+implementation of it would disagree the first time either changed. The app is the
+token's only client-side holder. Logging goes to stderr. The private stdout pipe
+keeps the token out of `argv`, the environment, and persistent files.
 
 The app keeps the write end of the gateway's stdin open without writing. When the
 app exits, the kernel closes it; the gateway reads EOF and exits.

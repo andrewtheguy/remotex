@@ -132,9 +132,10 @@ final class GatewayConfigStore {
         # This file belongs to the app and to nothing else: it is not the installed
         # server's /opt/remotex/etc/remotex.toml, and the two never read each other.
         #
-        # There is no [server] block here. The app decides where its gateway listens
-        # (an ephemeral port on 127.0.0.1), serves no web UI, and authenticates itself,
-        # so a [server] block would only contradict it and is refused.
+        # There is no [server] block here. The app's gateway listens on loopback,
+        # serves no web UI and authenticates itself, so a [server] block would only
+        # contradict it and is refused. The port below is the one thing about it you
+        # may set.
         #
         # Add one [[targets]] block per machine. Edit this from the app —
         # Remote > Configuration… — which checks it before saving.
@@ -142,6 +143,17 @@ final class GatewayConfigStore {
         # What this instance calls itself: the heading above the target list, the
         # window title, and the launch screen. Useful when two instances run at once.
         # branding = "remotex"
+
+        # The loopback port the app's own gateway listens on (default 45380).
+        #
+        # Fixed rather than picked fresh each time, because the page's address is what
+        # the client's remembered settings — audio, auto resize, the keyboard override
+        # — are filed under, and an address that moved every launch lost them all.
+        #
+        # Set this only if the default is taken: most often that means a second
+        # instance of remotex.app is running, since both would otherwise want the same
+        # port. The app says so on its launch screen when it happens.
+        # port = 45380
 
         # A Windows machine over RDP:
         #

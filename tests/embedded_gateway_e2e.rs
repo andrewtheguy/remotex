@@ -20,8 +20,28 @@ use std::time::{Duration, Instant};
 struct Embedded {
     child: Child,
     addr: SocketAddr,
+    /// The `<label>.localhost` origin the gateway announced, which is what the app
+    /// loads and therefore what these requests claim in `Host`.
+    host: String,
     token: String,
     dir: common::ScratchDir,
+}
+
+/// A port nothing is listening on, for a gateway this test is about to start.
+///
+/// Needed because the embedded port is *fixed* — that is the point of it, and it is
+/// what lets the client's saved preferences survive a relaunch — so several gateways
+/// at once is exactly the case `--port` exists for. A real second instance is moved
+/// the same way, through `port` in its config.
+///
+/// Bound and released rather than counted from a base: a number picked by arithmetic
+/// is one another test, or anything else on the machine, may already hold.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("a loopback port")
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 impl Drop for Embedded {
@@ -39,54 +59,32 @@ impl Embedded {
     fn start(config: &str) -> Self {
         let dir = common::ScratchDir::new("embedded");
         dir.write("remotex.toml", config);
-        let web = web_root(&dir);
-        let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
-            .arg("serve-embedded")
-            .arg("--instance-dir")
-            .arg(dir.path())
-            .arg("--web-root")
-            .arg(&web)
-            // stdin is the liveness pipe: closing our end is how the app tells this
-            // process to stop, so it must be a pipe and not this test's terminal.
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the gateway binary must be built");
-
-        // Taken rather than borrowed, so the reader below owns what is left of stdout
-        // after the handshake line.
-        let mut stdout = BufReader::new(child.stdout.take().expect("a piped stdout"));
-        let mut line = String::new();
-        stdout
-            .read_line(&mut line)
-            .expect("the gateway must print a handshake line");
-        let handshake: serde_json::Value =
-            serde_json::from_str(line.trim_end()).unwrap_or_else(|e| {
-                panic!("the handshake must be one line of JSON, got {line:?}: {e}")
-            });
-
-        // Both pipes are drained for the rest of the child's life. Nothing reads what
-        // arrives — the assertions are all made over HTTP — but a pipe nobody empties
-        // fills at 64 KiB and then blocks the gateway inside a `write`, which is a
-        // test that hangs rather than fails. Today's output is nowhere near that; the
-        // first test to drive real traffic through one of these would find out the
-        // hard way, at which point the failure looks like anything but this.
-        //
-        // Detached deliberately: each thread ends by itself when its pipe closes, and
-        // the child is killed on `Drop`.
-        std::thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
-        if let Some(mut stderr) = child.stderr.take() {
-            std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
-        }
-        let port = handshake["port"].as_u64().expect("a port") as u16;
-        let token = handshake["token"].as_str().expect("a token").to_owned();
+        let (child, addr, host, token) = spawn(&dir);
         Self {
             child,
-            addr: SocketAddr::from(([127, 0, 0, 1], port)),
+            addr,
+            host,
             token,
             dir,
         }
+    }
+
+    /// Stop this gateway and start another one in the same instance directory: a
+    /// relaunch of the app, as the gateway sees it. The directory and its config are
+    /// untouched, which is what makes the two origins comparable.
+    fn relaunch(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let (child, addr, host, token) = spawn(&self.dir);
+        self.child = child;
+        self.addr = addr;
+        self.host = host;
+        self.token = token;
+    }
+
+    /// The authority the app puts in the URL bar: the announced name, this port.
+    fn authority(&self) -> String {
+        format!("{}:{}", self.host, self.addr.port())
     }
 
     /// A `GET` carrying `cookie` verbatim as the `Cookie` header, or none.
@@ -95,9 +93,11 @@ impl Embedded {
             Some(value) => format!("Cookie: {value}\r\n"),
             None => String::new(),
         };
+        // The announced origin, not the bare address: that is what the web view
+        // asks for, and asking as `127.0.0.1` would be redirected to this name.
         let req = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\n{header}Connection: close\r\n\r\n",
-            self.addr
+            self.authority()
         );
         let (status, _head, body) = common::http_request(self.addr, &req).await;
         (status, body)
@@ -132,6 +132,63 @@ impl Embedded {
     }
 }
 
+/// Start a gateway on `dir`, read its handshake, and drain its pipes for the rest of
+/// its life.
+///
+/// A free function because [`Embedded::relaunch`] needs it while already holding the
+/// directory, which a constructor cannot be asked for.
+fn spawn(dir: &common::ScratchDir) -> (Child, SocketAddr, String, String) {
+    let web = web_root(dir);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
+        .arg("serve-embedded")
+        .arg("--instance-dir")
+        .arg(dir.path())
+        .arg("--web-root")
+        .arg(&web)
+        .arg("--port")
+        .arg(free_port().to_string())
+        // stdin is the liveness pipe: closing our end is how the app tells this
+        // process to stop, so it must be a pipe and not this test's terminal.
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the gateway binary must be built");
+
+    // Taken rather than borrowed, so the reader below owns what is left of stdout
+    // after the handshake line.
+    let mut stdout = BufReader::new(child.stdout.take().expect("a piped stdout"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the gateway must print a handshake line");
+    let handshake: serde_json::Value = serde_json::from_str(line.trim_end())
+        .unwrap_or_else(|e| panic!("the handshake must be one line of JSON, got {line:?}: {e}"));
+
+    // Both pipes are drained for the rest of the child's life. Nothing reads what
+    // arrives — the assertions are all made over HTTP — but a pipe nobody empties
+    // fills at 64 KiB and then blocks the gateway inside a `write`, which is a
+    // test that hangs rather than fails. Today's output is nowhere near that; the
+    // first test to drive real traffic through one of these would find out the
+    // hard way, at which point the failure looks like anything but this.
+    //
+    // Detached deliberately: each thread ends by itself when its pipe closes, and
+    // the child is killed on `Drop`.
+    std::thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+    }
+    let port = handshake["port"].as_u64().expect("a port") as u16;
+    let host = handshake["host"].as_str().expect("a host").to_owned();
+    let token = handshake["token"].as_str().expect("a token").to_owned();
+    (
+        child,
+        SocketAddr::from(([127, 0, 0, 1], port)),
+        host,
+        token,
+    )
+}
+
 /// A stand-in for `Contents/Resources/web`: an `index.html` and one asset beside
 /// it, which is the whole shape the gateway cares about.
 fn web_root(dir: &common::ScratchDir) -> std::path::PathBuf {
@@ -155,11 +212,18 @@ fn one_target() -> &'static str {
 /// in it has to be the one that answers — a number printed before the bind would
 /// pass a parse and fail a connection.
 #[tokio::test]
-async fn the_handshake_names_a_port_that_answers_and_a_token_that_works() {
+async fn the_handshake_names_an_origin_that_answers_and_a_token_that_works() {
     let embedded = Embedded::start(one_target());
 
-    assert_ne!(embedded.addr.port(), 0, "an ephemeral port, already bound");
+    assert_ne!(embedded.addr.port(), 0, "a port, already bound");
     assert_ne!(embedded.addr.port(), 52380, "not the served gateway's port");
+    // The name is the other half of the origin, and the half that is new: without it
+    // the page's `localStorage` would be keyed on whatever port this launch got.
+    assert!(
+        embedded.host.starts_with("remotex-") && embedded.host.ends_with(".localhost"),
+        "the handshake must name a derived loopback origin, got {:?}",
+        embedded.host
+    );
     assert_eq!(embedded.token.len(), 43, "32 bytes of base64url: {}", embedded.token);
 
     let (status, body) = embedded.get_authorized("/api/health").await;
@@ -198,7 +262,8 @@ async fn nothing_but_the_token_gets_past_the_guard() {
     let req = format!(
         "GET /api/targets HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
          Connection: close\r\n\r\n",
-        embedded.addr, embedded.token
+        embedded.authority(),
+        embedded.token
     );
     let (status, _, _) = common::http_request(embedded.addr, &req).await;
     assert_eq!(status, 401, "the credential lives in the cookie now");
@@ -215,7 +280,7 @@ async fn the_login_routes_refuse_rather_than_vanish() {
     let req = format!(
         "POST /api/auth/login HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        embedded.addr,
+        embedded.authority(),
         body.len()
     );
     let (status, head, _) = common::http_request(embedded.addr, &req).await;
@@ -427,8 +492,60 @@ async fn two_instances_share_nothing() {
     assert_ne!(a.addr.port(), b.addr.port());
     assert_ne!(a.token, b.token);
     assert_ne!(a.dir.path(), b.dir.path());
+    // Two origins, not one, and this is the assertion that keeps them apart when the
+    // ports do not: the port is fixed by default, and a cookie ignores it entirely —
+    // so on one origin, whichever of these a browser visited last would be handing
+    // its launch token to the other.
+    assert_ne!(
+        a.host, b.host,
+        "two instance directories must give two loopback origins"
+    );
 
     // And one's token is refused by the other, which is the part that matters.
     let (status, _) = b.get("/api/targets", Some(&format!("Bearer {}", a.token))).await;
     assert_eq!(status, 401);
+}
+
+/// The same instance directory gives the same origin at every launch. This is the
+/// whole point of deriving it: the client keeps its three remembered preferences in
+/// `localStorage`, which is keyed by origin, so an origin that moves is preferences
+/// that silently reset — which is exactly what an ephemeral port used to do.
+#[tokio::test]
+async fn one_instance_directory_keeps_one_origin_across_launches() {
+    let mut gateway = Embedded::start(one_target());
+    let (host, token) = (gateway.host.clone(), gateway.token.clone());
+
+    gateway.relaunch();
+
+    assert_eq!(
+        gateway.host, host,
+        "the origin is a fact about the instance directory and must not move"
+    );
+    assert_ne!(
+        gateway.token, token,
+        "the credential is the opposite: minted per launch, and kept in memory"
+    );
+    let (status, _) = gateway.get_authorized("/api/health").await;
+    assert_eq!(status, 200, "and the new token is the one that works");
+}
+
+/// Anything that arrives on the bare loopback address is sent to the derived origin,
+/// so there is one place the page can be and one jar its cookie can be in. The app
+/// loads the right name to begin with; this is for everything else — a browser
+/// opened at `127.0.0.1:<port>`, or a bookmark from before the label existed.
+#[tokio::test]
+async fn the_bare_loopback_address_is_redirected_to_the_derived_origin() {
+    let embedded = Embedded::start(one_target());
+
+    let req = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        embedded.addr
+    );
+    let (status, head, _) = common::http_request(embedded.addr, &req).await;
+    assert_eq!(status, 307, "a temporary redirect, never a cached one");
+    assert!(
+        head.to_lowercase()
+            .contains(&format!("location: http://{}/", embedded.authority()).to_lowercase()),
+        "must point at the derived origin: {head}"
+    );
 }
