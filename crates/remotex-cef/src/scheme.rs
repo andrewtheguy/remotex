@@ -35,6 +35,79 @@ pub fn index_url() -> String {
     format!("{SCHEME}://{HOST}/index.html")
 }
 
+/// Which page the window opens on: the client, unless asked for the grid.
+///
+/// `REMOTEX_STARTUP_PAGE=grid` is the one other answer, and it earned its place.
+/// An empty window has two quite different causes — a page that never rendered, and
+/// a browser view that is the wrong size or never composited — and from the outside
+/// they are the same black rectangle. [`GRID_PAGE`] has no script in it at all, so
+/// what it does is the engine's alone: if the grid fills the window, then Chromium,
+/// the scheme, the view and the compositor are all fine and the fault is in the
+/// client. That is one relaunch to halve the search, and the first time it was asked
+/// it answered in one look — the engine was sound and the client was rendering
+/// nothing on purpose, waiting on a request that would never settle.
+pub fn startup_url() -> String {
+    match std::env::var("REMOTEX_STARTUP_PAGE").as_deref() {
+        Ok("grid") => format!("{SCHEME}://{HOST}/{GRID_PATH}"),
+        _ => index_url(),
+    }
+}
+
+/// The path [`GRID_PAGE`] is served at, under the same origin as everything else so
+/// that it is the same scheme handler, the same process and the same view.
+const GRID_PATH: &str = "grid.html";
+
+/// A page with no script in it, served from memory rather than from the bundle.
+///
+/// Every part of it is a question. The checkerboard says whether anything paints at
+/// all. The four corner markers are `position: fixed`, so they sit at the edges of
+/// the *viewport* — if the window is 1474 wide and the layout is 600, the right-hand
+/// pair is stranded in the middle of the window and the mismatch is visible without
+/// measuring anything. The `@media` rules under them report the viewport's own idea
+/// of its width, which is the number a stale layout gets wrong.
+const GRID_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>remotex grid</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #101418; color: #e6edf3;
+               font: 14px system-ui, -apple-system, sans-serif; }
+  .grid { display: grid; height: 100vh; width: 100vw;
+          grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(6, 1fr); }
+  .grid div { display: flex; align-items: center; justify-content: center;
+              border: 1px solid #30363d; }
+  .grid div:nth-child(odd)  { background: #161b22; }
+  .grid div:nth-child(even) { background: #21262d; }
+  .corner { position: fixed; padding: 4px 8px; background: #f85149; color: #fff;
+            font-weight: 600; }
+  .tl { top: 0; left: 0 } .tr { top: 0; right: 0 }
+  .bl { bottom: 0; left: 0 } .br { bottom: 0; right: 0 }
+  .size { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+          padding: 10px 16px; background: #0d1117; border: 1px solid #8b949e; }
+  .size::after { content: "viewport under 700px wide" }
+  @media (min-width: 700px)  { .size::after { content: "viewport 700-1099px wide" } }
+  @media (min-width: 1100px) { .size::after { content: "viewport 1100px or wider" } }
+</style>
+</head>
+<body>
+<div class="grid">
+<div>1</div><div>2</div><div>3</div><div>4</div><div>5</div><div>6</div><div>7</div><div>8</div>
+<div>9</div><div>10</div><div>11</div><div>12</div><div>13</div><div>14</div><div>15</div><div>16</div>
+<div>17</div><div>18</div><div>19</div><div>20</div><div>21</div><div>22</div><div>23</div><div>24</div>
+<div>25</div><div>26</div><div>27</div><div>28</div><div>29</div><div>30</div><div>31</div><div>32</div>
+<div>33</div><div>34</div><div>35</div><div>36</div><div>37</div><div>38</div><div>39</div><div>40</div>
+<div>41</div><div>42</div><div>43</div><div>44</div><div>45</div><div>46</div><div>47</div><div>48</div>
+</div>
+<div class="corner tl">TOP LEFT</div>
+<div class="corner tr">TOP RIGHT</div>
+<div class="corner bl">BOTTOM LEFT</div>
+<div class="corner br">BOTTOM RIGHT</div>
+<div class="size"></div>
+</body>
+</html>
+"#;
+
 /// The origin the gateway answers cross-origin. Must equal `SHELL_ORIGIN` in
 /// `src/server.rs`; the test below is what keeps the two from drifting.
 pub fn origin() -> String {
@@ -74,6 +147,14 @@ struct Asset {
 /// asking for — so `../../..` is resolved and compared rather than trusted.
 fn load(web_root: &Path, path: &str, gateway_origin: &str) -> Option<Asset> {
     let relative = path.trim_start_matches('/');
+    // Before the disk is consulted at all, so the diagnostic page does not depend on
+    // a built SPA being in the bundle — see `startup_url`.
+    if relative == GRID_PATH {
+        return Some(Asset {
+            body: GRID_PAGE.as_bytes().to_vec(),
+            mime: "text/html",
+        });
+    }
     let relative = if relative.is_empty() {
         "index.html"
     } else {
@@ -307,6 +388,7 @@ pub fn asset_factory(web_root: PathBuf) -> SchemeHandlerFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client;
 
     /// A mime type with the charset stuck on the end is not the mime type
     /// Chromium is comparing against, and the symptom is not an error: the client
@@ -374,6 +456,21 @@ mod tests {
             "only the injected element's own closing tag may appear: {out}"
         );
         assert!(out.contains(r"</script>"), "{out}");
+    }
+
+    /// The diagnostic page answers on its own — no bundle, no build, and above all
+    /// no script, which is the only reason it can tell the engine's faults apart
+    /// from the client's.
+    #[test]
+    fn the_grid_page_needs_neither_a_bundle_nor_a_script() {
+        let nowhere = Path::new("/nonexistent/web/root");
+        let asset = load(nowhere, "/grid.html", "").expect("the grid must not need a web root");
+        let text = String::from_utf8(asset.body).unwrap();
+        assert_eq!(asset.mime, "text/html");
+        assert!(!text.contains("<script"), "the grid page must have no script in it");
+        assert!(client::permits(&startup_url()), "the window must be allowed to open it");
+        // And the window opens on the client unless something asks otherwise.
+        assert_eq!(startup_url(), index_url());
     }
 
     #[test]

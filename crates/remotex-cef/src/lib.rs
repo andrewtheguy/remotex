@@ -335,13 +335,14 @@ pub unsafe extern "C" fn remotex_cef_set_cookie(
     };
 
     let mut manager = cookie_manager_get_global_manager(None);
-    if let Some(manager) = manager.as_mut() {
+    let queued = manager.as_mut().map(|manager| {
         manager.set_cookie(
             Some(&CefString::from(origin.as_str())),
             Some(&cookie),
             None,
-        );
-    }
+        )
+    });
+    trace!("cookie for {origin} on host {host:?}: queued = {queued:?}");
     // Answered synchronously. `set_cookie` without a callback still queues the
     // write on the IO thread, but every read of it goes through the same queue —
     // so the load below cannot overtake it, which is the ordering the callback
@@ -351,14 +352,18 @@ pub unsafe extern "C" fn remotex_cef_set_cookie(
     }
 }
 
+/// A `Basetime` `days` from now.
+///
+/// Counted from CEF's own `basetime_now()` rather than from `SystemTime`, and that
+/// is the whole point of the function. A `cef_basetime_t` is microseconds since
+/// **base::Time's** epoch, not since the Unix one, and the two are 369 years apart —
+/// so a Unix timestamp handed over as one is a date in the seventeenth century. A
+/// cookie that expired in 1657 is not rejected loudly: it is accepted, dropped, and
+/// the jar is simply empty afterwards, which reads exactly like a cookie that was
+/// never set.
 fn expiry_in_days(days: i64) -> Basetime {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0)
-        + days * 24 * 60 * 60;
     Basetime {
-        val: seconds * 1_000_000,
+        val: basetime_now().val + days * 24 * 60 * 60 * 1_000_000,
     }
 }
 
@@ -410,7 +415,8 @@ pub unsafe extern "C" fn remotex_cef_create(
 /// `handle` must come from `remotex_cef_create` and still be live.
 unsafe fn spawn_browser(parent_view: *mut c_void, handle: *mut RemotexCefBrowser) {
     let entry = unsafe { &*handle };
-    trace!("creating a browser on {parent_view:?} for {}", scheme::index_url());
+    let startup = scheme::startup_url();
+    trace!("creating a browser on {parent_view:?} for {startup}");
     let (mut cef_client, router) = client::client(entry.browser.clone(), entry.deliver.clone());
     *entry.router.borrow_mut() = Some(router);
     *entry.client.borrow_mut() = Some(cef_client.clone());
@@ -424,7 +430,7 @@ unsafe fn spawn_browser(parent_view: *mut c_void, handle: *mut RemotexCefBrowser
             height: 1,
         },
     );
-    let url = CefString::from(scheme::index_url().as_str());
+    let url = CefString::from(startup.as_str());
     let settings = BrowserSettings::default();
     let created = browser_host_create_browser(
         Some(&window_info),
