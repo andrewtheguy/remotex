@@ -569,12 +569,6 @@ async fn active_loop(
         pointer_software_rendering: connection_result.pointer_software_rendering,
     }
     .build();
-    // RDP6 bitmap streams from xrdp use the bottom-up scanline ordering that
-    // IronRDP exposed as an explicit compatibility mode when it fixed source
-    // stride handling. Keep the ordering used by the released decoder while
-    // taking the corrected, independent source stride.
-    active_stage.use_bottom_up_rdp6_bitmap_order();
-
     // Last known pointer position, so button/wheel events (which the browser
     // sends without coordinates) land where the cursor actually is.
     let mut last_pos: (u16, u16) = (desktop.width / 2, desktop.height / 2);
