@@ -368,7 +368,8 @@ export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
 /**
  * Read the sequence that lets the paint worker acknowledge this batch after
  * it has finished. Header validation lives here so the main thread never posts
- * an acknowledgment-capable command for a non-batch or reserved future flags.
+ * an acknowledgment-capable command for a non-batch, reserved future flags,
+ * or sequence zero (real attachment sequences start at one).
  */
 export function batchFrameSequence(buf: ArrayBuffer): number | null {
   if (buf.byteLength < BATCH_HEADER_LEN) {
@@ -378,7 +379,8 @@ export function batchFrameSequence(buf: ArrayBuffer): number | null {
   if (view.getUint8(0) !== BATCH_FRAME_KIND || view.getUint8(1) !== 0) {
     return null;
   }
-  return view.getUint32(4, true);
+  const sequence = view.getUint32(4, true);
+  return sequence === 0 ? null : sequence;
 }
 
 function decodeRecord(

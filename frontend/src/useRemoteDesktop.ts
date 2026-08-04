@@ -18,6 +18,7 @@ import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { isMacHost, MacKeyboardTranslator } from "./macKeys.ts";
 import { NATIVE_HOST, postToHost } from "./nativeHost.ts";
 import { createSender } from "./outbound.ts";
+import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
 import { createRectCache } from "./pointerRect.ts";
 import {
   binaryFrameKind,
@@ -557,6 +558,11 @@ export function useRemoteDesktop(
   );
 
   const wsRef = useRef<WebSocket | null>(null);
+  // The painter survives connection-effect reruns on the same canvas, so its
+  // attachment epoch must survive them too. Otherwise both the old and new
+  // effects start at one and a late old completion can acknowledge the new
+  // socket. Starts and teardowns both advance it; no value is reused.
+  const paintGenerationRef = useRef(0);
   // Releases every key the input effect has sent as pressed and clears the
   // Command translator with them. Set by that effect; called from here when the
   // translation rules change under a chord that is part way through — the guest
@@ -747,28 +753,19 @@ export function useRemoteDesktop(
     // the worker with each batch; only the live generation may acknowledge on
     // the live socket. Batch sequences alone are insufficient because each new
     // attachment starts them over.
-    let paintGeneration = 0;
     let paintSocket: WebSocket | null = null;
     painter?.bind({
       onCacheReset: () => sendRef.current({ type: "cacheReset" }),
       onVideoError: setVideoError,
       onPainted: (sequence, generation, queuedMs, drawMs) => {
-        const socket = paintSocket;
-        if (
-          generation !== paintGeneration ||
-          socket === null ||
-          socket !== ws ||
-          socket.readyState !== WebSocket.OPEN
-        ) {
-          return;
-        }
-        socket.send(
-          JSON.stringify({
-            type: "paintAck",
-            sequence,
-            queuedMs,
-            drawMs,
-          }),
+        sendPaintAck(
+          paintGenerationRef,
+          generation,
+          paintSocket,
+          ws,
+          sequence,
+          queuedMs,
+          drawMs,
         );
       },
       onResized: (seq) => {
@@ -997,8 +994,7 @@ export function useRemoteDesktop(
     const open = (sessionId: string) => {
       session = sessionId;
       const socket = new WebSocket(gatewaySocketUrl("/ws", sessionId));
-      paintGeneration += 1;
-      const generation = paintGeneration;
+      const generation = advancePaintGeneration(paintGenerationRef);
       paintSocket = socket;
       socket.binaryType = "arraybuffer";
       ws = socket;
@@ -1582,7 +1578,7 @@ export function useRemoteDesktop(
 
     return () => {
       disposed = true;
-      paintGeneration += 1;
+      advancePaintGeneration(paintGenerationRef);
       paintSocket = null;
       startRef.current = null;
       resizeToWindowRef.current = null;

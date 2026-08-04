@@ -26,6 +26,13 @@ test("a screen batch carries its attachment-local sequence", () => {
   assert.equal(batchFrameSequence(frame.buffer), null);
 });
 
+test("screen batch sequences start at one; zero is not an attachment sequence", () => {
+  const frame = new Uint8Array([0x02, 0, 0, 0, 0, 0, 0, 0]);
+  assert.equal(batchFrameSequence(frame.buffer), null);
+  frame[4] = 1;
+  assert.equal(batchFrameSequence(frame.buffer), 1);
+});
+
 test("an ordinary click run is passed through as the browser counted it", () => {
   assert.equal(clickCount(1), 1);
   assert.equal(clickCount(2), 2);

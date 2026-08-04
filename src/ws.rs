@@ -56,6 +56,9 @@ use crate::{
 const CLOSE_INVALID_TOKEN: u16 = 4000;
 /// Close code: another browser took over the session slot.
 const CLOSE_EVICTED: u16 = 4001;
+/// Standard internal-error close. The browser treats it as reconnectable, so a
+/// fresh attachment gets a fresh sequence space rather than reusing one.
+const CLOSE_SEQUENCE_EXHAUSTED: u16 = 1011;
 
 /// WebSocket keepalive interval. Browsers answer protocol pings in the network
 /// stack, so background-tab JavaScript timer throttling cannot suppress it.
@@ -254,7 +257,14 @@ async fn audio(
                 // No run collection: every audio message is its own frame regardless,
                 // so batching would only add latency to the one thing that cannot
                 // absorb any.
-                for frame in wire.encode(vec![msg]) {
+                let frames = match wire.encode(vec![msg]) {
+                    Ok(frames) => frames,
+                    Err(e) => {
+                        warn!("ws: audio wire failed: {e}");
+                        break;
+                    }
+                };
+                for frame in frames {
                     let frame = match frame {
                         WireFrame::Audio(bytes) => Message::Binary(bytes.into()),
                         WireFrame::Text(json) => Message::Text(json.into()),
@@ -396,7 +406,20 @@ async fn session(
 
             // Whatever was already encoded still goes out first: eviction is not a
             // reason to drop paint the client was owed.
-            for frame in wire.encode(run) {
+            let frames = match wire.encode(run) {
+                Ok(frames) => frames,
+                Err(e) => {
+                    warn!("ws: closing exhausted attachment: {e}");
+                    let _ = ws_tx
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CLOSE_SEQUENCE_EXHAUSTED,
+                            reason: e.to_string().into(),
+                        })))
+                        .await;
+                    break 'outbound;
+                }
+            };
+            for frame in frames {
                 let (frame, sequence) = match frame {
                     WireFrame::Batch { sequence, bytes } => {
                         outbound_paint.lock().unwrap().sent(sequence);
