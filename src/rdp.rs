@@ -569,12 +569,6 @@ async fn active_loop(
         pointer_software_rendering: connection_result.pointer_software_rendering,
     }
     .build();
-    // RDP6 bitmap streams from xrdp use the bottom-up scanline ordering that
-    // IronRDP exposed as an explicit compatibility mode when it fixed source
-    // stride handling. Keep the ordering used by the released decoder while
-    // taking the corrected, independent source stride.
-    active_stage.use_bottom_up_rdp6_bitmap_order();
-
     // Last known pointer position, so button/wheel events (which the browser
     // sends without coordinates) land where the cursor actually is.
     let mut last_pos: (u16, u16) = (desktop.width / 2, desktop.height / 2);
@@ -1680,7 +1674,11 @@ fn build_connector_config(config: &TargetConfig) -> Config {
         enable_server_pointer: true,
         pointer_software_rendering: true,
         request_data: None,
-        autologon: false,
+        // INFO_AUTOLOGON in the Client Info PDU. Without it xrdp treats the
+        // credentials sent in that same PDU as pre-fill and still shows its own
+        // login screen; a target always carries credentials, so always ask the
+        // server to use them.
+        autologon: true,
         // Load-bearing beyond the channel registration: left false, IronRDP puts
         // NO_AUDIO_PLAYBACK in the Client Info PDU, and the server then redirects
         // nothing however carefully RDPSND was negotiated.

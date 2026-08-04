@@ -8,8 +8,10 @@
 //!     --test rdp_bytes_probe -- --ignored --nocapture
 //!
 //! It is deterministic to the byte — the dummy xrdp login screen does not animate
-//! and the sweep is scripted — so two revisions are directly comparable. Measured
-//! figures, three runs each:
+//! and the sweep is scripted — so two revisions are directly comparable. Since the
+//! gateway went autologon that screen carries a static login-failed message, so
+//! figures from before that change are not comparable to figures from after it.
+//! Measured figures, three runs each (pre-autologon screen):
 //!
 //! | revision | frames | bytes |
 //! |---|---|---|
