@@ -10,35 +10,38 @@ rustdesk).
 What the audit found *sound* — and later work should not regress — is at the
 bottom.
 
-## In progress — end-to-end screen backpressure
+## In progress — enforce end-to-end screen backpressure
 
-**Highest expected impact, shared by every target.** The gateway's bounded queues
-currently stop at the browser WebSocket. The classic WebSocket API has no receive
-backpressure: `useRemoteDesktop.ts` transfers every binary frame immediately to
-the painter worker, and `desktopPainterWorker.ts` appends every frame to an
-unbounded promise chain. A fast socket and a slow decode/paint worker therefore
-look healthy to `src/encode.rs`; its queue-stall congestion signal cannot see the
-latency the user is actually watching.
+**Highest expected impact, shared by every target.** The measurement contract has
+landed and is recorded in Done: each batch is sequenced, the worker acknowledges it
+after its ordered parse/decode/draw pass, and `src/ws.rs` reports queue, draw,
+end-to-end and in-flight totals. This makes the hidden browser backlog observable,
+but does not bound it yet. The classic WebSocket API still has no receive
+backpressure, so the page transfers every binary frame immediately and the painter
+worker can append them to an unbounded promise chain.
 
-Guacamole closes this loop with a frame `sync`: the browser answers only after its
+Guacamole closes the loop with a frame `sync`: the browser answers only after its
 display flush completes, and the server uses the returned processing lag to pace
-later frames. Remotex should take the same shape without adding a second client:
+later frames. Remotex now has the equivalent feedback; the remaining behaviour
+change is:
 
-1. Put a monotonically increasing attachment-local sequence in every screen batch.
-2. Have the painter worker echo that sequence only after its ordered
-   parse/decode/draw pass, together with time queued and time spent drawing.
-3. Consume the acknowledgment in `src/ws.rs`, never forward it to an RDP/VNC
-   engine, and report worker queue, draw and end-to-end latency in the attachment
-   totals. Fence late worker completions by the browser's socket generation so an
-   old attachment cannot acknowledge a new one.
-4. Once field measurements establish the normal in-flight depth, bound batches
-   outstanding past the WebSocket and make the video quality/pacing decision read
-   acknowledged presentation lag rather than socket-write stall alone. Preserve
-   video dependency order: old delta frames may not simply be dropped.
+1. Run every screen profile in `tmp/test_uat.toml` and retain each attachment's
+   `ws: paint totals` line. Measure idle repaint, continuous motion and interactive
+   input separately; record codec, resolution, maximum in-flight depth and
+   queue/draw/end-to-end average and maximum.
+2. Choose the normal in-flight window from those measurements rather than from a
+   machine-timing test. Decide from the data whether tile and video targets need
+   different windows; do not infer one from encoded byte size alone.
+3. Bound screen batches outstanding past the WebSocket. When the window is full,
+   stop admitting another encoded round until a cumulative `paintAck` advances it;
+   an outbound control message must not overtake a screen batch already before it,
+   but the window must not block inbound JSON reads or the independent audio socket.
+4. Make video quality and presentation pacing use acknowledged completion lag in
+   addition to socket-write stall. Preserve access-unit dependency order: old
+   delta frames may not simply be dropped, and recovery must begin at a keyframe.
 
-The first implementation slice is steps 1–3. It is observability and the wire
-contract needed for real application-level backpressure; step 4 is the behaviour
-change and remains open until those measurements choose its window.
+Acceptance is a bounded worker queue during every UAT workload, with no regression
+in input/control responsiveness and no stale or cross-attachment acknowledgment.
 
 ## Next, not backlog
 
@@ -50,11 +53,6 @@ change and remains open until those measurements choose its window.
   `FramebufferUpdate` and expands CopyRect back into encoded pixels for the browser.
   Negotiate Continuous Updates where supported and add an ordered copy record that
   lets the painter blit pixels it already holds.
-- **Presentation pacing after paint feedback.** Whole-desktop video is capped at
-  30 Hz and RDP tile damage at 16 ms. Revisit those limits only after acknowledged
-  paint latency makes it possible to distinguish useful additional frames from a
-  deeper client backlog.
-
 ## Backlog — explicitly not prioritized
 
 - **IronRDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics`, use its real
@@ -72,6 +70,19 @@ change and remains open until those measurements choose its window.
   `ard` improvements.
 
 ## Done
+
+- **Cross-boundary paint completion feedback** (`src/wire.rs`, `src/ws.rs`,
+  `frontend/src/desktopPainterWorker.ts`, `useRemoteDesktop.ts`). Batch-envelope
+  v4 carries an attachment-local sequence starting at one. The ordered worker
+  echoes it only after asynchronous decode and draw finish, with queue and draw
+  durations; a socket generation prevents a completion from a dead attachment
+  acknowledging a new one. The WebSocket bridge consumes `paintAck` before the
+  engine boundary, keeps a bounded timestamp table, treats acknowledgments as
+  cumulative, and logs sent/acknowledged/in-flight counts plus queue, draw and
+  end-to-end average/max totals on detach. This slice deliberately measures only:
+  it neither stalls nor drops a batch. Unit tests pin sequence layout, ordered
+  completion, bounded/cumulative tracking and the engine boundary; the independent
+  Playwright parsers pin the v4 header seen on the SPA's real socket.
 
 - **PNG tiles: `Compression::Fast` → `Fastest`** (`src/protocol.rs`,
   `encode_png`). In png 0.18 the two select the same `FdeflateUltraFast`
@@ -267,11 +278,11 @@ change and remains open until those measurements choose its window.
 
 ## Gateway — screen
 
-The cross-boundary paint acknowledgment above is active. One smaller local item
-remains assessed and left: ~144 tile records can buffer across three queues in
-series while supersede sees only the final batch (speculative, no measurement
-saying the depths bind). Reassess it with the worker queue measurements rather
-than changing another depth in isolation.
+The cross-boundary paint acknowledgment in Done is active; enforcing its window is
+the in-progress item above. One smaller local item remains assessed and left: ~144
+tile records can buffer across three queues in series while supersede sees only the
+final batch (speculative, no measurement saying the depths bind). Reassess it with
+the worker queue measurements rather than changing another depth in isolation.
 
 ## Gateway — audio
 
@@ -279,9 +290,10 @@ All addressed — see Done.
 
 ## Client
 
-The parse/decode/paint hot path items are in Done. End-to-end completion feedback
-is active above; the browser worker is no longer treated as the endpoint merely
-because the main thread handed it an `ArrayBuffer`.
+The parse/decode/paint hot path and completion-feedback foundation are in Done. The
+remaining client work is to keep its worker queue inside the enforced in-flight
+window above; the worker is no longer treated as the endpoint merely because the
+main thread handed it an `ArrayBuffer`.
 
 ## Audited and sound — do not regress
 
