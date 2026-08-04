@@ -73,6 +73,32 @@ It would not bring the probe back either. The client-side codec negotiation was 
 and removed (see [`architecture.md`](architecture.md)); a third codec is a third value
 for a key, not a reason to ask the browser again.
 
+### Source payloads the gateway decodes instead of forwarding
+
+Three places where a remote could hand this gateway something closer to what the
+browser needs, and it decodes or re-encodes instead. Each is real work with a real
+payoff, and none of them is near-term — they are here so that "why not this one"
+has an answer rather than being rediscovered.
+
+- **IronRDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics` and use its real
+  frame boundaries, acknowledgments and surface compositor, then separately assess
+  AVC420 pass-through. The tested Windows server offers the channel and the pinned
+  IronRDP revision contains a client, so the parts exist; what makes this large is
+  that it is a second graphics pipeline beside the one every engine shares, not an
+  option on it.
+- **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
+  the lossless standard encodings on purpose: Tight and TightPNG are vendor
+  encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
+  decode it. Tight-family decoding, and handing a lossy source payload to the
+  browser untouched, would remove upstream bytes and a transcode — for a target
+  where the operator has already accepted lossy, the transcode is pure loss. The
+  cost is a decoder this repo would then own.
+- **Apple Adaptive media.** High Performance supplies its virtual display over zlib
+  rectangles. Apple's HEVC/AAC-over-SRTP path is reverse-engineering work with no
+  specification behind it, on the subtype that is already the least settled — see
+  [`apple-vnc-889.md`](apple-vnc-889.md). Widening standard `ard`, or anything on
+  the path both subtypes share, comes first.
+
 ### Apple Screen Sharing display modes
 
 - **Make Standard mode's All Displays view point-correct on mixed-density Macs.**
@@ -126,6 +152,19 @@ beside the `.crx`, or the Web Store's. A policy has no way to pin a `.crx` sitti
 on the disk.
 
 ## Not planned
+
+### The screen path's remaining queue depths
+
+About 144 tile records can buffer across three queues in series on the way to the
+socket, and `wire.rs`'s supersede rule sees only the final batch — so a record two
+queues back is not a candidate for the drop that would make it unnecessary.
+
+Left alone deliberately. The measurements behind `PAINT_WINDOW` say those depths
+are not what binds: under the window the same motion carried its picture in half
+as many records, and the queue the client actually waited on was the one past the
+socket, which the window now bounds. Shrinking a depth here would be another
+number adjusted in isolation, which is how the audit found these in the first
+place.
 
 ### Multiple sessions
 
