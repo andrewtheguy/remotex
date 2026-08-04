@@ -585,11 +585,18 @@ impl VideoUnit {
     }
 }
 
+/// Largest cursor edge a client is asked to draw. Real pointers are 32x32 or
+/// 64x64; a shape past this is dropped rather than sent, because a CSS cursor
+/// that big is ignored by the browser and would leave no pointer at all.
+pub const MAX_CURSOR_DIM: u16 = 256;
+
 /// The remote pointer shape, for engines whose server does **not** composite
 /// the cursor into the framebuffer and hands the shape over instead (the VNC
-/// Cursor pseudo-encoding — see [`crate::vnc`]). The browser draws it locally,
-/// anchoring the image so that `(hx, hy)` — the hotspot — lands on the pointer
-/// position. RDP never sends one: it renders the pointer into the framebuffer.
+/// Cursor pseudo-encoding — see [`crate::vnc`] — and RDP's pointer updates,
+/// which [`crate::rdp`] forwards rather than letting IronRDP draw them). The
+/// browser draws it locally, anchoring the image so that `(hx, hy)` — the
+/// hotspot — lands on the pointer position, which is what lets the pointer move
+/// with the mouse instead of with the framebuffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorShape {
     pub w: u16,
@@ -736,9 +743,11 @@ pub enum ServerMsg {
     Resize { w: u16, h: u16, scale: f32 },
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that
-    /// composites the cursor into the framebuffer (RDP, and VNC servers that
-    /// ignore the Cursor pseudo-encoding) never sends this, and the browser
-    /// keeps its own pointer hidden. `None` means the remote hid the pointer.
+    /// composites the cursor into the framebuffer (a VNC server that ignores
+    /// the Cursor pseudo-encoding) never sends this, and the browser keeps its
+    /// own pointer hidden. `None` means the remote hid the pointer, or named a
+    /// shape this end will not send; the browser draws its own arrow, because a
+    /// pointer you cannot see is worse than a generic one.
     Cursor(Option<CursorShape>),
     /// A fatal session error the client should surface. The session then
     /// returns to the picker, so the browser shows this against the picker.

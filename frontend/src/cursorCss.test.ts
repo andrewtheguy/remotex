@@ -8,8 +8,8 @@ import { test } from "node:test";
 import { bareCursorCss, cursorImage } from "./cursorCss.ts";
 
 test("a desktop with no cursor image hides the local pointer", () => {
-  // RDP and any VNC server that ignores the Cursor pseudo-encoding draw their
-  // pointer into the framebuffer; showing the local one too would draw two.
+  // A VNC server that ignores the Cursor pseudo-encoding draws its pointer into
+  // the framebuffer; showing the local one too would draw two.
   assert.equal(bareCursorCss(true), "none");
 });
 

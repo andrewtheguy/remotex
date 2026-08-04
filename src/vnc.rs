@@ -38,8 +38,8 @@ use crate::encode::TileSink;
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES, MouseButton,
-    ServerMsg, UNSCALED, WheelUnit, clipboard_fits,
+    ClientMsg, ClipboardSnapshot, CursorShape, DisplayInfo, MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM,
+    MouseButton, ServerMsg, UNSCALED, WheelUnit, clipboard_fits,
 };
 use crate::tiles::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
@@ -108,9 +108,6 @@ const ENCODING_LAST_RECT: i32 = -224;
 pub(crate) const BPP: usize = 4;
 /// Cap on server-sent reason/name strings, so a bogus length can't OOM us.
 const MAX_STRING: u32 = 1024;
-/// Largest cursor edge accepted. Real pointers are 32x32 or 64x64; anything
-/// beyond this is drained and ignored rather than drawn.
-const MAX_CURSOR_DIM: u16 = 256;
 /// Cap on an Apple cursor rect's compressed payload. Its size is not implied by
 /// the rect header the way a raw cursor's is — a *select* carries zeroed geometry
 /// — so the length has to be bounded on its own.

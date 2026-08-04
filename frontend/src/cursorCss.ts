@@ -2,11 +2,12 @@
 //
 // Engines whose server hands the cursor shape over instead of drawing it into
 // the framebuffer (VNC's Cursor pseudo-encoding — macOS Screen Sharing never
-// draws one) make the client responsible for the pointer: the hardware pointer
-// wears the shape as a CSS cursor. Engines that composite the pointer
-// themselves (RDP, and VNC servers that ignore the pseudo-encoding) send no
-// `cursor` message at all, and the client keeps its own pointer hidden — see
-// index.css.
+// draws one — and RDP, whose pointer updates the gateway forwards) make the
+// client responsible for the pointer: the hardware pointer wears the shape as a
+// CSS cursor, which is what lets it move with the mouse rather than with the
+// framebuffer. Engines that composite the pointer themselves (a VNC server that
+// ignores the pseudo-encoding) send no `cursor` message at all, and the client
+// keeps its own pointer hidden — see index.css.
 
 export interface CursorImage {
   url: string;
@@ -88,9 +89,9 @@ export function cursorImage(remote: RemoteCursor | null): CursorImage | null {
 /// The CSS `cursor` for a surface with no cursor image to draw — which is two
 /// different situations that must not be answered the same way.
 ///
-/// **With a desktop on screen**, `none` is right: RDP and any VNC server that
-/// ignores the Cursor pseudo-encoding composite their pointer into the framebuffer,
-/// so showing the local one too would draw two.
+/// **With a desktop on screen**, `none` is right: a VNC server that ignores the
+/// Cursor pseudo-encoding composites its pointer into the framebuffer, so showing
+/// the local one too would draw two.
 ///
 /// **With no desktop**, hiding it is a bug: the canvas remains mounted under the
 /// target picker, so a page still claiming `none` leaves the person choosing a
