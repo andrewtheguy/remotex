@@ -39,6 +39,11 @@ with `VideoDecoder.isConfigSupported` and then asserted both ways: a decoder tha
 refuses must produce the banner naming the codec, and one that accepts must produce no
 banner at all.
 
+`audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
+asserts which socket receives the format and packets, and that opening and closing
+that socket is the whole subscription. The deterministic tone harness in
+`src/server.rs` supplies audio without a remote.
+
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
 revealing the panel leave the local clipboard untouched until explicit Copy.
@@ -50,9 +55,9 @@ the claim spans macOS Screen Sharing, the gateway, the browser link and the pane
 and the failure it guards against — a truncated value arriving *successfully* —
 is invisible to any one of them.
 
-`support.ts` holds what both share: the login/target flow and the SSH hooks that
-read and write the Mac's pasteboard. Two conventions live there. Every spec ends
-by handing the session back to the picker, because the server keeps a target
+`support.ts` holds what the specs share: the login/target flow and the SSH hooks
+that read and write the Mac's pasteboard. Two conventions live there. Every spec
+ends by handing the session back to the picker, because the server keeps a target
 session running when its browser goes away; and `logInAndConnect` accepts either
 landing, so a run abandoned on the desktop does not break the next one.
 
@@ -96,12 +101,13 @@ that address before starting, rather than failing later inside the browser and
 making an unavailable target look like a product bug. This is the same bargain
 the Rust e2e tests make with `#[ignore]`.
 
-The video spec needs a gateway whose config hard-codes the video targets, which
-`tmp/qa_vp9.toml` does, and it opts in by naming them — one variable per codec, so a
-run can cover the default alone or both:
+The video spec needs a local gateway config with video targets. Put that
+gitignored config under `tmp/` (for example, `tmp/qa_video.toml`) and name the
+targets through one variable per codec, so a run can cover the VP9 default alone
+or both codecs:
 
 ```sh
-cargo run -- serve --config tmp/qa_vp9.toml
+cargo run -- serve --config tmp/qa_video.toml
 ```
 
 ```sh
@@ -116,6 +122,23 @@ npm run test:video
 
 That gateway serves the built SPA from `frontend/dist`, so run `bun run build` in
 `frontend/` first; a stale bundle is exactly what these specs cannot see.
+
+The audio spec uses the test-tone gateway instead of a live target:
+
+```sh
+cargo test --lib serve_a_test_tone -- --ignored --nocapture
+```
+
+Against the URL it prints, run:
+
+```sh
+cd tests/playwright
+REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
+REMOTEX_PLAYWRIGHT_USERNAME='admin' \
+REMOTEX_PLAYWRIGHT_PASSWORD='hunter2' \
+REMOTEX_PLAYWRIGHT_AUDIO_TARGET='test-tone' \
+npx playwright test '/audio-socket\.spec\.ts$'
+```
 
 A bare `npx playwright test` runs all specs. `npm run test:clipboard`,
 `npm run test:oversized` and `npm run test:video` run one each; their filters are

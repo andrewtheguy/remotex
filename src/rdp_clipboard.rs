@@ -13,8 +13,8 @@
 //!
 //! ## Delayed rendering
 //!
-//! Unlike VNC's `ServerCutText` (which carries the text) and the Mac agent's
-//! pasteboard read, RDP only announces *which formats* the remote clipboard now
+//! Unlike VNC's `ServerCutText` and Apple pasteboard messages, which carry the
+//! text, RDP only announces *which formats* the remote clipboard now
 //! holds; the bytes cost a second round trip. Both directions are lazy on the
 //! wire:
 //!

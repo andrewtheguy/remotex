@@ -1,9 +1,10 @@
 # Other implementations of remote desktop audio
 
 Projects that carry desktop sound over RDP, collected while chasing a stutter
-remotex has and the official Microsoft client does not (see the open question at
-the end). Each entry says what it implements and why it is worth reading; none of
-them has been read in depth except Guacamole.
+observed in remotex but not in the official Microsoft client. The investigation
+changed remotex's transport; the result is recorded at the end. Each entry says
+what it implements and why it is worth reading; none of them has been read in
+depth except Guacamole.
 
 The useful split is which side of the wire a project sits on. remotex receives
 `rdpsnd` and plays it, so the **client** entries are the ones doing the same job
@@ -118,25 +119,29 @@ Listed so they are not searched for twice, not as recommendations.
 - **gnome-remote-desktop** — GNOME's RDP server; audio is believed to go through
   PipeWire. Unconfirmed.
 
-## The open question this was collected for
+## What this investigation changed
 
-remotex's RDP audio stutters during movie playback on a 2.5 GbE link. Microsoft's
-own client does not, at full picture quality, on the same host. Ruled out so far:
+A stutter was observed during movie playback on a 2.5 GbE link. Microsoft's own
+client did not reproduce it, at full picture quality, on the same host. The
+investigation ruled out:
 
-- **Bitrate.** Guacamole sends 22× the bytes at 1.41 Mbit/s and is clean.
+- **Bitrate.** Guacamole sends uncompressed audio at 1.41 Mbit/s and is clean.
 - **Encoding cost.** HE-AAC at 64 kbps was built and made no difference, which is
   what `audio_codec = "pcm"` replaced.
 - **Video encoding blocking the read loop.** All tile and frame encoding runs in
   `spawn_blocking` (`src/encode.rs`).
 
-Still standing, and the reason the client-side entries above are the interesting
-ones: remotex can *lose* audio in the gateway in a way guacd structurally cannot.
-`AudioBridge` drops its oldest buffers when the pump falls behind
-(`src/audio.rs`), and the pump awaits the same bounded queue video frames use —
-four deep under `render_type = "video"` (`src/session.rs`). Guacamole has no such
-queue and never discards a wave buffer.
+The remaining structural difference was a loss path in the gateway. The audio
+pump awaited the same bounded outbound queue as video frames — four deep under
+`render_type = "video"` — and a pump stalled behind picture traffic stopped
+draining `AudioBridge`, whose bounded queue then dropped old wave buffers.
 
-The measurement that would settle it is audio seconds delivered ÷ wall-clock
-elapsed. Guacamole is 1.0 by construction; anything below 1.0 here means the
-gateway is deleting sound before it reaches a browser, which would sound
-identical on every codec.
+That shared path no longer exists. Audio has its own `/ws/audio` WebSocket and its
+own outbound queue; opening the socket is the subscription and closing it stops
+sound. `AudioBridge` can still drop its oldest buffers if the audio consumer itself
+falls behind, but video backlog can no longer cause that lag. See the audio section
+of [`architecture.md`](architecture.md).
+
+If a stutter recurs, the useful measurement remains audio seconds delivered ÷
+wall-clock elapsed. Anything below 1.0 means sound is still being discarded before
+it reaches the browser, which would sound identical on every codec.

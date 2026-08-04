@@ -62,8 +62,9 @@ pub enum Subtype {
     ///
     /// The Mac's metadata extension lists every attached display, permits selecting
     /// one or their combined desktop, and supplies each display's pixel density.
-    /// Apple's native pasteboard is available, while pixels stay raw so this is
-    /// the uncompressed alternative to Apple's record-layer subtype.
+    /// Apple's native pasteboard is available. Once the first layout arrives, a
+    /// second `SetEncodings` switches the rectangles from raw to zlib without losing
+    /// that display metadata.
     Ard,
     /// The same Mac over Apple's own protocol revision, RFB 003.889: an
     /// AES-128-CBC record layer (see [`crate::vnc_record`]) carrying Apple's
@@ -78,8 +79,8 @@ pub enum Subtype {
     ///
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the
-    /// target's [`TargetConfig::width`] and [`TargetConfig::height`], adds zlib
-    /// pixels, and uses Apple's encrypted record transport.
+    /// target's [`TargetConfig::width`] and [`TargetConfig::height`], carries zlib
+    /// rectangles, and uses Apple's encrypted record transport.
     ///
     /// Apple's native pasteboard payloads are carried inside the encrypted record
     /// transport when `clipboard` is enabled. With `resize`, viewport reports
@@ -444,7 +445,8 @@ impl RenderPlan {
 
 /// One `[[targets]]` profile: a remote machine plus its credentials.
 ///
-/// Credentials live here (server-side) and are used during the RDP handshake.
+/// Credentials live here (server-side) and are used during the target protocol's
+/// authentication handshake.
 /// They are never sent to the browser — see docs/architecture.md.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -462,7 +464,7 @@ pub struct TargetConfig {
     /// Declared rather than sniffed from the credentials, because the two
     /// dialects want different ones and guessing which was meant is how a
     /// perfectly good password ends up authenticating nobody — see
-    /// [`Subtype::Ard`]. Validated against the protocol in
+    /// [`Subtype`]. Validated against the protocol in
     /// [`ConfigFile::parse`].
     #[serde(default)]
     pub subtype: Option<Subtype>,
@@ -472,7 +474,7 @@ pub struct TargetConfig {
     /// (3389 for RDP, 5900 for VNC) — normalized in [`ConfigFile::parse`].
     #[serde(default)]
     pub port: u16,
-    /// Username. Required by RDP, and by a `vnc` target of [`Subtype::Ard`],
+    /// Username. Required by RDP, and by a `vnc` target of either Apple subtype,
     /// where it is a *macOS account* and [`Self::password`] is that account's —
     /// not the Screen Sharing password. A plain `vnc` target has no use for
     /// either and is refused both, because RFB `VncAuth` cannot carry a name.
@@ -489,7 +491,7 @@ pub struct TargetConfig {
     /// connection's own (see [`crate::vnc`]).
     ///
     /// The credential of a plain `vnc` target, and the only one such a server
-    /// takes. Rejected on other protocols and on [`Subtype::Ard`] — see
+    /// takes. Rejected on other protocols and on either Apple [`Subtype`] — see
     /// [`ConfigFile::parse`].
     #[serde(default)]
     pub vnc_password: String,
@@ -543,9 +545,9 @@ pub struct TargetConfig {
     /// so exposing it is a per-target decision rather than a default.
     ///
     /// Supported by both engines, though what reaches the far side differs:
-    /// `vnc` uses RFB `ServerCutText`/`ClientCutText` and is latin-1, so
-    /// anything outside it becomes `?`; `rdp` uses the MS-RDPECLIP virtual
-    /// channel with `CF_UNICODETEXT`, UTF-8 end to end.
+    /// generic VNC uses the UTF-8 Extended Clipboard extension when available and
+    /// falls back to latin-1 `ServerCutText`/`ClientCutText`; Apple VNC uses the
+    /// native pasteboard protocol; RDP uses MS-RDPECLIP `CF_UNICODETEXT`.
     #[serde(default)]
     pub clipboard: bool,
     /// Negotiate RDP audio at connect. Packets are sent only while the attached
@@ -688,7 +690,7 @@ impl TargetConfig {
     }
 
     /// The motion encode this target asked for, falling back to the base codec when
-    /// the key is omitted — which `h264` never is, since a stream is not a cheaper
+    /// the key is omitted — which `stream` never is, since a stream is not a cheaper
     /// version of a still. `None` only for the pairing parse rejects: a `png` base
     /// with no motion subtype named.
     fn motion_subtype(&self) -> Option<MotionSubtype> {
@@ -836,9 +838,8 @@ impl ConfigFile {
         for target in &config.targets {
             // Audio is the mirror image of `resize`: refused outright rather than
             // accepted and left inert, because there is nothing on the other side
-            // of the protocol to be uncertain about. RFB has no audio channel and
-            // the Mac agent captures no sound, so this key could never do anything
-            // for them however they were configured.
+            // of the protocol to be uncertain about. This gateway implements audio
+            // only through MS-RDPEA, so the key can never do anything on VNC.
             anyhow::ensure!(
                 !target.audio || target.protocol == Protocol::Rdp,
                 "target {:?} is protocol {:?} but sets audio, which only \"rdp\" targets \

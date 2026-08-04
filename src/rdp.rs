@@ -434,8 +434,8 @@ impl Density {
     /// What a [`ClientMsg::HostScale`] means here.
     ///
     /// Through `scale_ratio` rather than dividing by hand: that is the guard which
-    /// turns a value no screen could have into 1x, and the 1.5 midpoint is the one
-    /// the agent applies to this same message.
+    /// turns a value no screen could have into 1x and centralizes the 1.5 midpoint
+    /// used for RDP's two supported densities.
     fn from_host(scale: u16) -> Self {
         if crate::protocol::scale_ratio(scale) >= 1.5 {
             Self::Two
@@ -1846,13 +1846,12 @@ mod tests {
 
     /// The midpoint, and the two ends `scale_ratio` refuses.
     ///
-    /// 150 is the boundary the Mac agent uses on this same message, so the two
-    /// engines answer a 1.5x screen the same way; the out-of-range pair matter
-    /// because a client computes the number from `devicePixelRatio` (or
-    /// `backingScaleFactor`) and a screen that reports nonsense should read as the
+    /// 150 is the midpoint between the supported 1x and 2x densities. The
+    /// out-of-range pair matter because a client computes the number from
+    /// `devicePixelRatio`, and a screen that reports nonsense should read as the
     /// density that asks the remote for least, not as an absurd one.
     #[test]
-    fn a_hosts_density_quantizes_at_the_agents_midpoint() {
+    fn a_hosts_density_quantizes_at_the_midpoint() {
         for scale in [0, 1, 99, 100, 125, 149] {
             assert_eq!(Density::from_host(scale), Density::One, "{scale}");
         }

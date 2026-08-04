@@ -1,9 +1,9 @@
 // Wire protocol shared (in shape) with the Rust backend `src/protocol.rs`.
 //
-// Browser -> server: input events as JSON text frames.
-// Server -> browser: screen tiles and the remote's audio as binary frames, told
-// apart by their first byte (binaryFrameKind below); rare control messages
-// (resize/error, the audio format) as JSON text frames with a `type` tag.
+// Browser -> server: input events as JSON text frames on `/ws`.
+// Server -> browser: screen batches on `/ws` and audio frames on `/ws/audio`,
+// with their kind in the first byte; control messages (resize/error on the first
+// socket, the audio format on the second) are tagged JSON text frames.
 
 // "back" and "forward" are the side buttons of a five-button mouse. No engine
 // acts on them today — RDP and VNC drop them for want of anywhere to put them.
@@ -101,8 +101,7 @@ export interface RemoteClipboard extends ClipboardSnapshot {
 
 // One of the remote's displays, as the picker lists it. The strings are built
 // by the remote end and shown verbatim: the Mac knows how its own displays are
-// named and numbered, and saying it once keeps this panel and the native
-// viewer's Display menu reading the same.
+// named and numbered, and saying it once keeps every part of the panel consistent.
 export interface DisplayInfo {
   // Opaque here — whatever goes back in a "selectDisplay".
   id: number;
@@ -203,8 +202,8 @@ export type ControlMsg =
   // parameter sets to parse.
   | { type: "videoFormat"; stream: number; codec: string; decode: string }
   // Whether the remote runs macOS, discovered by the engine as it connects.
-  // Only the native viewer acts on it, to decide whether a local Command
-  // shortcut stays Command or becomes remote Control.
+  // The browser uses it to decide whether selected local Command shortcuts stay
+  // Command or become remote Control.
   | { type: "remoteOs"; macos: boolean }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
@@ -301,7 +300,7 @@ const CODEC_BY_FORMAT: Record<number, TileMsg["codec"] | undefined> = {
   3: "image/webp",
 };
 export const NO_SLOT = 0xffff;
-// How many H.264 streams one session may run at once. Part of the wire contract
+// How many video streams one session may run at once. Part of the wire contract
 // (`batch::MAX_STREAMS`), and the same kind of bound as SLOT_COUNT: a stream id at
 // or above it is a malformed record rather than a reason to hold another decoder,
 // which keeps this client's memory a function of the protocol instead of of what a

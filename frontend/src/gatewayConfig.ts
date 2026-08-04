@@ -8,12 +8,10 @@ import { gatewayFetch } from "./gateway.ts";
 
 export interface GatewayConfig {
   branding: string;
-  protocolVersion: number;
 }
 
 const FALLBACK: GatewayConfig = {
   branding: "remotex",
-  protocolVersion: 0,
 };
 
 let pending: Promise<GatewayConfig> | null = null;
@@ -30,7 +28,6 @@ export function gatewayConfig(): Promise<GatewayConfig> {
     .then((res) => res.json() as Promise<Partial<GatewayConfig>>)
     .then((config) => ({
       branding: config.branding || FALLBACK.branding,
-      protocolVersion: config.protocolVersion ?? FALLBACK.protocolVersion,
     }))
     .catch(() => FALLBACK);
   return pending;

@@ -87,8 +87,8 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     // returned first (on macOS, `::1`), and the other loopback is then simply
     // refused. The startup line said `listening on http://localhost:52675`, which
     // is exactly the wrong thing to print when only half of localhost answers — a
-    // native client on `127.0.0.1` failed with `NSURLErrorCannotConnectToHost` and
-    // nothing in the log hinted why.
+    // client resolving `localhost` to `127.0.0.1` was refused, and nothing in the
+    // log hinted why.
     //
     // Binding each of them is also what makes "both loopbacks" expressible at all.
     // `::` would do it by accident — a dual-stack wildcard reaches `127.0.0.1` — but
@@ -150,8 +150,8 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
 /// is serving that port — most often a gateway from an earlier run — and starting
 /// beside it is worse than not starting: a browser resolving `localhost` picks
 /// either family, so it would reach the old process or the new one depending on
-/// which address it happened to try, and the two would fight over the agent's
-/// session slot. This is the "stale gateway answered while the fresh one thought
+/// which address it happened to try, and the two would fight over the target's
+/// session. This is the "stale gateway answered while the fresh one thought
 /// it was serving" failure, and refusing to start is the only honest answer.
 ///
 /// The one tolerated failure is an address family this machine does not have:

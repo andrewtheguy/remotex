@@ -21,8 +21,7 @@ type PointerMove = Extract<ClientMsg, { type: "mouseMove" }>;
 /// at all: the gate is `bufferedAmount`, so this engages under congestion and
 /// stays out of the way otherwise.
 ///
-/// Two rules make that safe, and they are the same two the native viewer's
-/// `OutboundQueue` follows:
+/// Two rules make that safe:
 ///
 /// - **Only motion is coalesced.** Anything else flushes the deferred move
 ///   first, because a click has to follow the move that positioned it. Dropping

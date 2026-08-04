@@ -3,7 +3,7 @@
 //!
 //! Two dials arrive here and they differ only in how many rectangles they ask for.
 //! `render_type = "video"` asks for one covering the whole desktop and never changes
-//! its mind ([`Policy::Whole`]). `render_motion_subtype = "h264"` asks for one per
+//! its mind ([`Policy::Whole`]). `render_motion_subtype = "stream"` asks for one per
 //! coalesced moving region, with the still codecs carrying everything else
 //! ([`Policy::Moving`]). A codec module knows how to encode a rectangle; this module
 //! is every decision about *which*.
@@ -85,7 +85,7 @@ pub enum Policy {
     /// `render_type = "video"`: one stream over the whole desktop, for the whole
     /// session. No cells, no debts, no cleanup — nothing else is being sent.
     Whole,
-    /// `render_motion_subtype = "h264"`: a stream per coalesced moving region, with
+    /// `render_motion_subtype = "stream"`: a stream per coalesced moving region, with
     /// the base codec carrying every cell outside one.
     Moving,
 }
@@ -289,7 +289,7 @@ fn free_id(taken: &[u8]) -> Option<u8> {
 /// The mirror, the live streams, and the cells they owe.
 pub struct Regions {
     policy: Policy,
-    /// The negotiated codec every stream here is built with. One per session: it was decided
+    /// The configured codec every stream here is built with. One per session: it was decided
     /// before the target was connected, and nothing changes it afterwards.
     codec: VideoCodec,
     /// The 1–100 dial a new stream starts at — the config's, unless the congestion loop
@@ -492,7 +492,7 @@ impl Regions {
             || self.live.iter().zip(&next).any(|(a, b)| a.rect != b.rect)
         {
             log::debug!(
-                "h264 regions: {} cell(s) moving -> {}",
+                "video regions: {} cell(s) moving -> {}",
                 moving.len(),
                 if next.is_empty() {
                     "nothing".to_owned()

@@ -104,8 +104,8 @@ password = "change-me"
 # renegotiates a real size change with a Deactivation-Reactivation Sequence and
 # `ard-high-performance` replaces a virtual display, and what those two sometimes
 # leave behind is in docs/known-issues.md — a fault a window drag walks into far
-# more often than a button press does. On those targets the clients show the mode
-# greyed and keep the one-shot live.
+# more often than a button press does. On those targets the client shows the mode
+# greyed and keeps the one-shot live.
 #
 # One narrowing that is not the client's to make either: generic VNC needs a
 # server that accepts SetDesktopSize — the TigerVNC family — and Standard Apple
@@ -122,12 +122,11 @@ password = "change-me"
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
-# all. (The macOS viewer has no such restriction: it reads NSPasteboard
-# directly.) The Clipboard panel always works regardless, and is the way to move
-# text when automatic sync cannot run.
-# RDP (MS-RDPECLIP) always carries full UTF-8. VNC does too on servers implementing
-# the Extended Clipboard extension (TigerVNC does); on servers that do not
-# (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
+# all. The Clipboard panel always works regardless, and is the way to move text
+# when automatic sync cannot run.
+# RDP (MS-RDPECLIP) always carries full Unicode text. VNC does too on servers
+# implementing the Extended Clipboard extension (TigerVNC does); on servers that
+# do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
 # Both Apple subtypes use the Mac's native UTF-8 pasteboard protocol; High
 # Performance carries its fetches and data inside the encrypted record transport.
 #clipboard = false
@@ -189,9 +188,10 @@ password = "change-me"
 # second example below does. A third-party VNC server that happens to run on a
 # Mac is not this: it is a plain "vnc" target.
 #
-# `subtype = "ard"` is standard screen sharing on the ordinary RFB wire. Raw pixels,
-# Extended Clipboard where the Mac offers it, and one framebuffer holding every
-# attached display at once.
+# `subtype = "ard"` is standard screen sharing on the ordinary RFB wire: the Mac's
+# physical display list and native pasteboard, with one framebuffer holding every
+# attached display at once. The first encoding list must remain zlib-free so the
+# display layout arrives; a second list then switches the pixels from raw to zlib.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
@@ -211,9 +211,10 @@ password = "change-me"
 # `subtype = "ard-high-performance"` requests one virtual display instead of the
 # Mac's physical displays. `width` and `height` select the mode requested during
 # setup. Once connected, the Mac's physical displays are disabled and all of its
-# windows are placed on this virtual display. Zlib compresses the pixels over
-# Apple's own protocol revision. Apple's official macOS Screen Sharing client can
-# choose up to two virtual displays; Remotex requests one. With `resize = true`,
+# windows are placed on this virtual display. The same zlib rectangles are
+# carried over Apple's encrypted protocol revision. Apple's official macOS Screen
+# Sharing client can choose up to two virtual displays; Remotex requests one. With
+# `resize = true`,
 # it supports Resize to Window like RDP, using Apple's dynamic-resolution feature
 # to replace that virtual display's mode from client viewport reports — when the
 # user asks, which is the only way it is offered: auto resize is plain `vnc`'s
@@ -234,8 +235,8 @@ password = "change-me"
 # clipboard = true
 # resize = true
 
-# How this target's pixels are compressed on their way to the browser. Two keys and
-# a dial, and they apply to every protocol.
+# How this target's pixels are compressed on their way to the browser. A strategy,
+# a still-image codec, and a quality dial, all per target and valid for every protocol.
 #
 # All three are per-target keys, so they belong *inside* a [[targets]] table and not
 # in a section of their own — uncommented here they would attach to whichever
@@ -288,9 +289,9 @@ password = "change-me"
 #render_quality = 60
 #render_motion_quality = 10
 
-# render_motion_subtype = "h264" is the third thing the motion axis can be, and the
-# only one that is not a still: the cells in motion are coalesced into regions and
-# each region gets its own H.264 stream, while the base codec carries everything
+# render_motion_subtype = "stream" is the third thing the motion axis can be, and
+# the only one that is not a still: the cells in motion are coalesced into regions
+# and each region gets its own video stream, while the base codec carries everything
 # else. A video in a window costs its own pixels; the text beside it stays exactly
 # what render_subtype says, and is never re-encoded at all.
 #
@@ -309,11 +310,11 @@ password = "change-me"
 # decode them is left with — a desktop with a blank rectangle where the video is,
 # rather than no desktop at all.
 #render_type = "motion"
-#render_motion_subtype = "h264"
+#render_motion_subtype = "stream"
 #render_motion_quality = 30
 
 # render_type = "video" is not a fourth codec, it is a different transport: the whole
-# desktop as one H.264 stream instead of one encoded image per changed region. Every
+# desktop as one video stream instead of one encoded image per changed region. Every
 # frame says what changed since the one before it, so nothing is cut into per-region
 # tiles and the cell grid does not apply — which is why it takes no render_subtype and
 # refuses one. (The frames still travel in the same records the still codecs use, each
@@ -337,11 +338,18 @@ password = "change-me"
 #render_type = "video"
 #render_quality = 60
 
+# The codec for either streaming mode above. "vp9" is the default: licence-free,
+# broadly decodable, and faster and smaller on the measured screen content. Set
+# "h264" only for a deployment whose browsers support it. This key applies to both
+# render_type = "video" and render_motion_subtype = "stream", and is refused on a
+# target that uses neither.
+#video_codec = "vp9"
+
 # QA aid for "motion", off unless asked for: outline every piece the strategy emits
 # in the pixels themselves, so which cells it put in motion is something you read
 # off the screen rather than infer from how blurry a region looks.
 #
-#   magenta — sent at the motion encode. Under render_motion_subtype = "h264" it is
+#   magenta — sent at the motion encode. Under render_motion_subtype = "stream" it is
 #             the outline of a streamed region, drawn on the picture the encoder
 #             sees rather than on the pixels a cleanup restores. Magenta over
 #             something that is not moving is the detection reaching further than

@@ -476,7 +476,7 @@ mod tests {
                 batch::OP_VIDEO => {
                     // `op | stream | flags | x | y | w | h | u32 len`, so the length sits two
                     // bytes further in than a reader written against the pre-flags layout would
-                    // look — which is the whole reason `PROTOCOL_VERSION` moved.
+                    // look.
                     let len = u32::from_le_bytes([
                         frame[at + 11],
                         frame[at + 12],
@@ -556,9 +556,9 @@ mod tests {
         assert_eq!(wire.totals.tiles, 8);
     }
 
-    // The format byte is the codec, and the wire relays it untouched: the gateway's
-    // engines send PNG, the agent may send JPEG, and neither the batching nor the
-    // cache may drop or rewrite it.
+    // The format byte is the codec, and the wire relays it untouched: the tile
+    // encoder may send PNG, JPEG, or WebP, and neither batching nor the cache may
+    // drop or rewrite it.
     #[test]
     fn the_tile_format_byte_survives_encoding() {
         let mut wire = Wire::default();

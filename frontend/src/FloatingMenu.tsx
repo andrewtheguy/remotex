@@ -349,10 +349,10 @@ function AudioSection({
 }
 
 // How this session drives the remote's size, for a session allowed to drive it at
-// all — the target's `resize`, and for the Mac agent a display it made rather than
-// one of the Mac's own screens. Absent otherwise, like Display and Audio and
-// unlike Clipboard: there is no feature here to grey out, only one the operator
-// did not turn on.
+// all — the target's `resize`, and for Apple High Performance a virtual display
+// rather than one of the Mac's own screens. Absent otherwise, like Display and
+// Audio and unlike Clipboard: there is no feature here to grey out, only one the
+// operator did not turn on.
 //
 // Both controls in one section because they are one decision. Auto hands the size
 // to the window continuously; manual — the default, and what every connect starts

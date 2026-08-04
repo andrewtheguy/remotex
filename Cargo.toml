@@ -42,9 +42,9 @@ env_logger = "0.11"
 futures-util = "0.3"
 toml = "1"
 # Tiles and cursor shapes both. The RDP and VNC engines PNG-compress screen tiles
-# (`Tile::from_rgb`), and cursor shapes ride the JSON control channel as base64 PNG
-# — the macOS agent's arrive already PNG-encoded from AppKit. `encode_png` in
-# src/protocol.rs is shared by both. Fast compression on the session's hot path.
+# (`Tile::from_rgb`), and VNC cursor shapes ride the JSON control channel as base64
+# PNG. `encode_png` in src/protocol.rs is shared by both. Fast compression on the
+# session's hot path.
 png = "0.18"
 # JPEG for the lossy tile path: a target with `render_type = "fixed-quality"`,
 # `render_subtype = "jpeg"` encodes every tile at a fixed `render_quality` instead
@@ -57,9 +57,9 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 # Binds a statically-linked libwebp built by `cc`
 # (not cmake) with the target's SIMD, so it costs no cmake and no new runtime dep.
 webp = "0.3"
-# H.264 for `render_type = "video"`, which is not a fourth still codec but a
-# different transport: one inter-frame stream carrying the whole framebuffer for the
-# whole session (src/h264.rs). Cisco's encoder, whose sys crate compiles the vendored
+# H.264 for either streaming mode: the whole framebuffer under `render_type =
+# "video"`, or moving regions under `render_motion_subtype = "stream"` (src/h264.rs).
+# Cisco's encoder, whose sys crate compiles the vendored
 # C with `cc` — no system library, no cmake, and no runtime dependency, which is the
 # same bargain `webp` above strikes. Encoder only; the gateway never decodes H.264,
 # and the client's decoder is not ours either — it is WebCodecs. Note for anyone
@@ -101,10 +101,10 @@ vpx-sys = { package = "libvpx-prebuilt-sys", git = "https://github.com/andrewthe
 # still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
 opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260731073637-74aab76" }
 # There is deliberately no container. Opus packets travel as audio frames on the
-# desktop WebSocket, which already delimits them, and the browser hands them
-# straight to a WebCodecs decoder — so an Ogg dependency would buy framing that is
-# already there. `OpusHead` is still built by hand in src/opus_stream.rs, because a
-# decoder needs it wherever it arrives from.
+# dedicated audio WebSocket, which already delimits them, and the browser hands
+# them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
+# that is already there. `OpusHead` is still built by hand in src/opus_stream.rs,
+# because a decoder needs it wherever it arrives from.
 #
 # The other audio option (`audio_codec = "pcm"`, src/pcm_stream.rs) needs no
 # dependency at all, which is most of its point: passthrough copies the remote's

@@ -57,8 +57,8 @@ pub const QUALITY_MAX: u8 = 100;
 ///
 /// It is openh264's limit rather than a shared one — libvpx has no comparable ceiling —
 /// and it is applied to both anyway, so a target's picture size does not decide which
-/// codec can carry it. A negotiated codec that changed what sizes work would make the
-/// refusal below depend on the browser that happened to connect.
+/// codec can carry it. Letting the configured codec change which sizes work would
+/// make target behavior depend on that otherwise independent choice.
 const MAX_LONG_SIDE: u16 = 3840;
 /// See [`MAX_LONG_SIDE`].
 const MAX_SHORT_SIDE: u16 = 2160;
