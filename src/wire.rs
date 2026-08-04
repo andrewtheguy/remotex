@@ -3,7 +3,7 @@
 //! are bounded, and a tile covered later in the same batch may be dropped.
 //! Cache state lives here because frames are discarded before attachment.
 
-use crate::protocol::{self, ServerMsg, Tile, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, CopyRect, ServerMsg, Tile, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead without making a full repaint one work unit.
@@ -113,6 +113,11 @@ impl Slots {
 enum Record {
     Tile(Tile),
     Video(VideoUnit),
+    /// Pixels moved on the client's own canvas. A third kind for the same reason
+    /// the second exists: none of the tile rules apply to it, and one of them is
+    /// actively wrong — a copy *reads* the canvas, so what precedes it has to have
+    /// been drawn. See [`Wire::supersede`].
+    Copy(CopyRect),
 }
 
 impl Record {
@@ -120,6 +125,7 @@ impl Record {
         match self {
             Record::Tile(tile) => tile.record_len(),
             Record::Video(unit) => unit.record_len(),
+            Record::Copy(copy) => copy.record_len(),
         }
     }
 }
@@ -150,6 +156,15 @@ pub struct Wire {
     /// flush costs seven bytes instead of its payload, so a batch can come out
     /// smaller than this predicted. Bounding high is the safe direction for a cap.
     pending_bytes: usize,
+    /// How far back into `pending` [`Wire::supersede`] may reach: one past the last
+    /// `COPY` record, or zero when the batch holds none.
+    ///
+    /// A copy reads the canvas at its own place in the order, so a tile before it
+    /// is not merely a picture that something later covers — it is an input. Dropping
+    /// one would change what the copy picks up. Nothing before a copy is a candidate,
+    /// which is one comparison in the common case (no copies, barrier zero) and the
+    /// whole of the reasoning.
+    copy_barrier: usize,
     slots: Slots,
     /// Sequence written into the next screen batch. Per attachment because a
     /// `Wire` belongs to one attachment; starts at one so zero can remain the
@@ -163,6 +178,7 @@ impl Default for Wire {
         Self {
             pending: Vec::new(),
             pending_bytes: 0,
+            copy_barrier: 0,
             slots: Slots::default(),
             next_sequence: 1,
             totals: Totals::default(),
@@ -201,6 +217,7 @@ impl Wire {
                 None => match msg {
                     ServerMsg::Tile(tile) => self.push_tile(tile, &mut frames)?,
                     ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
+                    ServerMsg::Copy(copy) => self.push_copy(copy, &mut frames)?,
                     // Audio has no pixel-order dependency, so do not delay it
                     // behind the current tile batch.
                     ServerMsg::Audio(packets) => {
@@ -221,6 +238,17 @@ impl Wire {
         // makes room and a flush that was not needed costs a frame.
         self.supersede(&tile);
         self.push(Record::Tile(tile), frames)
+    }
+
+    /// Queue a copy, and close the batch's coverage window behind it.
+    ///
+    /// The barrier is set after the push rather than before it, so it lands on the
+    /// index the copy took — including after a flush the push forced, where it must
+    /// be zero again rather than an index into the batch that just left.
+    fn push_copy(&mut self, copy: CopyRect, frames: &mut Vec<WireFrame>) -> Result<(), WireError> {
+        self.push(Record::Copy(copy), frames)?;
+        self.copy_barrier = self.pending.len();
+        Ok(())
     }
 
     fn push(&mut self, record: Record, frames: &mut Vec<WireFrame>) -> Result<(), WireError> {
@@ -250,6 +278,13 @@ impl Wire {
     /// unit covers the whole framebuffer, so each one covers its predecessor exactly.
     /// It follows from the record kinds here, which is the point of them: the
     /// question is not asked rather than answered carefully.
+    ///
+    /// A `COPY` record is outside it too, and in both directions. It is never
+    /// dropped — there are no pixels to cover, only an instruction — and nothing
+    /// before one may be dropped either, because a copy reads the canvas where it
+    /// stands: a tile the coverage rule would remove is not a paint nobody could
+    /// have seen, it is the source the copy is about to pick up. That is what
+    /// [`Wire::copy_barrier`] holds, and why this scans forward from it.
     fn supersede(&mut self, tile: &Tile) {
         let (right, bottom) = (
             u32::from(tile.x) + u32::from(tile.w),
@@ -257,7 +292,14 @@ impl Wire {
         );
         let mut dropped_bytes = 0usize;
         let mut dropped = 0u64;
+        let barrier = self.copy_barrier;
+        let mut at = 0usize;
         self.pending.retain(|old| {
+            let index = at;
+            at += 1;
+            if index < barrier {
+                return true;
+            }
             let Record::Tile(old) = old else {
                 return true;
             };
@@ -297,6 +339,11 @@ impl Wire {
                     unit.write_record(&mut frame);
                     continue;
                 }
+                Record::Copy(copy) => {
+                    self.totals.copy(&copy);
+                    copy.write_record(&mut frame);
+                    continue;
+                }
                 Record::Tile(tile) => tile,
             };
             match self.slots.place(&tile) {
@@ -315,6 +362,7 @@ impl Wire {
             }
         }
         self.pending_bytes = 0;
+        self.copy_barrier = 0;
         self.totals.frame(frame.len());
         frames.push(WireFrame::Batch { sequence, bytes: frame });
         Ok(())
@@ -354,6 +402,13 @@ pub struct Totals {
     /// every ratio the cache is judged by.
     pub video: u64,
     pub video_bytes: u64,
+    /// Copies sent, and the pixels they moved without carrying.
+    ///
+    /// The pixel count rather than a byte count is what this is worth reading for:
+    /// a copy costs [`batch::COPY_LEN`] whatever it moves, so the record bytes say
+    /// nothing, and what it saved is an encode of that many pixels.
+    pub copies: u64,
+    pub copied_pixels: u64,
     /// Audio packets and their binary-frame bytes. Separate from tile traffic, and now
     /// on a separate socket too — so on any one `Wire` these and the tile counters are
     /// mutually exclusive.
@@ -390,6 +445,11 @@ impl Totals {
         self.video_bytes += len as u64;
     }
 
+    fn copy(&mut self, copy: &CopyRect) {
+        self.copies += 1;
+        self.copied_pixels += u64::from(copy.w) * u64::from(copy.h);
+    }
+
     fn tile_ref(&mut self, would_have_been: usize) {
         self.refs += 1;
         self.tile_bytes += batch::TILE_REF_LEN as u64;
@@ -408,6 +468,7 @@ impl std::fmt::Display for Totals {
             f,
             "{} binary frames / {} bytes carrying {} tile records / {} bytes \
              and {} video records / {} bytes, \
+             {} copy records moving {} pixel(s), \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} superseded / {} bytes, \
              {} cache refs saving {} bytes, {} cache resets, \
@@ -418,6 +479,8 @@ impl std::fmt::Display for Totals {
             self.tile_bytes,
             self.video,
             self.video_bytes,
+            self.copies,
+            self.copied_pixels,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,
@@ -481,7 +544,9 @@ mod tests {
     /// A parsed batch record: `(op, slot, x, y, w, h, payload_len, format)`. A
     /// reference carries no size, payload or format, so those come back zero; a
     /// `VIDEO` record puts its stream id where a tile's slot goes and its flags byte
-    /// where a tile's format goes.
+    /// where a tile's format goes. A `COPY` has no slot, payload or format either,
+    /// and its source position is read by [`copies`] instead — a record whose two
+    /// rectangles do not fit one row of this tuple.
     type Parsed = (u8, u16, u16, u16, u16, u16, usize, u8);
 
     fn records(frame: &[u8]) -> Vec<Parsed> {
@@ -507,6 +572,10 @@ mod tests {
                     ]) as usize;
                     out.push((op, le(2), le(4), le(6), le(8), le(10), len, frame[at + 1]));
                     at += batch::TILE_HEADER_LEN + len;
+                }
+                batch::OP_COPY => {
+                    out.push((op, 0, le(5), le(7), le(9), le(11), 0, 0));
+                    at += batch::COPY_LEN;
                 }
                 batch::OP_VIDEO => {
                     // `op | stream | flags | x | y | w | h | u32 len`, so the length sits two
@@ -559,6 +628,43 @@ mod tests {
         }
         assert_eq!(at, frame.len(), "packets must exactly fill the frame");
         assert_eq!(out.len(), usize::from(count), "the header's count must match");
+        out
+    }
+
+    /// Every `COPY` in a frame, as `(sx, sy, x, y, w, h)`. Its own parser because a
+    /// copy names two rectangles and [`Parsed`] has room for one.
+    fn copies(frame: &[u8]) -> Vec<(u16, u16, u16, u16, u16, u16)> {
+        let mut at = batch::HEADER_LEN;
+        let mut out = Vec::new();
+        while at < frame.len() {
+            let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
+            match frame[at] {
+                batch::OP_COPY => {
+                    out.push((le(1), le(3), le(5), le(7), le(9), le(11)));
+                    at += batch::COPY_LEN;
+                }
+                batch::OP_TILE_REF => at += batch::TILE_REF_LEN,
+                batch::OP_TILE => {
+                    let len = u32::from_le_bytes([
+                        frame[at + 12],
+                        frame[at + 13],
+                        frame[at + 14],
+                        frame[at + 15],
+                    ]) as usize;
+                    at += batch::TILE_HEADER_LEN + len;
+                }
+                batch::OP_VIDEO => {
+                    let len = u32::from_le_bytes([
+                        frame[at + 11],
+                        frame[at + 12],
+                        frame[at + 13],
+                        frame[at + 14],
+                    ]) as usize;
+                    at += batch::VIDEO_HEADER_LEN + len;
+                }
+                other => panic!("unknown record op {other}"),
+            }
+        }
         out
     }
 
@@ -1094,6 +1200,96 @@ mod tests {
         assert_eq!(records.len(), 2, "the covered tile was not dropped");
         assert_eq!(records[0].0, batch::OP_VIDEO);
         assert_eq!(records[1].0, batch::OP_TILE);
+        assert_eq!(wire.totals.superseded, 1);
+    }
+
+    // MARK: copies
+
+    fn copy(sx: u16, sy: u16, x: u16, y: u16, w: u16, h: u16) -> ServerMsg {
+        ServerMsg::Copy(CopyRect { sx, sy, x, y, w, h })
+    }
+
+    /// Thirteen bytes and both rectangles, whatever it moves.
+    #[test]
+    fn a_copy_costs_thirteen_bytes_and_names_where_the_pixels_are() {
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![copy(0, 64, 0, 0, 1920, 1000)]).unwrap();
+        assert_eq!(
+            binary(&frames)[0].len(),
+            batch::HEADER_LEN + batch::COPY_LEN,
+            "a copy carries no payload, so its size cannot depend on the rectangle"
+        );
+        assert_eq!(copies(binary(&frames)[0]), vec![(0, 64, 0, 0, 1920, 1000)]);
+        assert_eq!(wire.totals.copies, 1);
+        assert_eq!(wire.totals.copied_pixels, 1920 * 1000);
+        assert_eq!(wire.totals.tiles, 0, "an instruction is not a tile");
+        assert_eq!(wire.totals.refs, 0, "and never a reference");
+    }
+
+    /// The rule the barrier exists for. A copy reads the canvas where it stands, so
+    /// a tile before it is an input rather than a paint nobody could have seen —
+    /// dropping one would change the pixels the copy picks up.
+    #[test]
+    fn a_tile_a_copy_reads_is_not_dropped_by_what_comes_after_it() {
+        let mut wire = Wire::default();
+        let frames = wire
+            .encode(vec![
+                rect(0, 0, 320, 64, 50),   // the copy's source
+                copy(0, 0, 640, 0, 320, 64),
+                rect(0, 0, 640, 128, 50), // covers the first, but must not take it
+            ])
+            .unwrap();
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 3, "the copy's source was superseded out from under it");
+        assert_eq!(records[0].0, batch::OP_TILE);
+        assert_eq!(records[1].0, batch::OP_COPY);
+        assert_eq!(records[2].0, batch::OP_TILE);
+        assert_eq!(wire.totals.superseded, 0);
+    }
+
+    /// The barrier reaches back, not forward: tiles *after* the copy still supersede
+    /// each other, because the copy has already read the canvas by then.
+    #[test]
+    fn tiles_after_a_copy_still_supersede_each_other() {
+        let mut wire = Wire::default();
+        let frames = wire
+            .encode(vec![
+                copy(0, 0, 640, 0, 320, 64),
+                rect(0, 0, 320, 64, 50),
+                rect(0, 0, 640, 128, 50), // covers the one above it
+            ])
+            .unwrap();
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].0, batch::OP_COPY);
+        assert_eq!(records[1].0, batch::OP_TILE);
+        assert_eq!(wire.totals.superseded, 1);
+    }
+
+    /// A copy is never itself dropped. It carries no pixels for a later tile to
+    /// cover, and its meaning is an instruction rather than a picture.
+    #[test]
+    fn a_copy_is_not_superseded_by_a_tile_that_covers_it() {
+        let mut wire = Wire::default();
+        let frames = wire
+            .encode(vec![copy(0, 0, 0, 0, 320, 64), rect(0, 0, 640, 128, 50)])
+            .unwrap();
+        let records = records(binary(&frames)[0]);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].0, batch::OP_COPY);
+        assert_eq!(wire.totals.superseded, 0);
+    }
+
+    /// The barrier belongs to the batch being built, not to the encoder: once a
+    /// batch is out, the tiles in the next one have nothing behind them to protect.
+    #[test]
+    fn the_barrier_does_not_outlive_its_batch() {
+        let mut wire = Wire::default();
+        wire.encode(vec![copy(0, 0, 640, 0, 320, 64)]).unwrap();
+        let frames = wire
+            .encode(vec![rect(0, 0, 320, 64, 50), rect(0, 0, 640, 128, 50)])
+            .unwrap();
+        assert_eq!(records(binary(&frames)[0]).len(), 1);
         assert_eq!(wire.totals.superseded, 1);
     }
 

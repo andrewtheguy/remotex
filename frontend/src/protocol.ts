@@ -286,10 +286,30 @@ export interface VideoMsg {
   data: Uint8Array;
 }
 
+// Pixels the client already holds, moved from one place on its canvas to another:
+// RFB's CopyRect carried through to the browser rather than stopping at the gateway,
+// which used to read the source out of its own copy and re-encode it. Thirteen bytes
+// whatever the rectangle's size, which for a scrolling window is most of a desktop.
+//
+// The source is read as the canvas stands when the record is applied, so records
+// before it in the batch must already have been drawn — and an overlapping copy moves
+// the original pixels, which is what a canvas blit does anyway. There is no payload
+// and no slot: a copy is an instruction, not a picture, so it is never cached,
+// referenced, or superseded. See `CopyRect` in src/protocol.rs.
+export interface CopyMsg {
+  sx: number;
+  sy: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export type BatchRecord =
   | ({ kind: "tile" } & TileMsg)
   | ({ kind: "ref" } & TileRefMsg)
-  | ({ kind: "video" } & VideoMsg);
+  | ({ kind: "video" } & VideoMsg)
+  | ({ kind: "copy" } & CopyMsg);
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
@@ -299,9 +319,11 @@ const AUDIO_PACKET_HEADER_LEN = 2;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
+const OP_COPY = 0x04;
 const TILE_HEADER_LEN = 16;
 const TILE_REF_LEN = 7;
 const VIDEO_HEADER_LEN = 15;
+const COPY_LEN = 13;
 // A VIDEO record's only flag: a decoder that has seen nothing before it can start here.
 // Any other bit means a gateway newer than this client, and the record is dropped rather
 // than guessed at — the same strictness the batch's own flags byte gets.
@@ -341,6 +363,7 @@ export const SLOT_COUNT = 256;
 //   TILE_REF (op 0x02):  u16 slot | u16 x | u16 y
 //   VIDEO (op 0x03):     u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
 //                       | u32 len | payload[len]
+//   COPY (op 0x04):      u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
@@ -393,6 +416,8 @@ function decodeRecord(
       return decodeRef(view, buf.byteLength, at);
     case OP_VIDEO:
       return decodeVideo(view, buf, at);
+    case OP_COPY:
+      return decodeCopy(view, buf.byteLength, at);
     default:
       return decodeTile(view, buf, at);
   }
@@ -454,6 +479,28 @@ function decodeTile(
       codec,
     },
     next: start + len,
+  };
+}
+
+function decodeCopy(
+  view: DataView,
+  length: number,
+  at: number,
+): { record: BatchRecord; next: number } | null {
+  if (at + COPY_LEN > length) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "copy",
+      sx: view.getUint16(at + 1, true),
+      sy: view.getUint16(at + 3, true),
+      x: view.getUint16(at + 5, true),
+      y: view.getUint16(at + 7, true),
+      w: view.getUint16(at + 9, true),
+      h: view.getUint16(at + 11, true),
+    },
+    next: at + COPY_LEN,
   };
 }
 

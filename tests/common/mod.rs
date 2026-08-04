@@ -148,6 +148,43 @@ pub type Ws = tokio_tungstenite::WebSocketStream<
 pub enum BatchRecord {
     Tile(BatchTile),
     Reference { slot: u16, x: u16, y: u16 },
+    /// Pixels the client already holds, moved on its own canvas — RFB's CopyRect
+    /// carried through rather than expanded into an encode. No payload and no slot:
+    /// it is an instruction, and the only thing to check about it is its geometry.
+    Copy {
+        sx: u16,
+        sy: u16,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+    },
+}
+
+/// One record as a client would *paint* it: pixels that arrived, or pixels it
+/// already had being moved.
+#[allow(dead_code)]
+pub enum Painted {
+    Tile(BatchTile),
+    Copy {
+        sx: u16,
+        sy: u16,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+    },
+}
+
+#[allow(dead_code)]
+impl Painted {
+    /// The rectangle this puts on screen, whichever kind it is.
+    pub fn rect(&self) -> (u16, u16, u16, u16) {
+        match self {
+            Painted::Tile(tile) => (tile.x, tile.y, tile.w, tile.h),
+            Painted::Copy { x, y, w, h, .. } => (*x, *y, *w, *h),
+        }
+    }
 }
 
 /// One `TILE` record parsed out of a batch frame.
@@ -222,6 +259,17 @@ pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
                 }));
                 at = start + len;
             }
+            batch::OP_COPY => {
+                records.push(BatchRecord::Copy {
+                    sx: le(1),
+                    sy: le(3),
+                    x: le(5),
+                    y: le(7),
+                    w: le(9),
+                    h: le(11),
+                });
+                at += batch::COPY_LEN;
+            }
             op => panic!("unknown record op {op}"),
         }
     }
@@ -247,6 +295,10 @@ pub struct TileStream {
     slots: Vec<Option<BatchTile>>,
     /// References seen, so a test can say whether the cache was exercised at all.
     pub references: u64,
+    /// Copies seen, and the pixels they moved. The same question for the other
+    /// record that carries no payload — whether the gateway ever used it.
+    pub copies: u64,
+    pub copied_pixels: u64,
 }
 
 #[allow(dead_code)]
@@ -255,15 +307,21 @@ impl TileStream {
         Self {
             slots: vec![None; usize::from(remotex::protocol::batch::SLOT_COUNT)],
             references: 0,
+            copies: 0,
+            copied_pixels: 0,
         }
     }
 
-    /// The tiles `frame` paints, in wire order.
+    /// What `frame` paints, in wire order.
     ///
     /// Panics on a reference to an empty slot: a real client answers that with a
     /// `cacheReset`, but in a test it means the gateway and the client disagree about
     /// what was sent, which is the bug this would otherwise hide.
-    pub fn paint(&mut self, frame: &[u8]) -> Vec<BatchTile> {
+    ///
+    /// A copy comes back as itself. This holds slots rather than a framebuffer, so
+    /// it cannot say what pixels a copy moves — only where they land, which is what
+    /// a coverage measurement is asking.
+    pub fn paint(&mut self, frame: &[u8]) -> Vec<Painted> {
         let mut painted = Vec::new();
         for record in batch_records(frame) {
             match record {
@@ -271,14 +329,19 @@ impl TileStream {
                     if tile.slot != remotex::protocol::batch::NO_SLOT {
                         self.slots[usize::from(tile.slot)] = Some(tile.clone());
                     }
-                    painted.push(tile);
+                    painted.push(Painted::Tile(tile));
                 }
                 BatchRecord::Reference { slot, x, y } => {
                     self.references += 1;
                     let held = self.slots[usize::from(slot)]
                         .clone()
                         .unwrap_or_else(|| panic!("reference to empty slot {slot}"));
-                    painted.push(BatchTile { x, y, ..held });
+                    painted.push(Painted::Tile(BatchTile { x, y, ..held }));
+                }
+                BatchRecord::Copy { sx, sy, x, y, w, h } => {
+                    self.copies += 1;
+                    self.copied_pixels += u64::from(w) * u64::from(h);
+                    painted.push(Painted::Copy { sx, sy, x, y, w, h });
                 }
             }
         }

@@ -50,6 +50,20 @@ type PaintJob =
       /** From the record's flags byte, so from the encoder rather than a bitstream parse. */
       keyframe: boolean;
       data: Uint8Array;
+    }
+  /**
+   * Pixels already on this canvas, moved. Nothing to decode: the job is the whole
+   * of it, and it is settled in wire order like everything else, which is what makes
+   * the canvas it reads the one the records before it left behind.
+   */
+  | {
+      kind: "copy";
+      sx: number;
+      sy: number;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
     };
 
 // One slot's decoded bitmap. The encoded slot table is the contract with the
@@ -231,7 +245,7 @@ export function createTilePainter(options: {
     record: BatchRecord,
     batch: Batch,
   ): PaintJob | null => {
-    if (record.kind === "video") {
+    if (record.kind === "video" || record.kind === "copy") {
       return record;
     }
     if (record.kind === "tile") {
@@ -281,6 +295,12 @@ export function createTilePainter(options: {
     }
     if (job.kind === "video") {
       return decodeAccessUnit(job);
+    }
+    if (job.kind === "copy") {
+      // Nothing to decode, and deliberately not short-circuited past the loop
+      // either: it keeps its place in the queue, so the draws before it happen
+      // before it reads the canvas.
+      return null;
     }
     if (job.decoded) {
       // The whole point of the decoded cache: a reference is a draw, not a
@@ -366,6 +386,11 @@ export function createTilePainter(options: {
     job: PaintJob,
     image: ImageBitmap | VideoFrame,
   ) => {
+    if (job.kind === "copy") {
+      // Unreachable: a copy carries no image, so it is settled by `paintCopy`.
+      image.close();
+      return;
+    }
     if (job.kind === "video") {
       // Cropped by the source rectangle rather than drawn whole: the encoders
       // are held to even sides and a region at the edge of an odd desktop does
@@ -390,6 +415,30 @@ export function createTilePainter(options: {
     }
   };
 
+  // The canvas onto itself. Both context types name their own surface, and both
+  // surfaces are a valid image source, so this is one `drawImage` and no
+  // intermediate: the browser blits, and an overlapping copy takes the source as it
+  // stood before the write, which is what the record means and what a scroll needs.
+  const paintCopy = (
+    ctx: PaintContext | null,
+    job: PaintJob & { kind: "copy" },
+  ) => {
+    if (!ctx) {
+      return;
+    }
+    ctx.drawImage(
+      ctx.canvas,
+      job.sx,
+      job.sy,
+      job.w,
+      job.h,
+      job.x,
+      job.y,
+      job.w,
+      job.h,
+    );
+  };
+
   // Settle one landed decode: paint it, or — when `stale`, because `clear()`
   // ran while the decode was in flight — let its image go without touching
   // the next attachment's canvas or caches. A stale tile painted would be the
@@ -409,7 +458,9 @@ export function createTilePainter(options: {
       }
       return;
     }
-    if (image && job) {
+    if (job?.kind === "copy") {
+      paintCopy(ctx, job);
+    } else if (image && job) {
       paintJob(ctx, job, image);
     } else if (job?.kind === "tile" && job.decoded) {
       releaseDecoded(job.decoded);

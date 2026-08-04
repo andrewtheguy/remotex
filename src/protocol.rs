@@ -266,6 +266,7 @@ pub enum ClientMsg {
 /// 0x01 TILE      u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
 /// 0x02 TILE_REF  u16 slot | u16 x | u16 y
 /// 0x03 VIDEO     u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
+/// 0x04 COPY      u16 sx | u16 sy | u16 x | u16 y | u16 w | u16 h
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
@@ -282,6 +283,7 @@ pub mod batch {
     pub const OP_TILE: u8 = 0x01;
     pub const OP_TILE_REF: u8 = 0x02;
     pub const OP_VIDEO: u8 = 0x03;
+    pub const OP_COPY: u8 = 0x04;
 
     /// Bytes a `TILE` record costs besides its payload.
     pub const TILE_HEADER_LEN: usize = 16;
@@ -289,6 +291,8 @@ pub mod batch {
     pub const TILE_REF_LEN: usize = 7;
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 15;
+    /// A whole `COPY` record.
+    pub const COPY_LEN: usize = 13;
 
     /// A `VIDEO` record's only flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -510,6 +514,61 @@ pub fn write_tile_ref(slot: u16, x: u16, y: u16, out: &mut Vec<u8>) {
     out.extend_from_slice(&y.to_le_bytes());
 }
 
+/// Pixels the client already holds, moved from one place on its canvas to
+/// another: a `COPY` record inside a [`batch`] frame, and thirteen bytes whatever
+/// the rectangle's size.
+///
+/// This is RFB's CopyRect carried through to the browser instead of stopping at
+/// the gateway. A server sends CopyRect for a scroll or a window move — the pixels
+/// are on both sides of *that* link already — and reading the source back out of
+/// the shadow and re-encoding it saved the RFB hop while paying the browser hop in
+/// full, which for a scrolling window is most of a desktop per frame.
+///
+/// The contract every client implements:
+///
+/// - The source `(sx, sy)` and the destination `(x, y)` are both in framebuffer
+///   pixels, and both rectangles are `w`x`h`. The source is read **as the canvas
+///   stood when this record is applied**, so an overlapping copy moves the original
+///   pixels rather than smearing them — which is what a canvas blit does anyway,
+///   and what RFB requires.
+/// - Records are applied in order, so everything earlier in the batch has been
+///   drawn before this reads the canvas. That is why [`crate::wire`] must not drop
+///   a tile that precedes one of these — see its `supersede`.
+/// - There is no payload and no cache slot. A copy is not a picture: it cannot be
+///   remembered, referenced, or drawn twice to mean the same thing.
+///
+/// Only a target whose client canvas is made *entirely* of tiles is sent these —
+/// see [`crate::encode::TileSink::copies`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyRect {
+    /// Where the pixels are now.
+    pub sx: u16,
+    pub sy: u16,
+    /// Where they are going.
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl CopyRect {
+    /// What this copy will cost inside a batch. Constant: there is no payload.
+    pub fn record_len(&self) -> usize {
+        batch::COPY_LEN
+    }
+
+    /// Append this copy as a `COPY` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_COPY);
+        out.extend_from_slice(&self.sx.to_le_bytes());
+        out.extend_from_slice(&self.sy.to_le_bytes());
+        out.extend_from_slice(&self.x.to_le_bytes());
+        out.extend_from_slice(&self.y.to_le_bytes());
+        out.extend_from_slice(&self.w.to_le_bytes());
+        out.extend_from_slice(&self.h.to_le_bytes());
+    }
+}
+
 /// One video access unit for one region of the framebuffer, carried as a `VIDEO`
 /// record inside a [`batch`] frame.
 ///
@@ -729,6 +788,10 @@ pub enum ServerMsg {
     /// [`crate::wire`] puts it in a batch in its place among the tiles, which is
     /// load-bearing.
     Video(VideoUnit),
+    /// Pixels the client already holds, moved on its own canvas — see [`CopyRect`].
+    /// A binary record like the two above, and its place among the tiles is
+    /// load-bearing for the same reason and then some: it *reads* the canvas.
+    Copy(CopyRect),
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -973,7 +1036,10 @@ impl ServerMsg {
     /// type-level fact is what stops a future caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Tile(_) | ServerMsg::Video(_) | ServerMsg::Audio(_) => return None,
+            ServerMsg::Tile(_)
+            | ServerMsg::Video(_)
+            | ServerMsg::Copy(_)
+            | ServerMsg::Audio(_) => return None,
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,
