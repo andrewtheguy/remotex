@@ -739,6 +739,16 @@ pub enum ServerMsg {
     Connected {
         name: String,
         protocol: &'static str,
+        /// The target's `subtype`, where it has one — `ard` or
+        /// `ard-high-performance` — and `None` for plain RDP and plain VNC.
+        ///
+        /// Carried for the same reason as [`Self::Connected::render`]: it is a
+        /// property of the session that decides what the client can expect and
+        /// that nothing on the wire said. The two Apple subtypes differ in what
+        /// they share (physical displays against one virtual one), whether resize
+        /// is offered at all, and how settled the path is — and a client showing
+        /// "VNC" for all three cannot tell somebody which of them they are on.
+        subtype: Option<&'static str>,
         resize: bool,
         auto_resize: bool,
         clipboard: bool,
@@ -861,6 +871,7 @@ enum ControlMsg<'a> {
     Connected {
         name: &'a str,
         protocol: &'a str,
+        subtype: Option<&'a str>,
         resize: bool,
         // `rename_all` on this enum renames the variants, not their fields, so
         // every camelCase key on the wire is spelled here — see `changedAtMs`.
@@ -951,6 +962,7 @@ impl ServerMsg {
             ServerMsg::Connected {
                 name,
                 protocol,
+                subtype,
                 resize,
                 auto_resize,
                 clipboard,
@@ -960,6 +972,7 @@ impl ServerMsg {
             } => control(&ControlMsg::Connected {
                 name,
                 protocol,
+                subtype: *subtype,
                 resize: *resize,
                 auto_resize: *auto_resize,
                 clipboard: *clipboard,
@@ -1199,9 +1212,12 @@ mod tests {
             Some(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
             None => panic!("error must be a text frame"),
         }
+        // A Mac, which is where the subtype earns its place on the wire: three
+        // targets say `"protocol":"vnc"` and only this field tells them apart.
         match (ServerMsg::Connected {
             name: "mac".to_owned(),
             protocol: "vnc",
+            subtype: Some("ard"),
             resize: false,
             auto_resize: false,
             clipboard: true,
@@ -1213,7 +1229,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","resize":false,"autoResize":false,"clipboard":true,"audio":false,"video":null,"render":"tiles · lossless png"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"autoResize":false,"clipboard":true,"audio":false,"video":null,"render":"tiles · lossless png"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1222,6 +1238,9 @@ mod tests {
         match (ServerMsg::Connected {
             name: "desk".to_owned(),
             protocol: "rdp",
+            // Null rather than absent: RDP has no subtype, and a key that comes and
+            // goes is one a client has to test for two ways.
+            subtype: None,
             resize: false,
             auto_resize: false,
             clipboard: false,

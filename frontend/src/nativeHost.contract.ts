@@ -88,6 +88,17 @@ export type NativeCommand =
   | { type: "clipboardLocal"; text: string }
   /** Menu commands, each standing in for a control the shell hides. */
   | { type: "openClipboard" }
+  /**
+   * Show the client's Help card, which is where "This session" is — the remote's
+   * size and density against this window's, the connection and its subtype, the
+   * render dial, the video codec and the exact decoder configuration.
+   *
+   * A command rather than fields on {@link NativeState}, and that is the whole
+   * design of this seam: the card is derived from state the page already holds,
+   * and a menu that rendered its own copy would be a second one to keep in step —
+   * the thing the Swift shell did and got wrong. The shell's part is a menu item.
+   */
+  | { type: "openSessionInfo" }
   | { type: "openDisplays" }
   | { type: "closePanel" }
   | { type: "resizeToWindow" }

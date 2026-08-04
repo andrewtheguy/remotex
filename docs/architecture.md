@@ -467,6 +467,22 @@ audio format, and errors. The `connected` message includes `resize`,
 `autoResize`, `clipboard`, and `audio` capability flags so clients expose only
 supported controls.
 
+It also carries three things a client cannot work out and nothing else reveals:
+`render`, the resolved render dial; `video`, the codec family or null; and
+`subtype`, the target's `ard` or `ard-high-performance` where it has one. The
+last is there because `protocol` is not an answer on VNC — a plain server, a Mac
+in Standard mode and a Mac in High Performance mode all say `vnc`, and they
+differ in whether there is a display list, whether resize is offered, and
+whether the path beneath is the reverse-engineered one. All three appear on the
+client's session card, which `frontend/src/connectionLabel.ts` and
+`videoLabel.ts` word.
+
+`GET /api/targets` carries `subtype` too, so the picker names it one step
+earlier — the difference between two Macs in that list is a choice being made,
+not something to discover after connecting. The row uses the config spelling
+alone (`VNC · ard · 192.0.2.10:5900`); the card, which describes one target and
+has the room, spells it out.
+
 ### Image batches
 
 Screen updates use little-endian binary frames:

@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::audio::AudioBridge;
-use crate::config::{Protocol, TargetConfig, VideoCodec};
+use crate::config::{Protocol, Subtype, TargetConfig, VideoCodec};
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::{rdp, vnc};
 
@@ -442,6 +442,7 @@ impl SessionManager {
                 ServerMsg::Connected {
                     name: target.name.clone(),
                     protocol: target.protocol.name(),
+                    subtype: target.subtype.map(Subtype::name),
                     resize: target.resize,
                     auto_resize: target.auto_resize(),
                     clipboard: target.clipboard,
@@ -690,6 +691,7 @@ impl SessionManager {
 
         let name = target.name.clone();
         let protocol = target.protocol.name();
+        let subtype = target.subtype.map(Subtype::name);
         let resize = target.resize;
         let auto_resize = target.auto_resize();
         let clipboard = target.clipboard;
@@ -705,6 +707,7 @@ impl SessionManager {
             let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Connected {
                 name,
                 protocol,
+                subtype,
                 resize,
                 auto_resize,
                 clipboard,
@@ -1131,6 +1134,9 @@ mod tests {
             AttachEvent::Msg(ServerMsg::Connected {
                 name: got,
                 protocol: got_protocol,
+                // The fake targets are all plain RDP and plain VNC, so there is no
+                // subtype to report either. `config.rs` owns what the Apple ones mean.
+                subtype: None,
                 resize: got_resize,
                 auto_resize: got_auto_resize,
                 clipboard: got_clipboard,

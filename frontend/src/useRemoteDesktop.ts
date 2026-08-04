@@ -5,6 +5,7 @@ import {
   createAudioPlayer,
   decodeAudioHead,
 } from "./audioPlayer.ts";
+import { connectionLabel } from "./connectionLabel.ts";
 import {
   applyCursorCss,
   cursorImage,
@@ -425,6 +426,11 @@ export function useRemoteDesktop(
   // Null family means a target that streams no video at all, which is most of them.
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
+  // What this session is speaking, from `connected`: the protocol and the target's
+  // subtype where it has one. Empty in the picker, and read only by the card — no
+  // behaviour hangs off it, because every capability that varies by subtype already
+  // arrives as its own flag on the same message. See connectionLabel.ts.
+  const [connection, setConnection] = useState("");
   const [videoCodec, setVideoCodec] = useState<string | null>(null);
   const [videoDecodeStrings, setVideoDecodeStrings] = useState<string[]>([]);
   // The remote's displays and which one it is sharing, as the remote last
@@ -1197,6 +1203,7 @@ export function useRemoteDesktop(
       // the codec its target names, and whether this browser has a decoder for it is
       // answered by `configure` refusing it, once, with the codec in hand.
       setRenderPlan(msg.render);
+      setConnection(connectionLabel(msg.protocol, msg.subtype));
       setVideoCodec(msg.video);
       setVideoDecodeStrings([]);
       // Manual on every connect, before either branch: a reattach, a target switch
@@ -1386,6 +1393,7 @@ export function useRemoteDesktop(
           // video at all.
           setVideoError(null);
           setRenderPlan("");
+          setConnection("");
           setVideoCodec(null);
           setVideoDecodeStrings([]);
           // Back to the default rather than left as the last target's answer: the
@@ -1966,6 +1974,7 @@ export function useRemoteDesktop(
     size,
     hostScale,
     renderPlan,
+    connection,
     videoCodec,
     videoDecodeStrings,
     // The two permissions, and the client's per-session choice of how to use

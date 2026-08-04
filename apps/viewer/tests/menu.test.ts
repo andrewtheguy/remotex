@@ -127,6 +127,20 @@ describe("what the menus claim", () => {
     expect(find(menus, "Restart Local Gateway")?.enabled).toBe(true);
   });
 
+  test("the session's own numbers are reachable from the bar", () => {
+    // The card is behind the ☰ button in a browser, and this shell hides that
+    // button — so this item is the only route to the remote's size and density,
+    // the connection, the render dial and the video codec. It opens the client's
+    // card rather than describing any of it here.
+    const item = find(buildMenuSpec(context()), "Session Info…");
+    expect(item?.command).toEqual({ type: "openSessionInfo" });
+    expect(item?.enabled).toBe(true);
+    expect(
+      find(buildMenuSpec(context({ mode: "picker" })), "Session Info…")
+        ?.enabled,
+    ).toBe(false);
+  });
+
   test("a restart in progress disables the item that would start another", () => {
     const menus = buildMenuSpec(context({}, { idle: false }));
     expect(find(menus, "Restart Local Gateway")?.enabled).toBe(false);

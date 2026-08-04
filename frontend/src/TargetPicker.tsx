@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
 import { NATIVE_HOST } from "./nativeHost.ts";
 
@@ -16,6 +17,12 @@ import { NATIVE_HOST } from "./nativeHost.ts";
 interface TargetInfo {
   name: string;
   protocol: string;
+  // The target's `subtype` where it has one, null otherwise. Shown because three
+  // entries in this list can say `vnc` and mean a plain server, a Mac sharing its
+  // physical displays, and a Mac on one virtual display it will disable them for —
+  // which is a difference somebody is choosing between here, not discovering after
+  // connecting. See connectionLabel.ts.
+  subtype: string | null;
   host: string;
   port: number;
 }
@@ -108,7 +115,7 @@ export default function TargetPicker({
                   <span className="picker-target-meta">
                     {connecting
                       ? "Connecting…"
-                      : `${t.protocol.toUpperCase()} · ${t.host}:${t.port}`}
+                      : `${connectionShortLabel(t.protocol, t.subtype)} · ${t.host}:${t.port}`}
                   </span>
                 </button>
               </li>

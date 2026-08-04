@@ -147,6 +147,17 @@ export interface PanelControls {
   openClipboard: () => void;
   toggleDisplays: () => void;
   closePanel: () => void;
+  /**
+   * Show the Help card, which is where "This session" lives.
+   *
+   * The one route to it in a chromeless host: the ☰ button that opens it is the
+   * chrome such a host replaces, so without this the card — the remote's size and
+   * density against this window's, the connection, the render dial, the video
+   * codec — is unreachable in `remotex.app`. Reported by the page rather than
+   * rebuilt natively, because every line of it is derived from state this page
+   * already holds and a second copy is a second copy to keep in step.
+   */
+  openHelp: () => void;
 }
 
 function usePanel() {
@@ -275,12 +286,14 @@ function DisplaySection({
 function ScreenHelp({
   size,
   hostScale,
+  connection,
   renderPlan,
   videoCodec,
   videoDecodeStrings,
 }: {
   size: RemoteSize | null;
   hostScale: number;
+  connection: string;
   renderPlan: string;
   videoCodec: string | null;
   videoDecodeStrings: string[];
@@ -305,6 +318,15 @@ function ScreenHelp({
           <dd>
             {densityLabel(hostScale)} ({dpiLabel(hostScale)})
           </dd>
+        </div>
+        <div className="help-item">
+          <dt>Connection</dt>
+          {/* Which of the three `vnc` targets this is, where it is one of them.
+              Nothing else on screen distinguishes a plain VNC server from a Mac in
+              either Screen Sharing mode, and what a person notices — a display
+              list, a greyed resize, a path with no specification behind it —
+              follows from exactly that. Empty only before `connected`. */}
+          <dd>{connection || "Waiting for the target"}</dd>
         </div>
         <div className="help-item">
           <dt>Render</dt>
@@ -494,6 +516,7 @@ export default function FloatingMenu({
   onSelectDisplay,
   size,
   hostScale,
+  connection,
   renderPlan,
   videoCodec,
   videoDecodeStrings,
@@ -558,6 +581,9 @@ export default function FloatingMenu({
   // both densities and not just the size.
   size: RemoteSize | null;
   hostScale: number;
+  // What this session is speaking, one line, from `connected` — the protocol and
+  // the target's subtype where it has one. See connectionLabel.ts.
+  connection: string;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
   // What this session's video is: the target's codec family, and the exact
@@ -864,6 +890,10 @@ export default function FloatingMenu({
       openClipboard: onClipboard,
       toggleDisplays,
       closePanel,
+      openHelp: () => {
+        setOpen(false);
+        setHelpOpen(true);
+      },
     });
     return () => onPanelControls(null);
   }, [onPanelControls, onClipboard, togglePanel, closePanel]);
@@ -1073,21 +1103,29 @@ export default function FloatingMenu({
             <ScreenHelp
               size={size}
               hostScale={hostScale}
+              connection={connection}
               renderPlan={renderPlan}
               videoCodec={videoCodec}
               videoDecodeStrings={videoDecodeStrings}
             />
-            <h3>Shortcuts</h3>
-            <dl className="help-list">
-              <div className="help-item">
-                <dt>Hide or show this menu</dt>
-                {/* Worth documenting precisely because of what it does: once the
+            {/* Only where there is a menu to hide. A chromeless host has no ☰ and
+                does not take the chord (the listener returns early there), so this
+                row would be documenting a shortcut that does nothing. */}
+            {!chromeless && (
+              <>
+                <h3>Shortcuts</h3>
+                <dl className="help-list">
+                  <div className="help-item">
+                    <dt>Hide or show this menu</dt>
+                    {/* Worth documenting precisely because of what it does: once the
                     ☰ button is hidden there is nothing left on screen to read the
                     way back off, so a shortcut nobody wrote down is a menu that
                     looks gone for good. */}
-                <dd>{hideChromeShortcut(isMacHost)}</dd>
-              </div>
-            </dl>
+                    <dd>{hideChromeShortcut(isMacHost)}</dd>
+                  </div>
+                </dl>
+              </>
+            )}
             {isMacHost && (
               <>
                 <h3>Mac key override</h3>

@@ -27,9 +27,16 @@ What it adds is only what a page genuinely cannot do for itself:
   guest's.
 
 The client hides its floating menu under `NATIVE_HOST` and the menu bar drives the
-same actions. Its *panels* — the clipboard editor, the display list — stay the
-client's: rebuilding those natively would be two of each to keep in step, and the
-consent boundary (the panel's Copy button) would then exist in two places.
+same actions. Its *panels* — the clipboard editor, the display list, the Help card
+behind **Remote ▸ Session Info…** — stay the client's: rebuilding those natively
+would be two of each to keep in step, and the consent boundary (the panel's Copy
+button) would then exist in two places.
+
+**Session Info…** is the one item that exists because hiding the floating menu hid
+something: the card is where the remote's size and density sit beside this window's,
+with the connection and its subtype, the render dial, the video codec and the exact
+configuration each decoder was built with. In a browser it is behind the ☰ button;
+here the item opens the same card, and the shell renders none of it.
 
 ## The embedded gateway
 

@@ -43,6 +43,7 @@ export default function RemoteDesktop({
     size,
     hostScale,
     renderPlan,
+    connection,
     videoCodec,
     videoDecodeStrings,
     canResize,
@@ -147,6 +148,7 @@ export default function RemoteDesktop({
     () => ({
       clipboardLocal: ({ text }) => pushLocalClipboard(text),
       openClipboard: () => panelControlsRef.current?.openClipboard(),
+      openSessionInfo: () => panelControlsRef.current?.openHelp(),
       openDisplays: () => panelControlsRef.current?.toggleDisplays(),
       closePanel: () => panelControlsRef.current?.closePanel(),
       resizeToWindow: () => resizeToWindow(),
@@ -239,6 +241,7 @@ export default function RemoteDesktop({
           onSelectDisplay={selectDisplay}
           size={size}
           hostScale={hostScale}
+          connection={connection}
           renderPlan={renderPlan}
           videoCodec={videoCodec}
           videoDecodeStrings={videoDecodeStrings}
