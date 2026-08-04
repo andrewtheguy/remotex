@@ -26,7 +26,14 @@ import type { VideoFormat } from "./videoDecoder.ts";
 /** What the page sends the worker. `init` arrives exactly once, first. */
 export type PainterCommand =
   | { type: "init"; canvas: OffscreenCanvas }
-  | { type: "frame"; data: ArrayBuffer }
+  | {
+      type: "frame";
+      data: ArrayBuffer;
+      /** From the server's batch header. */
+      sequence: number;
+      /** Which browser WebSocket posted this command. */
+      generation: number;
+    }
   /**
    * The canvas bitmap in framebuffer pixels, filled black — a repaint follows.
    * Echoed back as `resized` once applied, which is what lets the page hold
@@ -41,6 +48,13 @@ export type PainterCommand =
 export type PainterEvent =
   | { type: "cacheReset" }
   | { type: "videoError"; reason: string | null }
+  | {
+      type: "painted";
+      sequence: number;
+      generation: number;
+      queuedMs: number;
+      drawMs: number;
+    }
   | { type: "resized"; seq: number };
 
 export interface PainterHost {
@@ -55,6 +69,7 @@ export interface PainterHost {
 export function createPainterWorker(
   post: (event: PainterEvent) => void,
   makePainter: typeof createTilePainter = createTilePainter,
+  now: () => number = () => performance.now(),
 ): PainterHost {
   let canvas: OffscreenCanvas | null = null;
   let ctx: OffscreenCanvasRenderingContext2D | null = null;
@@ -82,16 +97,30 @@ export function createPainterWorker(
             onVideoError: (reason) => post({ type: "videoError", reason }),
           });
           break;
-        case "frame":
+        case "frame": {
+          const queuedAt = now();
           // The kind is still read rather than assumed: a batch parser handed
           // anything else would spend its way through the bytes looking for
-          // tile records.
-          queued(() =>
-            binaryFrameKind(command.data) === "batch"
-              ? painter?.draw(command.data)
-              : undefined,
-          );
+          // tile records. Only a real batch earns an acknowledgment.
+          queued(async () => {
+            if (binaryFrameKind(command.data) !== "batch") {
+              return;
+            }
+            const startedAt = now();
+            await painter?.draw(command.data);
+            const finishedAt = now();
+            const milliseconds = (value: number) =>
+              Math.min(0xffffffff, Math.max(0, Math.round(value)));
+            post({
+              type: "painted",
+              sequence: command.sequence,
+              generation: command.generation,
+              queuedMs: milliseconds(startedAt - queuedAt),
+              drawMs: milliseconds(finishedAt - startedAt),
+            });
+          });
           break;
+        }
         case "resize":
           queued(() => {
             if (canvas && ctx) {

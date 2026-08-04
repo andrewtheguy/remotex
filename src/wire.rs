@@ -124,8 +124,13 @@ impl Record {
     }
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum WireError {
+    #[error("screen batch sequence exhausted; reconnect the attachment")]
+    SequenceExhausted,
+}
+
 /// Per-attachment encoder for the server -> client direction.
-#[derive(Default)]
 pub struct Wire {
     /// Records accumulated for the batch currently being built.
     ///
@@ -146,7 +151,23 @@ pub struct Wire {
     /// smaller than this predicted. Bounding high is the safe direction for a cap.
     pending_bytes: usize,
     slots: Slots,
+    /// Sequence written into the next screen batch. Per attachment because a
+    /// `Wire` belongs to one attachment; starts at one so zero can remain the
+    /// conspicuous value in malformed or hand-built frames.
+    next_sequence: u32,
     pub totals: Totals,
+}
+
+impl Default for Wire {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            pending_bytes: 0,
+            slots: Slots::default(),
+            next_sequence: 1,
+            totals: Totals::default(),
+        }
+    }
 }
 
 impl Wire {
@@ -155,14 +176,21 @@ impl Wire {
     /// "Run" means everything the caller had available at once. Whatever is
     /// returned is complete: no records are retained for a later call, so a batch
     /// can never sit waiting for traffic that never comes.
-    pub fn encode(&mut self, run: impl IntoIterator<Item = ServerMsg>) -> Vec<WireFrame> {
+    ///
+    /// Sequence exhaustion is terminal for this attachment. The caller must
+    /// close it so a reattachment creates a fresh `Wire`; this encoder never
+    /// wraps or reuses a sequence.
+    pub fn encode(
+        &mut self,
+        run: impl IntoIterator<Item = ServerMsg>,
+    ) -> Result<Vec<WireFrame>, WireError> {
         let mut frames = Vec::new();
         for msg in run {
             match msg.text_frame() {
                 // A control message: flush what is pending so the client applies
                 // the tiles that preceded it before the state change.
                 Some(json) => {
-                    self.flush(&mut frames);
+                    self.flush(&mut frames)?;
                     self.totals.text(json.len());
                     frames.push(WireFrame::Text(json));
                 }
@@ -171,40 +199,41 @@ impl Wire {
                 // variant added later without a `text_frame` arm should cost that
                 // one message, not the whole attachment.
                 None => match msg {
-                    ServerMsg::Tile(tile) => self.push_tile(tile, &mut frames),
-                    ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames),
+                    ServerMsg::Tile(tile) => self.push_tile(tile, &mut frames)?,
+                    ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
                     // Audio has no pixel-order dependency, so do not delay it
                     // behind the current tile batch.
                     ServerMsg::Audio(packets) => {
                         let frame = protocol::audio::frame(&packets);
                         self.totals.audio(frame.len(), packets.len());
-                        frames.push(WireFrame::Binary(frame));
+                        frames.push(WireFrame::Audio(frame));
                     }
                     other => log::warn!("wire: dropping {other:?}, which has no encoding"),
                 },
             }
         }
-        self.flush(&mut frames);
-        frames
+        self.flush(&mut frames)?;
+        Ok(frames)
     }
 
-    fn push_tile(&mut self, tile: Tile, frames: &mut Vec<WireFrame>) {
+    fn push_tile(&mut self, tile: Tile, frames: &mut Vec<WireFrame>) -> Result<(), WireError> {
         // Before the cap is consulted, because dropping covered tiles is what
         // makes room and a flush that was not needed costs a frame.
         self.supersede(&tile);
-        self.push(Record::Tile(tile), frames);
+        self.push(Record::Tile(tile), frames)
     }
 
-    fn push(&mut self, record: Record, frames: &mut Vec<WireFrame>) {
+    fn push(&mut self, record: Record, frames: &mut Vec<WireFrame>) -> Result<(), WireError> {
         let len = record.record_len();
         if !self.pending.is_empty()
             && (self.pending_bytes + len > MAX_BATCH_BYTES
                 || self.pending.len() >= MAX_BATCH_RECORDS)
         {
-            self.flush(frames);
+            self.flush(frames)?;
         }
         self.pending_bytes += len;
         self.pending.push(record);
+        Ok(())
     }
 
     /// Drop pending tiles that `tile` completely covers.
@@ -248,14 +277,19 @@ impl Wire {
     }
 
     /// Emit the pending batch, if there is one.
-    fn flush(&mut self, frames: &mut Vec<WireFrame>) {
+    fn flush(&mut self, frames: &mut Vec<WireFrame>) -> Result<(), WireError> {
         if self.pending.is_empty() {
-            return;
+            return Ok(());
         }
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .ok_or(WireError::SequenceExhausted)?;
         let mut frame = Vec::with_capacity(batch::HEADER_LEN + self.pending_bytes);
         frame.push(batch::FRAME_KIND);
         frame.push(0); // flags
         frame.extend_from_slice(&(self.pending.len() as u16).to_le_bytes());
+        frame.extend_from_slice(&sequence.to_le_bytes());
         for record in self.pending.drain(..) {
             let tile = match record {
                 Record::Video(unit) => {
@@ -282,7 +316,8 @@ impl Wire {
         }
         self.pending_bytes = 0;
         self.totals.frame(frame.len());
-        frames.push(WireFrame::Binary(frame));
+        frames.push(WireFrame::Batch { sequence, bytes: frame });
+        Ok(())
     }
 
     /// Forget every slot, because the client says it lost them.
@@ -531,8 +566,18 @@ mod tests {
         frames
             .iter()
             .filter_map(|f| match f {
-                WireFrame::Binary(bytes) => Some(bytes),
+                WireFrame::Batch { bytes, .. } | WireFrame::Audio(bytes) => Some(bytes),
                 WireFrame::Text(_) => None,
+            })
+            .collect()
+    }
+
+    fn sequences(frames: &[WireFrame]) -> Vec<u32> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                WireFrame::Batch { sequence, .. } => Some(*sequence),
+                WireFrame::Text(_) | WireFrame::Audio(_) => None,
             })
             .collect()
     }
@@ -541,8 +586,10 @@ mod tests {
     #[test]
     fn a_run_of_tiles_becomes_one_frame() {
         let mut wire = Wire::default();
-        let frames = wire.encode((0..8).map(|i| tile(i * 64, 100)));
+        let frames = wire.encode((0..8).map(|i| tile(i * 64, 100))).unwrap();
         assert_eq!(frames.len(), 1, "eight tiles must not cost eight frames");
+        assert_eq!(sequences(&frames), vec![1]);
+        assert_eq!(&binary(&frames)[0][4..8], &1u32.to_le_bytes());
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 8);
         // In order, each carrying its payload and the slot to keep it in.
@@ -554,6 +601,27 @@ mod tests {
         }
         assert_eq!(wire.totals.binary_frames, 1);
         assert_eq!(wire.totals.tiles, 8);
+    }
+
+    #[test]
+    fn an_exhausted_sequence_returns_an_error_without_wrapping_or_panicking() {
+        let mut wire = Wire {
+            next_sequence: u32::MAX,
+            ..Wire::default()
+        };
+
+        assert_eq!(
+            wire.encode(vec![tile(0, 100)]).unwrap_err(),
+            WireError::SequenceExhausted
+        );
+        assert_eq!(wire.next_sequence, u32::MAX, "the sequence must not wrap");
+        assert_eq!(wire.totals.binary_frames, 0, "no partial frame was emitted");
+        assert_eq!(wire.pending.len(), 1, "the failed flush did not drain records");
+        assert_eq!(
+            wire.encode(Vec::new()).unwrap_err(),
+            WireError::SequenceExhausted,
+            "an exhausted attachment stays exhausted until it is replaced"
+        );
     }
 
     // The format byte is the codec, and the wire relays it untouched: the tile
@@ -570,7 +638,7 @@ mod tests {
             h: 64,
             data: vec![0xFFu8; 900],
         });
-        let frames = wire.encode(vec![tile(0, 900), jpeg]);
+        let frames = wire.encode(vec![tile(0, 900), jpeg]).unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].7, Tile::FORMAT_PNG, "the PNG tile keeps its codec");
@@ -582,13 +650,16 @@ mod tests {
     #[test]
     fn a_control_message_flushes_the_tiles_that_preceded_it() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![tile(0, 50), tile(64, 50), resize(), tile(0, 50)]);
+        let frames = wire
+            .encode(vec![tile(0, 50), tile(64, 50), resize(), tile(0, 50)])
+            .unwrap();
         assert!(
-            matches!(frames[0], WireFrame::Binary(_)),
+            matches!(frames[0], WireFrame::Batch { .. }),
             "the first two tiles go out before the resize"
         );
         assert!(matches!(frames[1], WireFrame::Text(_)));
-        assert!(matches!(frames[2], WireFrame::Binary(_)));
+        assert!(matches!(frames[2], WireFrame::Batch { .. }));
+        assert_eq!(sequences(&frames), vec![1, 2]);
         assert_eq!(frames.len(), 3);
         assert_eq!(records(binary(&frames)[0]).len(), 2);
         assert_eq!(records(binary(&frames)[1]).len(), 1);
@@ -605,10 +676,12 @@ mod tests {
     #[test]
     fn audio_alone_through_the_wire_is_one_binary_frame_and_no_batch() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![ServerMsg::Audio(vec![
-            bytes::Bytes::from_static(&[1, 2, 3]),
-            bytes::Bytes::from_static(&[4, 5]),
-        ])]);
+        let frames = wire
+            .encode(vec![ServerMsg::Audio(vec![
+                bytes::Bytes::from_static(&[1, 2, 3]),
+                bytes::Bytes::from_static(&[4, 5]),
+            ])])
+            .unwrap();
 
         assert_eq!(frames.len(), 1, "no batch is flushed around it");
         let binary = binary(&frames);
@@ -652,7 +725,7 @@ mod tests {
     fn a_batch_is_split_before_it_exceeds_the_byte_cap() {
         let mut wire = Wire::default();
         let each = 100 * 1024;
-        let frames = wire.encode((0..6).map(|i| tile(i * 64, each)));
+        let frames = wire.encode((0..6).map(|i| tile(i * 64, each))).unwrap();
         assert!(frames.len() > 1, "600 KB of tiles cannot be one frame");
         for frame in binary(&frames) {
             assert!(
@@ -675,7 +748,7 @@ mod tests {
     #[test]
     fn a_single_oversized_tile_is_still_sent() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![tile(0, MAX_BATCH_BYTES * 2)]);
+        let frames = wire.encode(vec![tile(0, MAX_BATCH_BYTES * 2)]).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(records(binary(&frames)[0])[0].6, MAX_BATCH_BYTES * 2);
     }
@@ -685,12 +758,12 @@ mod tests {
     #[test]
     fn nothing_is_held_back_between_runs() {
         let mut wire = Wire::default();
-        assert_eq!(wire.encode(vec![tile(0, 10)]).len(), 1);
+        assert_eq!(wire.encode(vec![tile(0, 10)]).unwrap().len(), 1);
         assert!(wire.pending.is_empty());
         assert_eq!(wire.pending_bytes, 0);
         // A run with nothing in it produces nothing, rather than an empty frame.
-        assert!(wire.encode(Vec::new()).is_empty());
-        assert_eq!(wire.encode(vec![resize()]).len(), 1);
+        assert!(wire.encode(Vec::new()).unwrap().is_empty());
+        assert_eq!(wire.encode(vec![resize()]).unwrap().len(), 1);
     }
 
     // A tile a later one paints over completely never needed sending. Safe only
@@ -698,11 +771,13 @@ mod tests {
     #[test]
     fn a_covered_tile_is_dropped_from_the_batch() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![
-            rect(0, 0, 320, 64, 50),   // covered exactly
-            rect(320, 0, 320, 64, 50), // beside it, untouched
-            rect(0, 0, 640, 128, 50),  // covers the first, and the second
-        ]);
+        let frames = wire
+            .encode(vec![
+                rect(0, 0, 320, 64, 50),   // covered exactly
+                rect(320, 0, 320, 64, 50), // beside it, untouched
+                rect(0, 0, 640, 128, 50),  // covers the first, and the second
+            ])
+            .unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 1, "both earlier tiles were painted over");
         assert_eq!((records[0].2, records[0].4), (0, 640));
@@ -714,10 +789,12 @@ mod tests {
     #[test]
     fn a_partly_overlapping_tile_keeps_both() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![
-            rect(0, 0, 320, 64, 50),
-            rect(160, 0, 320, 64, 50), // overlaps half of it
-        ]);
+        let frames = wire
+            .encode(vec![
+                rect(0, 0, 320, 64, 50),
+                rect(160, 0, 320, 64, 50), // overlaps half of it
+            ])
+            .unwrap();
         assert_eq!(records(binary(&frames)[0]).len(), 2);
         assert_eq!(wire.totals.superseded, 0);
     }
@@ -728,11 +805,13 @@ mod tests {
     #[test]
     fn coverage_never_reaches_across_a_control_message() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![
-            rect(0, 0, 320, 64, 50),
-            resize(),
-            rect(0, 0, 640, 128, 50), // would cover the first, if it could
-        ]);
+        let frames = wire
+            .encode(vec![
+                rect(0, 0, 320, 64, 50),
+                resize(),
+                rect(0, 0, 640, 128, 50), // would cover the first, if it could
+            ])
+            .unwrap();
         assert_eq!(frames.len(), 3);
         assert_eq!(
             records(binary(&frames)[0]).len(),
@@ -752,11 +831,13 @@ mod tests {
     fn coverage_never_reaches_across_a_flushed_batch() {
         let mut wire = Wire::default();
         let big = MAX_BATCH_BYTES - 1024;
-        let frames = wire.encode(vec![
-            rect(0, 0, 320, 64, big),
-            rect(0, 64, 320, 64, big), // no overlap, so the cap forces a flush
-            rect(0, 0, 640, 128, 100), // covers both, but only reaches the pending one
-        ]);
+        let frames = wire
+            .encode(vec![
+                rect(0, 0, 320, 64, big),
+                rect(0, 64, 320, 64, big), // no overlap, so the cap forces a flush
+                rect(0, 0, 640, 128, 100), // covers both, but only reaches the pending one
+            ])
+            .unwrap();
         let sent: usize = binary(&frames).iter().map(|f| records(f).len()).sum();
         assert_eq!(sent, 2, "the flushed tile survives, the pending one does not");
         assert_eq!(wire.totals.superseded, 1);
@@ -768,10 +849,12 @@ mod tests {
     fn superseding_makes_room_instead_of_forcing_a_flush() {
         let mut wire = Wire::default();
         let big = MAX_BATCH_BYTES - 1024;
-        let frames = wire.encode(vec![
-            rect(0, 0, 320, 64, big),
-            rect(0, 0, 640, 128, big), // covers it; must not also flush
-        ]);
+        let frames = wire
+            .encode(vec![
+                rect(0, 0, 320, 64, big),
+                rect(0, 0, 640, 128, big), // covers it; must not also flush
+            ])
+            .unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(records(binary(&frames)[0]).len(), 1);
     }
@@ -785,7 +868,9 @@ mod tests {
         let cells = 80;
         let payload = 900;
         let mut wire = Wire::default();
-        let frames = wire.encode((0..cells).map(|i| tile(i as u16 * 64, payload)));
+        let frames = wire
+            .encode((0..cells).map(|i| tile(i as u16 * 64, payload)))
+            .unwrap();
 
         // v2: one WebSocket frame per tile, each with a 10-byte header. The frame
         // count is the real cost — 80 client events and 80 scheduled decodes.
@@ -801,7 +886,9 @@ mod tests {
     #[test]
     fn content_the_client_already_holds_becomes_a_reference() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![repeat(0, 0, 900), repeat(320, 0, 900)]);
+        let frames = wire
+            .encode(vec![repeat(0, 0, 900), repeat(320, 0, 900)])
+            .unwrap();
         let records = records(binary(&frames)[0]);
 
         assert_eq!(records[0].0, batch::OP_TILE, "the first copy carries payload");
@@ -823,8 +910,8 @@ mod tests {
     #[test]
     fn a_reference_costs_seven_bytes() {
         let mut wire = Wire::default();
-        let first = wire.encode(vec![repeat(0, 0, 20_000)]);
-        let second = wire.encode(vec![repeat(640, 128, 20_000)]);
+        let first = wire.encode(vec![repeat(0, 0, 20_000)]).unwrap();
+        let second = wire.encode(vec![repeat(640, 128, 20_000)]).unwrap();
         assert_eq!(
             binary(&second)[0].len(),
             batch::HEADER_LEN + batch::TILE_REF_LEN
@@ -836,12 +923,12 @@ mod tests {
     #[test]
     fn a_tile_that_differs_by_one_byte_is_not_a_reference() {
         let mut wire = Wire::default();
-        wire.encode(vec![repeat(0, 0, 900)]);
+        wire.encode(vec![repeat(0, 0, 900)]).unwrap();
         let mut changed = repeat(320, 0, 900);
         if let ServerMsg::Tile(tile) = &mut changed {
             tile.data[500] = 1;
         }
-        let frames = wire.encode(vec![changed]);
+        let frames = wire.encode(vec![changed]).unwrap();
         assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
         assert_eq!(wire.totals.refs, 0);
     }
@@ -851,15 +938,17 @@ mod tests {
     #[test]
     fn the_same_bytes_at_a_different_size_are_not_a_reference() {
         let mut wire = Wire::default();
-        wire.encode(vec![repeat(0, 0, 900)]);
-        let frames = wire.encode(vec![ServerMsg::Tile(Tile {
-            format: Tile::FORMAT_PNG,
-            x: 0,
-            y: 0,
-            w: 64,
-            h: 320,
-            data: vec![9u8; 900],
-        })]);
+        wire.encode(vec![repeat(0, 0, 900)]).unwrap();
+        let frames = wire
+            .encode(vec![ServerMsg::Tile(Tile {
+                format: Tile::FORMAT_PNG,
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 320,
+                data: vec![9u8; 900],
+            })])
+            .unwrap();
         assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
         assert_eq!(wire.totals.refs, 0);
     }
@@ -903,7 +992,12 @@ mod tests {
     #[test]
     fn a_keyframes_flag_survives_the_wire_and_a_delta_frames_absence_does_too() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![keyframe_unit(1, 700), region_unit(1, 0, 0, 1280, 800, 600)]);
+        let frames = wire
+            .encode(vec![
+                keyframe_unit(1, 700),
+                region_unit(1, 0, 0, 1280, 800, 600),
+            ])
+            .unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 2);
         assert_eq!((records[0].0, records[0].1), (batch::OP_VIDEO, 1));
@@ -921,8 +1015,8 @@ mod tests {
     #[test]
     fn an_access_unit_is_never_cached_or_referenced() {
         let mut wire = Wire::default();
-        wire.encode(vec![access_unit(900)]);
-        let frames = wire.encode(vec![access_unit(900)]);
+        wire.encode(vec![access_unit(900)]).unwrap();
+        let frames = wire.encode(vec![access_unit(900)]).unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records[0].0, batch::OP_VIDEO, "an access unit came back as a reference");
         assert_eq!(wire.totals.refs, 0);
@@ -937,7 +1031,9 @@ mod tests {
     #[test]
     fn an_access_unit_is_neither_dropped_nor_drops_anything() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![access_unit(900), access_unit(910)]);
+        let frames = wire
+            .encode(vec![access_unit(900), access_unit(910)])
+            .unwrap();
         assert_eq!(records(binary(&frames)[0]).len(), 2, "one access unit superseded another");
         assert_eq!(wire.totals.superseded, 0);
 
@@ -945,7 +1041,9 @@ mod tests {
         // not take an access unit with it either. That is the cleanup a settled
         // region gets, and it lands *after* the unit it replaces.
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![access_unit(900), rect(0, 0, 1280, 800, 900)]);
+        let frames = wire
+            .encode(vec![access_unit(900), rect(0, 0, 1280, 800, 900)])
+            .unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 2, "a still tile dropped an access unit");
         assert_eq!(records[0].0, batch::OP_VIDEO, "the cleanup overtook what it replaces");
@@ -959,10 +1057,12 @@ mod tests {
     #[test]
     fn several_regions_ride_one_batch_each_with_its_own_rectangle() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![
-            region_unit(0, 320, 64, 640, 128, 500),
-            region_unit(1, 1280, 512, 320, 64, 300),
-        ]);
+        let frames = wire
+            .encode(vec![
+                region_unit(0, 320, 64, 640, 128, 500),
+                region_unit(1, 1280, 512, 320, 64, 300),
+            ])
+            .unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 2);
         assert_eq!((records[0].0, records[0].1), (batch::OP_VIDEO, 0), "stream 0");
@@ -983,11 +1083,13 @@ mod tests {
     #[test]
     fn an_access_unit_between_two_tiles_does_not_stop_them_superseding() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![
-            rect(0, 0, 320, 64, 400),
-            access_unit(500),
-            rect(0, 0, 640, 128, 600),
-        ]);
+        let frames = wire
+            .encode(vec![
+                rect(0, 0, 320, 64, 400),
+                access_unit(500),
+                rect(0, 0, 640, 128, 600),
+            ])
+            .unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records.len(), 2, "the covered tile was not dropped");
         assert_eq!(records[0].0, batch::OP_VIDEO);
@@ -1001,10 +1103,10 @@ mod tests {
     fn a_payload_too_large_for_a_slot_is_sent_uncached() {
         let mut wire = Wire::default();
         let huge = batch::MAX_CACHED_BYTES + 1;
-        let first = wire.encode(vec![repeat(0, 0, huge)]);
+        let first = wire.encode(vec![repeat(0, 0, huge)]).unwrap();
         assert_eq!(records(binary(&first)[0])[0].1, batch::NO_SLOT);
 
-        let second = wire.encode(vec![repeat(0, 0, huge)]);
+        let second = wire.encode(vec![repeat(0, 0, huge)]).unwrap();
         assert_eq!(
             records(binary(&second)[0])[0].0,
             batch::OP_TILE,
@@ -1019,12 +1121,14 @@ mod tests {
     fn a_slot_reused_for_new_content_stops_being_referenced() {
         let mut wire = Wire::default();
         let oldest = repeat(0, 0, 200);
-        wire.encode(vec![oldest.clone()]);
+        wire.encode(vec![oldest.clone()]).unwrap();
         // Fill every remaining slot with something else, so slot 0 is reused.
-        wire.encode((1..batch::SLOT_COUNT).map(|i| rect(i, 0, 320, 64, 200)));
-        wire.encode(vec![rect(0, 64, 320, 64, 200)]);
+        wire
+            .encode((1..batch::SLOT_COUNT).map(|i| rect(i, 0, 320, 64, 200)))
+            .unwrap();
+        wire.encode(vec![rect(0, 64, 320, 64, 200)]).unwrap();
 
-        let frames = wire.encode(vec![oldest]);
+        let frames = wire.encode(vec![oldest]).unwrap();
         assert_eq!(
             records(binary(&frames)[0])[0].0,
             batch::OP_TILE,
@@ -1038,12 +1142,15 @@ mod tests {
     #[test]
     fn a_cache_reset_sends_payloads_again() {
         let mut wire = Wire::default();
-        wire.encode(vec![repeat(0, 0, 900)]);
-        assert_eq!(records(binary(&wire.encode(vec![repeat(0, 0, 900)]))[0])[0].0, batch::OP_TILE_REF);
+        wire.encode(vec![repeat(0, 0, 900)]).unwrap();
+        assert_eq!(
+            records(binary(&wire.encode(vec![repeat(0, 0, 900)]).unwrap())[0])[0].0,
+            batch::OP_TILE_REF
+        );
 
         wire.reset_cache();
 
-        let frames = wire.encode(vec![repeat(0, 0, 900)]);
+        let frames = wire.encode(vec![repeat(0, 0, 900)]).unwrap();
         let records = records(binary(&frames)[0]);
         assert_eq!(records[0].0, batch::OP_TILE);
         assert_eq!(records[0].1, 0, "and slot numbering starts over");
@@ -1055,7 +1162,13 @@ mod tests {
     #[test]
     fn a_reference_may_share_a_batch_with_the_tile_it_names() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![repeat(0, 0, 900), repeat(0, 64, 900), repeat(0, 128, 900)]);
+        let frames = wire
+            .encode(vec![
+                repeat(0, 0, 900),
+                repeat(0, 64, 900),
+                repeat(0, 128, 900),
+            ])
+            .unwrap();
         assert_eq!(frames.len(), 1);
         let records = records(binary(&frames)[0]);
         assert_eq!(records[0].0, batch::OP_TILE);
@@ -1068,16 +1181,18 @@ mod tests {
     #[test]
     fn a_superseded_tile_claims_no_slot() {
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![
-            repeat(0, 0, 200),        // covered by the next one, never sent
-            rect(0, 0, 640, 128, 200),
-        ]);
+        let frames = wire
+            .encode(vec![
+                repeat(0, 0, 200),        // covered by the next one, never sent
+                rect(0, 0, 640, 128, 200),
+            ])
+            .unwrap();
         assert_eq!(records(binary(&frames)[0]).len(), 1);
 
         // The covered payload arrives for real now. If it had claimed a slot while
         // being dropped, this would come back as a reference to a tile the client
         // never received.
-        let frames = wire.encode(vec![repeat(0, 256, 200)]);
+        let frames = wire.encode(vec![repeat(0, 256, 200)]).unwrap();
         assert_eq!(records(binary(&frames)[0])[0].0, batch::OP_TILE);
     }
 }

@@ -75,7 +75,17 @@ export type ClientMsg =
   // There is no audio message. Subscribing is opening `/ws/audio`, and stopping is
   // closing it — see useRemoteDesktop's `setAudio`. The UI click that does it also
   // authorizes playback, which is why it has to be a click either way.
-  | { type: "cacheReset" };
+  | { type: "cacheReset" }
+  // The paint worker finished this batch after its ordered parse/decode/draw
+  // pass. The sequence came from the batch header; the timings make the
+  // browser backlog visible to the gateway instead of stopping at WebSocket
+  // delivery, which has no receive-side backpressure signal.
+  | {
+      type: "paintAck";
+      sequence: number;
+      queuedMs: number;
+      drawMs: number;
+    };
 
 // Ceiling on one clipboard transfer, mirroring MAX_CLIPBOARD_BYTES in
 // src/protocol.rs. The backend refuses anything over it in either direction;
@@ -282,7 +292,7 @@ export type BatchRecord =
   | ({ kind: "video" } & VideoMsg);
 
 const BATCH_FRAME_KIND = 0x02;
-const BATCH_HEADER_LEN = 4;
+const BATCH_HEADER_LEN = 8;
 const AUDIO_FRAME_KIND = 0x03;
 const AUDIO_HEADER_LEN = 4;
 const AUDIO_PACKET_HEADER_LEN = 2;
@@ -323,7 +333,8 @@ export const SLOT_COUNT = 256;
 //   offset 0: u8  frame kind, always 0x02 (batch)
 //   offset 1: u8  flags, always 0
 //   offset 2: u16 record count
-//   offset 4: records, back to back
+//   offset 4: u32 sequence, increasing per attachment
+//   offset 8: records, back to back
 //
 //   TILE (op 0x01):     u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
 //                       | u32 len | payload[len]
@@ -336,13 +347,10 @@ export const SLOT_COUNT = 256;
 // only because the header carries a record count — without it, a short read
 // would look like a complete but smaller batch.
 export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
-  if (buf.byteLength < BATCH_HEADER_LEN) {
+  if (batchFrameSequence(buf) === null) {
     return null;
   }
   const view = new DataView(buf);
-  if (view.getUint8(0) !== BATCH_FRAME_KIND || view.getUint8(1) !== 0) {
-    return null;
-  }
   const count = view.getUint16(2, true);
   const records: BatchRecord[] = [];
   let at = BATCH_HEADER_LEN;
@@ -355,6 +363,24 @@ export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
     at = parsed.next;
   }
   return records.length === count ? records : null;
+}
+
+/**
+ * Read the sequence that lets the paint worker acknowledge this batch after
+ * it has finished. Header validation lives here so the main thread never posts
+ * an acknowledgment-capable command for a non-batch, reserved future flags,
+ * or sequence zero (real attachment sequences start at one).
+ */
+export function batchFrameSequence(buf: ArrayBuffer): number | null {
+  if (buf.byteLength < BATCH_HEADER_LEN) {
+    return null;
+  }
+  const view = new DataView(buf);
+  if (view.getUint8(0) !== BATCH_FRAME_KIND || view.getUint8(1) !== 0) {
+    return null;
+  }
+  const sequence = view.getUint32(4, true);
+  return sequence === 0 ? null : sequence;
 }
 
 function decodeRecord(

@@ -2720,7 +2720,10 @@ fn translate_input(
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here. `CacheReset` is one of
         // them: it empties that socket's tile cache and injects its own `Refresh`.
-        ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::CacheReset => Vec::new(),
+        ClientMsg::Connect { .. }
+        | ClientMsg::Disconnect
+        | ClientMsg::CacheReset
+        | ClientMsg::PaintAck { .. } => Vec::new(),
         // Intercepted by the input loop, which is where the requested screen is
         // checked — see the `SelectDisplay` branch there. Generic RFB has nothing
         // for it; the Apple extension supplies the selectable list on either

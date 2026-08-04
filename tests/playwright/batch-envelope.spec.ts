@@ -1,4 +1,4 @@
-// The v3 binary envelope, observed from the real SPA's own WebSocket.
+// The v4 binary envelope, observed from the real SPA's own WebSocket.
 //
 // This is the only test that watches the browser link as the browser actually
 // uses it. The Rust e2e tests drive a raw WebSocket client, and the TypeScript
@@ -15,7 +15,7 @@ import { logInAndConnect, returnToPicker, skipUnlessLiveMac } from "./support";
 
 // Must match `batch` in src/protocol.rs.
 const BATCH_FRAME_KIND = 0x02;
-const BATCH_HEADER_LEN = 4;
+const BATCH_HEADER_LEN = 8;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const TILE_HEADER_LEN = 16;
@@ -37,6 +37,7 @@ interface Record {
 interface Batch {
   flags: number;
   count: number;
+  sequence: number;
   records: Record[];
   /** Whether the records exactly filled the frame. */
   exact: boolean;
@@ -90,13 +91,14 @@ function parseBatch(payload: Buffer): Batch {
   return {
     flags: payload.readUInt8(1),
     count,
+    sequence: payload.readUInt32LE(4),
     records,
     exact: exact && at === payload.length,
     badOp,
   };
 }
 
-test.describe("v3 batch envelope", () => {
+test.describe("v4 batch envelope", () => {
   // Needs the Mac's Screen Sharing service to be up: the frames under test are
   // its screen arriving through the gateway.
   skipUnlessLiveMac();
@@ -175,6 +177,11 @@ test.describe("v3 batch envelope", () => {
         expect(record.payloadLen).toBeGreaterThan(0);
       }
     }
+
+    expect(
+      batches.map((batch) => batch.sequence),
+      "screen batch sequences must increase in socket order",
+    ).toEqual(batches.map((_, index) => index + 1));
 
     // Whatever the gateway sent, the SPA has to have parsed it: every record it
     // could not read would be a dropped frame, and a dropped frame is a region of

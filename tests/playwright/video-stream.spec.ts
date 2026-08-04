@@ -37,7 +37,7 @@ const H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_VIDEO_H264_TARGET;
 /// is the independent check that the gateway and the client agree, and reading the
 /// client's own parser to decide that would be asking the accused.
 const BATCH_FRAME_KIND = 0x02;
-const BATCH_HEADER_LEN = 4;
+const BATCH_HEADER_LEN = 8;
 const OP_TILE = 0x01;
 const OP_TILE_REF = 0x02;
 const OP_VIDEO = 0x03;
@@ -63,6 +63,7 @@ interface VideoRecord {
 interface Batch {
   flags: number;
   count: number;
+  sequence: number;
   /** Every record, video or not — the count is the header's claim to check. */
   records: number;
   video: VideoRecord[];
@@ -134,6 +135,7 @@ function parseBatch(payload: Buffer): Batch {
   return {
     flags: payload.readUInt8(1),
     count,
+    sequence: payload.readUInt32LE(4),
     records,
     video,
     exact: exact && at === payload.length,
@@ -255,6 +257,10 @@ function assertTheEnvelopeHolds(seen: Session): void {
       "the header's record count must match the records present",
     ).toBe(batch.count);
   }
+  expect(
+    seen.batches.map((batch) => batch.sequence),
+    "screen batch sequences must increase in socket order",
+  ).toEqual(seen.batches.map((_, index) => index + 1));
 
   const first = new Map<number, VideoRecord>();
   for (const unit of units(seen)) {

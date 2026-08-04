@@ -10,36 +10,6 @@ rustdesk).
 What the audit found *sound* — and later work should not regress — is at the
 bottom.
 
-## In progress — end-to-end screen backpressure
-
-**Highest expected impact, shared by every target.** The gateway's bounded queues
-currently stop at the browser WebSocket. The classic WebSocket API has no receive
-backpressure: `useRemoteDesktop.ts` transfers every binary frame immediately to
-the painter worker, and `desktopPainterWorker.ts` appends every frame to an
-unbounded promise chain. A fast socket and a slow decode/paint worker therefore
-look healthy to `src/encode.rs`; its queue-stall congestion signal cannot see the
-latency the user is actually watching.
-
-Guacamole closes this loop with a frame `sync`: the browser answers only after its
-display flush completes, and the server uses the returned processing lag to pace
-later frames. Remotex should take the same shape without adding a second client:
-
-1. Put a monotonically increasing attachment-local sequence in every screen batch.
-2. Have the painter worker echo that sequence only after its ordered
-   parse/decode/draw pass, together with time queued and time spent drawing.
-3. Consume the acknowledgment in `src/ws.rs`, never forward it to an RDP/VNC
-   engine, and report worker queue, draw and end-to-end latency in the attachment
-   totals. Fence late worker completions by the browser's socket generation so an
-   old attachment cannot acknowledge a new one.
-4. Once field measurements establish the normal in-flight depth, bound batches
-   outstanding past the WebSocket and make the video quality/pacing decision read
-   acknowledged presentation lag rather than socket-write stall alone. Preserve
-   video dependency order: old delta frames may not simply be dropped.
-
-The first implementation slice is steps 1–3. It is observability and the wire
-contract needed for real application-level backpressure; step 4 is the behaviour
-change and remains open until those measurements choose its window.
-
 ## Next, not backlog
 
 - **RDP cursor rendered locally.** `src/rdp.rs` currently asks IronRDP to composite
@@ -50,11 +20,6 @@ change and remains open until those measurements choose its window.
   `FramebufferUpdate` and expands CopyRect back into encoded pixels for the browser.
   Negotiate Continuous Updates where supported and add an ordered copy record that
   lets the painter blit pixels it already holds.
-- **Presentation pacing after paint feedback.** Whole-desktop video is capped at
-  30 Hz and RDP tile damage at 16 ms. Revisit those limits only after acknowledged
-  paint latency makes it possible to distinguish useful additional frames from a
-  deeper client backlog.
-
 ## Backlog — explicitly not prioritized
 
 - **IronRDP EGFX.** Negotiate `Microsoft::Windows::RDS::Graphics`, use its real
@@ -72,6 +37,83 @@ change and remains open until those measurements choose its window.
   `ard` improvements.
 
 ## Done
+
+- **End-to-end screen backpressure** (`src/ws.rs`). The completion feedback below
+  made the browser's backlog observable; this bounds it. A screen batch now waits
+  before its socket write until the painter admits another — under `PAINT_WINDOW`
+  (24) owed, and the oldest owed no longer than `PAINT_LAG_LIMIT` (150ms) — so the
+  one hop with no backpressure of its own has the same discipline as every queue
+  behind it. The wait is between encode and write, which is what keeps a control
+  message from overtaking a batch already ahead of it; inbound JSON and the audio
+  socket are separate tasks and never wait. Heartbeats continue while parked, and
+  a client that acknowledges nothing is paced by a 500ms grace rather than
+  wedging the session — the raw-socket e2e tests never acknowledge anything and
+  are unchanged.
+
+  Both numbers come from the UAT profiles in `tmp/test_uat.toml`, measured live
+  across idle, continuous motion and interactive input against real RDP, generic
+  VNC and Apple Standard desktops — a headless browser attached per workload, and
+  the gateway's own `ws: paint totals` line kept for each attachment. That run is
+  local and its harness gitignored with the config it drives; the numbers below
+  are the record of it. Apple High Performance was measured alongside the rest and
+  deliberately kept out of the decision — it is the experimental, specification-less
+  path, so it does not get to set a constant every target lives under.
+
+  Under motion the deepest a *working* attachment ran was 22 (1280x800 RDP
+  playing video). Generic VNC on the same LAN
+  and the same video ran **461 deep, 49ms behind on average and 503ms at worst** —
+  RFB has no pacing of its own, so nothing between that engine and the canvas was
+  telling it to stop. Windowed, that run held 24 in flight at 2/43ms end-to-end
+  and carried the same picture in *half* as many tile records: the backlog was
+  paying to encode detail the client was already too late to show.
+
+  The window sits above the deepest working depth on purpose — one a healthy
+  attachment hits is a throughput tax, not backpressure. Eight was measured too
+  and is worse in the way that matters: the gateway coalesces harder while a batch
+  is parked, batches get fatter, and one fat batch takes longer to draw than the
+  queue it saved (end-to-end max 124ms against 43ms). The floor on latency is a
+  batch.
+
+  Depth alone cannot pace video, which is why the lag rule exists. With the
+  renderer throttled twenty times, a VP9 attachment ran 222ms behind while never
+  exceeding 7 batches in flight: nothing parked, nothing filled the queues behind
+  the socket, and `encode`'s congestion loop — which reads exactly that blocking —
+  coarsened not one round. Depth is the wrong unit for a path whose messages are
+  whole frames. Nothing is dropped to achieve the pacing, so access-unit
+  dependency order is untouched and no keyframe recovery is needed.
+
+  What the same throttled run did *not* show is a case for coarsening video on
+  paint lag: even at twenty times slower, that attachment averaged 17ms behind,
+  because the throttle lands on the main thread while `VideoDecoder` runs off it.
+  The lag rule fired twice in thirty seconds and quality never moved. So the
+  quality half of the original plan is left unbuilt — there is no measurement
+  asking for it, and the pacing it would have been built on top of is now in.
+
+  Accepted on twenty-four live attachments — every profile under connect, idle,
+  motion and interactive input with the final constants. Nothing exceeded the
+  window, no attachment sent a batch past it, and no acknowledgment was stale or
+  from a dead attachment. Twenty-one of the twenty-four never waited at all,
+  which is the property being aimed for: a window a healthy client does not
+  notice, and a bound the unhealthy one cannot cross. Pinned by unit test at both
+  rules and at the grace — `a_full_window_holds_the_next_batch_until_an_acknowledgment`,
+  `a_painter_that_is_behind_holds_a_batch_the_depth_window_would_admit`, and
+  `a_client_that_acknowledges_nothing_is_paced_not_wedged`. No browser test: the
+  window is a gateway decision about when to write, and the Playwright rules put
+  paint timing out of scope for exactly the reason that would make such a spec
+  meaningless.
+
+- **Cross-boundary paint completion feedback** (`src/wire.rs`, `src/ws.rs`,
+  `frontend/src/desktopPainterWorker.ts`, `useRemoteDesktop.ts`). Batch-envelope
+  v4 carries an attachment-local sequence starting at one. The ordered worker
+  echoes it only after asynchronous decode and draw finish, with queue and draw
+  durations; a socket generation prevents a completion from a dead attachment
+  acknowledging a new one. The WebSocket bridge consumes `paintAck` before the
+  engine boundary, keeps a bounded timestamp table, treats acknowledgments as
+  cumulative, and logs sent/acknowledged/in-flight counts plus queue, draw and
+  end-to-end average/max totals on detach. This slice deliberately measures only:
+  it neither stalls nor drops a batch. Unit tests pin sequence layout, ordered
+  completion, bounded/cumulative tracking and the engine boundary; the independent
+  Playwright parsers pin the v4 header seen on the SPA's real socket.
 
 - **PNG tiles: `Compression::Fast` → `Fastest`** (`src/protocol.rs`,
   `encode_png`). In png 0.18 the two select the same `FdeflateUltraFast`
@@ -267,11 +309,13 @@ change and remains open until those measurements choose its window.
 
 ## Gateway — screen
 
-The cross-boundary paint acknowledgment above is active. One smaller local item
-remains assessed and left: ~144 tile records can buffer across three queues in
-series while supersede sees only the final batch (speculative, no measurement
-saying the depths bind). Reassess it with the worker queue measurements rather
-than changing another depth in isolation.
+The paint acknowledgment and the window it now enforces are both in Done. One
+smaller local item remains assessed and left: ~144 tile records can buffer across
+three queues in series while supersede sees only the final batch. The UAT
+measurements say those depths are not what binds — under the window the same
+motion carried its picture in half as many records, and the queue the client
+actually waited on was the one past the socket — so this stays unchanged rather
+than becoming another depth adjusted in isolation.
 
 ## Gateway — audio
 
@@ -279,9 +323,12 @@ All addressed — see Done.
 
 ## Client
 
-The parse/decode/paint hot path items are in Done. End-to-end completion feedback
-is active above; the browser worker is no longer treated as the endpoint merely
-because the main thread handed it an `ArrayBuffer`.
+The parse/decode/paint hot path, the completion feedback and the window that acts
+on it are all in Done, and the client needed no change for the last of them: the
+worker already answers only after its ordered decode and draw, which is what the
+gateway paces against. The worker is no longer treated as the endpoint merely
+because the main thread handed it an `ArrayBuffer` — under motion on generic VNC
+its queue went from 461 batches deep to 24.
 
 ## Audited and sound — do not regress
 

@@ -15,9 +15,10 @@ import {
 } from "./desktopPainterWorker.ts";
 import type { createTilePainter, TilePainter } from "./tilePainter.ts";
 
-// A one-record-free batch frame: kind 0x02, flags 0, count 0. Valid enough for
-// the kind check, which is all the worker itself reads.
-const batchFrame = () => new Uint8Array([0x02, 0, 0, 0]).buffer;
+// A one-record-free batch frame: kind 0x02, flags 0, count 0, then its u32
+// sequence. Valid enough for the kind check, which is all the worker itself reads.
+const batchFrame = (sequence = 1) =>
+  new Uint8Array([0x02, 0, 0, 0, sequence, 0, 0, 0]).buffer;
 // An audio frame's kind byte — the thing the session socket never carries, and
 // the worker must drop rather than hand to the batch parser.
 const audioFrame = () => new Uint8Array([0x03, 0, 0, 0]).buffer;
@@ -30,6 +31,7 @@ function harness() {
   const drawn: ArrayBuffer[] = [];
   let releaseDraw = () => {};
   let stallDraws = false;
+  let clock = 0;
   let painterOptions: Parameters<typeof createTilePainter>[0] | null = null;
 
   const painter: TilePainter = {
@@ -71,6 +73,7 @@ function harness() {
       painterOptions = options;
       return painter;
     },
+    () => clock,
   );
   host.handle({
     type: "init",
@@ -91,6 +94,9 @@ function harness() {
       stallDraws = false;
       releaseDraw();
     },
+    advance: (milliseconds: number) => {
+      clock += milliseconds;
+    },
     painterOptions: () => {
       assert.ok(painterOptions);
       return painterOptions;
@@ -101,17 +107,36 @@ function harness() {
 test("a batch frame reaches the painter; anything else is dropped", async () => {
   const h = harness();
   const frame = batchFrame();
-  h.host.handle({ type: "frame", data: frame });
-  h.host.handle({ type: "frame", data: audioFrame() });
+  h.host.handle({ type: "frame", data: frame, sequence: 1, generation: 3 });
+  h.host.handle({
+    type: "frame",
+    data: audioFrame(),
+    sequence: 2,
+    generation: 3,
+  });
   await settled();
   assert.deepEqual(h.calls, ["draw"]);
   assert.equal(h.drawn[0], frame);
+  assert.deepEqual(h.events, [
+    {
+      type: "painted",
+      sequence: 1,
+      generation: 3,
+      queuedMs: 0,
+      drawMs: 0,
+    },
+  ]);
 });
 
 test("resize and videoFormat hold their place behind a stalled draw", async () => {
   const h = harness();
   h.stall();
-  h.host.handle({ type: "frame", data: batchFrame() });
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(4),
+    sequence: 4,
+    generation: 2,
+  });
   h.host.handle({ type: "resize", w: 640, h: 480, seq: 7 });
   h.host.handle({
     type: "videoFormat",
@@ -124,6 +149,7 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
   assert.deepEqual(h.calls, ["draw"]);
   assert.equal(h.canvas.width, 0);
   assert.deepEqual(h.events, []);
+  h.advance(12);
   h.release();
   await settled();
   assert.deepEqual(h.calls, ["draw", "fill", "format:2:vp09.00.40.08"]);
@@ -131,7 +157,54 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
   assert.equal(h.canvas.height, 480);
   assert.equal(h.ctx.fillStyle, "#000");
   assert.deepEqual(h.ctx.rects, [[0, 0, 640, 480]]);
-  assert.deepEqual(h.events, [{ type: "resized", seq: 7 }]);
+  assert.deepEqual(h.events, [
+    {
+      type: "painted",
+      sequence: 4,
+      generation: 2,
+      queuedMs: 0,
+      drawMs: 12,
+    },
+    { type: "resized", seq: 7 },
+  ]);
+});
+
+test("a later batch reports the time it waited behind earlier paint", async () => {
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 5,
+  });
+  await settled();
+  h.advance(9);
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(2),
+    sequence: 2,
+    generation: 5,
+  });
+  h.advance(3);
+  h.release();
+  await settled();
+  assert.deepEqual(h.events, [
+    {
+      type: "painted",
+      sequence: 1,
+      generation: 5,
+      queuedMs: 0,
+      drawMs: 12,
+    },
+    {
+      type: "painted",
+      sequence: 2,
+      generation: 5,
+      queuedMs: 3,
+      drawMs: 0,
+    },
+  ]);
 });
 
 test("clear holds its place too, so an earlier frame cannot outlive it", async () => {
@@ -139,7 +212,12 @@ test("clear holds its place too, so an earlier frame cannot outlive it", async (
   h.host.handle({ type: "resize", w: 640, h: 480, seq: 1 });
   await settled();
   h.stall();
-  h.host.handle({ type: "frame", data: batchFrame() });
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(),
+    sequence: 1,
+    generation: 1,
+  });
   h.host.handle({ type: "clear" });
   await settled();
   // The stalled draw is still out; the clear waits behind it. A clear that ran

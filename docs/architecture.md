@@ -492,7 +492,7 @@ has the room, spells it out.
 Screen updates use little-endian binary frames:
 
 ```text
-u8 kind = 0x02 | u8 flags = 0 | u16 record count | records
+u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
 TILE     op 0x01: u8 format | u16 slot | u16 x | u16 y | u16 w | u16 h
                   | u32 len | payload[len]
@@ -506,6 +506,16 @@ repaint does not require one WebSocket event per tile. Receivers reject unknown
 operations, truncated records, and unsupported formats, and reject a nonzero frame
 flags byte. A `VIDEO` record's own flags byte is `0x01` for a keyframe and nothing
 else — any other bit is rejected the same way.
+
+`sequence` starts at one and increases for the lifetime of one session-socket
+attachment. After the paint worker has finished the batch's ordered
+parse/decode/draw pass, the client sends `paintAck` with that sequence plus its
+worker queue and draw times. `ws.rs` consumes this transport feedback rather than
+forwarding it to the remote engine, and logs those measurements with the
+attachment totals. A socket generation travels through the worker so a late
+completion from a dead attachment cannot acknowledge a new one. This is the
+measurement contract for application-level backpressure; the gateway does not
+yet delay or drop a batch based on it.
 
 `TILE` draws a payload and optionally stores it in a gateway-selected cache
 slot. `TILE_REF` redraws the encoded payload already stored in that slot.
