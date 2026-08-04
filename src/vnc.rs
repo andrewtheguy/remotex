@@ -995,7 +995,11 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
-    let shadow: SharedShadow = Arc::new(std::sync::Mutex::new(Shadow::new("vnc", size.0, size.1)));
+    let shadow: SharedShadow = Arc::new(std::sync::Mutex::new({
+        let mut shadow = Shadow::new("vnc", size.0, size.1);
+        shadow.classify_cells(sink.wants_cells());
+        shadow
+    }));
     let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
     let shared = Shared {
         uplink: Arc::clone(&uplink),
@@ -1340,10 +1344,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
         // a frame in half. And a cancelled one-byte read is safe to retry — a byte is
         // either taken or it is not, so unlike a multi-byte `read_exact` there is no
         // half-read state for `select!` to strand.
+        // A clean mirror parks on the round-returned signal instead of forever:
+        // while a round is away being encoded the live table is empty and `due_at`
+        // cannot see the damage that lands meanwhile, so the round's return is what
+        // re-arms this.
         let video_flush = async {
             match sink.due_at().await {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending().await,
+                None => sink.round_returned().await,
             }
         };
         let read = tokio::select! {

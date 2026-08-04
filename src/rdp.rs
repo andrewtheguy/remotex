@@ -50,7 +50,7 @@ use crate::keymap;
 use crate::protocol::{ClientMsg, ClipboardSnapshot, MouseButton, ServerMsg, UNSCALED};
 use crate::rdp_audio;
 use crate::rdp_clipboard::{self, ClipboardEvent};
-use crate::tiles::{Rect, Shadow};
+use crate::tiles::{self, Rect, Shadow};
 
 // A type-erased async stream, so the connect path (which upgrades TCP → TLS) can
 // return a single concrete framed type.
@@ -556,6 +556,7 @@ async fn active_loop(
     // The pixels the browser has already been sent. Lives beside the framebuffer
     // it shadows, and is forgotten on a repaint and on a resize.
     let mut shadow = Shadow::new("rdp", desktop.width, desktop.height);
+    shadow.classify_cells(sink.wants_cells());
 
     let mut active_stage = ActiveStageBuilder {
         static_channels: connection_result.static_channels,
@@ -614,6 +615,18 @@ async fn active_loop(
     let mut pending_layout: Option<PendingLayout> = None;
     let mut layout_retry_at: Option<Instant> = None;
 
+    // Damage accumulated toward the next tile flush, and its deadline. A busy RDP
+    // server reports damage far faster than anything presents it — ~126 batches a
+    // second measured against a 60 Hz screen — and the pointer being composited
+    // into the framebuffer means even a still desktop produces one per mouse event.
+    // Each used to take the pack-and-compare walk on arrival. Now a batch on a
+    // quiet screen still goes out on the spot, and everything inside one interval
+    // after it coalesces — overlapping reports collapse to one rectangle — and is
+    // packed once at the deadline, against the newest framebuffer.
+    let mut pending_damage: Vec<Rect> = Vec::new();
+    let mut damage_flushed = Instant::now() - DAMAGE_INTERVAL;
+    let mut damage_due: Option<Instant> = None;
+
     loop {
         // The clipboard sender lives inside `active_stage`, so it is only
         // closed when the target did not opt in and the backend was never
@@ -641,9 +654,19 @@ async fn active_loop(
         };
         // Video only, and `None` unless the mirror is holding pixels no access unit
         // has carried — see `TileSink::due_at` for why a paced stream cannot rely on
-        // the next `outputs` batch to come and collect them.
+        // the next `outputs` batch to come and collect them. A clean mirror parks on
+        // the round-returned signal instead of forever: while a round is away being
+        // encoded the live table is empty and `due_at` cannot see the damage that
+        // lands meanwhile, so the round's return is what re-arms this.
         let video_flush = async {
             match sink.due_at().await {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => sink.round_returned().await,
+            }
+        };
+        // Damage waiting out its accumulation interval — see `pending_damage` above.
+        let damage_flush = async {
+            match damage_due {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -664,6 +687,11 @@ async fn active_loop(
                 // A (re)attached browser needs the desktop size and a full
                 // repaint from the server-owned framebuffer.
                 if matches!(input, ClientMsg::Refresh) {
+                    // The repaint below covers every pixel, so damage waiting out
+                    // its interval is subsumed by it.
+                    pending_damage.clear();
+                    damage_due = None;
+                    damage_flushed = Instant::now();
                     // A repaint means the client has nothing, so the shadow must
                     // not claim otherwise. This covers detach, reattach and
                     // takeover in one place, because `Refresh` is injected on
@@ -1002,6 +1030,18 @@ async fn active_loop(
                 sink.frame().await?;
                 continue;
             }
+            _ = damage_flush => {
+                for rect in pending_damage.drain(..) {
+                    send_tiles(&image, rect, &mut shadow, sink).await?;
+                }
+                damage_flushed = Instant::now();
+                damage_due = None;
+                // The flush is a frame boundary of its own: under a video plan those
+                // blits just landed in the mirror, and nothing else may come to
+                // collect them.
+                sink.frame().await?;
+                continue;
+            }
         };
 
         for out in outputs {
@@ -1013,24 +1053,29 @@ async fn active_loop(
                         .map_err(|e| anyhow::anyhow!("write response: {e}"))?;
                 }
                 ActiveStageOutput::GraphicsUpdate(region) => {
-                    send_tiles(
-                        &image,
+                    // Staged rather than sent: whether this batch goes out now or at
+                    // the deadline is decided once, after the whole batch — see the
+                    // end of the loop.
+                    stage_damage(
+                        &mut pending_damage,
                         Rect {
                             left: region.left,
                             top: region.top,
                             right: region.right,
                             bottom: region.bottom,
                         },
-                        &mut shadow,
-                        sink,
-                    )
-                    .await?;
+                    );
                 }
                 ActiveStageOutput::Terminate(reason) => {
                     info!("rdp: session terminated by server: {reason:?}");
-                    // Best effort, and only for the pixels of this last batch: the
+                    // Best effort, and only for the pixels still pending: the
                     // session is over either way, and the shadow's claim about them
                     // dies with it.
+                    for rect in pending_damage.drain(..) {
+                        if send_tiles(&image, rect, &mut shadow, sink).await.is_err() {
+                            break;
+                        }
+                    }
                     let _ = sink.frame().await;
                     return Ok(());
                 }
@@ -1052,6 +1097,11 @@ async fn active_loop(
                     desktop = reactivate(&mut active_stage, &mut framed, &activation_factory)
                         .await?;
                     image = DecodedImage::new(PixelFormat::RgbA32, desktop.width, desktop.height);
+                    // Damage staged before the reactivation names rectangles of a
+                    // framebuffer that no longer exists; the server repaints the
+                    // new one in full.
+                    pending_damage.clear();
+                    damage_due = None;
                     shadow.resize(desktop.width, desktop.height);
                     // The cell grid is anchored at (0,0) in framebuffer pixels, so
                     // a new size makes every key name somewhere else.
@@ -1069,6 +1119,21 @@ async fn active_loop(
                         .await?;
                 }
                 _ => {}
+            }
+        }
+        // A quiet screen's damage leaves on the spot — the first batch after an idle
+        // interval pays no added latency — and everything after it within one
+        // interval waits for the deadline, coalesced. Leading edge, trailing edge:
+        // the same shape the client's own motion coalescing has.
+        if !pending_damage.is_empty() {
+            if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
+                for rect in pending_damage.drain(..) {
+                    send_tiles(&image, rect, &mut shadow, sink).await?;
+                }
+                damage_flushed = Instant::now();
+                damage_due = None;
+            } else if damage_due.is_none() {
+                damage_due = Some(damage_flushed + DAMAGE_INTERVAL);
             }
         }
         // The closest thing RDP offers to the end of a frame: one batch of outputs is
@@ -1430,6 +1495,49 @@ fn translate_input(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<FastPathI
     }
 }
 
+/// The shortest gap between two tile flushes — the still path's counterpart to
+/// `VIDEO_FRAME_INTERVAL`, at the 60 Hz a screen actually presents rather than the
+/// stream's 30.
+///
+/// The interval coalesces, it does not merely defer: a busy server's ~126 damage
+/// batches a second overlap heavily — the pointer rectangle repeats with every
+/// mouse event — and [`stage_damage`] folds an overlapping report into the one
+/// already waiting, so the deadline packs and compares each region once instead of
+/// per report.
+const DAMAGE_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Most rectangles the pending-damage list holds before collapsing to one bounding
+/// box. Slop from a collapse costs a pack and a `memcmp` on pixels that did not
+/// change — exactly what the shadow exists to absorb — never wire bytes.
+const DAMAGE_RECTS_CAP: usize = 32;
+
+/// Fold `rect` into the damage accumulated toward the next flush.
+///
+/// A report overlapping one already staged is unioned into it — the common case,
+/// since a busy server re-reports the same regions many times per interval — and a
+/// disjoint one is kept apart, so a cursor and a video at opposite corners do not
+/// conspire to repack the whole desktop.
+fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
+    let union = |a: &Rect, b: &Rect| Rect {
+        left: a.left.min(b.left),
+        top: a.top.min(b.top),
+        right: a.right.max(b.right),
+        bottom: a.bottom.max(b.bottom),
+    };
+    for staged in pending.iter_mut() {
+        if staged.intersect(&rect).is_some() {
+            *staged = union(staged, &rect);
+            return;
+        }
+    }
+    if pending.len() >= DAMAGE_RECTS_CAP {
+        let whole = pending.drain(..).fold(rect, |acc, r| union(&acc, &r));
+        pending.push(whole);
+    } else {
+        pending.push(rect);
+    }
+}
+
 /// Send whatever part of `rect` the client does not already have, as tiles of at
 /// most [`crate::protocol::CELL_H`] rows each. How that region is cut, and what
 /// each piece is encoded as, is [`TileSink::damage`]'s business.
@@ -1474,11 +1582,12 @@ async fn send_tiles(
 
     // Its own buffer per piece, not the one above: the encoder reads those pixels
     // after this call has returned, and `image` is overwritten by the next PDU.
-    // Repacked rather than sliced, because a piece of the *trimmed* rectangle is
-    // narrower than the reported one, so its rows are not contiguous in `buf`.
+    // Cropped out of the pack already made rather than repacked from the image —
+    // a piece's rows are not contiguous in `buf`, but they are row copies, where a
+    // repack is another per-pixel swizzle over the same pixels.
     sink.damage(&changed, |piece| {
         let mut pixels = Vec::new();
-        pack_rgb(image, piece, &mut pixels);
+        tiles::crop(&buf, rect, piece, &mut pixels);
         pixels
     })
     .await
@@ -1493,13 +1602,23 @@ fn pack_rgb(image: &DecodedImage, rect: Rect, buf: &mut Vec<u8>) {
     let stride = image.stride();
     let data = image.data();
     let w = usize::from(rect.w());
+    let h = usize::from(rect.h());
 
     buf.clear();
-    buf.reserve(w * usize::from(rect.h()) * 3);
-    for r in 0..rect.h() {
-        let start = usize::from(rect.top + r) * stride + usize::from(rect.left) * bpp;
-        for px in data[start..start + w * bpp].chunks_exact(bpp) {
-            buf.extend_from_slice(&px[..3]);
+    buf.resize(w * h * 3, 0);
+    for r in 0..h {
+        let start = (usize::from(rect.top) + r) * stride + usize::from(rect.left) * bpp;
+        let dst = &mut buf[r * w * 3..(r + 1) * w * 3];
+        if bpp == 4 {
+            // The literal stride is what lets the compiler vectorize the 4-in/3-out
+            // shuffle; sized writes rather than per-pixel `extend` for the same reason.
+            for (out, px) in dst.chunks_exact_mut(3).zip(data[start..start + w * 4].chunks_exact(4)) {
+                out.copy_from_slice(&px[..3]);
+            }
+        } else {
+            for (out, px) in dst.chunks_exact_mut(3).zip(data[start..start + w * bpp].chunks_exact(bpp)) {
+                out.copy_from_slice(&px[..3]);
+            }
         }
     }
 }
@@ -1582,6 +1701,45 @@ fn build_connector_config(config: &TargetConfig) -> Config {
 mod tests {
     use super::*;
     use crate::protocol::WheelUnit;
+
+    fn rect(left: u16, top: u16, right: u16, bottom: u16) -> Rect {
+        Rect { left, top, right, bottom }
+    }
+
+    /// The reason the interval coalesces rather than defers: the same region
+    /// re-reported many times inside one interval is one rectangle at the flush.
+    #[test]
+    fn overlapping_damage_folds_into_one_rectangle() {
+        let mut pending = Vec::new();
+        stage_damage(&mut pending, rect(0, 0, 15, 15));
+        stage_damage(&mut pending, rect(8, 8, 31, 31));
+        assert_eq!(pending, vec![rect(0, 0, 31, 31)]);
+        // A repeat of a region already inside changes nothing.
+        stage_damage(&mut pending, rect(4, 4, 12, 12));
+        assert_eq!(pending, vec![rect(0, 0, 31, 31)]);
+    }
+
+    /// Two corners of the screen must not conspire into one desktop-sized repack.
+    #[test]
+    fn disjoint_damage_stays_apart() {
+        let mut pending = Vec::new();
+        stage_damage(&mut pending, rect(0, 0, 15, 15));
+        stage_damage(&mut pending, rect(1000, 800, 1030, 830));
+        assert_eq!(pending.len(), 2);
+    }
+
+    /// The cap bounds the list, not the coverage: past it everything collapses to
+    /// one bounding box, whose slop the shadow absorbs.
+    #[test]
+    fn past_the_cap_the_list_collapses_to_a_bounding_box() {
+        let mut pending = Vec::new();
+        for i in 0..DAMAGE_RECTS_CAP as u16 {
+            stage_damage(&mut pending, rect(i * 100, 0, i * 100 + 10, 10));
+        }
+        assert_eq!(pending.len(), DAMAGE_RECTS_CAP);
+        stage_damage(&mut pending, rect(0, 500, 10, 510));
+        assert_eq!(pending, vec![rect(0, 0, (DAMAGE_RECTS_CAP as u16 - 1) * 100 + 10, 510)]);
+    }
 
     fn one(input: ClientMsg, last_pos: &mut (u16, u16)) -> FastPathInputEvent {
         let mut events = translate_input(input, last_pos);

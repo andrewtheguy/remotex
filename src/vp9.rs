@@ -27,7 +27,9 @@ use std::os::raw::{c_int, c_ulong};
 use vpx_sys as vpx;
 
 use crate::tiles::Rect;
-use crate::video::{AccessUnit, I420, Mark, Mirror, QUALITY_MAX, QUALITY_MIN, coded_rect, outline};
+use crate::video::{
+    AccessUnit, I420, Mark, Mirror, QUALITY_MAX, QUALITY_MIN, coded_rect, outline, threads_for,
+};
 
 /// Turn a libvpx return code into an `anyhow::Error` naming the call and libvpx's own explanation.
 ///
@@ -223,12 +225,11 @@ impl Stream {
         // would cost compression to protect against loss that cannot happen. The same argument
         // removes the periodic keyframe below.
         cfg.g_error_resilient = 0;
-        // One thread per stream: this already runs on a blocking worker, and several regions
-        // encode in parallel with each other, which is where the cores go. Row-based
-        // multithreading and tile columns are deliberately *not* set — both are inert at one
-        // thread, and turning them on means turning on threads, which is a measurement rather
-        // than a preference.
-        cfg.g_threads = 1;
+        // One thread per *region* stream — several regions encode in parallel with each
+        // other, which is where the cores go — and several for the one stream that covers
+        // the whole mirror, which has nothing to overlap with. See `video::threads_for`.
+        let threads = threads_for(coded, mirror);
+        cfg.g_threads = threads as u32;
         // No fixed keyframe interval; every keyframe is one somebody asked for — a repaint, a
         // resize, a client coming back, a region that grew.
         cfg.kf_mode = vpx::vpx_kf_mode_VPX_KF_DISABLED;
@@ -309,6 +310,19 @@ impl Stream {
             // Off: adaptive quantization would move the quantizer off the dial that was just
             // pinned, which is the same reason `crate::h264` turns openh264's off.
             stream.control(vpx::vp8e_enc_control_id_VP9E_SET_AQ_MODE, 0, "aq_mode")?;
+            if threads > 1 {
+                // Both are what turns `g_threads` into actual parallelism on one picture:
+                // row-based multithreading inside a tile, and enough tile columns for the
+                // threads to have separate work. Inert at one thread, so they are set only
+                // where the whole desktop is one stream. libvpx clamps the column count to
+                // what the picture's breadth allows.
+                stream.control(vpx::vp8e_enc_control_id_VP9E_SET_ROW_MT, 1, "row_mt")?;
+                stream.control(
+                    vpx::vp8e_enc_control_id_VP9E_SET_TILE_COLUMNS,
+                    threads.ilog2() as c_int,
+                    "tile_columns",
+                )?;
+            }
 
             // An image that *wraps* the conversion buffer rather than owning one. A non-null
             // pointer that is never dereferenced is libvpx's own idiom for "compute the layout,
@@ -396,12 +410,21 @@ impl Stream {
         mirror: &Mirror,
         mark: Option<Mark>,
     ) -> anyhow::Result<Option<AccessUnit>> {
-        mirror.crop_into(self.coded, &mut self.scratch)?;
         let coded = (usize::from(self.coded.w()), usize::from(self.coded.h()));
-        if let Some(mark) = mark {
-            outline(&mut self.scratch, coded, mark);
-        }
-        self.yuv.read_rgb(&self.scratch)?;
+        // The whole-mirror stream reads the mirror's own buffer; only a sub-rectangle,
+        // or a debug outline that must not be painted on the source, goes through the
+        // crop. See `Mirror::whole`.
+        let rgb: &[u8] = match (mark, mirror.whole(self.coded)) {
+            (None, Some(rgb)) => rgb,
+            _ => {
+                mirror.crop_into(self.coded, &mut self.scratch)?;
+                if let Some(mark) = mark {
+                    outline(&mut self.scratch, coded, mark);
+                }
+                &self.scratch
+            }
+        };
+        self.yuv.read_rgb(rgb)?;
 
         let (y, u, v) = self.yuv.planes();
         let (sy, su, sv) = self.yuv.strides();

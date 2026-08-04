@@ -20,7 +20,9 @@ use openh264::encoder::{
 use openh264::{OpenH264API, Timestamp};
 
 use crate::tiles::Rect;
-use crate::video::{AccessUnit, I420, Mark, Mirror, QUALITY_MAX, QUALITY_MIN, coded_rect, outline};
+use crate::video::{
+    AccessUnit, I420, Mark, Mirror, QUALITY_MAX, QUALITY_MIN, coded_rect, outline, threads_for,
+};
 
 /// The quantizer the dial spans. 51 is H.264's coarsest.
 ///
@@ -163,10 +165,11 @@ impl Stream {
             // SPS and PPS repeat with every keyframe, which is what [`codec_string`]
             // reads and what lets a decoder be built from any keyframe.
             .sps_pps_strategy(SpsPpsStrategy::ConstantId)
-            // One slice on one thread: this already runs on a blocking worker, and one
-            // thread makes an access unit a deterministic thing to test. Several regions
-            // encode in parallel with each other, which is where the cores go.
-            .num_threads(1)
+            // One thread per *region* stream — several regions encode in parallel with
+            // each other, which is where the cores go — and several for the one stream
+            // that covers the whole mirror, which has nothing to overlap with. See
+            // `video::threads_for`.
+            .num_threads(threads_for(coded, mirror) as u16)
             .complexity(Complexity::Low)
             // Both are refused for screen content anyway — openh264 turns them off and
             // says so on stderr — so they are off here rather than left at the crate's
@@ -280,12 +283,21 @@ impl Stream {
         mirror: &Mirror,
         mark: Option<Mark>,
     ) -> anyhow::Result<Option<AccessUnit>> {
-        mirror.crop_into(self.coded, &mut self.scratch)?;
         let coded = (usize::from(self.coded.w()), usize::from(self.coded.h()));
-        if let Some(mark) = mark {
-            outline(&mut self.scratch, coded, mark);
-        }
-        self.yuv.read_rgb(&self.scratch)?;
+        // The whole-mirror stream reads the mirror's own buffer; only a sub-rectangle,
+        // or a debug outline that must not be painted on the source, goes through the
+        // crop. See `Mirror::whole`.
+        let rgb: &[u8] = match (mark, mirror.whole(self.coded)) {
+            (None, Some(rgb)) => rgb,
+            _ => {
+                mirror.crop_into(self.coded, &mut self.scratch)?;
+                if let Some(mark) = mark {
+                    outline(&mut self.scratch, coded, mark);
+                }
+                &self.scratch
+            }
+        };
+        self.yuv.read_rgb(rgb)?;
 
         let at = Timestamp::from_millis(self.started.elapsed().as_millis() as u64);
         let bitstream = self

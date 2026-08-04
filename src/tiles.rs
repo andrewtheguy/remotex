@@ -127,7 +127,8 @@ pub struct Changed {
     pub rect: Rect,
     /// Grid cells ([`Rect::cell_key`]) holding at least one differing pixel,
     /// sorted and deduplicated. Always a subset of the cells `rect` covers, and
-    /// never empty when `rect` is present.
+    /// never empty when `rect` is present — unless the shadow was told nothing
+    /// reads them ([`Shadow::classify_cells`]), in which case it is always empty.
     pub cells: Vec<(u16, u16)>,
 }
 
@@ -166,9 +167,16 @@ pub struct Shadow {
     h: u16,
     pixels: Vec<u8>,
     /// One flag per pixel: whether `pixels` says anything about it. `[bool]`
-    /// rather than a bitset because scanning it for a `false` is a `memchr`,
-    /// which is what the hot path does once per row.
+    /// rather than a bitset because scanning it for a `false` is a `memchr`.
     known: Vec<bool>,
+    /// How many of `known` are false. The steady state is zero — everything on
+    /// screen has been seen — and zero is what lets [`Self::accept`] skip the
+    /// per-row scan of the flags entirely.
+    unknown: usize,
+    /// Whether [`Self::accept`] classifies which grid cells differ. Only a motion
+    /// strategy reads [`Changed::cells`]; on every other plan the classification
+    /// was per-cell `memcmp` work computed to be discarded.
+    classify: bool,
     /// Rectangles examined, and those that turned out to hold nothing new.
     examined: u64,
     unchanged: u64,
@@ -187,10 +195,19 @@ impl Shadow {
             h,
             pixels: vec![0; usize::from(w) * usize::from(h) * 3],
             known: vec![false; usize::from(w) * usize::from(h)],
+            unknown: usize::from(w) * usize::from(h),
+            classify: true,
             examined: 0,
             unchanged: 0,
             trimmed: 0,
         }
+    }
+
+    /// Say whether anything will read [`Changed::cells`]. Only a motion strategy
+    /// does (`TileSink::wants_cells`); with this off, `accept` skips the per-cell
+    /// classification and returns `cells` empty.
+    pub fn classify_cells(&mut self, on: bool) {
+        self.classify = on;
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -200,8 +217,10 @@ impl Shadow {
     /// Adopt a new framebuffer size, keeping the tally but nothing else.
     pub fn resize(&mut self, w: u16, h: u16) {
         let counts = (self.examined, self.unchanged, self.trimmed);
+        let classify = self.classify;
         *self = Self::new(self.engine, w, h);
         (self.examined, self.unchanged, self.trimmed) = counts;
+        self.classify = classify;
     }
 
     /// Forget everything: the client is about to be repainted from scratch.
@@ -213,6 +232,7 @@ impl Shadow {
         // The pixels are left alone; only the claim to know them is dropped. That
         // is all the difference between them, and it saves touching 25 MB.
         self.known.fill(false);
+        self.unknown = self.known.len();
         self.examined = 0;
         self.unchanged = 0;
         self.trimmed = 0;
@@ -236,7 +256,11 @@ impl Shadow {
         if rect.right >= self.w || rect.bottom >= self.h || rgb.len() != w * h * 3 {
             // Nothing here can be compared, so nothing can be ruled out: every cell
             // it touches counts as changed.
-            let mut cells: Vec<(u16, u16)> = rect.cells().map(|c| c.cell_key()).collect();
+            let mut cells: Vec<(u16, u16)> = if self.classify {
+                rect.cells().map(|c| c.cell_key()).collect()
+            } else {
+                Vec::new()
+            };
             cells.sort_unstable();
             cells.dedup();
             return Some(Changed { rect, cells });
@@ -256,12 +280,16 @@ impl Shadow {
             let src = &rgb[r * row_bytes..(r + 1) * row_bytes];
             // Whole-slice equality first: it is a `memcmp`, and on an update that
             // changed nothing — which is most of them — no row is scanned byte by
-            // byte and the unknown flags are never consulted.
+            // byte.
             let differs = (src != self.row(rect.left, y, row_bytes))
                 .then(|| differing_bytes(src, self.row(rect.left, y, row_bytes)));
             // An unknown pixel differs by definition, even where its bytes match.
-            let unknown = self
-                .first_unknown(rect.left, y, w)
+            // The counter is what makes the steady state — everything known — skip
+            // the flag scan outright instead of walking `w` flags per row to learn
+            // nothing.
+            let unknown = (self.unknown > 0)
+                .then(|| self.first_unknown(rect.left, y, w))
+                .flatten()
                 .map(|lo| (lo * 3, self.last_unknown(rect.left, y, w).unwrap_or(lo) * 3 + 2));
 
             let (lo, hi) = match (differs, unknown) {
@@ -279,7 +307,10 @@ impl Shadow {
             // per cell across a span already known to differ, so the extra work
             // only happens on rows that changed at all — and it is what stops a
             // change in two corners of a row from reading as a change everywhere
-            // between them.
+            // between them. Skipped entirely when nothing reads the answer.
+            if !self.classify {
+                continue;
+            }
             let mine = self.row(rect.left, y, row_bytes);
             let (row_cell, left, cw) = (y / CELL_H, u32::from(rect.left), u32::from(CELL_W));
             let (span_lo, span_hi) = (left + (lo / 3) as u32, left + (hi / 3) as u32);
@@ -309,6 +340,9 @@ impl Shadow {
             let y = rect.top + r as u16;
             self.row_mut(rect.left, y, row_bytes).copy_from_slice(src);
             let at = usize::from(y) * usize::from(self.w) + usize::from(rect.left);
+            if self.unknown > 0 {
+                self.unknown -= self.known[at..at + w].iter().filter(|known| !**known).count();
+            }
             self.known[at..at + w].fill(true);
         }
 
@@ -425,19 +459,52 @@ pub fn crop(src: &[u8], rect: Rect, sub: Rect, out: &mut Vec<u8>) {
 /// The first and last byte index at which two equal-length rows differ.
 ///
 /// Only called for rows already known to differ, so there is always an answer.
+/// Saturating instead of unwrapping anyway: the caller is one line away today, and
+/// a panic here would take a whole session down over an update that could simply
+/// have been sent whole.
+///
+/// Word-compared eight bytes at a time from both ends — the byte-at-a-time scans
+/// this replaces ran the full width of every changed row, and the reverse one
+/// defeated autovectorization outright.
 fn differing_bytes(a: &[u8], b: &[u8]) -> (usize, usize) {
-    // Only ever called for rows a `memcmp` has already found unequal, so both
-    // searches must succeed. Saturating instead of unwrapping anyway: the caller is
-    // one line away today, and a panic here would take a whole session down over an
-    // update that could simply have been sent whole.
-    let first = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(0);
-    let back = a
-        .iter()
-        .rev()
-        .zip(b.iter().rev())
-        .position(|(x, y)| x != y)
-        .unwrap_or(0);
-    (first, a.len().saturating_sub(1 + back))
+    const WORD: usize = 8;
+    let word = |chunk: &[u8]| u64::from_ne_bytes(chunk.try_into().expect("an 8-byte chunk"));
+
+    let mut first = a.len();
+    for (i, (x, y)) in a.chunks_exact(WORD).zip(b.chunks_exact(WORD)).enumerate() {
+        if word(x) != word(y) {
+            first = i * WORD + x.iter().zip(y).position(|(p, q)| p != q).unwrap_or(0);
+            break;
+        }
+    }
+    if first == a.len() {
+        let head = a.len() - a.len() % WORD;
+        first = a[head..]
+            .iter()
+            .zip(&b[head..])
+            .position(|(p, q)| p != q)
+            .map_or(0, |i| head + i);
+    }
+
+    let mut last = None;
+    for (i, (x, y)) in a.rchunks_exact(WORD).zip(b.rchunks_exact(WORD)).enumerate() {
+        if word(x) != word(y) {
+            let end = a.len() - i * WORD;
+            let back = x.iter().rev().zip(y.iter().rev()).position(|(p, q)| p != q).unwrap_or(0);
+            last = Some(end - 1 - back);
+            break;
+        }
+    }
+    let last = last.unwrap_or_else(|| {
+        let tail = a.len() % WORD;
+        a[..tail]
+            .iter()
+            .rev()
+            .zip(b[..tail].iter().rev())
+            .position(|(p, q)| p != q)
+            .map_or_else(|| a.len().saturating_sub(1), |back| tail - 1 - back)
+    });
+    (first, last)
 }
 
 #[cfg(test)]

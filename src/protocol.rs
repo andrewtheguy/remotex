@@ -610,7 +610,10 @@ impl CursorShape {
 /// Shared by [`Tile::from_rgb`] (RGB screen tiles) and [`CursorShape::from_rgba`]
 /// (RGBA cursor shapes).
 fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut out = Vec::new();
+    // Room for a tile that compressed to a quarter, in one allocation: screen
+    // content usually does far better, and a `Vec::new()` here grew through five
+    // reallocations per tile on the way to the same place.
+    let mut out = Vec::with_capacity(pixels.len() / 4 + 256);
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
     encoder.set_color(color);
     encoder.set_depth(png::BitDepth::Eight);
@@ -625,7 +628,8 @@ fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::R
 /// ([`Tile::from_rgb_jpeg`]); JPEG embeds its own quantization tables, so the
 /// quality rides no wire and the decoder needs no telling.
 fn encode_jpeg(w: u16, h: u16, rgb: &[u8], quality: u8) -> anyhow::Result<Vec<u8>> {
-    let mut out = Vec::new();
+    // Same argument as `encode_png`'s capacity, at JPEG's better ratio.
+    let mut out = Vec::with_capacity(rgb.len() / 8 + 1024);
     let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
     encoder
         .encode(rgb, w, h, jpeg_encoder::ColorType::Rgb)
