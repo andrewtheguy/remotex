@@ -7,6 +7,10 @@
 # readable only by the service user — it holds credentials.
 #
 #   chmod 600 remotex.toml
+#
+# This is the served gateway's file. remotex.app keeps its own in its instance
+# directory and is the thing that edits it; everything below applies to both
+# except [server], which that one has no use for and refuses.
 
 # Display name of this gateway: the login screen, the interstitials, and the
 # browser tab title. Defaults to "remotex". Top-level rather than under [server]:
@@ -136,8 +140,9 @@ password = "change-me"
 #clipboard = false
 
 # Remote audio (opt-in): redirect this target's sound when the client asks for it,
-# with the floating menu's Audio button. RDP only — MS-RDPEA is the one audio channel the gateway speaks, so this is
-# refused on "vnc" rather than accepted and left doing nothing.
+# with the floating menu's Audio button. RDP only — MS-RDPEA is the one audio
+# channel the gateway speaks, so this is refused on "vnc" rather than accepted and
+# left doing nothing.
 #
 # The channel has to be negotiated when the connection is made, so an audio
 # target asks the server to redirect from the moment it connects and throws the
@@ -217,13 +222,15 @@ password = "change-me"
 # setup. Once connected, the Mac's physical displays are disabled and all of its
 # windows are placed on this virtual display. The same zlib rectangles are
 # carried over Apple's encrypted protocol revision. Apple's official macOS Screen
-# Sharing client can choose up to two virtual displays; Remotex requests one. With
-# `resize = true`,
-# it supports Resize to Window like RDP, using Apple's dynamic-resolution feature
-# to replace that virtual display's mode from client viewport reports — when the
-# user asks, which is the only way it is offered: auto resize is plain `vnc`'s
-# alone. Apple's display-count and fixed-resolution-preset controls are not
-# implemented.
+# Sharing client can choose up to two virtual displays; remotex requests one. With
+# `resize = true` it supports Resize to Window like RDP, using Apple's
+# dynamic-resolution feature to replace that virtual display's mode from client
+# viewport reports — when the user asks, which is the only way it is offered: auto
+# resize is plain `vnc`'s alone. Apple's display-count and
+# fixed-resolution-preset controls are not implemented.
+#
+# It is also the one target that cannot use `render_type = "motion"`, in any of
+# its forms — see the render dial below.
 #
 # `clipboard = true` enables the native Apple pasteboard in both directions.
 # See docs/apple-vnc-889.md.
@@ -260,8 +267,17 @@ password = "change-me"
 # render_quality is 1-100 and is *required* whenever the subtype is lossy, refused
 # when it is "png" — there is no default, because a quality nobody chose is not a
 # quality. Higher is larger and closer to exact.
+#
+# The defaults, spelled out. Nothing to add: PNG is lossless, so a quality here is
+# refused rather than ignored.
 #render_type = "full"
 #render_subtype = "png"
+#
+# A fixed lossy encode instead — every tile at one quality, for a link that cannot
+# afford exact pixels. A separate configuration from the two lines above, not more
+# of them:
+#render_type = "fixed-quality"
+#render_subtype = "webp"
 #render_quality = 75
 
 # render_type = "motion" adds a second, cheaper encode used only for the cells that
@@ -292,6 +308,14 @@ password = "change-me"
 #render_subtype = "webp"
 #render_quality = 60
 #render_motion_quality = 10
+
+# One pairing "motion" is refused with, in every form it takes including "stream"
+# below: subtype = "ard-high-performance". A resize under both corrupts the desktop
+# until the whole gateway is restarted — a reconnect does not clear it — and which
+# of the two is at fault is not established, so the config is refused at load
+# rather than left to be discovered on a live desktop. Use subtype = "ard" to keep
+# "motion", or any other render_type to keep the virtual display. Every other
+# subtype may use "motion", and that target may use every other render_type.
 
 # render_motion_subtype = "stream" is the third thing the motion axis can be, and
 # the only one that is not a still: the cells in motion are coalesced into regions
